@@ -540,14 +540,26 @@ class VoiceActivityTrackerCog(commands.Cog):
             logger.error(f"Resend failed for voice feedback req {req_id}: {exc}")
 
         try:
-            central_db.execute(
-                """
-                UPDATE voice_feedback_requests
-                SET status=?, error_message=?, prompt_message_id=?, sent_at_ts=strftime('%s','now')
-                WHERE id=?
-                """,
-                (status, error_message, prompt_message_id, req_id),
-            )
+            if status == "sent":
+                central_db.execute(
+                    """
+                    UPDATE voice_feedback_requests
+                    SET status=?, error_message=?, prompt_message_id=?, sent_at_ts=strftime('%s','now')
+                    WHERE id=?
+                    """,
+                    (status, error_message, prompt_message_id, req_id),
+                )
+            else:
+                # sent_at_ts bewusst nicht anfassen: Request fällt nach 72h
+                # natürlich aus dem Wiederherstellungsfenster heraus.
+                central_db.execute(
+                    """
+                    UPDATE voice_feedback_requests
+                    SET status=?, error_message=?, prompt_message_id=?
+                    WHERE id=?
+                    """,
+                    (status, error_message, prompt_message_id, req_id),
+                )
         except Exception as exc:
             logger.debug(f"Failed to update voice feedback request {req_id} after resend: {exc}")
 
@@ -594,8 +606,13 @@ class VoiceActivityTrackerCog(commands.Cog):
         try:
             was_first_session = not bool(
                 central_db.query_one(
-                    "SELECT total_seconds FROM voice_stats WHERE user_id=? LIMIT 1",
-                    (session["user_id"],),
+                    """
+                    SELECT 1 FROM voice_stats WHERE user_id=?
+                    UNION ALL
+                    SELECT 1 FROM voice_session_log WHERE user_id=?
+                    LIMIT 1
+                    """,
+                    (session["user_id"], session["user_id"]),
                 )
             )
         except Exception as e:
