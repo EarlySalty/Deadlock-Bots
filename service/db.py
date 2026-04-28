@@ -564,6 +564,66 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               UNIQUE(hero_id, build_id)
             );
 
+            -- Deadlock Tierlist Settings (KV)
+            CREATE TABLE IF NOT EXISTS tierlist_settings(
+              k TEXT PRIMARY KEY,
+              v TEXT NOT NULL,
+              updated_at INTEGER NOT NULL
+            );
+
+            -- Deadlock Tierlist Hero Meta
+            CREATE TABLE IF NOT EXISTS tierlist_hero_meta(
+              hero_id INTEGER PRIMARY KEY,
+              description TEXT NOT NULL DEFAULT '',
+              updated_at INTEGER NOT NULL
+            );
+
+            -- Deadlock Tierlist Streamers
+            CREATE TABLE IF NOT EXISTS tierlist_streamers(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              hero_id INTEGER NOT NULL,
+              twitch_login TEXT NOT NULL,
+              display_name TEXT NOT NULL,
+              sort_order INTEGER NOT NULL DEFAULT 100,
+              is_active INTEGER NOT NULL DEFAULT 1,
+              created_at INTEGER NOT NULL,
+              UNIQUE(hero_id, twitch_login)
+            );
+
+            -- Deadlock Tierlist Snapshots
+            CREATE TABLE IF NOT EXISTS tierlist_snapshots(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              bucket TEXT NOT NULL,
+              patch_id TEXT NOT NULL,
+              patch_unix INTEGER NOT NULL,
+              fetched_at INTEGER NOT NULL,
+              UNIQUE(bucket, fetched_at)
+            );
+
+            CREATE TABLE IF NOT EXISTS tierlist_snapshot_heroes(
+              snapshot_id INTEGER NOT NULL,
+              hero_id INTEGER NOT NULL,
+              matches INTEGER NOT NULL,
+              wins INTEGER NOT NULL,
+              losses INTEGER NOT NULL,
+              winrate REAL NOT NULL,
+              PRIMARY KEY(snapshot_id, hero_id),
+              FOREIGN KEY(snapshot_id) REFERENCES tierlist_snapshots(id) ON DELETE CASCADE
+            );
+
+            -- Deadlock Tierlist Build Votes
+            CREATE TABLE IF NOT EXISTS tierlist_build_votes(
+              build_id INTEGER PRIMARY KEY,
+              upvotes INTEGER NOT NULL DEFAULT 0,
+              downvotes INTEGER NOT NULL DEFAULT 0,
+              updated_at INTEGER NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_tierlist_snapshots_bucket_fetched
+              ON tierlist_snapshots(bucket, fetched_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_tierlist_snapshot_heroes_snapshot
+              ON tierlist_snapshot_heroes(snapshot_id);
+
             -- Voice Stats (aggregiert)
             CREATE TABLE IF NOT EXISTS voice_stats(
               user_id       INTEGER PRIMARY KEY,

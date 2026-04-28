@@ -40,6 +40,24 @@ GPT-Worker 1 (`cogs/ai_connector.py`) und GPT-Worker 2 (`cogs/ai_moderator.py`) 
 
 ---
 
+# Tierlist Public Backend Cog (2026-04-28)
+
+## Ziel
+Neuer Backend-Cog `tierlist_public` für die öffentliche Deadlock-Tierliste: dedizierter aiohttp-Service, Snapshot-Refresh aus deadlock-api, Public- und Admin-API auf Basis des bestehenden Dashboard-Discord-OAuth-Cookies.
+
+## Fortschritt
+- Spec, bestehende Service-Patterns (`turnier_public`, `public_stats`), Dashboard-Session-Handling und DB-Schema-Setup gesichtet.
+- `service/db.py` um `tierlist_*`-Tabellen + Snapshot-Indizes erweitert.
+- `service/dashboard.py` exportiert jetzt `validate_discord_session(...)` für Cookie-Wiederverwendung.
+- Neuer `service/tierlist_public.py` mit Refresh-Loop, Public-/Admin-API, In-Memory-Vote-Rate-Limit und on-the-fly Tier-Berechnung.
+- Neuer Cog `cogs/tierlist_public_cog.py`; Loader-Anpassung war nicht nötig, da `bot_core/cog_loader.py` bereits Auto-Discovery über `setup()` macht.
+- Tests `tests/test_tierlist_refresh.py` und `tests/test_tierlist_endpoints.py` ergänzt; lokaler `unittest`-Lauf grün.
+
+## Offen
+- Umgebung hat kein `python`-Alias und kein installiertes `pytest`; Verifikation lief daher mit `python3` bzw. `python3 -m unittest`.
+
+---
+
 # LFG Lobby/Lane Vorschlags-Overhaul (2026-04-22)
 
 ## Ziel

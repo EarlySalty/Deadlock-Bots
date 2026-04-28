@@ -1058,6 +1058,25 @@ class DashboardServer:
         self._ensure_session_csrf_token(session)
         return session
 
+    def validate_discord_session(self, session_id: str) -> dict[str, Any] | None:
+        if not self._discord_auth_required:
+            return None
+        token = str(session_id or "").strip()
+        if not token:
+            return None
+        self._cleanup_discord_auth_state()
+        session = self._discord_sessions.get(token)
+        if not session:
+            return None
+        now = time.time()
+        if float(session.get("expires_at", 0.0)) <= now:
+            self._discord_sessions.pop(token, None)
+            return None
+        session["expires_at"] = now + self._discord_session_ttl
+        session["last_seen_at"] = now
+        self._ensure_session_csrf_token(session)
+        return session
+
     def _auth_session_for_request(self, request: web.Request) -> dict[str, Any] | None:
         return self._get_discord_auth_session(request)
 

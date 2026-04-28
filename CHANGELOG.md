@@ -1,3 +1,11 @@
+## #3 — Tierlist-Backend: WR-Daten alle 8 Stunden automatisch
+
+- Neuer Service liefert die Hero-Tierliste der Website mit Live-Winrates pro Skill-Bucket
+- Daten werden alle 8 Stunden automatisch aktualisiert, immer auf Basis des aktuellen Patches
+- Drei Skill-Buckets verfügbar: All, Phantom+, Eternus
+- Admin-Endpunkte für Beschreibungen, Streamer-Listen und Schwellen — Login über bestehenden Discord-Flow
+- Build-Voting (👍 / 👎) mit Rate-Limit pro Browser
+
 ## #2 — Voice Feedback geht nicht mehr an bestehende User nach Bot-Neustart
 
 - Nutzer, die beim Neustart bereits im Voice-Call saßen, bekommen kein fälschliches „erstes Mal"-Feedback mehr
