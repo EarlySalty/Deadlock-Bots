@@ -36,18 +36,10 @@ DB_CONNECT_TIMEOUT = float(os.environ.get("DEADLOCK_DB_TIMEOUT", str(DB_BUSY_TIM
 ENV_DB_PATH = "DEADLOCK_DB_PATH"  # kompletter Pfad zur DB-Datei (höchste Prio)
 ENV_DB_DIR = "DEADLOCK_DB_DIR"  # nur Verzeichnis; Datei = deadlock.sqlite3
 
-
-# ---- Default-Dateiname/Ort (plattform-sicher) ----
-def _default_dir() -> str:
-    # Windows: %USERPROFILE%\Documents\Deadlock\service
-    up = os.environ.get("USERPROFILE")
-    if up:
-        return str(Path(up) / "Documents" / "Deadlock" / "service")
-    # Linux/Mac/Container: ~/Documents/Deadlock/service
-    return str(Path.home() / "Documents" / "Deadlock" / "service")
-
-
-DEFAULT_DIR = _default_dir()
+# ---- Fixer DB-Pfad relativ zum Repo-Root ----
+# data/deadlock.sqlite3 liegt eine Ebene über diesem service/-Verzeichnis.
+_REPO_ROOT = Path(__file__).parent.parent
+DEFAULT_DIR = str(_REPO_ROOT / "data")
 DB_NAME = "deadlock.sqlite3"
 # Maximal zugelassene Zeilen in der steam_tasks-Tabelle (älteste werden gekappt)
 STEAM_TASKS_MAX_ROWS = int(os.environ.get("STEAM_TASKS_MAX_ROWS", "1000"))
