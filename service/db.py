@@ -1005,6 +1005,32 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               had_interaction INTEGER NOT NULL DEFAULT 0
             );
 
+            CREATE TABLE IF NOT EXISTS user_tags(
+              user_id INTEGER NOT NULL,
+              tag_key TEXT NOT NULL,
+              tag_value TEXT NOT NULL,
+              set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              PRIMARY KEY(user_id, tag_key)
+            );
+
+            CREATE TABLE IF NOT EXISTS user_mod_tags(
+              user_id INTEGER NOT NULL,
+              mod_tag TEXT NOT NULL,
+              set_by INTEGER NOT NULL,
+              reason TEXT,
+              set_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+              expires_at TIMESTAMP,
+              PRIMARY KEY(user_id, mod_tag)
+            );
+
+            CREATE TABLE IF NOT EXISTS tempvoice_lane_tag_filter(
+              channel_id INTEGER PRIMARY KEY,
+              min_age_tag TEXT,
+              required_tone_tag TEXT,
+              deny_ragebaiter INTEGER DEFAULT 0,
+              updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- Datenschutz-/Opt-out-Status je User
             CREATE TABLE IF NOT EXISTS user_privacy(
               user_id    INTEGER PRIMARY KEY,
@@ -1389,6 +1415,9 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
             )
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_text_log_started ON text_conversation_log(started_at, user_id)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_user_mod_tags_active ON user_mod_tags(user_id, expires_at)"
             )
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_user_privacy_opted ON user_privacy(opted_out)"
