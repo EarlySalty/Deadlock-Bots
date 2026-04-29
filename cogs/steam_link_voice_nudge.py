@@ -59,7 +59,7 @@ def _mark_nudge_done(user_id: int, status: str = "sent") -> None:
     try:
         db.set_kv(VOICE_NUDGE_DONE_NS, str(int(user_id)), status)
     except Exception:
-        log.debug("[nudge] Konnte Nudge-Done-Flag nicht setzen", exc_info=True)
+        log.warning("[nudge] Konnte Nudge-Done-Flag nicht setzen (user_id=%s)", user_id, exc_info=True)
 
 
 def _is_nudge_done(user_id: int) -> bool:
@@ -624,6 +624,10 @@ class SteamLinkVoiceNudge(commands.Cog):
                     return False
                 else:
                     _clear_nudge_state(uid)
+                    # Wurde bereits benachrichtigt – nicht erneut senden, nur weil die alte Nachricht weg ist.
+                    notified_at = state["notified_at"] if "notified_at" in state.keys() else None  # type: ignore[index]
+                    if notified_at:
+                        return False
 
             dm = user.dm_channel or await user.create_dm()
             embed, view = await self._build_dm_payload(user)

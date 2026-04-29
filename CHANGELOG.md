@@ -1,3 +1,8 @@
+## #5 — Steam-Nudge-DM geht nicht mehr mehrfach an denselben User
+
+- Wenn die ursprüngliche Nudge-DM gelöscht wurde (z. B. vom User selbst), schickt der Bot keine zweite DM mehr — die Nachricht ist weg, die Benachrichtigung bleibt trotzdem gesetzt
+- Fehlschläge beim Speichern des „bereits benachrichtigt"-Flags werden jetzt im Log sichtbar, statt still ignoriert zu werden
+
 ## #4 — Tag-System: bessere Sortierung in Voice-Lanes und LFG
 
 - Du kannst dir jetzt selbst zwei Tags setzen: deinen Lieblings-Ton (Banter-OK oder Ragebaiter-Free) und optional eine Altersangabe (25+ oder U25)
