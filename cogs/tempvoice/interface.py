@@ -12,6 +12,7 @@ from .core import (
     MINRANK_CATEGORY_IDS,
     RANK_ORDER,
     RANKED_CATEGORY_ID,
+    LaneTagFilter,
     _member_rank_index,
 )
 
@@ -86,6 +87,25 @@ def _resolve_member_rank_index(core, member: discord.Member) -> int:
                 if resolved > 0:
                     return min(resolved, len(RANK_ORDER) - 1)
     return _member_rank_index(member)
+
+
+def _is_owner_or_mod(core, lane: discord.VoiceChannel, member: discord.Member) -> bool:
+    owner_id = core.lane_owner.get(lane.id, member.id)
+    perms = lane.permissions_for(member)
+    return bool(owner_id == member.id or perms.manage_channels or perms.administrator)
+
+
+def _format_tag_filter_summary(lane_filter: LaneTagFilter) -> str:
+    parts: list[str] = []
+    if lane_filter.min_age_tag == "25+":
+        parts.append("25+")
+    if lane_filter.required_tone_tag == "ragebaiter_free":
+        parts.append("Ragebaiter-Free")
+    if lane_filter.deny_ragebaiter:
+        parts.append("Ragebaiter blockiert")
+    if not parts:
+        return "Tag-Filter aus."
+    return f"Tag-Filter aktiv: {' · '.join(parts)}."
 
 
 class TempVoiceInterface(commands.Cog):
@@ -535,6 +555,7 @@ class MainView(discord.ui.View):
             # Row 2: Haupt-Rang Selektor
             self.add_item(MinRankSelect(core))
             # Row 3: Quick Templates + Presets (zusammengefasst)
+            self.add_item(TagFilterButton(core, row=3))
             self.add_item(ResetLaneButton(core))
             self.add_item(DuoCallButton(core))
             self.add_item(TrioCallButton(core))
@@ -545,6 +566,7 @@ class MainView(discord.ui.View):
             self.add_item(SubRankSelectPermanent(core))
         else:
             # Nicht-Ranked: Standard-Layout
+            self.add_item(TagFilterButton(core, row=2))
             self.add_item(ResetLaneButton(core))
             self.add_item(DuoCallButton(core))
             self.add_item(TrioCallButton(core))
@@ -744,6 +766,184 @@ class QuickTemplateButton(discord.ui.Button):
             f"Lane auf {self.template_name} gestellt (Limit {self.limit}).",
             ephemeral=True,
         )
+
+
+class TagFilterButton(discord.ui.Button):
+    def __init__(self, core, row: int = 3):
+        super().__init__(
+            label="🛡️ Tag-Filter",
+            style=discord.ButtonStyle.secondary,
+            row=row,
+            custom_id="tv_tag_filter",
+        )
+        self.core = core
+
+    async def callback(self, itx: discord.Interaction):
+        member: discord.Member = itx.user  # type: ignore
+        lane = MainView.lane_of(itx)
+        if not lane:
+            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            return
+        if not _is_owner_or_mod(self.core, lane, member):
+            await itx.response.send_message(
+                "Nur Owner/Mods dürfen den Tag-Filter ändern.",
+                ephemeral=True,
+            )
+            return
+        lane_filter = await self.core.get_lane_tag_filter(lane.id)
+        await itx.response.send_message(
+            "Tag-Filter konfigurieren:",
+            view=TagFilterConfigView(self.core, lane, member, lane_filter),
+            ephemeral=True,
+        )
+
+
+class TagFilterMinAgeSelect(discord.ui.Select):
+    def __init__(self, lane_filter: LaneTagFilter):
+        options = [
+            discord.SelectOption(
+                label="Aus",
+                value="off",
+                default=lane_filter.min_age_tag is None,
+            ),
+            discord.SelectOption(
+                label="25+",
+                value="25+",
+                default=lane_filter.min_age_tag == "25+",
+            ),
+        ]
+        super().__init__(
+            placeholder="Mindest-Alter",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    async def callback(self, itx: discord.Interaction):
+        view: TagFilterConfigView = self.view  # type: ignore[assignment]
+        view.min_age_tag = None if self.values[0] == "off" else self.values[0]
+        await itx.response.defer()
+
+
+class TagFilterToneSelect(discord.ui.Select):
+    def __init__(self, lane_filter: LaneTagFilter):
+        options = [
+            discord.SelectOption(
+                label="Aus",
+                value="off",
+                default=lane_filter.required_tone_tag is None,
+            ),
+            discord.SelectOption(
+                label="Ragebaiter-Free",
+                value="ragebaiter_free",
+                default=lane_filter.required_tone_tag == "ragebaiter_free",
+            ),
+        ]
+        super().__init__(
+            placeholder="Tonfall",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=1,
+        )
+
+    async def callback(self, itx: discord.Interaction):
+        view: TagFilterConfigView = self.view  # type: ignore[assignment]
+        view.required_tone_tag = None if self.values[0] == "off" else self.values[0]
+        await itx.response.defer()
+
+
+class TagFilterRagebaiterSelect(discord.ui.Select):
+    def __init__(self, lane_filter: LaneTagFilter):
+        options = [
+            discord.SelectOption(
+                label="Aus",
+                value="off",
+                default=not lane_filter.deny_ragebaiter,
+            ),
+            discord.SelectOption(
+                label="An",
+                value="on",
+                default=lane_filter.deny_ragebaiter,
+            ),
+        ]
+        super().__init__(
+            placeholder="Ragebaiter blockieren",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=2,
+        )
+
+    async def callback(self, itx: discord.Interaction):
+        view: TagFilterConfigView = self.view  # type: ignore[assignment]
+        view.deny_ragebaiter = self.values[0] == "on"
+        await itx.response.defer()
+
+
+class TagFilterSaveButton(discord.ui.Button):
+    def __init__(self):
+        super().__init__(
+            label="Speichern",
+            style=discord.ButtonStyle.success,
+            row=3,
+        )
+
+    async def callback(self, itx: discord.Interaction):
+        view: TagFilterConfigView = self.view  # type: ignore[assignment]
+        await view.save(itx)
+
+
+class TagFilterConfigView(discord.ui.View):
+    def __init__(
+        self,
+        core,
+        lane: discord.VoiceChannel,
+        requester: discord.Member,
+        lane_filter: LaneTagFilter,
+    ):
+        super().__init__(timeout=120)
+        self.core = core
+        self.lane = lane
+        self.requester = requester
+        self.min_age_tag = lane_filter.min_age_tag
+        self.required_tone_tag = lane_filter.required_tone_tag
+        self.deny_ragebaiter = lane_filter.deny_ragebaiter
+        self.add_item(TagFilterMinAgeSelect(lane_filter))
+        self.add_item(TagFilterToneSelect(lane_filter))
+        self.add_item(TagFilterRagebaiterSelect(lane_filter))
+        self.add_item(TagFilterSaveButton())
+
+    async def interaction_check(self, itx: discord.Interaction) -> bool:
+        member: discord.Member = itx.user  # type: ignore
+        if member.id == self.requester.id:
+            return True
+        if _is_owner_or_mod(self.core, self.lane, member):
+            return True
+        await itx.response.send_message(
+            "Nur Owner/Mods dürfen den Tag-Filter ändern.",
+            ephemeral=True,
+        )
+        return False
+
+    async def save(self, itx: discord.Interaction) -> None:
+        await itx.response.defer(ephemeral=True)
+        lane_filter = await self.core.set_lane_tag_filter(
+            self.lane.id,
+            min_age_tag=self.min_age_tag,
+            required_tone_tag=self.required_tone_tag,
+            deny_ragebaiter=self.deny_ragebaiter,
+        )
+        await self.core._apply_tag_filter(self.lane, lane_filter)  # type: ignore[attr-defined]
+        summary = _format_tag_filter_summary(lane_filter)
+        try:
+            if isinstance(itx.channel, discord.TextChannel):
+                await itx.channel.send(summary)
+        except Exception as exc:
+            logger.debug("TagFilterConfigView channel send failed: %r", exc)
+        await itx.followup.send(summary, ephemeral=True)
+        self.stop()
 
 
 class DuoCallButton(QuickTemplateButton):
@@ -1055,7 +1255,6 @@ class SubRankSelectPermanent(discord.ui.Select):
         )
 
     async def callback(self, itx: discord.Interaction):
-        m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
             await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)

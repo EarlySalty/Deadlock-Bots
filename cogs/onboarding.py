@@ -1,4 +1,4 @@
-"""Statisches Multi-Step Onboarding – kein AI, kein Role-Gate, 7 klare Schritte."""
+"""Statisches Multi-Step Onboarding – kein AI, kein Role-Gate, 9 klare Schritte."""
 
 from __future__ import annotations
 
@@ -204,6 +204,32 @@ STEPS: list[dict] = [
     },
     # ── 7 ─────────────────────────────────────────────────────────────────
     {
+        "title": "Voice-Ton",
+        "description": (
+            "Wähle optional, wie du meist im Voice unterwegs bist.\n\n"
+            "**Banter-OK**\n"
+            "Direktere Runden, in denen auch mal geflucht oder gestichelt wird.\n\n"
+            "**Ragebaiter-Free**\n"
+            "Runden ohne gezielte Provokationen, dafür mit strengerem Filter.\n\n"
+            "Wenn du nichts auswählst, kannst du das später jederzeit per `/meine-tags` setzen."
+        ),
+        "color": 0x5865F2,
+    },
+    # ── 8 ─────────────────────────────────────────────────────────────────
+    {
+        "title": "Alter (optional)",
+        "description": (
+            "Wähle optional eine Altersgruppe für Voice-Filter.\n\n"
+            "**25+**\n"
+            "Für Runden, die bewusst mit 25+-Filter erstellt werden.\n\n"
+            "**U25**\n"
+            "Für Runden ohne 25+-Markierung.\n\n"
+            "Wenn du diesen Schritt überspringst, kannst du den Tag später per `/meine-tags` setzen."
+        ),
+        "color": 0xFEE75C,
+    },
+    # ── 9 ─────────────────────────────────────────────────────────────────
+    {
         "id": "steam_link",
         "title": "🔗 Account verknüpfen & Rang-System",
         "description": (
@@ -225,7 +251,9 @@ STEPS: list[dict] = [
 
 
 # Index des Account-Verknüpfen-Schritts
-_ACCOUNT_STEP_INDEX = 7
+_TONE_STEP_INDEX = 7
+_AGE_STEP_INDEX = 8
+_ACCOUNT_STEP_INDEX = 9
 _STREAMER_STEP_INDEX = 2
 
 
@@ -309,6 +337,20 @@ class NextStepView(discord.ui.View):
             self.stop()
             return
 
+        if next_index == _TONE_STEP_INDEX:
+            embed = _build_embed(next_index, interaction.user)
+            view = OnboardingToneStepView(self.cog, next_index, self.user_id)
+            await interaction.response.send_message(embed=embed, view=view)
+            self.stop()
+            return
+
+        if next_index == _AGE_STEP_INDEX:
+            embed = _build_embed(next_index, interaction.user)
+            view = OnboardingAgeStepView(self.cog, next_index, self.user_id)
+            await interaction.response.send_message(embed=embed, view=view)
+            self.stop()
+            return
+
         embed = _build_embed(next_index, interaction.user)
         if next_index >= len(STEPS) - 1:
             view = DoneView(self.user_id)
@@ -317,6 +359,104 @@ class NextStepView(discord.ui.View):
 
         await interaction.response.send_message(embed=embed, view=view)
         self.stop()
+
+
+class OnboardingTagStepView(discord.ui.View):
+    """Basisklasse fuer optionale Tag-Schritte im Onboarding."""
+
+    def __init__(self, cog: StaticOnboarding, step_index: int, user_id: int):
+        super().__init__(timeout=3600)
+        self.cog = cog
+        self.step_index = step_index
+        self.user_id = user_id
+
+    async def _store_tag_and_continue(
+        self,
+        interaction: discord.Interaction,
+        *,
+        key: str | None = None,
+        value: str | None = None,
+    ) -> None:
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Dieses Onboarding gehoert jemand anderem.", ephemeral=True
+            )
+            return
+
+        if key is not None and value is not None:
+            tag_service = self.cog.bot.get_cog("TagService")
+            if tag_service is not None:
+                await tag_service.set_user_tag(self.user_id, key, value)
+            else:
+                log.warning(
+                    "TagService nicht geladen, Onboarding-Tag wurde nicht gespeichert (user_id=%s, key=%s)",
+                    self.user_id,
+                    key,
+                )
+
+        next_index = self.step_index + 1
+
+        if next_index == _AGE_STEP_INDEX:
+            embed = _build_embed(next_index, interaction.user)
+            view = OnboardingAgeStepView(self.cog, next_index, self.user_id)
+            await interaction.response.send_message(embed=embed, view=view)
+            self.stop()
+            return
+
+        if next_index == _ACCOUNT_STEP_INDEX:
+            already_verified = any(r.id == VERIFIED_ROLE_ID for r in interaction.user.roles)
+            view = OnboardingAccountLinkView(
+                self.cog, next_index, self.user_id, show_next=already_verified
+            )
+
+            if not already_verified:
+                await self.cog._register_pending_verify(self.user_id, interaction.channel.id)
+
+            embed = _build_embed(next_index, interaction.user)
+            await interaction.response.send_message(embed=embed, view=view)
+            self.stop()
+            return
+
+        embed = _build_embed(next_index, interaction.user)
+        view = DoneView(self.user_id) if next_index >= len(STEPS) - 1 else NextStepView(
+            self.cog, next_index, self.user_id
+        )
+        await interaction.response.send_message(embed=embed, view=view)
+        self.stop()
+
+
+class OnboardingToneStepView(OnboardingTagStepView):
+    """Optionaler Onboarding-Schritt fuer den bevorzugten Voice-Ton."""
+
+    @discord.ui.button(label="Banter-OK", style=discord.ButtonStyle.primary, row=0)
+    async def banter_ok(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._store_tag_and_continue(interaction, key="tone", value="banter_ok")
+
+    @discord.ui.button(label="Ragebaiter-Free", style=discord.ButtonStyle.secondary, row=0)
+    async def ragebaiter_free(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ):
+        await self._store_tag_and_continue(interaction, key="tone", value="ragebaiter_free")
+
+    @discord.ui.button(label="Überspringen", style=discord.ButtonStyle.secondary, row=1)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._store_tag_and_continue(interaction)
+
+
+class OnboardingAgeStepView(OnboardingTagStepView):
+    """Optionaler Onboarding-Schritt fuer die Altersgruppe."""
+
+    @discord.ui.button(label="25+", style=discord.ButtonStyle.primary, row=0)
+    async def age_25_plus(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._store_tag_and_continue(interaction, key="age", value="25+")
+
+    @discord.ui.button(label="U25", style=discord.ButtonStyle.secondary, row=0)
+    async def age_u25(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._store_tag_and_continue(interaction, key="age", value="u25")
+
+    @discord.ui.button(label="Überspringen", style=discord.ButtonStyle.secondary, row=1)
+    async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._store_tag_and_continue(interaction)
 
 
 class OnboardingContentCreatorView(discord.ui.View):
@@ -576,7 +716,7 @@ def _build_embed(step_index: int, user: discord.Member | None = None) -> discord
     if user:
         is_streamer = any(r.id == CONTENT_CREATOR_ROLE_ID for r in user.roles)
 
-    total_steps = 8 if is_streamer else 7
+    total_steps = 10 if is_streamer else 9
     display_step = step_index + 1
     if not is_streamer and step_index > _STREAMER_STEP_INDEX:
         display_step -= 1

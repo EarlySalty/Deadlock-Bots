@@ -6,6 +6,7 @@ import asyncio
 import logging
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
@@ -118,6 +119,17 @@ __all__ = [
 ]
 
 
+@dataclass(slots=True)
+class LaneTagFilter:
+    channel_id: int
+    min_age_tag: str | None = None
+    required_tone_tag: str | None = None
+    deny_ragebaiter: bool = False
+
+    def is_enabled(self) -> bool:
+        return bool(self.min_age_tag or self.required_tone_tag or self.deny_ragebaiter)
+
+
 # --------- Hilfen ---------
 def _is_fixed_lane(ch: discord.abc.GuildChannel | int | None) -> bool:
     try:
@@ -220,7 +232,8 @@ def _member_rank_index(member: discord.Member) -> int:
     for role in getattr(member, "roles", []):
         try:
             role_name = str(role.name).lower().strip()
-        except Exception:
+        except Exception as e:
+            log.debug("member rank parse failed for role on member %s: %r", member.id, e)
             continue
         idx = _rank_index(role_name)
         if idx > best_idx:
@@ -346,6 +359,8 @@ class TempVoiceCore(commands.Cog):
         self.lane_initial_owner: dict[int, int] = {}
         self.lane_base: dict[int, str] = {}
         self.lane_min_rank: dict[int, str] = {}
+        self.lane_tag_filters: dict[int, LaneTagFilter] = {}
+        self._tag_filter_blocked_members: dict[int, set[int]] = {}
         self.join_time: dict[int, dict[int, float]] = {}
         self._edit_locks: dict[int, asyncio.Lock] = {}
         self._lane_creation_locks: dict[int, asyncio.Lock] = {}
@@ -748,6 +763,7 @@ class TempVoiceCore(commands.Cog):
         self._refresh_category_rules(self._first_guild())
         await self._ensure_tables()
 
+        await self._rehydrate_lane_tag_filters()
         await self._rehydrate_from_db()
         await self._purge_empty_lanes_once()
         self._track(self._delayed_purge(30))
@@ -845,6 +861,32 @@ class TempVoiceCore(commands.Cog):
             # KEIN aggressives Rename hier – _refresh_name() prüft Schutzbedingungen
             await self._refresh_name(lane)
 
+    async def _rehydrate_lane_tag_filters(self) -> None:
+        try:
+            rows = await db.query_all_async(
+                """
+                SELECT channel_id, min_age_tag, required_tone_tag, deny_ragebaiter
+                FROM tempvoice_lane_tag_filter
+                """
+            )
+        except Exception as e:
+            log.warning("rehydrate lane tag filters failed: %r", e)
+            return
+
+        cache: dict[int, LaneTagFilter] = {}
+        for row in rows:
+            try:
+                lane_filter = self._row_to_lane_tag_filter(row)
+            except ValueError as e:
+                log.debug(
+                    "rehydrate lane tag filter skipped for lane %s: %r",
+                    row.get("channel_id"),
+                    e,
+                )
+                continue
+            cache[lane_filter.channel_id] = lane_filter
+        self.lane_tag_filters = cache
+
     async def _purge_empty_lanes_once(self):
         guild = self._first_guild()
         if not guild:
@@ -902,6 +944,13 @@ class TempVoiceCore(commands.Cog):
             await db.execute_async("DELETE FROM tempvoice_interface WHERE lane_id=?", (lane_id,))
         except Exception as e:
             log.debug("cleanup: delete interface row %s failed: %r", lane_id, e)
+        try:
+            await db.execute_async(
+                "DELETE FROM tempvoice_lane_tag_filter WHERE channel_id=?",
+                (lane_id,),
+            )
+        except Exception as e:
+            log.debug("cleanup: delete tag filter row %s failed: %r", lane_id, e)
 
         self.created_channels.discard(lane_id)
         for mapping in (
@@ -914,6 +963,8 @@ class TempVoiceCore(commands.Cog):
             self._last_name_patch_ts,
         ):
             mapping.pop(lane_id, None)
+        self.lane_tag_filters.pop(lane_id, None)
+        self._tag_filter_blocked_members.pop(lane_id, None)
         self.lane_rules.pop(lane_id, None)
         self.minrank_blocked_lanes.discard(lane_id)
         self._edit_locks.pop(lane_id, None)
@@ -1700,6 +1751,8 @@ class TempVoiceCore(commands.Cog):
         region = await self.get_region_pref(owner_id)
         await self.apply_region(lane, region)
         await self._apply_owner_bans(lane, owner_id)
+        lane_filter = await self.get_lane_tag_filter(lane.id)
+        await self._apply_tag_filter(lane, lane_filter)
 
     async def _apply_owner_settings_background(self, lane: discord.VoiceChannel, owner_id: int):
         try:
@@ -1771,6 +1824,202 @@ class TempVoiceCore(commands.Cog):
                     tasks.append(_set_perm_safe(role, None, "TempVoice: MinRank clear"))
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
+
+    def _row_to_lane_tag_filter(self, row: dict[str, Any]) -> LaneTagFilter:
+        channel_id = int(row["channel_id"])
+        min_age_tag = row.get("min_age_tag")
+        required_tone_tag = row.get("required_tone_tag")
+        deny_ragebaiter = bool(int(row.get("deny_ragebaiter") or 0))
+        return LaneTagFilter(
+            channel_id=channel_id,
+            min_age_tag=self._normalize_min_age_tag(min_age_tag),
+            required_tone_tag=self._normalize_required_tone_tag(required_tone_tag),
+            deny_ragebaiter=deny_ragebaiter,
+        )
+
+    def _normalize_min_age_tag(self, value: Any) -> str | None:
+        if value in (None, "", "off"):
+            return None
+        normalized = str(value).strip().lower()
+        if normalized == "25+":
+            return "25+"
+        raise ValueError(f"Invalid min_age_tag: {value!r}")
+
+    def _normalize_required_tone_tag(self, value: Any) -> str | None:
+        if value in (None, "", "off"):
+            return None
+        normalized = str(value).strip().lower()
+        if normalized == "ragebaiter_free":
+            return "ragebaiter_free"
+        raise ValueError(f"Invalid required_tone_tag: {value!r}")
+
+    async def get_lane_tag_filter(self, channel_id: int) -> LaneTagFilter:
+        lane_id = int(channel_id)
+        cached = self.lane_tag_filters.get(lane_id)
+        if cached is not None:
+            return cached
+        try:
+            row = await db.query_one_async(
+                """
+                SELECT channel_id, min_age_tag, required_tone_tag, deny_ragebaiter
+                FROM tempvoice_lane_tag_filter
+                WHERE channel_id=?
+                """,
+                (lane_id,),
+            )
+        except Exception as e:
+            log.debug("get_lane_tag_filter failed for lane %s: %r", lane_id, e)
+            return LaneTagFilter(channel_id=lane_id)
+        if not row:
+            return LaneTagFilter(channel_id=lane_id)
+        lane_filter = self._row_to_lane_tag_filter(row)
+        self.lane_tag_filters[lane_id] = lane_filter
+        return lane_filter
+
+    async def set_lane_tag_filter(
+        self,
+        channel_id: int,
+        *,
+        min_age_tag: str | None,
+        required_tone_tag: str | None,
+        deny_ragebaiter: bool,
+    ) -> LaneTagFilter:
+        lane_id = int(channel_id)
+        lane_filter = LaneTagFilter(
+            channel_id=lane_id,
+            min_age_tag=self._normalize_min_age_tag(min_age_tag),
+            required_tone_tag=self._normalize_required_tone_tag(required_tone_tag),
+            deny_ragebaiter=bool(deny_ragebaiter),
+        )
+        await db.execute_async(
+            """
+            INSERT INTO tempvoice_lane_tag_filter(
+                channel_id,
+                min_age_tag,
+                required_tone_tag,
+                deny_ragebaiter,
+                updated_at
+            )
+            VALUES(?,?,?,?,CURRENT_TIMESTAMP)
+            ON CONFLICT(channel_id) DO UPDATE SET
+                min_age_tag=excluded.min_age_tag,
+                required_tone_tag=excluded.required_tone_tag,
+                deny_ragebaiter=excluded.deny_ragebaiter,
+                updated_at=CURRENT_TIMESTAMP
+            """,
+            (
+                lane_id,
+                lane_filter.min_age_tag,
+                lane_filter.required_tone_tag,
+                1 if lane_filter.deny_ragebaiter else 0,
+            ),
+        )
+        self.lane_tag_filters[lane_id] = lane_filter
+        return lane_filter
+
+    async def _member_block_reason(
+        self,
+        member: discord.Member,
+        lane_filter: LaneTagFilter,
+        *,
+        tag_service: Any,
+    ) -> str | None:
+        if lane_filter.min_age_tag:
+            user_tags = await tag_service.get_user_tags(int(member.id))
+            if user_tags.get("age") != lane_filter.min_age_tag:
+                return "min_age"
+        if lane_filter.deny_ragebaiter and await tag_service.has_active_mod_tag(
+            int(member.id), "ragebaiter"
+        ):
+            return "ragebaiter"
+        return None
+
+    async def _set_tag_filter_permission(
+        self,
+        lane: discord.VoiceChannel,
+        member: discord.Member,
+        *,
+        deny: bool,
+    ) -> None:
+        overwrite = lane.overwrites_for(member)
+        if deny:
+            if overwrite.connect is False:
+                return
+            overwrite.connect = False
+            await lane.set_permissions(
+                member,
+                overwrite=overwrite,
+                reason="TempVoice: Tag-Filter deny",
+            )
+            self._tag_filter_blocked_members.setdefault(lane.id, set()).add(int(member.id))
+            return
+
+        blocked_members = self._tag_filter_blocked_members.setdefault(lane.id, set())
+        if int(member.id) not in blocked_members:
+            return
+        owner_id = self.lane_owner.get(lane.id)
+        if owner_id and await self.bans.is_banned_by_owner(owner_id, int(member.id)):
+            blocked_members.discard(int(member.id))
+            return
+        await lane.set_permissions(member, overwrite=None, reason="TempVoice: Tag-Filter clear")
+        blocked_members.discard(int(member.id))
+
+    async def _disconnect_member_for_tag_filter(
+        self,
+        member: discord.Member,
+        *,
+        reason: str,
+    ) -> None:
+        try:
+            await member.move_to(None, reason=reason)
+        except Exception as e:
+            log.debug(
+                "tag filter disconnect failed for member %s: %r",
+                getattr(member, "id", "?"),
+                e,
+            )
+
+    async def _apply_tag_filter(
+        self,
+        lane: discord.VoiceChannel,
+        lane_filter: LaneTagFilter,
+        *,
+        target_members: list[discord.Member] | None = None,
+        disconnect_blocked: bool = True,
+    ) -> None:
+        """Setzt Member-Overwrites für Tag-Filter und trennt geblockte Nutzer bei Bedarf."""
+        if not lane_filter.is_enabled():
+            members = target_members or list(getattr(lane, "members", []))
+            for member in members:
+                await self._set_tag_filter_permission(lane, member, deny=False)
+            return
+
+        tag_service = self.bot.get_cog("TagService")
+        if tag_service is None:
+            return
+
+        members = target_members or list(getattr(lane, "members", []))
+        for member in members:
+            try:
+                block_reason = await self._member_block_reason(
+                    member,
+                    lane_filter,
+                    tag_service=tag_service,
+                )
+                should_block = block_reason is not None
+                await self._set_tag_filter_permission(lane, member, deny=should_block)
+                if should_block and disconnect_blocked:
+                    await self._disconnect_member_for_tag_filter(
+                        member,
+                        reason="TempVoice: Tag-Filter enforced",
+                    )
+            except Exception as e:
+                log.debug(
+                    "apply_tag_filter failed for lane %s member %s: %r",
+                    getattr(lane, "id", "?"),
+                    getattr(member, "id", "?"),
+                    e,
+                )
 
     # --------- Lane-Erstellung ---------
     async def _create_lane(self, member: discord.Member, staging: discord.VoiceChannel):
@@ -2118,6 +2367,16 @@ class TempVoiceCore(commands.Cog):
 
                 if ch.id in self.join_time:
                     self.join_time[ch.id].pop(member.id, None)
+                if ch.id in self._tag_filter_blocked_members:
+                    try:
+                        await self._set_tag_filter_permission(ch, member, deny=False)
+                    except Exception as e:
+                        log.debug(
+                            "tag filter leave cleanup failed for lane %s member %s: %r",
+                            ch.id,
+                            member.id,
+                            e,
+                        )
                 if ch.id in self.lane_owner and self.lane_owner[ch.id] == member.id:
                     if len(ch.members) > 0:
                         tsmap = self.join_time.get(ch.id, {})
@@ -2267,9 +2526,50 @@ class TempVoiceCore(commands.Cog):
 
                 # Nur falls sehr frisch und noch ohne Live-Suffix – s. _refresh_name
                 if _is_managed_lane(ch):
+                    lane_filter = await self.get_lane_tag_filter(ch.id)
+                    await self._apply_tag_filter(
+                        ch,
+                        lane_filter,
+                        target_members=[member],
+                        disconnect_blocked=True,
+                    )
                     await self._refresh_name(ch)
         except Exception as e:
             log.debug("post-join flow failed: %r", e)
+
+    @commands.Cog.listener()
+    async def on_mod_tag_added(
+        self,
+        user_id: int,
+        tag: str,
+        set_by: int,
+        reason: str | None,
+    ) -> None:
+        del set_by, reason
+        if tag != "ragebaiter":
+            return
+        guilds = list(getattr(self.bot, "guilds", []))
+        for guild in guilds:
+            member = guild.get_member(int(user_id))
+            if not member or not getattr(member, "voice", None):
+                continue
+            lane = getattr(member.voice, "channel", None)
+            if lane is None or not getattr(lane, "id", None):
+                continue
+            lane_filter = self.lane_tag_filters.get(int(lane.id))
+            if not lane_filter or not lane_filter.deny_ragebaiter:
+                continue
+            await self._apply_tag_filter(
+                lane,
+                lane_filter,
+                target_members=[member],
+                disconnect_blocked=False,
+            )
+            if getattr(member.voice, "channel", None) == lane:
+                await self._disconnect_member_for_tag_filter(
+                    member,
+                    reason="TempVoice: Ragebaiter tag applied",
+                )
 
 
 async def setup(bot: commands.Bot):

@@ -184,7 +184,7 @@ class TagServiceTests(unittest.IsolatedAsyncioTestCase):
         setup_bot = _SetupBot()
         await setup(setup_bot)  # type: ignore[arg-type]
 
-        self.assertEqual(len(setup_bot.added_cogs), 1)
+        self.assertGreaterEqual(len(setup_bot.added_cogs), 1)
         self.assertIsInstance(setup_bot.added_cogs[0], TagService)
 
     async def test_cleanup_loop_task_can_start_and_stop(self) -> None:

@@ -11,7 +11,7 @@ import re
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 import discord
 from discord.ext import commands
@@ -160,6 +160,16 @@ MESSAGE_RANK_ALIASES = {
     "ascendent": "Ascendant",
     "ethernus": "Eternus",
 }
+LFG_AGE_FILTER_RE = re.compile(r"(?<!\d)25\+(?!\d)")
+LFG_RAGEBAITER_FREE_RE = re.compile(r"\bragebaiter(?:[\s-]?free)\b", re.IGNORECASE)
+VISIBLE_AGE_TAG_LABELS = {
+    "25+": "25+",
+    "u25": "U25",
+}
+VISIBLE_TONE_TAG_LABELS = {
+    "banter_ok": "Banter-OK",
+    "ragebaiter_free": "Ragebaiter-Free",
+}
 
 
 @dataclass
@@ -207,6 +217,16 @@ class UserActivityProfile:
     )  # (co_id, sessions, minutes)
     is_likely_active_now: bool = False
     is_likely_active_soon: bool = False
+
+
+@dataclass(frozen=True)
+class LFGTagFilters:
+    min_age_tag: str | None = None
+    require_ragebaiter_free: bool = False
+
+    @property
+    def enabled(self) -> bool:
+        return self.min_age_tag is not None or self.require_ragebaiter_free
 
 
 class SmartLFGAgent(commands.Cog):
@@ -965,6 +985,110 @@ class SmartLFGAgent(commands.Cog):
             return []
         return []
 
+    def _parse_tag_filters(self, message_content: str) -> LFGTagFilters:
+        # LFG ist aktuell nachrichtenbasiert; bis ein Modal existiert, lesen wir
+        # die optionalen Filter direkt aus der Nachricht.
+        normalized = (message_content or "").casefold()
+        min_age_tag = "25+" if LFG_AGE_FILTER_RE.search(normalized) else None
+        require_ragebaiter_free = bool(LFG_RAGEBAITER_FREE_RE.search(normalized))
+        return LFGTagFilters(
+            min_age_tag=min_age_tag,
+            require_ragebaiter_free=require_ragebaiter_free,
+        )
+
+    async def _filter_candidate_ids_by_tags(
+        self,
+        candidate_ids: list[int],
+        tag_filters: LFGTagFilters,
+    ) -> list[int]:
+        if not candidate_ids or not tag_filters.enabled:
+            return candidate_ids
+
+        candidate_ids_json = json.dumps([int(user_id) for user_id in candidate_ids])
+        now_iso = datetime.now(UTC).isoformat()
+        rows = await db.query_all_async(
+            """
+            SELECT candidate.user_id
+            FROM (
+              SELECT CAST(value AS INTEGER) AS user_id
+              FROM json_each(?)
+            ) AS candidate
+            WHERE (
+              ? IS NULL OR EXISTS (
+                SELECT 1
+                FROM user_tags AS ut_age
+                WHERE ut_age.user_id = candidate.user_id
+                  AND ut_age.tag_key = 'age'
+                  AND ut_age.tag_value = ?
+              )
+            )
+              AND (
+                ? = 0 OR EXISTS (
+                  SELECT 1
+                  FROM user_tags AS ut_tone
+                  WHERE ut_tone.user_id = candidate.user_id
+                    AND ut_tone.tag_key = 'tone'
+                    AND ut_tone.tag_value = 'ragebaiter_free'
+                )
+              )
+              AND (
+                ? = 0 OR NOT EXISTS (
+                  SELECT 1
+                  FROM user_mod_tags AS mod_tag
+                  WHERE mod_tag.user_id = candidate.user_id
+                    AND mod_tag.mod_tag = 'ragebaiter'
+                    AND (
+                      mod_tag.expires_at IS NULL
+                      OR mod_tag.expires_at > ?
+                    )
+                )
+              )
+            """,
+            (
+                candidate_ids_json,
+                tag_filters.min_age_tag,
+                tag_filters.min_age_tag,
+                int(tag_filters.require_ragebaiter_free),
+                int(tag_filters.require_ragebaiter_free),
+                now_iso,
+            ),
+        )
+        allowed_ids = {int(row["user_id"]) for row in rows}
+        return [user_id for user_id in candidate_ids if user_id in allowed_ids]
+
+    def _get_tag_service(self) -> object | None:
+        get_cog = getattr(self.bot, "get_cog", None)
+        if not callable(get_cog):
+            return None
+        return get_cog("TagService")
+
+    async def _get_visible_user_tag_line(self, user_id: int) -> str | None:
+        tag_service = self._get_tag_service()
+        if tag_service is None:
+            return None
+
+        get_user_tags = getattr(tag_service, "get_user_tags", None)
+        if not callable(get_user_tags):
+            return None
+
+        try:
+            user_tags = await get_user_tags(int(user_id))
+        except Exception as exc:
+            log.warning("TagService get_user_tags fehlgeschlagen fuer %s: %s", user_id, exc)
+            return None
+
+        visible_labels: list[str] = []
+        age_value = user_tags.get("age")
+        tone_value = user_tags.get("tone")
+        if age_value in VISIBLE_AGE_TAG_LABELS:
+            visible_labels.append(VISIBLE_AGE_TAG_LABELS[age_value])
+        if tone_value in VISIBLE_TONE_TAG_LABELS:
+            visible_labels.append(VISIBLE_TONE_TAG_LABELS[tone_value])
+
+        if not visible_labels:
+            return None
+        return f"Tags: {' · '.join(visible_labels)}"
+
     def _rank_score(
         self,
         target_rank: int,
@@ -1285,6 +1409,10 @@ class SmartLFGAgent(commands.Cog):
                 rank_strict = False
 
         candidate_ids = list(steam_links.keys())
+        tag_filters = self._parse_tag_filters(message_content)
+        candidate_ids = await self._filter_candidate_ids_by_tags(candidate_ids, tag_filters)
+        if not candidate_ids:
+            return []
         patterns = await self._fetch_activity_patterns(candidate_ids)
 
         content_lower = (message_content or "").lower()
@@ -2043,6 +2171,9 @@ class SmartLFGAgent(commands.Cog):
             ),
             color=discord.Color.orange(),
         )
+        visible_tag_line = await self._get_visible_user_tag_line(message.author.id)
+        if visible_tag_line:
+            embed.description = f"{embed.description}\n\n{visible_tag_line}"
 
         requester_rank_float = rank_val + (rank_sub or 5) / 10.0
         if has_active:

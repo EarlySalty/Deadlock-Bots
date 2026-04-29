@@ -8,7 +8,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -107,6 +107,9 @@ WHITESPACE_RE = re.compile(r"\s+")
 DISCORD_FIELD_LIMIT = 1024
 DISCORD_MESSAGE_SAFE_LIMIT = 1800
 PERSISTENT_CASE_PLACEHOLDER = "template"
+RAGEBAITER_FREE_PROPOSE_CONFIDENCE = 0.40
+RAGEBAITER_MOD_TAG_DURATION = timedelta(days=14)
+RAGEBAITER_FREE_WARNING_WINDOW = timedelta(minutes=30)
 ALLOWED_CATEGORIES = {
     "nsfw_explicit",
     "csam",
@@ -223,7 +226,7 @@ class ModerationCase:
         return _case_jump_url(self.guild_id, self.channel_id, self.message_id)
 
     @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "ModerationCase":
+    def from_row(cls, row: sqlite3.Row) -> ModerationCase:
         attachments_raw = row["attachments_json"] or "[]"
         try:
             attachments = json.loads(attachments_raw)
@@ -255,7 +258,7 @@ class ModerationCase:
 
 
 class DenyReasonModal(discord.ui.Modal):
-    def __init__(self, cog: "AIModeratorCog", case_id: str) -> None:
+    def __init__(self, cog: AIModeratorCog, case_id: str) -> None:
         super().__init__(title="Moderation ablehnen")
         self.cog = cog
         self.case_id = case_id
@@ -277,7 +280,7 @@ class AcceptModerationButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
     template=rf"aimod:accept:{CASE_ID_TEMPLATE}",
 ):
-    def __init__(self, cog: "AIModeratorCog", case_id: str | None = None) -> None:
+    def __init__(self, cog: AIModeratorCog, case_id: str | None = None) -> None:
         self.cog = cog
         self.case_id = case_id or PERSISTENT_CASE_PLACEHOLDER
         super().__init__(
@@ -294,7 +297,7 @@ class AcceptModerationButton(
         interaction: discord.Interaction,
         item: discord.ui.Item[Any],
         match: re.Match[str],
-    ) -> "AcceptModerationButton":
+    ) -> AcceptModerationButton:
         cog = interaction.client.get_cog("AIModeratorCog")
         if cog is None:
             raise RuntimeError("AIModeratorCog nicht geladen")
@@ -308,7 +311,7 @@ class DenyModerationButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
     template=rf"aimod:deny:{CASE_ID_TEMPLATE}",
 ):
-    def __init__(self, cog: "AIModeratorCog", case_id: str | None = None) -> None:
+    def __init__(self, cog: AIModeratorCog, case_id: str | None = None) -> None:
         self.cog = cog
         self.case_id = case_id or PERSISTENT_CASE_PLACEHOLDER
         super().__init__(
@@ -325,7 +328,7 @@ class DenyModerationButton(
         interaction: discord.Interaction,
         item: discord.ui.Item[Any],
         match: re.Match[str],
-    ) -> "DenyModerationButton":
+    ) -> DenyModerationButton:
         cog = interaction.client.get_cog("AIModeratorCog")
         if cog is None:
             raise RuntimeError("AIModeratorCog nicht geladen")
@@ -336,7 +339,7 @@ class DenyModerationButton(
 
 
 class ModerationProposalView(discord.ui.View):
-    def __init__(self, cog: "AIModeratorCog", case_id: str | None) -> None:
+    def __init__(self, cog: AIModeratorCog, case_id: str | None) -> None:
         super().__init__(timeout=None)
         self.add_item(AcceptModerationButton(cog, case_id))
         self.add_item(DenyModerationButton(cog, case_id))
@@ -367,6 +370,7 @@ class AIModeratorCog(commands.Cog):
         self.max_prompt_chars = int(cfg["MAX_PROMPT_CHARS"])
         self.db_path = _resolve_db_path()
         self._last_scan_ts: dict[int, float] = {}
+        self._ragebaiter_free_warnings: dict[tuple[int, int], datetime] = {}
 
     async def cog_load(self) -> None:
         await asyncio.to_thread(self._ensure_schema_sync)
@@ -436,21 +440,33 @@ class AIModeratorCog(commands.Cog):
             return
         self._last_scan_ts[message.author.id] = now
 
+        required_tone_tag = await asyncio.to_thread(
+            self._get_required_tone_tag_sync,
+            message.channel.id,
+        )
+        proposal_threshold = self._get_proposal_threshold(required_tone_tag)
         verdict, escalated = await self._classify_message(message, image_attachments)
         if verdict.verdict == "needs_context":
             return
 
         if verdict.verdict == "ok" and verdict.category == "ragebait_ok":
             escalated_verdict = await self._handle_ragebait_hit(message, verdict)
-            if escalated_verdict is None:
+            if escalated_verdict is not None:
+                verdict = escalated_verdict
+                await self._create_proposal_case(
+                    message,
+                    verdict,
+                    escalated_with_context=escalated,
+                    action="ragebait_escalated",
+                )
                 return
-            verdict = escalated_verdict
-            await self._create_proposal_case(
+            if await self._maybe_handle_ragebaiter_free_warning(
                 message,
                 verdict,
+                required_tone_tag=required_tone_tag,
                 escalated_with_context=escalated,
-                action="ragebait_escalated",
-            )
+            ):
+                return
             return
 
         if verdict.verdict == "ok":
@@ -464,7 +480,7 @@ class AIModeratorCog(commands.Cog):
             await self._auto_delete_case(message, verdict, escalated_with_context=escalated)
             return
 
-        if verdict.confidence < self.propose_confidence:
+        if verdict.confidence < proposal_threshold:
             return
 
         if verdict.verdict in {"delete", "propose"}:
@@ -767,6 +783,7 @@ class AIModeratorCog(commands.Cog):
         )
         if count < self.ragebait_escalate_threshold:
             return None
+        await self._apply_persistent_ragebait_tag(message.author.id)
 
         lines = ["Wiederholtes Ragebait innerhalb des Zeitfensters erkannt:"]
         for hit in hits[-self.ragebait_escalate_threshold :]:
@@ -782,11 +799,140 @@ class AIModeratorCog(commands.Cog):
         return AIVerdict(
             verdict="propose",
             category="persistent_ragebait",
-            confidence=max(self.propose_confidence, verdict.confidence),
+            confidence=max(self._get_proposal_threshold(None), verdict.confidence),
             reason=_truncate(combined_reason, 900),
             needs_context=False,
             raw_json=verdict.raw_json,
         )
+
+    async def _apply_persistent_ragebait_tag(self, user_id: int) -> None:
+        tag_service = self.bot.get_cog("TagService")
+        if tag_service is None or not hasattr(tag_service, "add_mod_tag"):
+            return
+
+        expires_at = self._now_utc() + RAGEBAITER_MOD_TAG_DURATION
+        try:
+            await tag_service.add_mod_tag(
+                int(user_id),
+                "ragebaiter",
+                set_by=0,
+                reason="auto: persistent_ragebait",
+                expires_at=expires_at,
+            )
+        except Exception as exc:
+            log.warning("Konnte persistent_ragebait Tag fuer User %s nicht setzen: %s", user_id, exc)
+
+    async def _maybe_handle_ragebaiter_free_warning(
+        self,
+        message: discord.Message,
+        verdict: AIVerdict,
+        *,
+        required_tone_tag: str | None,
+        escalated_with_context: bool,
+    ) -> bool:
+        if required_tone_tag != "ragebaiter_free":
+            return False
+        if not (RAGEBAITER_FREE_PROPOSE_CONFIDENCE <= verdict.confidence < self.propose_confidence):
+            return False
+
+        user_id = int(message.author.id)
+        channel_id = int(message.channel.id)
+        now = self._now_utc()
+        if self._has_recent_ragebaiter_free_warning(user_id, channel_id, now=now):
+            repeated_reason = (
+                f"{verdict.reason}\nHinweis fuer Ragebaiter-Free-Channel bereits innerhalb von 30 Minuten erfolgt."
+            )
+            proposal_verdict = AIVerdict(
+                verdict="propose",
+                category=verdict.category,
+                confidence=max(RAGEBAITER_FREE_PROPOSE_CONFIDENCE, verdict.confidence),
+                reason=_truncate(repeated_reason, 900),
+                needs_context=False,
+                raw_json=verdict.raw_json,
+            )
+            await self._create_proposal_case(
+                message,
+                proposal_verdict,
+                escalated_with_context=escalated_with_context,
+                action="proposed",
+            )
+            return True
+
+        self._remember_ragebaiter_free_warning(user_id, channel_id, now=now)
+        await self._send_ragebaiter_free_hint(message)
+        return True
+
+    async def _send_ragebaiter_free_hint(self, message: discord.Message) -> None:
+        sender = getattr(message.author, "send", None)
+        if sender is None:
+            return
+        try:
+            await sender(
+                "Hinweis: Dieser Voice ist als `Ragebaiter-Free` markiert, "
+                "bitte Provokationen reduzieren."
+            )
+        except discord.HTTPException:
+            pass
+
+    def _has_recent_ragebaiter_free_warning(
+        self,
+        user_id: int,
+        channel_id: int,
+        *,
+        now: datetime,
+    ) -> bool:
+        self._prune_ragebaiter_free_warnings(now=now)
+        warned_at = self._ragebaiter_free_warnings.get((int(user_id), int(channel_id)))
+        if warned_at is None:
+            return False
+        return now - warned_at <= RAGEBAITER_FREE_WARNING_WINDOW
+
+    def _remember_ragebaiter_free_warning(
+        self,
+        user_id: int,
+        channel_id: int,
+        *,
+        now: datetime,
+    ) -> None:
+        self._prune_ragebaiter_free_warnings(now=now)
+        self._ragebaiter_free_warnings[(int(user_id), int(channel_id))] = now
+
+    def _prune_ragebaiter_free_warnings(self, *, now: datetime) -> None:
+        expired_keys = [
+            key
+            for key, warned_at in self._ragebaiter_free_warnings.items()
+            if now - warned_at > RAGEBAITER_FREE_WARNING_WINDOW
+        ]
+        for key in expired_keys:
+            self._ragebaiter_free_warnings.pop(key, None)
+
+    def _get_proposal_threshold(self, required_tone_tag: str | None) -> float:
+        if required_tone_tag == "ragebaiter_free":
+            return RAGEBAITER_FREE_PROPOSE_CONFIDENCE
+        return self.propose_confidence
+
+    def _get_required_tone_tag_sync(self, channel_id: int) -> str | None:
+        try:
+            with self._connect_db() as connection:
+                row = connection.execute(
+                    """
+                    SELECT required_tone_tag
+                    FROM tempvoice_lane_tag_filter
+                    WHERE channel_id = ?
+                    """,
+                    (int(channel_id),),
+                ).fetchone()
+        except sqlite3.OperationalError:
+            return None
+
+        tone_tag = row["required_tone_tag"] if row else None
+        if tone_tag is None:
+            return None
+        normalized = str(tone_tag).strip().lower()
+        return normalized or None
+
+    def _now_utc(self) -> datetime:
+        return datetime.now(UTC)
 
     async def _create_proposal_case(
         self,
@@ -809,8 +955,12 @@ class AIModeratorCog(commands.Cog):
                 review_message_id = review_message.id
                 try:
                     self.bot.add_view(view, message_id=review_message.id)
-                except Exception:
-                    pass
+                except Exception as exc:
+                    log.debug(
+                        "Konnte Proposal-View fuer Review-Message %s nicht registrieren: %s",
+                        review_message.id,
+                        exc,
+                    )
             except discord.HTTPException as exc:
                 log.warning("Konnte Moderationsvorschlag fuer Case %s nicht posten: %s", case.case_id, exc)
 
