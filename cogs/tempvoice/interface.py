@@ -550,12 +550,13 @@ class MainView(discord.ui.View):
         self.add_item(BanButton(util))
         self.add_item(UnbanButton(util))
         if include_minrank:
-            # Ranked: Lurker auf Row 1 verschieben, damit Row 4 für Sub-Rang frei ist
+            # Ranked: Lurker und Tag-Filter zu Row 1 (Mod-Reihe), damit Row 3
+            # für Quick-Templates + Presets frei bleibt (max. 5 Items pro Row).
             self.add_item(LurkerButton(util, row=1))
+            self.add_item(TagFilterButton(core, row=1))
             # Row 2: Haupt-Rang Selektor
             self.add_item(MinRankSelect(core))
-            # Row 3: Quick Templates + Presets (zusammengefasst)
-            self.add_item(TagFilterButton(core, row=3))
+            # Row 3: Quick Templates + Presets
             self.add_item(ResetLaneButton(core))
             self.add_item(DuoCallButton(core))
             self.add_item(TrioCallButton(core))

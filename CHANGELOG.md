@@ -1,3 +1,11 @@
+## #4 — Tag-System: bessere Sortierung in Voice-Lanes und LFG
+
+- Du kannst dir jetzt selbst zwei Tags setzen: deinen Lieblings-Ton (Banter-OK oder Ragebaiter-Free) und optional eine Altersangabe (25+ oder U25)
+- Setzen geht entweder direkt im Onboarding nach dem Server-Join oder jederzeit per `/meine-tags`
+- Voice-Lane-Owner können in ihrer Lane einen 🛡️ Tag-Filter setzen, damit nur Leute mit passendem Ton oder Alter joinen können
+- Wer wiederholt Ragebait fährt, bekommt automatisch einen Ragebaiter-Mod-Tag (14 Tage), der ihn aus Ragebaiter-Free-Lanes raushält — Mods können den Tag jederzeit anpassen
+- LFG-Suche kann jetzt auch nach Tags filtern, damit Mitspieler besser zur eigenen Stimmung passen
+
 ## #3 — Tierlist-Backend: WR-Daten alle 8 Stunden automatisch
 
 - Neuer Service liefert die Hero-Tierliste der Website mit Live-Winrates pro Skill-Bucket
