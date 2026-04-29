@@ -2010,11 +2010,14 @@ class DashboardServer:
             parsed = urlparse(candidate)
         except Exception:
             return False
-        if (parsed.scheme or "").lower() != "https":
-            return False
+        scheme = (parsed.scheme or "").lower()
         if parsed.username or parsed.password or not parsed.netloc:
             return False
         host = (parsed.hostname or "").strip().lower()
+        if host in {"127.0.0.1", "localhost", "::1"}:
+            return scheme in {"http", "https"}
+        if scheme != "https":
+            return False
         if host not in {
             "deutsche-deadlock-community.de",
             "admin.deutsche-deadlock-community.de",

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from unittest import mock
 from types import SimpleNamespace
 
 from cogs.welcome_dm import twitch_partner_integration as integration
@@ -116,6 +117,104 @@ class TwitchPartnerIntegrationTests(unittest.TestCase):
                 }
             ],
         )
+
+    def test_generate_discord_auth_url_prefers_internal_api(self) -> None:
+        calls: list[tuple[str, dict[str, object | None]]] = []
+
+        def _fake_request(path: str, query: dict[str, object | None]):
+            calls.append((path, query))
+            return {"auth_url": "https://auth.example/internal"}
+
+        with mock.patch.dict(
+            integration.os.environ,
+            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+            clear=False,
+        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+            auth_url = integration.generate_discord_auth_url(265152027863023617)
+
+        self.assertEqual(auth_url, "https://auth.example/internal")
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "/internal/twitch/v1/raid/auth-url",
+                    {
+                        "login": "discord:265152027863023617",
+                        "discord_user_id": 265152027863023617,
+                    },
+                )
+            ],
+        )
+
+    def test_internal_api_config_accepts_main_bot_token_fallback(self) -> None:
+        with mock.patch.dict(
+            integration.os.environ,
+            {
+                "TWITCH_INTERNAL_API_TOKEN": "",
+                "MASTER_BROKER_TOKEN": "",
+                "MAIN_BOT_INTERNAL_TOKEN": "main-bot-token",
+                "TWITCH_INTERNAL_API_BASE_URL": "http://127.0.0.1:8776",
+            },
+            clear=False,
+        ):
+            config = integration._internal_api_config()
+
+        self.assertIsNotNone(config)
+        assert config is not None
+        self.assertEqual(config[0], "http://127.0.0.1:8776")
+        self.assertEqual(config[1], "main-bot-token")
+
+    def test_get_auth_state_prefers_internal_api(self) -> None:
+        def _fake_request(path: str, query: dict[str, object | None]):
+            self.assertEqual(path, "/internal/twitch/v1/raid/auth-state")
+            self.assertEqual(query, {"discord_user_id": 265152027863023617})
+            return {
+                "twitch_login": "MasterIOFPS",
+                "twitch_user_id": "153828567",
+                "authorized": True,
+            }
+
+        with mock.patch.dict(
+            integration.os.environ,
+            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+            clear=False,
+        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+            state = integration.get_auth_state(265152027863023617)
+
+        self.assertEqual(state.twitch_login, "masteriofps")
+        self.assertEqual(state.twitch_user_id, "153828567")
+        self.assertTrue(state.authorized)
+
+    def test_check_onboarding_blocklist_prefers_internal_api(self) -> None:
+        def _fake_request(path: str, query: dict[str, object | None]):
+            self.assertEqual(path, "/internal/twitch/v1/raid/block-state")
+            self.assertEqual(
+                query,
+                {
+                    "discord_user_id": 265152027863023617,
+                    "twitch_login": "masteriofps",
+                },
+            )
+            return {
+                "twitch_login": "MasterIOFPS",
+                "twitch_user_id": "153828567",
+                "partner_opt_out": False,
+                "token_blacklisted": False,
+                "raid_blacklisted": True,
+            }
+
+        with mock.patch.dict(
+            integration.os.environ,
+            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+            clear=False,
+        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+            blocked, reason = integration.check_onboarding_blocklist(
+                discord_user_id=265152027863023617,
+                twitch_login="MasterIOFPS",
+            )
+
+        self.assertTrue(blocked)
+        self.assertEqual(reason, "twitch_raid_blacklist fuer masteriofps")
 
 
 if __name__ == "__main__":

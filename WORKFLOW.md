@@ -161,3 +161,35 @@ Durchgang 1 abgeschlossen. Änderungen liegen unstaged — noch nicht committed,
 
 ## Nächster Schritt
 User reviewt Änderungen. Bei OK: `COACHING_BOT_TOKEN` setzen (Infisical), dann commit+push in beiden Repos.
+
+---
+
+# Tag-System Phase 1 — Welle 1 (2026-04-29)
+
+## Ziel
+Nur Foundation aus Phase 1 umsetzen: DB-Schema, neues `cogs/tags/`-Cog mit `TagService`, Cache/Rehydration/Cleanup und dedizierte Tests.
+
+## Fortschritt
+- Plan und Spec für Phase 1 gesichtet, Scope auf Welle 1 begrenzt.
+- Bestehende Patterns in `service/db.py`, `cogs/tempvoice/` und den vorhandenen Async-Tests abgeglichen.
+- TDD durchgezogen: `tests/test_tag_service.py` zuerst angelegt, danach `service/db.py` und `cogs/tags/` bis zum grünen Lauf ergänzt.
+- `TagService` implementiert: User-/Mod-Tag-CRUD, In-Memory-Cache, Rehydration via `cog_load()`, 5-Minuten-Cleanup-Loop und `bot.dispatch(...)`-Events.
+- Kein separater Loader-Patch nötig: `bot_core/cog_loader.py` nutzt Auto-Discovery; `cogs/tags/__init__.py` stellt dafür ein konsistentes `setup()` bereit.
+- Verifikation grün: `pytest tests/test_tag_service.py -v` (in temporärer venv mit `pytest`) und `ruff check service/db.py cogs/tags tests/test_tag_service.py`.
+
+## Offen
+- Welle 2 ist bewusst offen: Commands, Onboarding-, TempVoice-, AI-Mod- und LFG-Integration wurden in dieser Welle nicht angefasst.
+- Änderungen sind absichtlich uncommitted; Commit/Push bleibt beim Orchestrator.
+
+---
+
+# Tag-System Phase 1 — Welle 2 / TempVoice Tag-Filter (2026-04-29)
+
+## Fortschritt
+- `cogs/tempvoice/core.py` um `LaneTagFilter`, DB-Rehydration/Persistenz, `_apply_tag_filter()`, Join-Enforcement und `on_mod_tag_added`-Cleanup ergänzt.
+- `cogs/tempvoice/interface.py` um den Button `🛡️ Tag-Filter` sowie eine Config-View mit drei Single-Selects und Save-Flow erweitert.
+- Neuer Test `tests/test_tempvoice_tag_filter.py` deckt Persistenz, Min-Age-Block und Ragebaiter-Cleanup ab.
+- Verifikation lokal grün: `pytest tests/test_tempvoice_tag_filter.py -v`, `pytest tests/test_tempvoice_core.py tests/test_tempvoice_lane_sorting.py -v`, `ruff check cogs/tempvoice/core.py cogs/tempvoice/interface.py tests/test_tempvoice_tag_filter.py`.
+
+## Offen
+- Kein Live-Discord-Smoke-Test in dieser Worker-Phase.
