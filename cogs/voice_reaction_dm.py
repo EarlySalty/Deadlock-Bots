@@ -62,6 +62,8 @@ class VoiceReactionDM(commands.Cog):
         self._psycopg = None  # lazy
         self._owner: discord.User | None = None
         self._poll_failed_logged = False
+        self._poll_tick = 0
+        self._last_pending_count: int | None = None
 
     async def cog_load(self) -> None:
         if not _is_enabled():
@@ -94,10 +96,30 @@ class VoiceReactionDM(commands.Cog):
     # ------------------------------------------------------------------
     # Poll-Loop
     # ------------------------------------------------------------------
+    async def _resolve_owner_id(self) -> int:
+        owner_id = int(getattr(settings, "owner_id", 0) or 0)
+        if owner_id > 0:
+            return owner_id
+        env_id = (os.getenv("VOICE_REACTION_DM_OWNER_ID") or "").strip()
+        if env_id.isdigit():
+            return int(env_id)
+        try:
+            info = await self.bot.application_info()
+        except Exception:
+            return 0
+        owner = getattr(info, "owner", None)
+        return int(getattr(owner, "id", 0) or 0)
+
     @tasks.loop(seconds=POLL_INTERVAL_SECONDS)
     async def _poll(self) -> None:
-        owner_id = int(getattr(settings, "owner_id", 0) or 0)
+        self._poll_tick += 1
+        owner_id = await self._resolve_owner_id()
         if owner_id <= 0:
+            if self._poll_tick == 1 or self._poll_tick % 60 == 0:
+                log.warning(
+                    "VoiceReactionDM: owner_id nicht gesetzt (settings.owner_id=%r, auch keine application_info-owner) — DMs deaktiviert",
+                    getattr(settings, "owner_id", None),
+                )
             return
         try:
             pending = await asyncio.to_thread(self._fetch_pending)
@@ -107,6 +129,16 @@ class VoiceReactionDM(commands.Cog):
                 self._poll_failed_logged = True
             return
         self._poll_failed_logged = False
+
+        count = len(pending)
+        if self._poll_tick == 1 or count != self._last_pending_count:
+            log.info(
+                "VoiceReactionDM: Poll-Tick #%d, owner_id=%d, pending=%d",
+                self._poll_tick,
+                owner_id,
+                count,
+            )
+        self._last_pending_count = count
 
         if not pending:
             return
