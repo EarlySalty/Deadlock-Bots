@@ -30,5 +30,5 @@ requests==2.33.0
 beautifulsoup4==4.14.3
 
 # Crypto / auth
-cryptography==46.0.5
+cryptography==46.0.7
 keyring==25.7.0
