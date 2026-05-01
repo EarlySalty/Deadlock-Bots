@@ -57,7 +57,7 @@ class StandaloneMixin:
                 steam_dir = Path(steam_bridge_env).expanduser()
             else:
                 steam_bot_default = (
-                    Path(os.path.expandvars("%USERPROFILE%"))
+                    Path.home()
                     / "Documents"
                     / "Deadlock-Steam-Bot"
                     / "cogs"

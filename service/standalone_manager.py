@@ -151,6 +151,7 @@ class StandaloneBotManager:
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 cwd=str(state.config.workdir),
+                env=env,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 stdin=asyncio.subprocess.PIPE,
