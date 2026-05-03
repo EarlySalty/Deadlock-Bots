@@ -2,7 +2,7 @@ name: "🚨 Security Incident Automation"
 
 on:
   schedule:
-    - cron: "11 */6 * * *"
+    - cron: "0 4 * * *"
   workflow_dispatch:
 
 permissions:

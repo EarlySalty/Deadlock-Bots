@@ -1,3 +1,11 @@
+## #9 — Dependabot-PRs werden jetzt automatisch gemerged + CI-Laufzeiten halbiert
+
+- Dependabot-PRs werden ab jetzt automatisch approved und direkt gemerged (nicht mehr blockiert durch Lint oder DAST)
+- Lint und DAST-Scans überspringen Dependabot-PRs, da sie nur Dependency-Dateien ändern — kein Sicherheitsverlust
+- Security-Scans laufen weiterhin täglich; Container/IaC/Supply-Chain scannen jetzt wöchentlich statt täglich
+- Security-Incident-Automation läuft jetzt täglich statt alle 6 Stunden — 75 % weniger Runs
+- Dependency-Review hat keinen sinnlosen Tages-Schedule mehr (läuft weiterhin auf jedem PR)
+
 ## #8 — CI-Artifacts werden nach 30 Tagen automatisch gelöscht
 
 - Alle automatisch erzeugten CI-Berichte (Security-Scans, Performance-Reports, Logs) werden ab jetzt nach 30 Tagen automatisch von GitHub entfernt

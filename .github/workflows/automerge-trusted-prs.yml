@@ -1,82 +1,191 @@
-name: "🤖 Dependabot Auto-Merge"
+name: "Dependabot Auto-Merge"
 
 on:
   pull_request_target:
-    types: [opened, reopened, synchronize, ready_for_review]
+    types: [opened, synchronize, reopened, ready_for_review]
+  schedule:
+    - cron: "0 6 * * *"
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
-  dependabot-automerge:
-    if: >
-      github.event.pull_request.draft == false &&
-      github.event.pull_request.user.login == 'dependabot[bot]'
+  auto-merge:
+    name: "Auto-merge trusted Dependabot updates"
+    if: github.event_name == 'pull_request_target' && github.actor == 'dependabot[bot]'
     runs-on: ubuntu-latest
     permissions:
+      contents: write
       pull-requests: write
-      contents: read # Explicitly stated for clarity
 
     steps:
-      - name: Approve Dependabot PR
+      - name: Fetch Dependabot metadata
+        id: metadata
+        uses: dependabot/fetch-metadata@25dd0e34f4fe68f24cc83900b1fe3fe149efef98 # v3.1.0
+        with:
+          alert-lookup: true
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Decide eligibility
+        id: gate
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          ALERT_STATE: ${{ steps.metadata.outputs.alert-state }}
+          DEPENDENCY_NAMES: ${{ steps.metadata.outputs.dependency-names }}
+          MAINTAINER_CHANGES: ${{ steps.metadata.outputs.maintainer-changes }}
+          PACKAGE_ECOSYSTEM: ${{ steps.metadata.outputs.package-ecosystem }}
+          UPDATE_TYPE: ${{ steps.metadata.outputs.update-type }}
+        with:
+          script: |
+            const names = (process.env.DEPENDENCY_NAMES || "")
+              .split(",")
+              .map((v) => v.trim())
+              .filter(Boolean);
+            const updateType = process.env.UPDATE_TYPE || "";
+            const securityUpdate = (process.env.ALERT_STATE || "").toUpperCase() === "OPEN";
+            const maintainerChanges = (process.env.MAINTAINER_CHANGES || "").toLowerCase() === "true";
+
+            let shouldMerge = false;
+            let reason = "unsupported update type";
+
+            if (maintainerChanges) {
+              reason = "maintainer changes detected";
+            } else if (securityUpdate) {
+              shouldMerge = true;
+              reason = "security update";
+            } else if (updateType.startsWith("version-update:") || names.length > 0) {
+              shouldMerge = true;
+              reason = updateType || "dependabot version update";
+            }
+
+            core.setOutput("should_merge", shouldMerge ? "true" : "false");
+            core.setOutput("reason", reason);
+            core.notice(`Auto-merge decision: ${shouldMerge} (${reason})`);
+
+      - name: Auto-approve PR
+        if: steps.gate.outputs.should_merge == 'true' && github.event.pull_request.draft == false
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const pr = context.payload.pull_request;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
+            const pull_number = context.payload.pull_request.number;
 
-            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
-              core.info("PR comes from a fork; skipping.");
+            const reviews = await github.paginate(github.rest.pulls.listReviews, {
+              owner, repo, pull_number, per_page: 100,
+            });
+
+            const alreadyApproved = reviews.some(
+              (r) => r.user?.login === "github-actions[bot]" && r.state === "APPROVED",
+            );
+
+            if (alreadyApproved) {
+              core.notice(`PR #${pull_number} is already approved.`);
               return;
             }
 
-            try {
-              await github.rest.pulls.createReview({
-                owner,
-                repo,
-                pull_number: pr.number,
-                event: "APPROVE",
-                body: "Dependabot PR auto-approved."
-              });
-              core.info(`Approved PR #${pr.number}.`);
-            } catch (e) {
-              core.info(`Approve skipped: ${e.message}`);
-            }
+            await github.rest.pulls.createReview({
+              owner, repo, pull_number,
+              event: "APPROVE",
+              body: "Auto-approved trusted Dependabot update.",
+            });
 
-      - name: Enable auto-merge (squash)
+      - name: Merge PR
+        if: steps.gate.outputs.should_merge == 'true' && github.event.pull_request.draft == false
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
-            const pr = context.payload.pull_request;
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            const allowedBases = new Set(["main", "master", "develop"]);
+            const pull_number = context.payload.pull_request.number;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-            if (pr.head.repo.full_name !== `${owner}/${repo}`) {
-              core.info("PR comes from a fork; skipping auto-merge.");
-              return;
-            }
-
-            if (!allowedBases.has(pr.base.ref)) {
-              core.info(`Base branch ${pr.base.ref} is not allowed for auto-merge.`);
-              return;
-            }
-
-            try {
-              await github.graphql(
-                `
-                mutation($pullRequestId: ID!) {
-                  enablePullRequestAutoMerge(input: { pullRequestId: $pullRequestId, mergeMethod: SQUASH }) {
-                    pullRequest {
-                      number
-                    }
-                  }
+            for (let attempt = 1; attempt <= 12; attempt++) {
+              try {
+                await github.rest.pulls.merge({
+                  owner, repo, pull_number,
+                  merge_method: "squash",
+                });
+                core.notice(`PR #${pull_number} merged on attempt ${attempt}.`);
+                return;
+              } catch (error) {
+                const msg = String(error?.message || error);
+                const retryable = msg.includes("405") || msg.includes("Base branch was modified");
+                if (retryable && attempt < 12) {
+                  core.notice(`Merge attempt ${attempt}/12 failed, retrying in 10s: ${msg}`);
+                  await sleep(10_000);
+                  continue;
                 }
-                `,
-                { pullRequestId: pr.node_id }
+                core.warning(`Could not merge PR #${pull_number}: ${msg}`);
+                return;
+              }
+            }
+
+      - name: Skip note
+        if: steps.gate.outputs.should_merge != 'true'
+        run: echo "Dependabot PR does not meet auto-merge policy: ${{ steps.gate.outputs.reason }}"
+
+  reconcile-open-prs:
+    name: "Reconcile open Dependabot PRs"
+    if: github.event_name != 'pull_request_target'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Approve and merge open Dependabot PRs
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+            const pulls = await github.paginate(github.rest.pulls.list, {
+              owner, repo, state: "open", per_page: 100,
+            });
+
+            const dependabotPulls = pulls.filter(
+              (p) => p.user?.login === "dependabot[bot]" && p.draft === false,
+            );
+
+            for (const pull of dependabotPulls) {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner, repo, pull_number: pull.number, per_page: 100,
+              });
+
+              const alreadyApproved = reviews.some(
+                (r) => r.user?.login === "github-actions[bot]" && r.state === "APPROVED",
               );
-              core.info(`Enabled auto-merge for PR #${pr.number}.`);
-            } catch (e) {
-              core.info(`Auto-merge not enabled: ${e.message}`);
+
+              if (!alreadyApproved) {
+                await github.rest.pulls.createReview({
+                  owner, repo,
+                  pull_number: pull.number,
+                  event: "APPROVE",
+                  body: "Auto-approved trusted Dependabot update.",
+                });
+              }
+
+              const files = await github.paginate(github.rest.pulls.listFiles, {
+                owner, repo, pull_number: pull.number, per_page: 100,
+              });
+              const touchesWorkflows = files.some((f) => f.filename.startsWith(".github/workflows/"));
+              if (touchesWorkflows) {
+                core.notice(`PR #${pull.number} modifies workflow files — requires manual merge.`);
+                continue;
+              }
+
+              try {
+                await github.rest.pulls.merge({
+                  owner, repo,
+                  pull_number: pull.number,
+                  merge_method: "squash",
+                });
+                core.notice(`PR #${pull.number} merged successfully.`);
+              } catch (error) {
+                core.warning(`Could not merge PR #${pull.number}: ${String(error?.message || error)}`);
+              }
             }
