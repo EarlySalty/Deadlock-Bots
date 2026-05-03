@@ -1,3 +1,9 @@
+## #11 — Steam-Verknüpfung: Link wird jetzt immer frisch beim Klick erstellt
+
+- Der „Via Steam verknüpfen"-Button im Onboarding generiert den Login-Link jetzt erst beim Klicken – nicht mehr beim Laden der Nachricht
+- Dadurch können Links nicht mehr ablaufen, bevor jemand draufklickt
+- Das Problem „invalid Launch" bei der Steam-Verifizierung ist damit behoben
+
 ## #10 — Vollständige Security-Fortress hinzugefügt
 
 - Neuer Security-Scan läuft täglich: prüft Workflow-Integrität, findet Secrets im Code, scannt Python auf Sicherheitslücken und bekannte CVEs in Dependencies

@@ -536,8 +536,8 @@ class OnboardingContentCreatorView(discord.ui.View):
 
 class OnboardingAccountLinkView(discord.ui.View):
     """
-    Spezialisierte View für den Account-Verknüpfen-Schritt:
-    Enthält die Steam-Link-Buttons (URL-Buttons).
+    Spezialisierte View für den Account-Verknüpfen-Schritt.
+    Steam-URL wird erst beim Klick generiert (kein ablaufender Link im View).
     'Weiter' Button wird nur gezeigt, wenn der User bereits verifiziert ist.
     """
 
@@ -548,29 +548,15 @@ class OnboardingAccountLinkView(discord.ui.View):
         self.cog = cog
         self.step_index = step_index
         self.user_id = user_id
-        self._steam_urls = _steam_link_urls_for(int(user_id))
 
-        steam_url = self._steam_urls.get("steam_openid_start") or ""
-
-        if steam_url:
-            self.add_item(
-                discord.ui.Button(
-                    label="Via Steam verknüpfen",
-                    style=discord.ButtonStyle.link,
-                    url=steam_url,
-                    emoji="🎮",
-                    row=0,
-                )
-            )
-        else:
-            self.add_item(
-                discord.ui.Button(
-                    label="Steam-Link gerade nicht verfügbar",
-                    style=discord.ButtonStyle.secondary,
-                    disabled=True,
-                    row=0,
-                )
-            )
+        btn = discord.ui.Button(
+            label="Via Steam verknüpfen",
+            style=discord.ButtonStyle.success,
+            emoji="🎮",
+            row=0,
+        )
+        btn.callback = self.start_steam_link
+        self.add_item(btn)
 
         if _steam_friend_code_supported():
             btn = discord.ui.Button(
@@ -593,6 +579,33 @@ class OnboardingAccountLinkView(discord.ui.View):
             )
             btn.callback = self.refresh_status
             self.add_item(btn)
+
+    async def start_steam_link(self, interaction: discord.Interaction):
+        if interaction.user.id != self.user_id:
+            await interaction.response.send_message(
+                "Das ist nicht dein Onboarding.", ephemeral=True
+            )
+            return
+        urls = _steam_link_urls_for(int(self.user_id))
+        steam_url = urls.get("steam_openid_start") or ""
+        if not steam_url:
+            await interaction.response.send_message(
+                "❌ Steam-Login gerade nicht verfügbar. Bitte kurz später nochmal versuchen.",
+                ephemeral=True,
+            )
+            return
+        view = discord.ui.View(timeout=120)
+        view.add_item(
+            discord.ui.Button(
+                label="Bei Steam anmelden",
+                style=discord.ButtonStyle.link,
+                url=steam_url,
+                emoji="🎮",
+            )
+        )
+        await interaction.response.send_message(
+            "🔐 Öffne den Steam-Login hier:", view=view, ephemeral=True
+        )
 
     async def friend_code(self, interaction: discord.Interaction):
         if interaction.user.id != self.user_id:
