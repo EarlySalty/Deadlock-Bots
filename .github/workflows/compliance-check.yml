@@ -65,6 +65,7 @@ jobs:
           name: documentation-check
           path: docs-report.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # GIT HYGIENE (ALWAYS RUNS)
@@ -126,6 +127,7 @@ jobs:
           name: git-hygiene
           path: git-report.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # CODE STYLE (PYTHON ONLY IF EXISTS)
@@ -163,6 +165,7 @@ jobs:
           name: python-style
           path: python-style.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # SUMMARY

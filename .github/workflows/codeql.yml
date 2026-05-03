@@ -159,3 +159,4 @@ jobs:
           name: codeql-sarif-${{ matrix.language }}
           path: /home/runner/work/**/results/**/*.sarif
           if-no-files-found: ignore
+          retention-days: 30

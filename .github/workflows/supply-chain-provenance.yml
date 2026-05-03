@@ -44,6 +44,7 @@ jobs:
           name: source-archive
           path: dist/source-${{ github.sha }}.tar.gz
           if-no-files-found: error
+          retention-days: 30
 
       - name: Attest Build Provenance
         uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0

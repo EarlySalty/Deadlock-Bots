@@ -171,6 +171,7 @@ jobs:
           name: master-dashboard-auth-guard-log
           path: master-dashboard-auth-guard.log
           if-no-files-found: ignore
+          retention-days: 30
 
       - name: Stop Master Dashboard Guard Server
         if: always()

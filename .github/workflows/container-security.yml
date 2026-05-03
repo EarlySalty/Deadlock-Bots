@@ -113,6 +113,7 @@ jobs:
             checkov-compose.sarif
             trivy-docker.sarif
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # DOCKERFILE LINTING - ONLY IF DOCKERFILE EXISTS
@@ -149,6 +150,7 @@ jobs:
           name: hadolint-report
           path: hadolint.sarif
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # DOCKER COMPOSE VALIDATION - ONLY IF COMPOSE EXISTS
@@ -224,6 +226,7 @@ jobs:
           name: container-best-practices
           path: container-analysis.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # SUMMARY

@@ -1,3 +1,8 @@
+## #8 — CI-Artifacts werden nach 30 Tagen automatisch gelöscht
+
+- Alle automatisch erzeugten CI-Berichte (Security-Scans, Performance-Reports, Logs) werden ab jetzt nach 30 Tagen automatisch von GitHub entfernt
+- Verhindert, dass sich der GitHub-Actions-Speicher dauerhaft volläuft
+
 ## #7 — Steam-Bot startet wieder und updated Ränge
 
 - Steam-Bot lief seit dem 27. April nicht mehr — FAs annehmen/senden und Rang-Updates funktionierten nicht

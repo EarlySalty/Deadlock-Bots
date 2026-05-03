@@ -169,6 +169,7 @@ jobs:
             ansible-lint.sarif
             trivy-config.sarif
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # GENERAL IAC BEST PRACTICES (ALWAYS RUNS)
@@ -220,6 +221,7 @@ jobs:
           name: iac-best-practices
           path: iac-analysis.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # CONFIG FILE SECURITY (ALWAYS RUNS)
@@ -257,6 +259,7 @@ jobs:
           name: config-security
           path: config-security.md
           if-no-files-found: ignore
+          retention-days: 30
 
   # ============================================================================
   # SUMMARY

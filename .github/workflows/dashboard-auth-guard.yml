@@ -123,6 +123,7 @@ jobs:
           name: dashboard-auth-guard-log
           path: dashboard-auth-guard.log
           if-no-files-found: ignore
+          retention-days: 30
 
       - name: Stop Dashboard Guard Test Server
         if: always()
