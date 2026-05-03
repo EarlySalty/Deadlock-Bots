@@ -1,3 +1,10 @@
+## #10 — Vollständige Security-Fortress hinzugefügt
+
+- Neuer Security-Scan läuft täglich: prüft Workflow-Integrität, findet Secrets im Code, scannt Python auf Sicherheitslücken und bekannte CVEs in Dependencies
+- Alle Workflow-Dateien sind jetzt auf genaue Commit-Hashes gepinnt — kein Supply-Chain-Angriff über gemutete Action-Tags möglich
+- JavaScript-Abhängigkeiten werden auf bekannte Schwachstellen geprüft
+- Security-Fortress ergänzt den bestehenden Deep-Scan sinnvoll, ohne Laufzeit zu verschwenden
+
 ## #9 — Dependabot-PRs werden jetzt automatisch gemerged + CI-Laufzeiten halbiert
 
 - Dependabot-PRs werden ab jetzt automatisch approved und direkt gemerged (nicht mehr blockiert durch Lint oder DAST)

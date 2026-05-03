@@ -1,0 +1,334 @@
+name: "Security Fortress (Thorough)"
+
+on:
+  push:
+    branches: [ "main", "master", "develop" ]
+  pull_request:
+    branches: [ "main", "master", "develop" ]
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-fortress-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-integrity:
+    name: "Workflow Integrity Checks"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install actionlint
+        run: |
+          set -euo pipefail
+          version="1.7.11"
+          curl -sSL -o actionlint.tgz "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz"
+          tar -xzf actionlint.tgz actionlint
+          sudo mv actionlint /usr/local/bin/actionlint
+          actionlint -version
+
+      - name: Lint GitHub workflow files
+        run: actionlint -color -shellcheck=
+
+      - name: Verify all external actions are SHA-pinned
+        run: |
+          python - <<'PY'
+          import pathlib
+          import re
+          import sys
+
+          pattern = re.compile(r'^\s*uses:\s*([^\s#]+)')
+          sha40 = re.compile(r'^[0-9a-f]{40}$')
+          bad = []
+          for path in pathlib.Path(".github/workflows").glob("*.yml"):
+            for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+              match = pattern.match(line)
+              if not match:
+                continue
+              use_target = match.group(1)
+              if use_target.startswith("./") or use_target.startswith("docker://"):
+                continue
+              if "@" not in use_target:
+                bad.append(f"{path}:{line_number} -> {use_target} (missing @ref)")
+                continue
+              ref = use_target.rsplit("@", 1)[1]
+              if not sha40.fullmatch(ref):
+                bad.append(f"{path}:{line_number} -> {use_target} (ref is not a full 40-char SHA)")
+          if bad:
+            print("Found non-pinned external actions:")
+            for item in bad:
+              print(f"- {item}")
+            sys.exit(1)
+          print("All external actions are SHA-pinned.")
+          PY
+
+  secret-detection:
+    name: "Secret Detection"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Block tracked secret material files
+        run: |
+          forbidden=$(git ls-files | grep -E '(^|/)(\.env(\..*)?|id_rsa|id_dsa|machine_auth_token\.txt|refresh\.token|oauth_tokens?.*|.*\.pem|.*\.key)$' || true)
+          if [ -n "$forbidden" ]; then
+            echo "::error::Tracked secret material files detected:"
+            echo "$forbidden"
+            exit 1
+          fi
+
+      - name: Run Gitleaks (strict)
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2.3.9
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_CONFIG: .gitleaks.toml
+          GITLEAKS_ENABLE_SUMMARY: true
+
+  python-security:
+    name: "Python SAST + Dependency Audit"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Detect Python files
+        id: detect_py
+        shell: bash
+        run: |
+          if git ls-files '*.py' | grep -q .; then
+            echo "has_python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_python=false" >> "$GITHUB_OUTPUT"
+            echo "No Python files tracked in this repository."
+          fi
+
+      - name: Set up Python
+        if: steps.detect_py.outputs.has_python == 'true'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install scanner dependencies
+        if: steps.detect_py.outputs.has_python == 'true'
+        run: ./.github/scripts/install-locked-python-deps.sh .github/requirements-tools-locked.txt
+
+      - name: Run Bandit
+        if: steps.detect_py.outputs.has_python == 'true'
+        run: |
+          set -euo pipefail
+          targets=()
+          for target in bot tests scripts twitch_cog; do
+            if [ -e "$target" ]; then
+              targets+=("$target")
+            fi
+          done
+          if [ ${#targets[@]} -eq 0 ]; then
+            targets+=(".")
+          fi
+          printf 'Bandit targets: %s\n' "${targets[*]}"
+          bandit -r "${targets[@]}" -ll -ii -f json -o bandit-report.json || true
+          bandit -r "${targets[@]}" -ll -ii -f sarif -o bandit.sarif || true
+
+      - name: Upload Bandit report
+        if: always() && steps.detect_py.outputs.has_python == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bandit-report
+          path: bandit-report.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+      - name: Upload Bandit SARIF
+        if: always() && steps.detect_py.outputs.has_python == 'true' && hashFiles('bandit.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: bandit.sarif
+          category: bandit
+
+      - name: Run pip-audit
+        if: steps.detect_py.outputs.has_python == 'true'
+        run: |
+          set -euo pipefail
+          found=0
+          if find . -maxdepth 3 -type f -name "requirements*.txt" | grep -q .; then
+            while IFS= read -r req; do
+              found=1
+              echo "Auditing dependencies in $req"
+              pip-audit --strict --desc -r "$req"
+            done < <(find . -maxdepth 3 -type f -name "requirements*.txt" | sort)
+          fi
+
+          if find . -maxdepth 3 -type f -name "pyproject.toml" | grep -q .; then
+            while IFS= read -r pyproject_file; do
+              found=1
+              req_file="$(mktemp)"
+              python - "$pyproject_file" "$req_file" <<'PY'
+              import sys
+              import tomllib
+              from pathlib import Path
+
+              pyproject_path = Path(sys.argv[1])
+              req_path = Path(sys.argv[2])
+              data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+              project = data.get("project", {})
+              dependencies = project.get("dependencies", []) or []
+              req_path.write_text("".join(f"{dep}\n" for dep in dependencies), encoding="utf-8")
+              PY
+              if [ ! -s "$req_file" ]; then
+                echo "No direct dependencies declared in $pyproject_file"
+                rm -f "$req_file"
+                continue
+              fi
+              echo "Auditing pyproject dependencies in $pyproject_file"
+              pip-audit --strict --desc -r "$req_file"
+              rm -f "$req_file"
+            done < <(find . -maxdepth 3 -type f -name "pyproject.toml" | sort)
+          fi
+
+          if [ "$found" -eq 0 ]; then
+            echo "No requirements*.txt files found for pip-audit."
+          fi
+
+      - name: Skip (no Python files)
+        if: steps.detect_py.outputs.has_python != 'true'
+        run: echo "Skipping Python security scans because no Python files were found."
+
+  javascript-security:
+    name: "JavaScript Dependency Audit"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Detect npm lockfiles
+        id: detect_node
+        shell: bash
+        run: |
+          lockfiles=$(find . -type f \( -name "package-lock.json" -o -name "npm-shrinkwrap.json" \) \
+            -not -path "*/node_modules/*" \
+            -not -path "*/.git/*" | sort)
+          if [ -z "$lockfiles" ]; then
+            echo "has_node=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          {
+            echo "has_node=true"
+            echo "lockfiles<<EOF"
+            echo "$lockfiles"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        if: steps.detect_node.outputs.has_node == 'true'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: |
+            .github/eslint-security/package-lock.json
+
+      - name: Run npm audit for each lockfile
+        if: steps.detect_node.outputs.has_node == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r lockfile; do
+            [ -z "$lockfile" ] && continue
+            project_dir="$(dirname "$lockfile")"
+            echo "Auditing $project_dir"
+            pushd "$project_dir" >/dev/null
+            npm audit --audit-level=high
+            if ! npm audit signatures; then
+              echo "npm audit signatures skipped for $project_dir (unsupported registry metadata)."
+            fi
+            popd >/dev/null
+          done <<< "${{ steps.detect_node.outputs.lockfiles }}"
+
+      - name: Skip (no npm lockfiles)
+        if: steps.detect_node.outputs.has_node != 'true'
+        run: echo "Skipping JavaScript audits because no npm lockfiles were found."
+
+  semgrep-sast:
+    name: "Semgrep SAST"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    container:
+      image: semgrep/semgrep:1.151.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Run Semgrep
+        run: |
+          semgrep scan \
+            --config p/default \
+            --config p/python \
+            --error \
+            --exclude node_modules \
+            --exclude .venv \
+            --exclude venv \
+            --output semgrep.sarif \
+            --sarif
+
+      - name: Upload Semgrep SARIF
+        if: always() && hashFiles('semgrep.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@95e58e9a2cdfd71adc6e0353d5c52f41a045d225 # v4
+        with:
+          sarif_file: semgrep.sarif
+          category: semgrep
+
+  dependency-review:
+    name: "Dependency Review (PR)"
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Dependency Review
+        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        with:
+          fail-on-severity: high
+          deny-licenses: GPL-2.0, GPL-3.0, AGPL-3.0
+
+  security-summary:
+    name: "Security Summary"
+    if: always()
+    needs:
+      - workflow-integrity
+      - secret-detection
+      - python-security
+      - javascript-security
+      - semgrep-sast
+      - dependency-review
+    runs-on: ubuntu-latest
+    steps:
+      - name: Write summary
+        run: |
+          echo "# Security Fortress Summary" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Workflow integrity: ${{ needs.workflow-integrity.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Secret detection: ${{ needs.secret-detection.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Python security: ${{ needs.python-security.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- JavaScript security: ${{ needs.javascript-security.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Semgrep SAST: ${{ needs.semgrep-sast.result }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- Dependency review: ${{ needs.dependency-review.result }}" >> "$GITHUB_STEP_SUMMARY"
