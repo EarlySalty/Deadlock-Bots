@@ -61,6 +61,7 @@ Gemini.ps1
 /cogs/twitch/analytics/dashboard_v2/dist/assets
 /scripts
 !scripts/check-local.sh
+!scripts/kill_stale_bot.sh
 /service/pg_twitch/
 /.github/tmp
 /erinnerungen
