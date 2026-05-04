@@ -1095,6 +1095,7 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               games_played TEXT,
               hours_played TEXT,
               availability TEXT,
+              scheduled_slot TEXT,
               current_problems TEXT,
               ai_summary TEXT,
               ai_insights_json TEXT,
@@ -1106,6 +1107,14 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               role_removed_at INTEGER,
               created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
               updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+            );
+
+            -- Coaching Bans (7 Tage Sperre)
+            CREATE TABLE IF NOT EXISTS coaching_bans (
+              discord_user_id INTEGER PRIMARY KEY,
+              banned_at INTEGER NOT NULL,
+              expires_at INTEGER NOT NULL,
+              reason TEXT
             );
 
             -- Coaching Sessions (Aktive Sessions)
@@ -1121,6 +1130,8 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               role_assigned_at INTEGER,
               role_reminder_at INTEGER,
               role_expires_at INTEGER,
+              reward_role_expires_at INTEGER,
+              reward_role_removed_at INTEGER,
               voice_channel_id INTEGER,
               voice_started_at INTEGER,
               voice_last_seen_at INTEGER,
@@ -1257,10 +1268,13 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
             "ALTER TABLE coaching_requests ADD COLUMN role_assigned_at INTEGER",
             "ALTER TABLE coaching_requests ADD COLUMN role_expires_at INTEGER",
             "ALTER TABLE coaching_requests ADD COLUMN role_removed_at INTEGER",
+            "ALTER TABLE coaching_requests ADD COLUMN scheduled_slot TEXT",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_channel_id INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_started_at INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_last_seen_at INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN survey_sent_at INTEGER",
+            "ALTER TABLE coaching_sessions ADD COLUMN reward_role_expires_at INTEGER",
+            "ALTER TABLE coaching_sessions ADD COLUMN reward_role_removed_at INTEGER",
         ):
             try:
                 c.execute(alter_sql)

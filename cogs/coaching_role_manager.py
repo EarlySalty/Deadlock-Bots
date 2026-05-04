@@ -39,9 +39,48 @@ class CoachingRoleManagerCog(commands.Cog):
         while True:
             try:
                 await self._check_expired_roles()
+                await self._check_expired_reward_roles()
             except Exception as e:
                 log.error(f"Role check loop error: {e}")
             await asyncio.sleep(60)  # Check every minute
+
+    async def _check_expired_reward_roles(self):
+        """Remove expired coaching reward roles (5 days)."""
+        now = int(time.time())
+
+        rows = db.query_all(
+            """SELECT * FROM coaching_sessions
+               WHERE reward_role_removed_at IS NULL
+               AND reward_role_expires_at IS NOT NULL
+               AND reward_role_expires_at < ?""",
+            (now,),
+        )
+
+        for session in rows:
+            guild = self.bot.guilds[0] if self.bot.guilds else None
+            if not guild:
+                continue
+
+            member = guild.get_member(session["discord_user_id"])
+            if not member:
+                db.execute(
+                    "UPDATE coaching_sessions SET reward_role_removed_at=? WHERE id=?",
+                    (now, session["id"]),
+                )
+                continue
+
+            role = guild.get_role(settings.coaching_reward_role_id)
+            if role and role in member.roles:
+                try:
+                    await member.remove_roles(role, reason="Coaching Reward-Rolle abgelaufen (5 Tage)")
+                    log.info(f"Removed reward role from {member.display_name}")
+                except Exception as e:
+                    log.error(f"Could not remove reward role from {member.display_name}: {e}")
+
+            db.execute(
+                "UPDATE coaching_sessions SET reward_role_removed_at=? WHERE id=?",
+                (now, session["id"]),
+            )
 
     async def _check_expired_roles(self):
         """Remove expired coaching active roles."""

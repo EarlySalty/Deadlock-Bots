@@ -5,6 +5,7 @@ Coaching Panel - Ein großes Formular fuer Coaching-Anfragen.
 import asyncio
 import logging
 import time
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -55,8 +56,8 @@ class CoachingRequestModal(discord.ui.Modal, title="Deadlock Coaching"):
             max_length=50,
         )
         self.availability_input = discord.ui.TextInput(
-            label="Wann hast du Zeit?",
-            placeholder="z.B. Wochentags ab 19 Uhr",
+            label="Wann hast du Zeit? (Datum + Uhrzeit)",
+            placeholder="z.B. Montag 18:00, Heute Abend ab 20 Uhr...",
             max_length=120,
         )
         self.games_hours_input = discord.ui.TextInput(
@@ -67,7 +68,7 @@ class CoachingRequestModal(discord.ui.Modal, title="Deadlock Coaching"):
         self.problems_input = discord.ui.TextInput(
             label="Probleme / Ziele",
             style=discord.TextStyle.paragraph,
-            placeholder="Wobei brauchst du Hilfe? Was soll ein Coach mit dir verbessern?",
+            placeholder="Wobei brauchst du Hilfe? (Keine DMs/FAs an Coaches! Kommunikation nur im Chat!)",
             max_length=1000,
         )
 
@@ -160,14 +161,18 @@ class CoachingPanelCog(commands.Cog):
             title="🎮  Deadlock Coaching",
             description=(
                 "Du willst besser werden? Unsere Coaches helfen dir, dein Spiel gezielt zu verbessern.\n\n"
-                "Klicke auf den Button und fuelle das Formular direkt aus."
+                "**⚠️ Wichtige Regeln:**\n"
+                "• Die Kommunikation findet **ausschließlich** im Coaching-Chat statt.\n"
+                "• Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches.\n"
+                "• Sei bereit zu antworten, wenn sich ein Coach meldet.\n\n"
+                "Klicke auf den Button und fülle das Formular direkt aus."
             ),
             color=discord.Color.blue(),
         )
         embed.add_field(
             name="📋 Ablauf",
             value=(
-                "1. Formular ausfuellen\n"
+                "1. Formular ausfüllen\n"
                 "2. AI analysiert deine Anfrage\n"
                 "3. Du bekommst die Coaching-Rolle\n"
                 "4. Ein Coach meldet sich bei dir"
@@ -230,6 +235,20 @@ class CoachingPanelCog(commands.Cog):
 
     async def _start_coaching_flow(self, interaction: discord.Interaction) -> None:
         await self._db_connect()
+        
+        # Ban check
+        now = int(time.time())
+        ban = db.query_one("SELECT * FROM coaching_bans WHERE discord_user_id=? AND expires_at > ?", (interaction.user.id, now))
+        if ban:
+            expiry_dt = datetime.fromtimestamp(ban["expires_at"])
+            await interaction.response.send_message(
+                f"❌ Du bist aktuell vom Coaching-System gesperrt.\n"
+                f"Grund: {ban['reason'] or 'Unbekannt'}\n"
+                f"Sperre endet am: {expiry_dt.strftime('%d.%m.%Y %H:%M')}",
+                ephemeral=True
+            )
+            return
+
         self._discard_incomplete_pending_requests(interaction.user.id)
         await interaction.response.send_modal(CoachingRequestModal(self))
 
@@ -256,9 +275,9 @@ class CoachingPanelCog(commands.Cog):
         db.execute(
             """INSERT INTO coaching_requests (
                    discord_user_id, discord_username, rank, subrank, hero, availability,
-                   games_played, hours_played, current_problems, status, created_at, updated_at
+                   scheduled_slot, games_played, hours_played, current_problems, status, created_at, updated_at
                )
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)""",
             (
                 interaction.user.id,
                 interaction.user.display_name,
@@ -266,6 +285,7 @@ class CoachingPanelCog(commands.Cog):
                 "",
                 hero_raw,
                 availability_raw,
+                availability_raw, # Use availability also for scheduled_slot field
                 games_hours_raw,
                 "",
                 problems_raw,

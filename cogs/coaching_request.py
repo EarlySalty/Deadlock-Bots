@@ -6,6 +6,7 @@ import asyncio
 import logging
 import time
 import uuid
+from datetime import datetime
 
 import discord
 from discord import app_commands
@@ -88,10 +89,95 @@ def _format_ai_summary_for_embed(value: str, *, limit: int = DISCORD_EMBED_FIELD
     return truncated + "…"
 
 
+class CoachCancelButton(discord.ui.Button):
+    def __init__(self, session_id: str, author_id: int):
+        super().__init__(
+            label="Coaching abbrechen",
+            style=discord.ButtonStyle.danger,
+            custom_id=f"coach_cancel_{session_id}",
+        )
+        self.session_id = session_id
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            return
+        
+        # Admin or Coach check (the one who claimed it)
+        session = db.query_one("SELECT * FROM coaching_sessions WHERE id=?", (self.session_id,))
+        if not session:
+            await interaction.response.send_message("❌ Session nicht gefunden.", ephemeral=True)
+            return
+            
+        is_owner = interaction.user.id == interaction.guild.owner_id
+        is_assigned_coach = str(session["coach_id"]) == str(interaction.user.id)
+        
+        if not (is_owner or is_assigned_coach):
+            await interaction.response.send_message("❌ Nur der zugewiesene Coach oder ein Admin kann abbrechen.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        now = int(time.time())
+        ban_expiry = now + (7 * 24 * 60 * 60) # 7 days
+        
+        # 1. Update session status
+        db.execute(
+            "UPDATE coaching_sessions SET status='cancelled', completed_at=? WHERE id=?",
+            (now, self.session_id),
+        )
+        
+        # 2. Update request status
+        db.execute(
+            "UPDATE coaching_requests SET status='cancelled', updated_at=? WHERE id=?",
+            (now, session["request_id"]),
+        )
+        
+        # 3. Apply 7-day ban to user
+        db.execute(
+            """INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT(discord_user_id) DO UPDATE SET
+               banned_at=excluded.banned_at, expires_at=excluded.expires_at, reason=excluded.reason""",
+            (self.author_id, now, ban_expiry, "User hat sich nicht gemeldet / Abbruch durch Coach")
+        )
+        
+        # 4. Remove roles
+        coaching_role = interaction.guild.get_role(settings.coaching_active_role_id)
+        author = interaction.guild.get_member(self.author_id)
+        if author and coaching_role and coaching_role in author.roles:
+            try:
+                await author.remove_roles(coaching_role, reason="Coaching abgebrochen - 7D Ban")
+            except Exception as e:
+                log.warning("Could not remove roles from user %s after cancellation: %s", self.author_id, e)
+
+        # 5. Notify user in DM
+        try:
+            expiry_dt = datetime.fromtimestamp(ban_expiry)
+            await author.send(
+                f"❌ Dein Coaching wurde vom Coach abgebrochen (z.B. weil du dich nicht gemeldet hast).\n"
+                f"Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.\n"
+                f"Sperre endet am: {expiry_dt.strftime('%d.%m.%Y %H:%M')}"
+            )
+        except Exception as e:
+            log.info("Could not DM user %s about coaching cancellation: %s", self.author_id, e)
+
+        # 6. Notify in channel
+        await interaction.channel.send(f"⚠️ Das Coaching für <@{self.author_id}> wurde von {interaction.user.display_name} abgebrochen. Der User wurde für 7 Tage gesperrt.")
+        
+        # Edit original message to remove view
+        try:
+            if interaction.message:
+                await interaction.message.edit(view=None)
+        except Exception as e:
+            log.warning("Could not edit message after cancellation: %s", e)
+            
+        await interaction.followup.send("✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.", ephemeral=True)
+
+
 class CoachClaimButton(discord.ui.Button):
     def __init__(self, request_id: int, author_id: int):
         super().__init__(
-            label="Coach melden",
+            label="Coaching claimen",
             style=discord.ButtonStyle.success,
             custom_id=f"coach_claim_{request_id}",
         )
@@ -112,6 +198,12 @@ class CoachClaimButton(discord.ui.Button):
         # Coach role check first — before defer, so we can respond cleanly.
         coach_role = interaction.guild.get_role(settings.coach_role_id)
         if not coach_role or coach_role not in interaction.user.roles:
+            log.warning(
+                "User %s (%s) tried to claim coaching but lacks coach role %s",
+                interaction.user.display_name,
+                interaction.user.id,
+                settings.coach_role_id,
+            )
             await interaction.response.send_message(
                 "❌ Nur Coaches können sich für Sessions melden!",
                 ephemeral=True,
@@ -195,6 +287,7 @@ class CoachClaimButton(discord.ui.Button):
                 dm_ok = False
                 log.warning("Failed to DM user %s after coach claim: %s", author.id, exc)
 
+            # Post claim confirmation
             try:
                 await interaction.channel.send(
                     f"✅ {author.mention} – **{interaction.user.display_name}** ist jetzt dein Coach! "
@@ -203,13 +296,14 @@ class CoachClaimButton(discord.ui.Button):
             except Exception as exc:
                 log.warning("Could not post claim confirmation to channel: %s", exc)
 
-            # Disable the claim button on the original request message (interaction.response
-            # is already consumed by defer(), so edit the message directly).
+            # Update the original request message: remove claim, add cancel
             try:
                 if interaction.message is not None:
-                    await interaction.message.edit(view=None)
+                    new_view = discord.ui.View(timeout=None)
+                    new_view.add_item(CoachCancelButton(session_id, author.id))
+                    await interaction.message.edit(view=new_view)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
-                log.warning("Could not disable claim button on message: %s", exc)
+                log.warning("Could not update request message with cancel button: %s", exc)
 
             dm_note = "" if dm_ok else " (DM an User fehlgeschlagen – bitte im Channel anpingen.)"
             await interaction.followup.send(
@@ -260,17 +354,33 @@ class CoachingRequestCog(commands.Cog):
 
     async def cog_load(self):
         self._recover_stale_analyzing_requests()
-        rows = db.query_all(
+        
+        # 1. Re-register claim buttons for analyzed requests
+        rows_analyzed = db.query_all(
             "SELECT id, discord_user_id, message_id FROM coaching_requests "
             "WHERE status='analyzed' AND message_id IS NOT NULL"
         )
-        for row in rows:
+        for row in rows_analyzed:
             self.bot.add_view(
                 CoachClaimView(row["id"], row["discord_user_id"]),
                 message_id=row["message_id"],
             )
-        if rows:
-            log.info("Re-registered %d persistent CoachClaimView(s) after restart", len(rows))
+            
+        # 2. Re-register cancel buttons for active sessions
+        rows_active = db.query_all(
+            """SELECT s.id as session_id, r.message_id, s.discord_user_id
+               FROM coaching_sessions s
+               JOIN coaching_requests r ON s.request_id = r.id
+               WHERE s.status='active' AND r.message_id IS NOT NULL"""
+        )
+        for row in rows_active:
+            view = discord.ui.View(timeout=None)
+            view.add_item(CoachCancelButton(row["session_id"], row["discord_user_id"]))
+            self.bot.add_view(view, message_id=row["message_id"])
+            
+        if rows_analyzed or rows_active:
+            log.info("Re-registered %d claim and %d cancel views after restart", len(rows_analyzed), len(rows_active))
+            
         if self._analyze_loop is None or self._analyze_loop.done():
             self._analyze_loop = asyncio.create_task(self._analyze_pending_requests())
 
@@ -428,10 +538,9 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
             fallback="Nicht angegeben",
         )
         games_hours = _normalize_inline_text(request_data.get("games_played") or "N/A")
-        availability = _normalize_inline_text(
-            request_data.get("availability") or "Nicht angegeben",
+        scheduled_slot = _normalize_inline_text(
+            request_data.get("scheduled_slot") or "Nicht angegeben",
             fallback="Nicht angegeben",
-            limit=256,
         )
         problems = _normalize_inline_text(
             request_data.get("current_problems") or "Keine Beschreibung",
@@ -443,7 +552,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         embed.add_field(name="Rang", value=rank, inline=True)
         embed.add_field(name="Hero", value=hero, inline=True)
         embed.add_field(name="Games / Stunden", value=games_hours, inline=True)
-        embed.add_field(name="Verfügbar", value=availability, inline=False)
+        embed.add_field(name="📅 Bevorzugter Slot", value=scheduled_slot, inline=False)
         embed.add_field(name="📝 Probleme", value=problems or "Keine", inline=False)
         embed.add_field(name="🤖 AI Analyse", value=ai_summary_text, inline=False)
 
