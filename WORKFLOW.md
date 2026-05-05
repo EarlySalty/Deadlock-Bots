@@ -78,7 +78,7 @@ Implementierung durch GPT-Worker abgeschlossen. Statische Verifikation (`py_comp
 - **Flow-Trennung**: User im gescannten VC = Spielersuche (nur Ping, keine Lobby-Vorschläge). User nicht im VC = Lobby-Suche (nur Lobbys, keine Mitspielerliste, kein Ping).
 - **Offtopic**: Substring `"off topic voice"` (case-insensitive) im Channel-Namen filtern.
 - **Juice Kammer** (Channel-ID `1493690350580138114`): fest als Eternus (Rank 11) einstufen.
-- **Staging-IDs**: Casual `1330278323145801758`, Street Brawl `1357422958544420944`, Ranked `1412804671432818890`. New Player: Kategorie `1465839366634209361` scannen, ersten Channel mit <6 Leuten (adaptive Channels).
+- **Staging-IDs**: Casual `1501089974093873232`, Street Brawl `1357422958544420944`, Ranked `1412804671432818890`. New Player: Kategorie `1465839366634209361` scannen, ersten Channel mit <6 Leuten (adaptive Channels).
 - **Voll-Hinweis**: ab 6 Leuten im VC.
 - **Füll-Anzeige**: kombiniert "Deadlock-aktiv / VC-Gesamt" via Steam-Presence.
 - **Rank-Warnung**: ab >1.5 Ränge Diff Suffix `⚠️ höher als dein Rang`.
