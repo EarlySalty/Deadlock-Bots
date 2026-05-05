@@ -55,7 +55,7 @@ class RetentionConfig:
 
     # Direktlinks zu Channels (feste URLs)
     server_link: str | None = "https://discord.com/channels/1289721245281292288/1289721245281292291"
-    voice_link: str | None = "https://discord.com/channels/1289721245281292288/1330278323145801758"
+    voice_link: str | None = "https://discord.com/channels/1289721245281292288/1501089974093873232"
 
     # Ausgeschlossene Rollen (bekommen keine Nachrichten)
     excluded_role_ids: tuple = (

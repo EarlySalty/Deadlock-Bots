@@ -1,3 +1,8 @@
+## #12 — Chill Lanes Staging Channel auf neuen Channel aktualisiert
+
+- Der Staging-Channel für Chill Lanes wurde nach dem Löschen des alten Channels auf den neuen Channel umgestellt
+- Alle betroffenen Stellen im Code wurden aktualisiert: TempVoice, LFG und User-Retention-Links
+
 ## #11 — Steam-Verknüpfung: Link wird jetzt immer frisch beim Klick erstellt
 
 - Der „Via Steam verknüpfen"-Button im Onboarding generiert den Login-Link jetzt erst beim Klicken – nicht mehr beim Laden der Nachricht

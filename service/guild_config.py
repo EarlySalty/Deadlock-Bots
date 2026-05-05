@@ -3,7 +3,7 @@ Zentrale Guild-spezifische Konfiguration.
 Verschiebt hardcoded IDs aus verschiedenen Cogs in eine Config.
 
 Neue Lane-Struktur (kein Ranked/Grind Split mehr):
-  Chill Lanes   → Kategorie 1289721245281292290 | Staging 1330278323145801758
+  Chill Lanes   → Kategorie 1289721245281292290 | Staging 1501089974093873232
   Comp/Ranked   → Kategorie 1412804540994162789 | Staging 1412804671432818890
   Street Brawl  → Kategorie 1357422957017698478 | Staging 1357422958544420944
 """
@@ -16,7 +16,7 @@ class GuildIDs:
     """Hardcoded Guild/Channel/Role IDs - zentral verwaltet."""
 
     # TempVoice Staging Channels
-    TEMPVOICE_STAGING_CASUAL: int = 1330278323145801758
+    TEMPVOICE_STAGING_CASUAL: int = 1501089974093873232
     TEMPVOICE_STAGING_STREET_BRAWL: int = 1357422958544420944
     TEMPVOICE_STAGING_COMP: int = 1412804671432818890
     TEMPVOICE_STAGING_RANKED: int = TEMPVOICE_STAGING_COMP  # Alias für Altcode
