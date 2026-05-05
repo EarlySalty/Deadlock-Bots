@@ -1,3 +1,8 @@
+## #13 — TempVoice Sweep löscht keine Staging-Channels mehr
+
+- Staging-Channels sind jetzt gegen den automatischen Sweep geschützt
+- Hintergrund: Der Bot hatte den alten Chill Lanes Staging-Channel selbst gelöscht, weil dessen Name einem Lane-Muster entsprach
+
 ## #12 — Chill Lanes Staging Channel auf neuen Channel aktualisiert
 
 - Der Staging-Channel für Chill Lanes wurde nach dem Löschen des alten Channels auf den neuen Channel umgestellt

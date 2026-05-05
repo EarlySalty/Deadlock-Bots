@@ -136,7 +136,7 @@ def _is_fixed_lane(ch: discord.abc.GuildChannel | int | None) -> bool:
         lane_id = int(ch) if isinstance(ch, int) else int(getattr(ch, "id", 0))
     except Exception:
         return False
-    return lane_id in FIXED_LANE_IDS
+    return lane_id in FIXED_LANE_IDS or lane_id in STAGING_CHANNEL_IDS
 
 
 def _is_managed_lane(ch: discord.VoiceChannel | None) -> bool:
