@@ -1,3 +1,10 @@
+## #15 — FAQ-Bot erkennt Onboarding- und Invite-Probleme automatisch
+
+- FAQ-Bot gibt jetzt bei "kein Invite" oder "kann nicht herunterladen" sofort eine Schritt-für-Schritt-Anleitung aus
+- Checkliste: Onboarding abgeschlossen? Richtige Option gewählt? Rollen gesetzt? /betainvite verwendet? Steam-Kauf vorhanden?
+- Bot weist freundlich aber klar darauf hin wenn das Onboarding-Lesen das Problem gelöst hätte
+- Neue Dokumentationsdatei mit dem vollständigen Invite-Ablauf für die Bot-Wissensbasis
+
 ## #14 — Tracking-Invite und Auswertung für Website-Joins
 
 - Bot legt automatisch einen permanenten Tracking-Invite an und merkt sich den Code in der DB
