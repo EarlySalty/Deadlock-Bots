@@ -1,3 +1,11 @@
+## #14 — Tracking-Invite und Auswertung für Website-Joins
+
+- Bot legt automatisch einen permanenten Tracking-Invite an und merkt sich den Code in der DB
+- Neuer Slash-Befehl `/website-invite` zeigt Status, Code und bisherige Nutzungen
+- `/website-invite-recreate` erzeugt bei Bedarf einen neuen Code (z.B. wenn jemand den alten löscht)
+- `/join-quellen [tage]` aggregiert die Member-Joins der letzten N Tage nach Quelle (Website, Vanity, Twitch-Streamer, persönliche Einladungen)
+- Channel-Default ist der Welcome-Channel, kann via `WEBSITE_INVITE_CHANNEL_ID` Env-Var überschrieben werden
+
 ## #13 — TempVoice Sweep löscht keine Staging-Channels mehr
 
 - Staging-Channels sind jetzt gegen den automatischen Sweep geschützt
