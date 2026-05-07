@@ -148,3 +148,15 @@ Konfiguration in `service/standalone_manager.py`
 ## Lizenz
 
 MIT (siehe `LICENSE`)
+
+<!-- DDC-LINK-START -->
+
+## Deutsche Deadlock Community
+
+Dieser Bot ist Teil der **[Deutschen Deadlock Community](https://deutsche-deadlock-community.de/)** — Master-Bot der Deutschen Deadlock Community.
+
+- 🌐 Website: [deutsche-deadlock-community.de](https://deutsche-deadlock-community.de/)
+- 💬 Discord: [discord.gg/PhkP3WgY7w](https://discord.gg/PhkP3WgY7w)
+- 🎮 [Helden-Übersicht auf Deutsch](https://deutsche-deadlock-community.de/helden/) · [Anfänger-Guide](https://deutsche-deadlock-community.de/guides/anfaenger/)
+
+<!-- DDC-LINK-END -->
