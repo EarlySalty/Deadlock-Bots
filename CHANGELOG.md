@@ -1,3 +1,10 @@
+## #16 — FAQ-Bot antwortet automatisch in neuen Tickets
+
+- Wenn in der Support-Kategorie ein neues Ticket aufgemacht wird, analysiert der FAQ-Bot die erste Nachricht des Users
+- Hat der Bot eine passende Antwort aus der Dokumentation, antwortet er direkt im Ticket
+- Kann der Bot das Problem nicht lösen, schreibt er gar nichts – der Mensch übernimmt dann wie gewohnt
+- Gilt für alle Channels die mit "ticket-" beginnen in der ❓Support-Kategorie
+
 ## #15 — FAQ-Bot erkennt Onboarding- und Invite-Probleme automatisch
 
 - FAQ-Bot gibt jetzt bei "kein Invite" oder "kann nicht herunterladen" sofort eine Schritt-für-Schritt-Anleitung aus

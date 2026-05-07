@@ -22,6 +22,7 @@ log = logging.getLogger(__name__)
 
 PANEL_CHANNEL_ID = int(os.getenv("FAQ_PANEL_CHANNEL", "1491953161747955853"))
 FAQ_CATEGORY_ID = int(os.getenv("FAQ_CATEGORY_ID", "1310153243795390475"))
+TICKET_AUTO_HELP_CATEGORY_ID = int(os.getenv("TICKET_AUTO_HELP_CATEGORY_ID", "1459628097145147645"))
 LOG_CHANNEL_ID = int(os.getenv("FAQ_LOG_CHANNEL", "1374364800817303632"))
 SESSION_TIMEOUT_HOURS = int(os.getenv("FAQ_SESSION_HOURS", "24"))
 
@@ -245,11 +246,23 @@ class FAQChatView(discord.ui.View):
 # --- FAQ Chat Cog ---
 
 
+TICKET_AUTO_HELP_SYSTEM_PROMPT = """
+Du bist ein automatischer Ticket-Helfer. Entscheide anhand der Dokumentation ob du die Frage des Users lösen kannst.
+
+REGEL:
+- Wenn du die Frage aus der Dokumentation klar und vollständig beantworten kannst: antworte direkt und hilfreich.
+- Wenn die Frage außerhalb deines Wissens liegt, unklar ist, oder menschlichen Support erfordert: antworte NUR mit dem Token KEIN_TREFFER und nichts weiter.
+- Erfinde keine Informationen. Wenn du dir nicht sicher bist: KEIN_TREFFER.
+- Antworte auf Deutsch, kurz und direkt.
+""".strip()
+
+
 class FAQChat(commands.Cog):
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
         self._panel_message_id: int | None = None
         self._cleanup_task: asyncio.Task | None = None
+        self._ticket_pending: set[int] = set()  # Channel-IDs wo wir auf erste User-Msg warten
 
     async def cog_load(self) -> None:
         log.info("FAQ Chat cog_load start")
@@ -553,6 +566,84 @@ class FAQChat(commands.Cog):
         if message.guild is None:
             return
         await self._handle_chat_message(message)
+        await self._handle_ticket_auto_help(message)
+
+    @commands.Cog.listener("on_guild_channel_create")
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel) -> None:
+        if not isinstance(channel, discord.TextChannel):
+            return
+        if not channel.category_id or channel.category_id != TICKET_AUTO_HELP_CATEGORY_ID:
+            return
+        # Nur echte Ticket-Channels (Name beginnt mit "ticket-")
+        if not channel.name.startswith("ticket-"):
+            return
+        log.info("FAQ: neues Ticket erkannt: #%s (%s) – warte auf erste User-Nachricht", channel.name, channel.id)
+        self._ticket_pending.add(channel.id)
+        # Timeout: nach 10 Minuten aus pending entfernen falls kein User schreibt
+        asyncio.ensure_future(self._ticket_pending_timeout(channel.id))
+
+    async def _ticket_pending_timeout(self, channel_id: int) -> None:
+        await asyncio.sleep(600)
+        self._ticket_pending.discard(channel_id)
+
+    async def _handle_ticket_auto_help(self, message: discord.Message) -> None:
+        if message.author.bot:
+            return
+        if message.channel.id not in self._ticket_pending:
+            return
+        if not isinstance(message.channel, discord.TextChannel):
+            return
+
+        self._ticket_pending.discard(message.channel.id)
+        problem = message.content.strip()
+        if not problem:
+            return
+
+        log.info("FAQ auto-help: Ticket #%s – analysiere '%s...'", message.channel.name, problem[:60])
+
+        async with message.channel.typing():
+            answer = await self._ticket_auto_answer(problem)
+
+        if answer is None:
+            log.info("FAQ auto-help: kein Treffer für Ticket #%s – schweige", message.channel.name)
+            return
+
+        log.info("FAQ auto-help: Antwort für Ticket #%s gepostet", message.channel.name)
+        try:
+            await message.reply(answer, suppress_embeds=True)
+        except discord.HTTPException:
+            await message.channel.send(answer, suppress_embeds=True)
+
+    async def _ticket_auto_answer(self, problem: str) -> str | None:
+        """Gibt eine Antwort zurück wenn der Bot helfen kann, sonst None."""
+        ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")
+        if not ai:
+            return None
+
+        full_prompt = (
+            f"Dokumentation:\n{DOCS_CONTEXT}\n\n"
+            f"Ticket-Inhalt:\n{problem.strip()}"
+        )
+
+        try:
+            answer_text, _ = await ai.generate_text(
+                provider=PRIMARY_PROVIDER,
+                prompt=full_prompt,
+                system_prompt=TICKET_AUTO_HELP_SYSTEM_PROMPT,
+                model=PRIMARY_MODEL,
+                max_output_tokens=MAX_OUTPUT_TOKENS,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            log.warning("FAQ auto-help: AI-Fehler: %s", exc)
+            return None
+
+        if not answer_text:
+            return None
+        answer_text = answer_text.strip()
+        if "KEIN_TREFFER" in answer_text:
+            return None
+        return answer_text
 
     async def _generate_answer(self, session_id: str, new_question: str) -> tuple[str, str | None]:
         ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")
