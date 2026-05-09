@@ -37,6 +37,11 @@ FIXED_LANE_IDS: set[int] = {
     1470126503252721845,  # Ausgenommen: nie von TempVoice verwalten/loeschen
 }
 MINRANK_CATEGORY_IDS: set[int] = set(_cfg.tempvoice_minrank_categories)
+TEMPVOICE_CATEGORY_IDS: set[int] = {
+    _cfg.TEMPVOICE_CATEGORY_CHILL,
+    _cfg.TEMPVOICE_CATEGORY_COMP,
+    _cfg.TEMPVOICE_CATEGORY_STREET_BRAWL,
+}
 # Per-Staging-Speziallogik (nur Lanes die vom Standard abweichen)
 STAGING_RULES: dict[int, dict[str, Any]] = {
     _cfg.TEMPVOICE_STAGING_STREET_BRAWL: {  # Street Brawl
@@ -112,6 +117,7 @@ __all__ = [
     "FIXED_LANE_IDS",
     "MINRANK_CATEGORY_ID",
     "MINRANK_CATEGORY_IDS",
+    "TEMPVOICE_CATEGORY_IDS",
     "RANKED_CATEGORY_ID",
     "INTERFACE_TEXT_CHANNEL_ID",
     "ENGLISH_ONLY_ROLE_ID",
@@ -143,6 +149,8 @@ def _is_managed_lane(ch: discord.VoiceChannel | None) -> bool:
     if not isinstance(ch, discord.VoiceChannel):
         return False
     if _is_fixed_lane(ch):
+        return False
+    if ch.category_id not in TEMPVOICE_CATEGORY_IDS:
         return False
     name = ch.name.lower()
     for prefix in MANAGED_PREFIXES:
@@ -985,6 +993,16 @@ class TempVoiceCore(commands.Cog):
             await self._forget_lane(lane_id)
             return
 
+        if channel and getattr(channel, "category_id", None) not in TEMPVOICE_CATEGORY_IDS:
+            log.warning(
+                "TempVoice: skip cleanup for channel %s (%s) in unmanaged category %s",
+                lane_id,
+                getattr(channel, "name", "?"),
+                getattr(channel, "category_id", None),
+            )
+            await self._forget_lane(lane_id)
+            return
+
         if channel:
             try:
                 await channel.delete(reason=reason)
@@ -1347,6 +1365,13 @@ class TempVoiceCore(commands.Cog):
     ):
         if _is_fixed_lane(lane):
             log.debug("TempVoice: skip edit for fixed lane %s", getattr(lane, "id", "?"))
+            return
+        if lane.category_id not in TEMPVOICE_CATEGORY_IDS:
+            log.warning(
+                "TempVoice: skip edit for channel %s in unmanaged category %s",
+                lane.id,
+                lane.category_id,
+            )
             return
         lock = self._lock_for(lane.id)
         async with lock:

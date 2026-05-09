@@ -1,3 +1,9 @@
+## #17 — TempVoice greift nicht mehr in fremde Voice-Kategorien ein
+
+- Channels außerhalb der TempVoice-Kategorien (Chill, Comp, Street Brawl) werden nicht mehr umbenannt oder gelöscht
+- Betrifft z.B. Custom Games oder andere manuelle Voice-Channels
+- Verhindert, dass Channels mit Namen wie "Lane 1" in falschen Kategorien fälschlicherweise als TempVoice-Lane erkannt werden
+
 ## #16 — FAQ-Bot antwortet automatisch in neuen Tickets
 
 - Wenn in der Support-Kategorie ein neues Ticket aufgemacht wird, analysiert der FAQ-Bot die erste Nachricht des Users
