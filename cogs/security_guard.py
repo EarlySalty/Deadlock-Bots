@@ -46,8 +46,8 @@ SECURITY_CONFIG: dict[str, object] = {
     "MESSAGE_THRESHOLD": 3,
     # Account muss juenger als X Stunden sein. Join-Alter spielt keine Rolle mehr.
     "ACCOUNT_MAX_AGE_HOURS": 720,  # 30 Tage
-    # Ab diesem Account-Alter + Join-Alter gilt ein Account als "etabliert" (Mod-Vorschlag statt Auto-Ban).
-    "ESTABLISHED_ACCOUNT_MIN_AGE_HOURS": 168,  # 7 Tage
+    # Ab diesem Account-Alter gilt ein Account als "etabliert" → Timeout statt Ban.
+    "ESTABLISHED_ACCOUNT_MIN_AGE_HOURS": 720,  # 30 Tage
     "ESTABLISHED_MIN_JOIN_HOURS": 24,
     # AI-Scam-Erkennung fuer Einzelnachrichten mit Keyword-Treffer.
     "AI_SCAM_PROVIDER": "openai",
@@ -331,35 +331,36 @@ class SecurityGuard(commands.Cog):
             return  # do not police staff
 
         now = discord.utils.utcnow()
-        if not self._is_new_account(member, now):
-            self._prune_history(member.id, now)
-            return
+        is_young = self._is_new_account(member, now)  # Account < 30 Tage
 
-        history = self._message_history[member.id]
-        history.append(
-            RecentMessage(
-                message=message,
-                channel_id=message.channel.id,
-                created_at=message.created_at or now,
-                content=message.content or "",
-                attachments=list(message.attachments),
+        # Pfad 1: Mehrkanal-Burst — nur fuer junge Accounts (<30 Tage), regelbasiert
+        if is_young and member.id not in self._active_cases:
+            history = self._message_history[member.id]
+            history.append(
+                RecentMessage(
+                    message=message,
+                    channel_id=message.channel.id,
+                    created_at=message.created_at or now,
+                    content=message.content or "",
+                    attachments=list(message.attachments),
+                )
             )
-        )
-        self._prune_history(member.id, now)
-        recent_msgs = list(history)
+            self._prune_history(member.id, now)
+            recent_msgs = list(history)
 
-        # Pfad 1: Mehrkanal-Burst (regelbasiert, keine AI noetig)
-        triggered, reason, meta = self._should_trigger(member, recent_msgs, now)
-        if triggered and member.id not in self._active_cases:
-            self._active_cases.add(member.id)
-            try:
-                await self._handle_incident(member, recent_msgs, reason, meta)
-            finally:
-                self._message_history.pop(member.id, None)
-                self._active_cases.discard(member.id)
-            return
+            triggered, reason, meta = self._should_trigger(member, recent_msgs, now)
+            if triggered:
+                self._active_cases.add(member.id)
+                try:
+                    await self._handle_incident(member, recent_msgs, reason, meta)
+                finally:
+                    self._message_history.pop(member.id, None)
+                    self._active_cases.discard(member.id)
+                return
+        else:
+            self._prune_history(member.id, now)
 
-        # Pfad 2: Keyword-Treffer in Einzelnachricht → AI-Scam-Check
+        # Pfad 2: Keyword + AI — fuer alle Accounts (jung = Ban, etabliert = Timeout + DM)
         if (
             self._contains_suspicious_text(message.content)
             and member.id not in self._active_cases

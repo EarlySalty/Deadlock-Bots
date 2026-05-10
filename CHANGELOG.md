@@ -1,3 +1,10 @@
+## #20 — Klare Grenze: jung = bis 30 Tage, etabliert = älter als 30 Tage
+
+- Accounts bis 30 Tage alt werden bei erkanntem Scam direkt gebannt
+- Accounts älter als 30 Tage (möglicherweise gehackt) bekommen stattdessen einen 24h-Timeout und eine DM
+- Der KI-Scam-Check läuft jetzt für alle Accounts, nicht mehr nur für neue
+- Mehrkanal-Burst-Erkennung bleibt weiterhin auf Accounts unter 30 Tagen begrenzt
+
 ## #19 — Etablierte Scam-Accounts werden sofort getimeoutet und per DM informiert
 
 - Accounts die älter sind und möglicherweise gehackt wurden, werden nicht mehr nur gemeldet, sondern sofort für 24h stummgeschaltet
