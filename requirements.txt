@@ -19,7 +19,7 @@ Jinja2==3.1.6
 
 # Data / validation
 pydantic==2.12.5
-pydantic-settings==2.13.1
+pydantic-settings==2.14.0
 pytz==2026.1.post1
 
 # HTTP client
