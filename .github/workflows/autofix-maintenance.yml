@@ -1,8 +1,6 @@
 name: "🤖 Autofix Maintenance PR"
 
 on:
-  schedule:
-    - cron: "35 2 * * *"
   workflow_dispatch:
 
 permissions:

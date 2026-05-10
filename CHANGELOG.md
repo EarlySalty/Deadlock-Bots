@@ -1,3 +1,10 @@
+## #26 — GitHub Actions Minutenverbrauch stark reduziert
+
+- Neun tägliche Workflows auf wöchentliche oder event-basierte Trigger umgestellt
+- Dashboard DAST und Auth-Guardrails laufen jetzt wöchentlich statt täglich
+- Security-Scans, Secret-Scanning und Incident-Automation brauchen keinen täglichen Lauf mehr
+- Semgrep meldet Findings als Artifact statt den Build zu blockieren
+
 ## #25 — SecurityGuard: Kein Auto-Ban ohne AI-Bestätigung
 
 - Jeder Burst-Trigger wird jetzt zuerst von der KI geprüft — kein Ban ohne AI-Bestätigung
