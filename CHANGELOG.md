@@ -1,3 +1,11 @@
+## #18 — Scam-Erkennung mit KI und erweiterter Account-Prüfung
+
+- Scam-Nachrichten werden jetzt auch von Accounts erkannt, die bis zu einem Monat alt sind (vorher nur 24 Stunden)
+- Einzelne Nachrichten mit verdächtigen Inhalten werden per KI automatisch auf Scam geprüft — kein Multi-Channel-Spam mehr nötig
+- Neue Accounts werden bei KI-bestätigtem Scam automatisch gebannt
+- Ältere, etablierte Accounts (möglicherweise gehackt) werden nicht automatisch gebannt — stattdessen erscheint ein Mod-Vorschlag mit Ban-Button im Mod-Channel
+- Das bisherige Join-Zeitfenster als Bedingung wurde entfernt
+
 ## #17 — TempVoice greift nicht mehr in fremde Voice-Kategorien ein
 
 - Channels außerhalb der TempVoice-Kategorien (Chill, Comp, Street Brawl) werden nicht mehr umbenannt oder gelöscht

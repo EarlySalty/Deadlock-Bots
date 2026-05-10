@@ -1,5 +1,7 @@
 import asyncio
+import json
 import logging
+import re
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -10,6 +12,17 @@ import discord
 from discord.ext import commands
 
 log = logging.getLogger(__name__)
+
+
+SCAM_DETECTION_SYSTEM_PROMPT = (
+    "You are a scam detector for a Discord gaming server. "
+    "Decide if the message is financial spam or a scam (earnings promises, investment schemes, "
+    "Telegram/contact requests, profit-sharing, referral schemes, or similar). "
+    "Reply only with valid JSON, no other text: "
+    '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
+)
+
+_SCAM_JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
 
 
 def _safe_log_value(value: Any) -> str:
@@ -31,9 +44,14 @@ SECURITY_CONFIG: dict[str, object] = {
     # Schwellen fuer Mehrkanal-Spam (z.B. 3 Nachrichten in 3 Channels).
     "CHANNEL_THRESHOLD": 3,
     "MESSAGE_THRESHOLD": 3,
-    # Account muss juenger als X Stunden sein UND Join juenger als Y Minuten.
-    "ACCOUNT_MAX_AGE_HOURS": 24,
-    "JOIN_WATCH_MINUTES": 60,
+    # Account muss juenger als X Stunden sein. Join-Alter spielt keine Rolle mehr.
+    "ACCOUNT_MAX_AGE_HOURS": 720,  # 30 Tage
+    # Ab diesem Account-Alter + Join-Alter gilt ein Account als "etabliert" (Mod-Vorschlag statt Auto-Ban).
+    "ESTABLISHED_ACCOUNT_MIN_AGE_HOURS": 168,  # 7 Tage
+    "ESTABLISHED_MIN_JOIN_HOURS": 24,
+    # AI-Scam-Erkennung fuer Einzelnachrichten mit Keyword-Treffer.
+    "AI_SCAM_PROVIDER": "openai",
+    "AI_SCAM_CONFIDENCE": 0.78,
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,
     # Timeout fuer Buttons (Sekunden).
@@ -155,6 +173,43 @@ class UnbanView(discord.ui.View):
         )
 
 
+class ScamBanView(discord.ui.View):
+    def __init__(self, cog: "SecurityGuard", guild_id: int, user_id: int, case_id: str) -> None:
+        super().__init__(timeout=cog.view_timeout_seconds)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.case_id = case_id
+
+    @discord.ui.button(label="Ban", style=discord.ButtonStyle.danger)
+    async def ban_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not perms or not (perms.ban_members or perms.administrator):
+            await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+            return
+        guild = self.cog.bot.get_guild(self.guild_id)
+        if guild is None:
+            await interaction.response.send_message("Server nicht gefunden.", ephemeral=True)
+            return
+        try:
+            await guild.ban(
+                discord.Object(id=self.user_id),
+                reason=f"[SecurityGuard][case:{self.case_id}] Mod-confirmed scam (established account)",
+            )
+            button.disabled = True
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+            await interaction.response.send_message("Gebannt.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Keine Ban-Berechtigung.", ephemeral=True)
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Ban fehlgeschlagen: {exc}", ephemeral=True)
+
+
 class SecurityGuard(commands.Cog):
     """
     Guards against brand new accounts that shotgun messages across channels.
@@ -172,8 +227,17 @@ class SecurityGuard(commands.Cog):
         self.window_seconds = int(cfg.get("WINDOW_SECONDS", 120) or 120)
         self.channel_threshold = max(2, int(cfg.get("CHANNEL_THRESHOLD", 3) or 3))
         self.message_threshold = max(2, int(cfg.get("MESSAGE_THRESHOLD", 3) or 3))
-        self.account_max_age_hours = max(1, int(cfg.get("ACCOUNT_MAX_AGE_HOURS", 24) or 24))
-        self.join_watch_minutes = max(5, int(cfg.get("JOIN_WATCH_MINUTES", 60) or 60))
+        self.account_max_age_hours = max(1, int(cfg.get("ACCOUNT_MAX_AGE_HOURS", 720) or 720))
+        self.established_account_min_age_hours = max(
+            1, int(cfg.get("ESTABLISHED_ACCOUNT_MIN_AGE_HOURS", 168) or 168)
+        )
+        self.established_min_join_hours = max(
+            0, int(cfg.get("ESTABLISHED_MIN_JOIN_HOURS", 24) or 24)
+        )
+        self.ai_scam_provider = str(cfg.get("AI_SCAM_PROVIDER", "openai") or "openai").lower()
+        self.ai_scam_confidence = max(
+            0.5, min(1.0, float(cfg.get("AI_SCAM_CONFIDENCE", 0.78) or 0.78))
+        )
         self.timeout_minutes = max(5, int(cfg.get("TIMEOUT_MINUTES", 1440) or 1440))
         self.view_timeout_seconds = max(60, int(cfg.get("VIEW_TIMEOUT_SECONDS", 86400) or 86400))
         self.appeal_min_chars = max(1, int(cfg.get("APPEAL_MIN_CHARS", 4) or 4))
@@ -230,7 +294,7 @@ class SecurityGuard(commands.Cog):
             return  # do not police staff
 
         now = discord.utils.utcnow()
-        if not self._is_new_account(member, now) or not self._is_recent_join(member, now):
+        if not self._is_new_account(member, now):
             self._prune_history(member.id, now)
             return
 
@@ -247,18 +311,47 @@ class SecurityGuard(commands.Cog):
         self._prune_history(member.id, now)
         recent_msgs = list(history)
 
+        # Pfad 1: Mehrkanal-Burst (regelbasiert, keine AI noetig)
         triggered, reason, meta = self._should_trigger(member, recent_msgs, now)
-        if not triggered:
-            return
-        if member.id in self._active_cases:
+        if triggered and member.id not in self._active_cases:
+            self._active_cases.add(member.id)
+            try:
+                await self._handle_incident(member, recent_msgs, reason, meta)
+            finally:
+                self._message_history.pop(member.id, None)
+                self._active_cases.discard(member.id)
             return
 
-        self._active_cases.add(member.id)
-        try:
-            await self._handle_incident(member, recent_msgs, reason, meta)
-        finally:
-            self._message_history.pop(member.id, None)
-            self._active_cases.discard(member.id)
+        # Pfad 2: Keyword-Treffer in Einzelnachricht → AI-Scam-Check
+        if (
+            self._contains_suspicious_text(message.content)
+            and member.id not in self._active_cases
+        ):
+            self._active_cases.add(member.id)
+            try:
+                is_scam, confidence, ai_reason = await self._ai_check_scam(message.content)
+                if is_scam and confidence >= self.ai_scam_confidence:
+                    if self._is_established_account(member, now):
+                        await self._handle_scam_proposal(member, message, ai_reason, confidence)
+                    else:
+                        single = RecentMessage(
+                            message=message,
+                            channel_id=message.channel.id,
+                            created_at=message.created_at or now,
+                            content=message.content or "",
+                            attachments=list(message.attachments),
+                        )
+                        ai_reason_short = f"AI-Scam (conf {confidence:.0%}): {ai_reason}"
+                        scam_meta = {
+                            "channel_count": 1,
+                            "message_count": 1,
+                            "attachment_count": len(message.attachments),
+                            "keyword_hit": 1,
+                        }
+                        await self._handle_incident(member, [single], ai_reason_short, scam_meta)
+                    self._message_history.pop(member.id, None)
+            finally:
+                self._active_cases.discard(member.id)
 
     # ---------------- Core logic ----------------
     def _is_new_account(self, member: discord.Member, now: datetime) -> bool:
@@ -268,12 +361,46 @@ class SecurityGuard(commands.Cog):
         age = now - created.replace(tzinfo=UTC)
         return age.total_seconds() <= self.account_max_age_hours * 3600
 
-    def _is_recent_join(self, member: discord.Member, now: datetime) -> bool:
+    def _is_established_account(self, member: discord.Member, now: datetime) -> bool:
+        created = member.created_at
         joined = member.joined_at
-        if not joined:
+        if not created or not joined:
             return False
-        age = now - joined.replace(tzinfo=UTC)
-        return age.total_seconds() <= self.join_watch_minutes * 60
+        account_age_h = (now - created.replace(tzinfo=UTC)).total_seconds() / 3600
+        join_age_h = (now - joined.replace(tzinfo=UTC)).total_seconds() / 3600
+        return (
+            account_age_h >= self.established_account_min_age_hours
+            and join_age_h >= self.established_min_join_hours
+        )
+
+    async def _ai_check_scam(self, content: str) -> tuple[bool, float, str]:
+        ai = self.bot.get_cog("AIConnector")
+        if ai is None or not hasattr(ai, "generate_text"):
+            return False, 0.0, "ai_unavailable"
+        try:
+            text, _ = await ai.generate_text(
+                provider=self.ai_scam_provider,
+                prompt=content[:2000],
+                system_prompt=SCAM_DETECTION_SYSTEM_PROMPT,
+                max_output_tokens=120,
+                temperature=0.1,
+            )
+        except Exception as exc:
+            log.warning("AI scam check fehlgeschlagen: %s", exc)
+            return False, 0.0, "ai_error"
+        if not text:
+            return False, 0.0, "no_response"
+        match = _SCAM_JSON_RE.search(text)
+        if not match:
+            return False, 0.0, "parse_error"
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return False, 0.0, "json_error"
+        is_scam = bool(data.get("is_scam", False))
+        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+        reason = str(data.get("reason", ""))[:300]
+        return is_scam, confidence, reason
 
     def _prune_history(self, user_id: int, now: datetime) -> None:
         cutoff = now - timedelta(seconds=self.window_seconds)
@@ -382,6 +509,51 @@ class SecurityGuard(commands.Cog):
             case_id,
             dm_sent,
         )
+
+    async def _handle_scam_proposal(
+        self,
+        member: discord.Member,
+        message: discord.Message,
+        ai_reason: str,
+        confidence: float,
+    ) -> None:
+        now = discord.utils.utcnow()
+        case_id = self._make_case_id(member, now)
+
+        try:
+            await message.delete(reason=f"[SecurityGuard][case:{case_id}] suspected scam (established account)")
+        except discord.HTTPException:
+            pass
+
+        mod_channel = await self._resolve_mod_channel(member.guild)
+        if not mod_channel:
+            log.warning("Kein Mod-Channel fuer Scam-Proposal gesetzt; Case %s nur gelogt.", case_id)
+            return
+
+        snippet = (message.content or "")[:500].replace("`", "'")
+        embed = discord.Embed(
+            title="Scam-Verdacht: etablierter Account",
+            color=0xE67E22,
+            timestamp=now,
+        )
+        embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
+        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.add_field(name="Account-Alter", value=self._fmt_delta(now, member.created_at), inline=True)
+        embed.add_field(name="Server-Mitglied seit", value=self._fmt_delta(now, member.joined_at), inline=True)
+        embed.add_field(name="AI Confidence", value=f"{confidence:.0%}", inline=True)
+        embed.add_field(name="AI Reason", value=ai_reason or "—", inline=False)
+        embed.add_field(
+            name="Nachricht",
+            value=f"```{snippet}```" if snippet else "(leer)",
+            inline=False,
+        )
+        embed.set_footer(text="Nachricht gelöscht — Account möglicherweise gehackt. Manuell prüfen.")
+
+        view = ScamBanView(self, member.guild.id, member.id, case_id)
+        try:
+            await mod_channel.send(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            log.warning("Konnte Scam-Proposal nicht posten fuer Case %s: %s", case_id, exc)
 
     async def _send_user_dm(self, member: discord.Member, reason: str, case_id: str) -> bool:
         action_label = "banned" if self.punishment == "ban" else "timed out"
@@ -783,7 +955,9 @@ class SecurityGuard(commands.Cog):
         desc = (
             f"Fenster: {self.window_seconds}s | Kanaele: >= {self.channel_threshold} | "
             f"Nachrichten: >= {self.message_threshold}\n"
-            f"Account-Alter: <= {self.account_max_age_hours}h | Join: <= {self.join_watch_minutes}min\n"
+            f"Account-Alter: <= {self.account_max_age_hours}h (kein Join-Gate)\n"
+            f"Etabliert ab: Account >= {self.established_account_min_age_hours}h & Join >= {self.established_min_join_hours}h → Mod-Vorschlag\n"
+            f"AI-Scam: Provider={self.ai_scam_provider} | Confidence >= {self.ai_scam_confidence:.0%}\n"
             f"Aktion: {self.punishment} | Timeout: {self.timeout_minutes}m\n"
             f"Review-Channel: {review} | Mod-Channel: {mod}\n"
             f"Aktiv auf Guilds: {guilds}"
