@@ -181,12 +181,19 @@ class ScamBanView(discord.ui.View):
         self.user_id = user_id
         self.case_id = case_id
 
+    def _check_perms(self, interaction: discord.Interaction) -> bool:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        return bool(perms and (perms.ban_members or perms.administrator))
+
+    def _disable_all(self) -> None:
+        for item in self.children:
+            item.disabled = True  # type: ignore[attr-defined]
+
     @discord.ui.button(label="Ban", style=discord.ButtonStyle.danger)
     async def ban_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
-        perms = getattr(interaction.user, "guild_permissions", None)
-        if not perms or not (perms.ban_members or perms.administrator):
+        if not self._check_perms(interaction):
             await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
             return
         guild = self.cog.bot.get_guild(self.guild_id)
@@ -196,9 +203,9 @@ class ScamBanView(discord.ui.View):
         try:
             await guild.ban(
                 discord.Object(id=self.user_id),
-                reason=f"[SecurityGuard][case:{self.case_id}] Mod-confirmed scam (established account)",
+                reason=f"[SecurityGuard][case:{self.case_id}] Mod-escalation: scam (established account)",
             )
-            button.disabled = True
+            self._disable_all()
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:
@@ -208,6 +215,36 @@ class ScamBanView(discord.ui.View):
             await interaction.response.send_message("Keine Ban-Berechtigung.", ephemeral=True)
         except discord.HTTPException as exc:
             await interaction.response.send_message(f"Ban fehlgeschlagen: {exc}", ephemeral=True)
+
+    @discord.ui.button(label="Timeout aufheben", style=discord.ButtonStyle.secondary)
+    async def remove_timeout_button(
+        self, interaction: discord.Interaction, button: discord.ui.Button
+    ) -> None:
+        if not self._check_perms(interaction):
+            await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+            return
+        guild = self.cog.bot.get_guild(self.guild_id)
+        if guild is None:
+            await interaction.response.send_message("Server nicht gefunden.", ephemeral=True)
+            return
+        try:
+            member = guild.get_member(self.user_id) or await guild.fetch_member(self.user_id)
+            await member.edit(
+                communication_disabled_until=None,
+                reason=f"[SecurityGuard][case:{self.case_id}] Mod: false positive, timeout entfernt",
+            )
+            self._disable_all()
+            try:
+                await interaction.message.edit(view=self)
+            except discord.HTTPException:
+                pass
+            await interaction.response.send_message("Timeout aufgehoben.", ephemeral=True)
+        except discord.NotFound:
+            await interaction.response.send_message("Member nicht gefunden.", ephemeral=True)
+        except discord.Forbidden:
+            await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+        except discord.HTTPException as exc:
+            await interaction.response.send_message(f"Fehlgeschlagen: {exc}", ephemeral=True)
 
 
 class SecurityGuard(commands.Cog):
@@ -520,19 +557,58 @@ class SecurityGuard(commands.Cog):
         now = discord.utils.utcnow()
         case_id = self._make_case_id(member, now)
 
+        # Nachricht löschen
         try:
-            await message.delete(reason=f"[SecurityGuard][case:{case_id}] suspected scam (established account)")
+            await message.delete(reason=f"[SecurityGuard][case:{case_id}] scam (established account)")
         except discord.HTTPException:
             pass
 
+        # Sofort 24h-Timeout anwenden
+        timeout_ok = False
+        until = now + timedelta(minutes=self.timeout_minutes)
+        try:
+            me = member.guild.me or await member.guild.fetch_member(self.bot.user.id)
+            if me.guild_permissions.moderate_members:
+                await member.edit(
+                    communication_disabled_until=until,
+                    reason=f"[SecurityGuard][case:{case_id}] AI-Scam, etablierter Account (möglicherweise gehackt)",
+                )
+                timeout_ok = True
+        except discord.HTTPException as exc:
+            log.warning("Timeout fuer etablierten Scam-Account %s fehlgeschlagen: %s", member.id, exc)
+
+        # DM an User
+        if timeout_ok:
+            try:
+                dm_embed = discord.Embed(
+                    title="Du wurdest vorübergehend stummgeschaltet",
+                    color=0xE67E22,
+                    timestamp=now,
+                )
+                dm_embed.add_field(name="Server", value=member.guild.name, inline=False)
+                dm_embed.add_field(
+                    name="Grund",
+                    value="Auf deinem Account wurde eine verdächtige Scam-Nachricht erkannt. "
+                          "Falls dein Account gehackt wurde, melde dich bitte beim Mod-Team, "
+                          "sobald du ihn zurück hast.",
+                    inline=False,
+                )
+                dm_embed.add_field(name="Dauer", value=f"{self.timeout_minutes // 60} Stunden", inline=True)
+                dm_embed.add_field(name="Case ID", value=case_id, inline=True)
+                dm_embed.set_footer(text="Wende dich an das Mod-Team, wenn dein Account wieder sicher ist.")
+                await member.send(embed=dm_embed)
+            except discord.HTTPException:
+                pass
+
+        # Mod-Channel: Info-Embed mit Aktions-Buttons
         mod_channel = await self._resolve_mod_channel(member.guild)
         if not mod_channel:
-            log.warning("Kein Mod-Channel fuer Scam-Proposal gesetzt; Case %s nur gelogt.", case_id)
+            log.warning("Kein Mod-Channel gesetzt; Scam-Proposal Case %s nur gelogt.", case_id)
             return
 
         snippet = (message.content or "")[:500].replace("`", "'")
         embed = discord.Embed(
-            title="Scam-Verdacht: etablierter Account",
+            title="Scam erkannt: etablierter Account — Auto-Timeout",
             color=0xE67E22,
             timestamp=now,
         )
@@ -541,19 +617,23 @@ class SecurityGuard(commands.Cog):
         embed.add_field(name="Account-Alter", value=self._fmt_delta(now, member.created_at), inline=True)
         embed.add_field(name="Server-Mitglied seit", value=self._fmt_delta(now, member.joined_at), inline=True)
         embed.add_field(name="AI Confidence", value=f"{confidence:.0%}", inline=True)
+        embed.add_field(name="Timeout", value="24h ✓" if timeout_ok else "fehlgeschlagen ✗", inline=True)
         embed.add_field(name="AI Reason", value=ai_reason or "—", inline=False)
         embed.add_field(
             name="Nachricht",
             value=f"```{snippet}```" if snippet else "(leer)",
             inline=False,
         )
-        embed.set_footer(text="Nachricht gelöscht — Account möglicherweise gehackt. Manuell prüfen.")
+        embed.set_footer(
+            text="Nachricht gelöscht + 24h Timeout gesetzt. "
+                 "Account möglicherweise gehackt — User wurde per DM informiert."
+        )
 
         view = ScamBanView(self, member.guild.id, member.id, case_id)
         try:
             await mod_channel.send(embed=embed, view=view)
         except discord.HTTPException as exc:
-            log.warning("Konnte Scam-Proposal nicht posten fuer Case %s: %s", case_id, exc)
+            log.warning("Konnte Scam-Info nicht posten fuer Case %s: %s", case_id, exc)
 
     async def _send_user_dm(self, member: discord.Member, reason: str, case_id: str) -> bool:
         action_label = "banned" if self.punishment == "ban" else "timed out"

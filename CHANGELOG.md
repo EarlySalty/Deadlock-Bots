@@ -1,3 +1,10 @@
+## #19 — Etablierte Scam-Accounts werden sofort getimeoutet und per DM informiert
+
+- Accounts die älter sind und möglicherweise gehackt wurden, werden nicht mehr nur gemeldet, sondern sofort für 24h stummgeschaltet
+- Der betroffene User bekommt automatisch eine DM: Grund, Dauer, und der Hinweis sich beim Mod-Team zu melden sobald der Account wieder sicher ist
+- Mods sehen im Mod-Channel trotzdem ein Info-Embed mit zwei Buttons: "Ban" (eskalieren) oder "Timeout aufheben" (falls False Positive)
+- Kein manuelles Bestätigen mehr nötig — der Bot handelt sofort
+
 ## #18 — Scam-Erkennung mit KI und erweiterter Account-Prüfung
 
 - Scam-Nachrichten werden jetzt auch von Accounts erkannt, die bis zu einem Monat alt sind (vorher nur 24 Stunden)
