@@ -1,3 +1,10 @@
+## #25 — SecurityGuard: Kein Auto-Ban ohne AI-Bestätigung
+
+- Jeder Burst-Trigger wird jetzt zuerst von der KI geprüft — kein Ban ohne AI-Bestätigung
+- Wenn die KI nicht sicher genug ist, landet der Fall nur als Vorschlag im Mod-Channel (inkl. Ban-Button für manuelle Entscheidung)
+- Verhindert Fehlbans bei neuen Accounts die zufällig in mehreren Channels aktiv sind
+- Bilder werden ebenfalls AI-geprüft wenn Text alleine nicht ausreicht
+
 ## #24 — SecurityGuard: Ban-Logs persistent in DB gespeichert + Review-Channel aktiv
 
 - Jeder automatische Ban/Timeout wird jetzt dauerhaft in der Datenbank gespeichert — Fälle bleiben auch nach Bot-Neustart nachvollziehbar

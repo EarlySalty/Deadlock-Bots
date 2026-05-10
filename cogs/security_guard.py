@@ -431,13 +431,31 @@ class SecurityGuard(commands.Cog):
         self._prune_history(member.id, now)
         recent_msgs = list(history)
 
-        # Pfad 1: Mehrkanal-Burst — nur fuer junge Accounts (<30 Tage), regelbasiert
+        # Pfad 1: Mehrkanal-Burst — nur fuer junge Accounts (<30 Tage), AI-bestaetigt
         if is_young and member.id not in self._active_cases:
             triggered, reason, meta = self._should_trigger(member, recent_msgs, now)
             if triggered:
                 self._active_cases.add(member.id)
                 try:
-                    await self._handle_incident(member, recent_msgs, reason, meta)
+                    combined_text = " ".join(m.content for m in recent_msgs if m.content).strip()
+                    if combined_text:
+                        is_scam, confidence, ai_reason = await self._ai_check_scam(combined_text[:2000])
+                    else:
+                        is_scam, confidence, ai_reason = False, 0.0, "no_text"
+
+                    # Bilder zusaetzlich pruefen wenn Text nicht reicht
+                    if not is_scam and any(m.attachments for m in recent_msgs):
+                        img_scam, img_conf, img_reason = await self._ai_check_image_scam(recent_msgs)
+                        if img_scam and img_conf > confidence:
+                            is_scam, confidence, ai_reason = img_scam, img_conf, img_reason
+
+                    if is_scam and confidence >= self.ai_scam_confidence:
+                        full_reason = f"{reason}; AI conf {confidence:.0%}: {ai_reason}"
+                        await self._handle_incident(member, recent_msgs, full_reason, meta)
+                    else:
+                        await self._handle_burst_proposal(
+                            member, recent_msgs, reason, meta, confidence, ai_reason
+                        )
                 finally:
                     self._message_history.pop(member.id, None)
                     self._active_cases.discard(member.id)
@@ -821,6 +839,74 @@ class SecurityGuard(commands.Cog):
             await mod_channel.send(embed=embed, view=view)
         except discord.HTTPException as exc:
             log.warning("Konnte Scam-Info nicht posten fuer Case %s: %s", case_id, exc)
+
+    async def _handle_burst_proposal(
+        self,
+        member: discord.Member,
+        msgs: list[RecentMessage],
+        trigger_reason: str,
+        meta: dict[str, int],
+        ai_confidence: float,
+        ai_reason: str,
+    ) -> None:
+        now = discord.utils.utcnow()
+        case_id = self._make_case_id(member, now)
+
+        record = IncidentCase(
+            case_id=case_id,
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            reason=f"Burst (AI nicht bestaetigt, conf {ai_confidence:.0%}): {trigger_reason}",
+            created_at=now,
+            action="proposal-only",
+        )
+        self._remember_case(record)
+        await self._persist_incident(record, meta, msgs)
+
+        mod_channel = await self._resolve_mod_channel(member.guild)
+        if not mod_channel:
+            log.info(
+                "Burst nicht bestaetigt fuer %s (case %s, conf %.0f%%) — kein Mod-Channel konfiguriert.",
+                member.id, case_id, ai_confidence * 100,
+            )
+            return
+
+        snippets = []
+        for m in sorted(msgs, key=lambda x: x.created_at):
+            ch = getattr(m.message.channel, "mention", f"#{m.channel_id}")
+            text = (m.content or "(kein Text)")[:120].replace("`", "'")
+            attach = f" [{len(m.attachments)} Anhang]" if m.attachments else ""
+            snippets.append(f"{ch}: {text}{attach}")
+
+        embed = discord.Embed(
+            title="Burst erkannt — AI nicht bestaetigt (kein Auto-Ban)",
+            color=0xF39C12,
+            timestamp=now,
+        )
+        embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
+        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.add_field(name="Account-Alter", value=self._fmt_delta(now, member.created_at), inline=True)
+        embed.add_field(name="Server-Mitglied seit", value=self._fmt_delta(now, member.joined_at), inline=True)
+        embed.add_field(
+            name="Trigger",
+            value=f"{meta.get('message_count', 0)} Nachrichten / {meta.get('channel_count', 0)} Channels",
+            inline=True,
+        )
+        embed.add_field(name="AI Confidence", value=f"{ai_confidence:.0%} (unter Schwelle)", inline=True)
+        embed.add_field(name="AI Reason", value=ai_reason or "—", inline=False)
+        embed.add_field(
+            name="Nachrichten",
+            value="\n".join(snippets[:8]) or "(keine)",
+            inline=False,
+        )
+        embed.set_footer(text="Kein automatischer Ban — bitte manuell prüfen.")
+
+        view = ScamBanView(self, member.guild.id, member.id, case_id)
+        try:
+            await mod_channel.send(embed=embed, view=view)
+        except discord.HTTPException as exc:
+            log.warning("Konnte Burst-Proposal nicht posten fuer Case %s: %s", case_id, exc)
 
     async def _send_user_dm(self, member: discord.Member, reason: str, case_id: str) -> bool:
         action_label = "banned" if self.punishment == "ban" else "timed out"
