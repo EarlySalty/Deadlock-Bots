@@ -22,6 +22,16 @@ SCAM_DETECTION_SYSTEM_PROMPT = (
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
 )
 
+SCAM_IMAGE_SYSTEM_PROMPT = (
+    "You are a scam detector for a Discord gaming server. "
+    "Analyze the images and determine if they show financial scam content: "
+    "fake investment or trading profit screenshots, fake X/Twitter posts about earnings, "
+    "crypto/forex/stock gain screenshots, testimonials about making money, "
+    "or any get-rich-quick scheme visuals. "
+    "Reply only with valid JSON, no other text: "
+    '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
+)
+
 _SCAM_JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
 
 
@@ -52,6 +62,11 @@ SECURITY_CONFIG: dict[str, object] = {
     # AI-Scam-Erkennung fuer Einzelnachrichten mit Keyword-Treffer.
     "AI_SCAM_PROVIDER": "openai",
     "AI_SCAM_CONFIDENCE": 0.78,
+    # AI-Bild-Scam-Erkennung (Multimodal, nur MiniMax unterstuetzt).
+    "AI_IMAGE_PROVIDER": "minimax",
+    "AI_IMAGE_CONFIDENCE": 0.75,
+    # Mindestanzahl Channels mit Bildern um Bild-Scam-Check auszuloesen.
+    "IMAGE_CHANNEL_THRESHOLD": 2,
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,
     # Timeout fuer Buttons (Sekunden).
@@ -275,6 +290,11 @@ class SecurityGuard(commands.Cog):
         self.ai_scam_confidence = max(
             0.5, min(1.0, float(cfg.get("AI_SCAM_CONFIDENCE", 0.78) or 0.78))
         )
+        self.ai_image_provider = str(cfg.get("AI_IMAGE_PROVIDER", "minimax") or "minimax").lower()
+        self.ai_image_confidence = max(
+            0.5, min(1.0, float(cfg.get("AI_IMAGE_CONFIDENCE", 0.75) or 0.75))
+        )
+        self.image_channel_threshold = max(2, int(cfg.get("IMAGE_CHANNEL_THRESHOLD", 2) or 2))
         self.timeout_minutes = max(5, int(cfg.get("TIMEOUT_MINUTES", 1440) or 1440))
         self.view_timeout_seconds = max(60, int(cfg.get("VIEW_TIMEOUT_SECONDS", 86400) or 86400))
         self.appeal_min_chars = max(1, int(cfg.get("APPEAL_MIN_CHARS", 4) or 4))
@@ -333,21 +353,22 @@ class SecurityGuard(commands.Cog):
         now = discord.utils.utcnow()
         is_young = self._is_new_account(member, now)  # Account < 30 Tage
 
+        # History fuer ALLE Accounts tracken (noetig fuer Bild-Scam-Detection)
+        history = self._message_history[member.id]
+        history.append(
+            RecentMessage(
+                message=message,
+                channel_id=message.channel.id,
+                created_at=message.created_at or now,
+                content=message.content or "",
+                attachments=list(message.attachments),
+            )
+        )
+        self._prune_history(member.id, now)
+        recent_msgs = list(history)
+
         # Pfad 1: Mehrkanal-Burst — nur fuer junge Accounts (<30 Tage), regelbasiert
         if is_young and member.id not in self._active_cases:
-            history = self._message_history[member.id]
-            history.append(
-                RecentMessage(
-                    message=message,
-                    channel_id=message.channel.id,
-                    created_at=message.created_at or now,
-                    content=message.content or "",
-                    attachments=list(message.attachments),
-                )
-            )
-            self._prune_history(member.id, now)
-            recent_msgs = list(history)
-
             triggered, reason, meta = self._should_trigger(member, recent_msgs, now)
             if triggered:
                 self._active_cases.add(member.id)
@@ -357,10 +378,37 @@ class SecurityGuard(commands.Cog):
                     self._message_history.pop(member.id, None)
                     self._active_cases.discard(member.id)
                 return
-        else:
-            self._prune_history(member.id, now)
 
-        # Pfad 2: Keyword + AI — fuer alle Accounts (jung = Ban, etabliert = Timeout + DM)
+        # Pfad 2: Bilder in mehreren Channels → AI-Bild-Scam-Check (alle Accounts)
+        if (
+            self._is_image_multi_channel(recent_msgs)
+            and member.id not in self._active_cases
+        ):
+            self._active_cases.add(member.id)
+            try:
+                is_scam, confidence, ai_reason = await self._ai_check_image_scam(recent_msgs)
+                if is_scam and confidence >= self.ai_image_confidence:
+                    if self._is_established_account(member, now):
+                        latest_img_msg = next(
+                            (m.message for m in reversed(recent_msgs) if m.attachments), message
+                        )
+                        await self._handle_scam_proposal(member, latest_img_msg, ai_reason, confidence)
+                    else:
+                        img_channels = len({m.channel_id for m in recent_msgs if m.attachments})
+                        img_count = sum(len(m.attachments) for m in recent_msgs)
+                        reason_str = f"Bild-Scam in {img_channels} Channels (conf {confidence:.0%}): {ai_reason}"
+                        scam_meta = {
+                            "channel_count": img_channels,
+                            "message_count": len(recent_msgs),
+                            "attachment_count": img_count,
+                            "keyword_hit": 0,
+                        }
+                        await self._handle_incident(member, recent_msgs, reason_str, scam_meta)
+                    self._message_history.pop(member.id, None)
+            finally:
+                self._active_cases.discard(member.id)
+
+        # Pfad 3: Keyword + AI — fuer alle Accounts (jung = Ban, etabliert = Timeout + DM)
         if (
             self._contains_suspicious_text(message.content)
             and member.id not in self._active_cases
@@ -435,6 +483,56 @@ class SecurityGuard(commands.Cog):
             data = json.loads(match.group(0))
         except json.JSONDecodeError:
             return False, 0.0, "json_error"
+        is_scam = bool(data.get("is_scam", False))
+        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+        reason = str(data.get("reason", ""))[:300]
+        return is_scam, confidence, reason
+
+    def _is_image_multi_channel(self, msgs: list[RecentMessage]) -> bool:
+        channels_with_images = {m.channel_id for m in msgs if m.attachments}
+        return len(channels_with_images) >= self.image_channel_threshold
+
+    async def _ai_check_image_scam(self, msgs: list[RecentMessage]) -> tuple[bool, float, str]:
+        ai = self.bot.get_cog("AIConnector")
+        if ai is None or not hasattr(ai, "generate_multimodal"):
+            return False, 0.0, "ai_unavailable"
+
+        image_urls: list[str] = []
+        for msg in msgs:
+            for att in msg.attachments:
+                if (att.content_type or "").lower().startswith("image/"):
+                    image_urls.append(att.url)
+                if len(image_urls) >= 4:
+                    break
+            if len(image_urls) >= 4:
+                break
+
+        if not image_urls:
+            return False, 0.0, "no_images"
+
+        try:
+            text, _ = await ai.generate_multimodal(
+                provider=self.ai_image_provider,
+                prompt="Analyze these images for scam content.",
+                images=image_urls,
+                system_prompt=SCAM_IMAGE_SYSTEM_PROMPT,
+                max_output_tokens=120,
+                temperature=0.1,
+            )
+        except Exception as exc:
+            log.warning("AI Bild-Scam-Check fehlgeschlagen: %s", exc)
+            return False, 0.0, "ai_error"
+
+        if not text:
+            return False, 0.0, "no_response"
+        match = _SCAM_JSON_RE.search(text)
+        if not match:
+            return False, 0.0, "parse_error"
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return False, 0.0, "json_error"
+
         is_scam = bool(data.get("is_scam", False))
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
         reason = str(data.get("reason", ""))[:300]

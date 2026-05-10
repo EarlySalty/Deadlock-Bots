@@ -1,3 +1,11 @@
+## #21 — Bild-Scam-Erkennung: KI analysiert Screenshots in mehreren Channels
+
+- Accounts die nur Bilder senden (z.B. gefälschte X-Posts mit Investitions-Gewinnen) werden jetzt erkannt
+- Sobald jemand Bilder in 2+ verschiedenen Channels schickt, prüft die KI automatisch ob es Scam ist
+- Junge Accounts (<30 Tage) werden bei bestätigtem Bild-Scam direkt gebannt
+- Ältere Accounts bekommen einen 24h-Timeout + DM und Mods sehen den Fall im Mod-Channel
+- Message-Verlauf wird jetzt für alle Accounts getrackt, nicht nur für neue
+
 ## #20 — Klare Grenze: jung = bis 30 Tage, etabliert = älter als 30 Tage
 
 - Accounts bis 30 Tage alt werden bei erkanntem Scam direkt gebannt
