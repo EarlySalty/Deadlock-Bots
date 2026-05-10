@@ -1,3 +1,9 @@
+## #27 — Dependabot Auto-Merge wieder voll funktionsfähig
+
+- Fehlende Hilfsdatei ergänzt, die den Python-Security-Scanner blockiert hat
+- Syntaxfehler in der Auto-Merge-Workflow-Datei behoben (Actionlint-Fehler)
+- Alle drei Ursachen, die Dependabot-PRs vom automatischen Merge abgehalten haben, sind beseitigt
+
 ## #26 — GitHub Actions Minutenverbrauch stark reduziert
 
 - Neun tägliche Workflows auf wöchentliche oder event-basierte Trigger umgestellt
