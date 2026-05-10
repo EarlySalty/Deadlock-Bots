@@ -1,3 +1,10 @@
+## #23 — KI-Moderationskontext deutlich verbessert
+
+- Kontext-Nachrichten zeigen jetzt relative Zeitstempel (z.B. "[2min ago]") — die KI erkennt ob der Kontext frisch oder veraltet ist
+- Nachrichten vom selben User der bewertet wird, sind mit ">>>" markiert — so sieht die KI das Verhaltensmuster des Users klar
+- Reply-Chain: wenn jemand auf eine Nachricht antwortet, bekommt die KI die Original-Nachricht direkt mit — Reaktionen werden im richtigen Kontext bewertet
+- System-Prompt erklärt jetzt explizit: Reaktion auf eine Provokation wird milder bewertet als die Provokation selbst
+
 ## #22 — KI-Moderationsfilter entschärft: weniger False Positives
 
 - Schwellenwert für Moderationsvorschläge von 55% auf 78% Konfidenz angehoben

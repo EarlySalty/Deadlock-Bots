@@ -59,6 +59,12 @@ Immer OK — NICHT flaggen (verdict="ok"):
 - Ragebait, Flame, Trash Talk generell — der Bot zaehlt das separat, du klassifizierst es als "ragebait_ok".
 - Spielkritik, Balance-Beschwerden, Patchnotes, Matchmaking-Frust.
 
+Kontext korrekt lesen:
+- Nachrichten mit ">>>" am Anfang stammen vom GLEICHEN User der bewertet wird — so siehst du sein Verhaltensmuster.
+- Zeitstempel wie "[2min ago]" zeigen wie frisch der Kontext ist — alles ueber 30 Minuten ist wahrscheinlich ein anderes Gespraech.
+- Wenn "is_reply_to" vorhanden: die Nachricht ist eine DIREKTE ANTWORT darauf — bewerte sie immer im Kontext dieser Provokation.
+- Wenn jemand auf eine Beleidigung reagiert, ist die Reaktion milder zu werten als der Ausloser.
+
 Zweifelsfaelle:
 - Wenn der Kontext unklar ist oder du dir nicht sicher bist: verdict="needs_context".
 - Lieber zu wenig flaggen als zu viel — Mods koennen selbst eingreifen.
@@ -654,7 +660,10 @@ class AIModeratorCog(commands.Cog):
                 raw_json=raw_json,
             )
 
-        payload = self._build_prompt_payload(message, context_lines, len(image_attachments), include_full_context)
+        replied_to = await self._fetch_reply_context(message)
+        payload = self._build_prompt_payload(
+            message, context_lines, len(image_attachments), include_full_context, replied_to=replied_to
+        )
         prompt = json.dumps(payload, ensure_ascii=False)
         image_urls = [attachment.url for attachment in image_attachments]
 
@@ -681,19 +690,33 @@ class AIModeratorCog(commands.Cog):
         context_lines: list[str],
         attachment_count: int,
         include_full_context: bool,
+        *,
+        replied_to: dict[str, str] | None = None,
     ) -> dict[str, Any]:
-        focus_message = _truncate(_strip_mentions(message.content), 1000)
+        focus_message = _strip_mentions(message.content)
         if not focus_message:
             focus_message = "[kein Text]"
+        focus_message = _truncate(focus_message, 1000)
 
-        context_limit = 110 if include_full_context else 220
+        context_limit = 110 if include_full_context else 200
         trimmed_context = [_truncate(line, context_limit) for line in context_lines]
-        payload = {
-            "user_message": focus_message,
+        payload: dict[str, Any] = {
             "user_tag": _truncate(str(message.author), 80),
-            "recent_context": trimmed_context,
+            "user_message": focus_message,
             "attachment_count": attachment_count,
+            # >>> prefix in context = same user as evaluated; timestamp shows freshness
+            "recent_context": trimmed_context,
+            "context_note": (
+                "Lines starting with '>>>' are from the SAME user being evaluated. "
+                "Timestamps show how long ago each message was sent."
+            ),
         }
+        if replied_to:
+            payload["is_reply_to"] = replied_to
+            payload["reply_note"] = (
+                "The evaluated message is a DIRECT REPLY to 'is_reply_to'. "
+                "Read it as a response to that specific message, not in isolation."
+            )
         if include_full_context:
             payload["analysis_stage"] = "context_escalation"
             payload["focus_message_id"] = str(message.id)
@@ -1047,6 +1070,8 @@ class AIModeratorCog(commands.Cog):
 
     async def _fetch_context_lines(self, message: discord.Message, *, limit: int) -> list[str]:
         lines: list[str] = []
+        msg_time = (message.created_at or discord.utils.utcnow()).replace(tzinfo=UTC)
+        author_id = message.author.id
         try:
             async for previous in message.channel.history(limit=limit + 1, before=message):
                 preview = _strip_mentions(previous.content)
@@ -1054,11 +1079,43 @@ class AIModeratorCog(commands.Cog):
                     preview = "[Anhang]"
                 if not preview:
                     continue
-                lines.append(f"{previous.author.display_name}: {_truncate(preview, 160)}")
+
+                # relative timestamp so AI knows if context is fresh or old
+                if previous.created_at:
+                    delta_s = (msg_time - previous.created_at.replace(tzinfo=UTC)).total_seconds()
+                    mins = max(0, int(delta_s / 60))
+                    time_tag = f"[{mins}min ago]" if mins < 60 else f"[{mins // 60}h ago]"
+                else:
+                    time_tag = ""
+
+                # mark messages from the same user being evaluated
+                same_user = previous.author.id == author_id
+                prefix = ">>>" if same_user else "   "
+
+                lines.append(
+                    f"{prefix} {time_tag} {previous.author.display_name}: {_truncate(preview, 150)}"
+                )
         except discord.HTTPException as exc:
             log.debug("Konnte Kontext fuer Message %s nicht laden: %s", message.id, exc)
         lines.reverse()
         return lines[-limit:]
+
+    async def _fetch_reply_context(self, message: discord.Message) -> dict[str, str] | None:
+        if not message.reference:
+            return None
+        ref = message.reference.cached_message
+        if ref is None:
+            try:
+                ref = await message.channel.fetch_message(message.reference.message_id)
+            except discord.HTTPException:
+                return None
+        if ref is None:
+            return None
+        content = _strip_mentions(ref.content) or ("[Anhang]" if ref.attachments else "[kein Text]")
+        return {
+            "author": _truncate(str(ref.author.display_name), 60),
+            "content": _truncate(content, 300),
+        }
 
     def _extract_image_attachments(
         self, attachments: list[discord.Attachment]
