@@ -20,8 +20,9 @@ import asyncio
 import json
 import logging
 import os
+from collections.abc import Iterable
 from datetime import datetime
-from typing import Any, Iterable
+from typing import Any
 
 import discord
 from discord.ext import commands, tasks
@@ -70,17 +71,13 @@ class VoiceReactionDM(commands.Cog):
             log.info("VoiceReactionDM: deaktiviert (VOICE_REACTION_DM_ENABLED leer)")
             return
         if not self._dsn:
-            log.warning(
-                "VoiceReactionDM: kein %s gesetzt — Polling startet nicht", DSN_ENV
-            )
+            log.warning("VoiceReactionDM: kein %s gesetzt — Polling startet nicht", DSN_ENV)
             return
         try:
             import psycopg  # type: ignore
             from psycopg.rows import dict_row  # type: ignore
         except Exception:
-            log.warning(
-                "VoiceReactionDM: psycopg nicht verfügbar, Cog inaktiv", exc_info=True
-            )
+            log.warning("VoiceReactionDM: psycopg nicht verfügbar, Cog inaktiv", exc_info=True)
             return
         self._psycopg = psycopg
         self._dict_row = dict_row
@@ -222,9 +219,7 @@ class VoiceReactionDM(commands.Cog):
         login = str(row.get("streamer_login") or "")
         stance = str(row.get("last_stance") or "—")
         confidence = row.get("last_confidence")
-        confidence_str = (
-            f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "—"
-        )
+        confidence_str = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "—"
         source = str(row.get("source") or "—")
         history = _coerce_history(row.get("messages_json"))
         description = _format_history(history) or "_keine relevante History_"

@@ -59,7 +59,9 @@ def _mark_nudge_done(user_id: int, status: str = "sent") -> None:
     try:
         db.set_kv(VOICE_NUDGE_DONE_NS, str(int(user_id)), status)
     except Exception:
-        log.warning("[nudge] Konnte Nudge-Done-Flag nicht setzen (user_id=%s)", user_id, exc_info=True)
+        log.warning(
+            "[nudge] Konnte Nudge-Done-Flag nicht setzen (user_id=%s)", user_id, exc_info=True
+        )
 
 
 def _is_nudge_done(user_id: int) -> bool:

@@ -96,7 +96,9 @@ class Settings(BaseSettings):
     coaching_request_channel_id: int = Field(
         1461682293105229979, alias="COACHING_REQUEST_CHANNEL_ID"
     )
-    coaching_feedback_channel_id: int = Field(1494756126644895885, alias="COACHING_FEEDBACK_CHANNEL_ID")
+    coaching_feedback_channel_id: int = Field(
+        1494756126644895885, alias="COACHING_FEEDBACK_CHANNEL_ID"
+    )
     coaching_panel_channel_id: int = Field(1494373349944459355, alias="COACHING_PANEL_CHANNEL_ID")
     coaching_voice_category_id: int = Field(1459526231686119600, alias="COACHING_VOICE_CATEGORY_ID")
     coaching_role_expiry_hours: int = Field(48, alias="COACHING_ROLE_EXPIRY_HOURS")

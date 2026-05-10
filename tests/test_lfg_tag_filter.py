@@ -136,10 +136,16 @@ class SmartLFGTagFilterTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            mock.patch.object(agent, "_get_steam_friend_ids", new=mock.AsyncMock(return_value=set())),
+            mock.patch.object(
+                agent, "_get_steam_friend_ids", new=mock.AsyncMock(return_value=set())
+            ),
             mock.patch.object(agent, "_fetch_co_player_stats", new=mock.AsyncMock(return_value={})),
-            mock.patch.object(agent, "_fetch_activity_patterns", new=mock.AsyncMock(return_value={})),
-            mock.patch.object(agent, "_fetch_lane_activity_users", new=mock.AsyncMock(return_value=set())),
+            mock.patch.object(
+                agent, "_fetch_activity_patterns", new=mock.AsyncMock(return_value={})
+            ),
+            mock.patch.object(
+                agent, "_fetch_lane_activity_users", new=mock.AsyncMock(return_value=set())
+            ),
         ):
             candidates = await agent._find_matching_players(
                 author,
@@ -152,7 +158,9 @@ class SmartLFGTagFilterTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([candidate["user_id"] for candidate in candidates], [2001])
 
-    async def test_find_matching_players_excludes_active_ragebaiter_on_ragebaiter_free(self) -> None:
+    async def test_find_matching_players_excludes_active_ragebaiter_on_ragebaiter_free(
+        self,
+    ) -> None:
         author = _FakeMember(user_id=1000, guild=None, display_name="Author")  # type: ignore[arg-type]
         member_ok = _FakeMember(user_id=2101, guild=None, display_name="Safe")  # type: ignore[arg-type]
         member_ragebaiter = _FakeMember(
@@ -197,10 +205,16 @@ class SmartLFGTagFilterTests(unittest.IsolatedAsyncioTestCase):
         }
 
         with (
-            mock.patch.object(agent, "_get_steam_friend_ids", new=mock.AsyncMock(return_value=set())),
+            mock.patch.object(
+                agent, "_get_steam_friend_ids", new=mock.AsyncMock(return_value=set())
+            ),
             mock.patch.object(agent, "_fetch_co_player_stats", new=mock.AsyncMock(return_value={})),
-            mock.patch.object(agent, "_fetch_activity_patterns", new=mock.AsyncMock(return_value={})),
-            mock.patch.object(agent, "_fetch_lane_activity_users", new=mock.AsyncMock(return_value=set())),
+            mock.patch.object(
+                agent, "_fetch_activity_patterns", new=mock.AsyncMock(return_value={})
+            ),
+            mock.patch.object(
+                agent, "_fetch_lane_activity_users", new=mock.AsyncMock(return_value=set())
+            ),
         ):
             candidates = await agent._find_matching_players(
                 author,

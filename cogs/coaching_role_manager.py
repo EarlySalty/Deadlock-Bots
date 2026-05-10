@@ -72,7 +72,9 @@ class CoachingRoleManagerCog(commands.Cog):
             role = guild.get_role(settings.coaching_reward_role_id)
             if role and role in member.roles:
                 try:
-                    await member.remove_roles(role, reason="Coaching Reward-Rolle abgelaufen (5 Tage)")
+                    await member.remove_roles(
+                        role, reason="Coaching Reward-Rolle abgelaufen (5 Tage)"
+                    )
                     log.info(f"Removed reward role from {member.display_name}")
                 except Exception as e:
                     log.error(f"Could not remove reward role from {member.display_name}: {e}")

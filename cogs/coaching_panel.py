@@ -235,17 +235,20 @@ class CoachingPanelCog(commands.Cog):
 
     async def _start_coaching_flow(self, interaction: discord.Interaction) -> None:
         await self._db_connect()
-        
+
         # Ban check
         now = int(time.time())
-        ban = db.query_one("SELECT * FROM coaching_bans WHERE discord_user_id=? AND expires_at > ?", (interaction.user.id, now))
+        ban = db.query_one(
+            "SELECT * FROM coaching_bans WHERE discord_user_id=? AND expires_at > ?",
+            (interaction.user.id, now),
+        )
         if ban:
             expiry_dt = datetime.fromtimestamp(ban["expires_at"])
             await interaction.response.send_message(
                 f"❌ Du bist aktuell vom Coaching-System gesperrt.\n"
                 f"Grund: {ban['reason'] or 'Unbekannt'}\n"
                 f"Sperre endet am: {expiry_dt.strftime('%d.%m.%Y %H:%M')}",
-                ephemeral=True
+                ephemeral=True,
             )
             return
 
@@ -285,7 +288,7 @@ class CoachingPanelCog(commands.Cog):
                 "",
                 hero_raw,
                 availability_raw,
-                availability_raw, # Use availability also for scheduled_slot field
+                availability_raw,  # Use availability also for scheduled_slot field
                 games_hours_raw,
                 "",
                 problems_raw,

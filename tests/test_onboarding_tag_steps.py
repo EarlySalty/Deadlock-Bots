@@ -132,7 +132,9 @@ class OnboardingTagStepsTest(unittest.TestCase):
                 cog=cog, step_index=self.mod._TONE_STEP_INDEX, user_id=123456789
             )
             interaction = _FakeInteraction()
-            button = next(child for child in view.children if getattr(child, "label", "") == "Banter-OK")
+            button = next(
+                child for child in view.children if getattr(child, "label", "") == "Banter-OK"
+            )
 
             await button.callback(interaction)
 
@@ -191,7 +193,9 @@ class OnboardingTagStepsTest(unittest.TestCase):
             )
             tone_interaction = _FakeInteraction()
             tone_skip = next(
-                child for child in tone_view.children if getattr(child, "label", "") == "Überspringen"
+                child
+                for child in tone_view.children
+                if getattr(child, "label", "") == "Überspringen"
             )
 
             await tone_skip.callback(tone_interaction)
@@ -206,7 +210,9 @@ class OnboardingTagStepsTest(unittest.TestCase):
             )
             age_interaction = _FakeInteraction()
             age_skip = next(
-                child for child in age_view.children if getattr(child, "label", "") == "Überspringen"
+                child
+                for child in age_view.children
+                if getattr(child, "label", "") == "Überspringen"
             )
 
             await age_skip.callback(age_interaction)

@@ -7,7 +7,7 @@ import os
 import time
 from collections import defaultdict
 from collections.abc import Iterable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import ClientError, ClientSession, ClientTimeout, web
@@ -125,7 +125,7 @@ def _parse_unix_or_iso(value: Any) -> int | None:
             text = text[:-1] + "+00:00"
         parsed = datetime.fromisoformat(text)
         if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
+            parsed = parsed.replace(tzinfo=UTC)
         return int(parsed.timestamp())
     except ValueError:
         return None
@@ -154,7 +154,10 @@ def _normalize_thresholds(payload: Any) -> dict[str, float]:
     if None in normalized.values():
         raise ValueError("thresholds must contain numeric values")
     if not (
-        normalized["s_plus_min"] >= normalized["s_min"] >= normalized["a_min"] >= normalized["b_min"]
+        normalized["s_plus_min"]
+        >= normalized["s_min"]
+        >= normalized["a_min"]
+        >= normalized["b_min"]
     ):
         raise ValueError("thresholds must be descending (S+ >= S >= A >= B)")
     return {key: round(float(value), 2) for key, value in normalized.items()}
@@ -272,9 +275,7 @@ class TierlistPublicServer:
 
     async def _get_http_session(self) -> ClientSession:
         if self._http_session is None or self._http_session.closed:
-            self._http_session = ClientSession(
-                timeout=ClientTimeout(total=REFRESH_TIMEOUT_SECONDS)
-            )
+            self._http_session = ClientSession(timeout=ClientTimeout(total=REFRESH_TIMEOUT_SECONDS))
         return self._http_session
 
     async def _fetch_json(self, url: str, *, params: dict[str, Any] | None = None) -> Any:
@@ -292,7 +293,7 @@ class TierlistPublicServer:
                 return await response.json()
         except RetryableRefreshError:
             raise
-        except asyncio.TimeoutError as exc:
+        except TimeoutError as exc:
             raise RetryableRefreshError("upstream request timed out") from exc
         except ClientError as exc:
             raise RetryableRefreshError(f"upstream request failed: {exc}") from exc
@@ -331,7 +332,9 @@ class TierlistPublicServer:
         raw = {str(row["k"]): row["v"] for row in rows}
 
         try:
-            thresholds_raw = json.loads(raw.get("thresholds_json") or DEFAULT_SETTINGS["thresholds_json"])
+            thresholds_raw = json.loads(
+                raw.get("thresholds_json") or DEFAULT_SETTINGS["thresholds_json"]
+            )
         except json.JSONDecodeError:
             thresholds_raw = DEFAULT_THRESHOLDS
         thresholds = _normalize_thresholds(thresholds_raw)
@@ -818,10 +821,7 @@ class TierlistPublicServer:
             """,
             (int(row["id"]),),
         )
-        return {
-            int(item["hero_id"]): round(float(item["winrate"]), 2)
-            for item in snapshot_rows
-        }
+        return {int(item["hero_id"]): round(float(item["winrate"]), 2) for item in snapshot_rows}
 
     def _snapshot_rows(self, snapshot_id: int) -> list[dict[str, Any]]:
         rows = db.query_all(
@@ -892,7 +892,9 @@ class TierlistPublicServer:
             )
 
         for heroes_in_tier in tier_groups.values():
-            heroes_in_tier.sort(key=lambda item: (-float(item["wr"]), -int(item["matches"]), item["name"]))
+            heroes_in_tier.sort(
+                key=lambda item: (-float(item["wr"]), -int(item["matches"]), item["name"])
+            )
 
         return {
             "bucket": bucket,
@@ -1102,7 +1104,9 @@ class TierlistPublicServer:
                     content_type="application/json",
                 )
             self._vote_rate_limits = {
-                ip: ts for ip, ts in self._vote_rate_limits.items() if now - ts < VOTE_RATE_LIMIT_SECONDS
+                ip: ts
+                for ip, ts in self._vote_rate_limits.items()
+                if now - ts < VOTE_RATE_LIMIT_SECONDS
             }
             self._vote_rate_limits[peer] = now
 
@@ -1253,7 +1257,9 @@ class TierlistPublicServer:
                         content_type="application/json",
                     )
                 login = str(item.get("twitch_login", item.get("twitchLogin")) or "").strip().lower()
-                display_name = str(item.get("display_name", item.get("displayName")) or login).strip()
+                display_name = str(
+                    item.get("display_name", item.get("displayName")) or login
+                ).strip()
                 if not login:
                     raise web.HTTPBadRequest(
                         text=json.dumps(
@@ -1265,7 +1271,9 @@ class TierlistPublicServer:
                         ),
                         content_type="application/json",
                     )
-                sort_order = _coerce_int(item.get("sort_order", item.get("sortOrder", 100)), 100) or 100
+                sort_order = (
+                    _coerce_int(item.get("sort_order", item.get("sortOrder", 100)), 100) or 100
+                )
                 is_active = _coerce_bool(item.get("is_active", item.get("isActive", True)), True)
                 parsed_streamers.append(
                     {
@@ -1309,7 +1317,9 @@ class TierlistPublicServer:
                         ),
                         content_type="application/json",
                     )
-                sort_order = _coerce_int(item.get("sort_order", item.get("sortOrder", 100)), 100) or 100
+                sort_order = (
+                    _coerce_int(item.get("sort_order", item.get("sortOrder", 100)), 100) or 100
+                )
                 is_active = _coerce_bool(item.get("is_active", item.get("isActive", True)), True)
                 parsed_builds_meta.append(
                     {

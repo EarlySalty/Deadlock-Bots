@@ -102,45 +102,47 @@ class CoachCancelButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         if not interaction.guild:
             return
-        
+
         # Admin or Coach check (the one who claimed it)
         session = db.query_one("SELECT * FROM coaching_sessions WHERE id=?", (self.session_id,))
         if not session:
             await interaction.response.send_message("❌ Session nicht gefunden.", ephemeral=True)
             return
-            
+
         is_owner = interaction.user.id == interaction.guild.owner_id
         is_assigned_coach = str(session["coach_id"]) == str(interaction.user.id)
-        
+
         if not (is_owner or is_assigned_coach):
-            await interaction.response.send_message("❌ Nur der zugewiesene Coach oder ein Admin kann abbrechen.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Nur der zugewiesene Coach oder ein Admin kann abbrechen.", ephemeral=True
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
         now = int(time.time())
-        ban_expiry = now + (7 * 24 * 60 * 60) # 7 days
-        
+        ban_expiry = now + (7 * 24 * 60 * 60)  # 7 days
+
         # 1. Update session status
         db.execute(
             "UPDATE coaching_sessions SET status='cancelled', completed_at=? WHERE id=?",
             (now, self.session_id),
         )
-        
+
         # 2. Update request status
         db.execute(
             "UPDATE coaching_requests SET status='cancelled', updated_at=? WHERE id=?",
             (now, session["request_id"]),
         )
-        
+
         # 3. Apply 7-day ban to user
         db.execute(
             """INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
                VALUES (?, ?, ?, ?)
                ON CONFLICT(discord_user_id) DO UPDATE SET
                banned_at=excluded.banned_at, expires_at=excluded.expires_at, reason=excluded.reason""",
-            (self.author_id, now, ban_expiry, "User hat sich nicht gemeldet / Abbruch durch Coach")
+            (self.author_id, now, ban_expiry, "User hat sich nicht gemeldet / Abbruch durch Coach"),
         )
-        
+
         # 4. Remove roles
         coaching_role = interaction.guild.get_role(settings.coaching_active_role_id)
         author = interaction.guild.get_member(self.author_id)
@@ -148,7 +150,9 @@ class CoachCancelButton(discord.ui.Button):
             try:
                 await author.remove_roles(coaching_role, reason="Coaching abgebrochen - 7D Ban")
             except Exception as e:
-                log.warning("Could not remove roles from user %s after cancellation: %s", self.author_id, e)
+                log.warning(
+                    "Could not remove roles from user %s after cancellation: %s", self.author_id, e
+                )
 
         # 5. Notify user in DM
         try:
@@ -162,16 +166,20 @@ class CoachCancelButton(discord.ui.Button):
             log.info("Could not DM user %s about coaching cancellation: %s", self.author_id, e)
 
         # 6. Notify in channel
-        await interaction.channel.send(f"⚠️ Das Coaching für <@{self.author_id}> wurde von {interaction.user.display_name} abgebrochen. Der User wurde für 7 Tage gesperrt.")
-        
+        await interaction.channel.send(
+            f"⚠️ Das Coaching für <@{self.author_id}> wurde von {interaction.user.display_name} abgebrochen. Der User wurde für 7 Tage gesperrt."
+        )
+
         # Edit original message to remove view
         try:
             if interaction.message:
                 await interaction.message.edit(view=None)
         except Exception as e:
             log.warning("Could not edit message after cancellation: %s", e)
-            
-        await interaction.followup.send("✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.", ephemeral=True)
+
+        await interaction.followup.send(
+            "✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.", ephemeral=True
+        )
 
 
 class CoachClaimButton(discord.ui.Button):
@@ -349,12 +357,14 @@ class CoachingRequestCog(commands.Cog):
         )
         recovered = max(int(cur.rowcount or 0), 0)
         if recovered:
-            log.warning("Recovered %s stale coaching request(s) from analyzing -> pending", recovered)
+            log.warning(
+                "Recovered %s stale coaching request(s) from analyzing -> pending", recovered
+            )
         return recovered
 
     async def cog_load(self):
         self._recover_stale_analyzing_requests()
-        
+
         # 1. Re-register claim buttons for analyzed requests
         rows_analyzed = db.query_all(
             "SELECT id, discord_user_id, message_id FROM coaching_requests "
@@ -365,7 +375,7 @@ class CoachingRequestCog(commands.Cog):
                 CoachClaimView(row["id"], row["discord_user_id"]),
                 message_id=row["message_id"],
             )
-            
+
         # 2. Re-register cancel buttons for active sessions
         rows_active = db.query_all(
             """SELECT s.id as session_id, r.message_id, s.discord_user_id
@@ -377,10 +387,14 @@ class CoachingRequestCog(commands.Cog):
             view = discord.ui.View(timeout=None)
             view.add_item(CoachCancelButton(row["session_id"], row["discord_user_id"]))
             self.bot.add_view(view, message_id=row["message_id"])
-            
+
         if rows_analyzed or rows_active:
-            log.info("Re-registered %d claim and %d cancel views after restart", len(rows_analyzed), len(rows_active))
-            
+            log.info(
+                "Re-registered %d claim and %d cancel views after restart",
+                len(rows_analyzed),
+                len(rows_active),
+            )
+
         if self._analyze_loop is None or self._analyze_loop.done():
             self._analyze_loop = asyncio.create_task(self._analyze_pending_requests())
 
@@ -593,10 +607,14 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
 
             request_data = dict(row)
             request_id = int(request_data["id"])
-            affected = db.connect_proxy().execute(
-                "UPDATE coaching_requests SET status='analyzing', updated_at=? WHERE id=? AND status='pending'",
-                (int(time.time()), request_id),
-            ).rowcount
+            affected = (
+                db.connect_proxy()
+                .execute(
+                    "UPDATE coaching_requests SET status='analyzing', updated_at=? WHERE id=? AND status='pending'",
+                    (int(time.time()), request_id),
+                )
+                .rowcount
+            )
             if not affected:
                 log.info(
                     "Request %s already being processed, skipping immediate trigger",
@@ -653,10 +671,14 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
                     request_id: int | None = None
                     request_data = dict(row)
                     request_id = int(request_data["id"])
-                    affected = db.connect_proxy().execute(
-                        "UPDATE coaching_requests SET status='analyzing', updated_at=? WHERE id=? AND status='pending'",
-                        (int(time.time()), request_id),
-                    ).rowcount
+                    affected = (
+                        db.connect_proxy()
+                        .execute(
+                            "UPDATE coaching_requests SET status='analyzing', updated_at=? WHERE id=? AND status='pending'",
+                            (int(time.time()), request_id),
+                        )
+                        .rowcount
+                    )
                     if not affected:
                         log.info(
                             "Request %s already claimed by another path, skipping loop",
@@ -676,7 +698,9 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
                     try:
                         ai_summary = await self._analyze_with_ai(request_data)
                         if not ai_summary:
-                            log.info("Coaching request %s aborted (invalid/non-serious)", request_id)
+                            log.info(
+                                "Coaching request %s aborted (invalid/non-serious)", request_id
+                            )
                             db.execute(
                                 "UPDATE coaching_requests SET status='invalid', updated_at=? WHERE id=?",
                                 (int(time.time()), request_id),
@@ -693,7 +717,9 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
                                 (int(time.time()), request_id),
                             )
                     except Exception:
-                        log.exception("Background coaching analysis failed for request %s", request_id)
+                        log.exception(
+                            "Background coaching analysis failed for request %s", request_id
+                        )
                         db.execute(
                             """UPDATE coaching_requests
                                SET status='pending', updated_at=?

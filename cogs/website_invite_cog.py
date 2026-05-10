@@ -133,7 +133,9 @@ class WebsiteInviteCog(commands.Cog):
         guilds = list(getattr(self.bot, "guilds", []))
         return guilds[0] if guilds else None
 
-    async def _resolve_invite_channel(self, guild: discord.Guild) -> discord.abc.GuildChannel | None:
+    async def _resolve_invite_channel(
+        self, guild: discord.Guild
+    ) -> discord.abc.GuildChannel | None:
         channel_id = _welcome_channel_id()
         channel = guild.get_channel(channel_id)
         if channel:
@@ -187,7 +189,9 @@ class WebsiteInviteCog(commands.Cog):
         try:
             invite = await _create_permanent_invite(channel)
         except discord.Forbidden:
-            log.warning("WebsiteInviteCog: Bot darf in Channel %s keinen Invite erstellen", channel.id)
+            log.warning(
+                "WebsiteInviteCog: Bot darf in Channel %s keinen Invite erstellen", channel.id
+            )
             return None
         except discord.HTTPException as exc:
             log.warning("WebsiteInviteCog: create_invite fehlgeschlagen: %s", exc)
@@ -211,7 +215,9 @@ class WebsiteInviteCog(commands.Cog):
     @app_commands.guild_only()
     async def cmd_show(self, interaction: discord.Interaction) -> None:
         if not _is_owner_or_admin(interaction):
-            await interaction.response.send_message("❌ Nur für Server-Owner/Admins.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Nur für Server-Owner/Admins.", ephemeral=True
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -254,7 +260,9 @@ class WebsiteInviteCog(commands.Cog):
     @app_commands.guild_only()
     async def cmd_recreate(self, interaction: discord.Interaction) -> None:
         if not _is_owner_or_admin(interaction):
-            await interaction.response.send_message("❌ Nur für Server-Owner/Admins.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Nur für Server-Owner/Admins.", ephemeral=True
+            )
             return
 
         await interaction.response.defer(ephemeral=True)
@@ -284,7 +292,9 @@ class WebsiteInviteCog(commands.Cog):
         try:
             invite = await _create_permanent_invite(channel)
         except discord.HTTPException as exc:
-            await interaction.followup.send(f"❌ Invite-Erstellung fehlgeschlagen: {exc}", ephemeral=True)
+            await interaction.followup.send(
+                f"❌ Invite-Erstellung fehlgeschlagen: {exc}", ephemeral=True
+            )
             return
 
         code = str(invite.code)
@@ -302,7 +312,9 @@ class WebsiteInviteCog(commands.Cog):
     @app_commands.guild_only()
     async def cmd_join_sources(self, interaction: discord.Interaction, tage: int = 30) -> None:
         if not _is_owner_or_admin(interaction):
-            await interaction.response.send_message("❌ Nur für Server-Owner/Admins.", ephemeral=True)
+            await interaction.response.send_message(
+                "❌ Nur für Server-Owner/Admins.", ephemeral=True
+            )
             return
 
         tage = max(1, min(int(tage), 365))

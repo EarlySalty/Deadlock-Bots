@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest import mock
 from types import SimpleNamespace
+from unittest import mock
 
 from cogs.welcome_dm import twitch_partner_integration as integration
 
@@ -125,11 +125,14 @@ class TwitchPartnerIntegrationTests(unittest.TestCase):
             calls.append((path, query))
             return {"auth_url": "https://auth.example/internal"}
 
-        with mock.patch.dict(
-            integration.os.environ,
-            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
-            clear=False,
-        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+        with (
+            mock.patch.dict(
+                integration.os.environ,
+                {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+                clear=False,
+            ),
+            mock.patch.object(integration, "_request_internal_api_json", _fake_request),
+        ):
             auth_url = integration.generate_discord_auth_url(265152027863023617)
 
         self.assertEqual(auth_url, "https://auth.example/internal")
@@ -174,11 +177,14 @@ class TwitchPartnerIntegrationTests(unittest.TestCase):
                 "authorized": True,
             }
 
-        with mock.patch.dict(
-            integration.os.environ,
-            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
-            clear=False,
-        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+        with (
+            mock.patch.dict(
+                integration.os.environ,
+                {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+                clear=False,
+            ),
+            mock.patch.object(integration, "_request_internal_api_json", _fake_request),
+        ):
             state = integration.get_auth_state(265152027863023617)
 
         self.assertEqual(state.twitch_login, "masteriofps")
@@ -203,11 +209,14 @@ class TwitchPartnerIntegrationTests(unittest.TestCase):
                 "raid_blacklisted": True,
             }
 
-        with mock.patch.dict(
-            integration.os.environ,
-            {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
-            clear=False,
-        ), mock.patch.object(integration, "_request_internal_api_json", _fake_request):
+        with (
+            mock.patch.dict(
+                integration.os.environ,
+                {"TWITCH_INTERNAL_API_TOKEN": "secret-token"},
+                clear=False,
+            ),
+            mock.patch.object(integration, "_request_internal_api_json", _fake_request),
+        ):
             blocked, reason = integration.check_onboarding_blocklist(
                 discord_user_id=265152027863023617,
                 twitch_login="MasterIOFPS",
