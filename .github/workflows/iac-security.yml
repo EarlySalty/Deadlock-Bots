@@ -118,7 +118,7 @@ jobs:
           sarif_file: kubelinter.sarif
           category: kubelinter
       - name: KICS IaC Scan (SARIF)
-        uses: checkmarx/kics-github-action@4063ea7186bec9fed1bf055e095a4658693f9998 # v2.1.19
+        uses: checkmarx/kics-github-action@adb675615871acaa5238d433dce4807d485f993f # v2.1.19
         with:
           path: .
           output_path: kics-results
