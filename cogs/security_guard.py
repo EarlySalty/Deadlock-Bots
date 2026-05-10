@@ -11,6 +11,8 @@ from typing import Any
 import discord
 from discord.ext import commands
 
+from service import db
+
 log = logging.getLogger(__name__)
 
 
@@ -44,7 +46,7 @@ def _safe_log_value(value: Any) -> str:
 # ---------------- Static Config (edit here, no ENV needed) ----------------
 SECURITY_CONFIG: dict[str, object] = {
     # ID eines Textkanals, in den Beweise/Embeds gepostet werden.
-    "REVIEW_CHANNEL_ID": 0,
+    "REVIEW_CHANNEL_ID": 1374364800817303632,
     # ID des Mod-Kanals fuer Ban-Logs, Appeals und Unban-Button.
     "MOD_CHANNEL_ID": 1315684135175716978,
     # Aktion bei Treffer: "ban" oder "timeout".
@@ -336,6 +338,68 @@ class SecurityGuard(commands.Cog):
                     kws.add(item.lower())
         self.suspicious_keywords = kws
 
+    async def cog_load(self) -> None:
+        await db.execute_async(
+            """
+            CREATE TABLE IF NOT EXISTS security_guard_incidents (
+                case_id      TEXT PRIMARY KEY,
+                guild_id     INTEGER NOT NULL,
+                user_id      INTEGER NOT NULL,
+                user_tag     TEXT NOT NULL,
+                action       TEXT NOT NULL,
+                reason       TEXT NOT NULL,
+                channel_count   INTEGER DEFAULT 0,
+                message_count   INTEGER DEFAULT 0,
+                attachment_count INTEGER DEFAULT 0,
+                keyword_hit  INTEGER DEFAULT 0,
+                messages_json TEXT,
+                created_at   TEXT NOT NULL
+            )
+            """
+        )
+
+    async def _persist_incident(
+        self,
+        case: IncidentCase,
+        meta: dict[str, int],
+        msgs: list[RecentMessage],
+    ) -> None:
+        messages_data = [
+            {
+                "channel_id": m.channel_id,
+                "ts": m.created_at.isoformat(),
+                "content": m.content[:500],
+                "attachments": len(m.attachments),
+            }
+            for m in msgs
+        ]
+        try:
+            await db.execute_async(
+                """
+                INSERT OR IGNORE INTO security_guard_incidents
+                    (case_id, guild_id, user_id, user_tag, action, reason,
+                     channel_count, message_count, attachment_count, keyword_hit,
+                     messages_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    case.case_id,
+                    case.guild_id,
+                    case.user_id,
+                    case.user_tag,
+                    case.action,
+                    case.reason,
+                    meta.get("channel_count", 0),
+                    meta.get("message_count", 0),
+                    meta.get("attachment_count", 0),
+                    meta.get("keyword_hit", 0),
+                    json.dumps(messages_data, ensure_ascii=False),
+                    case.created_at.isoformat(),
+                ),
+            )
+        except Exception as exc:
+            log.warning("DB-Persistierung fuer Case %s fehlgeschlagen: %s", case.case_id, exc)
+
     # ---------------- Events ----------------
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
@@ -625,6 +689,7 @@ class SecurityGuard(commands.Cog):
             action=self.punishment,
         )
         self._remember_case(record)
+        await self._persist_incident(record, meta, msgs)
 
         # Copy attachments before deletion
         forwarded_files = await self._collect_attachments(msgs)
@@ -655,6 +720,29 @@ class SecurityGuard(commands.Cog):
     ) -> None:
         now = discord.utils.utcnow()
         case_id = self._make_case_id(member, now)
+
+        proposal_record = IncidentCase(
+            case_id=case_id,
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            reason=f"AI-Scam proposal (conf {confidence:.0%}): {ai_reason}",
+            created_at=now,
+            action="timeout-proposal",
+        )
+        self._remember_case(proposal_record)
+        single_msg = RecentMessage(
+            message=message,
+            channel_id=message.channel.id,
+            created_at=message.created_at or now,
+            content=message.content or "",
+            attachments=list(message.attachments),
+        )
+        await self._persist_incident(
+            proposal_record,
+            {"channel_count": 1, "message_count": 1, "attachment_count": len(message.attachments), "keyword_hit": 1},
+            [single_msg],
+        )
 
         # Nachricht löschen
         try:

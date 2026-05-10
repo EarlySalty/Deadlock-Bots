@@ -1,3 +1,10 @@
+## #24 — SecurityGuard: Ban-Logs persistent in DB gespeichert + Review-Channel aktiv
+
+- Jeder automatische Ban/Timeout wird jetzt dauerhaft in der Datenbank gespeichert — Fälle bleiben auch nach Bot-Neustart nachvollziehbar
+- Die gespeicherten Daten umfassen Grund, betroffene Channels, Nachrichten-Snippets und Anhang-Anzahl
+- Auch KI-erkannte Scam-Fälle bei etablierten Accounts (Timeout-Proposals) werden persistiert
+- Ein dedizierter Review-Channel zeigt ab sofort alle Incidents als Embed an
+
 ## #23 — KI-Moderationskontext deutlich verbessert
 
 - Kontext-Nachrichten zeigen jetzt relative Zeitstempel (z.B. "[2min ago]") — die KI erkennt ob der Kontext frisch oder veraltet ist
