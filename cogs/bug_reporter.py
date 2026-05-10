@@ -943,7 +943,7 @@ class BugReporter(commands.Cog):
             try:
                 output_path.unlink(missing_ok=True)
             except Exception:
-                pass
+                pass  # Temporary output cleanup is best-effort.
 
         if LOCAL_CODEX_CMD_OVERRIDE:
             try:
@@ -1000,7 +1000,7 @@ class BugReporter(commands.Cog):
             try:
                 await proc.communicate()
             except Exception:
-                pass
+                pass  # Draining process pipes after kill is best-effort.
             detail = str(exc).strip() or exc.__class__.__name__
             _cleanup_output_file()
             return None, f"communicate failed: {detail}"

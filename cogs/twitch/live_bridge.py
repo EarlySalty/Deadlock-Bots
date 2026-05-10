@@ -459,7 +459,7 @@ class TwitchLiveBridgeCog(commands.Cog):
             try:
                 await self._restore_task
             except asyncio.CancelledError:
-                pass
+                pass  # Awaiting a cancelled restore task during unload is expected.
             self._restore_task = None
 
         if self._owns_client and self._api_client is not None:

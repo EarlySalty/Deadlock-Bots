@@ -902,7 +902,7 @@ class AIModeratorCog(commands.Cog):
                 "bitte Provokationen reduzieren."
             )
         except discord.HTTPException:
-            pass
+            pass  # Warning delivery is non-critical if the DM/send attempt fails.
 
     def _has_recent_ragebaiter_free_warning(
         self,

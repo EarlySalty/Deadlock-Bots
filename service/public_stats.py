@@ -576,7 +576,7 @@ async def handle_activity_heatmap(request: web.Request) -> web.Response:
         hour = started.hour
         user_id = row["user_id"]
         co_players_raw = row["co_player_ids"] or "[]"
-        channel_name = row["channel_name"]
+        _channel_name = row["channel_name"]
 
         # Determine rank for this user
         user_rank = _get_user_rank(user_id)
@@ -619,7 +619,7 @@ async def handle_activity_heatmap(request: web.Request) -> web.Response:
 async def handle_rank_distribution(request: web.Request) -> web.Response:
     """Returns current rank distribution and trend over time."""
     now = datetime.now()
-    cutoff_30d = now - timedelta(days=30)
+    _cutoff_30d = now - timedelta(days=30)
     weeks_count = _parse_positive_int(
         request.query.get("weeks"),
         default=4,

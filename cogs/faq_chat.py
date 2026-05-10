@@ -421,13 +421,13 @@ class FAQChat(commands.Cog):
 
             await interaction.response.defer(ephemeral=True)
         except discord.InteractionResponded:
-            pass
+            pass  # Another handler already responded to this interaction.
         except Exception as exc:
             log.exception("FAQ: defer failed: %s", exc)
             try:
                 await interaction.followup.send(f"❌ Fehler bei defer: {exc}", ephemeral=True)
-            except:
-                pass
+            except Exception:
+                pass  # best-effort error report; ignore send failures
             return
 
         user = interaction.user
@@ -489,13 +489,13 @@ class FAQChat(commands.Cog):
                 return
             await interaction.response.defer(ephemeral=True)
         except discord.InteractionResponded:
-            pass
+            pass  # Another handler already responded to this interaction.
         except Exception as exc:
             log.exception("FAQ close defer failed")
             try:
                 await interaction.followup.send(f"❌ Fehler: {exc}", ephemeral=True)
-            except:
-                pass
+            except Exception:
+                pass  # best-effort error report; ignore send failures
             return
 
         row = await service_db.query_one_async(
@@ -520,7 +520,7 @@ class FAQChat(commands.Cog):
                 await channel.send("🛑 Chat beendet.")
                 await channel.edit(archived=True)
             except discord.Forbidden:
-                pass
+                pass  # Archive/send failure is non-critical after manual chat closure.
 
         await interaction.followup.send("✅ Chat beendet.", ephemeral=True)
 
@@ -665,7 +665,7 @@ class FAQChat(commands.Cog):
 
             patchnote_context = changelogs.get_context_for_question(new_question)
         except Exception:
-            pass
+            pass  # Patchnote enrichment is optional for FAQ answers.
 
         context_parts = [DOCS_CONTEXT]
         if patchnote_context:
@@ -707,7 +707,7 @@ class FAQChat(commands.Cog):
         try:
             await channel.send(embed=embed)
         except Exception:
-            pass
+            pass  # FAQ logging is best-effort and should not break the request flow.
 
     async def _cleanup_loop(self) -> None:
         while True:
@@ -737,7 +737,7 @@ class FAQChat(commands.Cog):
                         await channel.send("⏱️ Chat wurde automatisch geschlossen (24h Timeout).")
                         await channel.edit(archived=True)
                     except discord.Forbidden:
-                        pass
+                        pass  # Archive/send failure is non-critical during timeout cleanup.
 
     @app_commands.command(name="faqpanel", description="Erstellt das FAQ Panel (Admin)")
     @app_commands.default_permissions(administrator=True)
@@ -782,4 +782,4 @@ async def setup(bot: commands.Bot) -> None:
     try:
         bot.tree.add_command(faq_cog.faqpanel)
     except app_commands.CommandAlreadyRegistered:
-        pass
+        pass  # Command registration is idempotent; duplicates are acceptable.

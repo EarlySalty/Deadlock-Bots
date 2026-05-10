@@ -239,7 +239,7 @@ class MasterBot(LoggingMixin, CogLoaderMixin, PresenceMixin, StandaloneMixin, co
         try:
             await self.load_extension(bridge_extension)
         except commands.ExtensionAlreadyLoaded:
-            pass
+            pass  # Bridge extension loading is idempotent.
         except Exception as exc:
             logging.warning(
                 "Could not load Twitch live bridge required by master broker: %s",

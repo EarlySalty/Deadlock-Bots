@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import os
 import unittest
+import unittest.mock as mock
 from typing import Any
-from unittest import mock
 
 import discord
 

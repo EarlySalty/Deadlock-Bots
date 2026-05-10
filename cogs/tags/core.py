@@ -38,7 +38,7 @@ class TagService(commands.Cog):
         try:
             await self._cleanup_task
         except asyncio.CancelledError:
-            pass
+            pass  # Awaiting a cancelled cleanup task during unload is expected.
         finally:
             self._cleanup_task = None
 

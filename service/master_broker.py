@@ -308,7 +308,7 @@ class MasterBroker:
                     ipaddress.IPv6Address(host_part)
                     value = host_part
                 except ValueError:
-                    pass
+                    pass  # Invalid IPv6 parse means the host part is not an IPv6 literal.
 
         # Plain IP literals should be accepted as-is (for example "::1").
         try:
@@ -603,8 +603,8 @@ class MasterBroker:
         except BaseException:
             logger.exception(
                 "Master broker failed to settle idempotent result (action=%s key=%s)",
-                action,
-                idempotency_key,
+                _safe_log_value(action),
+                _safe_log_value(idempotency_key),
             )
             await self._fail_idempotent_request(
                 action=action,

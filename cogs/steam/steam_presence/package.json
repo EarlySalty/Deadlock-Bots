@@ -11,5 +11,8 @@
   "dependencies": {
     "protobufjs": "^8.2.0",
     "steam-user": "^5.3.0"
+  },
+  "overrides": {
+    "steam-appticket": "^2.0.1"
   }
 }

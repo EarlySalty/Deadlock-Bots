@@ -6,7 +6,7 @@
 <title>Aktivitätsstatistik – EarlySalty Deadlock</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
 <style>
 /* ── Fonts ── */
 @font-face {
@@ -692,6 +692,10 @@ const RANK_COLORS = {
 };
 const DAY_NAMES = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 
+function _escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+
 let timelineChart = null;
 let donutChart = null;
 let weeklyChart = null;
@@ -1008,28 +1012,30 @@ function renderBestTimes(data, rank) {
   const peakHours = data.peak_hours || [];
   const dayDist = data.day_distribution || [];
   const maxDay = Math.max(...dayDist.map(d => d.count), 1);
+  const safeRank = _escHtml(rank);
+  const safeColor = _escHtml(color);
 
   grid.innerHTML = `
-    <div class="best-time-card" style="box-shadow: 0 10px 30px ${color}18;">
-      <div class="card-bg-glow" style="background: radial-gradient(circle at 50% 50%, ${color} 0%, transparent 70%);"></div>
+    <div class="best-time-card" style="box-shadow: 0 10px 30px ${safeColor}18;">
+      <div class="card-bg-glow" style="background: radial-gradient(circle at 50% 50%, ${safeColor} 0%, transparent 70%);"></div>
       <div class="rank-info">
-        <img src="/rank_icons/${rank.charAt(0).toUpperCase() + rank.slice(1)}.webp"
-             alt="${rank}" class="rank-icon"
+        <img src="/rank_icons/${safeRank.charAt(0).toUpperCase() + safeRank.slice(1)}.webp"
+             alt="${safeRank}" class="rank-icon"
              onerror="this.style.display='none'">
-        <span class="rank-name" style="color:${color}">${rank.charAt(0).toUpperCase() + rank.slice(1)}</span>
+        <span class="rank-name" style="color:${safeColor}">${safeRank.charAt(0).toUpperCase() + safeRank.slice(1)}</span>
       </div>
       <div class="peak-info">
         ${peakHours.length === 0 ? '<div class="no-data">Keine Daten verfügbar</div>' : peakHours.map((p, i) => `
           <div class="peak-row">
             <div class="peak-time">
-              <span class="peak-badge" style="background:${color}22;color:${color}">${p.hour}:00 - ${(p.hour + 2) % 24}:00</span>
+              <span class="peak-badge" style="background:${safeColor}22;color:${safeColor}">${p.hour}:00 - ${(p.hour + 2) % 24}:00</span>
             </div>
             <span class="peak-count">${p.count} Sessions</span>
           </div>
         `).join('')}
       </div>
       <div class="trend-bar">
-        <div class="trend-bar-fill" style="width:${Math.round((dayDist.reduce((a,b) => a + b.count, 0) / maxDay) * 100)}%;background:${color}"></div>
+        <div class="trend-bar-fill" style="width:${Math.round((dayDist.reduce((a,b) => a + b.count, 0) / maxDay) * 100)}%;background:${safeColor}"></div>
       </div>
     </div>
     <div class="best-time-card">
@@ -1043,7 +1049,7 @@ function renderBestTimes(data, rank) {
               <span class="peak-badge" style="background:var(--card-hover);color:var(--text-secondary)">${DAY_NAMES[i]}</span>
             </div>
             <div class="trend-bar" style="flex:1;margin-top:0;margin-left:8px;">
-              <div class="trend-bar-fill" style="width:${Math.round((d.count / maxDay) * 100)}%;background:${color}88"></div>
+              <div class="trend-bar-fill" style="width:${Math.round((d.count / maxDay) * 100)}%;background:${safeColor}88"></div>
             </div>
             <span class="peak-count">${d.count}</span>
           </div>

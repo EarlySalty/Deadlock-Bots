@@ -9,11 +9,7 @@ import re
 import discord
 from discord.ext import commands
 
-from service.guild_config import get_guild_config
-
 log = logging.getLogger("DuoLane")
-
-_cfg = get_guild_config()
 
 # Der Channel der beobachtet wird
 TRIGGER_CHANNEL_ID = 1411391356278018245

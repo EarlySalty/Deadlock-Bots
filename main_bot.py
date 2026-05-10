@@ -238,7 +238,7 @@ def _acquire_pid_lock() -> None:
             try:
                 pid_file.unlink()
             except FileNotFoundError:
-                pass
+                pass  # PID file is already gone; cleanup can continue.
             except OSError as exc:
                 logging.getLogger(__name__).debug("PID lock cleanup failed: %r", exc)
         finally:

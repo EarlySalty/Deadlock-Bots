@@ -91,7 +91,7 @@ class VoiceReactionDM(commands.Cog):
         try:
             self._poll.cancel()
         except Exception:
-            pass
+            pass  # Poll cancellation is best-effort during unload.
 
     # ------------------------------------------------------------------
     # Poll-Loop

@@ -245,7 +245,7 @@ class ServerFAQ(commands.Cog):
 
             patchnote_context = changelogs.get_context_for_question(new_question)
         except Exception:
-            pass
+            pass  # Patchnote enrichment is optional for FAQ answers.
 
         # Prompt zusammensetzen
         context_parts = [DOCS_CONTEXT]
@@ -408,7 +408,7 @@ class ServerFAQ(commands.Cog):
             )
             return
 
-        session = await self._get_or_create_session(user.id, thread.id)
+        _session = await self._get_or_create_session(user.id, thread.id)
 
         # Willkommensnachricht im Thread
         welcome = (
@@ -422,7 +422,7 @@ class ServerFAQ(commands.Cog):
         try:
             await thread.send(welcome)
         except discord.HTTPException:
-            pass
+            pass  # Welcome message failure is non-critical after thread creation.
 
         await interaction.followup.send(
             f"✅ Dein FAQ-Chat wurde erstellt: {thread.mention}\n\n"
@@ -472,7 +472,7 @@ class ServerFAQ(commands.Cog):
             await channel.send("🛑 Dieser FAQ-Chat wurde beendet.")
             await channel.edit(archived=True)
         except discord.HTTPException:
-            pass
+            pass  # Archive/send failure is non-critical after closing the session state.
 
         await interaction.response.send_message(
             "✅ Dein FAQ-Chat wurde beendet.",

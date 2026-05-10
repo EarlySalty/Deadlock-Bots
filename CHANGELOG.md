@@ -1,3 +1,13 @@
+## #28 — Alle GitHub Code-Scanning-Alerts behoben
+
+- Sicherheitslücke in der Node.js-Abhängigkeit protobufjs durch Paket-Override geschlossen
+- XSS-Gefahr in der Aktivitätsstatistik-Seite behoben (HTML-Escaping für API-Daten)
+- Integrity-Attribut für externes Chart.js-CDN-Skript hinzugefügt
+- YAML-Syntaxfehler im Auto-Merge-Workflow behoben
+- Log-Injection-Schwachstelle im Master-Broker gefixt (sanitisierte Log-Werte)
+- Über 50 Code-Quality-Hinweise bereinigt (leere Except-Blöcke, ungenutzte Variablen, Import-Stil)
+- 23 bestätigte False Positives (URL-Redirection, Cookie-Injection, SQL-Queries) als solche markiert und geschlossen
+
 ## #27 — Dependabot Auto-Merge wieder voll funktionsfähig
 
 - Fehlende Hilfsdatei ergänzt, die den Python-Security-Scanner blockiert hat

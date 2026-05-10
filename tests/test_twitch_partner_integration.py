@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
-from unittest import mock
+import unittest.mock as mock
 from types import SimpleNamespace
 
 from cogs.welcome_dm import twitch_partner_integration as integration

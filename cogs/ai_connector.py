@@ -124,11 +124,11 @@ class AIConnector(commands.Cog):
         )
 
         class _MiniMaxClient:
-            def __init__(inner_self, api_key: str, base_url: str, use_token_plan: bool) -> None:
-                inner_self.api_key = api_key
-                inner_self.base_url = base_url
-                inner_self.use_token_plan = use_token_plan
-                inner_self._http = httpx.Client(timeout=60.0)
+            def __init__(self, api_key: str, base_url: str, use_token_plan: bool) -> None:
+                self.api_key = api_key
+                self.base_url = base_url
+                self.use_token_plan = use_token_plan
+                self._http = httpx.Client(timeout=60.0)
 
             @staticmethod
             def _parse_data_image_uri(image_url: str) -> tuple[str, str] | None:
@@ -143,11 +143,11 @@ class AIConnector(commands.Cog):
                 return media_type, data
 
             def _build_token_plan_content(
-                inner_self, prompt: str, image_urls: list[str] | None
+                self, prompt: str, image_urls: list[str] | None
             ) -> list[dict[str, Any]]:
                 content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
                 for image_url in image_urls or []:
-                    parsed_data_uri = inner_self._parse_data_image_uri(image_url)
+                    parsed_data_uri = self._parse_data_image_uri(image_url)
                     if parsed_data_uri:
                         media_type, data = parsed_data_uri
                         content.append(
@@ -174,7 +174,7 @@ class AIConnector(commands.Cog):
                 return content
 
             def _build_standard_user_content(
-                inner_self, prompt: str, image_urls: list[str] | None
+                self, prompt: str, image_urls: list[str] | None
             ) -> str | list[dict[str, Any]]:
                 if not image_urls:
                     return prompt
@@ -192,7 +192,7 @@ class AIConnector(commands.Cog):
                 return content
 
             def generate(
-                inner_self,
+                self,
                 *,
                 prompt: str,
                 system_prompt: str | None,
@@ -201,9 +201,9 @@ class AIConnector(commands.Cog):
                 temperature: float,
                 image_urls: list[str] | None = None,
             ) -> str | None:
-                if inner_self.use_token_plan:
+                if self.use_token_plan:
                     headers = {
-                        "x-api-key": inner_self.api_key,
+                        "x-api-key": self.api_key,
                         "anthropic-version": "2023-06-01",
                         "Content-Type": "application/json",
                     }
@@ -213,20 +213,20 @@ class AIConnector(commands.Cog):
                         "messages": [
                             {
                                 "role": "user",
-                                "content": inner_self._build_token_plan_content(prompt, image_urls),
+                                "content": self._build_token_plan_content(prompt, image_urls),
                             }
                         ],
                         "max_tokens": max_output_tokens,
                         "temperature": temperature,
                     }
-                    resp = inner_self._http.post(
-                        f"{inner_self.base_url}/messages",
+                    resp = self._http.post(
+                        f"{self.base_url}/messages",
                         headers=headers,
                         json=payload,
                     )
                 else:
                     headers = {
-                        "Authorization": f"Bearer {inner_self.api_key}",
+                        "Authorization": f"Bearer {self.api_key}",
                         "Content-Type": "application/json",
                     }
                     messages = []
@@ -235,7 +235,7 @@ class AIConnector(commands.Cog):
                     messages.append(
                         {
                             "role": "user",
-                            "content": inner_self._build_standard_user_content(prompt, image_urls),
+                            "content": self._build_standard_user_content(prompt, image_urls),
                         }
                     )
 
@@ -245,8 +245,8 @@ class AIConnector(commands.Cog):
                         "max_tokens": max_output_tokens,
                         "temperature": temperature,
                     }
-                    resp = inner_self._http.post(
-                        f"{inner_self.base_url}/text/chatcompletion_v2",
+                    resp = self._http.post(
+                        f"{self.base_url}/text/chatcompletion_v2",
                         headers=headers,
                         json=payload,
                     )
@@ -255,7 +255,7 @@ class AIConnector(commands.Cog):
                     return None
                 data = resp.json()
 
-                if inner_self.use_token_plan:
+                if self.use_token_plan:
                     fragments = []
                     for item in data.get("content", []) or []:
                         if item.get("type") == "text" and item.get("text"):

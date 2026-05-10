@@ -258,7 +258,7 @@ class TierlistPublicServer:
             try:
                 await self._refresh_task
             except asyncio.CancelledError:
-                pass
+                pass  # Awaiting a cancelled refresh task during shutdown is expected.
         self._refresh_task = None
 
         if self._http_session and not self._http_session.closed:

@@ -226,7 +226,7 @@ class ScamBanView(discord.ui.View):
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:
-                pass
+                pass  # View update after ban is non-critical if Discord rejects the edit.
             await interaction.response.send_message("Gebannt.", ephemeral=True)
         except discord.Forbidden:
             await interaction.response.send_message("Keine Ban-Berechtigung.", ephemeral=True)
@@ -254,7 +254,7 @@ class ScamBanView(discord.ui.View):
             try:
                 await interaction.message.edit(view=self)
             except discord.HTTPException:
-                pass
+                pass  # View update after timeout removal is non-critical if Discord rejects the edit.
             await interaction.response.send_message("Timeout aufgehoben.", ephemeral=True)
         except discord.NotFound:
             await interaction.response.send_message("Member nicht gefunden.", ephemeral=True)
@@ -766,7 +766,7 @@ class SecurityGuard(commands.Cog):
         try:
             await message.delete(reason=f"[SecurityGuard][case:{case_id}] scam (established account)")
         except discord.HTTPException:
-            pass
+            pass  # Message delete failure is non-critical once moderation handling continues.
 
         # Sofort 24h-Timeout anwenden
         timeout_ok = False
@@ -803,7 +803,7 @@ class SecurityGuard(commands.Cog):
                 dm_embed.set_footer(text="Wende dich an das Mod-Team, wenn dein Account wieder sicher ist.")
                 await member.send(embed=dm_embed)
             except discord.HTTPException:
-                pass
+                pass  # DM delivery failure is non-critical after the timeout was applied.
 
         # Mod-Channel: Info-Embed mit Aktions-Buttons
         mod_channel = await self._resolve_mod_channel(member.guild)

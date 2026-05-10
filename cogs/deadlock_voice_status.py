@@ -389,7 +389,7 @@ class DeadlockVoiceStatus(commands.Cog):
             try:
                 bucket["latest_seen_at"] = max(int(seen_at_raw or 0), int(bucket["latest_seen_at"]))
             except (TypeError, ValueError):
-                pass
+                pass  # Skip invalid seen_at values when computing the latest timestamp.
 
         best: dict[str, Any] | None = None
         best_score: tuple[int, int, int, int] | None = None

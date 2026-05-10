@@ -318,7 +318,7 @@ class CoachClaimButton(discord.ui.Button):
                     ephemeral=True,
                 )
             except discord.HTTPException:
-                pass
+                pass  # Follow-up error reporting is best-effort after the main failure.
         finally:
             _CLAIM_IN_PROGRESS.discard(self.request_id)
 
