@@ -122,7 +122,9 @@ jobs:
 
       - name: Skip note
         if: steps.gate.outputs.should_merge != 'true'
-        run: echo "Dependabot PR does not meet auto-merge policy: ${{ steps.gate.outputs.reason }}"
+        env:
+          REASON: ${{ steps.gate.outputs.reason }}
+        run: echo "Dependabot PR does not meet auto-merge policy: $REASON"
 
   reconcile-open-prs:
     name: "Reconcile open Dependabot PRs"
