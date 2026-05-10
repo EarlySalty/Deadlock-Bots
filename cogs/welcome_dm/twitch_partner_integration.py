@@ -164,15 +164,11 @@ def _internal_api_config() -> tuple[str, str, float] | None:
 def _request_internal_api_json(path: str, query: dict[str, object | None]) -> dict[str, Any]:
     config = _internal_api_config()
     if config is None:
-        raise TwitchPartnerIntegrationUnavailable(
-            "Kein Twitch-Internal-API-Token ist gesetzt."
-        )
+        raise TwitchPartnerIntegrationUnavailable("Kein Twitch-Internal-API-Token ist gesetzt.")
 
     base_url, token, timeout_seconds = config
     query_clean = {
-        key: str(value)
-        for key, value in query.items()
-        if value is not None and str(value).strip()
+        key: str(value) for key, value in query.items() if value is not None and str(value).strip()
     }
     query_string = urlencode(query_clean)
     url = f"{base_url.rstrip('/')}/{path.lstrip('/')}"

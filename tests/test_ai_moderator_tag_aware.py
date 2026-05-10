@@ -195,7 +195,9 @@ class AIModeratorTagAwareTests(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch("cogs.ai_moderator.discord.Member", _FakeMember):
-            with patch.object(self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))):
+            with patch.object(
+                self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))
+            ):
                 with patch.object(self.cog, "_create_proposal_case", AsyncMock()) as create_case:
                     await self.cog.on_message(message)
 
@@ -209,7 +211,9 @@ class AIModeratorTagAwareTests(unittest.IsolatedAsyncioTestCase):
             content="maybe harassment elsewhere",
         )
         with patch("cogs.ai_moderator.discord.Member", _FakeMember):
-            with patch.object(self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))):
+            with patch.object(
+                self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))
+            ):
                 with patch.object(self.cog, "_create_proposal_case", AsyncMock()) as create_case:
                     await self.cog.on_message(other_message)
 
@@ -249,8 +253,12 @@ class AIModeratorTagAwareTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("cogs.ai_moderator.discord.Member", _FakeMember):
             with patch.object(self.cog, "_handle_ragebait_hit", AsyncMock(return_value=None)):
-                with patch.object(self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))):
-                    with patch.object(self.cog, "_create_proposal_case", AsyncMock()) as create_case:
+                with patch.object(
+                    self.cog, "_classify_message", AsyncMock(return_value=(verdict, False))
+                ):
+                    with patch.object(
+                        self.cog, "_create_proposal_case", AsyncMock()
+                    ) as create_case:
                         self.cog._now_utc = lambda: first_now  # type: ignore[method-assign]
                         await self.cog.on_message(first_message)
 

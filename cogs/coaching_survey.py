@@ -112,10 +112,10 @@ class CoachingSurveyCog(commands.Cog):
         self._survey_dispatching.add(session_id)
         try:
             coach_name = coach_member.display_name if coach_member else f"Coach {coach_id}"
-            
+
             # 1. Remove active role immediately
             await self._remove_active_role(guild, session["discord_user_id"])
-            
+
             # 2. Assign reward role for 5 days
             reward_expiry = now + (5 * 24 * 60 * 60)
             await self._assign_reward_role(guild, session["discord_user_id"])
@@ -133,7 +133,7 @@ class CoachingSurveyCog(commands.Cog):
                    WHERE id=?""",
                 (now, now, reward_expiry, now, session_id),
             )
-            
+
             # Also update the request status and mark role as removed
             db.execute(
                 "UPDATE coaching_requests SET status='completed', role_removed_at=?, updated_at=? WHERE id=?",
@@ -149,11 +149,13 @@ class CoachingSurveyCog(commands.Cog):
                 member = await guild.fetch_member(user_id)
             except Exception:
                 return
-        
+
         role = guild.get_role(settings.coaching_reward_role_id)
         if role and role not in member.roles:
             try:
-                await member.add_roles(role, reason="Coaching abgeschlossen - Feedback-Berechtigung")
+                await member.add_roles(
+                    role, reason="Coaching abgeschlossen - Feedback-Berechtigung"
+                )
                 log.info("Assigned reward role to user %s", user_id)
             except Exception as e:
                 log.error("Could not assign reward role to %s: %s", user_id, e)
@@ -165,7 +167,7 @@ class CoachingSurveyCog(commands.Cog):
                 member = await guild.fetch_member(user_id)
             except Exception:
                 return
-        
+
         coaching_role = guild.get_role(settings.coaching_active_role_id)
         if coaching_role and coaching_role in member.roles:
             try:
@@ -189,7 +191,7 @@ class CoachingSurveyCog(commands.Cog):
 
         try:
             feedback_channel_url = f"https://discord.com/channels/{settings.guild_id}/{settings.coaching_feedback_channel_id}"
-            
+
             embed = discord.Embed(
                 title="🎮 Coaching abgeschlossen!",
                 description=f"Deine Coaching-Session mit **{coach_name}** ist beendet. Wir hoffen, es hat dir geholfen!",
@@ -252,7 +254,8 @@ class CoachingSurveyCog(commands.Cog):
             await interaction.response.send_message("❌ Konnte DM nicht senden.", ephemeral=True)
 
     @app_commands.command(
-        name="coaching-session-beenden", description="Session beenden und Reward-Rolle vergeben (Admin)"
+        name="coaching-session-beenden",
+        description="Session beenden und Reward-Rolle vergeben (Admin)",
     )
     @app_commands.describe(session_id="Session ID")
     async def end_session(self, interaction: discord.Interaction, session_id: str):
@@ -276,7 +279,7 @@ class CoachingSurveyCog(commands.Cog):
 
         now = int(time.time())
         reward_expiry = now + (5 * 24 * 60 * 60)
-        
+
         # Get coach info
         coach_id = session["coach_id"]
         coach_member = interaction.guild.get_member(int(coach_id)) if coach_id else None
@@ -284,7 +287,7 @@ class CoachingSurveyCog(commands.Cog):
 
         # 1. Remove active role
         await self._remove_active_role(interaction.guild, session["discord_user_id"])
-        
+
         # 2. Assign reward role
         await self._assign_reward_role(interaction.guild, session["discord_user_id"])
 
@@ -298,7 +301,7 @@ class CoachingSurveyCog(commands.Cog):
                WHERE id=?""",
             (now, now, reward_expiry, session_id),
         )
-        
+
         # Update request
         db.execute(
             "UPDATE coaching_requests SET status='completed', role_removed_at=?, updated_at=? WHERE id=?",
@@ -311,7 +314,8 @@ class CoachingSurveyCog(commands.Cog):
             )
         else:
             await interaction.response.send_message(
-                "⚠️ Session beendet, aber DM konnte nicht gesendet werden. (Rollen wurden trotzdem aktualisiert)", ephemeral=True
+                "⚠️ Session beendet, aber DM konnte nicht gesendet werden. (Rollen wurden trotzdem aktualisiert)",
+                ephemeral=True,
             )
 
 

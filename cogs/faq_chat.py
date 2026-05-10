@@ -577,7 +577,11 @@ class FAQChat(commands.Cog):
         # Nur echte Ticket-Channels (Name beginnt mit "ticket-")
         if not channel.name.startswith("ticket-"):
             return
-        log.info("FAQ: neues Ticket erkannt: #%s (%s) – warte auf erste User-Nachricht", channel.name, channel.id)
+        log.info(
+            "FAQ: neues Ticket erkannt: #%s (%s) – warte auf erste User-Nachricht",
+            channel.name,
+            channel.id,
+        )
         self._ticket_pending.add(channel.id)
         # Timeout: nach 10 Minuten aus pending entfernen falls kein User schreibt
         asyncio.ensure_future(self._ticket_pending_timeout(channel.id))
@@ -599,7 +603,9 @@ class FAQChat(commands.Cog):
         if not problem:
             return
 
-        log.info("FAQ auto-help: Ticket #%s – analysiere '%s...'", message.channel.name, problem[:60])
+        log.info(
+            "FAQ auto-help: Ticket #%s – analysiere '%s...'", message.channel.name, problem[:60]
+        )
 
         async with message.channel.typing():
             answer = await self._ticket_auto_answer(problem)
@@ -620,10 +626,7 @@ class FAQChat(commands.Cog):
         if not ai:
             return None
 
-        full_prompt = (
-            f"Dokumentation:\n{DOCS_CONTEXT}\n\n"
-            f"Ticket-Inhalt:\n{problem.strip()}"
-        )
+        full_prompt = f"Dokumentation:\n{DOCS_CONTEXT}\n\nTicket-Inhalt:\n{problem.strip()}"
 
         try:
             answer_text, _ = await ai.generate_text(

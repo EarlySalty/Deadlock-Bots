@@ -418,8 +418,10 @@ class OnboardingTagStepView(discord.ui.View):
             return
 
         embed = _build_embed(next_index, interaction.user)
-        view = DoneView(self.user_id) if next_index >= len(STEPS) - 1 else NextStepView(
-            self.cog, next_index, self.user_id
+        view = (
+            DoneView(self.user_id)
+            if next_index >= len(STEPS) - 1
+            else NextStepView(self.cog, next_index, self.user_id)
         )
         await interaction.response.send_message(embed=embed, view=view)
         self.stop()
@@ -433,9 +435,7 @@ class OnboardingToneStepView(OnboardingTagStepView):
         await self._store_tag_and_continue(interaction, key="tone", value="banter_ok")
 
     @discord.ui.button(label="Ragebaiter-Free", style=discord.ButtonStyle.secondary, row=0)
-    async def ragebaiter_free(
-        self, interaction: discord.Interaction, button: discord.ui.Button
-    ):
+    async def ragebaiter_free(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._store_tag_and_continue(interaction, key="tone", value="ragebaiter_free")
 
     @discord.ui.button(label="Überspringen", style=discord.ButtonStyle.secondary, row=1)

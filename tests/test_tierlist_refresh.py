@@ -117,11 +117,7 @@ class TierlistRefreshTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(int(snapshot_hero_count["c"]), 12)
 
         payload = server.build_tierlist_payload("all")
-        visible_heroes = [
-            hero
-            for tier in payload["tiers"]
-            for hero in tier["heroes"]
-        ]
+        visible_heroes = [hero for tier in payload["tiers"] for hero in tier["heroes"]]
         self.assertEqual([hero["hero_id"] for hero in visible_heroes], [1])
         self.assertEqual(visible_heroes[0]["tier"], "S+")
         self.assertEqual(visible_heroes[0]["wr"], 54.5)

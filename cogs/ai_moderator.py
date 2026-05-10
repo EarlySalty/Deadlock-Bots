@@ -395,7 +395,9 @@ class AIModeratorCog(commands.Cog):
                     message_id=case.mod_review_message_id,
                 )
             except Exception as exc:
-                log.debug("Konnte Proposal-View fuer Case %s nicht registrieren: %s", case.case_id, exc)
+                log.debug(
+                    "Konnte Proposal-View fuer Case %s nicht registrieren: %s", case.case_id, exc
+                )
 
         if not self.cleanup_ragebait_hits.is_running():
             self.cleanup_ragebait_hits.start()
@@ -647,7 +649,9 @@ class AIModeratorCog(commands.Cog):
                 raw_json=raw_json,
             )
 
-        payload = self._build_prompt_payload(message, context_lines, len(image_attachments), include_full_context)
+        payload = self._build_prompt_payload(
+            message, context_lines, len(image_attachments), include_full_context
+        )
         prompt = json.dumps(payload, ensure_ascii=False)
         image_urls = [attachment.url for attachment in image_attachments]
 
@@ -820,7 +824,9 @@ class AIModeratorCog(commands.Cog):
                 expires_at=expires_at,
             )
         except Exception as exc:
-            log.warning("Konnte persistent_ragebait Tag fuer User %s nicht setzen: %s", user_id, exc)
+            log.warning(
+                "Konnte persistent_ragebait Tag fuer User %s nicht setzen: %s", user_id, exc
+            )
 
     async def _maybe_handle_ragebaiter_free_warning(
         self,
@@ -839,9 +845,7 @@ class AIModeratorCog(commands.Cog):
         channel_id = int(message.channel.id)
         now = self._now_utc()
         if self._has_recent_ragebaiter_free_warning(user_id, channel_id, now=now):
-            repeated_reason = (
-                f"{verdict.reason}\nHinweis fuer Ragebaiter-Free-Channel bereits innerhalb von 30 Minuten erfolgt."
-            )
+            repeated_reason = f"{verdict.reason}\nHinweis fuer Ragebaiter-Free-Channel bereits innerhalb von 30 Minuten erfolgt."
             proposal_verdict = AIVerdict(
                 verdict="propose",
                 category=verdict.category,
@@ -942,7 +946,9 @@ class AIModeratorCog(commands.Cog):
         escalated_with_context: bool,
         action: str,
     ) -> None:
-        case = self._make_case(message, verdict, escalated_with_context=escalated_with_context, action=action)
+        case = self._make_case(
+            message, verdict, escalated_with_context=escalated_with_context, action=action
+        )
         await asyncio.to_thread(self._insert_case_sync, case)
 
         review_message_id: int | None = None
@@ -962,7 +968,9 @@ class AIModeratorCog(commands.Cog):
                         exc,
                     )
             except discord.HTTPException as exc:
-                log.warning("Konnte Moderationsvorschlag fuer Case %s nicht posten: %s", case.case_id, exc)
+                log.warning(
+                    "Konnte Moderationsvorschlag fuer Case %s nicht posten: %s", case.case_id, exc
+                )
 
         log_message_id = await self._post_action_log(case, action=action)
         await asyncio.to_thread(
@@ -1091,7 +1099,9 @@ class AIModeratorCog(commands.Cog):
             value=_safe_message_text(case.original_content, limit=DISCORD_FIELD_LIMIT),
             inline=False,
         )
-        embed.add_field(name="Status", value=_truncate(status_text, DISCORD_FIELD_LIMIT), inline=False)
+        embed.add_field(
+            name="Status", value=_truncate(status_text, DISCORD_FIELD_LIMIT), inline=False
+        )
         embed.add_field(name="Case-ID", value=case.case_id, inline=False)
         self._apply_attachment_rendering(embed, case.attachments)
         return embed
@@ -1150,7 +1160,9 @@ class AIModeratorCog(commands.Cog):
                 inline=False,
             )
         if detail:
-            embed.add_field(name="Detail", value=_truncate(detail, DISCORD_FIELD_LIMIT), inline=False)
+            embed.add_field(
+                name="Detail", value=_truncate(detail, DISCORD_FIELD_LIMIT), inline=False
+            )
         self._apply_attachment_rendering(embed, case.attachments)
         return embed
 

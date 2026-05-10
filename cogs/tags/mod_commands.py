@@ -33,7 +33,9 @@ class ModTagCommands(commands.GroupCog, group_name="mod-tag"):
         if permissions and bool(getattr(permissions, "manage_messages", False)):
             return True
         role_ids = {
-            int(role.id) for role in getattr(interaction.user, "roles", []) if getattr(role, "id", None)
+            int(role.id)
+            for role in getattr(interaction.user, "roles", [])
+            if getattr(role, "id", None)
         }
         return MOD_ROLE_ID in role_ids
 
@@ -116,9 +118,7 @@ class ModTagCommands(commands.GroupCog, group_name="mod-tag"):
         reason="Optionaler Grund",
         expires_in_days="Ablauf in Tagen",
     )
-    @app_commands.choices(
-        tag=[app_commands.Choice(name="Ragebaiter", value="ragebaiter")]
-    )
+    @app_commands.choices(tag=[app_commands.Choice(name="Ragebaiter", value="ragebaiter")])
     async def set_tag(
         self,
         interaction: discord.Interaction,
@@ -161,9 +161,7 @@ class ModTagCommands(commands.GroupCog, group_name="mod-tag"):
         user="Betroffener User",
         tag="Zu entfernendes Mod-Tag",
     )
-    @app_commands.choices(
-        tag=[app_commands.Choice(name="Ragebaiter", value="ragebaiter")]
-    )
+    @app_commands.choices(tag=[app_commands.Choice(name="Ragebaiter", value="ragebaiter")])
     async def remove_tag(
         self,
         interaction: discord.Interaction,
