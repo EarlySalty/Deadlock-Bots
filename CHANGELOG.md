@@ -1,3 +1,10 @@
+## #22 — KI-Moderationsfilter entschärft: weniger False Positives
+
+- Schwellenwert für Moderationsvorschläge von 55% auf 78% Konfidenz angehoben
+- Die KI holt jetzt nur noch 12 statt 25 Nachrichten Kontext — verhindert, dass Kontext-Rauschen aus dem Gaming-Channel die Bewertung verfälscht
+- System-Prompt präzisiert: Gaming-Klischees (Nationalitäten), kurze Ein-Wort-Antworten und einmalige Beleidigungen werden nicht mehr gemeldet
+- Wichtig: Wer schlechtes Verhalten meldet oder kommentiert, wird nicht mehr selbst geflaggt
+
 ## #21 — Bild-Scam-Erkennung: KI analysiert Screenshots in mehreren Channels
 
 - Accounts die nur Bilder senden (z.B. gefälschte X-Posts mit Investitions-Gewinnen) werden jetzt erkannt

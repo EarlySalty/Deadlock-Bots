@@ -28,9 +28,9 @@ AI_MODERATOR_CONFIG = {
     "RAGEBAIT_WINDOW_MINUTES": 120,
     "RAGEBAIT_ESCALATE_THRESHOLD": 4,
     "AUTO_DELETE_CONFIDENCE": 0.90,
-    "PROPOSE_CONFIDENCE": 0.55,
-    "CONTEXT_ESCALATE_BETWEEN": (0.35, 0.70),
-    "CONTEXT_BACKFILL_MESSAGES": 25,
+    "PROPOSE_CONFIDENCE": 0.78,
+    "CONTEXT_ESCALATE_BETWEEN": (0.55, 0.78),
+    "CONTEXT_BACKFILL_MESSAGES": 12,
     "AUTO_DELETE_CATEGORIES": ["nsfw_explicit", "csam", "raping", "epstein_child"],
     "IGNORE_BOTS": True,
     "PER_USER_COOLDOWN_SECONDS": 2,
@@ -38,23 +38,30 @@ AI_MODERATOR_CONFIG = {
     "MAX_PROMPT_CHARS": 4000,
 }
 
-MODERATION_SYSTEM_PROMPT = """Du bist ein Discord-Moderations-Klassifikator fuer einen Gaming-Server zu Deadlock.
+MODERATION_SYSTEM_PROMPT = """Du bist ein Discord-Moderations-Klassifikator fuer einen kompetitiven Gaming-Server zu Deadlock.
 Deine Aufgabe: Bewerte die letzte Nachricht eines Users. Antworte ausschliesslich mit gueltigem JSON und ohne weiteren Text.
 
-Regeln:
-- NSFW explizit, Pornografie, sexuelle Gewalt, Raping, Child-Content, Minderjaehrigen-Sexualisierung oder Epstein-bezogene Child-Anspielungen:
-  verdict="delete", category="nsfw_explicit"|"csam"|"raping"|"epstein_child", confidence hoch.
-- Racism, Hate Speech, Slurs, gezieltes Mobbing oder wiederholte persoenliche Angriffe:
-  verdict="propose", category="racism"|"harassment"|"hate_speech".
-- Ragebait, Gaming-Flame, Trash Talk, "noob", "trash", "deine Mama" im Spass oder provokante Spiel-Diskussion:
-  verdict="ok", category="ragebait_ok" oder "game_related_ok".
-  WICHTIG: Ragebait ist grundsaetzlich erlaubt und soll NICHT eskaliert werden. Der Bot zaehlt das separat.
-  Nur gezieltes oder wiederholtes Mobbing gegen konkrete Personen ist harassment.
-- Normale Spielkritik, Balance-Beschwerden, Patchnotes, Taktik, Matchmaking, Diskussion ueber Deadlock:
-  verdict="ok", category="game_related_ok".
-- Wenn du ohne mehr Kontext unsicher bist:
-  verdict="needs_context", needs_context=true.
-- Bei Bildern/GIFs: Wenn unsicher oder nicht klar erkennbar, needs_context=true.
+WICHTIG — Standardmaessig ist der Ton auf diesem Server rau und direkt. Sei NICHT ueberempfindlich.
+
+Klare Lösch-Faelle (verdict="delete", hohe confidence):
+- NSFW explizit, Pornografie, sexuelle Gewalt, Raping, CSAM, Minderjaehrigen-Sexualisierung, Epstein-Anspielungen.
+
+Moderationsvorschlag nur bei echtem Verstoss (verdict="propose", confidence >= 0.80):
+- Gezielte rassistische Beleidigungen oder Slurs mit klarer Diskriminierungsabsicht.
+- Nackte Hassrede gegen eine Gruppe (ethnisch, religioese etc.) ohne jeglichen Gaming-Kontext.
+- Anhaltende persoenliche Angriffe gegen einen konkreten User ueber mehrere Nachrichten.
+
+Immer OK — NICHT flaggen (verdict="ok"):
+- Gaming-typische Laender-Klischees oder Nationalitaets-Kommentare im Spiel-Kontext ("Russe", "typisch Brasilianer", etc.) — das ist Spielkultur, kein Hate Speech.
+- Einmalige kurze Beleidigungen wie "halts Maul", "noob", "trash", "fick dich" im Spielfluss.
+- Einzelne kurze Nachrichten oder Ein-Wort-Antworten (z.B. "lol", "ok", "nein") — fast nie Harassment.
+- Jemand der schlechtes Verhalten MELDET oder KOMMENTIERT ("da war ein Hakenkreuz im GIF", "der hat gerade X gesagt") — das ist Reporting, kein Verstoss.
+- Ragebait, Flame, Trash Talk generell — der Bot zaehlt das separat, du klassifizierst es als "ragebait_ok".
+- Spielkritik, Balance-Beschwerden, Patchnotes, Matchmaking-Frust.
+
+Zweifelsfaelle:
+- Wenn der Kontext unklar ist oder du dir nicht sicher bist: verdict="needs_context".
+- Lieber zu wenig flaggen als zu viel — Mods koennen selbst eingreifen.
 
 Erlaubte Kategorien:
 nsfw_explicit, csam, raping, epstein_child, racism, harassment, hate_speech, ragebait_ok, game_related_ok, other
