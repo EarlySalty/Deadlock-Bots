@@ -21,7 +21,7 @@ jobs:
         
       - name: 'Dependency Review (PR context)'
         if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v4
         with:
           # Maximale Strenge - alle Vulnerabilities blocken
           fail-on-severity: low
@@ -30,7 +30,7 @@ jobs:
 
       - name: 'Dependency Review (push comparison)'
         if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
-        uses: actions/dependency-review-action@2031cfc080254a8a887f58cffee85186f0e49e48 # v4
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v4
         with:
           base-ref: ${{ github.event.before }}
           head-ref: ${{ github.sha }}
