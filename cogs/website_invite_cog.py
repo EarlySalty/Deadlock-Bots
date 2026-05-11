@@ -1,19 +1,19 @@
-"""WebsiteInviteCog — verwaltet einen Permanent-Invite für die Website-CTAs.
+"""WebsiteInviteCog — verwaltet Permanent-Invites für Website-CTAs.
 
 Was er tut:
-- Beim Cog-Load: prüft ob ein gespeicherter Website-Invite-Code noch live ist.
-  Falls nicht (oder nie erstellt): erstellt einen neuen, permanenten Invite
-  (max_age=0, max_uses=0) im konfigurierten Welcome-Channel und persistiert
-  den Code in central_db (key-value).
-- /website-invite (Owner): Zeigt aktuellen Invite-Status (Code, URL, uses).
-- /website-invite-recreate (Owner): Erstellt neuen Code und löscht den alten.
+- Beim Cog-Load: prüft ob pro Website-Subseite ein gespeicherter Invite-Code
+  noch live ist. Falls nicht (oder nie erstellt): erstellt einen neuen,
+  permanenten Invite (max_age=0, max_uses=0) im konfigurierten Welcome-Channel
+  und persistiert den Code in central_db (key-value).
+- /website-invite (Owner): Zeigt aktuellen Invite-Status (Code, URL, uses) je Subseite.
+- /website-invite-recreate (Owner): Erstellt einen neuen Code für genau eine Subseite.
 - /join-quellen (Owner): Aggregiert member_events der letzten N Tage und
   zeigt pro Quelle (Website / Vanity / Personal-Invite / etc.) wie viele
   Joins reinkamen.
 
 Tracking-Logik basiert auf dem bereits existierenden user_activity_analyzer:
 der speichert pro Member-Join `metadata.invite_code`. Wir labeln hier
-zur Query-Zeit den Website-Code als "Website".
+zur Query-Zeit passende Website-Codes als "Website: <Subseite>".
 
 Env-Override: WEBSITE_INVITE_CHANNEL_ID (default: RULES_CHANNEL_ID).
 """
@@ -44,6 +44,14 @@ KV_NAMESPACE = "website_invites"
 KV_KEY_MAIN = "main"  # Speichert JSON: {"code": "...", "channel_id": ..., "created_at": "..."}
 
 WEBSITE_SOURCE_LABEL = "Website"
+WEBSITE_SUBPAGES: list[tuple[str, str]] = [
+    ("landing", "Landing"),
+    ("streamer", "Streamer"),
+    ("mitspieler", "Mitspieler"),
+    ("coaching", "Coaching"),
+    ("helden", "Helden"),
+    ("guides", "Guides"),
+]
 
 
 def _welcome_channel_id() -> int:
@@ -63,8 +71,15 @@ def _is_owner_or_admin(interaction: discord.Interaction) -> bool:
     return bool(perms and perms.administrator)
 
 
-def _load_stored_invite() -> dict | None:
-    raw = central_db.get_kv(KV_NAMESPACE, KV_KEY_MAIN)
+def _subpage_label(slug: str) -> str:
+    for subpage_slug, label in WEBSITE_SUBPAGES:
+        if subpage_slug == slug:
+            return label
+    return slug
+
+
+def _load_raw_invite(key: str) -> dict | None:
+    raw = central_db.get_kv(KV_NAMESPACE, key)
     if not raw:
         return None
     try:
@@ -79,13 +94,29 @@ def _load_stored_invite() -> dict | None:
     return data
 
 
-def _save_stored_invite(code: str, channel_id: int) -> None:
+def _load_invite_for_subpage(slug: str) -> dict | None:
+    stored = _load_raw_invite(slug)
+    if stored is not None:
+        return stored
+    if slug == "landing":
+        return _load_raw_invite(KV_KEY_MAIN)
+    return None
+
+
+def _save_invite_for_subpage(slug: str, code: str, channel_id: int) -> None:
     payload = {
         "code": code,
         "channel_id": channel_id,
         "created_at": datetime.utcnow().isoformat(timespec="seconds"),
     }
-    central_db.set_kv(KV_NAMESPACE, KV_KEY_MAIN, json.dumps(payload, separators=(",", ":")))
+    payload_json = json.dumps(payload, separators=(",", ":"))
+    central_db.set_kv(KV_NAMESPACE, slug, payload_json)
+    if slug == "landing":
+        central_db.set_kv(KV_NAMESPACE, KV_KEY_MAIN, payload_json)
+
+
+def _load_all_subpage_invites() -> list[tuple[str, str, dict | None]]:
+    return [(slug, label, _load_invite_for_subpage(slug)) for slug, label in WEBSITE_SUBPAGES]
 
 
 async def _create_permanent_invite(channel: discord.abc.GuildChannel) -> discord.Invite:
@@ -99,7 +130,7 @@ async def _create_permanent_invite(channel: discord.abc.GuildChannel) -> discord
 
 
 class WebsiteInviteCog(commands.Cog):
-    """Verwaltet den dedizierten Website-Invite und liefert Join-Quellen-Stats."""
+    """Verwaltet dedizierte Website-Invites und liefert Join-Quellen-Stats."""
 
     def __init__(self, bot: commands.Bot) -> None:
         self.bot = bot
@@ -159,48 +190,63 @@ class WebsiteInviteCog(commands.Cog):
                 return inv
         return None
 
-    async def _ensure_invite(self) -> dict | None:
+    async def _ensure_invite(self) -> dict[str, dict[str, object]] | None:
         guild = await self._resolve_target_guild()
         if guild is None:
             log.warning("WebsiteInviteCog: keine Guild verfügbar — skip")
             return None
 
-        stored = _load_stored_invite()
-        if stored:
-            existing = await self._verify_invite_alive(guild, stored["code"])
-            if existing is not None:
-                log.info(
-                    "WebsiteInviteCog: existierender Invite ok — code=%s uses=%s",
-                    stored["code"],
-                    getattr(existing, "uses", 0),
-                )
-                return stored
-            log.info(
-                "WebsiteInviteCog: gespeicherter Code %s nicht mehr vorhanden — erstelle neu",
-                stored["code"],
-            )
-
         channel = await self._resolve_invite_channel(guild)
         if channel is None:
             return None
 
-        try:
-            invite = await _create_permanent_invite(channel)
-        except discord.Forbidden:
-            log.warning("WebsiteInviteCog: Bot darf in Channel %s keinen Invite erstellen", channel.id)
-            return None
-        except discord.HTTPException as exc:
-            log.warning("WebsiteInviteCog: create_invite fehlgeschlagen: %s", exc)
-            return None
+        resolved: dict[str, dict[str, object]] = {}
+        for slug, label in WEBSITE_SUBPAGES:
+            stored = _load_invite_for_subpage(slug)
+            if stored:
+                existing = await self._verify_invite_alive(guild, stored["code"])
+                if existing is not None:
+                    if slug == "landing" and central_db.get_kv(KV_NAMESPACE, "landing") is None:
+                        _save_invite_for_subpage(slug, stored["code"], int(stored["channel_id"]))
+                    log.info(
+                        "WebsiteInviteCog: existierender Invite ok — subpage=%s code=%s uses=%s",
+                        slug,
+                        stored["code"],
+                        getattr(existing, "uses", 0),
+                    )
+                    resolved[slug] = stored
+                    continue
+                log.info(
+                    "WebsiteInviteCog: gespeicherter Code %s fuer %s nicht mehr vorhanden — erstelle neu",
+                    stored["code"],
+                    slug,
+                )
 
-        code = str(invite.code)
-        _save_stored_invite(code, channel.id)
-        log.info(
-            "WebsiteInviteCog: neuer Permanent-Invite erstellt — code=%s channel=%s",
-            code,
-            channel.id,
-        )
-        return {"code": code, "channel_id": channel.id}
+            try:
+                invite = await _create_permanent_invite(channel)
+            except discord.Forbidden:
+                log.warning(
+                    "WebsiteInviteCog: Bot darf in Channel %s keinen Invite erstellen",
+                    channel.id,
+                )
+                return None
+            except discord.HTTPException as exc:
+                log.warning("WebsiteInviteCog: create_invite fehlgeschlagen: %s", exc)
+                return None
+
+            code = str(invite.code)
+            _save_invite_for_subpage(slug, code, channel.id)
+            stored = _load_invite_for_subpage(slug) or {"code": code, "channel_id": channel.id}
+            resolved[slug] = stored
+            log.info(
+                "WebsiteInviteCog: neuer Permanent-Invite erstellt — subpage=%s label=%s code=%s channel=%s",
+                slug,
+                label,
+                code,
+                channel.id,
+            )
+
+        return resolved
 
     # ── Slash-Commands ────────────────────────────────────────────────────
 
@@ -215,44 +261,74 @@ class WebsiteInviteCog(commands.Cog):
             return
 
         await interaction.response.defer(ephemeral=True)
-        stored = _load_stored_invite()
-        if not stored:
-            stored = await self._ensure_invite()
-        if not stored:
+        stored_map = {slug: stored for slug, _, stored in _load_all_subpage_invites() if stored}
+        if len(stored_map) < len(WEBSITE_SUBPAGES):
+            ensured = await self._ensure_invite()
+            if ensured:
+                stored_map = ensured
+        if not stored_map:
             await interaction.followup.send(
                 "⚠️ Kein Website-Invite verfügbar. Prüfe Logs und Bot-Permissions (MANAGE_GUILD).",
                 ephemeral=True,
             )
             return
 
-        code = stored["code"]
         guild = interaction.guild
-        invite_url = f"https://discord.gg/{code}"
-        uses_text = "—"
-        if guild is not None:
-            existing = await self._verify_invite_alive(guild, code)
-            if existing is not None:
-                uses_text = str(getattr(existing, "uses", "—") or 0)
-
-        channel_id = stored.get("channel_id")
-        channel_mention = f"<#{channel_id}>" if channel_id else "—"
         embed = discord.Embed(
-            title="Website-Invite",
-            description=f"**URL:** {invite_url}\n**Code:** `{code}`",
+            title="Website-Invites",
+            description="Aktuelle Invite-Codes pro Website-Subseite",
             color=0x40C4FF,
         )
-        embed.add_field(name="Channel", value=channel_mention, inline=True)
-        embed.add_field(name="Bisherige Joins", value=uses_text, inline=True)
-        if stored.get("created_at"):
-            embed.set_footer(text=f"Erstellt: {stored['created_at']}")
+        footer_parts: list[str] = []
+        for slug, label in WEBSITE_SUBPAGES:
+            stored = stored_map.get(slug)
+            if not stored:
+                embed.add_field(name=label, value="⚠️ Nicht konfiguriert", inline=False)
+                continue
+
+            code = str(stored["code"])
+            invite_url = f"https://discord.gg/{code}"
+            uses_text = "—"
+            if guild is not None:
+                existing = await self._verify_invite_alive(guild, code)
+                if existing is not None:
+                    uses_text = str(getattr(existing, "uses", "—") or 0)
+
+            channel_id = stored.get("channel_id")
+            channel_mention = f"<#{channel_id}>" if channel_id else "—"
+            embed.add_field(
+                name=label,
+                value=(
+                    f"**URL:** {invite_url}\n"
+                    f"**Code:** `{code}`\n"
+                    f"**Channel:** {channel_mention}\n"
+                    f"**Joins:** {uses_text}"
+                ),
+                inline=False,
+            )
+            if stored.get("created_at"):
+                footer_parts.append(f"{label}: {stored['created_at']}")
+
+        if footer_parts:
+            embed.set_footer(text=" | ".join(footer_parts[:3]))
         await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="website-invite-recreate",
-        description="Erstellt einen neuen Website-Invite-Code (alter wird gelöscht).",
+        description="Erstellt einen neuen Website-Invite-Code fuer eine Subseite.",
+    )
+    @app_commands.describe(subseite="Welche Website-Subseite soll einen neuen Code bekommen?")
+    @app_commands.choices(
+        subseite=[
+            app_commands.Choice(name=label, value=slug) for slug, label in WEBSITE_SUBPAGES
+        ]
     )
     @app_commands.guild_only()
-    async def cmd_recreate(self, interaction: discord.Interaction) -> None:
+    async def cmd_recreate(
+        self,
+        interaction: discord.Interaction,
+        subseite: app_commands.Choice[str],
+    ) -> None:
         if not _is_owner_or_admin(interaction):
             await interaction.response.send_message("❌ Nur für Server-Owner/Admins.", ephemeral=True)
             return
@@ -263,8 +339,10 @@ class WebsiteInviteCog(commands.Cog):
             await interaction.followup.send("❌ Nur im Server nutzbar.", ephemeral=True)
             return
 
-        # Alten Invite löschen wenn vorhanden
-        stored = _load_stored_invite()
+        slug = subseite.value
+        label = _subpage_label(slug)
+
+        stored = _load_invite_for_subpage(slug)
         if stored:
             old = await self._verify_invite_alive(guild, stored["code"])
             if old is not None:
@@ -288,9 +366,9 @@ class WebsiteInviteCog(commands.Cog):
             return
 
         code = str(invite.code)
-        _save_stored_invite(code, channel.id)
+        _save_invite_for_subpage(slug, code, channel.id)
         await interaction.followup.send(
-            f"✅ Neuer Website-Invite: https://discord.gg/{code}\nVergiss nicht, ihn ins Frontend einzutragen.",
+            f"✅ Neuer Website-Invite fuer {label}: https://discord.gg/{code}",
             ephemeral=True,
         )
 
@@ -323,8 +401,16 @@ class WebsiteInviteCog(commands.Cog):
             (since_iso, guild_id, guild_id),
         )
 
-        stored = _load_stored_invite()
-        website_code = stored["code"] if stored else None
+        website_codes: dict[str, str] = {}
+        website_details: list[str] = []
+        for slug, label, stored in _load_all_subpage_invites():
+            if not stored:
+                continue
+            code = str(stored.get("code") or "").strip()
+            if not code:
+                continue
+            website_codes[code.lower()] = label
+            website_details.append(f"`{code}` → {label}")
 
         # Aggregation
         buckets: dict[str, int] = {}
@@ -341,8 +427,9 @@ class WebsiteInviteCog(commands.Cog):
             kind = str(meta.get("join_source_kind") or "").strip()
             label_existing = str(meta.get("join_source_label") or "").strip()
 
-            if website_code and invite_code == website_code:
-                key = WEBSITE_SOURCE_LABEL
+            website_label = website_codes.get(invite_code.lower()) if invite_code else None
+            if website_label:
+                key = f"{WEBSITE_SOURCE_LABEL}: {website_label}"
             elif kind == "vanity":
                 key = "Vanity-Link (Discord-Listings)"
             elif kind == "twitch_streamer":
@@ -385,15 +472,15 @@ class WebsiteInviteCog(commands.Cog):
             color=0x40C4FF,
         )
         embed.set_footer(text=f"Total: {total} Joins")
-        if website_code:
+        if website_details:
             embed.add_field(
-                name="Website-Code",
-                value=f"`{website_code}` → discord.gg/{website_code}",
+                name="Website-Codes",
+                value="\n".join(website_details),
                 inline=False,
             )
         else:
             embed.add_field(
-                name="Website-Code",
+                name="Website-Codes",
                 value="⚠️ Noch nicht konfiguriert — `/website-invite` aufrufen.",
                 inline=False,
             )

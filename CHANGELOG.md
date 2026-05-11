@@ -1,3 +1,11 @@
+## #29 — Ehrliche Member-Herkunft im Admin-Dashboard
+
+- Kreis-Diagramm "Wo kommen unsere Member her?" zeigt jetzt einen eigenen Website-Bereich statt Website-Joins in "Persönlich" zu verstecken
+- Historische Joins ohne klare Quelle werden nicht mehr als "Twitch" geschätzt, sondern ehrlich als "Unbekannt" markiert
+- Pro Website-Subseite gibt es jetzt einen eigenen Discord-Invite-Code (Landing, Streamer, Mitspieler, Coaching, Helden, Guides)
+- Hover über Twitch- oder Website-Stück zeigt die Aufschlüsselung pro Streamer bzw. Subseite
+- `/website-invite-recreate` rotiert jetzt gezielt nur eine ausgewählte Subseite
+
 ## #28 — Alle GitHub Code-Scanning-Alerts behoben
 
 - Sicherheitslücke in der Node.js-Abhängigkeit protobufjs durch Paket-Override geschlossen

@@ -1,5 +1,25 @@
 # AI-Moderator Cog (2026-04-24)
 
+# Member-Source-Tracking ehrlich + Website-Bucket (2026-05-11)
+
+## Ziel
+Backfill von historischen Joins ehrlich auf `unknown` halten, Website-Invites pro Subseite aufteilen und das Admin-Dashboard um einen eigenen Website-Bucket mit Subseiten-Breakdown erweitern.
+
+## Fortschritt
+- `cogs/user_activity_analyzer.py`: Backfill schreibt bei historischen Twitch-Treffern nur noch Audit-Hinweise (`twitch_streamer_login`, `matched_twitch_hint`), aber bucketed rueckwirkende Joins konsequent als `unknown/backfilled`.
+- `cogs/website_invite_cog.py`: Multi-Subpage-Invite-Verwaltung fuer `landing`, `streamer`, `mitspieler`, `coaching`, `helden`, `guides`; `main` bleibt Alias fuer `landing`. `/website-invite` zeigt jetzt alle Codes, `/website-invite-recreate` rotiert gezielt pro Subseite, `/join-quellen` erkennt alle Website-Codes mit Label `Website: <Subseite>`.
+- `service/db.py`: neue Hilfsfunktion `list_kv(ns)` fuer Namespace-Enumerierung.
+- `service/dashboard.py`: Website-Codes werden aus `website_invites` geladen, alte Events bei Website-Code nachtraeglich von `personal` auf `website` rebucketed und als `website_breakdown` aggregiert.
+- `service/static/dashboard.html`: Doughnut-Series um `Website` erweitert, Tooltip-Subbreakdown fuer Website eingebaut und eigene Website-Liste im Detailbereich ergaenzt.
+
+## Verifikation
+- `python -m py_compile ...` war nicht moeglich, weil in der Umgebung kein `python`-Binary existiert.
+- Fallback erfolgreich: `python3 -m py_compile cogs/user_activity_analyzer.py cogs/website_invite_cog.py service/dashboard.py service/db.py`
+- Keine passenden Tests unter `tests/` fuer `user_activity_analyzer`, `website_invite` oder `dashboard` gefunden.
+
+## Offen
+- Kein Live-Discord-Smoke-Test und kein Dashboard-Browser-Check in diesem Worker-Pass.
+
 ## Ziel
 Neues Cog `cogs/ai_moderator.py`, das Nachrichten in Chat-Channel `1289721245281292291` via MiniMax-M2.7 (Text + Bilder) klassifiziert und je nach Konfidenz auto-moderiert oder Moderatoren per Accept/Deny-Buttons im Channel `1315684135175716978` einbindet. Alle Aktionen werden im Log-Channel `1374364800817303632` festgehalten (ohne Buttons, nur Infos + Original-Message). Ragebait wird pro User mit einer 2h-Rolling-Window-Schwelle (4 Hits) zu `persistent_ragebait` eskaliert.
 
@@ -193,3 +213,34 @@ Nur Foundation aus Phase 1 umsetzen: DB-Schema, neues `cogs/tags/`-Cog mit `TagS
 
 ## Offen
 - Kein Live-Discord-Smoke-Test in dieser Worker-Phase.
+
+---
+
+# CodeQL HTML/JS/YAML Fixes (2026-05-11)
+
+## Fortschritt
+- `service/static/activity_stats.html`: Chart.js-CDN-Script auf verifizierten `sha384`-SRI umgestellt und `renderBestTimes()` gegen DOM-XSS abgesichert, indem `rank` und `color` vor `innerHTML` escaped werden.
+- `cogs/steam/steam_presence/index.js`: ungenutzten `crypto`-Import entfernt.
+- `.github/workflows/automerge-trusted-prs.yml`: `run:`-Zeile bei der Skip-Note auf Block-Scalar umgestellt, damit der Doppelpunkt im Echo keine YAML-Syntax mehr bricht.
+
+## Verifikation
+- SRI-Hash per `curl | openssl dgst -sha384 -binary | base64` gegen jsDelivr verifiziert.
+- HTML-Tag-Check fuer `service/static/activity_stats.html` erfolgreich.
+- `node --check cogs/steam/steam_presence/index.js` erfolgreich.
+- `python3 -c "import yaml; yaml.safe_load(...)"` fuer `.github/workflows/automerge-trusted-prs.yml` erfolgreich.
+
+---
+
+# CodeQL-Fixpass Python (2026-05-11)
+
+## Ziel
+Mehrere CodeQL-Sicherheits- und Quality-Alerts in der Python-Codebase mit minimalen, chirurgischen Aenderungen beheben.
+
+## Fortschritt
+- Leere `except`-Bloecke werden mit begruendenden Kommentaren versehen.
+- Zwei `bare except`-Stellen in `cogs/faq_chat.py` werden auf `except Exception` eingegrenzt.
+- Gezielte Cleanups fuer `inner_self`, ungenutzte Variablen, Test-Imports und Log-Sanitizing umgesetzt.
+
+## Verifikation
+- `python3 -m py_compile ...` fuer alle betroffenen Python-Dateien erfolgreich.
+- `python3 -m pytest tests/ -x -q 2>&1 | tail -20` nicht ausfuehrbar: `/usr/bin/python3: No module named pytest`.

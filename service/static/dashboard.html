@@ -1414,6 +1414,10 @@
                             <ul id="member-source-public" class="member-source-list"></ul>
                         </div>
                         <div class="member-source-section">
+                            <h4>Website</h4>
+                            <ul id="member-source-website" class="member-source-list"></ul>
+                        </div>
+                        <div class="member-source-section">
                             <h4>Twitch (Joins)</h4>
                             <ul id="member-source-twitch" class="member-source-list"></ul>
                         </div>
@@ -1792,6 +1796,7 @@
     const memberSourceChartCanvas = document.getElementById('member-source-chart');
     const memberSourceSummary = document.getElementById('member-source-summary');
     const memberSourcePublic = document.getElementById('member-source-public');
+    const memberSourceWebsite = document.getElementById('member-source-website');
     const memberSourceTwitch = document.getElementById('member-source-twitch');
     const memberSourcePersonal = document.getElementById('member-source-personal');
     const memberSourceBotInvite = document.getElementById('member-source-bot-invite');
@@ -3888,6 +3893,7 @@ function renderMemberSourceAnalytics(data) {
 
     const series = [
         { key: 'public', label: 'Public', color: '#4dabf7' },
+        { key: 'website', label: 'Website', color: '#51cf66' },
         { key: 'twitch', label: 'Twitch', color: '#9775fa' },
         { key: 'personal', label: 'Persönlich', color: '#ffa94d' },
         { key: 'bot_invite', label: 'Bot Invites', color: '#ff6b6b' },
@@ -3925,6 +3931,12 @@ function renderMemberSourceAnalytics(data) {
             if (entry.key === 'twitch' && analytics.twitch_breakdown && analytics.twitch_breakdown.length > 0) {
                 const lines = analytics.twitch_breakdown.slice(0, 12).map((r) =>
                     `@${r.streamer_login || r.label}: ${Number(r.count || 0).toLocaleString('de-DE')}`
+                );
+                row.title = lines.join('\n');
+                row.style.cursor = 'help';
+            } else if (entry.key === 'website' && analytics.website_breakdown && analytics.website_breakdown.length > 0) {
+                const lines = analytics.website_breakdown.slice(0, 12).map((r) =>
+                    `${r.subpage_label || r.label}: ${Number(r.count || 0).toLocaleString('de-DE')}`
                 );
                 row.title = lines.join('\n');
                 row.style.cursor = 'help';
@@ -3967,6 +3979,12 @@ function renderMemberSourceAnalytics(data) {
                                     );
                                     return [base, ...lines];
                                 }
+                                if (ctx.label === 'Website' && analytics.website_breakdown && analytics.website_breakdown.length > 0) {
+                                    const lines = analytics.website_breakdown.slice(0, 6).map((r) =>
+                                        `  ${r.subpage_label || r.label}: ${Number(r.count || 0).toLocaleString('de-DE')}`
+                                    );
+                                    return [base, ...lines];
+                                }
                                 return base;
                             },
                         },
@@ -3996,6 +4014,18 @@ function renderMemberSourceAnalytics(data) {
             href: row.invite_url || row.url || '',
             hrefLabel: (row.invite_url || row.url) ? 'oeffnen' : undefined,
             count: row.count === null || row.count === undefined ? null : Number(row.count || 0),
+        }),
+    );
+
+    renderMemberSourceList(
+        memberSourceWebsite,
+        (analytics.website_breakdown || []).slice(0, 8),
+        'Keine Website-Daten.',
+        (row) => ({
+            label: row.subpage_label || row.label || row.subpage_slug || 'Website',
+            href: row.invite_url || '',
+            hrefLabel: row.invite_code ? `discord.gg/${row.invite_code}` : undefined,
+            count: Number(row.count || 0),
         }),
     );
 

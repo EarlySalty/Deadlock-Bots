@@ -4038,6 +4038,15 @@ class DashboardServer:
 
         twitch_invite_lookup: dict[str, str] = {}
         twitch_assigned_links: list[dict[str, Any]] = []
+        website_subpage_labels: dict[str, str] = {
+            "landing": "Landing",
+            "streamer": "Streamer",
+            "mitspieler": "Mitspieler",
+            "coaching": "Coaching",
+            "helden": "Helden",
+            "guides": "Guides",
+        }
+        website_code_lookup: dict[str, str] = {}
         try:
             twitch_rows = db.query_all(
                 """
@@ -4078,9 +4087,27 @@ class DashboardServer:
             pass
         except Exception:
             logger.debug("Failed to load twitch invite assignments", exc_info=True)
+        try:
+            for key, raw_value in db.list_kv("website_invites"):
+                slug = "landing" if key == "main" else str(key or "").strip().lower()
+                if slug not in website_subpage_labels:
+                    continue
+                try:
+                    payload = json.loads(raw_value) if raw_value else {}
+                except (TypeError, ValueError):
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                code = str(payload.get("code") or "").strip()
+                if not code:
+                    continue
+                website_code_lookup.setdefault(code.lower(), slug)
+        except Exception:
+            logger.debug("Failed to load website invite assignments", exc_info=True)
 
         bucket_counts: dict[str, int] = {
             "public": 0,
+            "website": 0,
             "twitch": 0,
             "personal": 0,
             "bot_invite": 0,
@@ -4095,6 +4122,7 @@ class DashboardServer:
             "other": {"kind": "other", "label": "Public (Sonstige)", "count": 0},
         }
         # vanity entries added dynamically, keyed by invite_code
+        website_groups: dict[str, dict[str, Any]] = {}
         twitch_groups: dict[str, dict[str, Any]] = {}
         personal_groups: dict[str, dict[str, Any]] = {}
         bot_invite_groups: dict[str, dict[str, Any]] = {}
@@ -4129,9 +4157,26 @@ class DashboardServer:
                     metadata["twitch_streamer_login"] = twitch_login
                     metadata_changed = True
 
+            website_slug = website_code_lookup.get(invite_code.lower()) if invite_code else None
             bucket = bucket_raw
+            if website_slug:
+                if bucket != "website":
+                    bucket = "website"
+                    metadata["join_source_bucket"] = bucket
+                    metadata_changed = True
+                if kind_raw != "website_cta":
+                    kind_raw = "website_cta"
+                    metadata["join_source_kind"] = kind_raw
+                    metadata_changed = True
+                website_label = f"Website: {website_subpage_labels.get(website_slug, website_slug)}"
+                if label_raw != website_label:
+                    label_raw = website_label
+                    metadata["join_source_label"] = label_raw
+                    metadata_changed = True
             if bucket not in bucket_counts:
-                if twitch_login:
+                if website_slug:
+                    bucket = "website"
+                elif twitch_login:
                     bucket = "twitch"
                 elif kind_raw in {
                     "server_discovery",
@@ -4141,6 +4186,8 @@ class DashboardServer:
                     "vanity_url",
                 }:
                     bucket = "public"
+                elif kind_raw == "bot_invite" or metadata.get("inviter_bot"):
+                    bucket = "bot_invite"
                 elif invite_code or kind_raw in {
                     "invite_link",
                     "personal",
@@ -4155,6 +4202,7 @@ class DashboardServer:
             bucket_counts[bucket] += 1
 
             public_kind: str | None = None
+            website_label: str | None = None
             personal_label: str | None = None
             if bucket == "public":
                 if kind_raw in {"server_discovery", "discovery", "public_discovery"}:
@@ -4179,9 +4227,30 @@ class DashboardServer:
                 else:
                     public_kind = "other"
                     public_groups[public_kind]["count"] += 1
+            elif bucket == "website":
+                website_slug = website_slug or "landing"
+                website_label = website_subpage_labels.get(website_slug, website_slug)
+                entry = website_groups.get(website_slug)
+                if entry is None:
+                    entry = {
+                        "subpage_slug": website_slug,
+                        "subpage_label": website_label,
+                        "label": website_label,
+                        "invite_code": invite_code or None,
+                        "invite_url": invite_url or None,
+                        "count": 0,
+                    }
+                    website_groups[website_slug] = entry
+                entry["count"] += 1
+                if invite_code and not entry.get("invite_code"):
+                    entry["invite_code"] = invite_code
+                if invite_url and not entry.get("invite_url"):
+                    entry["invite_url"] = invite_url
 
             if not kind_raw:
-                if bucket == "twitch":
+                if bucket == "website":
+                    kind_raw = "website_cta"
+                elif bucket == "twitch":
                     kind_raw = "twitch_streamer"
                 elif bucket == "personal":
                     kind_raw = "invite_link"
@@ -4290,6 +4359,8 @@ class DashboardServer:
                         source_label = "Public: Vanity-Link"
                     else:
                         source_label = "Public"
+                elif bucket == "website":
+                    source_label = f"Website: {website_label or 'Landing'}"
                 elif bucket == "twitch":
                     source_label = f"Twitch: {twitch_login}" if twitch_login else "Twitch"
                 elif bucket == "personal":
@@ -4359,6 +4430,13 @@ class DashboardServer:
         public_breakdown = [
             entry for entry in public_groups.values() if int(entry.get("count", 0)) > 0
         ]
+        website_breakdown = sorted(
+            website_groups.values(),
+            key=lambda item: (
+                -int(item.get("count", 0)),
+                str(item.get("subpage_label") or "").lower(),
+            ),
+        )
         twitch_breakdown = sorted(
             twitch_groups.values(),
             key=lambda item: (
@@ -4383,6 +4461,7 @@ class DashboardServer:
 
         known_joins = (
             bucket_counts["public"]
+            + bucket_counts["website"]
             + bucket_counts["twitch"]
             + bucket_counts["personal"]
             + bucket_counts["bot_invite"]
@@ -4402,6 +4481,7 @@ class DashboardServer:
             "bucket_counts": bucket_counts,
             "bucket_labels": {
                 "public": "Public",
+                "website": "Website",
                 "twitch": "Twitch",
                 "personal": "Persönlich",
                 "bot_invite": "Bot Invites",
@@ -4409,6 +4489,7 @@ class DashboardServer:
             },
             "public_breakdown": public_breakdown,
             "public_links": self._collect_public_vanity_links(guild_filter),
+            "website_breakdown": website_breakdown,
             "twitch_breakdown": twitch_breakdown,
             "twitch_assigned_links": twitch_assigned_links,
             "personal_breakdown": personal_breakdown,

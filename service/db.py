@@ -1629,6 +1629,11 @@ def get_kv(ns: str, k: str) -> str | None:
     return row[0] if row else None
 
 
+def list_kv(ns: str) -> list[tuple[str, str]]:
+    rows = query_all("SELECT k, v FROM kv_store WHERE ns=? ORDER BY k ASC", (ns,))
+    return [(str(row[0]), str(row[1])) for row in rows]
+
+
 def _encode_oauth_state_metadata(metadata: Any) -> str | None:
     if metadata is None:
         return None

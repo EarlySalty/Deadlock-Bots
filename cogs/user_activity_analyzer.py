@@ -906,16 +906,10 @@ class UserActivityAnalyzer(commands.Cog):
                                     matched_twitch = twitch
                                     matched_bot = bool(info.get("inviter_bot"))
 
-                        if matched_twitch:
-                            source_bucket = "twitch"
-                            source_kind = "twitch_streamer"
-                            source_label = f"Twitch: {matched_twitch} (rückwirkend)"
-                            source_confidence = "low"
-                        else:
-                            source_bucket = "unknown"
-                            source_kind = "backfilled"
-                            source_label = "Vor Tracking (rückwirkend)"
-                            source_confidence = "none"
+                        source_bucket = "unknown"
+                        source_kind = "backfilled"
+                        source_label = "Vor Tracking (rückwirkend)"
+                        source_confidence = "none"
 
                         metadata = json.dumps(
                             {
@@ -926,6 +920,7 @@ class UserActivityAnalyzer(commands.Cog):
                                 "backfilled": True,
                                 "invite_code": matched_code,
                                 "twitch_streamer_login": matched_twitch,
+                                "matched_twitch_hint": matched_twitch,
                                 "inviter_bot": matched_bot or None,
                             }
                         )
