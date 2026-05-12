@@ -12,7 +12,7 @@ aiohttp-basicauth==1.1.0
 
 # Database
 aiosqlite==0.22.1
-psycopg[binary]==3.3.3
+psycopg[binary]==3.3.4
 
 # Templating
 Jinja2==3.1.6
