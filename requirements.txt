@@ -24,7 +24,7 @@ pytz==2026.2
 
 # HTTP client
 httpx==0.28.1
-requests==2.34.0
+requests==2.34.1
 
 # HTML parsing
 beautifulsoup4==4.14.3
