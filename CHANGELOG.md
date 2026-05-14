@@ -1,3 +1,11 @@
+## #30 — Lobby-Finder treffsicherer und übersichtlicher
+
+- Passt wirklich eine Lobby zu deinem Rang, wird dir gezielt die eine vorgeschlagen statt einer langen Liste
+- Rang-Schnitt einer Lobby zeigt jetzt den echten Rang-Namen (z. B. Oracle) statt kryptischer Kürzel
+- Aufgeräumteres Layout mit mehr Abstand, klarem Beitritts-Hinweis und Warnung wenn eine Lobby fast voll ist
+- Falsche "über deinem Rang"-Warnung bei Lobbys unter deinem Rang behoben
+- Erkennt mehr Nachrichten wie "jemand am start?" oder "noch wer wach?" und sortiert auch unverifizierte Rang-Rollen sauber ein
+
 ## #29 — Ehrliche Member-Herkunft im Admin-Dashboard
 
 - Kreis-Diagramm "Wo kommen unsere Member her?" zeigt jetzt einen eigenen Website-Bereich statt Website-Joins in "Persönlich" zu verstecken

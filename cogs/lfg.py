@@ -118,6 +118,20 @@ DISCORD_RANK_ROLES = {
     1331458087349129296: ("Eternus", 11),
     1397687886580547745: ("Unbekannt", 0),
 }
+# Unverifizierte Rang-Rollen (feste IDs, ein Eintrag pro Tier).
+UNVERIFIED_RANK_ROLES = {
+    1492959003700101180: ("Eternus", 11),
+    1491935935414276198: ("Ascendant", 10),
+    1492959474468655134: ("Phantom", 9),
+    1492959889767534602: ("Oracle", 8),
+    1492959936513052672: ("Archon", 7),
+    1492960184920834110: ("Emissary", 6),
+    1492960262184239178: ("Ritualist", 5),
+    1492960274096066831: ("Arcanist", 4),
+    1492960350755225730: ("Alchemist", 3),
+    1492959966284218611: ("Seeker", 2),
+    1492960891619250408: ("Initiate", 1),
+}
 UNVERIFIED_ROLE_RE = re.compile(r"^Unverifiziert\s+(.+)$", re.IGNORECASE)
 
 # Sub-Rank Rollen (z. B. "Ascendant 3" oder "Asc 3")
@@ -136,6 +150,9 @@ RANK_SHORT_NAMES = {
 }
 SHORT_NAME_TO_RANK = {v.casefold(): k for k, v in RANK_SHORT_NAMES.items()}
 RANK_NAME_TO_VALUE = {name.lower(): val for name, val in DISCORD_RANK_ROLES.values()}
+VALUE_TO_RANK_NAME = {
+    val: name for name, val in DISCORD_RANK_ROLES.values() if val > 0
+}
 _SUBRANK_PATTERN = "|".join(
     re.escape(n) for n in list(RANK_NAME_TO_VALUE.keys()) + list(RANK_SHORT_NAMES.values())
 )
@@ -188,7 +205,6 @@ class LaneInfo:
     deadlock_active_count: int = 0
     member_ids: list[int] = field(default_factory=list)
     co_player_ids_present: list[int] = field(default_factory=list)
-    link: str = ""
     is_staging: bool = False
 
 
@@ -291,7 +307,15 @@ class SmartLFGAgent(commands.Cog):
                     highest_name, highest_val, highest_sub = r_name, r_val, None
                     highest_score = score
 
-            # Unverifiziert-Rollen: gleicher Rang-Name, aber immer Sub-Rank 3
+            # Unverifiziert-Rollen per fester ID: gleicher Rang, immer Sub-Rank 3
+            if role.id in UNVERIFIED_RANK_ROLES:
+                r_name, r_val = UNVERIFIED_RANK_ROLES[role.id]
+                score = r_val * 10 + 3
+                if score > highest_score:
+                    highest_name, highest_val, highest_sub = r_name, r_val, 3
+                    highest_score = score
+
+            # Unverifiziert-Rollen per Name (Fallback): gleicher Rang-Name, Sub-Rank 3
             unv_match = UNVERIFIED_ROLE_RE.match(getattr(role, "name", ""))
             if unv_match:
                 rank_candidate = unv_match.group(1).strip()
@@ -340,15 +364,12 @@ class SmartLFGAgent(commands.Cog):
             avg_rank = sum(ranks) / len(ranks) if ranks else 0.0
             if ch.id == JUICE_KAMMER_CHANNEL_ID:
                 avg_rank = JUICE_KAMMER_FIXED_RANK_VALUE
-                avg_label = f"{JUICE_KAMMER_FIXED_RANK_LABEL} (fix)"
+                avg_label = JUICE_KAMMER_FIXED_RANK_LABEL
             elif avg_rank == 0:
                 avg_label = "Leer"
-            elif avg_rank < 5.5:
-                avg_label = f"Low (~{avg_rank:.1f})"
-            elif avg_rank < 7.5:
-                avg_label = f"Mid (~{avg_rank:.1f})"
             else:
-                avg_label = f"High (~{avg_rank:.1f})"
+                tier = min(11, max(1, round(avg_rank)))
+                avg_label = VALUE_TO_RANK_NAME.get(tier, "Unbekannt")
 
             limit = ch.user_limit or 99
             if label == "New Player":
@@ -371,7 +392,6 @@ class SmartLFGAgent(commands.Cog):
                 deadlock_active_count=deadlock_active_count,
                 member_ids=member_ids,
                 co_player_ids_present=co_present,
-                link=f"https://discord.com/channels/{guild.id}/{ch.id}",
             )
 
         # New Player Kategorie
@@ -752,6 +772,23 @@ class SmartLFGAgent(commands.Cog):
 
         # --- "möchte jemand" (2 Treffer) ---
         if "möchte" in text and ("jemand" in text or "wer" in text):
+            return True
+
+        # --- "jemand am start?" ---
+        if "am start" in text:
+            return True
+
+        # --- "schon jemand wach", "wer wach" ---
+        if "wach" in text and any(
+            w in text for w in ("jemand", "jmd", "wer", "iwer", "irgendwer")
+        ):
+            return True
+
+        # --- "noch jemand on?", "wer on" ---
+        if any(
+            p in text
+            for p in ("jemand on", "jmd on", "wer on", "iwer on", "irgendwer on")
+        ):
             return True
 
         if "neuling" in text and "platz" in text and ("jmd" in text or "jemand" in text):
@@ -1718,6 +1755,7 @@ class SmartLFGAgent(commands.Cog):
         is_new_player: bool,
         has_active_lobbys: bool,
         new_player_lane_occupied: bool = False,
+        lobby_count: int = 0,
     ) -> str:
         rank_part = f" ({rank_display})" if rank_display and rank_display != "Unbekannt" else ""
 
@@ -1747,9 +1785,13 @@ class SmartLFGAgent(commands.Cog):
             )
 
         if has_active_lobbys:
+            if lobby_count == 1:
+                lobby_text = "Ich hab eine passende Lobby für dich gefunden"
+            else:
+                lobby_text = "Ich hab passende Lobbys für dich gefunden"
             return (
                 f"Hey {user_mention}!{rank_part}\n"
-                "Ich hab passende Lobbys für dich gefunden — schau rein und spiel mit:"
+                f"{lobby_text} — schau rein und spiel mit:"
             )
         return (
             f"Hey {user_mention}!{rank_part}\n"
@@ -1884,24 +1926,40 @@ class SmartLFGAgent(commands.Cog):
             ),
             reverse=True,
         )
+
+        # Gibt es eine klar passende Lobby (Rang innerhalb der Toleranz),
+        # zeigen wir nur die bestbewertete - kein Auffuellen mit mittelmaessigen Treffern.
+        # Toleranz: +-1.5 wenn ein Subrang bekannt ist, sonst +-2.0.
+        if rank_value > 0:
+            tolerance = 1.5 if rank_sub is not None else 2.0
+            requester_float = rank_value + (rank_sub or 5) / 10.0
+            fitting = [
+                lane
+                for lane in ranked_candidates
+                if lane.avg_rank_value > 0
+                and abs(lane.avg_rank_value - requester_float) <= tolerance
+            ]
+            if fitting:
+                return fitting[:1]
+
         return ranked_candidates[:MAX_JOIN_LOBBIES_SHOWN]
 
     def _build_lobby_field_value(
         self,
         guild: discord.Guild,
         lane: LaneInfo,
+        warning_line: str = "",
     ) -> str:
-        maybe_full_suffix = ""
-        if lane.member_count >= LOBBY_MAYBE_FULL_THRESHOLD:
-            maybe_full_suffix = " · ⚠️ fast voll"
+        lines: list[str] = []
         if lane.member_count == 0:
-            headline = f"{lane.label} · noch leer, eröffne sie doch · Ø {lane.avg_rank_label}"
+            lines.append("Noch leer — eröffne sie doch")
         else:
-            headline = (
-                f"{lane.label} · {lane.member_count}/{lane.user_limit} im Voice · "
-                f"Ø {lane.avg_rank_label}{maybe_full_suffix}"
-            )
-        lines = [headline]
+            lines.append(f"{lane.member_count} im Voice")
+        lines.append(f"Ø-Rang: {lane.avg_rank_label}")
+
+        if warning_line:
+            lines.append(warning_line)
+
         if lane.co_player_ids_present:
             co_names = []
             for co_id in lane.co_player_ids_present[:3]:
@@ -1911,7 +1969,13 @@ class SmartLFGAgent(commands.Cog):
             if co_names:
                 verb = "sind" if len(co_names) > 1 else "ist"
                 lines.append(f"👥 {', '.join(co_names)} {verb} auch da")
-        lines.append(lane.link)
+
+        if lane.member_count >= LOBBY_MAYBE_FULL_THRESHOLD:
+            lines.append(
+                "⚠️ Könnte schon voll sein — schau kurz rein, sonst eigene Lobby aufmachen."
+            )
+
+        lines.append(f"\nHier klicken zum Beitreten 👉 <#{lane.channel.id}>")
         return "\n".join(lines)
 
     def _build_staging_suggestions(
@@ -2168,6 +2232,7 @@ class SmartLFGAgent(commands.Cog):
                 is_new_player,
                 has_active,
                 new_player_lane_occupied=new_player_lane_occupied,
+                lobby_count=len(suggested_lanes),
             ),
             color=discord.Color.orange(),
         )
@@ -2177,23 +2242,28 @@ class SmartLFGAgent(commands.Cog):
 
         requester_rank_float = rank_val + (rank_sub or 5) / 10.0
         if has_active:
-            for lane in suggested_lanes[:MAX_JOIN_LOBBIES_SHOWN]:
+            shown_lanes = suggested_lanes[:MAX_JOIN_LOBBIES_SHOWN]
+            for idx, lane in enumerate(shown_lanes):
                 slots = lane.slots_free
                 if slots <= 2:
                     status = "\U0001f7e1"
                 else:
                     status = "\U0001f7e2"
 
-                warning_suffix = ""
+                warning_line = ""
                 if lane.member_count > 0 and rank_val > 0:
-                    rank_diff = abs(lane.avg_rank_value - requester_rank_float)
+                    # Vorzeichenbehaftet: Warnung nur bei echtem Over-Rank,
+                    # nicht wenn die Lobby unter dem eigenen Rang liegt.
+                    rank_diff = lane.avg_rank_value - requester_rank_float
                     if rank_diff > RANK_WARNING_DIFF:
-                        warning_suffix = " ⚠️ etwas über deinem Rang"
+                        warning_line = "⚠️ etwas über deinem Rang"
                 embed.add_field(
-                    name=f"{status} {lane.channel.name}{warning_suffix}",
-                    value=self._build_lobby_field_value(guild, lane),
+                    name=f"{status} {lane.channel.name}",
+                    value=self._build_lobby_field_value(guild, lane, warning_line),
                     inline=False,
                 )
+                if idx < len(shown_lanes) - 1:
+                    embed.add_field(name="​", value="​", inline=False)
 
             staging_id = self._resolve_staging_channel(guild, preferred_label, lanes)
             if staging_id:
