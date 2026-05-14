@@ -24,6 +24,7 @@ _USER_TABLES: tuple[tuple[str, str], ...] = (
     ("user_activity_patterns", "user_id"),
     ("message_activity", "user_id"),
     ("member_events", "user_id"),
+    ("member_leave_surveys", "user_id"),
     ("steam_links", "user_id"),
     ("steam_cleanup_poll_state", "user_id"),
     ("steam_friendship_miss_tracker", "user_id"),
@@ -75,6 +76,7 @@ _DELETE_SQL_BY_TARGET: dict[tuple[str, str], str] = {
     ("user_activity_patterns", "user_id"): "DELETE FROM user_activity_patterns WHERE user_id=?",
     ("message_activity", "user_id"): "DELETE FROM message_activity WHERE user_id=?",
     ("member_events", "user_id"): "DELETE FROM member_events WHERE user_id=?",
+    ("member_leave_surveys", "user_id"): "DELETE FROM member_leave_surveys WHERE user_id=?",
     ("steam_links", "user_id"): "DELETE FROM steam_links WHERE user_id=?",
     ("steam_cleanup_poll_state", "user_id"): "DELETE FROM steam_cleanup_poll_state WHERE user_id=?",
     (
@@ -141,6 +143,7 @@ _SELECT_SQL_BY_TARGET: dict[tuple[str, str], str] = {
     ("user_activity_patterns", "user_id"): "SELECT * FROM user_activity_patterns WHERE user_id=?",
     ("message_activity", "user_id"): "SELECT * FROM message_activity WHERE user_id=?",
     ("member_events", "user_id"): "SELECT * FROM member_events WHERE user_id=?",
+    ("member_leave_surveys", "user_id"): "SELECT * FROM member_leave_surveys WHERE user_id=?",
     ("steam_links", "user_id"): "SELECT * FROM steam_links WHERE user_id=?",
     (
         "steam_cleanup_poll_state",

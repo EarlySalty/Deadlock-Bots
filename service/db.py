@@ -966,6 +966,26 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
               metadata TEXT
             );
 
+            CREATE TABLE IF NOT EXISTS member_leave_surveys(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              user_id INTEGER NOT NULL,
+              guild_id INTEGER NOT NULL,
+              left_at INTEGER NOT NULL,
+              display_name TEXT,
+              user_bucket TEXT NOT NULL,
+              days_on_server INTEGER,
+              survey_token TEXT UNIQUE NOT NULL,
+              dm_status TEXT,
+              reason_code TEXT,
+              follow_up_question TEXT,
+              follow_up_text TEXT,
+              extra_text TEXT,
+              responded_at INTEGER,
+              web_submitted_at INTEGER,
+              web_payload TEXT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+
             -- Message Activity (Message Tracking pro User)
             CREATE TABLE IF NOT EXISTS message_activity(
               user_id INTEGER NOT NULL,
@@ -1405,6 +1425,15 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
             )
             c.execute(
                 "CREATE INDEX IF NOT EXISTS idx_member_events_type ON member_events(event_type, timestamp DESC)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_leave_surveys_token ON member_leave_surveys(survey_token)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_leave_surveys_bucket ON member_leave_surveys(guild_id, user_bucket)"
+            )
+            c.execute(
+                "CREATE INDEX IF NOT EXISTS idx_leave_surveys_user ON member_leave_surveys(user_id, created_at DESC)"
             )
             # Message Activity: User & Guild Lookups
             c.execute(

@@ -9,6 +9,7 @@ import json
 import logging
 import math
 import os
+import re
 import secrets
 import sqlite3
 import subprocess
@@ -85,6 +86,16 @@ except Exception:
 
 _DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "static" / "dashboard.html"
 _TURNIER_HTML_PATH = Path(__file__).resolve().parent / "static" / "turnier.html"
+_LEAVE_SURVEY_UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "data" / "leave_survey_uploads"
+LEAVE_SURVEY_TOKEN_MAX_AGE_DAYS = 30
+LEAVE_SURVEY_MAX_IMAGES = 5
+LEAVE_SURVEY_MAX_IMAGE_BYTES = 5 * 1024 * 1024
+LEAVE_SURVEY_ALLOWED_IMAGE_TYPES = {
+    "image/jpeg": (".jpg", ".jpeg"),
+    "image/png": (".png",),
+    "image/webp": (".webp",),
+    "image/gif": (".gif",),
+}
 
 
 def _load_index_html() -> str:
@@ -408,6 +419,11 @@ class DashboardServer:
                     web.get("/api/voice-stats", self._handle_voice_stats),
                     web.get("/api/voice-history", self._handle_voice_history),
                     web.get("/api/user-retention", self._handle_user_retention),
+                    web.get("/api/leave-surveys", self._handle_leave_surveys),
+                    web.get(
+                        "/api/leave-surveys/image/{token}/{filename}",
+                        self._handle_leave_survey_image,
+                    ),
                     web.get("/api/member-events", self._handle_member_events),
                     web.get("/api/message-activity", self._handle_message_activity),
                     web.get("/api/co-player-network", self._handle_co_player_network),
@@ -449,6 +465,8 @@ class DashboardServer:
                         self._handle_standalone_autostart,
                     ),
                     web.post("/api/standalone/{key}/command", self._handle_standalone_command),
+                    web.get("/api/leave-survey/{token}", self._handle_leave_survey_get),
+                    web.post("/api/leave-survey/{token}", self._handle_leave_survey_post),
                     # Public endpoints (no auth required)
                     web.get("/api/public/guild-stats", self._handle_public_guild_stats),
                     web.route("OPTIONS", "/api/public/guild-stats", self._handle_public_cors),
@@ -3604,6 +3622,327 @@ class DashboardServer:
         except Exception as e:
             logger.error("Error building user retention payload: %s", e, exc_info=True)
             raise web.HTTPInternalServerError(text="Failed to load user retention data")
+
+    @staticmethod
+    def _is_valid_leave_survey_token(token: str) -> bool:
+        return bool(token) and bool(re.fullmatch(r"[A-Za-z0-9_-]+", token))
+
+    @staticmethod
+    def _is_valid_leave_survey_filename(filename: str) -> bool:
+        if not filename or filename.startswith("."):
+            return False
+        if "/" in filename or "\\" in filename or ".." in filename:
+            return False
+        return bool(re.fullmatch(r"[A-Za-z0-9._-]+", filename))
+
+    @staticmethod
+    def _parse_leave_survey_json(raw_value: Any) -> Any:
+        if raw_value in (None, ""):
+            return None
+        if isinstance(raw_value, (dict, list)):
+            return raw_value
+        if not isinstance(raw_value, str):
+            return None
+        try:
+            return json.loads(raw_value)
+        except (TypeError, ValueError):
+            return None
+
+    def _get_leave_survey_row(self, token: str):
+        if not self._is_valid_leave_survey_token(token):
+            return None
+        return db.query_one(
+            """
+            SELECT id, display_name, user_bucket, reason_code, survey_token, created_at, web_submitted_at
+            FROM member_leave_surveys
+            WHERE survey_token = ?
+              AND created_at >= datetime('now', ?)
+            LIMIT 1
+            """,
+            (token, f"-{LEAVE_SURVEY_TOKEN_MAX_AGE_DAYS} days"),
+        )
+
+    def _leave_survey_upload_dir(self, token: str) -> Path:
+        return _LEAVE_SURVEY_UPLOAD_ROOT / token
+
+    async def _handle_leave_surveys(self, request: web.Request) -> web.Response:
+        self._check_auth(request)
+
+        try:
+            total_row = db.query_one(
+                """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN responded_at IS NOT NULL THEN 1 ELSE 0 END) AS responded_count,
+                    SUM(CASE WHEN web_submitted_at IS NOT NULL THEN 1 ELSE 0 END) AS web_count
+                FROM member_leave_surveys
+                """
+            )
+            bucket_rows = db.query_all(
+                """
+                SELECT COALESCE(NULLIF(user_bucket, ''), 'unknown') AS user_bucket, COUNT(*) AS count
+                FROM member_leave_surveys
+                GROUP BY COALESCE(NULLIF(user_bucket, ''), 'unknown')
+                ORDER BY user_bucket ASC
+                """
+            )
+            dm_status_rows = db.query_all(
+                """
+                SELECT COALESCE(NULLIF(dm_status, ''), 'unknown') AS dm_status, COUNT(*) AS count
+                FROM member_leave_surveys
+                GROUP BY COALESCE(NULLIF(dm_status, ''), 'unknown')
+                ORDER BY dm_status ASC
+                """
+            )
+            reason_rows = db.query_all(
+                """
+                SELECT COALESCE(NULLIF(reason_code, ''), 'unknown') AS reason_code, COUNT(*) AS count
+                FROM member_leave_surveys
+                GROUP BY COALESCE(NULLIF(reason_code, ''), 'unknown')
+                ORDER BY count DESC, reason_code ASC
+                """
+            )
+            recent_rows = db.query_all(
+                """
+                SELECT
+                    display_name,
+                    survey_token,
+                    user_bucket,
+                    reason_code,
+                    follow_up_question,
+                    follow_up_text,
+                    extra_text,
+                    web_submitted_at,
+                    web_payload,
+                    left_at,
+                    responded_at
+                FROM member_leave_surveys
+                WHERE responded_at IS NOT NULL OR web_submitted_at IS NOT NULL
+                ORDER BY COALESCE(web_submitted_at, responded_at) DESC, id DESC
+                LIMIT 30
+                """
+            )
+
+            total = int(total_row["total"] or 0) if total_row else 0
+            responded_count = int(total_row["responded_count"] or 0) if total_row else 0
+            web_count = int(total_row["web_count"] or 0) if total_row else 0
+
+            payload = {
+                "totals": {
+                    "total": total,
+                    "by_user_bucket": {
+                        str(row["user_bucket"]): int(row["count"] or 0) for row in bucket_rows
+                    },
+                    "by_dm_status": {
+                        str(row["dm_status"]): int(row["count"] or 0) for row in dm_status_rows
+                    },
+                },
+                "response_rate": {
+                    "dm": {
+                        "count": responded_count,
+                        "rate": (responded_count / total) if total else 0,
+                    },
+                    "web": {
+                        "count": web_count,
+                        "rate": (web_count / total) if total else 0,
+                    },
+                },
+                "by_reason": [
+                    {
+                        "reason_code": row["reason_code"],
+                        "count": int(row["count"] or 0),
+                    }
+                    for row in reason_rows
+                ],
+                "recent": [
+                    {
+                        "display_name": row["display_name"],
+                        "survey_token": row["survey_token"],
+                        "user_bucket": row["user_bucket"],
+                        "reason_code": row["reason_code"],
+                        "follow_up_question": row["follow_up_question"],
+                        "follow_up_text": row["follow_up_text"],
+                        "extra_text": row["extra_text"],
+                        "web_submitted_at": row["web_submitted_at"],
+                        "web_payload": self._parse_leave_survey_json(row["web_payload"]),
+                        "left_at": row["left_at"],
+                        "responded_at": row["responded_at"],
+                    }
+                    for row in recent_rows
+                ],
+            }
+            return self._json(payload)
+        except Exception as exc:
+            logger.error("Error building leave surveys payload: %s", exc, exc_info=True)
+            raise web.HTTPInternalServerError(text="Failed to load leave surveys data")
+
+    async def _handle_leave_survey_get(self, request: web.Request) -> web.Response:
+        token = (request.match_info.get("token") or "").strip()
+        row = self._get_leave_survey_row(token)
+        if not row:
+            return self._json({"error": "not_found"}, status=404)
+        return self._json(
+            {
+                "display_name": row["display_name"],
+                "user_bucket": row["user_bucket"],
+                "reason_code": row["reason_code"],
+                "already_submitted": bool(row["web_submitted_at"]),
+            }
+        )
+
+    async def _handle_leave_survey_post(self, request: web.Request) -> web.Response:
+        token = (request.match_info.get("token") or "").strip()
+        row = self._get_leave_survey_row(token)
+        if not row:
+            return self._json({"error": "not_found"}, status=404)
+        if row["web_submitted_at"]:
+            return self._json({"error": "already_submitted"}, status=409)
+        if not (request.content_type or "").lower().startswith("multipart/"):
+            return self._json({"error": "invalid_content_type"}, status=400)
+
+        pending_images: list[tuple[str, bytes]] = []
+        answers: dict[str, Any] | None = None
+
+        try:
+            reader = await request.multipart()
+            image_count = 0
+
+            while True:
+                field = await reader.next()
+                if field is None:
+                    break
+
+                if field.name == "answers":
+                    if answers is not None:
+                        return self._json({"error": "duplicate_answers"}, status=400)
+                    raw_answers = await field.text()
+                    try:
+                        parsed_answers = json.loads(raw_answers)
+                    except (TypeError, ValueError):
+                        return self._json({"error": "invalid_answers_json"}, status=400)
+                    if not isinstance(parsed_answers, dict):
+                        return self._json({"error": "invalid_answers_payload"}, status=400)
+                    answers = parsed_answers
+                    continue
+
+                if field.name != "images":
+                    await field.read(decode=False)
+                    continue
+
+                image_count += 1
+                if image_count > LEAVE_SURVEY_MAX_IMAGES:
+                    return self._json({"error": "too_many_images"}, status=413)
+
+                content_type = str(
+                    field.headers.get("Content-Type") or getattr(field, "content_type", "") or ""
+                ).lower()
+                allowed_exts = LEAVE_SURVEY_ALLOWED_IMAGE_TYPES.get(content_type)
+                if not allowed_exts:
+                    return self._json({"error": "invalid_image_type"}, status=400)
+
+                original_ext = Path(field.filename or "").suffix.lower()
+                ext = original_ext if original_ext in allowed_exts else allowed_exts[0]
+
+                chunks: list[bytes] = []
+                total_bytes = 0
+                while True:
+                    chunk = await field.read_chunk()
+                    if not chunk:
+                        break
+                    total_bytes += len(chunk)
+                    if total_bytes > LEAVE_SURVEY_MAX_IMAGE_BYTES:
+                        return self._json({"error": "image_too_large"}, status=413)
+                    chunks.append(chunk)
+                pending_images.append((ext, b"".join(chunks)))
+
+            if answers is None:
+                return self._json({"error": "missing_answers"}, status=400)
+
+            upload_dir = self._leave_survey_upload_dir(token)
+            upload_dir.mkdir(parents=True, exist_ok=True)
+            saved_filenames: list[str] = []
+
+            for index, (ext, data) in enumerate(pending_images, start=1):
+                filename = f"image-{index}-{secrets.token_hex(8)}{ext}"
+                file_path = upload_dir / filename
+                with file_path.open("wb") as file_obj:
+                    file_obj.write(data)
+                saved_filenames.append(filename)
+
+            web_payload = json.dumps(
+                {
+                    "answers": answers,
+                    "images": saved_filenames,
+                },
+                ensure_ascii=False,
+            )
+            submitted_at = int(time.time())
+
+            with db.get_conn() as conn:
+                cur = conn.execute(
+                    """
+                    UPDATE member_leave_surveys
+                    SET web_payload = ?, web_submitted_at = ?
+                    WHERE survey_token = ?
+                      AND created_at >= datetime('now', ?)
+                      AND web_submitted_at IS NULL
+                    """,
+                    (web_payload, submitted_at, token, f"-{LEAVE_SURVEY_TOKEN_MAX_AGE_DAYS} days"),
+                )
+                updated = cur.rowcount if cur.rowcount is not None else 0
+
+            if updated <= 0:
+                for filename in saved_filenames:
+                    try:
+                        (upload_dir / filename).unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning(
+                            "Failed cleaning up leave survey upload %s/%s",
+                            self._safe_log_value(token),
+                            self._safe_log_value(filename),
+                        )
+                return self._json({"error": "already_submitted"}, status=409)
+
+            return self._json({"ok": True})
+        except web.HTTPException:
+            raise
+        except OSError as exc:
+            logger.error(
+                "Error saving leave survey uploads for %s: %s",
+                self._safe_log_value(token),
+                exc,
+                exc_info=True,
+            )
+            return self._json({"error": "upload_save_failed"}, status=500)
+        except Exception as exc:
+            logger.error(
+                "Error processing leave survey submission for %s: %s",
+                self._safe_log_value(token),
+                exc,
+                exc_info=True,
+            )
+            return self._json({"error": "submission_failed"}, status=500)
+
+    async def _handle_leave_survey_image(self, request: web.Request) -> web.Response:
+        self._check_auth(request)
+
+        token = (request.match_info.get("token") or "").strip()
+        filename = (request.match_info.get("filename") or "").strip()
+        if not self._is_valid_leave_survey_token(token) or not self._is_valid_leave_survey_filename(
+            filename
+        ):
+            raise web.HTTPNotFound(text="Image not found")
+
+        upload_dir = self._leave_survey_upload_dir(token)
+        image_path = (upload_dir / filename).resolve()
+        try:
+            image_path.relative_to(upload_dir.resolve())
+        except ValueError:
+            raise web.HTTPNotFound(text="Image not found")
+
+        if not image_path.is_file():
+            raise web.HTTPNotFound(text="Image not found")
+        return web.FileResponse(path=image_path)
 
     async def _handle_member_events(self, request: web.Request) -> web.Response:
         """Handler für Member-Events (Joins, Leaves, Bans)."""

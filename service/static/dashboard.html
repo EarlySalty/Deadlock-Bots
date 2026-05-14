@@ -970,6 +970,39 @@
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 0.75rem;
         }
+        .leave-survey-meta-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+        }
+        .leave-survey-detail-block {
+            margin-bottom: 0.5rem;
+        }
+        .leave-survey-detail-block strong {
+            display: block;
+            margin-bottom: 0.15rem;
+        }
+        .leave-survey-answer-list {
+            margin: 0.5rem 0 0;
+            padding-left: 1.1rem;
+        }
+        .leave-survey-answer-list li {
+            margin-bottom: 0.35rem;
+        }
+        .leave-survey-image-grid {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-top: 0.6rem;
+        }
+        .leave-survey-thumb {
+            width: 88px;
+            height: 88px;
+            object-fit: cover;
+            border-radius: 8px;
+            border: 1px solid rgba(255,255,255,0.12);
+            background: #0f0f0f;
+        }
         .voice-table {
             width: 100%;
             overflow-x: auto;
@@ -1466,6 +1499,30 @@
             </div>
         </section>
 
+        <section>
+            <div class="section-header">
+                <h2>Leave-Surveys</h2>
+                <div class="section-actions">
+                    <button class="reload" id="leave-surveys-refresh">Neu laden</button>
+                    <span class="voice-meta" id="leave-surveys-updated">Letzte Aktualisierung: -</span>
+                </div>
+            </div>
+            <div class="retention-layout">
+                <div class="card">
+                    <h3>Übersicht</h3>
+                    <div id="leave-surveys-summary" class="retention-summary"></div>
+                </div>
+                <div class="card">
+                    <h3>Top Gründe</h3>
+                    <div id="leave-surveys-reasons"></div>
+                </div>
+            </div>
+            <div class="card" style="margin-top: 1rem;">
+                <h3>Letzte Antworten</h3>
+                <div id="leave-surveys-recent"></div>
+            </div>
+        </section>
+
     </div><!-- end tab: overview -->
 
     <!-- ════════════════════════════════════════════════
@@ -1812,6 +1869,11 @@
     const retentionRecent = document.getElementById('retention-recent');
     const retentionRefreshButton = document.getElementById('retention-refresh');
     const retentionUpdated = document.getElementById('retention-updated');
+    const leaveSurveysSummary = document.getElementById('leave-surveys-summary');
+    const leaveSurveysReasons = document.getElementById('leave-surveys-reasons');
+    const leaveSurveysRecent = document.getElementById('leave-surveys-recent');
+    const leaveSurveysRefreshButton = document.getElementById('leave-surveys-refresh');
+    const leaveSurveysUpdated = document.getElementById('leave-surveys-updated');
 
     // Co-Player Netzwerk
     const coNetworkSvg = document.getElementById('co-network-svg');
@@ -2610,6 +2672,11 @@
     if (retentionRefreshButton) {
         retentionRefreshButton.addEventListener('click', () => {
             loadUserRetention();
+        });
+    }
+    if (leaveSurveysRefreshButton) {
+        leaveSurveysRefreshButton.addEventListener('click', () => {
+            loadLeaveSurveys();
         });
     }
     if (tournamentRefreshBtn) {
@@ -4342,6 +4409,249 @@ function renderUserRetention(data) {
     }
 }
 
+function formatLeaveSurveyAnswerValue(value) {
+    if (value === null || value === undefined || value === '') {
+        return '-';
+    }
+    if (typeof value === 'string') {
+        return value;
+    }
+    try {
+        return JSON.stringify(value);
+    } catch (err) {
+        return String(value);
+    }
+}
+
+function appendLeaveSurveyDetail(container, label, value) {
+    if (value === null || value === undefined || value === '') {
+        return;
+    }
+    const block = document.createElement('div');
+    block.className = 'leave-survey-detail-block';
+    const title = document.createElement('strong');
+    title.textContent = label;
+    const text = document.createElement('div');
+    text.textContent = String(value);
+    block.appendChild(title);
+    block.appendChild(text);
+    container.appendChild(block);
+}
+
+function buildLeaveSurveyImageUrl(token, filename) {
+    return `/api/leave-surveys/image/${encodeURIComponent(token)}/${encodeURIComponent(filename)}`;
+}
+
+function renderLeaveSurveys(data) {
+    const totals = (data && data.totals) || {};
+    const byBucket = totals.by_user_bucket || {};
+    const byDmStatus = totals.by_dm_status || {};
+    const responseRate = (data && data.response_rate) || {};
+    const total = Number(totals.total) || 0;
+
+    if (leaveSurveysSummary) {
+        leaveSurveysSummary.innerHTML = '';
+        const dmRate = Number((responseRate.dm || {}).rate) || 0;
+        const webRate = Number((responseRate.web || {}).rate) || 0;
+        const cards = [
+            { label: 'Gesamt', value: total, sub: 'Survey-Eintraege' },
+            { label: 'Bucket A', value: Number(byBucket.A) || 0, sub: 'User-Bucket A' },
+            { label: 'Bucket B', value: Number(byBucket.B) || 0, sub: 'User-Bucket B' },
+            { label: 'Bucket C', value: Number(byBucket.C) || 0, sub: 'User-Bucket C' },
+            {
+                label: 'DM Antworten',
+                value: Number((responseRate.dm || {}).count) || 0,
+                sub: `${(dmRate * 100).toFixed(1)}% Response-Rate`,
+            },
+            {
+                label: 'Web Antworten',
+                value: Number((responseRate.web || {}).count) || 0,
+                sub: `${(webRate * 100).toFixed(1)}% Response-Rate`,
+            },
+        ];
+
+        cards.forEach((card) => {
+            const el = document.createElement('div');
+            el.className = 'stat-card';
+            const label = document.createElement('div');
+            label.className = 'stat-label';
+            label.textContent = card.label;
+            const value = document.createElement('div');
+            value.className = 'stat-value';
+            value.textContent = Number.isFinite(card.value) ? card.value.toLocaleString('de-DE') : '-';
+            const sub = document.createElement('div');
+            sub.className = 'stat-sub';
+            sub.textContent = card.sub;
+            el.appendChild(label);
+            el.appendChild(value);
+            el.appendChild(sub);
+            leaveSurveysSummary.appendChild(el);
+        });
+
+        const dmStatusCard = document.createElement('div');
+        dmStatusCard.className = 'stat-card';
+        const dmStatusLabel = document.createElement('div');
+        dmStatusLabel.className = 'stat-label';
+        dmStatusLabel.textContent = 'DM Status';
+        const dmStatusValue = document.createElement('div');
+        dmStatusValue.className = 'leave-survey-meta-list';
+        const statusEntries = Object.entries(byDmStatus).sort((a, b) => a[0].localeCompare(b[0]));
+        if (!statusEntries.length) {
+            const empty = document.createElement('div');
+            empty.className = 'stat-sub';
+            empty.textContent = 'Keine Daten';
+            dmStatusValue.appendChild(empty);
+        } else {
+            statusEntries.forEach(([status, count]) => {
+                const line = document.createElement('div');
+                line.className = 'stat-sub';
+                line.textContent = `${status}: ${Number(count || 0).toLocaleString('de-DE')}`;
+                dmStatusValue.appendChild(line);
+            });
+        }
+        dmStatusCard.appendChild(dmStatusLabel);
+        dmStatusCard.appendChild(dmStatusValue);
+        leaveSurveysSummary.appendChild(dmStatusCard);
+    }
+
+    if (leaveSurveysReasons) {
+        leaveSurveysReasons.innerHTML = '';
+        const reasons = Array.isArray(data && data.by_reason) ? data.by_reason : [];
+        if (!reasons.length) {
+            leaveSurveysReasons.innerHTML = '<div class="voice-meta">Noch keine Gründe vorhanden.</div>';
+        } else {
+            const wrapper = document.createElement('div');
+            wrapper.className = 'voice-table';
+            const table = document.createElement('table');
+            const thead = document.createElement('thead');
+            thead.innerHTML = '<tr><th>Grund</th><th>Anzahl</th><th>Anteil</th></tr>';
+            table.appendChild(thead);
+            const tbody = document.createElement('tbody');
+
+            reasons.forEach((row) => {
+                const count = Number(row.count) || 0;
+                const tr = document.createElement('tr');
+                const reasonTd = document.createElement('td');
+                reasonTd.textContent = row.reason_code || 'unknown';
+                const countTd = document.createElement('td');
+                countTd.textContent = count.toLocaleString('de-DE');
+                const shareTd = document.createElement('td');
+                shareTd.textContent = total ? `${((count / total) * 100).toFixed(1)}%` : '0.0%';
+                tr.appendChild(reasonTd);
+                tr.appendChild(countTd);
+                tr.appendChild(shareTd);
+                tbody.appendChild(tr);
+            });
+
+            table.appendChild(tbody);
+            wrapper.appendChild(table);
+            leaveSurveysReasons.appendChild(wrapper);
+        }
+    }
+
+    if (leaveSurveysRecent) {
+        leaveSurveysRecent.innerHTML = '';
+        const rows = Array.isArray(data && data.recent) ? data.recent : [];
+
+        if (!rows.length) {
+            leaveSurveysRecent.innerHTML = '<div class="voice-meta">Noch keine Antworten vorhanden.</div>';
+            return;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'voice-table';
+        const table = document.createElement('table');
+        const thead = document.createElement('thead');
+        thead.innerHTML = '<tr><th>User</th><th>Bucket</th><th>Grund</th><th>Antworten</th><th>Zeitpunkte</th></tr>';
+        table.appendChild(thead);
+        const tbody = document.createElement('tbody');
+
+        rows.forEach((row) => {
+            const tr = document.createElement('tr');
+
+            const userTd = document.createElement('td');
+            userTd.textContent = row.display_name || '-';
+
+            const bucketTd = document.createElement('td');
+            bucketTd.textContent = row.user_bucket || '-';
+
+            const reasonTd = document.createElement('td');
+            reasonTd.textContent = row.reason_code || '-';
+
+            const detailsTd = document.createElement('td');
+            appendLeaveSurveyDetail(detailsTd, 'Follow-up Frage', row.follow_up_question);
+            appendLeaveSurveyDetail(detailsTd, 'Follow-up Antwort', row.follow_up_text);
+            appendLeaveSurveyDetail(detailsTd, 'Zusatztext', row.extra_text);
+
+            const webPayload = row.web_payload && typeof row.web_payload === 'object' ? row.web_payload : null;
+            const answers = webPayload && webPayload.answers && typeof webPayload.answers === 'object'
+                ? Object.entries(webPayload.answers)
+                : [];
+            if (answers.length) {
+                const answersBlock = document.createElement('div');
+                answersBlock.className = 'leave-survey-detail-block';
+                const title = document.createElement('strong');
+                title.textContent = 'Web-Details';
+                const list = document.createElement('ul');
+                list.className = 'leave-survey-answer-list';
+                answers.forEach(([key, value]) => {
+                    const li = document.createElement('li');
+                    li.textContent = `${key}: ${formatLeaveSurveyAnswerValue(value)}`;
+                    list.appendChild(li);
+                });
+                answersBlock.appendChild(title);
+                answersBlock.appendChild(list);
+                detailsTd.appendChild(answersBlock);
+            }
+
+            const images = webPayload && Array.isArray(webPayload.images) ? webPayload.images : [];
+            if (images.length && row.survey_token) {
+                const imageBlock = document.createElement('div');
+                imageBlock.className = 'leave-survey-detail-block';
+                const title = document.createElement('strong');
+                title.textContent = 'Bilder';
+                const grid = document.createElement('div');
+                grid.className = 'leave-survey-image-grid';
+                images.forEach((filename) => {
+                    if (!filename) return;
+                    const img = document.createElement('img');
+                    img.className = 'leave-survey-thumb';
+                    img.loading = 'lazy';
+                    img.alt = `Upload ${filename}`;
+                    img.src = buildLeaveSurveyImageUrl(row.survey_token, filename);
+                    grid.appendChild(img);
+                });
+                imageBlock.appendChild(title);
+                imageBlock.appendChild(grid);
+                detailsTd.appendChild(imageBlock);
+            }
+
+            if (!detailsTd.childElementCount) {
+                detailsTd.textContent = '-';
+            }
+
+            const timeTd = document.createElement('td');
+            const timeLines = [
+                `Leave: ${formatTimestamp(row.left_at)}`,
+                `DM: ${formatTimestamp(row.responded_at)}`,
+                `Web: ${formatTimestamp(row.web_submitted_at)}`,
+            ];
+            timeTd.textContent = timeLines.join(' | ');
+
+            tr.appendChild(userTd);
+            tr.appendChild(bucketTd);
+            tr.appendChild(reasonTd);
+            tr.appendChild(detailsTd);
+            tr.appendChild(timeTd);
+            tbody.appendChild(tr);
+        });
+
+        table.appendChild(tbody);
+        wrapper.appendChild(table);
+        leaveSurveysRecent.appendChild(wrapper);
+    }
+}
+
 async function loadUserRetention() {
     try {
         const data = await fetchJSON('/api/user-retention');
@@ -4353,6 +4663,27 @@ async function loadUserRetention() {
         log('User Retention konnte nicht geladen werden: ' + err.message, 'error');
         if (retentionSummary) {
             retentionSummary.innerHTML = '<div class="voice-meta">Fehler beim Laden der Retention-Daten.</div>';
+        }
+    }
+}
+
+async function loadLeaveSurveys() {
+    try {
+        const data = await fetchJSON('/api/leave-surveys');
+        renderLeaveSurveys(data);
+        if (leaveSurveysUpdated) {
+            leaveSurveysUpdated.textContent = 'Letzte Aktualisierung: ' + new Date().toLocaleTimeString();
+        }
+    } catch (err) {
+        log('Leave-Surveys konnten nicht geladen werden: ' + err.message, 'error');
+        if (leaveSurveysSummary) {
+            leaveSurveysSummary.innerHTML = '<div class="voice-meta">Fehler beim Laden der Leave-Surveys.</div>';
+        }
+        if (leaveSurveysReasons) {
+            leaveSurveysReasons.innerHTML = '';
+        }
+        if (leaveSurveysRecent) {
+            leaveSurveysRecent.innerHTML = '';
         }
     }
 }
@@ -5443,6 +5774,8 @@ async function fetchStandaloneLogs(key, limit = 200) {
     setInterval(loadVoiceHistory, 60000);
     loadUserRetention();
     setInterval(loadUserRetention, 60000);
+    loadLeaveSurveys();
+    setInterval(loadLeaveSurveys, 60000);
     loadCoNetwork();
     setInterval(loadCoNetwork, 120000);
     loadTournamentOverview();
