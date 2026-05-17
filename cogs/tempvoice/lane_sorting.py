@@ -26,6 +26,7 @@ SUPPORTED_CATEGORY_IDS: set[int] = {
 }
 CHILL_STAGING_CHANNEL_ID = _cfg.TEMPVOICE_STAGING_CASUAL
 PERMANENT_CHILL_LANE_ID = _cfg.TEMPVOICE_PERMANENT_CASUAL_CHANNEL
+PINNED_LAST_CHANNEL_IDS: set[int] = {1505618194017161267}
 REORDER_DEBOUNCE_SECONDS = 2.0
 STARTUP_REORDER_DELAY_SECONDS = 5.0
 RANK_LABEL_RE = re.compile(
@@ -154,7 +155,10 @@ class TempVoiceLaneSorting(commands.Cog):
                 reserved_start_position = await self._ensure_reserved_chill_slot(guild, category)
 
             lanes = [lane for lane in category.voice_channels if self._should_sort_lane(lane)]
-            if len(lanes) <= 1:
+            pinned_channels = [
+                ch for ch in category.voice_channels if ch.id in PINNED_LAST_CHANNEL_IDS
+            ]
+            if len(lanes) <= 1 and not pinned_channels:
                 return
 
             snapshots: list[LaneSortSnapshot] = []
@@ -179,6 +183,18 @@ class TempVoiceLaneSorting(commands.Cog):
                         moves.append((entry.lane_id, target_position))
             else:
                 moves = plan_lane_reorder(snapshots)
+
+            if pinned_channels and snapshots:
+                move_map = dict(moves)
+                final_positions = [
+                    move_map.get(s.lane_id, s.current_position) for s in snapshots
+                ]
+                end_pos = max(final_positions) + 1
+                for i, pinned_ch in enumerate(pinned_channels):
+                    desired = end_pos + i
+                    if int(pinned_ch.position) != desired:
+                        moves.append((pinned_ch.id, desired))
+
             if not moves:
                 return
 

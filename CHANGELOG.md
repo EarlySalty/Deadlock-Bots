@@ -1,3 +1,8 @@
+## #33 — Bestimmter Channel bleibt immer ganz unten in der Kategorie
+
+- Ein festgelegter Voice-Channel wird nach jedem Neu-Sortieren automatisch ans Ende der Kategorie verschoben
+- Er bleibt immer unter allen anderen Lanes, egal welche Ränge neu erstellt werden
+
 ## #32 — Channel aus TempVoice-Verwaltung ausgenommen
 
 - Ein bestimmter Voice-Channel wird vom Bot nicht mehr umbenannt, gelöscht oder verschoben
