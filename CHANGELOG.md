@@ -1,3 +1,8 @@
+## #32 — Channel aus TempVoice-Verwaltung ausgenommen
+
+- Ein bestimmter Voice-Channel wird vom Bot nicht mehr umbenannt, gelöscht oder verschoben
+- Der Channel bleibt weiterhin über die Verwaltungsinterfaces anpassbar
+
 ## #31 — Austritts-Umfrage: verstehen, warum Leute gehen
 
 - Wenn jemand den Server verlässt, bekommt er automatisch eine freundliche Nachricht mit einer kurzen Umfrage — die Fragen passen sich an, je nachdem ob jemand neu war oder schon länger aktiv dabei

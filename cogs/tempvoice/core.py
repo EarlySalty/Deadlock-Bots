@@ -35,6 +35,7 @@ FIXED_LANE_IDS: set[int] = {
     _cfg.TEMPVOICE_PERMANENT_CASUAL_CHANNEL,  # Permanenter Chill-Voice direkt unter dem Staging
     1411391356278018245,  # Dauerhafter Voice-Channel (nicht von TempVoice verwalten)
     1470126503252721845,  # Ausgenommen: nie von TempVoice verwalten/loeschen
+    1505618194017161267,  # Ausgenommen: nie von TempVoice umbenennen/loeschen/verschieben
 }
 MINRANK_CATEGORY_IDS: set[int] = set(_cfg.tempvoice_minrank_categories)
 TEMPVOICE_CATEGORY_IDS: set[int] = {
