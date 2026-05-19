@@ -1,3 +1,9 @@
+## #35 — Leere Sprachkanäle werden jetzt zuverlässig gelöscht
+
+- Leere Lanes in der Ranked-Kategorie werden jetzt korrekt automatisch entfernt
+- Channels bleiben nach einem Bot-Neustart nicht mehr dauerhaft erhalten
+- Namen von laufenden Lanes werden nach einem Neustart nicht mehr vom Bot überschrieben
+
 ## #34 — Tag-Filter-Bestätigung nur noch für dich sichtbar
 
 - Nach dem Speichern des Tag-Filters wird die Bestätigung nur noch dir angezeigt, nicht mehr im Channel

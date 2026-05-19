@@ -911,6 +911,7 @@ class TempVoiceCore(commands.Cog):
             return
 
         processed_lane_ids: set[int] = set()
+        log.info("TempVoice purge: %d DB-Lanes geprüft", len(rows))
         for r in rows:
             lane_id = int(r["channel_id"])
             processed_lane_ids.add(lane_id)
@@ -920,12 +921,17 @@ class TempVoiceCore(commands.Cog):
             try:
                 lane = guild.get_channel(lane_id)
                 if not isinstance(lane, discord.VoiceChannel):
+                    log.info("TempVoice purge: Lane %s nicht im Cache – DB-Cleanup", lane_id)
                     await self._cleanup_lane(
                         lane_id,
                         channel=None,
                         reason="TempVoice: Cleanup (missing channel)",
                     )
                     continue
+                log.info(
+                    "TempVoice purge: Lane %s (%s) members=%d cat=%s",
+                    lane_id, lane.name, len(lane.members), lane.category_id,
+                )
                 if len(lane.members) == 0:
                     await self._cleanup_lane(
                         lane_id, channel=lane, reason="TempVoice: Cleanup (leer)"
@@ -1007,8 +1013,13 @@ class TempVoiceCore(commands.Cog):
         if channel:
             try:
                 await channel.delete(reason=reason)
+                log.info(
+                    "TempVoice: Lane %s (%s) gelöscht – %s",
+                    lane_id,
+                    getattr(channel, "name", "?"),
+                    reason,
+                )
             except discord.NotFound:
-                # Channel wurde bereits gelöscht - das ist OK
                 log.debug(
                     "TempVoice: lane %s (%s) bereits gelöscht",
                     lane_id,
@@ -1851,11 +1862,12 @@ class TempVoiceCore(commands.Cog):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    def _row_to_lane_tag_filter(self, row: dict[str, Any]) -> LaneTagFilter:
-        channel_id = int(row["channel_id"])
-        min_age_tag = row.get("min_age_tag")
-        required_tone_tag = row.get("required_tone_tag")
-        deny_ragebaiter = bool(int(row.get("deny_ragebaiter") or 0))
+    def _row_to_lane_tag_filter(self, row: Any) -> LaneTagFilter:
+        r = dict(row)
+        channel_id = int(r["channel_id"])
+        min_age_tag = r.get("min_age_tag")
+        required_tone_tag = r.get("required_tone_tag")
+        deny_ragebaiter = bool(int(r.get("deny_ragebaiter") or 0))
         return LaneTagFilter(
             channel_id=channel_id,
             min_age_tag=self._normalize_min_age_tag(min_age_tag),
@@ -2459,11 +2471,10 @@ class TempVoiceCore(commands.Cog):
                                 ch.id,
                                 e,
                             )
-                    else:
-                        lane_id = int(ch.id)
-                        await self._cleanup_lane(lane_id, channel=ch, reason="TempVoice: Lane leer")
-
-                if _is_managed_lane(ch) and len(ch.members) > 0:
+                if _is_managed_lane(ch) and len(ch.members) == 0:
+                    lane_id = int(ch.id)
+                    await self._cleanup_lane(lane_id, channel=ch, reason="TempVoice: Lane leer")
+                elif _is_managed_lane(ch):
                     await self._refresh_name(ch)
         except Exception as e:
             log.debug("owner/cleanup flow failed: %r", e)

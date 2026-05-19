@@ -1145,7 +1145,8 @@ class RolePermissionVoiceManager(commands.Cog):
                 continue
             anchor_changed = await self._ensure_valid_anchor(channel, members_ranks)
             await self.update_channel_permissions_via_roles(channel, force=anchor_changed)
-            await self.update_channel_name(channel, force=anchor_changed)
+            if not self._is_tempvoice_lane(channel):
+                await self.update_channel_name(channel, force=anchor_changed)
 
     @commands.Cog.listener()
     async def on_guild_join(self, guild: discord.Guild):
