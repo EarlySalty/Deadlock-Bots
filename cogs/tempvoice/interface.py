@@ -938,11 +938,6 @@ class TagFilterConfigView(discord.ui.View):
         )
         await self.core._apply_tag_filter(self.lane, lane_filter)  # type: ignore[attr-defined]
         summary = _format_tag_filter_summary(lane_filter)
-        try:
-            if isinstance(itx.channel, discord.TextChannel):
-                await itx.channel.send(summary)
-        except Exception as exc:
-            logger.debug("TagFilterConfigView channel send failed: %r", exc)
         await itx.followup.send(summary, ephemeral=True)
         self.stop()
 

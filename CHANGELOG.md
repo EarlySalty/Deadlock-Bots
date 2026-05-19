@@ -1,3 +1,7 @@
+## #34 — Tag-Filter-Bestätigung nur noch für dich sichtbar
+
+- Nach dem Speichern des Tag-Filters wird die Bestätigung nur noch dir angezeigt, nicht mehr im Channel
+
 ## #33 — Bestimmter Channel bleibt immer ganz unten in der Kategorie
 
 - Ein festgelegter Voice-Channel wird nach jedem Neu-Sortieren automatisch ans Ende der Kategorie verschoben
