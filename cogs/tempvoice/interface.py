@@ -1636,11 +1636,11 @@ class RankPrefButton(discord.ui.Button):
 
     async def callback(self, itx: discord.Interaction):
         member: discord.Member = itx.user  # type: ignore
-        rank, subrank = self.core.get_rank_pref(member.id)
+        rank, _ = self.core.get_rank_pref(member.id)
         guild = getattr(member, "guild", None)
         await itx.response.send_message(
             "Wähle deinen Rang – wird als **Chill-Lane-Name** verwendet:",
-            view=RankPrefView(self.core, member, rank, subrank, guild),
+            view=RankPrefView(self.core, member, rank, guild),
             ephemeral=True,
         )
 
@@ -1677,40 +1677,9 @@ class RankPrefMainSelect(discord.ui.Select):
         await itx.response.defer()
 
 
-class RankPrefSubSelect(discord.ui.Select):
-    def __init__(self, current_subrank: int):
-        options = [
-            discord.SelectOption(
-                label="Kein Sub-Rang",
-                value="0",
-                default=current_subrank == 0,
-            )
-        ]
-        for n in range(1, 7):
-            options.append(
-                discord.SelectOption(
-                    label=f"Sub-Rang {n}",
-                    value=str(n),
-                    default=current_subrank == n,
-                )
-            )
-        super().__init__(
-            placeholder="Sub-Rang wählen (für Sortierung)",
-            min_values=1,
-            max_values=1,
-            options=options,
-            row=1,
-        )
-
-    async def callback(self, itx: discord.Interaction):
-        view: RankPrefView = self.view  # type: ignore
-        view.selected_subrank = int(self.values[0])
-        await itx.response.defer()
-
-
 class RankPrefSaveButton(discord.ui.Button):
     def __init__(self):
-        super().__init__(label="Speichern", style=discord.ButtonStyle.success, row=2)
+        super().__init__(label="Speichern", style=discord.ButtonStyle.success, row=1)
 
     async def callback(self, itx: discord.Interaction):
         view: RankPrefView = self.view  # type: ignore
@@ -1723,30 +1692,24 @@ class RankPrefView(discord.ui.View):
         core,
         member: discord.Member,
         current_rank: str,
-        current_subrank: int,
         guild: discord.Guild | None,
     ):
         super().__init__(timeout=120)
         self.core = core
         self.member = member
         self.selected_rank = current_rank
-        self.selected_subrank = current_subrank
         self.add_item(RankPrefMainSelect(current_rank, guild))
-        self.add_item(RankPrefSubSelect(current_subrank))
         self.add_item(RankPrefSaveButton())
 
     async def save(self, itx: discord.Interaction) -> None:
         await itx.response.defer(ephemeral=True)
-        await self.core.set_rank_pref(self.member.id, self.selected_rank, self.selected_subrank)
+        await self.core.set_rank_pref(self.member.id, self.selected_rank, 0)
         if self.selected_rank == "unknown":
             msg = "Rang-Einstellung zurückgesetzt – Lane-Name richtet sich wieder nach deiner Rolle."
         else:
-            rank_label = self.selected_rank.capitalize()
-            if self.selected_subrank > 0:
-                rank_label = f"{rank_label} {self.selected_subrank}"
             msg = (
-                f"Rang gespeichert: **{rank_label}**. "
-                "Deine nächste Chill-Lane wird entsprechend benannt und sortiert."
+                f"Rang gespeichert: **{self.selected_rank.capitalize()}**. "
+                "Deine nächste Chill-Lane wird entsprechend benannt."
             )
         await itx.followup.send(msg, ephemeral=True)
         self.stop()
