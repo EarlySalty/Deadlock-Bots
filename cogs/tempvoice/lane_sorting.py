@@ -327,6 +327,14 @@ class TempVoiceLaneSorting(commands.Cog):
         owner_id = initial_owner_id or self.core.lane_owner.get(lane.id)
         owner = lane.guild.get_member(int(owner_id)) if owner_id else None
 
+        # Manuell gespeicherte Rang-Präferenz hat höchste Priorität
+        if owner_id and hasattr(self.core, "get_rank_pref"):
+            pref_rank, pref_subrank = self.core.get_rank_pref(int(owner_id))
+            if pref_rank and pref_rank != "unknown":
+                rank_idx = _rank_index(pref_rank)
+                if rank_idx > 0:
+                    return rank_idx, pref_subrank
+
         if owner and manager and hasattr(manager, "get_user_rank_from_roles"):
             try:
                 _rank_name, rank_value, subrank = manager.get_user_rank_from_roles(owner)

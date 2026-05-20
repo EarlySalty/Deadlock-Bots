@@ -385,6 +385,7 @@ class TempVoiceCore(commands.Cog):
         self.minrank_blocked_lanes: set[int] = set()
         self.category_rules: dict[int, dict[str, Any]] = {}
         self.category_to_staging: dict[int, int] = {}
+        self.user_rank_pref: dict[int, tuple[str, int]] = {}  # user_id → (rank, subrank)
 
     def _rules_for_staging(self, staging: discord.abc.GuildChannel) -> dict[str, Any]:
         try:
@@ -471,6 +472,10 @@ class TempVoiceCore(commands.Cog):
     def _desired_prefix_for_rules(self, lane: discord.VoiceChannel, rules: dict[str, Any]) -> str:
         if rules.get("prefix_from_rank"):
             owner_id = self.lane_owner.get(lane.id)
+            if owner_id:
+                pref_rank, _ = self.get_rank_pref(int(owner_id))
+                if pref_rank and pref_rank != "unknown":
+                    return pref_rank.capitalize()
             member = lane.guild.get_member(int(owner_id)) if owner_id else None
             owner_prefix = _rank_prefix_for(member) if member else None
             if owner_prefix:
@@ -690,6 +695,7 @@ class TempVoiceCore(commands.Cog):
             )
         """)
         await self._ensure_interface_table()
+        await self._ensure_rank_pref_table()
 
     async def _ensure_interface_table(self):
         rows = await db.query_all_async("PRAGMA table_info(tempvoice_interface)")
@@ -764,6 +770,27 @@ class TempVoiceCore(commands.Cog):
                 log.info("tempvoice_interface migration rolled back successfully")
             except Exception as rollback_exc:
                 log.critical("Failed to rollback tempvoice_interface migration: %r", rollback_exc)
+
+    async def _ensure_rank_pref_table(self):
+        await db.execute_async("""
+            CREATE TABLE IF NOT EXISTS tempvoice_rank_pref (
+                user_id    INTEGER PRIMARY KEY,
+                rank       TEXT NOT NULL DEFAULT 'unknown',
+                subrank    INTEGER NOT NULL DEFAULT 0,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        try:
+            rows = await db.query_all_async(
+                "SELECT user_id, rank, subrank FROM tempvoice_rank_pref"
+            )
+            for row in rows:
+                self.user_rank_pref[int(row["user_id"])] = (
+                    str(row["rank"]),
+                    int(row["subrank"] or 0),
+                )
+        except Exception as e:
+            log.debug("_ensure_rank_pref_table: rehydrate failed: %r", e)
 
     async def _startup(self):
         await self.bot.wait_until_ready()
@@ -1134,6 +1161,27 @@ class TempVoiceCore(commands.Cog):
         except Exception as e:
             log.debug("get_region_pref failed for %s: %r", owner_id, e)
         return "EU"
+
+    def get_rank_pref(self, user_id: int) -> tuple[str, int]:
+        """Gibt die gespeicherte Rang-Präferenz zurück (rank, subrank). Sync, aus Cache."""
+        return self.user_rank_pref.get(int(user_id), ("unknown", 0))
+
+    async def set_rank_pref(self, user_id: int, rank: str, subrank: int) -> None:
+        self.user_rank_pref[int(user_id)] = (rank, int(subrank))
+        try:
+            await db.execute_async(
+                """
+                INSERT INTO tempvoice_rank_pref(user_id, rank, subrank, updated_at)
+                VALUES(?,?,?,CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    rank=excluded.rank,
+                    subrank=excluded.subrank,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (int(user_id), rank, int(subrank)),
+            )
+        except Exception as e:
+            log.warning("set_rank_pref failed for %s: %r", user_id, e)
 
     async def apply_region(self, lane: discord.VoiceChannel, region: str):
         role = lane.guild.get_role(ENGLISH_ONLY_ROLE_ID)

@@ -1,3 +1,10 @@
+## #36 — Rang-Präferenz für Chill-Lanes
+
+- Neuer Button „🎯 Mein Rang" im TempVoice-Interface (für alle Lane-Typen sichtbar)
+- Über ein Dropdown-Menü kannst du Haupt-Rang und Sub-Rang auswählen und speichern
+- Wenn du eine Chill-Lane erstellst, wird der gewählte Rang automatisch als Kanalname verwendet
+- Dein Sub-Rang bestimmt außerdem die Sortierposition deiner Lane in der Kategorie
+
 ## #35 — Leere Sprachkanäle werden jetzt zuverlässig gelöscht
 
 - Leere Lanes in der Ranked-Kategorie werden jetzt korrekt automatisch entfernt
