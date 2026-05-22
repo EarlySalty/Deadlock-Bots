@@ -89,6 +89,7 @@ STREET_BRAWL_CATEGORY_ID = 1357422957017698478
 JUICE_KAMMER_CHANNEL_ID = 1493690350580138114
 JUICE_KAMMER_FIXED_RANK_VALUE = 11
 JUICE_KAMMER_FIXED_RANK_LABEL = "Eternus"
+COACH_REQUEST_CHANNEL_ID = 1494373349944459355
 OFFTOPIC_NAME_SUBSTRING = "off topic voice"
 LOBBY_MAYBE_FULL_THRESHOLD = 6
 RANK_WARNING_DIFF = 1.5
@@ -179,14 +180,6 @@ MESSAGE_RANK_ALIASES = {
 }
 LFG_AGE_FILTER_RE = re.compile(r"(?<!\d)25\+(?!\d)")
 LFG_RAGEBAITER_FREE_RE = re.compile(r"\bragebaiter(?:[\s-]?free)\b", re.IGNORECASE)
-VISIBLE_AGE_TAG_LABELS = {
-    "25+": "25+",
-    "u25": "U25",
-}
-VISIBLE_TONE_TAG_LABELS = {
-    "banter_ok": "Banter-OK",
-    "ragebaiter_free": "Ragebaiter-Free",
-}
 
 
 @dataclass
@@ -1093,39 +1086,6 @@ class SmartLFGAgent(commands.Cog):
         allowed_ids = {int(row["user_id"]) for row in rows}
         return [user_id for user_id in candidate_ids if user_id in allowed_ids]
 
-    def _get_tag_service(self) -> object | None:
-        get_cog = getattr(self.bot, "get_cog", None)
-        if not callable(get_cog):
-            return None
-        return get_cog("TagService")
-
-    async def _get_visible_user_tag_line(self, user_id: int) -> str | None:
-        tag_service = self._get_tag_service()
-        if tag_service is None:
-            return None
-
-        get_user_tags = getattr(tag_service, "get_user_tags", None)
-        if not callable(get_user_tags):
-            return None
-
-        try:
-            user_tags = await get_user_tags(int(user_id))
-        except Exception as exc:
-            log.warning("TagService get_user_tags fehlgeschlagen fuer %s: %s", user_id, exc)
-            return None
-
-        visible_labels: list[str] = []
-        age_value = user_tags.get("age")
-        tone_value = user_tags.get("tone")
-        if age_value in VISIBLE_AGE_TAG_LABELS:
-            visible_labels.append(VISIBLE_AGE_TAG_LABELS[age_value])
-        if tone_value in VISIBLE_TONE_TAG_LABELS:
-            visible_labels.append(VISIBLE_TONE_TAG_LABELS[tone_value])
-
-        if not visible_labels:
-            return None
-        return f"Tags: {' · '.join(visible_labels)}"
-
     def _rank_score(
         self,
         target_rank: int,
@@ -1758,30 +1718,39 @@ class SmartLFGAgent(commands.Cog):
         lobby_count: int = 0,
     ) -> str:
         rank_part = f" ({rank_display})" if rank_display and rank_display != "Unbekannt" else ""
+        np_lane_mention = f"<#{NEW_PLAYER_LANE_ID}>"
+        coach_hint = (
+            f"\n\n\U0001f4a1 Allgemeiner Tipp: Movement ist in Deadlock mega wichtig — "
+            f"übe ruhig Dash, Slide und Air-Dash. Wenn du gezielt besser werden willst, "
+            f"meld dich gerne in <#{COACH_REQUEST_CHANNEL_ID}>."
+        )
 
         # Neue Spieler bekommen spezielle, einladende Texte
         if is_new_player:
             if has_active_lobbys and new_player_lane_occupied:
                 return (
                     f"Hey {user_mention}!{rank_part}\n"
-                    "Willkommen! In der **Neue Spieler Lane** sind schon Leute unterwegs "
+                    f"Willkommen! In der {np_lane_mention} sind schon Leute unterwegs "
                     "— spring rein und spiel mit! Dort triffst du andere, die auch gerade "
                     "anfangen oder entspannt spielen wollen:"
+                    f"{coach_hint}"
                 )
             if has_active_lobbys:
                 return (
                     f"Hey {user_mention}!{rank_part}\n"
                     "Willkommen! Ich hab Lobbys gefunden, die gut zu dir passen. "
-                    "Schau am besten auch mal in die **Neue Spieler Lane** — "
+                    f"Schau am besten auch mal in die {np_lane_mention} — "
                     "da sind alle super nett und helfen gerne weiter:"
+                    f"{coach_hint}"
                 )
             # Keine aktive Lobby
             return (
                 f"Hey {user_mention}!{rank_part}\n"
-                "Willkommen! Gerade ist die **Neue Spieler Lane** noch leer, aber das ist "
-                "kein Problem — mach sie einfach auf! Sobald du drin bist, sehen andere "
-                "dass jemand da ist und es kommen erfahrungsgemäß schnell Leute dazu. "
-                "Trau dich ruhig, hier sind alle freundlich! \U0001f44b"
+                f"Willkommen! Mach einfach in {np_lane_mention} eine Lobby auf — "
+                "sobald du drin bist, sehen andere dass jemand da ist und es kommen "
+                "erfahrungsgemäß schnell Leute dazu. Trau dich ruhig, hier sind alle "
+                "freundlich! \U0001f44b"
+                f"{coach_hint}"
             )
 
         if has_active_lobbys:
@@ -2236,9 +2205,6 @@ class SmartLFGAgent(commands.Cog):
             ),
             color=discord.Color.orange(),
         )
-        visible_tag_line = await self._get_visible_user_tag_line(message.author.id)
-        if visible_tag_line:
-            embed.description = f"{embed.description}\n\n{visible_tag_line}"
 
         requester_rank_float = rank_val + (rank_sub or 5) / 10.0
         if has_active:
@@ -2275,6 +2241,10 @@ class SmartLFGAgent(commands.Cog):
                     ),
                     inline=False,
                 )
+        elif is_new_player:
+            # Intro sagt für Neulinge bereits, dass sie die New-Player-Lane aufmachen sollen.
+            # Kein zweiter Aufmach-Block nötig.
+            pass
         else:
             staging_id = self._resolve_staging_channel(guild, preferred_label, lanes)
             if staging_id:
