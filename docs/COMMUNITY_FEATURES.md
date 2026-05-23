@@ -31,8 +31,8 @@ Diese README fasst alle Features zusammen, die auf dem Server für Community-Mit
 ## Feedback Hub
 - Ein permanenter Button **„Anonymes Feedback senden“** öffnet ein Formular mit fünf Freitext-Fragen zu Spielerlebnis, Server, Verbesserungen und Wünschen. Nach dem Absenden geht ein anonymes Embed an das Community-Team, optional mit Link zum ursprünglichen Interface.【F:cogs/feedback_hub.py†L28-L205】
 
-## Match-Coaching
-- Der Button **„Match-Coaching starten“** erzeugt einen privaten Thread und führt dich durch Rang-, Subrang- und Heldenauswahl sowie einen Kommentar. Abschließend erhältst du eine Zusammenfassung, der Thread wird archiviert und das Coaching-Team informiert.【F:cogs/dl_coaching.py†L217-L520】
+## Coaching
+- Im Channel <#1494373349944459355> findest du den **Coaching-Button**. Nach dem Ausfüllen des Formulars (Rang, Hero, Games, Probleme, Verfügbarkeit) analysiert die KI deine Anfrage und du bekommst automatisch die Coaching-Rolle. Ein Coach meldet sich dann im Coaching-Chat – keine DMs oder Freundschaftsanfragen an Coaches senden.
 
 ## Partner-Onboarding
 - Mit `/streamer` startest du den Partner-Onboarding-Flow. Deadlock vergibt die lokale Discord-Rolle und verschickt die interne Benachrichtigung erst nach bestätigter externer Autorisierung.【F:cogs/welcome_dm/step_streamer.py†L566-L797】

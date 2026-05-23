@@ -1,3 +1,10 @@
+## #37 — Coaching-Dokumentation und bessere KI-Antworten
+
+- Der FAQ-Bot weiß jetzt zuverlässig wo und wie Coaching beantragt wird und verweist direkt auf den richtigen Channel
+- Neue Coaching-Dokumentation hinterlegt, damit der Bot konkrete Antworten geben kann
+- Die KI-Analyse bei Coaching-Anfragen listet jetzt direkt die Fokuspunkte für den Coach – ohne Wiederholung der User-Angaben
+- Veraltete Referenz auf den alten Coaching-Bot entfernt
+
 ## #36 — Rang-Präferenz für Chill-Lanes
 
 - Neuer Button „🎯 Mein Rang" im TempVoice-Interface (für alle Lane-Typen sichtbar)

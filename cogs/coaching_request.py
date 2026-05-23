@@ -20,15 +20,15 @@ _CLAIM_IN_PROGRESS: set[int] = set()
 
 
 COACHING_ANALYSIS_SYSTEM = """Du bist ein Deadlock Coaching Koordinator.
-Analysiere die Coaching-Anfrage und erstelle eine saubere, informative Zusammenfassung.
+Der Coach sieht die Rohangaben des Spielers bereits (Rang, Hero, Games, Probleme).
+Wiederhole diese NICHT – liefere direkt die Coach-Einschätzung.
 
 Gib zurück:
-1. Eine 2-3 Sätze Zusammenfassung was der Spieler braucht
-2. 3-5 Key-Fokuspunkte für den Coach
-3. Priorität: low/medium/high
-4. Kurze Einschätzung was der Spieler verbessern sollte
+1. **Key-Fokuspunkte** (3-5 Punkte): Was soll der Coach konkret trainieren? Sei spezifisch für Deadlock Gameplay (z.B. Lane-Phase, Itemreihenfolge, Positioning, Hero-Mechaniken, Map-Awareness).
+2. **Priorität**: low / medium / high (basierend auf Rang, Erfahrung und Komplexität der Probleme)
+3. **Coach-Ansatz** (1-2 Sätze): Welchen Einstieg empfiehlst du für die erste Session?
 
-Sei spezifisch für Deadlock Gameplay.
+Keine Einleitung, kein "Der Spieler möchte..." – direkt mit den Fokuspunkten beginnen.
 
 WICHTIG: Wenn die Anfrage offensichtlich nicht ernst gemeint ist (z. B. Nonsens-Text,
 absichtlich falsche Angaben wie unmögliche Ränge, Beleidigungen, Spam oder kompletter
