@@ -1,3 +1,9 @@
+## #39 — FAQ-Bot kennt jetzt fast alle Server-Themen
+
+- Der FAQ-Bot kann jetzt deutlich mehr Fragen beantworten: TempVoice und Lanes, Coaching, Onboarding & Beta-Invite, Steam-Verknüpfung, Twitch-Dashboard inkl. Tarife, Turniere, Patchnotes-Bot und unsere Websites
+- Antworten zu Preisen und kostenlosen vs. bezahlten Features sind jetzt verlässlich, weil die zugrundeliegende Doku konkret und aktuell ist
+- Veraltete, sich überschneidende Doku wurde archiviert, damit der Bot keine widersprüchlichen Aussagen mehr mischt
+
 ## #38 — Coaching-Infos überarbeitet und bereinigt
 
 - Coaching ist jetzt überall klar als kostenlos und ohne Limit beschrieben
