@@ -1,3 +1,11 @@
+## #38 — Coaching-Infos überarbeitet und bereinigt
+
+- Coaching ist jetzt überall klar als kostenlos und ohne Limit beschrieben
+- Hinweis auf Feedback nach dem Coaching eingefügt – User werden gebeten ehrlich zu antworten
+- Technische Details (Rollen-Zuweisung etc.) aus den Nutzer-Infos entfernt
+- KI-Analyse erstellt keine Priorität mehr, sondern direkt nutzbare Fokuspunkte
+- Alle alten Referenzen auf das nicht mehr existierende Coaching-Modul aus den Docs entfernt
+
 ## #37 — Coaching-Dokumentation und bessere KI-Antworten
 
 - Der FAQ-Bot weiß jetzt zuverlässig wo und wie Coaching beantragt wird und verweist direkt auf den richtigen Channel

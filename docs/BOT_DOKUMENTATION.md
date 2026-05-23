@@ -6,18 +6,20 @@ Der Deadlock Bot bietet dir verschiedene Tools, um dein Spielerlebnis auf dem Se
 
 ---
 
-## 🎮 Match-Coaching
+## 🎮 Coaching
 
 **Was bringt's dir?**
-Du gibst deine Match-ID ein, wählst deinen Rang und Helden aus - und bekommst ein personalisiertes Coaching-Thread, wo dein Spiel analysiert werden kann.
+Kostenlose 1-on-1 Sessions mit erfahrenen Coaches aus der Community. Du beschreibst was du verbessern willst – ein Coach meldet sich und hilft dir gezielt weiter.
 
 **Wie nutzt du es?**
-1. Finde den Kanal mit dem Button "Match-Coaching starten"
-2. Klicke auf den Button
-3. Gib deine Match-ID ein (z.B. `12345-ABCDE`)
-4. Wähle deinen Rang und Subrang
-5. Wähle deinen Helden
-6. Optional: Kommentar hinzufügen
+1. Gehe in den Channel <#1494373349944459355>
+2. Klicke auf den Button und fülle das Formular aus (Rang, Hero, deine Baustellen)
+3. Ein Coach meldet sich bei dir im Coaching-Chat
+
+**Wichtig:**
+- Kommunikation läuft ausschließlich im Coaching-Chat – keine DMs oder Freundschaftsanfragen an Coaches
+- Du kannst beliebig oft anfragen
+- Nach dem Coaching bekommst du eine Feedback-Anfrage – bitte ehrlich ausfüllen, das hilft dem Team
 
 ---
 

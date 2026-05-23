@@ -25,8 +25,7 @@ Wiederhole diese NICHT – liefere direkt die Coach-Einschätzung.
 
 Gib zurück:
 1. **Key-Fokuspunkte** (3-5 Punkte): Was soll der Coach konkret trainieren? Sei spezifisch für Deadlock Gameplay (z.B. Lane-Phase, Itemreihenfolge, Positioning, Hero-Mechaniken, Map-Awareness).
-2. **Priorität**: low / medium / high (basierend auf Rang, Erfahrung und Komplexität der Probleme)
-3. **Coach-Ansatz** (1-2 Sätze): Welchen Einstieg empfiehlst du für die erste Session?
+2. **Coach-Ansatz** (1-2 Sätze): Welchen Einstieg empfiehlst du für die erste Session?
 
 Keine Einleitung, kein "Der Spieler möchte..." – direkt mit den Fokuspunkten beginnen.
 
