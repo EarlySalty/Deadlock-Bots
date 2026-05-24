@@ -1,0 +1,16 @@
+[Unit]
+Description=Deadlock Steam Bridge Watchdog
+After=deadlock-bot.service
+BindsTo=deadlock-bot.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/naniadm/Documents/Deadlock-Bots/.venv/bin/python standalone/steam_bridge_watchdog.py --interval 30 --grace-period 120 --restart-cooldown 180
+Restart=always
+RestartSec=10
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

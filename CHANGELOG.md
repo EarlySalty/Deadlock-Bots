@@ -1,3 +1,10 @@
+## #40 — Steam-Verifikation: Watchdog gegen stille Disconnects
+
+- Ein neuer automatischer Watchdog überwacht jetzt dauerhaft ob der Steam-Bot eingeloggt ist
+- Fällt die Steam-Verbindung lautlos weg (wie heute ~16 Uhr), erkennt der Watchdog das innerhalb von 30 Sekunden und startet den Bot nach 2 Minuten automatisch neu
+- Vorher konnte eine solche Verbindungsunterbrechung unbemerkt über eine Stunde anhalten, weshalb Steam-Verifikationen in diesem Zeitraum fehlschlugen
+- Betroffene User können die Verknüpfung jetzt erneut starten – sie wird wieder funktionieren
+
 ## #39 — FAQ-Bot kennt jetzt fast alle Server-Themen
 
 - Der FAQ-Bot kann jetzt deutlich mehr Fragen beantworten: TempVoice und Lanes, Coaching, Onboarding & Beta-Invite, Steam-Verknüpfung, Twitch-Dashboard inkl. Tarife, Turniere, Patchnotes-Bot und unsere Websites
