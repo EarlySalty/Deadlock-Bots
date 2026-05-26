@@ -1,3 +1,17 @@
+# FAQ-Doku W1 – Voice + Community (2026-05-23)
+
+## Ziel
+Zwei neue FAQ-Dateien fuer den FAQ-Bot: `docs/voice-features.md` und `docs/community-tools.md`, jeweils auf echter Cog-Logik statt Alt-Doku-Raten basierend.
+
+## Fortschritt
+- Referenz-Plan aus `~/.claude/plans/ich-m-chte-das-wir-floating-mountain.md` gelesen und Template/Stilregeln uebernommen.
+- Relevante Voice-Cogs gesichtet: `cogs/tempvoice/*`, `deadlock_team_balancer.py`, `deadlock_voice_status.py`, `rank_voice_manager.py`, `voice_activity_tracker.py`, `voice_reaction_dm.py`, `steam_link_voice_nudge.py`.
+- Relevante Community-Cogs gesichtet: `cogs/tags/*`, `bug_reporter.py`, `lfg.py`, `feedback_hub.py`, `clip_submission.py`, `player_finder.py`, `leave_survey.py`.
+- Alt-Doku fuer TempVoice und Community konsolidiert; Fokus bleibt auf User-Sicht, Admin-/Mod-Mechanik wird ausgespart.
+
+## Offen
+- Wortzahl und Stil der zwei neuen Markdown-Dateien nach dem Schreiben gegen das Worker-Briefing gegenpruefen.
+
 # AI-Moderator Cog (2026-04-24)
 
 # Member-Source-Tracking ehrlich + Website-Bucket (2026-05-11)
@@ -244,3 +258,34 @@ Mehrere CodeQL-Sicherheits- und Quality-Alerts in der Python-Codebase mit minima
 ## Verifikation
 - `python3 -m py_compile ...` fuer alle betroffenen Python-Dateien erfolgreich.
 - `python3 -m pytest tests/ -x -q 2>&1 | tail -20` nicht ausfuehrbar: `/usr/bin/python3: No module named pytest`.
+
+---
+
+# FAQ-Doku W2 – Coaching/Onboarding/Stats/Tierlist/Rules/FAQ-Meta (2026-05-23)
+
+## Ziel
+Sechs neue user-facing Markdown-Dateien fuer den FAQ-Bot in `docs/` erstellen: Coaching, Onboarding/Invites, Stats/Privacy, Tierlist/Builds, Rules/Channels und FAQ-Bot-Meta.
+
+## Fortschritt
+- Referenz-Plan unter `/home/naniadm/.claude/plans/ich-m-chte-das-wir-floating-mountain.md` gelesen und Template/Scope uebernommen.
+- Relevante Cogs und bestehende Doku gesichtet: `cogs/coaching_*`, `cogs/onboarding.py`, `cogs/ai_onboarding.py`, `cogs/welcome_dm/*`, `cogs/website_invite_cog.py`, `cogs/public_stats_cog.py`, `cogs/privacy_*`, `cogs/user_activity_analyzer.py`, `cogs/user_retention.py`, `cogs/tierlist_public_cog.py`, `cogs/turnier_public_cog.py`, `cogs/build_publisher.py`, `cogs/rules_channel.py`, `cogs/faq_chat.py`, `cogs/server_faq.py`.
+- Channel-/User-Flows, Slash-Commands, Session-Laufzeiten, sichtbare Rollen- und Feedback-Regeln fuer die neue Doku extrahiert.
+
+## Offen
+- Sechs Markdown-Dateien jetzt schreiben und danach Wortzahlen/Inventur pruefen.
+
+---
+
+# FAQ-Doku W3 - Master-Bot Internal-Doku (2026-05-23)
+
+## Ziel
+Acht technische Internal-Dokus unter `docs/internal/` fuer Admins, Mods und Devs erstellen: Admin-Commands, Security Guard, AI-Moderator, Build-Publisher, Rename-Manager, Claim-System, AI-Onboarding-Pipeline und Steam-Bridge-Watchdog.
+
+## Fortschritt
+- Referenz-Plan gelesen und Scope auf Internal-Doku im Master-Bot begrenzt.
+- Relevante Quellen gesichtet: `docs/admin_commands.md`, `docs/build-publishing/AUTONOMER_BETRIEB.md`, `docs/steam-bridge-watchdog.md`, `cogs/security_guard.py`, `cogs/ai_moderator.py`, `cogs/ai_connector.py`, `cogs/build_publisher.py`, `cogs/rename_manager.py`, `cogs/claim_system.py`, `cogs/ai_onboarding.py`, `standalone/steam_bridge_watchdog.py`.
+- Command-Scan fuer Admin-/Owner-relevante Commands und Sonderpfade (persistente Views, SQLite-Tabellen, Socket-Listener, Watchdog-Restarts) durchgefuehrt.
+- Auffaelligkeiten notiert: `rename_manager.py` hat aktuell keine In-Repo-Caller; `claim_system.py` wirkt als externer Socket-Entry-Point; Build-Publisher-Runbook enthaelt teils veraltete Windows-Pfade.
+
+## Offen
+- Acht Markdown-Dateien jetzt schreiben, Wortzahlen pruefen und kurzen Verifikationslauf machen.

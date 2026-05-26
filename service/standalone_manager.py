@@ -468,7 +468,7 @@ class StandaloneBotManager:
                 not self._shutting_down
                 and not state.stop_requested
                 and state.config.restart_on_crash
-                and returncode not in (0, None)
+                and returncode is not None
             )
             state.stop_requested = False
 

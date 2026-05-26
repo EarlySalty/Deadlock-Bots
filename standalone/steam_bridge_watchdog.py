@@ -219,6 +219,60 @@ def _restart_service(command: list[str], dry_run: bool) -> bool:
     return True
 
 
+def _systemd_user_properties(service_name: str) -> dict[str, str]:
+    if not service_name:
+        return {}
+    try:
+        completed = subprocess.run(
+            [
+                "systemctl",
+                "--user",
+                "show",
+                service_name,
+                "--property=ActiveState,SubState,Result",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except Exception as exc:
+        LOG.warning("Could not query host service %s: %s", service_name, exc)
+        return {}
+    if completed.returncode != 0:
+        LOG.warning(
+            "Could not query host service %s: %s",
+            service_name,
+            (completed.stderr or completed.stdout or "").strip(),
+        )
+        return {}
+    props: dict[str, str] = {}
+    for line in completed.stdout.splitlines():
+        key, sep, value = line.partition("=")
+        if sep:
+            props[key] = value.strip()
+    return props
+
+
+def _reset_failed_host_service(service_name: str, dry_run: bool) -> None:
+    if not service_name:
+        return
+    LOG.warning("Resetting failed host service state: %s", service_name)
+    if dry_run:
+        return
+    completed = subprocess.run(
+        ["systemctl", "--user", "reset-failed", service_name],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        LOG.error(
+            "reset-failed failed for %s: %s",
+            service_name,
+            (completed.stderr or completed.stdout or "").strip(),
+        )
+
+
 def _handle_signal(signum: int, _frame: Any) -> None:
     global STOP_REQUESTED
     STOP_REQUESTED = True
@@ -233,6 +287,7 @@ def _run_once(
     grace_period: int,
     heartbeat_max_age: int,
     restart_cooldown: int,
+    host_service: str,
     dry_run: bool,
 ) -> int:
     state = _load_state(state_path)
@@ -300,10 +355,27 @@ def _run_once(
         )
         return 1
 
+    host_props = _systemd_user_properties(host_service)
+    active_state = host_props.get("ActiveState", "")
+    result = host_props.get("Result", "")
+    if active_state == "inactive" and result in {"", "success"}:
+        LOG.info(
+            "Host service %s is intentionally inactive (result=%s); not restarting",
+            host_service,
+            result or "none",
+        )
+        return 0
+    if active_state in {"activating", "deactivating"}:
+        LOG.info("Host service %s is %s; waiting", host_service, active_state)
+        return 1
+    if active_state == "failed":
+        _reset_failed_host_service(host_service, dry_run=dry_run)
+
+    state["last_restart_at"] = now
+    state["last_restart_reason"] = issue.reason
+    _save_state(state_path, state)
+
     if _restart_service(restart_command, dry_run=dry_run):
-        state["last_restart_at"] = now
-        state["last_restart_reason"] = issue.reason
-        _save_state(state_path, state)
         return 10
     return 3
 
@@ -321,6 +393,11 @@ def main() -> int:
             "systemctl --user restart deadlock-bot.service",
         ),
         help="Command used to restart the host service.",
+    )
+    parser.add_argument(
+        "--host-service",
+        default=os.getenv("STEAM_BRIDGE_WATCHDOG_HOST_SERVICE", "deadlock-bot.service"),
+        help="systemd --user service supervised by this watchdog.",
     )
     parser.add_argument(
         "--interval", type=int, default=int(os.getenv("STEAM_BRIDGE_WATCHDOG_INTERVAL", "30"))
@@ -382,6 +459,7 @@ def main() -> int:
             grace_period=max(30, args.grace_period),
             heartbeat_max_age=max(30, args.heartbeat_max_age),
             restart_cooldown=max(60, args.restart_cooldown),
+            host_service=str(args.host_service or "").strip(),
             dry_run=args.dry_run,
         )
         if args.once:
