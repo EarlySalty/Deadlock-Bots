@@ -1,3 +1,10 @@
+## #41 — Changelog-Posts direkt in Discord
+
+- Neue Changelogs landen jetzt automatisch als Discord-Embed im Dev-Update-Kanal
+- Twitch-Bot-Änderungen können zusätzlich gezielt im Twitch-Bot-Kanal gepostet werden
+- Admin-interne Änderungen werden dabei bewusst weggelassen – nur was User sehen sollen kommt rein
+- Admins können Einträge auch per `/changelog post` manuell auslösen
+
 ## #40 — Steam-Verifikation: Watchdog gegen stille Disconnects
 
 - Ein neuer automatischer Watchdog überwacht jetzt dauerhaft ob der Steam-Bot eingeloggt ist
