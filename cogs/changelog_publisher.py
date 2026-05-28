@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime
 import logging
 import os
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import discord
@@ -19,6 +20,7 @@ DEV_UPDATES_CHANNEL_ID = 1492910851483504821
 TWITCH_BOT_CHANNEL_ID = 1318329964713611385
 CHANGELOG_API_TOKEN = os.getenv("CHANGELOG_API_TOKEN", "changeme-local")
 CHANGELOG_API_PORT = int(os.getenv("CHANGELOG_API_PORT", "8899"))
+MAX_FILE_BYTES = 24 * 1024 * 1024
 
 VALID_TARGETS = {"all", "twitch"}
 
@@ -34,6 +36,7 @@ class ChangelogPublisher(commands.Cog):
     async def cog_load(self) -> None:
         app = web.Application()
         app.router.add_post("/changelog", self._http_handler)
+        app.router.add_post("/highlight-clips", self._highlight_handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, "127.0.0.1", CHANGELOG_API_PORT)
@@ -64,6 +67,58 @@ class ChangelogPublisher(commands.Cog):
         await channel.send(embed=embed)
         log.info("Changelog posted to channel %s: %s", channel_id, title)
         return channel_id
+
+    async def _highlight_handler(self, request: web.Request) -> web.Response:
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        if data.get("token") != CHANGELOG_API_TOKEN:
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+
+        channel_id = int(data.get("channel_id") or 0)
+        streamer = str(data.get("streamer_login") or "").strip()
+        match_id = int(data.get("match_id") or 0)
+        events = data.get("events") or []
+        clip_paths = data.get("clip_paths") or []
+
+        if not channel_id or not streamer or not match_id:
+            return web.json_response({"ok": False, "error": "channel_id, streamer_login, match_id required"}, status=400)
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception:
+                pass
+        if channel is None or not hasattr(channel, "send"):
+            return web.json_response({"ok": False, "error": f"channel {channel_id} not found"}, status=404)
+
+        try:
+            embed = discord.Embed(
+                title=f"Highlights — {streamer} (Match #{match_id})",
+                description=f"{len(clip_paths)} Clip(s)",
+                color=discord.Color.orange(),
+                timestamp=datetime.datetime.now(datetime.timezone.utc),
+            )
+            await channel.send(embed=embed)
+
+            for event, clip_path in zip(events, clip_paths, strict=False):
+                path = Path(clip_path)
+                if not path.exists() or path.stat().st_size > MAX_FILE_BYTES:
+                    continue
+                label = event.get("label") or event.get("event_type") or "Clip"
+                await channel.send(
+                    content=f"**{streamer}** — {label}",
+                    file=discord.File(path, filename=path.name),
+                )
+
+            log.info("highlight-clips: %s clips posted for %s match=%s", len(clip_paths), streamer, match_id)
+            return web.json_response({"ok": True, "clips_sent": len(clip_paths)})
+        except Exception as e:
+            log.warning("highlight-clips post failed: %s", e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def _http_handler(self, request: web.Request) -> web.Response:
         try:
