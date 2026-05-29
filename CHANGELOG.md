@@ -1,17 +1,12 @@
 ## #43 — Spam-Schutz greift jetzt selbst durch
 
-So funktioniert die Erkennung: Der Schutz-Bot merkt sich für jedes Mitglied die Nachrichten der letzten Stunde (gleitendes Zeitfenster). Er schlägt an, wenn ein **junger Account** (jünger als 30 Tage) in kurzer Zeit in **mehreren Kanälen gleichzeitig** postet — konkret ab 3 Nachrichten über 3 Kanäle, oder schon ab 2 Kanälen, wenn Bilder/Anhänge oder typische Scam-Wörter dabei sind. Mods und etablierte Mitglieder sind von der Prüfung ausgenommen. Das ist das klassische Muster einer Spam-/Werbe-Welle.
+**Problem:** Wenn ein neuer Account (jünger als 30 Tage) in kurzer Zeit dieselbe Werbung oder dieselben Bilder über mehrere Kanäle streut — das klassische Spam-Wellen-Muster — hat der Bot das zwar erkannt, aber nur den Mods gemeldet und dann gewartet. Die Spam-Nachrichten blieben stehen, bis jemand von Hand eingriff. Erkennung lief, Reaktion nicht.
 
-Bisher hat der Bot bei so einem Treffer nur eine Meldung an die Mods geschickt und dann gewartet — die Spam-Nachrichten blieben stehen, bis jemand von Hand reagiert hat. Das war der eigentliche Fehler: Die Erkennung lief, die Reaktion nicht.
+**Geändert:** Der Bot greift jetzt beim Muster selbst durch, statt auf eine KI-Bestätigung zu warten — die kam vorher nämlich oft gar nicht (siehe unten).
 
-Was jetzt passiert, in genau dieser Reihenfolge:
+**Wie's funktioniert:** Schlägt das Muster an (ab 3 Nachrichten in 3 Kanälen, oder schon ab 2 Kanälen mit Bildern/Scam-Wörtern; Mods und etablierte Accounts ausgenommen), läuft der Reihe nach: erst die Bilder als Beweis in den Mod-Kanal kopieren (bevor die Links durchs Löschen tot sind), dann die Nachrichten löschen und den Account **1 Stunde stummschalten**. Die Mods bekommen eine Übersicht mit Texten, Bildern und zwei Buttons — **Bann** oder **Timeout aufheben**. Die Stunde ist bewusst kurz und umkehrbar, falls es doch ein harmloser Neuling war. Die KI prüft Text und Bilder weiterhin, aber nur noch als Hinweis fürs Mod-Team, nicht als Auslöser.
 
-- **Beweise sichern, bevor gelöscht wird:** Der Bot lädt zuerst die Anhänge/Bilder herunter und kopiert sie in den Mod-Kanal, weil die Links sonst nach dem Löschen tot wären.
-- **Sofort eingreifen, ohne auf das KI-Urteil zu warten:** Der Account wird für **1 Stunde stummgeschaltet** (Discord-Timeout) und die Burst-Nachrichten werden gelöscht. Das hängt jetzt bewusst **nur am Verhaltensmuster** (junger Account + Mehrkanal-Schwall), nicht mehr daran, ob eine KI den Inhalt sicher als „Betrug" bestätigt — denn genau diese Bestätigung kam vorher oft nicht zustande.
-- **Reversibel halten:** Die Stunde ist absichtlich kurz. Der Account bekommt eine Erklärungs-DM, und die Mods sehen eine Übersicht mit den gelöschten Texten, den gespiegelten Bildern und zwei Buttons — **Bann** (echter Spam) oder **Timeout aufheben** (Fehlalarm bei einem harmlosen Neuling).
-- **KI nur noch als Hinweis, nicht als Schalter:** Es laufen weiterhin zwei Prüfungen (eine auf den Text, eine auf die Bilder). Ihr Ergebnis steht jetzt nur zur Info im Mod-Embed — es entscheidet nicht mehr darüber, ob überhaupt eingegriffen wird.
-
-Warum vorher überall „0 %" stand: Die Text-Prüfung war auf einen KI-Dienst verdrahtet, der auf diesem Bot gar nicht eingerichtet ist (es fehlt der Zugangsschlüssel), also kam nie eine Antwort zurück — und „keine Antwort" wurde als 0 % angezeigt. Jetzt laufen **beide** Prüfungen über den Dienst, der hier tatsächlich konfiguriert ist und auch die Bilder mitlesen kann. Zusätzlich werden die internen „Denk"-Abschnitte dieser KI vor der Auswertung herausgefiltert, weil das eigentliche Ergebnis sonst beim Einlesen zerbrach.
+**Warum vorher „0 %" dastand:** Die Text-Prüfung lief gegen einen KI-Dienst, der auf diesem Bot gar nicht eingerichtet ist (Zugangsschlüssel fehlt) — es kam nie eine Antwort zurück, und „keine Antwort" wurde als 0 % angezeigt. Jetzt läuft die Prüfung über den Dienst, der hier wirklich konfiguriert ist und auch die Bilder mitliest. Dessen interne „Denk"-Abschnitte werden vor der Auswertung herausgefiltert, weil das Ergebnis sonst beim Einlesen zerbrach.
 
 ## #42 — Direkte Channel-ID für interne API-Posts
 
