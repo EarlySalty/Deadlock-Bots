@@ -1,8 +1,11 @@
 ## #43 — Spam-Schutz greift jetzt selbst durch
 
-- Bei einem erkannten Spam-Schwall aus mehreren Kanälen löscht der Bot die Nachrichten jetzt sofort selbst und schaltet den Account für 1 Stunde stumm – auch wenn die KI den Inhalt nicht eindeutig als Scam einstuft
-- Das Mod-Team bekommt danach eine Übersicht mit den gespiegelten Bildern/Anhängen zum Nachsichten und kann mit einem Klick bannen oder den Timeout wieder aufheben
-- Die Scam-Prüfung läuft jetzt zuverlässig über einen funktionierenden KI-Anbieter – vorher blieb die Einschätzung oft bei 0 % hängen
+Manche frisch beigetretenen Accounts spammen innerhalb von Sekunden dieselbe Nachricht oder dieselben Bilder gleichzeitig in viele Kanäle – ein typisches Spam-/Werbe-Muster. Bisher hat der Schutz-Bot so etwas nur **gemeldet** und auf einen Mod gewartet; die Nachrichten blieben so lange stehen. Das haben wir geändert:
+
+- Der Bot **löscht solche Spam-Nachrichten jetzt sofort von allein** und schaltet den betreffenden Account für **1 Stunde stumm**. Das passiert schon beim verdächtigen Muster („neuer Account + dieselbe Sache in mehreren Kanälen") und nicht erst, wenn eine zusätzliche Inhaltsprüfung sicher „Betrug" sagt.
+- Der Timeout ist **bewusst kurz und jederzeit umkehrbar**: Das Mod-Team bekommt direkt eine Übersicht mit den gelöschten Nachrichten und den dazugehörigen Bildern und entscheidet dann in Ruhe – per Klick **Bann** (wenn es echt Spam war) oder **Timeout aufheben** (falls es doch ein harmloser neuer User war).
+- **Für normale Mitglieder ändert sich nichts** – die Automatik greift nur bei sehr jungen Accounts mit diesem Spam-Verhalten, nicht bei euren normalen Nachrichten.
+- Nebenbei behoben: Die automatische Betrugs-Erkennung lief vorher praktisch ins Leere (der genutzte Prüf-Dienst war nicht erreichbar, die Bewertung blieb bei 0 %). Sie läuft jetzt über einen funktionierenden Dienst.
 
 ## #42 — Direkte Channel-ID für interne API-Posts
 
