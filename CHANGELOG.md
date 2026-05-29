@@ -1,11 +1,17 @@
 ## #43 — Spam-Schutz greift jetzt selbst durch
 
-Manche frisch beigetretenen Accounts spammen innerhalb von Sekunden dieselbe Nachricht oder dieselben Bilder gleichzeitig in viele Kanäle – ein typisches Spam-/Werbe-Muster. Bisher hat der Schutz-Bot so etwas nur **gemeldet** und auf einen Mod gewartet; die Nachrichten blieben so lange stehen. Das haben wir geändert:
+So funktioniert die Erkennung: Der Schutz-Bot merkt sich für jedes Mitglied die Nachrichten der letzten Stunde (gleitendes Zeitfenster). Er schlägt an, wenn ein **junger Account** (jünger als 30 Tage) in kurzer Zeit in **mehreren Kanälen gleichzeitig** postet — konkret ab 3 Nachrichten über 3 Kanäle, oder schon ab 2 Kanälen, wenn Bilder/Anhänge oder typische Scam-Wörter dabei sind. Mods und etablierte Mitglieder sind von der Prüfung ausgenommen. Das ist das klassische Muster einer Spam-/Werbe-Welle.
 
-- Der Bot **löscht solche Spam-Nachrichten jetzt sofort von allein** und schaltet den betreffenden Account für **1 Stunde stumm**. Das passiert schon beim verdächtigen Muster („neuer Account + dieselbe Sache in mehreren Kanälen") und nicht erst, wenn eine zusätzliche Inhaltsprüfung sicher „Betrug" sagt.
-- Der Timeout ist **bewusst kurz und jederzeit umkehrbar**: Das Mod-Team bekommt direkt eine Übersicht mit den gelöschten Nachrichten und den dazugehörigen Bildern und entscheidet dann in Ruhe – per Klick **Bann** (wenn es echt Spam war) oder **Timeout aufheben** (falls es doch ein harmloser neuer User war).
-- **Für normale Mitglieder ändert sich nichts** – die Automatik greift nur bei sehr jungen Accounts mit diesem Spam-Verhalten, nicht bei euren normalen Nachrichten.
-- Nebenbei behoben: Die automatische Betrugs-Erkennung lief vorher praktisch ins Leere (der genutzte Prüf-Dienst war nicht erreichbar, die Bewertung blieb bei 0 %). Sie läuft jetzt über einen funktionierenden Dienst.
+Bisher hat der Bot bei so einem Treffer nur eine Meldung an die Mods geschickt und dann gewartet — die Spam-Nachrichten blieben stehen, bis jemand von Hand reagiert hat. Das war der eigentliche Fehler: Die Erkennung lief, die Reaktion nicht.
+
+Was jetzt passiert, in genau dieser Reihenfolge:
+
+- **Beweise sichern, bevor gelöscht wird:** Der Bot lädt zuerst die Anhänge/Bilder herunter und kopiert sie in den Mod-Kanal, weil die Links sonst nach dem Löschen tot wären.
+- **Sofort eingreifen, ohne auf das KI-Urteil zu warten:** Der Account wird für **1 Stunde stummgeschaltet** (Discord-Timeout) und die Burst-Nachrichten werden gelöscht. Das hängt jetzt bewusst **nur am Verhaltensmuster** (junger Account + Mehrkanal-Schwall), nicht mehr daran, ob eine KI den Inhalt sicher als „Betrug" bestätigt — denn genau diese Bestätigung kam vorher oft nicht zustande.
+- **Reversibel halten:** Die Stunde ist absichtlich kurz. Der Account bekommt eine Erklärungs-DM, und die Mods sehen eine Übersicht mit den gelöschten Texten, den gespiegelten Bildern und zwei Buttons — **Bann** (echter Spam) oder **Timeout aufheben** (Fehlalarm bei einem harmlosen Neuling).
+- **KI nur noch als Hinweis, nicht als Schalter:** Es laufen weiterhin zwei Prüfungen (eine auf den Text, eine auf die Bilder). Ihr Ergebnis steht jetzt nur zur Info im Mod-Embed — es entscheidet nicht mehr darüber, ob überhaupt eingegriffen wird.
+
+Warum vorher überall „0 %" stand: Die Text-Prüfung war auf einen KI-Dienst verdrahtet, der auf diesem Bot gar nicht eingerichtet ist (es fehlt der Zugangsschlüssel), also kam nie eine Antwort zurück — und „keine Antwort" wurde als 0 % angezeigt. Jetzt laufen **beide** Prüfungen über den Dienst, der hier tatsächlich konfiguriert ist und auch die Bilder mitlesen kann. Zusätzlich werden die internen „Denk"-Abschnitte dieser KI vor der Auswertung herausgefiltert, weil das eigentliche Ergebnis sonst beim Einlesen zerbrach.
 
 ## #42 — Direkte Channel-ID für interne API-Posts
 
