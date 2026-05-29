@@ -1,3 +1,9 @@
+## #43 — Spam-Schutz greift jetzt selbst durch
+
+- Bei einem erkannten Spam-Schwall aus mehreren Kanälen löscht der Bot die Nachrichten jetzt sofort selbst und schaltet den Account für 1 Stunde stumm – auch wenn die KI den Inhalt nicht eindeutig als Scam einstuft
+- Das Mod-Team bekommt danach eine Übersicht mit den gespiegelten Bildern/Anhängen zum Nachsichten und kann mit einem Klick bannen oder den Timeout wieder aufheben
+- Die Scam-Prüfung läuft jetzt zuverlässig über einen funktionierenden KI-Anbieter – vorher blieb die Einschätzung oft bei 0 % hängen
+
 ## #42 — Direkte Channel-ID für interne API-Posts
 
 - Interne Bot-Posts können jetzt einen beliebigen Discord-Kanal direkt ansprechen (statt nur "all"/"twitch")

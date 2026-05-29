@@ -34,7 +34,25 @@ SCAM_IMAGE_SYSTEM_PROMPT = (
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
 )
 
-_SCAM_JSON_RE = re.compile(r"\{.*?\}", re.DOTALL)
+_SCAM_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+_THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+
+def _parse_scam_json(text: str) -> dict[str, Any] | None:
+    """Extract the scam-verdict JSON from a model reply.
+
+    MiniMax M2.7 wraps answers in <think> reasoning blocks; strip those first,
+    then take the outermost JSON object so the verdict survives extra prose.
+    """
+    cleaned = _THINK_RE.sub("", text or "").strip()
+    match = _SCAM_JSON_RE.search(cleaned)
+    if not match:
+        return None
+    try:
+        data = json.loads(match.group(0))
+    except json.JSONDecodeError:
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def _safe_log_value(value: Any) -> str:
@@ -62,7 +80,8 @@ SECURITY_CONFIG: dict[str, object] = {
     "ESTABLISHED_ACCOUNT_MIN_AGE_HOURS": 720,  # 30 Tage
     "ESTABLISHED_MIN_JOIN_HOURS": 24,
     # AI-Scam-Erkennung fuer Einzelnachrichten mit Keyword-Treffer.
-    "AI_SCAM_PROVIDER": "openai",
+    # Alle AI-Checks laufen ueber MiniMax (OpenAI ist auf diesem Bot nicht konfiguriert).
+    "AI_SCAM_PROVIDER": "minimax",
     "AI_SCAM_CONFIDENCE": 0.78,
     # AI-Bild-Scam-Erkennung (Multimodal, nur MiniMax unterstuetzt).
     "AI_IMAGE_PROVIDER": "minimax",
@@ -71,6 +90,9 @@ SECURITY_CONFIG: dict[str, object] = {
     "IMAGE_CHANNEL_THRESHOLD": 2,
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,
+    # Holding-Timeout (Minuten) bei erkanntem Burst, der von der AI NICHT als Scam
+    # bestaetigt wurde. Reversibel — Mod prueft danach (Ban oder Timeout aufheben).
+    "PROPOSAL_TIMEOUT_MINUTES": 60,
     # Timeout fuer Buttons (Sekunden).
     "VIEW_TIMEOUT_SECONDS": 86400,  # 24h
     # Appeal Textlaenge.
@@ -298,6 +320,9 @@ class SecurityGuard(commands.Cog):
         )
         self.image_channel_threshold = max(2, int(cfg.get("IMAGE_CHANNEL_THRESHOLD", 2) or 2))
         self.timeout_minutes = max(5, int(cfg.get("TIMEOUT_MINUTES", 1440) or 1440))
+        self.proposal_timeout_minutes = max(
+            5, int(cfg.get("PROPOSAL_TIMEOUT_MINUTES", 60) or 60)
+        )
         self.view_timeout_seconds = max(60, int(cfg.get("VIEW_TIMEOUT_SECONDS", 86400) or 86400))
         self.appeal_min_chars = max(1, int(cfg.get("APPEAL_MIN_CHARS", 4) or 4))
         self.appeal_max_chars = max(
@@ -439,22 +464,28 @@ class SecurityGuard(commands.Cog):
                 try:
                     combined_text = " ".join(m.content for m in recent_msgs if m.content).strip()
                     if combined_text:
-                        is_scam, confidence, ai_reason = await self._ai_check_scam(combined_text[:2000])
+                        txt_scam, txt_conf, txt_reason = await self._ai_check_scam(combined_text[:2000])
                     else:
-                        is_scam, confidence, ai_reason = False, 0.0, "no_text"
+                        txt_scam, txt_conf, txt_reason = False, 0.0, "no_text"
 
-                    # Bilder zusaetzlich pruefen wenn Text nicht reicht
-                    if not is_scam and any(m.attachments for m in recent_msgs):
+                    # Bild-Check getrennt halten, damit beide Urteile im Review sichtbar bleiben.
+                    img_scam, img_conf, img_reason = False, 0.0, "no_attachments"
+                    text_confirmed = txt_scam and txt_conf >= self.ai_scam_confidence
+                    if not text_confirmed and any(m.attachments for m in recent_msgs):
                         img_scam, img_conf, img_reason = await self._ai_check_image_scam(recent_msgs)
-                        if img_scam and img_conf > confidence:
-                            is_scam, confidence, ai_reason = img_scam, img_conf, img_reason
+
+                    # Staerkeres bestaetigtes Signal entscheidet ueber den Auto-Ban.
+                    is_scam, confidence, ai_reason = txt_scam, txt_conf, txt_reason
+                    if img_scam and img_conf > confidence:
+                        is_scam, confidence, ai_reason = img_scam, img_conf, img_reason
 
                     if is_scam and confidence >= self.ai_scam_confidence:
                         full_reason = f"{reason}; AI conf {confidence:.0%}: {ai_reason}"
                         await self._handle_incident(member, recent_msgs, full_reason, meta)
                     else:
                         await self._handle_burst_proposal(
-                            member, recent_msgs, reason, meta, confidence, ai_reason
+                            member, recent_msgs, reason, meta,
+                            txt_conf, txt_reason, img_conf, img_reason,
                         )
                 finally:
                     self._message_history.pop(member.id, None)
@@ -558,13 +589,9 @@ class SecurityGuard(commands.Cog):
             return False, 0.0, "ai_error"
         if not text:
             return False, 0.0, "no_response"
-        match = _SCAM_JSON_RE.search(text)
-        if not match:
+        data = _parse_scam_json(text)
+        if data is None:
             return False, 0.0, "parse_error"
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return False, 0.0, "json_error"
         is_scam = bool(data.get("is_scam", False))
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
         reason = str(data.get("reason", ""))[:300]
@@ -607,14 +634,9 @@ class SecurityGuard(commands.Cog):
 
         if not text:
             return False, 0.0, "no_response"
-        match = _SCAM_JSON_RE.search(text)
-        if not match:
+        data = _parse_scam_json(text)
+        if data is None:
             return False, 0.0, "parse_error"
-        try:
-            data = json.loads(match.group(0))
-        except json.JSONDecodeError:
-            return False, 0.0, "json_error"
-
         is_scam = bool(data.get("is_scam", False))
         confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
         reason = str(data.get("reason", ""))[:300]
@@ -846,29 +868,52 @@ class SecurityGuard(commands.Cog):
         msgs: list[RecentMessage],
         trigger_reason: str,
         meta: dict[str, int],
-        ai_confidence: float,
-        ai_reason: str,
+        txt_conf: float,
+        txt_reason: str,
+        img_conf: float,
+        img_reason: str,
     ) -> None:
         now = discord.utils.utcnow()
         case_id = self._make_case_id(member, now)
+        hold_minutes = self.proposal_timeout_minutes
 
         record = IncidentCase(
             case_id=case_id,
             guild_id=member.guild.id,
             user_id=member.id,
             user_tag=str(member),
-            reason=f"Burst (AI nicht bestaetigt, conf {ai_confidence:.0%}): {trigger_reason}",
+            reason=(
+                f"Burst (AI nicht bestaetigt — Text {txt_conf:.0%}/{txt_reason}, "
+                f"Bild {img_conf:.0%}/{img_reason}): {trigger_reason}"
+            ),
             created_at=now,
-            action="proposal-only",
+            action="auto-timeout-burst",
         )
         self._remember_case(record)
         await self._persist_incident(record, meta, msgs)
 
+        # Beweise sichern, BEVOR geloescht wird (CDN-URLs werden sonst ungueltig).
+        forwarded_files = await self._collect_attachments(msgs)
+
+        # Autonom durchgreifen: Holding-Timeout setzen + Burst-Nachrichten loeschen.
+        timeout_ok = await self._apply_timeout(
+            member,
+            f"Burst von neuem Account (AI nicht bestaetigt): {trigger_reason}",
+            case_id,
+            minutes=hold_minutes,
+        )
+        deleted = await self._delete_messages(msgs, f"Burst: {trigger_reason}")
+        dm_sent = (
+            await self._send_burst_timeout_dm(member, case_id, hold_minutes)
+            if timeout_ok
+            else False
+        )
+
         mod_channel = await self._resolve_mod_channel(member.guild)
         if not mod_channel:
             log.info(
-                "Burst nicht bestaetigt fuer %s (case %s, conf %.0f%%) — kein Mod-Channel konfiguriert.",
-                member.id, case_id, ai_confidence * 100,
+                "Burst auto-timeout fuer %s (case %s): Timeout=%s, geloescht=%s — kein Mod-Channel.",
+                member.id, case_id, timeout_ok, deleted,
             )
             return
 
@@ -879,8 +924,9 @@ class SecurityGuard(commands.Cog):
             attach = f" [{len(m.attachments)} Anhang]" if m.attachments else ""
             snippets.append(f"{ch}: {text}{attach}")
 
+        hold_label = f"{hold_minutes // 60}h" if hold_minutes % 60 == 0 else f"{hold_minutes}min"
         embed = discord.Embed(
-            title="Burst erkannt — AI nicht bestaetigt (kein Auto-Ban)",
+            title="Burst erkannt — Auto-Timeout gesetzt (AI nicht bestaetigt)",
             color=0xF39C12,
             timestamp=now,
         )
@@ -893,20 +939,64 @@ class SecurityGuard(commands.Cog):
             value=f"{meta.get('message_count', 0)} Nachrichten / {meta.get('channel_count', 0)} Channels",
             inline=True,
         )
-        embed.add_field(name="AI Confidence", value=f"{ai_confidence:.0%} (unter Schwelle)", inline=True)
-        embed.add_field(name="AI Reason", value=ai_reason or "—", inline=False)
+        embed.add_field(
+            name="Aktion",
+            value=(
+                f"Timeout {hold_label}: {'✓' if timeout_ok else 'fehlgeschlagen ✗'}\n"
+                f"Geloescht: {deleted}\nDM: {'ja' if dm_sent else 'nein'}"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Text-Check (MiniMax)", value=f"{txt_conf:.0%} — {txt_reason or '—'}", inline=False
+        )
+        embed.add_field(
+            name="Bild-Check (MiniMax)", value=f"{img_conf:.0%} — {img_reason or '—'}", inline=False
+        )
         embed.add_field(
             name="Nachrichten",
             value="\n".join(snippets[:8]) or "(keine)",
             inline=False,
         )
-        embed.set_footer(text="Kein automatischer Ban — bitte manuell prüfen.")
+        embed.set_footer(
+            text=f"Auto-Timeout {hold_label} gesetzt + Burst geloescht. "
+                 "Bitte pruefen: Ban (endgueltig) oder Timeout aufheben (false positive)."
+        )
 
         view = ScamBanView(self, member.guild.id, member.id, case_id)
         try:
-            await mod_channel.send(embed=embed, view=view)
+            await mod_channel.send(embed=embed, view=view, files=forwarded_files or None)
         except discord.HTTPException as exc:
             log.warning("Konnte Burst-Proposal nicht posten fuer Case %s: %s", case_id, exc)
+
+    async def _send_burst_timeout_dm(
+        self, member: discord.Member, case_id: str, minutes: int
+    ) -> bool:
+        if minutes % 60 == 0:
+            hours = minutes // 60
+            dauer = "1 Stunde" if hours == 1 else f"{hours} Stunden"
+        else:
+            dauer = f"{minutes} Minuten"
+        embed = discord.Embed(
+            title="Du wurdest vorübergehend stummgeschaltet",
+            color=0xF39C12,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Server", value=member.guild.name, inline=False)
+        embed.add_field(
+            name="Grund",
+            value="Dein Account hat in kurzer Zeit in mehreren Kanälen gepostet, was wie Spam "
+                  "aussah. Das Mod-Team prüft den Fall — bei einem Versehen wird der Timeout aufgehoben.",
+            inline=False,
+        )
+        embed.add_field(name="Dauer", value=dauer, inline=True)
+        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.set_footer(text="Falls das ein Irrtum ist, wende dich ans Mod-Team.")
+        try:
+            await member.send(embed=embed)
+            return True
+        except discord.HTTPException:
+            return False
 
     async def _send_user_dm(self, member: discord.Member, reason: str, case_id: str) -> bool:
         action_label = "banned" if self.punishment == "ban" else "timed out"
@@ -968,7 +1058,9 @@ class SecurityGuard(commands.Cog):
             log.warning("Failed to ban member %s: %s", member.id, exc)
         return False
 
-    async def _apply_timeout(self, member: discord.Member, reason: str, case_id: str) -> bool:
+    async def _apply_timeout(
+        self, member: discord.Member, reason: str, case_id: str, minutes: int | None = None
+    ) -> bool:
         guild = member.guild
         me = guild.me
         if me is None:
@@ -983,7 +1075,8 @@ class SecurityGuard(commands.Cog):
             log.warning("Missing Moderate Members permission to timeout %s", member.id)
             return False
 
-        until = discord.utils.utcnow() + timedelta(minutes=self.timeout_minutes)
+        mins = minutes if minutes is not None else self.timeout_minutes
+        until = discord.utils.utcnow() + timedelta(minutes=mins)
         timeout_reason = f"[SecurityGuard][case:{case_id}] {reason}"
         try:
             await member.edit(communication_disabled_until=until, reason=timeout_reason)
@@ -1310,8 +1403,9 @@ class SecurityGuard(commands.Cog):
             f"Nachrichten: >= {self.message_threshold}\n"
             f"Account-Alter: <= {self.account_max_age_hours}h (kein Join-Gate)\n"
             f"Etabliert ab: Account >= {self.established_account_min_age_hours}h & Join >= {self.established_min_join_hours}h → Mod-Vorschlag\n"
-            f"AI-Scam: Provider={self.ai_scam_provider} | Confidence >= {self.ai_scam_confidence:.0%}\n"
-            f"Aktion: {self.punishment} | Timeout: {self.timeout_minutes}m\n"
+            f"AI-Scam: Provider={self.ai_scam_provider} | Bild={self.ai_image_provider} | Confidence >= {self.ai_scam_confidence:.0%}\n"
+            f"Aktion (AI-bestaetigt): {self.punishment} | Timeout: {self.timeout_minutes}m\n"
+            f"Burst ohne AI-Bestaetigung: Auto-Loeschen + Holding-Timeout {self.proposal_timeout_minutes}m + Mod-Review\n"
             f"Review-Channel: {review} | Mod-Channel: {mod}\n"
             f"Aktiv auf Guilds: {guilds}"
         )
