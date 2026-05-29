@@ -135,6 +135,23 @@ class ChangelogPublisher(commands.Cog):
 
         if not title or not content:
             return web.json_response({"ok": False, "error": "title and content required"}, status=400)
+
+        # Direkte channel_id hat Vorrang vor target
+        raw_channel_id = data.get("channel_id")
+        if raw_channel_id:
+            try:
+                direct_channel_id = int(raw_channel_id)
+            except (TypeError, ValueError):
+                return web.json_response({"ok": False, "error": "channel_id must be an integer"}, status=400)
+            try:
+                channel = self.bot.get_channel(direct_channel_id) or await self.bot.fetch_channel(direct_channel_id)
+                embed = await self._build_embed(title, content, target)
+                await channel.send(embed=embed)
+                return web.json_response({"ok": True, "channel_id": direct_channel_id})
+            except Exception as e:
+                log.warning("Changelog HTTP post (direct channel) failed: %s", e)
+                return web.json_response({"ok": False, "error": str(e)}, status=500)
+
         if target not in VALID_TARGETS:
             return web.json_response({"ok": False, "error": f"target must be one of {VALID_TARGETS}"}, status=400)
 

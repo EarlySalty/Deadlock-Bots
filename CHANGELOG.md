@@ -1,3 +1,8 @@
+## #42 — Direkte Channel-ID für interne API-Posts
+
+- Interne Bot-Posts können jetzt einen beliebigen Discord-Kanal direkt ansprechen (statt nur "all"/"twitch")
+- Wird genutzt für Moderations-Alerts aus dem Twitch-Bot
+
 ## #41 — Changelog-Posts direkt in Discord
 
 - Neue Changelogs landen jetzt automatisch als Discord-Embed im Dev-Update-Kanal
