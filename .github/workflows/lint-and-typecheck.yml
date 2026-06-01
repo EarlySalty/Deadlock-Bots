@@ -1,9 +1,6 @@
 name: "🔍 Lint & Type Check"
 
 on:
-  push:
-    branches: [ "main", "master", "develop" ]
-  pull_request:
   workflow_dispatch:
 
 permissions:
