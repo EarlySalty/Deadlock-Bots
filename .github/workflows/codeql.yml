@@ -1,9 +1,6 @@
 name: "CodeQL Advanced (auto-detect)"
 
 on:
-  push:
-    branches: [ "main", "master", "develop" ]
-  pull_request:
   schedule:
     - cron: '44 10 * * 1'
   workflow_dispatch:
