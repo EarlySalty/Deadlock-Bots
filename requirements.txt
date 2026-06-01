@@ -5,7 +5,7 @@
 discord.py==2.7.1
 
 # HTTP / Dashboard
-aiohttp==3.13.5
+aiohttp==3.14.0
 aiohttp-jinja2==1.6
 aiohttp-session==2.12.1
 aiohttp-basicauth==1.1.0
