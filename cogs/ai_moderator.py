@@ -23,7 +23,7 @@ AI_MODERATOR_CONFIG = {
     "MOD_REVIEW_CHANNEL_ID": 1315684135175716978,
     "LOG_CHANNEL_ID": 1374364800817303632,
     "AI_PROVIDER": "minimax",
-    "AI_MODEL": "MiniMax-M2.7",
+    "AI_MODEL": "MiniMax-M3",
     "TIMEOUT_MINUTES": 1440,
     "RAGEBAIT_WINDOW_MINUTES": 120,
     "RAGEBAIT_ESCALATE_THRESHOLD": 4,
@@ -31,7 +31,7 @@ AI_MODERATOR_CONFIG = {
     "PROPOSE_CONFIDENCE": 0.78,
     "CONTEXT_ESCALATE_BETWEEN": (0.55, 0.78),
     "CONTEXT_BACKFILL_MESSAGES": 12,
-    "AUTO_DELETE_CATEGORIES": ["nsfw_explicit", "csam", "raping", "epstein_child"],
+    "AUTO_DELETE_CATEGORIES": ["nsfw_explicit", "csam", "raping", "epstein_child", "scam"],
     "IGNORE_BOTS": True,
     "PER_USER_COOLDOWN_SECONDS": 2,
     "MAX_IMAGES_PER_CHECK": 4,
@@ -45,6 +45,7 @@ WICHTIG — Standardmaessig ist der Ton auf diesem Server rau und direkt. Sei NI
 
 Klare Lösch-Faelle (verdict="delete", hohe confidence):
 - NSFW explizit, Pornografie, sexuelle Gewalt, Raping, CSAM, Minderjaehrigen-Sexualisierung, Epstein-Anspielungen.
+- Crypto-Scam, Advance-Fee-Fraud, Investment-Betrug, Gewinnversprechen mit Rueckzahlungspflicht (z. B. "I'll help the first 10 people earn $100k from crypto").
 
 Moderationsvorschlag nur bei echtem Verstoss (verdict="propose", confidence >= 0.80):
 - Gezielte rassistische Beleidigungen oder Slurs mit klarer Diskriminierungsabsicht.
@@ -70,7 +71,7 @@ Zweifelsfaelle:
 - Lieber zu wenig flaggen als zu viel — Mods koennen selbst eingreifen.
 
 Erlaubte Kategorien:
-nsfw_explicit, csam, raping, epstein_child, racism, harassment, hate_speech, ragebait_ok, game_related_ok, other
+nsfw_explicit, csam, raping, epstein_child, racism, harassment, hate_speech, ragebait_ok, game_related_ok, scam, other
 
 Output-Format strikt:
 {"verdict":"ok|delete|propose|needs_context","category":"...","confidence":0.0,"reason":"1-2 Saetze Deutsch","needs_context":true}
@@ -133,6 +134,7 @@ ALLOWED_CATEGORIES = {
     "hate_speech",
     "ragebait_ok",
     "game_related_ok",
+    "scam",
     "other",
 }
 INTERNAL_CATEGORIES = ALLOWED_CATEGORIES | {"persistent_ragebait"}
@@ -147,6 +149,7 @@ CATEGORY_LABELS = {
     "hate_speech": "Hate Speech",
     "ragebait_ok": "Ragebait OK",
     "game_related_ok": "Game Related OK",
+    "scam": "Scam",
     "persistent_ragebait": "Persistent Ragebait",
     "other": "Other",
 }
@@ -320,6 +323,37 @@ class AcceptModerationButton(
         await self.cog.handle_accept_interaction(interaction, self.case_id)
 
 
+class BanModerationButton(
+    discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
+    template=rf"aimod:ban:{CASE_ID_TEMPLATE}",
+):
+    def __init__(self, cog: AIModeratorCog, case_id: str | None = None) -> None:
+        self.cog = cog
+        self.case_id = case_id or PERSISTENT_CASE_PLACEHOLDER
+        super().__init__(
+            discord.ui.Button(
+                label="Ban",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"aimod:ban:{self.case_id}",
+            )
+        )
+
+    @classmethod
+    async def from_custom_id(
+        cls,
+        interaction: discord.Interaction,
+        item: discord.ui.Item[Any],
+        match: re.Match[str],
+    ) -> BanModerationButton:
+        cog = interaction.client.get_cog("AIModeratorCog")
+        if cog is None:
+            raise RuntimeError("AIModeratorCog nicht geladen")
+        return cls(cog, match.group("case_id"))
+
+    async def callback(self, interaction: discord.Interaction) -> Any:
+        await self.cog.handle_ban_interaction(interaction, self.case_id)
+
+
 class DenyModerationButton(
     discord.ui.DynamicItem[discord.ui.Button[discord.ui.View]],
     template=rf"aimod:deny:{CASE_ID_TEMPLATE}",
@@ -355,6 +389,7 @@ class ModerationProposalView(discord.ui.View):
     def __init__(self, cog: AIModeratorCog, case_id: str | None) -> None:
         super().__init__(timeout=None)
         self.add_item(AcceptModerationButton(cog, case_id))
+        self.add_item(BanModerationButton(cog, case_id))
         self.add_item(DenyModerationButton(cog, case_id))
 
 
@@ -390,7 +425,11 @@ class AIModeratorCog(commands.Cog):
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            self.bot.add_dynamic_items(AcceptModerationButton, DenyModerationButton)
+            self.bot.add_dynamic_items(
+                AcceptModerationButton,
+                BanModerationButton,
+                DenyModerationButton,
+            )
         except Exception as exc:
             log.debug("Dynamic items bereits registriert oder fehlgeschlagen: %s", exc)
 
@@ -558,6 +597,61 @@ class AIModeratorCog(commands.Cog):
             await asyncio.to_thread(self._update_log_message_id_sync, case.case_id, log_message_id)
 
         await interaction.followup.send("Moderationsvorschlag akzeptiert.", ephemeral=True)
+
+    async def handle_ban_interaction(
+        self, interaction: discord.Interaction, case_id: str
+    ) -> None:
+        if not self._has_review_permission(interaction):
+            await interaction.response.send_message("Keine Berechtigung.", ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        case = await asyncio.to_thread(self._fetch_case_sync, case_id)
+        if case is None:
+            await interaction.followup.send("Case nicht gefunden.", ephemeral=True)
+            return
+        if case.action in {"accepted", "denied", "banned"}:
+            await interaction.followup.send("Case wurde bereits bearbeitet.", ephemeral=True)
+            return
+
+        delete_ok, delete_note = await self._delete_case_message(case)
+        ban_ok, ban_note = await self._ban_case_member(case, interaction.guild)
+        detail_bits = [note for note in (delete_note, ban_note) if note]
+
+        await asyncio.to_thread(
+            self._mark_case_banned_sync,
+            case.case_id,
+            interaction.user.id,
+        )
+        updated = await asyncio.to_thread(self._fetch_case_sync, case.case_id)
+        if updated is None:
+            updated = case
+            updated.action = "banned"
+            updated.mod_id = interaction.user.id
+
+        status = f"Banned by {interaction.user.mention}"
+        if detail_bits:
+            status = f"{status} ({'; '.join(detail_bits)})"
+        await self._edit_review_message(updated, status_text=status)
+
+        detail = "; ".join(
+            bit
+            for bit in (
+                None if delete_ok else "Delete fehlgeschlagen",
+                None if ban_ok else "Ban fehlgeschlagen",
+            )
+            if bit
+        )
+        log_message_id = await self._post_action_log(
+            updated,
+            action="banned",
+            mod_user=interaction.user,
+            detail=detail,
+        )
+        if log_message_id is not None:
+            await asyncio.to_thread(self._update_log_message_id_sync, case.case_id, log_message_id)
+
+        await interaction.followup.send("User gebannt.", ephemeral=True)
 
     async def handle_deny_interaction(self, interaction: discord.Interaction, case_id: str) -> None:
         if not self._has_review_permission(interaction):
@@ -1364,6 +1458,42 @@ class AIModeratorCog(commands.Cog):
                 return False, "Member nicht abrufbar"
         return await self._timeout_member(guild, member, case.case_id)
 
+    async def _ban_case_member(
+        self, case: ModerationCase, guild: discord.Guild | None
+    ) -> tuple[bool, str | None]:
+        if guild is None:
+            return False, "Guild nicht verfuegbar"
+        member = guild.get_member(case.user_id)
+        if member is None:
+            try:
+                member = await guild.fetch_member(case.user_id)
+            except discord.NotFound:
+                return False, "Member nicht gefunden"
+            except discord.HTTPException:
+                return False, "Member nicht abrufbar"
+        me = guild.me
+        if me is None:
+            try:
+                me = await guild.fetch_member(self.bot.user.id)
+            except discord.HTTPException:
+                return False, "Bot-Member nicht aufloesbar"
+        if not me.guild_permissions.ban_members:
+            return False, "Bot hat kein Ban Members"
+        try:
+            await guild.ban(
+                discord.Object(id=case.user_id),
+                reason=f"AI-Moderator Ban {case.case_id}",
+                delete_message_days=1,
+            )
+            return True, None
+        except discord.NotFound:
+            return False, "Member nicht gefunden"
+        except discord.Forbidden:
+            return False, "Ban nicht erlaubt"
+        except discord.HTTPException as exc:
+            log.warning("Ban fehlgeschlagen fuer Member %s: %s", case.user_id, exc)
+            return False, "Ban fehlgeschlagen"
+
     async def _timeout_member(
         self,
         guild: discord.Guild,
@@ -1498,6 +1628,20 @@ class AIModeratorCog(commands.Cog):
                 """
                 UPDATE ai_moderation_cases
                 SET action = 'accepted',
+                    mod_id = ?,
+                    mod_action_at = CURRENT_TIMESTAMP
+                WHERE case_id = ?
+                """,
+                (mod_id, case_id),
+            )
+            connection.commit()
+
+    def _mark_case_banned_sync(self, case_id: str, mod_id: int) -> None:
+        with self._connect_db() as connection:
+            connection.execute(
+                """
+                UPDATE ai_moderation_cases
+                SET action = 'banned',
                     mod_id = ?,
                     mod_action_at = CURRENT_TIMESTAMP
                 WHERE case_id = ?

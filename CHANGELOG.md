@@ -1,3 +1,11 @@
+## #45 — Crypto-Scam: Jetzt automatisch gelöscht + Ban-Button für Mods
+
+**Problem:** Ein Einzel-Scam (eine Nachricht, ein Kanal) wurde vom Bot erkannt (Confidence 0,97), aber weder automatisch gelöscht noch direkt gesperrt — weil er in keine der Auto-Delete-Kategorien fiel. Der Moderator konnte anschließend auch nicht direkt über den Bot bannen, da "Accept" nur einen 24h-Timeout ausgelöst und keine Ban-Option angeboten hat.
+
+**Geändert:** `scam` als vollständige Kategorie im KI-Moderator eingeführt: im System-Prompt beschrieben, in die erlaubten Kategorien aufgenommen und in die Auto-Delete-Liste eingetragen. Zusätzlich ist ein neuer **Ban-Button** in jede Moderations-Review-Nachricht eingebaut worden.
+
+**Wie's jetzt funktioniert:** Stuft die KI eine Nachricht mit `category=scam` und `verdict=delete` bei Confidence ≥ 0,90 ein, wird sie sofort gelöscht und der User automatisch 24h stummgeschaltet — ohne Mod-Interaktion. Liegt die Confidence zwischen 0,78 und 0,90, landet ein Vorschlag im Review-Kanal mit drei Buttons: **Accept** (Nachricht löschen + Timeout), **Ban** (Nachricht löschen + permanenter Serverausschluss) und **Deny** (Fall ablehnen). Der Ban-Pfad greift auch bei allen anderen Kategorien — nicht nur bei Scam.
+
 ## #44 — Gekaperte Stamm-Accounts: Scam-Bilder werden gestoppt
 
 **Problem:** Ein langjähriges, etabliertes Mitglied wurde gehackt und hat in Sekunden Krypto-/Casino-Scam-Screenshots (gefälschte Auszahlungs-„Beweise", ein Fake-Promi-Giveaway, eine Casino-Bonusseite) über fünf, sechs Kanäle gestreut. Der Bot hat nicht reagiert — aus zwei Gründen. Erstens: Das harte Durchgreifen aus #43 galt nur für neue Accounts unter 30 Tagen; ein gekapertes Alt-Mitglied fiel komplett durch dieses Raster. Zweitens: Der Bild-Check hing an einer KI, die die Bilder technisch gar nicht „sehen" kann — das hier eingesetzte Modell ist reiner Text. Die in #43 erwähnte Bild-Mitlesung lief faktisch ins Leere, das Bild-Urteil stand deshalb immer auf „0 %".
