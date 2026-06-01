@@ -1,9 +1,6 @@
 name: "🔒 Deep Security Scan (Optimized)"
 
 on:
-  push:
-    branches: [ "main", "master", "develop" ]
-  pull_request:
   workflow_dispatch:
 
 permissions:
