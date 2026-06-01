@@ -1,7 +1,10 @@
 import asyncio
+import contextlib
 import json
 import logging
+import os
 import re
+import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -24,13 +27,13 @@ SCAM_DETECTION_SYSTEM_PROMPT = (
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
 )
 
-SCAM_IMAGE_SYSTEM_PROMPT = (
-    "You are a scam detector for a Discord gaming server. "
-    "Analyze the images and determine if they show financial scam content: "
-    "fake investment or trading profit screenshots, fake X/Twitter posts about earnings, "
-    "crypto/forex/stock gain screenshots, testimonials about making money, "
-    "or any get-rich-quick scheme visuals. "
-    "Reply only with valid JSON, no other text: "
+# Prompt fuer den MiniMax-Vision-Check via mmx-CLI (`mmx vision describe`).
+# Einzelner Prompt (kein separater System-Prompt im CLI), liefert dasselbe JSON-Schema.
+VISION_SCAM_PROMPT = (
+    "You are a scam detector for a Discord gaming server. Look at the image. "
+    "Decide if it shows financial/crypto/casino/gambling/giveaway scam content "
+    "(fake withdrawals, betting bonuses, promo codes, fake celebrity crypto promos, "
+    "trading/earnings proof). Reply ONLY with valid JSON, no other text: "
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
 )
 
@@ -88,6 +91,22 @@ SECURITY_CONFIG: dict[str, object] = {
     "AI_IMAGE_CONFIDENCE": 0.75,
     # Mindestanzahl Channels mit Bildern um Bild-Scam-Check auszuloesen.
     "IMAGE_CHANNEL_THRESHOLD": 2,
+    # --- Account-Takeover-Schnellpfad (deterministisch, OHNE AI) ---
+    # Gekaperter Account streut in Sekunden Bilder ueber mehrere Channels.
+    # Dieser Pfad greift fuer ALLE Accounts (auch etablierte) und braucht kein AI-Urteil.
+    "TAKEOVER_ENABLED": True,
+    # Zeitfenster fuer das Muster (Sekunden).
+    "TAKEOVER_WINDOW_SECONDS": 30,
+    # Mindestanzahl VERSCHIEDENER Channels mit Bild im Fenster (>=2 Bilder in >=2 Channels).
+    "TAKEOVER_IMAGE_CHANNELS": 2,
+    # MiniMax als VERSTAERKER: schickt die Bilder zusaetzlich durch die Bild-Scam-Pruefung
+    # und haengt das Urteil an den Mod-Alarm. Reines Label — die Quarantaene laeuft auch
+    # ohne/gegen das AI-Urteil. Timeout kappt einen haengenden Call.
+    "TAKEOVER_AI_LABEL": True,
+    "TAKEOVER_AI_TIMEOUT_SECONDS": 8,
+    # Pfad zur MiniMax-CLI fuer den Vision-Check (`mmx vision describe`).
+    # M2.7 ist text-only; Bild-Verstehen laeuft NUR ueber diese CLI (einmal `mmx auth login`).
+    "VISION_CLI_BIN": "/home/naniadm/.local/bin/mmx",
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,
     # Holding-Timeout (Minuten) bei erkanntem Burst, der von der AI NICHT als Scam
@@ -310,7 +329,7 @@ class SecurityGuard(commands.Cog):
         self.established_min_join_hours = max(
             0, int(cfg.get("ESTABLISHED_MIN_JOIN_HOURS", 24) or 24)
         )
-        self.ai_scam_provider = str(cfg.get("AI_SCAM_PROVIDER", "openai") or "openai").lower()
+        self.ai_scam_provider = str(cfg.get("AI_SCAM_PROVIDER", "minimax") or "minimax").lower()
         self.ai_scam_confidence = max(
             0.5, min(1.0, float(cfg.get("AI_SCAM_CONFIDENCE", 0.78) or 0.78))
         )
@@ -319,6 +338,14 @@ class SecurityGuard(commands.Cog):
             0.5, min(1.0, float(cfg.get("AI_IMAGE_CONFIDENCE", 0.75) or 0.75))
         )
         self.image_channel_threshold = max(2, int(cfg.get("IMAGE_CHANNEL_THRESHOLD", 2) or 2))
+        self.takeover_enabled = bool(cfg.get("TAKEOVER_ENABLED", True))
+        self.takeover_window_seconds = max(5, int(cfg.get("TAKEOVER_WINDOW_SECONDS", 30) or 30))
+        self.takeover_image_channels = max(2, int(cfg.get("TAKEOVER_IMAGE_CHANNELS", 2) or 2))
+        self.takeover_ai_label = bool(cfg.get("TAKEOVER_AI_LABEL", True))
+        self.takeover_ai_timeout = max(
+            2, int(cfg.get("TAKEOVER_AI_TIMEOUT_SECONDS", 8) or 8)
+        )
+        self.vision_bin = str(cfg.get("VISION_CLI_BIN", "/home/naniadm/.local/bin/mmx"))
         self.timeout_minutes = max(5, int(cfg.get("TIMEOUT_MINUTES", 1440) or 1440))
         self.proposal_timeout_minutes = max(
             5, int(cfg.get("PROPOSAL_TIMEOUT_MINUTES", 60) or 60)
@@ -455,6 +482,19 @@ class SecurityGuard(commands.Cog):
         )
         self._prune_history(member.id, now)
         recent_msgs = list(history)
+
+        # Pfad 0: Account-Takeover — Bilder in Sekunden ueber mehrere Channels (ALLE Accounts,
+        # deterministisch ohne AI). Faengt gekaperte Bestands-Accounts, die Scam-Bilder streuen.
+        if self.takeover_enabled and member.id not in self._active_cases:
+            tk_triggered, tk_reason, tk_meta, tk_burst = self._detect_takeover(recent_msgs, now)
+            if tk_triggered:
+                self._active_cases.add(member.id)
+                try:
+                    await self._handle_takeover(member, tk_burst, tk_reason, tk_meta)
+                finally:
+                    self._message_history.pop(member.id, None)
+                    self._active_cases.discard(member.id)
+                return
 
         # Pfad 1: Mehrkanal-Burst — nur fuer junge Accounts (<30 Tage), AI-bestaetigt
         if is_young and member.id not in self._active_cases:
@@ -602,39 +642,103 @@ class SecurityGuard(commands.Cog):
         return len(channels_with_images) >= self.image_channel_threshold
 
     async def _ai_check_image_scam(self, msgs: list[RecentMessage]) -> tuple[bool, float, str]:
-        ai = self.bot.get_cog("AIConnector")
-        if ai is None or not hasattr(ai, "generate_multimodal"):
-            return False, 0.0, "ai_unavailable"
+        """Bild-Scam-Pruefung ueber die MiniMax-CLI (`mmx vision describe`).
 
-        image_urls: list[str] = []
+        M2.7 ist text-only und kann Bilder NICHT verarbeiten — der fruehere
+        Multimodal-Chat-Call lieferte deshalb immer "No images provided". Vision
+        laeuft jetzt ueber das echte MiniMax-VLM via CLI. Geprueft wird ein
+        repraesentatives Bild aus dem Burst (reicht fuer das Scam-Urteil).
+        """
+        target: discord.Attachment | None = None
         for msg in msgs:
             for att in msg.attachments:
-                if (att.content_type or "").lower().startswith("image/"):
-                    image_urls.append(att.url)
-                if len(image_urls) >= 4:
+                if self._is_image_attachment(att):
+                    target = att
                     break
-            if len(image_urls) >= 4:
+            if target is not None:
                 break
-
-        if not image_urls:
+        if target is None:
             return False, 0.0, "no_images"
 
         try:
-            text, _ = await ai.generate_multimodal(
-                provider=self.ai_image_provider,
-                prompt="Analyze these images for scam content.",
-                images=image_urls,
-                system_prompt=SCAM_IMAGE_SYSTEM_PROMPT,
-                max_output_tokens=120,
-                temperature=0.1,
-            )
+            data_bytes = await target.read()
         except Exception as exc:
-            log.warning("AI Bild-Scam-Check fehlgeschlagen: %s", exc)
-            return False, 0.0, "ai_error"
+            log.warning("Bild-Download fuer Vision-Check fehlgeschlagen: %s", exc)
+            return False, 0.0, "download_error"
 
-        if not text:
-            return False, 0.0, "no_response"
-        data = _parse_scam_json(text)
+        return await self._mmx_vision_scam(data_bytes, target.filename or "image.jpg")
+
+    async def _mmx_vision_scam(self, image_bytes: bytes, filename: str) -> tuple[bool, float, str]:
+        """Schreibt das Bild in eine Temp-Datei und laesst es von `mmx vision describe`
+        bewerten. mmx ist persistent eingeloggt (`mmx auth login`) — kein Key im Bot.
+        Antwort-Envelope: {"content": "```json {...}```", "base_resp": {"status_code": 0}}.
+        """
+        suffix = os.path.splitext(filename)[1].lower()
+        if suffix not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
+            suffix = ".jpg"
+
+        tmp_path: str | None = None
+        proc: asyncio.subprocess.Process | None = None
+        out = b""
+        err = b""
+        try:
+            fd, tmp_path = tempfile.mkstemp(prefix="sg_vision_", suffix=suffix)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(image_bytes)
+
+            cmd = [
+                self.vision_bin, "vision", "describe",
+                "--image", tmp_path,
+                "--prompt", VISION_SCAM_PROMPT,
+                "--output", "json",
+                "--quiet", "--non-interactive",
+                "--timeout", str(self.takeover_ai_timeout),
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+            except FileNotFoundError:
+                log.warning("mmx-CLI nicht gefunden unter %s", self.vision_bin)
+                return False, 0.0, "mmx_missing"
+
+            try:
+                out, err = await asyncio.wait_for(
+                    proc.communicate(), timeout=self.takeover_ai_timeout + 5
+                )
+            except TimeoutError:
+                with contextlib.suppress(ProcessLookupError):
+                    proc.kill()
+                return False, 0.0, "timeout"
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                with contextlib.suppress(OSError):
+                    os.remove(tmp_path)
+
+        if proc.returncode != 0:
+            log.warning(
+                "mmx vision rc=%s: %s",
+                proc.returncode,
+                err.decode("utf-8", "replace")[:200],
+            )
+            return False, 0.0, "mmx_error"
+
+        try:
+            envelope = json.loads(out.decode("utf-8", "replace"))
+        except json.JSONDecodeError:
+            return False, 0.0, "parse_error"
+
+        content = ""
+        if isinstance(envelope, dict):
+            base = envelope.get("base_resp") or {}
+            if base.get("status_code") not in (0, None):
+                log.warning("mmx vision API-Fehler: %s", base.get("status_msg"))
+                return False, 0.0, "api_error"
+            content = str(envelope.get("content") or "")
+
+        data = _parse_scam_json(content)
         if data is None:
             return False, 0.0, "parse_error"
         is_scam = bool(data.get("is_scam", False))
@@ -709,6 +813,211 @@ class SecurityGuard(commands.Cog):
             return True, reason, meta
 
         return False, "", {}
+
+    # ---------------- Account-Takeover (deterministisch, ohne AI) ----------------
+    @staticmethod
+    def _is_image_attachment(att: discord.Attachment) -> bool:
+        ct = (att.content_type or "").lower()
+        if ct.startswith("image/"):
+            return True
+        name = (att.filename or "").lower()
+        return name.endswith((".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"))
+
+    def _detect_takeover(
+        self, msgs: list[RecentMessage], now: datetime
+    ) -> tuple[bool, str, dict[str, int], list[RecentMessage]]:
+        """Takeover-Fingerabdruck: Bilder ueber >=2 Channels in <=30s.
+
+        Rein verhaltensbasiert — kein AI-Urteil noetig. Greift fuer alle Accounts
+        (Staff ist in on_message bereits ausgenommen). Bedingung bewusst auf
+        VERSCHIEDENE Channels gestellt, damit ein normaler Doppelpost in EINEM
+        Channel nicht ausloest.
+        """
+        if not self.takeover_enabled:
+            return False, "", {}, []
+        cutoff = now - timedelta(seconds=self.takeover_window_seconds)
+        window = [m for m in msgs if m.created_at >= cutoff]
+        image_channels: dict[int, int] = {}
+        image_count = 0
+        for m in window:
+            imgs = sum(1 for a in m.attachments if self._is_image_attachment(a))
+            if imgs:
+                image_channels[m.channel_id] = image_channels.get(m.channel_id, 0) + imgs
+                image_count += imgs
+        if len(image_channels) < self.takeover_image_channels:
+            return False, "", {}, []
+        reason = (
+            f"Account-Takeover-Muster: {image_count} Bild(er) in "
+            f"{len(image_channels)} Channels in <= {self.takeover_window_seconds}s"
+        )
+        meta = {
+            "channel_count": len(image_channels),
+            "message_count": len(window),
+            "attachment_count": image_count,
+            "keyword_hit": 0,
+        }
+        return True, reason, meta, window
+
+    async def _handle_takeover(
+        self,
+        member: discord.Member,
+        burst_msgs: list[RecentMessage],
+        reason: str,
+        meta: dict[str, int],
+    ) -> None:
+        now = discord.utils.utcnow()
+        case_id = self._make_case_id(member, now)
+        record = IncidentCase(
+            case_id=case_id,
+            guild_id=member.guild.id,
+            user_id=member.id,
+            user_tag=str(member),
+            reason=reason,
+            created_at=now,
+            action="takeover-quarantine",
+        )
+        self._remember_case(record)
+        await self._persist_incident(record, meta, burst_msgs)
+
+        # 1. Beweise laden, SOLANGE die Nachrichten existieren (CDN-URLs sterben nach dem Delete).
+        forwarded_files = await self._collect_attachments(burst_msgs)
+        # 1b. MiniMax als VERSTAERKER (kein Gate): Bild-Scam-Label fuer die Mods anreichern.
+        #     Laeuft VOR dem Delete (URLs noch gueltig) und mit Timeout, damit ein haengender
+        #     Call die Loeschung nicht blockiert.
+        ai_label = await self._takeover_ai_label(burst_msgs)
+        # 2. ZUERST die Bilder in den Mod-Channel spiegeln — vor jeder Loeschung.
+        posted = await self._post_takeover_alert(
+            member, burst_msgs, meta, case_id, forwarded_files, ai_label
+        )
+        # 3. Reversible Quarantaene: 24h-Timeout (Mod kann eskalieren oder aufheben).
+        timeout_ok = await self._apply_timeout(
+            member, reason, case_id, minutes=self.timeout_minutes
+        )
+        # 4. Alle Burst-Nachrichten kanaluebergreifend loeschen.
+        deleted = await self._delete_messages(burst_msgs, reason)
+        # 5. User informieren (Hinweis auf moeglichen Hack, reversibel).
+        dm_sent = await self._send_takeover_dm(member, case_id)
+
+        log.info(
+            "Takeover-Quarantaene %s fuer %s: mod_post=%s, timeout=%s, geloescht=%s, dm=%s",
+            case_id, member.id, posted, timeout_ok, deleted, dm_sent,
+        )
+
+    async def _post_takeover_alert(
+        self,
+        member: discord.Member,
+        burst_msgs: list[RecentMessage],
+        meta: dict[str, int],
+        case_id: str,
+        forwarded_files: list[discord.File],
+        ai_label: str = "",
+    ) -> bool:
+        mod_channel = await self._resolve_mod_channel(member.guild)
+        if not mod_channel:
+            log.warning("Kein Mod-Channel gesetzt; Takeover-Case %s nur gelogt.", case_id)
+            return False
+
+        now = discord.utils.utcnow()
+        snippets = []
+        for m in sorted(burst_msgs, key=lambda x: x.created_at):
+            ch = getattr(m.message.channel, "mention", f"#{m.channel_id}")
+            text = (m.content or "(kein Text)")[:120].replace("`", "'")
+            n_img = sum(1 for a in m.attachments if self._is_image_attachment(a))
+            attach = f" [{n_img} Bild]" if n_img else ""
+            snippets.append(f"{ch}: {text}{attach}")
+
+        embed = discord.Embed(
+            title="⚠️ Account-Takeover erkannt — Quarantäne (reversibel)",
+            color=0xE74C3C,
+            timestamp=now,
+        )
+        embed.add_field(name="Member", value=f"{member.mention} ({member.id})", inline=False)
+        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.add_field(name="Account-Alter", value=self._fmt_delta(now, member.created_at), inline=True)
+        embed.add_field(name="Server-Mitglied seit", value=self._fmt_delta(now, member.joined_at), inline=True)
+        embed.add_field(
+            name="Muster",
+            value=(
+                f"{meta.get('attachment_count', 0)} Bild(er) in {meta.get('channel_count', 0)} "
+                f"Channels in ≤{self.takeover_window_seconds}s"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Aktion",
+            value="Bilder gespiegelt → 24h-Timeout → Burst gelöscht",
+            inline=False,
+        )
+        if ai_label:
+            embed.add_field(name="MiniMax-Einschätzung", value=ai_label[:300], inline=False)
+        embed.add_field(name="Nachrichten", value="\n".join(snippets[:8]) or "(keine)", inline=False)
+        embed.set_footer(
+            text="Bilder als Anhang gesichert. Prüfen: Ban (gehackter Account dauerhaft raus) "
+                 "oder Timeout aufheben (Fehlalarm)."
+        )
+
+        view = ScamBanView(self, member.guild.id, member.id, case_id)
+        try:
+            await mod_channel.send(embed=embed, view=view, files=forwarded_files or None)
+            return True
+        except discord.HTTPException as exc:
+            log.warning("Konnte Takeover-Alert nicht posten fuer Case %s: %s", case_id, exc)
+            return False
+
+    async def _send_takeover_dm(self, member: discord.Member, case_id: str) -> bool:
+        hours = self.timeout_minutes // 60
+        if self.timeout_minutes % 60 == 0 and hours:
+            dauer = "1 Stunde" if hours == 1 else f"{hours} Stunden"
+        else:
+            dauer = f"{self.timeout_minutes} Minuten"
+        embed = discord.Embed(
+            title="Du wurdest vorübergehend stummgeschaltet",
+            color=0xE67E22,
+            timestamp=discord.utils.utcnow(),
+        )
+        embed.add_field(name="Server", value=member.guild.name, inline=False)
+        embed.add_field(
+            name="Grund",
+            value="Dein Account hat in Sekunden Bilder in mehreren Kanälen gepostet — ein typisches "
+                  "Muster für einen gekaperten Account. Falls du gehackt wurdest: Passwort ändern, "
+                  "2FA aktivieren und beim Mod-Team melden, sobald du den Account zurück hast.",
+            inline=False,
+        )
+        embed.add_field(name="Dauer", value=dauer, inline=True)
+        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.set_footer(text="Falls das ein Irrtum war, wende dich ans Mod-Team — der Timeout wird aufgehoben.")
+        try:
+            await member.send(embed=embed)
+            return True
+        except discord.HTTPException:
+            return False
+
+    async def _takeover_ai_label(self, burst_msgs: list[RecentMessage]) -> str:
+        """MiniMax-Bild-Scan als reines Label (kein Gate). Timeout-gekappt.
+
+        Das Urteil aendert die Quarantaene NICHT — es liefert den Mods nur Kontext,
+        ob MiniMax die Bilder ebenfalls als Scam einschaetzt.
+        """
+        if not self.takeover_ai_label:
+            return ""
+        try:
+            is_scam, conf, reason = await self._ai_check_image_scam(burst_msgs)
+        except Exception as exc:  # noqa: BLE001 — Label ist best-effort, darf nie den Pfad brechen.
+            log.debug("Takeover MiniMax-Label fehlgeschlagen: %s", exc)
+            return "nicht verfügbar"
+        # Interne Fehler-Codes des Vision-Checks lesbar machen (kein echtes Urteil).
+        error_codes = {
+            "download_error", "mmx_missing", "mmx_error",
+            "parse_error", "api_error", "ai_unavailable",
+        }
+        if reason == "no_images":
+            return ""
+        if reason == "timeout":
+            return "Timeout (Quarantäne trotzdem ausgeführt)"
+        if reason in error_codes:
+            return "nicht verfügbar"
+        verdict = "Scam" if is_scam else "kein Scam"
+        return f"{verdict} ({conf:.0%}) — {reason or '—'}"
 
     async def _handle_incident(
         self,
