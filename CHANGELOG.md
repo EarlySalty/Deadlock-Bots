@@ -1,3 +1,13 @@
+## #46 — Master-Dashboard: Login hält jetzt 2 Wochen statt 6 Stunden
+
+**Problem:** Die Anmeldung am Master-Dashboard galt nur 6 Stunden. Da der Twitch-Admin-Bereich auf dieser zentralen Sitzung aufsetzt, fiel man dort regelmäßig nach wenigen Stunden raus — das Dashboard wirkte „tot": Oberfläche lädt, aber jede Aktion läuft ins Leere, weil die Sitzung im Hintergrund abgelaufen war.
+
+**Geändert:** Die Standard-Lebensdauer der Master-Dashboard-Sitzung von 6 Stunden auf 14 Tage angehoben.
+
+**Wie's funktioniert:** Die Sitzung gilt jetzt zwei Wochen und verlängert sich bei jeder Nutzung automatisch (Sliding-Refresh) — wer regelmäßig reinschaut, bleibt praktisch dauerhaft angemeldet. Der Wert ist weiterhin per Umgebungsvariable überschreibbar; der neue Standard greift, solange nichts anderes gesetzt ist. Einmal anmelden reicht damit für zwei Wochen statt mehrmals täglich neu einloggen zu müssen.
+
+**Betroffen:** Login-Komfort im Admin-/Dashboard-Bereich; für normale Discord-Nutzer nichts sichtbar.
+
 ## #45 — Crypto-Scam: Jetzt automatisch gelöscht + Ban-Button für Mods
 
 **Problem:** Ein Einzel-Scam (eine Nachricht, ein Kanal) wurde vom Bot erkannt (Confidence 0,97), aber weder automatisch gelöscht noch direkt gesperrt — weil er in keine der Auto-Delete-Kategorien fiel. Der Moderator konnte anschließend auch nicht direkt über den Bot bannen, da "Accept" nur einen 24h-Timeout ausgelöst und keine Ban-Option angeboten hat.
