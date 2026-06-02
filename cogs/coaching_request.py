@@ -478,7 +478,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
                 provider="minimax",
                 prompt=prompt,
                 system_prompt=COACHING_ANALYSIS_SYSTEM,
-                model="MiniMax-M2.7",
+                model="MiniMax-M3",
                 max_output_tokens=500,
                 temperature=0.7,
             )

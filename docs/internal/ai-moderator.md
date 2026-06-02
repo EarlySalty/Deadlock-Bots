@@ -23,7 +23,7 @@ Persistente Review-Buttons werden nach Reboot wieder registriert (`cogs/ai_moder
 Basis ist `AI_MODERATOR_CONFIG` in `cogs/ai_moderator.py:18`.
 
 - `SCAN_CHANNEL_IDS`, `MOD_REVIEW_CHANNEL_ID`, `LOG_CHANNEL_ID`
-- `AI_PROVIDER`, `AI_MODEL` aktuell default auf `minimax` und `MiniMax-M2.7`
+- `AI_PROVIDER`, `AI_MODEL` aktuell default auf `minimax` und `MiniMax-M3`
 - `AUTO_DELETE_CONFIDENCE`, `PROPOSE_CONFIDENCE`, `CONTEXT_ESCALATE_BETWEEN`
 - `TIMEOUT_MINUTES`
 - `RAGEBAIT_WINDOW_MINUTES`, `RAGEBAIT_ESCALATE_THRESHOLD`

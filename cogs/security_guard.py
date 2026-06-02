@@ -44,7 +44,7 @@ _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 def _parse_scam_json(text: str) -> dict[str, Any] | None:
     """Extract the scam-verdict JSON from a model reply.
 
-    MiniMax M2.7 wraps answers in <think> reasoning blocks; strip those first,
+    MiniMax responses may wrap answers in <think> reasoning blocks; strip those first,
     then take the outermost JSON object so the verdict survives extra prose.
     """
     cleaned = _THINK_RE.sub("", text or "").strip()
@@ -105,7 +105,7 @@ SECURITY_CONFIG: dict[str, object] = {
     "TAKEOVER_AI_LABEL": True,
     "TAKEOVER_AI_TIMEOUT_SECONDS": 8,
     # Pfad zur MiniMax-CLI fuer den Vision-Check (`mmx vision describe`).
-    # M2.7 ist text-only; Bild-Verstehen laeuft NUR ueber diese CLI (einmal `mmx auth login`).
+    # Bild-Verstehen laeuft in diesem Pfad NUR ueber diese CLI (einmal `mmx auth login`).
     "VISION_CLI_BIN": "/home/naniadm/.local/bin/mmx",
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,

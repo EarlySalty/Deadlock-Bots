@@ -25,7 +25,7 @@ except Exception:  # pragma: no cover - optional dependency
 log = logging.getLogger(__name__)
 
 # --- MiniMax Defaults ---
-DEFAULT_MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M2.7")
+DEFAULT_MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
 DEFAULT_MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat/v1")
 DEFAULT_MINIMAX_TOKEN_PLAN_BASE_URL = os.getenv(
     "MINIMAX_TOKEN_PLAN_BASE_URL",
@@ -208,7 +208,7 @@ class AIConnector(commands.Cog):
                         "Content-Type": "application/json",
                     }
                     payload = {
-                        "model": model if model != "MiniMax-Text-01" else "MiniMax-M2.7",
+                        "model": model if model != "MiniMax-Text-01" else "MiniMax-M3",
                         "system": system_prompt or "",
                         "messages": [
                             {
