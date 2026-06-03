@@ -1,3 +1,18 @@
+## #47 — Security Guard: Timeout-Bug gefixt, AI-Scam-Erkennung repariert, öffentliche Scam-Meldung
+
+**Problem:** Der Security Guard hat Scam-Accounts zwar erkannt und den Alert im Mod-Channel gepostet, aber keine einzige Aktion ausgeführt — kein Timeout, keine Nachrichtenlöschung. Der Bot hat den Mod-Alert sogar doppelt gepostet (der Case erschien zweimal), weil der Crash den State zurückgesetzt und beim nächsten Trigger erneut ausgelöst hat. Dazu hat die AI immer "kein Scam" zurückgegeben, obwohl MiniMax intern bereits 100 % Scam erkannt hatte.
+
+**Was war kaputt:**
+- py-cord 2.7.1 kennt den Parameter `timed_out_until`, nicht `communication_disabled_until` (discord.py-mainline-Name). Jeder Timeout-Aufruf ist mit einem `TypeError` abgestürzt — ungebated, bis zu `discord.client` hochgereicht, wo er stillschweigend weggeloggt wurde. Weder Timeout noch Nachrichtenlöschung (die danach kamen) liefen je.
+- `max_output_tokens=120` beim Scam-Text-Check war zu niedrig für Thinking-Modelle: MiniMax M3 hat alle 120 Token für den internen Denkprozess verbraucht, kein JSON-Response überlebt — die AI hat daher immer `False` zurückgegeben, egal wie eindeutig der Scam war.
+
+**Geändert:**
+- Timeout-Aufruf auf `timed_out_until` umgestellt (überall, inkl. Timeout-Aufhebung per Button).
+- `max_output_tokens` für Scam-Text-Check von 120 auf 1500 angehoben, damit Thinking + JSON beide reinpassen.
+- Nach jeder automatischen Scam-Aktion (Ban oder Timeout) postet der Bot jetzt kurz in den betroffenen Channel(s): `🔒 Scam erkannt — Account wurde automatisch gebannt/gesperrt.` — so sehen User, die den Scam gesehen haben, dass das Mod-System reagiert hat.
+
+**Wie's jetzt funktioniert:** Scam erkannt → Beweis in Mod-Channel spiegeln → Timeout setzen (funktioniert jetzt) → Nachrichten löschen → öffentliche Kurzmeldung im betroffenen Channel → DM an User. Der AI-Text-Check liefert jetzt bei eindeutigen Scams (wie Fake-MrBeast-Crypto oder USDT-Withdrawal-Screenshots) korrekt `is_scam: true` mit hoher Confidence.
+
 ## #46 — Master-Dashboard: Login hält jetzt 2 Wochen statt 6 Stunden
 
 **Problem:** Die Anmeldung am Master-Dashboard galt nur 6 Stunden. Da der Twitch-Admin-Bereich auf dieser zentralen Sitzung aufsetzt, fiel man dort regelmäßig nach wenigen Stunden raus — das Dashboard wirkte „tot": Oberfläche lädt, aber jede Aktion läuft ins Leere, weil die Sitzung im Hintergrund abgelaufen war.

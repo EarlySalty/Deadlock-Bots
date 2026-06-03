@@ -107,6 +107,8 @@ SECURITY_CONFIG: dict[str, object] = {
     # Pfad zur MiniMax-CLI fuer den Vision-Check (`mmx vision describe`).
     # Bild-Verstehen laeuft in diesem Pfad NUR ueber diese CLI (einmal `mmx auth login`).
     "VISION_CLI_BIN": "/home/naniadm/.local/bin/mmx",
+    # Kurze oeffentliche Meldung in den betroffenen Channels nach Scam-Action.
+    "POST_PUBLIC_NOTICE": True,
     # Dauer des Timeouts in Minuten (Default: 24h).
     "TIMEOUT_MINUTES": 1440,
     # Holding-Timeout (Minuten) bei erkanntem Burst, der von der AI NICHT als Scam
@@ -288,7 +290,7 @@ class ScamBanView(discord.ui.View):
         try:
             member = guild.get_member(self.user_id) or await guild.fetch_member(self.user_id)
             await member.edit(
-                communication_disabled_until=None,
+                timed_out_until=None,
                 reason=f"[SecurityGuard][case:{self.case_id}] Mod: false positive, timeout entfernt",
             )
             self._disable_all()
@@ -355,6 +357,7 @@ class SecurityGuard(commands.Cog):
         self.appeal_max_chars = max(
             self.appeal_min_chars, int(cfg.get("APPEAL_MAX_CHARS", 800) or 800)
         )
+        self.post_public_notice = bool(cfg.get("POST_PUBLIC_NOTICE", True))
         self.attachment_forward_limit = max(0, int(cfg.get("ATTACHMENT_FORWARD_LIMIT", 4) or 4))
         self.attachment_max_bytes = max(
             1_000_000, int(cfg.get("ATTACHMENT_MAX_BYTES", 7_000_000) or 7_000_000)
@@ -621,7 +624,7 @@ class SecurityGuard(commands.Cog):
                 provider=self.ai_scam_provider,
                 prompt=content[:2000],
                 system_prompt=SCAM_DETECTION_SYSTEM_PROMPT,
-                max_output_tokens=120,
+                max_output_tokens=1500,
                 temperature=0.1,
             )
         except Exception as exc:
@@ -897,6 +900,7 @@ class SecurityGuard(commands.Cog):
         deleted = await self._delete_messages(burst_msgs, reason)
         # 5. User informieren (Hinweis auf moeglichen Hack, reversibel).
         dm_sent = await self._send_takeover_dm(member, case_id)
+        await self._post_public_scam_notice(burst_msgs, "timeout")
 
         log.info(
             "Takeover-Quarantaene %s fuer %s: mod_post=%s, timeout=%s, geloescht=%s, dm=%s",
@@ -1046,6 +1050,7 @@ class SecurityGuard(commands.Cog):
         dm_sent = await self._send_user_dm(member, reason, case_id)
         action, action_ok = await self._apply_action(member, reason, case_id)
         deleted = await self._delete_messages(msgs, reason)
+        await self._post_public_scam_notice(msgs, action)
 
         await self._log_incident(
             member,
@@ -1099,6 +1104,15 @@ class SecurityGuard(commands.Cog):
         except discord.HTTPException:
             pass  # Message delete failure is non-critical once moderation handling continues.
 
+        single_rm = RecentMessage(
+            message=message,
+            channel_id=message.channel.id,
+            created_at=message.created_at or now,
+            content=message.content or "",
+            attachments=list(message.attachments),
+        )
+        await self._post_public_scam_notice([single_rm], "timeout")
+
         # Sofort 24h-Timeout anwenden
         timeout_ok = False
         until = now + timedelta(minutes=self.timeout_minutes)
@@ -1106,7 +1120,7 @@ class SecurityGuard(commands.Cog):
             me = member.guild.me or await member.guild.fetch_member(self.bot.user.id)
             if me.guild_permissions.moderate_members:
                 await member.edit(
-                    communication_disabled_until=until,
+                    timed_out_until=until,
                     reason=f"[SecurityGuard][case:{case_id}] AI-Scam, etablierter Account (möglicherweise gehackt)",
                 )
                 timeout_ok = True
@@ -1388,13 +1402,30 @@ class SecurityGuard(commands.Cog):
         until = discord.utils.utcnow() + timedelta(minutes=mins)
         timeout_reason = f"[SecurityGuard][case:{case_id}] {reason}"
         try:
-            await member.edit(communication_disabled_until=until, reason=timeout_reason)
+            await member.edit(timed_out_until=until, reason=timeout_reason)
             return True
         except discord.Forbidden:
             log.warning("Forbidden to timeout member %s", member.id)
         except discord.HTTPException as exc:
             log.warning("Failed to timeout member %s: %s", member.id, exc)
         return False
+
+    async def _post_public_scam_notice(self, msgs: list[RecentMessage], action: str) -> None:
+        if not self.post_public_notice:
+            return
+        action_text = "gebannt" if action == "ban" else "vorübergehend gesperrt"
+        seen: set[int] = set()
+        for rm in msgs:
+            if rm.channel_id in seen:
+                continue
+            seen.add(rm.channel_id)
+            ch = rm.message.channel
+            if not isinstance(ch, (discord.TextChannel, discord.Thread)):
+                continue
+            try:
+                await ch.send(f"🔒 Scam erkannt — Account wurde automatisch {action_text}.")
+            except discord.HTTPException:
+                pass
 
     async def _delete_messages(self, msgs: list[RecentMessage], reason: str) -> int:
         deleted = 0
