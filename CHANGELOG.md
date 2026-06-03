@@ -1,3 +1,11 @@
+## #48 — Security Guard: MiniMax-Label erscheint jetzt nachträglich im Mod-Embed
+
+**Problem:** Das MiniMax-Bild-Urteil lief blockierend *vor* dem Mod-Alert — wenn MiniMax länger brauchte (oder per Timeout abbrach bei 8 s), stand im ersten Post „nicht verfügbar" und der Bot wartete die ganze Zeit, bevor er überhaupt Timeout und Löschung ausführte.
+
+**Geändert:** Alert wird sofort gepostet (mit „⏳ wird ermittelt…" als Platzhalter), Timeout + Löschung laufen direkt danach. MiniMax läuft als Hintergrund-Task mit 45 s Spielraum und aktualisiert das Embed per Edit, sobald das Urteil vorliegt.
+
+**Wie's funktioniert:** `asyncio.create_task` startet den AI-Check entkoppelt vom Hauptpfad. Sobald MiniMax antwortet, sucht die Task das Feld „MiniMax-Einschätzung" im bereits geposteten Embed und überschreibt es. Schlägt das Edit fehl (Nachricht gelöscht, Bot-Rechte weg), wird das still ignoriert.
+
 ## #47 — Security Guard: Timeout-Bug gefixt, AI-Scam-Erkennung repariert, öffentliche Scam-Meldung
 
 **Problem:** Der Security Guard hat Scam-Accounts zwar erkannt und den Alert im Mod-Channel gepostet, aber keine einzige Aktion ausgeführt — kein Timeout, keine Nachrichtenlöschung. Der Bot hat den Mod-Alert sogar doppelt gepostet (der Case erschien zweimal), weil der Crash den State zurückgesetzt und beim nächsten Trigger erneut ausgelöst hat. Dazu hat die AI immer "kein Scam" zurückgegeben, obwohl MiniMax intern bereits 100 % Scam erkannt hatte.

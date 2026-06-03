@@ -103,7 +103,7 @@ SECURITY_CONFIG: dict[str, object] = {
     # und haengt das Urteil an den Mod-Alarm. Reines Label — die Quarantaene laeuft auch
     # ohne/gegen das AI-Urteil. Timeout kappt einen haengenden Call.
     "TAKEOVER_AI_LABEL": True,
-    "TAKEOVER_AI_TIMEOUT_SECONDS": 8,
+    "TAKEOVER_AI_TIMEOUT_SECONDS": 45,
     # Pfad zur MiniMax-CLI fuer den Vision-Check (`mmx vision describe`).
     # Bild-Verstehen laeuft in diesem Pfad NUR ueber diese CLI (einmal `mmx auth login`).
     "VISION_CLI_BIN": "/home/naniadm/.local/bin/mmx",
@@ -884,13 +884,9 @@ class SecurityGuard(commands.Cog):
 
         # 1. Beweise laden, SOLANGE die Nachrichten existieren (CDN-URLs sterben nach dem Delete).
         forwarded_files = await self._collect_attachments(burst_msgs)
-        # 1b. MiniMax als VERSTAERKER (kein Gate): Bild-Scam-Label fuer die Mods anreichern.
-        #     Laeuft VOR dem Delete (URLs noch gueltig) und mit Timeout, damit ein haengender
-        #     Call die Loeschung nicht blockiert.
-        ai_label = await self._takeover_ai_label(burst_msgs)
-        # 2. ZUERST die Bilder in den Mod-Channel spiegeln — vor jeder Loeschung.
-        posted = await self._post_takeover_alert(
-            member, burst_msgs, meta, case_id, forwarded_files, ai_label
+        # 2. Alert sofort posten — MiniMax-Label kommt asynchron nach (Embed-Edit).
+        alert_msg = await self._post_takeover_alert(
+            member, burst_msgs, meta, case_id, forwarded_files, ai_label="⏳ wird ermittelt…"
         )
         # 3. Reversible Quarantaene: 24h-Timeout (Mod kann eskalieren oder aufheben).
         timeout_ok = await self._apply_timeout(
@@ -901,10 +897,12 @@ class SecurityGuard(commands.Cog):
         # 5. User informieren (Hinweis auf moeglichen Hack, reversibel).
         dm_sent = await self._send_takeover_dm(member, case_id)
         await self._post_public_scam_notice(burst_msgs, "timeout")
+        # 6. AI-Label im Hintergrund ermitteln und Embed nachtraeglich aktualisieren.
+        asyncio.create_task(self._finalize_takeover_ai_label(alert_msg, burst_msgs))
 
         log.info(
             "Takeover-Quarantaene %s fuer %s: mod_post=%s, timeout=%s, geloescht=%s, dm=%s",
-            case_id, member.id, posted, timeout_ok, deleted, dm_sent,
+            case_id, member.id, alert_msg is not None, timeout_ok, deleted, dm_sent,
         )
 
     async def _post_takeover_alert(
@@ -962,11 +960,11 @@ class SecurityGuard(commands.Cog):
 
         view = ScamBanView(self, member.guild.id, member.id, case_id)
         try:
-            await mod_channel.send(embed=embed, view=view, files=forwarded_files or None)
-            return True
+            msg = await mod_channel.send(embed=embed, view=view, files=forwarded_files or None)
+            return msg
         except discord.HTTPException as exc:
             log.warning("Konnte Takeover-Alert nicht posten fuer Case %s: %s", case_id, exc)
-            return False
+            return None
 
     async def _send_takeover_dm(self, member: discord.Member, case_id: str) -> bool:
         hours = self.timeout_minutes // 60
@@ -1022,6 +1020,35 @@ class SecurityGuard(commands.Cog):
             return "nicht verfügbar"
         verdict = "Scam" if is_scam else "kein Scam"
         return f"{verdict} ({conf:.0%}) — {reason or '—'}"
+
+    async def _finalize_takeover_ai_label(
+        self,
+        alert_msg: discord.Message | None,
+        burst_msgs: list[RecentMessage],
+    ) -> None:
+        """AI-Label nachtraeglich ins Takeover-Embed eintragen (laeuft als Background-Task).
+
+        Fetcht die Nachricht frisch, sucht das Feld 'MiniMax-Einschaetzung' und ersetzt
+        den Platzhalter. Schlaegt der Edit fehl (Nachricht geloescht, kein Zugriff),
+        wird das still ignoriert.
+        """
+        if alert_msg is None or not self.takeover_ai_label:
+            return
+        label = await self._takeover_ai_label(burst_msgs)
+        if not label:
+            return
+        try:
+            msg = await alert_msg.channel.fetch_message(alert_msg.id)
+            if not msg.embeds:
+                return
+            embed = msg.embeds[0].copy()
+            for i, field in enumerate(embed.fields):
+                if field.name == "MiniMax-Einschätzung":
+                    embed.set_field_at(i, name=field.name, value=label[:300], inline=False)
+                    await msg.edit(embed=embed)
+                    return
+        except discord.HTTPException as exc:
+            log.debug("Takeover-Embed AI-Update fehlgeschlagen: %s", exc)
 
     async def _handle_incident(
         self,
