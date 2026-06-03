@@ -35,7 +35,7 @@ Backfill von historischen Joins ehrlich auf `unknown` halten, Website-Invites pr
 - Kein Live-Discord-Smoke-Test und kein Dashboard-Browser-Check in diesem Worker-Pass.
 
 ## Ziel
-Neues Cog `cogs/ai_moderator.py`, das Nachrichten in Chat-Channel `1289721245281292291` via MiniMax-M2.7 (Text + Bilder) klassifiziert und je nach Konfidenz auto-moderiert oder Moderatoren per Accept/Deny-Buttons im Channel `1315684135175716978` einbindet. Alle Aktionen werden im Log-Channel `1374364800817303632` festgehalten (ohne Buttons, nur Infos + Original-Message). Ragebait wird pro User mit einer 2h-Rolling-Window-Schwelle (4 Hits) zu `persistent_ragebait` eskaliert.
+Neues Cog `cogs/ai_moderator.py`, das Nachrichten in Chat-Channel `1289721245281292291` via MiniMax-M3 (Text + Bilder) klassifiziert und je nach Konfidenz auto-moderiert oder Moderatoren per Accept/Deny-Buttons im Channel `1315684135175716978` einbindet. Alle Aktionen werden im Log-Channel `1374364800817303632` festgehalten (ohne Buttons, nur Infos + Original-Message). Ragebait wird pro User mit einer 2h-Rolling-Window-Schwelle (4 Hits) zu `persistent_ragebait` eskaliert.
 
 ## Plan
 `/home/naniadm/.claude/plans/ich-m-chte-f-r-meinen-dapper-hennessy.md`
@@ -65,6 +65,9 @@ GPT-Worker 1 (`cogs/ai_connector.py`) und GPT-Worker 2 (`cogs/ai_moderator.py`) 
 
 ## Offen
 - Live-Smoke-Test im Zielchannel `1289721245281292291` (passiert beim naechsten echten Chat)
+
+## Fortschritt 2026-06-02
+- `cogs/ai_moderator.py`: `scam` als Auto-Delete-Kategorie + Prompt-Kategorie ergaenzt und Mod-Review um `Ban`-Button samt Ban-Handler/DB-Markierung/DynamicItem-Registrierung erweitert.
 
 ## Erledigt nach Review
 - Review durch Claude: DynamicItem-basierte persistente Buttons, saubere DB-Operationen, defensives AI-JSON-Parsing, korrektes `manage_messages`-Gate, Cleanup-Loop aktiv.
