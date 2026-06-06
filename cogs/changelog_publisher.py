@@ -254,8 +254,10 @@ class ChangelogPublisher(commands.Cog):
                 msg = await channel.fetch_message(int(message_id))
                 return web.json_response({"ok": True, "messages": [self._serialize_message(msg)]})
 
-            limit = min(int(data.get("limit") or 1), 50)
-            msgs = [self._serialize_message(m) async for m in channel.history(limit=limit)]
+            limit = min(int(data.get("limit") or 1), 100)
+            before_id = data.get("before_id")
+            before_obj = discord.Object(id=int(before_id)) if before_id else None
+            msgs = [self._serialize_message(m) async for m in channel.history(limit=limit, before=before_obj)]
             return web.json_response({"ok": True, "messages": msgs})
         except Exception as e:
             log.warning("fetch-messages failed for channel %s: %s", channel_id, e)
