@@ -10,7 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from service import db
+from service import db, website_client
 from service.config import settings
 
 log = logging.getLogger(__name__)
@@ -304,6 +304,22 @@ class CoachingSurveyCog(commands.Cog):
             "UPDATE coaching_requests SET status='completed', role_removed_at=?, updated_at=? WHERE id=?",
             (now, now, session["request_id"]),
         )
+
+        # Website-Mirror: Session als abgeschlossen markieren
+        req = db.query_one("SELECT * FROM coaching_requests WHERE id=?", (session["request_id"],))
+        if req:
+            asyncio.create_task(website_client.sync_coaching({
+                "bot_request_id": int(req["id"]),
+                "discord_user_id": int(session["discord_user_id"]),
+                "discord_username": session.get("discord_username") or "",
+                "rank": req.get("rank") or "",
+                "subrank": req.get("subrank") or "",
+                "status": "completed",
+                "coach_discord_id": int(session["coach_id"]) if session.get("coach_id") else None,
+                "coach_username": coach_name,
+                "session_status": "completed",
+                "bot_session_id": session_id,
+            }))
 
         if success:
             await interaction.response.send_message(

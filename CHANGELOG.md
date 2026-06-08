@@ -1,3 +1,11 @@
+## #54 — Coaching: Session-Abschluss wird jetzt an die Website gespiegelt
+
+**Ausgangslage:** Wenn ein Admin mit `/coaching-session-beenden` eine Session beendete, landete das nur in der Bot-DB. Die Coaching-Website zeigte weiterhin die Session als aktiv — weil der Bot nie den `/platform/sync`-Endpunkt aufrief.
+
+**Geändert:** Der `coaching_survey`-Cog sendet nach dem Session-Update jetzt automatisch einen HTTP-Call an das Website-Backend (`/platform/sync` auf Port 8772). Payload enthält Request-ID, Discord-IDs, Coach-Name und `session_status: "completed"` + die Bot-Session-UUID.
+
+**Wie's funktioniert:** Der interne Token (derselbe wie im restlichen Stack) authentifiziert den Call. Das Backend macht ein Upsert: Session wird auf `completed` gesetzt, der Timestamp landet in `completed_at`. Damit sehen Spieler auf `/coaching/me` ihre Session-Historie korrekt — inklusive dem Abschluss. Der Coaching-Flow in Discord bleibt unverändert.
+
 ## #53 — Master-Broker: Discord-Invites auf Anfrage erstellen
 
 **Hintergrund:** Der Twitch-Bot läuft als separater Prozess und hat keinen eigenen Discord-Guild-Mitgliedsstatus — er kann daher keine Invites direkt über die Discord-API erstellen. Gelöst über den Master-Broker, der bereits für andere Discord-Aktionen (Nachrichten senden, Channels anlegen, Rollen vergeben) als interner Proxy fungiert.
