@@ -58,6 +58,14 @@ class ModeButton(discord.ui.Button):
                 f"Standard-Modus auf **{label}** gesetzt.", ephemeral=True
             )
 
+        # Visuelles Feedback: Button 3 Sek grün
+        try:
+            await itx.message.edit(view=RouterView(active_mode=self.mode))
+            await asyncio.sleep(3)
+            await itx.message.edit(view=RouterView())
+        except discord.HTTPException:
+            pass
+
 
 class AutoJoinButton(discord.ui.Button):
     def __init__(self) -> None:
@@ -100,10 +108,13 @@ class AutoJoinButton(discord.ui.Button):
 
 
 class RouterView(discord.ui.View):
-    def __init__(self) -> None:
+    def __init__(self, active_mode: str | None = None) -> None:
         super().__init__(timeout=None)
         for mode in ("casual", "ranked", "street_brawl"):
-            self.add_item(ModeButton(mode))
+            btn = ModeButton(mode)
+            if mode == active_mode:
+                btn.style = discord.ButtonStyle.success
+            self.add_item(btn)
         self.add_item(AutoJoinButton())
 
 
