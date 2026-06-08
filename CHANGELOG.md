@@ -1,3 +1,9 @@
+## #53 — Master-Broker: Discord-Invites auf Anfrage erstellen
+
+**Hintergrund:** Der Twitch-Bot läuft als separater Prozess und hat keinen eigenen Discord-Guild-Mitgliedsstatus — er kann daher keine Invites direkt über die Discord-API erstellen. Gelöst über den Master-Broker, der bereits für andere Discord-Aktionen (Nachrichten senden, Channels anlegen, Rollen vergeben) als interner Proxy fungiert.
+
+**Geändert:** Neuer Endpunkt `POST /internal/master/v1/discord/create-invite` im Master-Broker. Nimmt `channel_id` und optionalen `reason`, löst den Channel über den Haupt-Bot auf und ruft `channel.create_invite(max_age=0, max_uses=0, unique=True)` auf. Antwort enthält `invite_url`, `code`, `channel_id` und `guild_id`. Auth und Idempotency-Handling laufen identisch zu den anderen Broker-Endpunkten.
+
 ## #52 — Fix: TempVoice-Interface lädt wieder korrekt
 
 **Problem:** Durch die neuen Router-Buttons (Umbenennen + Modus wechseln) kam es beim Bot-Start zu einem Fehler, der das komplette TempVoice-Modul am Laden hinderte — alle Lane-Funktionen waren damit ausgefallen.

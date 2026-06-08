@@ -231,6 +231,10 @@ class MasterBroker:
                         "/internal/master/v1/discord/voice-channel/members",
                         self._handle_get_voice_members,
                     ),
+                    web.post(
+                        "/internal/master/v1/discord/create-invite",
+                        self._handle_create_invite,
+                    ),
                 ]
             )
 
@@ -2036,6 +2040,104 @@ class MasterBroker:
                     for member in members
                 ],
             },
+        )
+
+    async def _handle_create_invite(self, request: web.Request) -> web.Response:
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            payload = await self._read_json_object(request)
+            idempotency_key = self._extract_idempotency_key(request, payload)
+            channel_id = self._parse_positive_payload_int(payload, "channel_id")
+            reason_raw = str(payload.get("reason") or "").strip()
+            reason = reason_raw[:512] if reason_raw else "master-broker:create-invite"
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+        except Exception:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="invalid JSON payload",
+            )
+
+        allowlist_rejected = self._allowlist_check(
+            request=request,
+            idempotency_key=idempotency_key,
+            scope="channel",
+            value=channel_id,
+            enabled=self._channel_allowlist_enabled,
+            allowed_ids=self._allowed_channel_ids,
+        )
+        if allowlist_rejected is not None:
+            return allowlist_rejected
+
+        payload_hash = self._payload_hash({"channel_id": channel_id, "reason": reason})
+
+        async def _operation() -> web.Response:
+            channel = await self._resolve_channel(channel_id)
+            if channel is None or not hasattr(channel, "create_invite"):
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"channel {channel_id} not found or does not support invites",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                invite = await channel.create_invite(
+                    max_age=0,
+                    max_uses=0,
+                    unique=True,
+                    reason=reason,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Master broker create_invite failed (channel=%s): %s",
+                    channel_id,
+                    exc,
+                )
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="failed to create invite",
+                    idempotency_key=idempotency_key,
+                )
+
+            invite_code = str(getattr(invite, "code", "") or "").strip()
+            invite_url = str(getattr(invite, "url", "") or "").strip()
+            if not invite_url and invite_code:
+                invite_url = f"https://discord.gg/{invite_code}"
+
+            guild = getattr(channel, "guild", None)
+            guild_id = int(getattr(guild, "id", 0) or 0) if guild else 0
+
+            return self._success_response(
+                request=request,
+                idempotency_key=idempotency_key,
+                result={
+                    "invite_url": invite_url,
+                    "code": invite_code,
+                    "channel_id": channel_id,
+                    "guild_id": guild_id,
+                },
+            )
+
+        return await self._run_idempotent_action(
+            request=request,
+            action="discord.create_invite",
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            operation=_operation,
         )
 
 
