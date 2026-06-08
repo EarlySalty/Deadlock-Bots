@@ -12,7 +12,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from service import db
+from service import db, website_client
 from service.config import settings
 
 log = logging.getLogger(__name__)
@@ -208,6 +208,17 @@ class CoachCancelButton(discord.ui.Button):
         except Exception as e:
             log.warning("Could not edit message after cancellation: %s", e)
             
+        cog = interaction.client.get_cog("CoachingRequestCog")
+        if cog:
+            asyncio.create_task(
+                cog._mirror_to_website(
+                    session["request_id"],
+                    coach_discord_id=interaction.user.id,
+                    coach_username=interaction.user.display_name,
+                    session_status="cancelled",
+                )
+            )
+
         await interaction.followup.send("✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.", ephemeral=True)
 
 
@@ -363,6 +374,17 @@ class CoachClaimButton(discord.ui.Button):
                     await interaction.message.edit(view=new_view)
             except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
                 log.warning("Could not update request message with cancel button: %s", exc)
+
+            cog = interaction.client.get_cog("CoachingRequestCog")
+            if cog:
+                asyncio.create_task(
+                    cog._mirror_to_website(
+                        self.request_id,
+                        coach_discord_id=interaction.user.id,
+                        coach_username=interaction.user.display_name,
+                        session_status="active",
+                    )
+                )
 
             dm_note = "" if dm_ok else " (DM an User fehlgeschlagen – bitte im Channel anpingen.)"
             await interaction.followup.send(
@@ -714,6 +736,8 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
             log.warning("Could not edit message when opening request %s: %s", request_id, exc)
 
+        asyncio.create_task(self._mirror_to_website(request_id))
+
     async def _reservation_expiry_loop(self):
         """Oeffnet abgelaufene 24h-Reservierungen automatisch fuer alle Coaches."""
         await self.bot.wait_until_ready()
@@ -731,6 +755,46 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
             except Exception as e:
                 log.error(f"Reservation expiry loop error: {e}")
             await asyncio.sleep(RESERVATION_CHECK_INTERVAL_SECONDS)
+
+    async def _mirror_to_website(
+        self,
+        request_id: int,
+        *,
+        assigned_coach_username: "str | None" = None,
+        coach_discord_id: "int | None" = None,
+        coach_username: "str | None" = None,
+        session_status: "str | None" = None,
+    ) -> None:
+        """Spiegelt den aktuellen Anfrage-/Session-Stand best-effort an die Website."""
+        try:
+            row = db.query_one("SELECT * FROM coaching_requests WHERE id=?", (request_id,))
+            if not row:
+                return
+            assigned = row["assigned_coach_id"]
+            payload: dict = {
+                "bot_request_id": int(row["id"]),
+                "discord_user_id": int(row["discord_user_id"]),
+                "discord_username": row["discord_username"],
+                "rank": row["rank"],
+                "subrank": row["subrank"],
+                "hero": row["hero"],
+                "games_played": row["games_played"],
+                "hours_played": row["hours_played"],
+                "availability": row["availability"],
+                "current_problems": row["current_problems"],
+                "ai_summary": row["ai_summary"],
+                "status": row["status"],
+                "assigned_coach_discord_id": int(assigned) if assigned else None,
+                "assigned_coach_username": assigned_coach_username,
+                "reserved_until": row["reserved_until"],
+            }
+            if coach_discord_id and session_status:
+                payload["coach_discord_id"] = int(coach_discord_id)
+                payload["coach_username"] = coach_username
+                payload["session_status"] = session_status
+            await website_client.sync_coaching(payload)
+        except Exception as exc:
+            log.debug("Coaching-Mirror an Website fehlgeschlagen (ignoriert): %s", exc)
 
     async def _post_request_to_channel(self, request_data: dict, ai_summary: str):
         """Post formatted coaching request to channel"""
@@ -782,6 +846,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
             request_data["status"] = "analyzed"
             request_data["assigned_coach_id"] = assigned_coach_id
             request_data["reserved_until"] = reserved_until
+            asyncio.create_task(
+                self._mirror_to_website(
+                    request_data["id"],
+                    assigned_coach_username=(assigned.display_name if assigned else None),
+                )
+            )
             return message.id
         except Exception as e:
             log.error(f"Error posting to channel: {e}")

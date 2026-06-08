@@ -101,6 +101,10 @@ class Settings(BaseSettings):
     coaching_voice_category_id: int = Field(1459526231686119600, alias="COACHING_VOICE_CATEGORY_ID")
     coaching_role_expiry_hours: int = Field(48, alias="COACHING_ROLE_EXPIRY_HOURS")
     coaching_reminders_enabled: bool = Field(False, alias="COACHING_REMINDERS_ENABLED")
+    website_api_base: str = Field(
+        "https://deutsche-deadlock-community.de/api", alias="WEBSITE_API_BASE"
+    )
+    coaching_bot_token: SecretStr | None = Field(None, alias="COACHING_BOT_TOKEN")
 
     # --- Steam Link UI & OAuth ---
     steam_return_path: str = Field("/callback/steam", alias="STEAM_RETURN_PATH")
