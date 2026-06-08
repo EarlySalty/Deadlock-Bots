@@ -125,6 +125,75 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
         except Exception:
             log.exception("RouterInterfaceCog: _post_interface_message fehlgeschlagen")
 
+    @staticmethod
+    def _build_guide_embed() -> discord.Embed:
+        e = discord.Embed(
+            title="📖 Router — Wie funktioniert das?",
+            color=0x2B2D31,
+        )
+        e.add_field(
+            name="1️⃣  Modus wählen",
+            value=(
+                "Klick unten auf **Casual**, **Ranked** oder **Street Brawl**. "
+                "Deine Wahl wird gespeichert und gilt für alle zukünftigen Joins."
+            ),
+            inline=False,
+        )
+        e.add_field(
+            name="2️⃣  Auto-Join",
+            value=(
+                "**Aus (grau)** → du bekommst immer eine eigene, leere Lane.\n"
+                "**An (grün)** → der Bot sucht eine passende Lane mit freien Plätzen (<6 Personen). "
+                "Bekannte Mitspieler werden dabei bevorzugt. "
+                "Gibt es keine freie Lane, wird eine neue für dich erstellt."
+            ),
+            inline=False,
+        )
+        e.add_field(
+            name="3️⃣  Router-VC betreten",
+            value=(
+                "Sobald du den **Deadlock Router**-Sprachkanal betrittst, passiert alles automatisch:\n"
+                "• Neuer Spieler → New-Player-Lane\n"
+                "• Kein Modus gesetzt → du bleibst im Router-VC bis du unten einen wählst\n"
+                "• Modus gesetzt, Auto-Join aus → sofort eigene Lane\n"
+                "• Modus gesetzt, Auto-Join an → Smart Routing"
+            ),
+            inline=False,
+        )
+        e.add_field(
+            name="🏆  Ranked",
+            value=(
+                "Ranked-Lanes erfordern einen **verifizierten Rang** (Steam-Verknüpfung). "
+                "Ohne Rang bekommst du eine DM mit dem Link zur Verifizierung — "
+                "du bleibst dann im Router-VC und kannst danach Casual oder Street Brawl wählen."
+            ),
+            inline=False,
+        )
+        e.add_field(
+            name="🔄  Lane-Modus wechseln",
+            value=(
+                "Als Lane-Owner kannst du deinen aktiven Kanal nachträglich umstellen: "
+                "im Lane-Control-Interface gibt es **Modus wechseln** (Casual / Ranked / Street Brawl / Off Topic) "
+                "und **Umbenennen**. "
+                "Der Kanal zieht dabei physisch in die passende Kategorie um."
+            ),
+            inline=False,
+        )
+        e.set_footer(text="Die alten Staging-Kanäle (Casual / Comp / Street Brawl) laufen weiterhin parallel.")
+        return e
+
+    @staticmethod
+    def _build_interface_embed() -> discord.Embed:
+        return discord.Embed(
+            title="🎮 Spielmodus wählen",
+            description=(
+                "Wähle deinen **Standard-Spielmodus** und stelle den Auto-Join-Toggle ein.\n\n"
+                "**Auto-Join aus** → eigene Lane wird für dich erstellt\n"
+                "**Auto-Join an** → Smart Routing in eine passende Lane"
+            ),
+            color=0x5865F2,
+        )
+
     async def _post_interface_message(self) -> None:
         cfg = get_guild_config()
         ch = self.bot.get_channel(cfg.TEMPVOICE_ROUTER_TEXT)
@@ -136,24 +205,33 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
             )
             return
 
-        embed = discord.Embed(
-            title="🎮 Spielmodus wählen",
-            description=(
-                "Wähle deinen **Standard-Spielmodus**.\n\n"
-                "**Auto-Join aus** → eine eigene Lane wird nur für dich erstellt\n"
-                "**Auto-Join an** → du landest in einer passenden Lane mit freien Plätzen\n\n"
-                "Ranked-Lanes erfordern einen verifizierten Rang (Steam-Verknüpfung)."
-            ),
-            color=0x5865F2,
-        )
-        async for msg in ch.history(limit=10):
-            if msg.author == self.bot.user and msg.embeds:
-                await msg.edit(embed=embed, view=RouterView())
-                log.info("RouterInterfaceCog: Interface-Message aktualisiert (ID %s)", msg.id)
-                return
+        guide_embed = self._build_guide_embed()
+        interface_embed = self._build_interface_embed()
 
-        msg = await ch.send(embed=embed, view=RouterView())
-        log.info("RouterInterfaceCog: Interface-Message gepostet (ID %s)", msg.id)
+        # Bestehende Bot-Nachrichten einlesen (max. 15, älteste zuerst)
+        bot_msgs: list[discord.Message] = []
+        async for msg in ch.history(limit=15, oldest_first=True):
+            if msg.author == self.bot.user and msg.embeds:
+                bot_msgs.append(msg)
+
+        # Anleitung-Message: erste Bot-Nachricht ohne View (kein Button)
+        guide_msg = next((m for m in bot_msgs if not m.components), None)
+        # Interface-Message: erste Bot-Nachricht mit Buttons (components vorhanden)
+        iface_msg = next((m for m in bot_msgs if m.components), None)
+
+        if guide_msg:
+            await guide_msg.edit(embed=guide_embed)
+            log.info("RouterInterfaceCog: Anleitung aktualisiert (ID %s)", guide_msg.id)
+        else:
+            guide_msg = await ch.send(embed=guide_embed)
+            log.info("RouterInterfaceCog: Anleitung gepostet (ID %s)", guide_msg.id)
+
+        if iface_msg:
+            await iface_msg.edit(embed=interface_embed, view=RouterView())
+            log.info("RouterInterfaceCog: Interface aktualisiert (ID %s)", iface_msg.id)
+        else:
+            iface_msg = await ch.send(embed=interface_embed, view=RouterView())
+            log.info("RouterInterfaceCog: Interface gepostet (ID %s)", iface_msg.id)
 
 
 async def setup(bot: commands.Bot) -> None:
