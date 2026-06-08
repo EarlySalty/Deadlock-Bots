@@ -12,6 +12,7 @@ nur geloggt — der Discord-Coaching-Flow darf dadurch nie blockieren.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any
 
 import aiohttp
@@ -27,7 +28,17 @@ def _base_url() -> str:
     return base.rstrip("/")
 
 
+# Gleicher interner Token wie der restliche Stack (master_broker/public_stats),
+# liegt bereits im Bot-Env. Kein eigenes COACHING_BOT_TOKEN noetig.
+_TOKEN_ENV_NAMES = ("TWITCH_INTERNAL_API_TOKEN", "MASTER_BROKER_TOKEN")
+
+
 def _token() -> str:
+    for name in _TOKEN_ENV_NAMES:
+        val = (os.getenv(name) or "").strip()
+        if val:
+            return val
+    # Fallback: optionaler COACHING_BOT_TOKEN
     tok = getattr(settings, "coaching_bot_token", None)
     if tok is None:
         return ""
@@ -38,7 +49,7 @@ async def sync_coaching(payload: dict[str, Any]) -> bool:
     """Sendet einen Snapshot an die Website. True bei Erfolg, sonst False (nie raise)."""
     token = _token()
     if not token:
-        log.debug("COACHING_BOT_TOKEN nicht gesetzt – Website-Coaching-Sync uebersprungen")
+        log.debug("Kein interner Token gesetzt – Website-Coaching-Sync uebersprungen")
         return False
 
     url = f"{_base_url()}/coaching/platform/sync"
@@ -47,7 +58,7 @@ async def sync_coaching(payload: dict[str, Any]) -> bool:
         timeout = aiohttp.ClientTimeout(total=10)
         async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
             async with session.post(
-                url, json=payload, headers={"X-Bot-Token": token}
+                url, json=payload, headers={"X-Internal-Token": token, "X-Bot-Token": token}
             ) as resp:
                 if resp.status >= 400:
                     body = (await resp.text())[:200]
