@@ -116,11 +116,19 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
 
     async def _ensure_interface_message(self) -> None:
         await self.bot.wait_until_ready()
+        try:
+            await self._post_interface_message()
+        except Exception:
+            log.exception("RouterInterfaceCog: _ensure_interface_message fehlgeschlagen")
+
+    async def _post_interface_message(self) -> None:
         cfg = get_guild_config()
         ch = self.bot.get_channel(cfg.TEMPVOICE_ROUTER_TEXT)
+        if ch is None:
+            ch = await self.bot.fetch_channel(cfg.TEMPVOICE_ROUTER_TEXT)
         if not isinstance(ch, discord.TextChannel):
             log.warning(
-                "RouterInterfaceCog: Textkanal %s nicht gefunden", cfg.TEMPVOICE_ROUTER_TEXT
+                "RouterInterfaceCog: Textkanal %s nicht erreichbar", cfg.TEMPVOICE_ROUTER_TEXT
             )
             return
 
@@ -136,13 +144,12 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
         )
         async for msg in ch.history(limit=10):
             if msg.author == self.bot.user and msg.embeds:
-                try:
-                    await msg.edit(embed=embed, view=RouterView())
-                except discord.HTTPException:
-                    pass
+                await msg.edit(embed=embed, view=RouterView())
+                log.info("RouterInterfaceCog: Interface-Message aktualisiert (ID %s)", msg.id)
                 return
 
-        await ch.send(embed=embed, view=RouterView())
+        msg = await ch.send(embed=embed, view=RouterView())
+        log.info("RouterInterfaceCog: Interface-Message gepostet (ID %s)", msg.id)
 
 
 async def setup(bot: commands.Bot) -> None:
