@@ -1,3 +1,13 @@
+## #49 — Coaching wird jetzt fair auf alle Coaches verteilt
+
+**Problem:** Eingehende Coaching-Anfragen liefen nach dem „Wer zuerst klickt"-Prinzip — der erste Coach, der auf „Claimen" drückte, bekam die Session. In der Praxis griff dadurch meist immer derselbe Coach zu, während andere kaum drankamen; eine echte Verteilung gab es nicht. Zusätzlich lief im Hintergrund noch ein altes, längst totes Zweit-System mit fest eingetragener Coach-Liste mit, das die Lage nur unübersichtlicher machte.
+
+**Geändert:** Neue Anfragen werden jetzt automatisch **fair** einem Coach zugewiesen und **24 Stunden exklusiv für ihn reserviert**. Es gibt einen **Freigeben-Button**, und nach Ablauf der 24 Stunden öffnet sich die Anfrage automatisch für alle. Wer Coach ist, ergibt sich dynamisch aus der Coach-Rolle — keine fest hinterlegte Namensliste mehr. Das alte parallele Claim-System wurde komplett entfernt.
+
+**Wie's funktioniert:** Sobald eine Anfrage analysiert und gepostet wird, wählt der Bot aus allen Trägern der Coach-Rolle (der Server-Inhaber ist bewusst ausgenommen) den aus, der **am längsten nicht mehr an der Reihe war** — bei Gleichstand den mit den **wenigsten laufenden Sessions**. Dieser Coach steht sichtbar im Embed und hat 24 Stunden exklusiv Zeit zu übernehmen; andere Coaches sehen die Anfrage, können sie in diesem Fenster aber nicht claimen. Drückt der reservierte Coach (oder ein Admin) auf „Freigeben", oder laufen die 24 Stunden ab, wird die Anfrage für alle Coaches geöffnet — ein Hintergrund-Check im Minutentakt erledigt das Ablaufen automatisch und aktualisiert die Nachricht. Lässt sich gerade kein passender Coach ermitteln, ist die Anfrage sofort für alle offen, genau wie vorher.
+
+**Betroffen:** Vor allem die Coaches (faire Reihenfolge statt Windhundprinzip). Für anfragende Spieler bleibt der Ablauf gleich — nur ist schneller klar, wer sich kümmert.
+
 ## #48 — Security Guard: MiniMax-Label erscheint jetzt nachträglich im Mod-Embed
 
 **Problem:** Das MiniMax-Bild-Urteil lief blockierend *vor* dem Mod-Alert — wenn MiniMax länger brauchte (oder per Timeout abbrach bei 8 s), stand im ersten Post „nicht verfügbar" und der Bot wartete die ganze Zeit, bevor er überhaupt Timeout und Löschung ausführte.

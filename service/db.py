@@ -1289,6 +1289,8 @@ def init_schema(conn: sqlite3.Connection | None = None) -> None:
             "ALTER TABLE coaching_requests ADD COLUMN role_expires_at INTEGER",
             "ALTER TABLE coaching_requests ADD COLUMN role_removed_at INTEGER",
             "ALTER TABLE coaching_requests ADD COLUMN scheduled_slot TEXT",
+            "ALTER TABLE coaching_requests ADD COLUMN assigned_coach_id TEXT",
+            "ALTER TABLE coaching_requests ADD COLUMN reserved_until INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_channel_id INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_started_at INTEGER",
             "ALTER TABLE coaching_sessions ADD COLUMN voice_last_seen_at INTEGER",

@@ -18,6 +18,44 @@ from service.config import settings
 log = logging.getLogger(__name__)
 _CLAIM_IN_PROGRESS: set[int] = set()
 
+# Owner/Inhaber wird aus der fairen Coach-Rotation ausgeschlossen.
+OWNER_EXCLUDE_ID = 662995601738170389
+# Wie lange ein neues Coaching exklusiv fuer den fair gewaehlten Coach reserviert bleibt.
+CLAIM_RESERVATION_HOURS = 24
+# Wie oft der Hintergrund-Loop abgelaufene Reservierungen oeffnet.
+RESERVATION_CHECK_INTERVAL_SECONDS = 60
+
+
+def pick_fair_coach(guild: "discord.Guild") -> "discord.Member | None":
+    """Waehle den fairsten Coach: Traeger der Coach-Rolle (ausser Owner/Bots),
+    der am laengsten nicht mehr zugewiesen war; Gleichstand -> wenigste aktiven Sessions.
+
+    Der Reservierungs-Status lebt allein in coaching_requests; diese Funktion leitet die
+    Rotation daraus ab, ohne statische Coach-Liste.
+    """
+    role = guild.get_role(settings.coach_role_id)
+    if not role:
+        return None
+    candidates = [m for m in role.members if not m.bot and m.id != OWNER_EXCLUDE_ID]
+    if not candidates:
+        return None
+
+    last_rows = db.query_all(
+        "SELECT assigned_coach_id, MAX(reserved_until) AS last_res "
+        "FROM coaching_requests WHERE assigned_coach_id IS NOT NULL GROUP BY assigned_coach_id"
+    )
+    last_assigned = {str(r["assigned_coach_id"]): int(r["last_res"] or 0) for r in last_rows}
+    active_rows = db.query_all(
+        "SELECT coach_id, COUNT(*) AS c FROM coaching_sessions "
+        "WHERE status='active' GROUP BY coach_id"
+    )
+    active = {str(r["coach_id"]): int(r["c"] or 0) for r in active_rows}
+
+    candidates.sort(
+        key=lambda m: (last_assigned.get(str(m.id), 0), active.get(str(m.id), 0), m.id)
+    )
+    return candidates[0]
+
 
 COACHING_ANALYSIS_SYSTEM = """Du bist ein Deadlock Coaching Koordinator.
 Der Coach sieht die Rohangaben des Spielers bereits (Rang, Hero, Games, Probleme).
@@ -226,6 +264,28 @@ class CoachClaimButton(discord.ui.Button):
                 )
                 return
 
+            # Reservierungs-Gate: waehrend der 24h-Reservierung darf nur der
+            # zugewiesene Coach (oder ein Admin) claimen. Danach ist es fuer alle offen.
+            assigned_coach_id = request["assigned_coach_id"]
+            reserved_until = request["reserved_until"]
+            is_owner = (
+                interaction.user.id == interaction.guild.owner_id
+                or interaction.user.id == OWNER_EXCLUDE_ID
+            )
+            still_reserved = bool(reserved_until) and int(time.time()) < int(reserved_until)
+            if (
+                still_reserved
+                and assigned_coach_id
+                and str(interaction.user.id) != str(assigned_coach_id)
+                and not is_owner
+            ):
+                await interaction.followup.send(
+                    f"⏳ Dieses Coaching ist noch fuer <@{assigned_coach_id}> reserviert "
+                    f"(bis <t:{int(reserved_until)}:R>). Danach kannst du es uebernehmen.",
+                    ephemeral=True,
+                )
+                return
+
             author = interaction.guild.get_member(request["discord_user_id"])
             if not author:
                 try:
@@ -322,10 +382,66 @@ class CoachClaimButton(discord.ui.Button):
             _CLAIM_IN_PROGRESS.discard(self.request_id)
 
 
+class CoachReleaseButton(discord.ui.Button):
+    """Gibt eine reservierte Coaching-Anfrage frei -> sofort fuer alle Coaches offen."""
+
+    def __init__(self, request_id: int, author_id: int):
+        super().__init__(
+            label="Freigeben",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"coach_release_{request_id}",
+        )
+        self.request_id = request_id
+        self.author_id = author_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not interaction.guild:
+            await interaction.response.send_message("❌ Nur im Server nutzbar.", ephemeral=True)
+            return
+
+        request = db.query_one(
+            "SELECT * FROM coaching_requests WHERE id=?", (self.request_id,)
+        )
+        if not request:
+            await interaction.response.send_message("❌ Request nicht gefunden.", ephemeral=True)
+            return
+        if request["status"] == "matched":
+            await interaction.response.send_message(
+                "❌ Schon geclaimt – kann nicht mehr freigegeben werden.", ephemeral=True
+            )
+            return
+
+        assigned_coach_id = request["assigned_coach_id"]
+        is_owner = (
+            interaction.user.id == interaction.guild.owner_id
+            or interaction.user.id == OWNER_EXCLUDE_ID
+        )
+        is_assigned = assigned_coach_id and str(interaction.user.id) == str(assigned_coach_id)
+        if not (is_owner or is_assigned):
+            await interaction.response.send_message(
+                "❌ Nur der reservierte Coach oder ein Admin kann freigeben.", ephemeral=True
+            )
+            return
+        if not assigned_coach_id:
+            await interaction.response.send_message(
+                "ℹ️ Dieses Coaching ist bereits fuer alle offen.", ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        cog = interaction.client.get_cog("CoachingRequestCog")
+        if cog:
+            await cog._open_request_to_all(self.request_id, reason="manual")
+        await interaction.followup.send(
+            "✅ Coaching freigegeben – jetzt fuer alle Coaches offen.", ephemeral=True
+        )
+
+
 class CoachClaimView(discord.ui.View):
     def __init__(self, request_id: int, author_id: int):
         super().__init__(timeout=None)
         self.add_item(CoachClaimButton(request_id, author_id))
+        self.add_item(CoachReleaseButton(request_id, author_id))
 
 
 class CoachingRequestCog(commands.Cog):
@@ -334,6 +450,7 @@ class CoachingRequestCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self._analyze_loop: asyncio.Task | None = None
+        self._expiry_loop: asyncio.Task | None = None
 
     def _recover_stale_analyzing_requests(self) -> int:
         cutoff = int(time.time()) - ANALYZING_STALE_AFTER_SECONDS
@@ -382,11 +499,16 @@ class CoachingRequestCog(commands.Cog):
             
         if self._analyze_loop is None or self._analyze_loop.done():
             self._analyze_loop = asyncio.create_task(self._analyze_pending_requests())
+        if self._expiry_loop is None or self._expiry_loop.done():
+            self._expiry_loop = asyncio.create_task(self._reservation_expiry_loop())
 
     async def cog_unload(self):
         if self._analyze_loop:
             self._analyze_loop.cancel()
             self._analyze_loop = None
+        if self._expiry_loop:
+            self._expiry_loop.cancel()
+            self._expiry_loop = None
 
     def _get_ai_connector(self):
         """Get AIConnector cog if available"""
@@ -510,43 +632,38 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
             return channel
         return None
 
-    async def _post_request_to_channel(self, request_data: dict, ai_summary: str):
-        """Post formatted coaching request to channel"""
-        channel = await self._get_coaching_channel()
-        if not channel:
-            log.error("Coaching channel not found")
-            return None
-
-        guild = channel.guild
-        member = await self._get_member(guild, request_data["discord_user_id"]) if guild else None
-
-        embed = discord.Embed(
-            title="🎮 Neue Coaching-Anfrage",
-            color=discord.Color.blue(),
-        )
+    def _build_request_embed(
+        self,
+        request_data: dict,
+        guild: "discord.Guild | None",
+        assigned_coach_id: "str | None",
+        reserved_until: "int | None",
+    ) -> discord.Embed:
+        """Baut das Anfrage-Embed inkl. Reservierungs-Status (DRY fuer Post/Freigabe/Ablauf)."""
+        member = guild.get_member(request_data["discord_user_id"]) if guild else None
+        embed = discord.Embed(title="🎮 Neue Coaching-Anfrage", color=discord.Color.blue())
 
         username = request_data.get("discord_username", "Unknown")
         if member:
             embed.set_author(
-                name=username, icon_url=member.display_avatar.url if member.display_avatar else None
+                name=username,
+                icon_url=member.display_avatar.url if member.display_avatar else None,
             )
 
         rank = _normalize_inline_text(request_data.get("rank") or "N/A")
         hero = _normalize_inline_text(
-            request_data.get("hero") or "Nicht angegeben",
-            fallback="Nicht angegeben",
+            request_data.get("hero") or "Nicht angegeben", fallback="Nicht angegeben"
         )
         games_hours = _normalize_inline_text(request_data.get("games_played") or "N/A")
         scheduled_slot = _normalize_inline_text(
-            request_data.get("scheduled_slot") or "Nicht angegeben",
-            fallback="Nicht angegeben",
+            request_data.get("scheduled_slot") or "Nicht angegeben", fallback="Nicht angegeben"
         )
         problems = _normalize_inline_text(
             request_data.get("current_problems") or "Keine Beschreibung",
             fallback="Keine Beschreibung",
             limit=DISCORD_EMBED_FIELD_LIMIT,
         )
-        ai_summary_text = _format_ai_summary_for_embed(ai_summary)
+        ai_summary_text = _format_ai_summary_for_embed(request_data.get("ai_summary") or "")
 
         embed.add_field(name="Rang", value=rank, inline=True)
         embed.add_field(name="Hero", value=hero, inline=True)
@@ -555,21 +672,116 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         embed.add_field(name="📝 Probleme", value=problems or "Keine", inline=False)
         embed.add_field(name="🤖 AI Analyse", value=ai_summary_text, inline=False)
 
+        if assigned_coach_id and reserved_until and int(time.time()) < int(reserved_until):
+            embed.add_field(
+                name="🎯 Reserviert fuer",
+                value=f"<@{assigned_coach_id}> – claim bis <t:{int(reserved_until)}:R>",
+                inline=False,
+            )
+            embed.color = discord.Color.gold()
+        else:
+            embed.add_field(name="🟢 Status", value="Offen fuer alle Coaches", inline=False)
+        return embed
+
+    async def _open_request_to_all(self, request_id: int, *, reason: str = "expired") -> None:
+        """Hebt die Reservierung auf und aktualisiert die Channel-Nachricht."""
+        now = int(time.time())
+        db.execute(
+            "UPDATE coaching_requests SET assigned_coach_id=NULL, reserved_until=NULL, "
+            "updated_at=? WHERE id=? AND status='analyzed'",
+            (now, request_id),
+        )
+        request = db.query_one("SELECT * FROM coaching_requests WHERE id=?", (request_id,))
+        if not request or request["status"] != "analyzed" or not request["message_id"]:
+            return
+        channel = await self._get_coaching_channel()
+        if not channel:
+            return
+        try:
+            message = await channel.fetch_message(int(request["message_id"]))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return
+
+        embed = self._build_request_embed(dict(request), channel.guild, None, None)
+        view = CoachClaimView(request["id"], request["discord_user_id"])
+        prefix = "⏰ Reservierung abgelaufen – " if reason == "expired" else "🟢 Freigegeben – "
+        content = (
+            f"📥 Anfrage von <@{request['discord_user_id']}> – {prefix}"
+            "jetzt fuer alle Coaches offen"
+        )
+        try:
+            await message.edit(content=content, embed=embed, view=view)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException) as exc:
+            log.warning("Could not edit message when opening request %s: %s", request_id, exc)
+
+    async def _reservation_expiry_loop(self):
+        """Oeffnet abgelaufene 24h-Reservierungen automatisch fuer alle Coaches."""
+        await self.bot.wait_until_ready()
+        while True:
+            try:
+                now = int(time.time())
+                rows = db.query_all(
+                    "SELECT id FROM coaching_requests WHERE status='analyzed' "
+                    "AND assigned_coach_id IS NOT NULL AND reserved_until IS NOT NULL "
+                    "AND reserved_until <= ?",
+                    (now,),
+                )
+                for row in rows:
+                    await self._open_request_to_all(int(row["id"]), reason="expired")
+            except Exception as e:
+                log.error(f"Reservation expiry loop error: {e}")
+            await asyncio.sleep(RESERVATION_CHECK_INTERVAL_SECONDS)
+
+    async def _post_request_to_channel(self, request_data: dict, ai_summary: str):
+        """Post formatted coaching request to channel"""
+        channel = await self._get_coaching_channel()
+        if not channel:
+            log.error("Coaching channel not found")
+            return None
+
+        guild = channel.guild
+
+        # Faire Vorab-Zuweisung: least-loaded Coach (Coach-Rolle, ausser Owner),
+        # 24h exklusiv reserviert; danach uebernimmt der Expiry-Loop das Oeffnen.
+        assigned = pick_fair_coach(guild) if guild else None
+        now_ts = int(time.time())
+        assigned_coach_id = str(assigned.id) if assigned else None
+        reserved_until = now_ts + CLAIM_RESERVATION_HOURS * 3600 if assigned else None
+
+        request_data["ai_summary"] = ai_summary
+        embed = self._build_request_embed(request_data, guild, assigned_coach_id, reserved_until)
         view = CoachClaimView(request_data["id"], request_data["discord_user_id"])
 
         try:
             user_mention = f"<@{request_data['discord_user_id']}>"
-            content = f"📥 Anfrage von {user_mention}"
+            if assigned:
+                content = (
+                    f"📥 Anfrage von {user_mention} – 🎯 reserviert fuer {assigned.mention} "
+                    f"({CLAIM_RESERVATION_HOURS}h)"
+                )
+            else:
+                content = f"📥 Anfrage von {user_mention} – 🟢 offen fuer alle Coaches"
             message = await channel.send(content=content, embed=embed, view=view)
 
-            # Update request with message info
+            # Update request with message info + Reservierung
             db.execute(
-                "UPDATE coaching_requests SET message_id=?, channel_id=?, ai_summary=?, status='analyzed', updated_at=? WHERE id=?",
-                (message.id, channel.id, ai_summary, int(time.time()), request_data["id"]),
+                "UPDATE coaching_requests SET message_id=?, channel_id=?, ai_summary=?, "
+                "status='analyzed', assigned_coach_id=?, reserved_until=?, updated_at=? WHERE id=?",
+                (
+                    message.id,
+                    channel.id,
+                    ai_summary,
+                    assigned_coach_id,
+                    reserved_until,
+                    int(time.time()),
+                    request_data["id"],
+                ),
             )
             request_data["channel_id"] = channel.id
             request_data["message_id"] = message.id
             request_data["status"] = "analyzed"
+            request_data["assigned_coach_id"] = assigned_coach_id
+            request_data["reserved_until"] = reserved_until
             return message.id
         except Exception as e:
             log.error(f"Error posting to channel: {e}")
