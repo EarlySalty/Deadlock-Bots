@@ -169,9 +169,7 @@ class PrivacyControls(commands.Cog):
             + self._summary_value(summary, "tempvoice_bans.banned_id")
         )
         claims_rows = (
-            self._summary_value(summary, "claimed_threads.assigned_user_id")
-            + self._summary_value(summary, "claimed_threads.claimed_by_id")
-            + self._summary_value(summary, "coaching_sessions.user_id")
+            self._summary_value(summary, "coaching_sessions.user_id")
             + self._summary_value(summary, "voice_channel_anchors.user_id")
         )
         partner_rows = self._summary_value(

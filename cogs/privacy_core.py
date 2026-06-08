@@ -38,8 +38,6 @@ _USER_TABLES: tuple[tuple[str, str], ...] = (
     ("user_retention_messages", "user_id"),
     ("voice_channel_anchors", "user_id"),
     ("coaching_sessions", "user_id"),
-    ("claimed_threads", "assigned_user_id"),
-    ("claimed_threads", "claimed_by_id"),
     ("steam_nudge_state", "user_id"),
     ("twitch_streamers", "discord_user_id"),
     ("twitch_link_clicks", "discord_user_id"),
@@ -96,8 +94,6 @@ _DELETE_SQL_BY_TARGET: dict[tuple[str, str], str] = {
     ("user_retention_messages", "user_id"): "DELETE FROM user_retention_messages WHERE user_id=?",
     ("voice_channel_anchors", "user_id"): "DELETE FROM voice_channel_anchors WHERE user_id=?",
     ("coaching_sessions", "user_id"): "DELETE FROM coaching_sessions WHERE user_id=?",
-    ("claimed_threads", "assigned_user_id"): "DELETE FROM claimed_threads WHERE assigned_user_id=?",
-    ("claimed_threads", "claimed_by_id"): "DELETE FROM claimed_threads WHERE claimed_by_id=?",
     ("steam_nudge_state", "user_id"): "DELETE FROM steam_nudge_state WHERE user_id=?",
     ("twitch_streamers", "discord_user_id"): "DELETE FROM twitch_streamers WHERE discord_user_id=?",
     (
@@ -166,11 +162,6 @@ _SELECT_SQL_BY_TARGET: dict[tuple[str, str], str] = {
     ("user_retention_messages", "user_id"): "SELECT * FROM user_retention_messages WHERE user_id=?",
     ("voice_channel_anchors", "user_id"): "SELECT * FROM voice_channel_anchors WHERE user_id=?",
     ("coaching_sessions", "user_id"): "SELECT * FROM coaching_sessions WHERE user_id=?",
-    (
-        "claimed_threads",
-        "assigned_user_id",
-    ): "SELECT * FROM claimed_threads WHERE assigned_user_id=?",
-    ("claimed_threads", "claimed_by_id"): "SELECT * FROM claimed_threads WHERE claimed_by_id=?",
     ("steam_nudge_state", "user_id"): "SELECT * FROM steam_nudge_state WHERE user_id=?",
     (
         "twitch_streamers",
@@ -486,20 +477,6 @@ def export_user_data(user_id: int) -> dict[str, object]:
                 uid,
                 keep="banned_id",
                 redact_fields=("owner_id",),
-            )
-        if "claimed_threads.assigned_user_id" in tables:
-            tables["claimed_threads.assigned_user_id"] = _redact_other_ids(
-                tables["claimed_threads.assigned_user_id"],
-                uid,
-                keep="assigned_user_id",
-                redact_fields=("claimed_by_id",),
-            )
-        if "claimed_threads.claimed_by_id" in tables:
-            tables["claimed_threads.claimed_by_id"] = _redact_other_ids(
-                tables["claimed_threads.claimed_by_id"],
-                uid,
-                keep="claimed_by_id",
-                redact_fields=("assigned_user_id",),
             )
 
     return snapshot
