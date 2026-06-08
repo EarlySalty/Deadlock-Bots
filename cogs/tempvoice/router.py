@@ -145,7 +145,17 @@ class RouterCog(commands.Cog, name="RouterCog"):
             return
 
         category_id = _mode_to_category(mode)
-        lane = self._find_suitable_lane(guild, category_id)
+
+        co_player_ids: set[int] = set()
+        activity_cog = self.bot.get_cog("UserActivityAnalyzer")
+        if activity_cog is not None:
+            try:
+                top = await activity_cog.get_top_co_players(member.id, limit=20)
+                co_player_ids = {uid for uid, _ in top}
+            except Exception as e:
+                log.debug("RouterCog: Co-Player-Lookup fehlgeschlagen für %s: %r", member.id, e)
+
+        lane = self._find_suitable_lane(guild, category_id, co_player_ids=co_player_ids)
 
         if lane is not None:
             try:
@@ -164,6 +174,7 @@ class RouterCog(commands.Cog, name="RouterCog"):
         guild: discord.Guild,
         category_id: int,
         max_members: int = 6,
+        co_player_ids: set[int] | None = None,
     ) -> discord.VoiceChannel | None:
         cat = guild.get_channel(category_id)
         if not isinstance(cat, discord.CategoryChannel):
@@ -171,12 +182,15 @@ class RouterCog(commands.Cog, name="RouterCog"):
         cfg = get_guild_config()
         skip_ids = {cfg.TEMPVOICE_STAGING_CASUAL, cfg.TEMPVOICE_STAGING_COMP,
                     cfg.TEMPVOICE_STAGING_STREET_BRAWL}
-        for ch in cat.voice_channels:
-            if ch.id in skip_ids:
-                continue
-            if 0 < len(ch.members) < max_members:
-                return ch
-        return None
+        suitable = [
+            ch for ch in cat.voice_channels
+            if ch.id not in skip_ids and 0 < len(ch.members) < max_members
+        ]
+        if co_player_ids:
+            for ch in suitable:
+                if any(m.id in co_player_ids for m in ch.members):
+                    return ch
+        return suitable[0] if suitable else None
 
 
 async def setup(bot: commands.Bot) -> None:

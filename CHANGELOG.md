@@ -1,3 +1,11 @@
+## #51 — Router: Smart-Routing bevorzugt bekannte Mitspieler
+
+**Problem:** Der Router hat beim Suchen einer freien Lane einfach die erste passende genommen — ohne Rücksicht darauf, ob da jemand drin sitzt, mit dem man schon oft gespielt hat.
+
+**Geändert:** Beim Smart-Routing (Auto-Join an) wird jetzt zuerst geprüft, ob in einer der passenden Lanes ein bekannter Mitspieler sitzt. Erst wenn keine solche Lane gefunden wird, greift der bisherige Fallback (erste freie Lane mit Platz).
+
+**Wie's funktioniert:** Beim Join holt der Router die Top-20-Co-Player aus der bestehenden `user_co_players`-Tabelle (die trackt, wie viele gemeinsame Voice-Sessions zwei User hatten). Dann werden alle passenden Lanes durchsucht: Liegt die User-ID eines Mitglieds in dieser Co-Player-Liste, wird diese Lane priorisiert. Findet sich kein Co-Player, landet man wie gewohnt in der nächsten freien Lane.
+
 ## #50 — TempVoice: Neues Router-System mit Spielmodus-Wahl
 
 **Problem:** Wer in einen Sprachkanal wollte, landete in einem von drei fixen Staging-Kanälen (Casual, Ranked, Street Brawl) — Modus-Wahl durch das Betreten des richtigen Kanals. Das war unflexibel: keine Möglichkeit den Modus zu ändern, keine smarte Verteilung in laufende Lanes, keine einheitliche Einstiegsstelle.
