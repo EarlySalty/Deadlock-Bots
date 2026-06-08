@@ -5,6 +5,7 @@ import logging
 import discord
 from discord.ext import commands
 
+from service import db
 from service.config import settings
 
 from .core import (
@@ -573,6 +574,9 @@ class MainView(discord.ui.View):
             self.add_item(DuoCallButton(core))
             self.add_item(TrioCallButton(core))
             self.add_item(LurkerButton(util))
+            # Row 3: Umbenennen + Modus-Wechsel (Router-Lanes)
+            self.add_item(RenameButton(core, row=3))
+            self.add_item(ModeSwitchButton(core, row=3))
 
     @staticmethod
     def lane_of(itx: discord.Interaction) -> discord.VoiceChannel | None:
@@ -1713,3 +1717,102 @@ class RankPrefView(discord.ui.View):
             )
         await itx.followup.send(msg, ephemeral=True)
         self.stop()
+
+
+# ── Router-spezifische Buttons ────────────────────────────────────────────────
+
+class RenameModal(discord.ui.Modal, title="Lane umbenennen"):
+    name_input: discord.ui.TextInput = discord.ui.TextInput(
+        label="Neuer Name",
+        placeholder="z. B. Sweaty Grind",
+        min_length=1,
+        max_length=50,
+    )
+
+    def __init__(self, core) -> None:
+        super().__init__()
+        self.core = core
+
+    async def on_submit(self, itx: discord.Interaction) -> None:
+        lane = MainView.lane_of(itx)
+        if lane is None:
+            await itx.response.send_message("Keine Lane.", ephemeral=True)
+            return
+        name = self.name_input.value.strip()
+        await db.execute_async(
+            "UPDATE tempvoice_lanes SET base_name = ? WHERE channel_id = ?",
+            (name, lane.id),
+        )
+        if hasattr(itx.client, "queue_channel_rename"):
+            await itx.client.queue_channel_rename(lane.id, name, "Umbenennung durch Owner")
+        await itx.response.send_message(f"Name auf **{name}** gesetzt.", ephemeral=True)
+
+
+class RenameButton(discord.ui.Button):
+    def __init__(self, core, *, row: int = 3) -> None:
+        super().__init__(
+            label="✏️ Umbenennen",
+            custom_id="tv_rename_btn",
+            style=discord.ButtonStyle.secondary,
+            row=row,
+        )
+        self.core = core
+
+    async def callback(self, itx: discord.Interaction) -> None:
+        lane = MainView.lane_of(itx)
+        owner_id = self.core.lane_owner.get(lane.id) if lane is not None else None
+        if owner_id != itx.user.id and not itx.user.guild_permissions.manage_channels:
+            await itx.response.send_message("Nur Owner dürfen umbenennen.", ephemeral=True)
+            return
+        await itx.response.send_modal(RenameModal(self.core))
+
+
+class ModeSwitchSelect(discord.ui.Select):
+    def __init__(self, core) -> None:
+        super().__init__(
+            custom_id="tv_mode_switch_select",
+            placeholder="Neuen Modus wählen…",
+            options=[
+                discord.SelectOption(label="Casual",       value="casual",       emoji="🎮"),
+                discord.SelectOption(label="Ranked",       value="ranked",       emoji="🏆"),
+                discord.SelectOption(label="Street Brawl", value="street_brawl", emoji="⚡"),
+                discord.SelectOption(label="Off Topic",    value="off_topic",    emoji="🗨️"),
+            ],
+        )
+        self.core = core
+
+    async def callback(self, itx: discord.Interaction) -> None:
+        lane = MainView.lane_of(itx)
+        if lane is None:
+            await itx.response.send_message("Keine Lane.", ephemeral=True)
+            return
+        if (
+            self.core.lane_owner.get(lane.id) != itx.user.id
+            and not itx.user.guild_permissions.manage_channels
+        ):
+            await itx.response.send_message("Nur Owner darf den Modus wechseln.", ephemeral=True)
+            return
+        await itx.response.defer(ephemeral=True)
+        err = await self.core.switch_lane_mode(lane, itx.user, self.values[0])
+        _labels = {
+            "casual": "Casual", "ranked": "Ranked",
+            "street_brawl": "Street Brawl", "off_topic": "Off Topic",
+        }
+        label = _labels.get(self.values[0], self.values[0])
+        await itx.followup.send(err or f"Lane auf **{label}** umgestellt.", ephemeral=True)
+
+
+class ModeSwitchButton(discord.ui.Button):
+    def __init__(self, core, *, row: int = 3) -> None:
+        super().__init__(
+            label="🔄 Modus wechseln",
+            custom_id="tv_mode_switch_btn",
+            style=discord.ButtonStyle.secondary,
+            row=row,
+        )
+        self.core = core
+
+    async def callback(self, itx: discord.Interaction) -> None:
+        v = discord.ui.View(timeout=60)
+        v.add_item(ModeSwitchSelect(self.core))
+        await itx.response.send_message("Wähle den neuen Modus:", view=v, ephemeral=True)

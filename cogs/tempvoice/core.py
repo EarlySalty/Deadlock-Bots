@@ -2341,6 +2341,130 @@ class TempVoiceCore(commands.Cog):
             if lock_ref and not lock_ref.locked():
                 self._lane_creation_locks.pop(member_id, None)
 
+    # --------- Router-Methoden ---------
+
+    async def _create_lane_for_router(
+        self, member: discord.Member, mode: str
+    ) -> discord.VoiceChannel | None:
+        """Erstellt eine Lane in der zum Modus passenden Kategorie (Router-Ursprung)."""
+        from service.guild_config import get_guild_config as _gcfg
+        cfg = _gcfg()
+        mode_cats = {
+            "ranked":       cfg.TEMPVOICE_CATEGORY_COMP,
+            "casual":       cfg.TEMPVOICE_CATEGORY_CHILL,
+            "street_brawl": cfg.TEMPVOICE_CATEGORY_STREET_BRAWL,
+        }
+        category_id = mode_cats.get(mode, cfg.TEMPVOICE_CATEGORY_CHILL)
+        guild = member.guild
+        cat = guild.get_channel(category_id)
+        if not isinstance(cat, discord.CategoryChannel):
+            log.warning("_create_lane_for_router: Kategorie %s nicht gefunden", category_id)
+            return None
+
+        if mode == "ranked":
+            mgr = self.bot.get_cog("RolePermissionVoiceManager")
+            if mgr is not None:
+                rn, _rv, rs = mgr.get_user_rank_from_roles(member)
+                base = f"{rn} {rs}" if rn and rs else "Ranked"
+            else:
+                base = "Ranked"
+        else:
+            base = {"casual": "Chill Lane", "street_brawl": "Street Brawl"}.get(mode, "Lane")
+
+        user_limit = 4 if mode == "street_brawl" else 6
+        index = len([c for c in cat.voice_channels]) + 1
+
+        try:
+            lane = await cat.create_voice_channel(
+                name=f"{base} {index}",
+                user_limit=user_limit,
+                reason=f"Router: neue {mode}-Lane für {member.display_name}",
+            )
+        except discord.HTTPException as e:
+            log.warning("_create_lane_for_router: Channel-Erstellung fehlgeschlagen: %r", e)
+            return None
+
+        await db.execute_async(
+            """INSERT OR REPLACE INTO tempvoice_lanes
+               (channel_id, guild_id, owner_id, initial_owner_id, base_name, category_id,
+                source_staging_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (lane.id, guild.id, member.id, member.id, base, category_id,
+             cfg.TEMPVOICE_ROUTER_VC),
+        )
+        self.lane_owner[lane.id] = member.id
+
+        try:
+            await member.move_to(lane, reason="Router: neue Lane erstellt")
+            log.info("Router: Lane %s erstellt + %s verschoben (%s)", lane.id, member.id, mode)
+        except (discord.Forbidden, discord.HTTPException) as e:
+            log.warning("Router: Move von %s fehlgeschlagen (%r), räume Lane auf", member.id, e)
+            await self._cleanup_lane(int(lane.id), channel=lane, reason="Router: Move fehlgeschlagen")
+            return None
+
+        asyncio.create_task(self._apply_owner_settings_background(lane, member.id))
+        await self._refresh_name(lane)
+        return lane
+
+    async def switch_lane_mode(
+        self, lane: discord.VoiceChannel, owner: discord.Member, new_mode: str
+    ) -> str | None:
+        """Wechselt Modus einer bestehenden Lane. Gibt Fehlermeldung oder None zurück."""
+        from service.guild_config import get_guild_config as _gcfg
+        cfg = _gcfg()
+        mode_cats = {
+            "ranked":       cfg.TEMPVOICE_CATEGORY_COMP,
+            "casual":       cfg.TEMPVOICE_CATEGORY_CHILL,
+            "street_brawl": cfg.TEMPVOICE_CATEGORY_STREET_BRAWL,
+            "off_topic":    cfg.TEMPVOICE_ROUTER_CATEGORY,
+        }
+        category_id = mode_cats.get(new_mode)
+        if category_id is None:
+            return "Unbekannter Modus."
+        cat = lane.guild.get_channel(category_id)
+        if not isinstance(cat, discord.CategoryChannel):
+            return "Ziel-Kategorie nicht gefunden."
+
+        if new_mode == "ranked":
+            router_cog = self.bot.get_cog("RouterCog")
+            if router_cog is not None and not router_cog.has_verified_rank(owner):
+                info_ch = lane.guild.get_channel(cfg.TEMPVOICE_RANKED_INFO_CHANNEL)
+                return (
+                    f"Ranked braucht einen verifizierten Rang. "
+                    f"Info: {info_ch.mention if info_ch else '#ranked-info'}"
+                )
+
+        try:
+            await lane.edit(category=cat, reason=f"Modus-Wechsel → {new_mode}")
+        except discord.HTTPException as e:
+            return f"Fehler beim Verschieben: {e}"
+
+        await db.execute_async(
+            "UPDATE tempvoice_lanes SET category_id = ? WHERE channel_id = ?",
+            (category_id, lane.id),
+        )
+
+        # Neuen Namen setzen
+        if new_mode == "ranked":
+            mgr = self.bot.get_cog("RolePermissionVoiceManager")
+            if mgr is not None:
+                rn, _rv, rs = mgr.get_user_rank_from_roles(owner)
+                new_name = f"{rn} {rs}" if rn and rs else "Ranked Lane"
+            else:
+                new_name = "Ranked Lane"
+        else:
+            # Gespeicherten base_name aus DB holen
+            row = await db.query_one_async(
+                "SELECT base_name FROM tempvoice_lanes WHERE channel_id = ?", (lane.id,)
+            )
+            new_name = row[0] if row else lane.name.split(" ")[0]
+
+        if hasattr(self.bot, "queue_channel_rename"):
+            await self.bot.queue_channel_rename(lane.id, new_name, f"Modus → {new_mode}")
+
+        log.info("switch_lane_mode: Lane %s → %s (owner=%s)", lane.id, new_mode, owner.id)
+        return None
+
     # --------- Events ---------
     @commands.Cog.listener()
     async def on_guild_channel_update(
