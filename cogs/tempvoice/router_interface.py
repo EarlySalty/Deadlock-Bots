@@ -113,12 +113,13 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
 
     async def cog_load(self) -> None:
         self.bot.add_view(RouterView())
-        asyncio.ensure_future(self._ensure_interface_message())
 
-    async def _ensure_interface_message(self) -> None:
-        log.info("RouterInterfaceCog: Interface-Task gestartet")
-        await self.bot.wait_until_ready()
-        log.info("RouterInterfaceCog: Bot ready, poste Interface-Message")
+    @commands.Cog.listener()
+    async def on_ready(self) -> None:
+        if getattr(self, "_interface_posted", False):
+            return
+        self._interface_posted = True
+        log.info("RouterInterfaceCog: on_ready → poste Interface-Message")
         try:
             await self._post_interface_message()
         except Exception:
