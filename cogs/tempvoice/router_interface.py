@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 
 import discord
@@ -112,14 +113,16 @@ class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
 
     async def cog_load(self) -> None:
         self.bot.add_view(RouterView())
-        self.bot.loop.create_task(self._ensure_interface_message())
+        asyncio.ensure_future(self._ensure_interface_message())
 
     async def _ensure_interface_message(self) -> None:
+        log.info("RouterInterfaceCog: Interface-Task gestartet")
         await self.bot.wait_until_ready()
+        log.info("RouterInterfaceCog: Bot ready, poste Interface-Message")
         try:
             await self._post_interface_message()
         except Exception:
-            log.exception("RouterInterfaceCog: _ensure_interface_message fehlgeschlagen")
+            log.exception("RouterInterfaceCog: _post_interface_message fehlgeschlagen")
 
     async def _post_interface_message(self) -> None:
         cfg = get_guild_config()
