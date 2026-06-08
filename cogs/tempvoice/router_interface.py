@@ -106,16 +106,28 @@ class AutoJoinButton(discord.ui.Button):
         ):
             await router_cog._smart_route(member, pref["mode"])
 
+        # Visuelles Feedback: Button 3 Sek grün
+        try:
+            await itx.message.edit(view=RouterView(auto_join_active=True))
+            await asyncio.sleep(3)
+            await itx.message.edit(view=RouterView())
+        except discord.HTTPException:
+            pass
+
 
 class RouterView(discord.ui.View):
-    def __init__(self, active_mode: str | None = None) -> None:
+    def __init__(self, active_mode: str | None = None, auto_join_active: bool = False) -> None:
         super().__init__(timeout=None)
         for mode in ("casual", "ranked", "street_brawl"):
             btn = ModeButton(mode)
             if mode == active_mode:
                 btn.style = discord.ButtonStyle.success
             self.add_item(btn)
-        self.add_item(AutoJoinButton())
+        aj_btn = AutoJoinButton()
+        if auto_join_active:
+            aj_btn.style = discord.ButtonStyle.success
+            aj_btn.emoji = "✅"
+        self.add_item(aj_btn)
 
 
 class RouterInterfaceCog(commands.Cog, name="RouterInterfaceCog"):
