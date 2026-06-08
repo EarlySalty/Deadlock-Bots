@@ -574,9 +574,9 @@ class MainView(discord.ui.View):
             self.add_item(DuoCallButton(core))
             self.add_item(TrioCallButton(core))
             self.add_item(LurkerButton(util))
-            # Row 3: Umbenennen + Modus-Wechsel (Router-Lanes)
-            self.add_item(RenameButton(core, row=3))
-            self.add_item(ModeSwitchButton(core, row=3))
+            # Row 4: Umbenennen + Modus-Wechsel (Router-Lanes)
+            self.add_item(RenameButton(core, row=4))
+            self.add_item(ModeSwitchButton(core, row=4))
 
     @staticmethod
     def lane_of(itx: discord.Interaction) -> discord.VoiceChannel | None:
