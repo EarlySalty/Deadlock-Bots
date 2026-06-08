@@ -1,3 +1,11 @@
+## #52 — Fix: TempVoice-Interface lädt wieder korrekt
+
+**Problem:** Durch die neuen Router-Buttons (Umbenennen + Modus wechseln) kam es beim Bot-Start zu einem Fehler, der das komplette TempVoice-Modul am Laden hinderte — alle Lane-Funktionen waren damit ausgefallen.
+
+**Ursache:** Der Lurker-Button hat intern row 3 als Standard, was die Reihe bereits auf 4 Items brachte. Die zwei neuen Buttons auf row 3 machten 6 Items — Discord erlaubt maximal 5 pro Reihe.
+
+**Geändert:** Die neuen Router-Buttons landen jetzt auf row 4, die in der Standard-Lane-Ansicht bisher leer war.
+
 ## #51 — Router: Smart-Routing bevorzugt bekannte Mitspieler
 
 **Problem:** Der Router hat beim Suchen einer freien Lane einfach die erste passende genommen — ohne Rücksicht darauf, ob da jemand drin sitzt, mit dem man schon oft gespielt hat.
