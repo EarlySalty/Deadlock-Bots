@@ -1,3 +1,19 @@
+## #50 — TempVoice: Neues Router-System mit Spielmodus-Wahl
+
+**Problem:** Wer in einen Sprachkanal wollte, landete in einem von drei fixen Staging-Kanälen (Casual, Ranked, Street Brawl) — Modus-Wahl durch das Betreten des richtigen Kanals. Das war unflexibel: keine Möglichkeit den Modus zu ändern, keine smarte Verteilung in laufende Lanes, keine einheitliche Einstiegsstelle.
+
+**Geändert:** Ein einzelner Router-Sprachkanal ersetzt die drei Eingänge für alle, die über diesen neuen Weg kommen wollen. Die alten Staging-Kanäle laufen unverändert weiter. Dazu gibt es einen Interface-Textkanal mit einer persistenten UI aus drei Modus-Buttons (Casual, Ranked, Street Brawl) und einem Auto-Join-Toggle.
+
+**Wie's funktioniert:**
+
+- **Modus wählen:** User klickt im Textkanal auf einen der drei Buttons — wird als Standard gespeichert und gilt für alle folgenden Joins.
+- **Auto-Join aus (grau):** Beim Betreten des Router-VC wird sofort eine eigene private Lane im passenden Bereich erstellt.
+- **Auto-Join an (grün):** Smart Routing — der Bot sucht eine bestehende Lane mit weniger als 6 Personen und demselben Modus. Findet er keine, wird eine neue erstellt.
+- **Ranked-Gate:** Wer Ranked wählt, braucht einen verifizierten Rang (Steam-Verknüpfung). Ohne Rang kommt eine DM mit Link zum Info-Kanal, kein Move.
+- **Neue Spieler:** Werden weiterhin automatisch in die New-Player-Lane umgeleitet, bevor das Modus-Routing greift — bestehende Logik unverändert.
+- **Modus-Wechsel einer laufenden Lane:** Lane-Owner können ihren Kanal nachträglich auf einen anderen Modus (inkl. Off Topic) umstellen — der Kanal zieht in die passende Discord-Kategorie um. Dazu gibt es neue Buttons im Lane-Control-Interface.
+- **Off-Topic-Lanes** landen in der Router-Kategorie, genau wie der bestehende permanente Off-Topic-Kanal.
+
 ## #49 — Coaching wird jetzt fair auf alle Coaches verteilt
 
 **Problem:** Eingehende Coaching-Anfragen liefen nach dem „Wer zuerst klickt"-Prinzip — der erste Coach, der auf „Claimen" drückte, bekam die Session. In der Praxis griff dadurch meist immer derselbe Coach zu, während andere kaum drankamen; eine echte Verteilung gab es nicht. Zusätzlich lief im Hintergrund noch ein altes, längst totes Zweit-System mit fest eingetragener Coach-Liste mit, das die Lage nur unübersichtlicher machte.
