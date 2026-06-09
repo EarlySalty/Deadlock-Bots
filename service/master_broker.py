@@ -235,6 +235,14 @@ class MasterBroker:
                         "/internal/master/v1/discord/create-invite",
                         self._handle_create_invite,
                     ),
+                    web.post(
+                        "/internal/master/v1/discord/member/remove-role",
+                        self._handle_remove_role,
+                    ),
+                    web.post(
+                        "/internal/master/v1/discord/send-dm",
+                        self._handle_send_dm,
+                    ),
                 ]
             )
 
@@ -2135,6 +2143,254 @@ class MasterBroker:
         return await self._run_idempotent_action(
             request=request,
             action="discord.create_invite",
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            operation=_operation,
+        )
+
+
+    async def _handle_remove_role(self, request: web.Request) -> web.Response:
+        """Entfernt eine Discord-Rolle von einem Mitglied.
+
+        Gleiche Auth- und Idempotenz-Behandlung wie _handle_add_role.
+        Body: {guild_id, user_id, role_id, reason?}
+        """
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            payload = await self._read_json_object(request)
+            idempotency_key = self._extract_idempotency_key(request, payload)
+            guild_id = self._parse_positive_payload_int(payload, "guild_id")
+            user_id = self._parse_positive_payload_int(payload, "user_id")
+            role_id = self._parse_positive_payload_int(payload, "role_id")
+            reason = str(payload.get("reason") or "").strip() or "master-broker:remove-role"
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+        except Exception:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="invalid JSON payload",
+            )
+
+        operation_payload = {
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "role_id": role_id,
+            "reason": reason,
+        }
+        guild_allowlist_rejected = self._allowlist_check(
+            request=request,
+            idempotency_key=idempotency_key,
+            scope="guild",
+            value=guild_id,
+            enabled=self._guild_allowlist_enabled,
+            allowed_ids=self._allowed_guild_ids,
+        )
+        if guild_allowlist_rejected is not None:
+            return guild_allowlist_rejected
+
+        role_allowlist_rejected = self._allowlist_check(
+            request=request,
+            idempotency_key=idempotency_key,
+            scope="role",
+            value=role_id,
+            enabled=self._role_allowlist_enabled,
+            allowed_ids=self._allowed_role_ids,
+        )
+        if role_allowlist_rejected is not None:
+            return role_allowlist_rejected
+
+        payload_hash = self._payload_hash(operation_payload)
+
+        async def _operation() -> web.Response:
+            guild = None
+            try:
+                guild = self.bot.get_guild(guild_id)
+            except Exception:
+                guild = None
+
+            if guild is None:
+                fetch_guild = getattr(self.bot, "fetch_guild", None)
+                if callable(fetch_guild):
+                    try:
+                        guild = await fetch_guild(guild_id)
+                    except Exception:
+                        guild = None
+
+            if guild is None:
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"guild {guild_id} not found",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                role = guild.get_role(role_id)
+            except Exception:
+                role = None
+            if role is None:
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"role {role_id} not found",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                member = guild.get_member(user_id)
+            except Exception:
+                member = None
+            if member is None and hasattr(guild, "fetch_member"):
+                try:
+                    member = await guild.fetch_member(user_id)
+                except Exception:
+                    member = None
+            if member is None:
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"member {user_id} not found",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                await member.remove_roles(role, reason=reason)
+            except Exception as exc:
+                logger.error(
+                    "Master broker remove_role failed (guild=%s user=%s role=%s): %s",
+                    guild_id,
+                    user_id,
+                    role_id,
+                    exc,
+                )
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="failed to remove role",
+                    idempotency_key=idempotency_key,
+                )
+
+            return self._success_response(
+                request=request,
+                idempotency_key=idempotency_key,
+                result={
+                    "guild_id": guild_id,
+                    "user_id": user_id,
+                    "role_id": role_id,
+                },
+            )
+
+        return await self._run_idempotent_action(
+            request=request,
+            action="discord.remove_role",
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            operation=_operation,
+        )
+
+    async def _handle_send_dm(self, request: web.Request) -> web.Response:
+        """Sendet eine DM an einen Discord-User via user.create_dm().
+
+        Analog zu _handle_send_message, aber ausschliesslich user-only (kein channel_id).
+        Body: {user_id, content}
+        """
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            payload = await self._read_json_object(request)
+            idempotency_key = self._extract_idempotency_key(request, payload)
+            user_id = self._parse_positive_payload_int(payload, "user_id")
+            content = str(payload.get("content") or "").strip()
+            if not content:
+                raise ValueError("content is required")
+            if len(content) > 2000:
+                raise ValueError("content exceeds Discord limit (2000)")
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+        except Exception:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="invalid JSON payload",
+            )
+
+        operation_payload = {"user_id": user_id, "content": content}
+        payload_hash = self._payload_hash(operation_payload)
+
+        async def _operation() -> web.Response:
+            user = await self._resolve_user(user_id)
+            if user is None:
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"user {user_id} not found",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                dm_channel = getattr(user, "dm_channel", None)
+                if dm_channel is None and hasattr(user, "create_dm"):
+                    dm_channel = await user.create_dm()
+                if dm_channel is None or not hasattr(dm_channel, "send"):
+                    return self._error_response(
+                        request=request,
+                        status=502,
+                        code="discord_error",
+                        message="failed to open DM channel",
+                        idempotency_key=idempotency_key,
+                    )
+                message = await dm_channel.send(content=content)
+            except Exception as exc:
+                logger.error(
+                    "Master broker send_dm failed (user=%s): %s",
+                    user_id,
+                    exc,
+                )
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="failed to send DM",
+                    idempotency_key=idempotency_key,
+                )
+
+            dm_channel_id = int(getattr(dm_channel, "id", 0) or 0) or None
+            return self._success_response(
+                request=request,
+                idempotency_key=idempotency_key,
+                result={
+                    "user_id": user_id,
+                    "channel_id": dm_channel_id,
+                    "message_id": int(getattr(message, "id", 0) or 0),
+                },
+            )
+
+        return await self._run_idempotent_action(
+            request=request,
+            action="discord.send_dm",
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
             operation=_operation,

@@ -1,3 +1,11 @@
+## #60 — Discord-Arm für den Rust-Steam-Bot: Broker erweitert + neuer Brücken-Cog
+
+Der Steam-Bot zieht nach Rust um — Discord bleibt aber beim Haupt-Bot. Damit der Rust-Dienst alle nötigen Discord-Aktionen auslösen kann, wurde der interne Vermittler (Master-Broker) um zwei Operationen erweitert: Rolle entfernen und Direktnachricht senden — beide mit derselben Absicherung wie die bestehenden Operationen (Token-Pflicht, Wiederholungsschutz über Idempotenz-Schlüssel, Guild-/Rollen-Whitelists).
+
+Neu dazu kommt ein bewusst dünner Brücken-Cog: Er rendert die Steam-Verknüpfungs-Panels (auch ältere, bereits gepostete bleiben klickbar), öffnet das Freundescode-Eingabefenster, leitet jeden Klick, jedes Server-Verlassen und die Steam-Admin-Befehle als Ereignis an den Rust-Dienst weiter und zeigt dessen Antwort an. Er enthält selbst keinerlei Steam-Logik — fällt der Rust-Dienst aus, antwortet er mit einem freundlichen Hinweis statt zu crashen.
+
+Aktiv wird das Ganze erst beim Umschalten: Dann werden die neun alten Steam-Bausteine über die Blockliste deaktiviert und der Rust-Dienst übernimmt.
+
 ## #59 — Coaching-Modal: Interaction-Timeout-Fix (Defer vor DB-Calls)
 
 **Ausgangslage:** Wenn ein User das Coaching-Formular ausgefüllt und auf „Absenden" gedrückt hat, kam manchmal die Fehlermeldung „Beim Absenden der Anfrage ist ein Fehler aufgetreten". Das passierte weil der Bot nach dem Modal-Submit zunächst eine synchrone DB-Operation (`INSERT INTO coaching_requests`) auf dem Event-Loop ausgeführt hat — ohne die Discord-Interaction vorher zu bestätigen. Discord erwartet eine Antwort innerhalb von 3 Sekunden; wenn der DB-Call (z.B. durch Lock-Contention mit dem Background-Analyse-Task) auch nur kurz blockiert, läuft der Interaction-Token ab und jede nachfolgende `send_message`-Antwort schlägt mit 404 fehl.
