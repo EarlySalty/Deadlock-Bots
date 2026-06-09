@@ -1,3 +1,11 @@
+## #56 — Dependency-Updates: aiohttp 3.14.0 + protobufjs-Lücken geschlossen
+
+**Ausgangslage:** Dependabot meldete 11 offene Sicherheitslücken: 4× aiohttp (medium, Cross-Origin-Redirect + Deserialisierung unsicherer Daten) und 7× protobufjs (bis high, u.a. Code-Injection via Byte-Felder, Prototype-Pollution, DoS durch rekursive Expansion).
+
+**Geändert:** aiohttp von 3.13.5 auf 3.14.0 angehoben (`requirements.txt` + `.venv`). protobufjs im steam_presence-Modul via `npm install` + `npm audit fix` aktualisiert: Top-Level-Package von 8.0.2 auf 8.4.2, zusätzlich die verschachtelten Kopien in den transitiven Abhängigkeiten (`steam-user`, `steam-session`, `steam-appticket`) auf gepatchte Versionen gebracht.
+
+**Ergebnis:** `npm audit` meldet 0 Vulnerabilities. Bot läuft weiter ohne Verhaltensänderung.
+
 ## #55 — Coaching: Freigeben-Button-Fix + echte Umlaute
 
 **Ausgangslage:** Der „Freigeben"-Button im Coaching-Request-Embed hatte zwei Bugs. Erstens: Wenn eine Anfrage bereits für alle offen war (kein reservierter Coach), bekamen Nicht-Server-Owner die Meldung „Nur der reservierte Coach oder ein Admin kann freigeben" — statt der korrekten Info „bereits für alle offen". Die eigentliche Info-Meldung war für alle außer dem Guild-Owner toter Code. Zweitens: Als „Admin" galten ausschließlich der Guild-Owner und eine hardcoded User-ID — Discord-User mit `Administrator`-Permission wurden geblockt, obwohl die Fehlermeldung selbst von „ein Admin" spricht.
