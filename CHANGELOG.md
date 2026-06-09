@@ -1,3 +1,11 @@
+## #55 — Coaching: Freigeben-Button-Fix + echte Umlaute
+
+**Ausgangslage:** Der „Freigeben"-Button im Coaching-Request-Embed hatte zwei Bugs. Erstens: Wenn eine Anfrage bereits für alle offen war (kein reservierter Coach), bekamen Nicht-Server-Owner die Meldung „Nur der reservierte Coach oder ein Admin kann freigeben" — statt der korrekten Info „bereits für alle offen". Die eigentliche Info-Meldung war für alle außer dem Guild-Owner toter Code. Zweitens: Als „Admin" galten ausschließlich der Guild-Owner und eine hardcoded User-ID — Discord-User mit `Administrator`-Permission wurden geblockt, obwohl die Fehlermeldung selbst von „ein Admin" spricht.
+
+**Geändert:** Logik-Reihenfolge korrigiert: Der „bereits offen"-Check läuft jetzt zuerst, bevor der Permission-Check greift. Außerdem wurde `guild_permissions.administrator` in den Admin-Check aufgenommen, konsistent mit dem restlichen Codebase-Pattern (`website_invite_cog._is_owner_or_admin`). Zusätzlich: Alle 14 Pseudo-Umlaute (`fuer`, `ue`, `oe` etc.) in der Datei durch echte Umlaute ersetzt.
+
+**Wie's funktioniert:** Klickt jemand Freigeben auf einer bereits offenen Anfrage, sieht er jetzt die korrekte Info — unabhängig von seiner Rolle. Klickt ein Discord-Admin (mit `Administrator`-Flag) auf eine reservierte Anfrage, kann er sie freigeben. Der assigned Coach kann weiterhin immer freigeben.
+
 ## #54 — Coaching: Session-Abschluss wird jetzt an die Website gespiegelt
 
 **Ausgangslage:** Wenn ein Admin mit `/coaching-session-beenden` eine Session beendete, landete das nur in der Bot-DB. Die Coaching-Website zeigte weiterhin die Session als aktiv — weil der Bot nie den `/platform/sync`-Endpunkt aufrief.

@@ -20,15 +20,15 @@ _CLAIM_IN_PROGRESS: set[int] = set()
 
 # Owner/Inhaber wird aus der fairen Coach-Rotation ausgeschlossen.
 OWNER_EXCLUDE_ID = 662995601738170389
-# Wie lange ein neues Coaching exklusiv fuer den fair gewaehlten Coach reserviert bleibt.
+# Wie lange ein neues Coaching exklusiv für den fair gewählten Coach reserviert bleibt.
 CLAIM_RESERVATION_HOURS = 24
-# Wie oft der Hintergrund-Loop abgelaufene Reservierungen oeffnet.
+# Wie oft der Hintergrund-Loop abgelaufene Reservierungen öffnet.
 RESERVATION_CHECK_INTERVAL_SECONDS = 60
 
 
 def pick_fair_coach(guild: "discord.Guild") -> "discord.Member | None":
-    """Waehle den fairsten Coach: Traeger der Coach-Rolle (ausser Owner/Bots),
-    der am laengsten nicht mehr zugewiesen war; Gleichstand -> wenigste aktiven Sessions.
+    """Wähle den fairsten Coach: Träger der Coach-Rolle (außer Owner/Bots),
+    der am längsten nicht mehr zugewiesen war; Gleichstand -> wenigste aktiven Sessions.
 
     Der Reservierungs-Status lebt allein in coaching_requests; diese Funktion leitet die
     Rotation daraus ab, ohne statische Coach-Liste.
@@ -275,8 +275,8 @@ class CoachClaimButton(discord.ui.Button):
                 )
                 return
 
-            # Reservierungs-Gate: waehrend der 24h-Reservierung darf nur der
-            # zugewiesene Coach (oder ein Admin) claimen. Danach ist es fuer alle offen.
+            # Reservierungs-Gate: während der 24h-Reservierung darf nur der
+            # zugewiesene Coach (oder ein Admin) claimen. Danach ist es für alle offen.
             assigned_coach_id = request["assigned_coach_id"]
             reserved_until = request["reserved_until"]
             is_owner = (
@@ -291,8 +291,8 @@ class CoachClaimButton(discord.ui.Button):
                 and not is_owner
             ):
                 await interaction.followup.send(
-                    f"⏳ Dieses Coaching ist noch fuer <@{assigned_coach_id}> reserviert "
-                    f"(bis <t:{int(reserved_until)}:R>). Danach kannst du es uebernehmen.",
+                    f"⏳ Dieses Coaching ist noch für <@{assigned_coach_id}> reserviert "
+                    f"(bis <t:{int(reserved_until)}:R>). Danach kannst du es übernehmen.",
                     ephemeral=True,
                 )
                 return
@@ -405,7 +405,7 @@ class CoachClaimButton(discord.ui.Button):
 
 
 class CoachReleaseButton(discord.ui.Button):
-    """Gibt eine reservierte Coaching-Anfrage frei -> sofort fuer alle Coaches offen."""
+    """Gibt eine reservierte Coaching-Anfrage frei -> sofort für alle Coaches offen."""
 
     def __init__(self, request_id: int, author_id: int):
         super().__init__(
@@ -434,19 +434,22 @@ class CoachReleaseButton(discord.ui.Button):
             return
 
         assigned_coach_id = request["assigned_coach_id"]
+        if not assigned_coach_id:
+            await interaction.response.send_message(
+                "ℹ️ Dieses Coaching ist bereits für alle offen.", ephemeral=True
+            )
+            return
+
+        perms = getattr(interaction.user, "guild_permissions", None)
         is_owner = (
             interaction.user.id == interaction.guild.owner_id
             or interaction.user.id == OWNER_EXCLUDE_ID
+            or bool(perms and perms.administrator)
         )
-        is_assigned = assigned_coach_id and str(interaction.user.id) == str(assigned_coach_id)
+        is_assigned = str(interaction.user.id) == str(assigned_coach_id)
         if not (is_owner or is_assigned):
             await interaction.response.send_message(
                 "❌ Nur der reservierte Coach oder ein Admin kann freigeben.", ephemeral=True
-            )
-            return
-        if not assigned_coach_id:
-            await interaction.response.send_message(
-                "ℹ️ Dieses Coaching ist bereits fuer alle offen.", ephemeral=True
             )
             return
 
@@ -455,7 +458,7 @@ class CoachReleaseButton(discord.ui.Button):
         if cog:
             await cog._open_request_to_all(self.request_id, reason="manual")
         await interaction.followup.send(
-            "✅ Coaching freigegeben – jetzt fuer alle Coaches offen.", ephemeral=True
+            "✅ Coaching freigegeben – jetzt für alle Coaches offen.", ephemeral=True
         )
 
 
@@ -661,7 +664,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         assigned_coach_id: "str | None",
         reserved_until: "int | None",
     ) -> discord.Embed:
-        """Baut das Anfrage-Embed inkl. Reservierungs-Status (DRY fuer Post/Freigabe/Ablauf)."""
+        """Baut das Anfrage-Embed inkl. Reservierungs-Status (DRY für Post/Freigabe/Ablauf)."""
         member = guild.get_member(request_data["discord_user_id"]) if guild else None
         embed = discord.Embed(title="🎮 Neue Coaching-Anfrage", color=discord.Color.blue())
 
@@ -696,13 +699,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
 
         if assigned_coach_id and reserved_until and int(time.time()) < int(reserved_until):
             embed.add_field(
-                name="🎯 Reserviert fuer",
+                name="🎯 Reserviert für",
                 value=f"<@{assigned_coach_id}> – claim bis <t:{int(reserved_until)}:R>",
                 inline=False,
             )
             embed.color = discord.Color.gold()
         else:
-            embed.add_field(name="🟢 Status", value="Offen fuer alle Coaches", inline=False)
+            embed.add_field(name="🟢 Status", value="Offen für alle Coaches", inline=False)
         return embed
 
     async def _open_request_to_all(self, request_id: int, *, reason: str = "expired") -> None:
@@ -729,7 +732,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         prefix = "⏰ Reservierung abgelaufen – " if reason == "expired" else "🟢 Freigegeben – "
         content = (
             f"📥 Anfrage von <@{request['discord_user_id']}> – {prefix}"
-            "jetzt fuer alle Coaches offen"
+            "jetzt für alle Coaches offen"
         )
         try:
             await message.edit(content=content, embed=embed, view=view)
@@ -739,7 +742,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
         asyncio.create_task(self._mirror_to_website(request_id))
 
     async def _reservation_expiry_loop(self):
-        """Oeffnet abgelaufene 24h-Reservierungen automatisch fuer alle Coaches."""
+        """Öffnet abgelaufene 24h-Reservierungen automatisch für alle Coaches."""
         await self.bot.wait_until_ready()
         while True:
             try:
@@ -805,8 +808,8 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
 
         guild = channel.guild
 
-        # Faire Vorab-Zuweisung: least-loaded Coach (Coach-Rolle, ausser Owner),
-        # 24h exklusiv reserviert; danach uebernimmt der Expiry-Loop das Oeffnen.
+        # Faire Vorab-Zuweisung: least-loaded Coach (Coach-Rolle, außer Owner),
+        # 24h exklusiv reserviert; danach übernimmt der Expiry-Loop das Öffnen.
         assigned = pick_fair_coach(guild) if guild else None
         now_ts = int(time.time())
         assigned_coach_id = str(assigned.id) if assigned else None
@@ -820,11 +823,11 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach."""
             user_mention = f"<@{request_data['discord_user_id']}>"
             if assigned:
                 content = (
-                    f"📥 Anfrage von {user_mention} – 🎯 reserviert fuer {assigned.mention} "
+                    f"📥 Anfrage von {user_mention} – 🎯 reserviert für {assigned.mention} "
                     f"({CLAIM_RESERVATION_HOURS}h)"
                 )
             else:
-                content = f"📥 Anfrage von {user_mention} – 🟢 offen fuer alle Coaches"
+                content = f"📥 Anfrage von {user_mention} – 🟢 offen für alle Coaches"
             message = await channel.send(content=content, embed=embed, view=view)
 
             # Update request with message info + Reservierung
