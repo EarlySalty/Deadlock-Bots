@@ -1,3 +1,9 @@
+## #61 — Steam-Brücke: Playtest-Funnel-UI + einheitliches Event-Format
+
+Nachtrag zu #60: Der Brücken-Cog kann jetzt auch den Playtest-Einladungs-Ablauf bedienen — drei Slash-Befehle (/betainvite für alle, Panel-Veröffentlichung und Statistik für Admins) und alle Funnel-Buttons werden als Ereignisse an den Rust-Dienst weitergereicht, der sämtliche Texte und Entscheidungen liefert. Das Panel hängt seine Buttons weiterhin lokal an, damit sie nach Bot-Neustarts klickbar bleiben.
+
+Außerdem wurde das Übertragungsformat zwischen Brücke und Rust-Dienst vereinheitlicht: Alle Ereignis-Arten (Klick, Server-Verlassen, Admin-Befehl, Slash-Befehl) senden ihre Daten jetzt in derselben verschachtelten Struktur. Vorher nutzten drei der vier Arten ein abweichendes flaches Format — die Gegenseite hätte sie kommentarlos abgelehnt.
+
 ## #60 — Discord-Arm für den Rust-Steam-Bot: Broker erweitert + neuer Brücken-Cog
 
 Der Steam-Bot zieht nach Rust um — Discord bleibt aber beim Haupt-Bot. Damit der Rust-Dienst alle nötigen Discord-Aktionen auslösen kann, wurde der interne Vermittler (Master-Broker) um zwei Operationen erweitert: Rolle entfernen und Direktnachricht senden — beide mit derselben Absicherung wie die bestehenden Operationen (Token-Pflicht, Wiederholungsschutz über Idempotenz-Schlüssel, Guild-/Rollen-Whitelists).

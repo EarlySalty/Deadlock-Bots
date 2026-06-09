@@ -18,6 +18,7 @@ from typing import Any
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,34 @@ _PANEL_CUSTOM_IDS: frozenset[str] = frozenset(
         # Legacy-IDs (alte persistente Panels)
         "linkpanel_friend_code",
         "linkpanel_rank_check",
+    ]
+)
+
+# ---------------------------------------------------------------------------
+# Playtest-Funnel: alle custom_ids aus dem Beta-Invite-Flow.
+# Reihenfolge entspricht den Schritten im Funnel-Spec (nachschlag-funnel.md).
+# ---------------------------------------------------------------------------
+
+# Panel-Einstieg (Schritt 0 — persistentes Panel in öffentlichem Kanal)
+_BETAINVITE_PANEL_CUSTOM_ID = "betainvite:panel:start"
+
+# Alle betainvite:*-custom_ids, die per Button-Klick an Rust weitergeleitet werden.
+# Schritt 0: Intent-Wahl (Community vs. Nur-Einladung)
+# Schritt 1: Steam-Link-Prüfung (+ disabled-Placeholder)
+# Schritt 2: Freundschaft prüfen
+# Schritt 3: Zahlung fortführen / überspringen
+# Fehler: erneut versuchen
+_BETAINVITE_CUSTOM_IDS: frozenset[str] = frozenset(
+    [
+        _BETAINVITE_PANEL_CUSTOM_ID,
+        "betainvite:intent:community",
+        "betainvite:intent:invite_only",
+        "betainvite:link:continue",
+        "betainvite:link:disabled",
+        "betainvite:friendhint:continue",
+        "betainvite:payment:continue",
+        "betainvite:support:skip",
+        "betainvite:error:retry",
     ]
 )
 
@@ -159,6 +188,57 @@ class SteamBridgePanelView(discord.ui.View):
         super().__init__(timeout=None)
         for cid in _PANEL_CUSTOM_IDS:
             self.add_item(_PanelButton(custom_id=cid))
+
+
+# ---------------------------------------------------------------------------
+# Playtest-Funnel: persistente Views für alle betainvite:* custom_ids
+# ---------------------------------------------------------------------------
+
+
+class _BetaInviteButton(discord.ui.Button):
+    """Proxy-Button für einen betainvite:*-custom_id.
+
+    Leitet jeden Klick als kind="interaction" an den Rust-steam-bot weiter.
+    Label und Stil werden bei der Registrierung leer/secondary gesetzt —
+    die echten Embeds und Beschriftungen kommen vollständig aus Rust.
+    """
+
+    def __init__(self, custom_id: str) -> None:
+        super().__init__(
+            label="​",  # Zero-Width-Space, unsichtbar; echter Label stammt von Rust
+            custom_id=custom_id,
+            style=discord.ButtonStyle.secondary,
+        )
+
+    async def callback(self, interaction: discord.Interaction) -> None:
+        await _forward_interaction(interaction, self.custom_id)
+
+
+class BetaInvitePanelView(discord.ui.View):
+    """Persistente View für das Playtest-Invite-Panel (Einstiegs-Button).
+
+    Registriert beim Bot-Start nur den Panel-Einstieg-custom_id
+    ("betainvite:panel:start"), damit bereits gepostete Panels nach einem
+    Neustart weiterhin auf Klicks reagieren.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+        self.add_item(_BetaInviteButton(custom_id=_BETAINVITE_PANEL_CUSTOM_ID))
+
+
+class BetaInviteFlowView(discord.ui.View):
+    """Persistente View, die alle 8 Funnel-Schritt-Buttons abfängt.
+
+    Wird beim Bot-Start registriert, damit laufende Funnel-Sessions nach
+    einem Neustart weiterhin funktionieren.  Alle Klicks werden als
+    kind="interaction" an den Rust-steam-bot weitergeleitet.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(timeout=None)
+        for cid in _BETAINVITE_CUSTOM_IDS:
+            self.add_item(_BetaInviteButton(custom_id=cid))
 
 
 # ---------------------------------------------------------------------------
@@ -288,16 +368,19 @@ async def _forward_interaction(
         await interaction.response.send_modal(_FriendCodeModal())
         return
 
-    event_data: dict[str, Any] = {
+    # Kanonisches Wire-Format: Payload verschachtelt im "interaction"-Feld
+    # (Rust: DiscordEventBody.interaction → InteractionPayload).
+    inner: dict[str, Any] = {
         "custom_id": custom_id,
         "user_id": interaction.user.id,
-        "guild_id": getattr(interaction.guild, "id", None),
-        "channel_id": interaction.channel_id,
+        "guild_id": getattr(interaction.guild, "id", None) or 0,
+        "channel_id": interaction.channel_id or 0,
     }
     # Select-Menü-Werte, falls vorhanden
     values = getattr(getattr(interaction, "data", None), "values", None)
     if values:
-        event_data["values"] = list(values)
+        inner["values"] = list(values)
+    event_data: dict[str, Any] = {"interaction": inner}
 
     # Wir starten den API-Call und warten maximal _DEFER_THRESHOLD_SECONDS.
     # Dauert er länger, defer wir die Interaction und senden dann ein Followup.
@@ -333,9 +416,120 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
         self.bot = bot
 
     async def cog_load(self) -> None:
-        # Persistente View registrieren — überlebt Bot-Restarts
+        # Persistente Views registrieren — überleben Bot-Restarts
         self.bot.add_view(SteamBridgePanelView())
-        log.info("steam-bridge: Persistente Panel-View registriert (%d custom_ids)", len(_PANEL_CUSTOM_IDS))
+        self.bot.add_view(BetaInvitePanelView())
+        self.bot.add_view(BetaInviteFlowView())
+        log.info(
+            "steam-bridge: Persistente Views registriert (link=%d, betainvite=%d custom_ids)",
+            len(_PANEL_CUSTOM_IDS),
+            len(_BETAINVITE_CUSTOM_IDS),
+        )
+
+    # ------------------------------------------------------------------
+    # Slash-Commands: Playtest-Invite-Funnel
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="betainvite",
+        description="Starte den Deadlock-Playtest-Invite-Flow.",
+    )
+    async def betainvite(self, interaction: discord.Interaction) -> None:
+        """Einstiegspunkt für alle User — startet den Funnel im Rust-steam-bot."""
+        result = await _post_event(
+            "slash_command",
+            {
+                "interaction": {
+                    "custom_id": "",
+                    "user_id": interaction.user.id,
+                    "guild_id": getattr(interaction.guild, "id", None) or 0,
+                    "data": {"name": "betainvite"},
+                }
+            },
+        )
+        await _render_response(interaction, result)
+
+    @app_commands.command(
+        name="publish_betainvite_panel",
+        description="Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def publish_betainvite_panel(self, interaction: discord.Interaction) -> None:
+        """Postet das persistente BetaInvite-Panel in den aktuellen Kanal.
+
+        Der Rust-steam-bot liefert den vollständigen Embed-Inhalt.
+        Python hängt die persistente BetaInvitePanelView an die Nachricht.
+        """
+        result = await _post_event(
+            "slash_command",
+            {
+                "interaction": {
+                    "custom_id": "",
+                    "user_id": interaction.user.id,
+                    "guild_id": getattr(interaction.guild, "id", None) or 0,
+                    "data": {"name": "publish_betainvite_panel"},
+                }
+            },
+        )
+        if result is None:
+            await interaction.response.send_message(
+                "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte erneut versuchen.",
+                ephemeral=True,
+            )
+            return
+
+        # Rust liefert den Embed; Python fügt die persistente View hinzu
+        ephemeral: bool = bool(result.get("ephemeral", False))
+        reply_text: str | None = result.get("reply_text") or None
+        embed: discord.Embed | None = None
+        embed_dict = result.get("reply_embed")
+        if embed_dict and isinstance(embed_dict, dict):
+            try:
+                embed = discord.Embed.from_dict(embed_dict)
+            except Exception as exc:
+                log.warning("steam-bridge: Konnte reply_embed (publish_panel) nicht parsen: %s", exc)
+
+        # URL-Button-Support wie in _render_response
+        view: discord.ui.View = BetaInvitePanelView()
+        link_button_data = result.get("link_button")
+        if link_button_data and isinstance(link_button_data, dict):
+            label = str(link_button_data.get("label") or "Öffnen")
+            url = str(link_button_data.get("url") or "")
+            if url:
+                view.add_item(
+                    discord.ui.Button(
+                        style=discord.ButtonStyle.link,
+                        label=label,
+                        url=url,
+                    )
+                )
+
+        await interaction.response.send_message(
+            content=reply_text,
+            embed=embed,
+            view=view,
+            ephemeral=ephemeral,
+        )
+
+    @app_commands.command(
+        name="betainvite_stats",
+        description="Zeigt Funnel-Metriken des Playtest-Invite-Systems (nur Admins).",
+    )
+    @app_commands.checks.has_permissions(manage_guild=True)
+    async def betainvite_stats(self, interaction: discord.Interaction) -> None:
+        """Fragt den Rust-steam-bot nach aktuellen Funnel-Statistiken."""
+        result = await _post_event(
+            "slash_command",
+            {
+                "interaction": {
+                    "custom_id": "",
+                    "user_id": interaction.user.id,
+                    "guild_id": getattr(interaction.guild, "id", None) or 0,
+                    "data": {"name": "betainvite_stats"},
+                }
+            },
+        )
+        await _render_response(interaction, result)
 
     # ------------------------------------------------------------------
     # Member-Ereignisse
@@ -347,8 +541,10 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
         await _post_event(
             "member_remove",
             {
-                "guild_id": member.guild.id,
-                "user_id": member.id,
+                "member_remove": {
+                    "guild_id": member.guild.id,
+                    "user_id": member.id,
+                }
             },
         )
 
@@ -379,15 +575,15 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
         if not perms.administrator:
             return
 
-        args = parts[1:]
+        # Rust: AdminCommandPayload {name (ohne '!'), args (Roh-String), invoker_id}
         result = await _post_event(
             "admin_command",
             {
-                "command": command,
-                "args": args,
-                "guild_id": message.guild.id,
-                "user_id": message.author.id,
-                "channel_id": message.channel.id,
+                "admin_command": {
+                    "name": command.lstrip("!"),
+                    "args": " ".join(parts[1:]),
+                    "invoker_id": message.author.id,
+                }
             },
         )
 
