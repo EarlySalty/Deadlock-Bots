@@ -1,3 +1,9 @@
+## #62 — Steam-Umschaltung: alte Steam-Bausteine deaktiviert
+
+Die Umschaltung auf den Rust-Steam-Dienst ist vollzogen: Über die Cog-Blockliste sind alle neun alten Steam-Bausteine (Verknüpfung, Freundes-Abgleich, Rang-Rollen, Aufräumer, Playtest-Trichter, Guard-Automatik, Token-Verwaltung) deaktiviert — der Code bleibt unangetastet liegen und kann im Notfall mit einer Zeile reaktiviert werden. Discord-seitig übernimmt der schlanke Brücken-Cog (#60/#61); die gesamte Logik läuft im Rust-Dienst.
+
+Der erste Live-Abgleich unter neuer Führung: 284 Steam-Freunde geprüft, 281 Verknüpfungen bestätigt, keine fälschlich entfernt. Der stündliche Verified-Rollen-Abgleich und die Voice-Erinnerung laufen unverändert weiter — sie kollidieren nicht mit dem neuen Dienst.
+
 ## #61 — Steam-Brücke: Playtest-Funnel-UI + einheitliches Event-Format
 
 Nachtrag zu #60: Der Brücken-Cog kann jetzt auch den Playtest-Einladungs-Ablauf bedienen — drei Slash-Befehle (/betainvite für alle, Panel-Veröffentlichung und Statistik für Admins) und alle Funnel-Buttons werden als Ereignisse an den Rust-Dienst weitergereicht, der sämtliche Texte und Entscheidungen liefert. Das Panel hängt seine Buttons weiterhin lokal an, damit sie nach Bot-Neustarts klickbar bleiben.
