@@ -1,3 +1,13 @@
+## #63 — Coaching: Coach-Roster-Sync zur Website + Termin-DMs
+
+**Ausgangslage:** Die Coaching-Website wusste nicht, wer eigentlich Coach ist — sie kannte nur die Coaches, die zufällig schon einmal eine Session gespiegelt hatten. Und für die neuen Coaching-Termine der Website gab es keinen Weg, Spieler in Discord zu benachrichtigen.
+
+**Geändert:** Ein neuer Baustein hält Discord und Website synchron: Er meldet alle Träger der Coach-Rolle an die Website und stellt Termin-Benachrichtigungen als DM zu.
+
+**Wie's funktioniert:**
+- **Rollen-Sync:** Beim Start, alle 10 Minuten und sofort bei jeder Rollenänderung (mit 5-Sekunden-Sammelfenster, damit mehrere Änderungen kurz hintereinander nur einen Sync auslösen) wird die komplette Coach-Liste mit Namen und Avataren übertragen. Leere Listen werden nie gesendet — Schutz davor, das Website-Roster versehentlich zu leeren. Ist der Mitglieder-Cache direkt nach dem Start noch leer, wird er einmal explizit nachgeladen.
+- **Termin-DMs:** Der Baustein fragt die Website im Minutentakt nach fälligen Benachrichtigungen und schickt dem Spieler je nach Typ eine DM — Einladung bei Terminanlage, Erinnerung unter 2 Stunden vor Start, Absage-Info. Zeiten werden in deutscher Zeit formatiert. Hat ein Spieler DMs deaktiviert, wird die Benachrichtigung als erledigt markiert statt endlos neu versucht; bei Netzwerkfehlern wird sie beim nächsten Durchlauf erneut zugestellt.
+
 ## #62 — Steam-Umschaltung: alte Steam-Bausteine deaktiviert
 
 Die Umschaltung auf den Rust-Steam-Dienst ist vollzogen: Über die Cog-Blockliste sind alle neun alten Steam-Bausteine (Verknüpfung, Freundes-Abgleich, Rang-Rollen, Aufräumer, Playtest-Trichter, Guard-Automatik, Token-Verwaltung) deaktiviert — der Code bleibt unangetastet liegen und kann im Notfall mit einer Zeile reaktiviert werden. Discord-seitig übernimmt der schlanke Brücken-Cog (#60/#61); die gesamte Logik läuft im Rust-Dienst.

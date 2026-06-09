@@ -68,3 +68,86 @@ async def sync_coaching(payload: dict[str, Any]) -> bool:
     except Exception as exc:  # best-effort, niemals den Bot-Flow brechen
         log.warning("Website-Coaching-Sync Fehler: %s", exc)
         return False
+
+
+async def sync_coaches(coaches: list[dict]) -> bool:
+    """Pusht die aktuelle Coach-Liste an die Website. True bei Erfolg, sonst False (nie raise)."""
+    token = _token()
+    if not token:
+        log.debug("Kein interner Token gesetzt – Coach-Sync übersprungen")
+        return False
+
+    url = f"{_base_url()}/coaching/platform/coaches/sync"
+    try:
+        connector = build_resilient_connector()
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.post(
+                url,
+                json={"coaches": coaches},
+                headers={"X-Internal-Token": token, "X-Bot-Token": token},
+            ) as resp:
+                if resp.status >= 400:
+                    body = (await resp.text())[:200]
+                    log.warning("Coach-Sync fehlgeschlagen (%s): %s", resp.status, body)
+                    return False
+                return True
+    except Exception as exc:
+        log.warning("Coach-Sync Fehler: %s", exc)
+        return False
+
+
+async def get_due_notifications() -> list[dict]:
+    """Holt fällige Termin-Benachrichtigungen von der Website. Bei Fehler: [] (nie raise)."""
+    token = _token()
+    if not token:
+        log.debug("Kein interner Token gesetzt – Notification-Poll übersprungen")
+        return []
+
+    url = f"{_base_url()}/coaching/platform/notifications/due"
+    try:
+        connector = build_resilient_connector()
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.get(
+                url,
+                headers={"X-Internal-Token": token, "X-Bot-Token": token},
+            ) as resp:
+                if resp.status >= 400:
+                    body = (await resp.text())[:200]
+                    log.warning("Notification-Poll fehlgeschlagen (%s): %s", resp.status, body)
+                    return []
+                data = await resp.json()
+                return data.get("notifications", [])
+    except Exception as exc:
+        log.warning("Notification-Poll Fehler: %s", exc)
+        return []
+
+
+async def ack_notifications(items: list[dict]) -> bool:
+    """Bestätigt verarbeitete Benachrichtigungen. True bei Erfolg, sonst False (nie raise)."""
+    if not items:
+        return True
+    token = _token()
+    if not token:
+        log.debug("Kein interner Token gesetzt – Notification-Ack übersprungen")
+        return False
+
+    url = f"{_base_url()}/coaching/platform/notifications/ack"
+    try:
+        connector = build_resilient_connector()
+        timeout = aiohttp.ClientTimeout(total=10)
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            async with session.post(
+                url,
+                json={"items": items},
+                headers={"X-Internal-Token": token, "X-Bot-Token": token},
+            ) as resp:
+                if resp.status >= 400:
+                    body = (await resp.text())[:200]
+                    log.warning("Notification-Ack fehlgeschlagen (%s): %s", resp.status, body)
+                    return False
+                return True
+    except Exception as exc:
+        log.warning("Notification-Ack Fehler: %s", exc)
+        return False
