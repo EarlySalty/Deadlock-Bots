@@ -1,3 +1,11 @@
+## #58 — Admin-Session-Validierung: Sliding TTL beim Cross-Dashboard-Check
+
+**Ausgangslage:** Der interne `validate-session`-Endpoint (den der Twitch-Bot nutzt, um zu prüfen ob eine aktive Admin-Session im Discord-Bot existiert) griff direkt auf das Session-Dict zu und machte die Ablauf-Prüfung manuell. Dabei wurde die Session-Laufzeit weder verlängert noch der zentrale Cleanup-Pfad durchlaufen — jeder Zugriff lief am eigentlichen Session-Management vorbei.
+
+**Geändert:** Der Handler nutzt jetzt `validate_discord_session()` statt des direkten Dict-Lookups. Das ist dieselbe Methode, die auch alle anderen Session-Zugriffspfade (Browser-Request, CSRF-Check etc.) verwenden.
+
+**Wie es jetzt funktioniert:** Jede erfolgreiche Cross-Dashboard-Validierung verlängert die Session-Laufzeit wie ein normaler Zugriff. Gleichzeitig werden abgelaufene Einträge über den einheitlichen Cleanup-Pfad entfernt, statt still im Dict zu bleiben.
+
 ## #57 — Lobby-Finder: Channel-Name "unbekannt" gefixt + Trigger-Rauschen reduziert
 
 **Ausgangslage:** Der Lobby-Finder zeigte in seinen Antworten statt der echten "Neue Spieler Lane" den Platzhalter "# unbekannt". Außerdem feuerte er auf Nachrichten wie "suche leute zum zocken, schreib mir bitte priv" — eine Ankündigung, keine Lobby-Anfrage.

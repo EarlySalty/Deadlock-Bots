@@ -2709,13 +2709,10 @@ class DashboardServer:
         session_id = str(payload.get("session_id") or "").strip()
         if not session_id:
             return web.json_response({"error": "missing_session_id"}, status=400)
-        session = self._discord_sessions.get(session_id)
+        session = self.validate_discord_session(session_id)
         if not session:
             return web.json_response({"valid": False})
         now = time.time()
-        if float(session.get("expires_at", 0.0)) <= now:
-            self._discord_sessions.pop(session_id, None)
-            return web.json_response({"valid": False})
         return web.json_response(
             {
                 "valid": True,
