@@ -76,7 +76,7 @@ MAX_JOIN_LOBBIES_SHOWN = 3
 
 # Spezielle Channel / Kategorien
 NEW_PLAYER_CATEGORY_ID = 1465839366634209361
-NEW_PLAYER_LANE_ID = 1465839460485697556
+NEW_PLAYER_LANE_ID = 1470126503252721845
 NEW_PLAYER_MAX_MEMBERS = 6
 STREET_BRAWL_LANE_ID = 1357422958544420944
 STAGING_CASUAL_ID = 1501089974093873232
@@ -629,6 +629,12 @@ class SmartLFGAgent(commands.Cog):
         """
         text = (message_content or "").lower()
         if not text:
+            return False
+
+        # Negativ-Signale: User will private Kontaktaufnahme — kein Bot-Assist nötig
+        if ("schreib" in text or "schreibt" in text or "meldet" in text) and (
+            "priv" in text or "privat" in text
+        ):
             return False
 
         rank_tokens = (

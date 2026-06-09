@@ -1,3 +1,11 @@
+## #57 — Lobby-Finder: Channel-Name "unbekannt" gefixt + Trigger-Rauschen reduziert
+
+**Ausgangslage:** Der Lobby-Finder zeigte in seinen Antworten statt der echten "Neue Spieler Lane" den Platzhalter "# unbekannt". Außerdem feuerte er auf Nachrichten wie "suche leute zum zocken, schreib mir bitte priv" — eine Ankündigung, keine Lobby-Anfrage.
+
+**Geändert:** Die Channel-ID für die Neue-Spieler-Lane war in `lfg.py` noch auf den alten Wert von vor der adaptiven-Lane-Einführung gesetzt (`1465839460485697556`), während der tatsächliche Anchor-Channel eine andere ID hat (`1470126503252721845`). ID korrigiert. Zusätzlich wurde ein Negativ-Signal ganz an den Anfang der Intent-Erkennung gelegt: Nachrichten, die gleichzeitig "schreib/schreibt/meldet" und "priv/privat" enthalten, werden jetzt sofort übersprungen — der User will selbst koordinieren, nicht vom Bot weitergeleitet werden.
+
+**Jetzt:** Channel-Mention zeigt den richtigen Namen. Nachrichten mit explizitem "schreib priv"-Muster lösen keine Lobby-Vorschläge mehr aus.
+
 ## #56 — Dependency-Updates: aiohttp 3.14.0 + protobufjs-Lücken geschlossen
 
 **Ausgangslage:** Dependabot meldete 11 offene Sicherheitslücken: 4× aiohttp (medium, Cross-Origin-Redirect + Deserialisierung unsicherer Daten) und 7× protobufjs (bis high, u.a. Code-Injection via Byte-Felder, Prototype-Pollution, DoS durch rekursive Expansion).
