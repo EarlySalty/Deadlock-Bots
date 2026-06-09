@@ -79,6 +79,8 @@ class CoachingRequestModal(discord.ui.Modal, title="Deadlock Coaching"):
         self.add_item(self.problems_input)
 
     async def on_submit(self, interaction: discord.Interaction) -> None:
+        # Sofort defer: Discord-Fenster (3 s) sichern, bevor DB-Calls blockieren können
+        await interaction.response.defer(ephemeral=True)
         try:
             await self.cog._submit_coaching_request(
                 interaction,
@@ -90,16 +92,10 @@ class CoachingRequestModal(discord.ui.Modal, title="Deadlock Coaching"):
             )
         except Exception:
             log.exception("Coaching modal submit failed for user %s", interaction.user.id)
-            if interaction.response.is_done():
-                await interaction.followup.send(
-                    "❌ Beim Absenden der Anfrage ist ein Fehler aufgetreten. Bitte versuche es erneut.",
-                    ephemeral=True,
-                )
-            else:
-                await interaction.response.send_message(
-                    "❌ Beim Absenden der Anfrage ist ein Fehler aufgetreten. Bitte versuche es erneut.",
-                    ephemeral=True,
-                )
+            await interaction.followup.send(
+                "❌ Beim Absenden der Anfrage ist ein Fehler aufgetreten. Bitte versuche es erneut.",
+                ephemeral=True,
+            )
 
     async def on_error(self, interaction: discord.Interaction, error: Exception) -> None:
         log.exception("Coaching modal error for user %s: %s", interaction.user.id, error)
@@ -302,7 +298,7 @@ class CoachingPanelCog(commands.Cog):
             (interaction.user.id,),
         )
 
-        await interaction.response.send_message(
+        await interaction.followup.send(
             "✅ Deine Coaching-Anfrage wurde gespeichert. Die AI analysiert sie jetzt und postet sie automatisch im Coaching-Channel.",
             ephemeral=True,
         )

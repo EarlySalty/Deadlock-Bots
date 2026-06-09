@@ -1,3 +1,11 @@
+## #59 — Coaching-Modal: Interaction-Timeout-Fix (Defer vor DB-Calls)
+
+**Ausgangslage:** Wenn ein User das Coaching-Formular ausgefüllt und auf „Absenden" gedrückt hat, kam manchmal die Fehlermeldung „Beim Absenden der Anfrage ist ein Fehler aufgetreten". Das passierte weil der Bot nach dem Modal-Submit zunächst eine synchrone DB-Operation (`INSERT INTO coaching_requests`) auf dem Event-Loop ausgeführt hat — ohne die Discord-Interaction vorher zu bestätigen. Discord erwartet eine Antwort innerhalb von 3 Sekunden; wenn der DB-Call (z.B. durch Lock-Contention mit dem Background-Analyse-Task) auch nur kurz blockiert, läuft der Interaction-Token ab und jede nachfolgende `send_message`-Antwort schlägt mit 404 fehl.
+
+**Geändert:** Der `on_submit`-Handler ruft jetzt sofort `interaction.response.defer(ephemeral=True)` auf, bevor irgendeine DB-Arbeit beginnt. Damit ist das 3-Sekunden-Fenster gesichert und der Bot hat anschließend bis zu 15 Minuten Zeit für die eigentliche Verarbeitung. Die Erfolgs- und Fehlermeldungen werden nun via `interaction.followup.send()` geschickt statt `interaction.response.send_message()`.
+
+**Ergebnis:** Das Formular nimmt Anfragen zuverlässig entgegen, egal ob die DB kurz ausgelastet ist oder ein paralleler Analyse-Task läuft.
+
 ## #58 — Admin-Session-Validierung: Sliding TTL beim Cross-Dashboard-Check
 
 **Ausgangslage:** Der interne `validate-session`-Endpoint (den der Twitch-Bot nutzt, um zu prüfen ob eine aktive Admin-Session im Discord-Bot existiert) griff direkt auf das Session-Dict zu und machte die Ablauf-Prüfung manuell. Dabei wurde die Session-Laufzeit weder verlängert noch der zentrale Cleanup-Pfad durchlaufen — jeder Zugriff lief am eigentlichen Session-Management vorbei.
