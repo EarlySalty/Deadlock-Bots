@@ -1625,7 +1625,7 @@ class MasterBroker:
                 idempotency_key=idempotency_key,
                 result={
                     "channel_id": rich_payload.channel_id,
-                    "message_id": message_id,
+                    "message_id": str(message_id),
                 },
             )
 
@@ -1758,7 +1758,7 @@ class MasterBroker:
                 idempotency_key=idempotency_key,
                 result={
                     "channel_id": rich_payload.channel_id,
-                    "message_id": message_id,
+                    "message_id": str(message_id),
                 },
             )
 

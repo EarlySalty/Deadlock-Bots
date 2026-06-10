@@ -1,3 +1,13 @@
+## #115 — Discord Go-Live-Sync repariert
+
+**Ausgangslage:** Wenn ein Partner-Streamer live ging, versuchte der Rust-Monitoring-Bot ein Discord-Embed über den Master-Broker zu posten — das schlug seit dem Rust-Cutover stumm fehl. Im Log stand `error decoding response body`, die Discord-Ankündigungen blieben einfach aus.
+
+**Ursache:** Der Broker antwortete auf `POST /internal/master/v1/discord/send-rich-message` mit einem JSON-Body, in dem `message_id` eine Ganzzahl war (z. B. `1381674235709513729`). Der Rust-Client erwartet an dieser Stelle einen String. Serde bricht bei diesem Typ-Mismatch die Deserialisierung ab — kein Crash, nur ein stilles WARN und kein Posting.
+
+**Geändert:** Im Master-Broker wird `message_id` in den Erfolgs-Antworten beider Discord-Endpunkte (send + edit) jetzt als String zurückgegeben. Discord-Snowflakes sind als JSON-Zahl ohnehin problematisch (sie überschreiten JavaScripts `Number.MAX_SAFE_INTEGER`), String ist hier das richtige Format.
+
+**Jetzt:** Go-Live-Postings landen wieder zuverlässig in Discord, sobald ein Streamer auf Sendung geht.
+
 ## #114 — Rust-Neuaufbau: die Turnier-Anmeldung
 
 **Ausgangslage:** Das Turnier-Panel mit den drei Knöpfen (Anmelden, Abmelden, Mein Status): Anmelden prüft die Turnier-Rolle, den offenen Anmeldezeitraum und die Steam-Verknüpfung, zeigt den verifizierten Rang und bietet die Wahl zwischen Solo- und Team-Anmeldung — mit Team-Auswahlmenü (volle Teams markiert) oder Team-Neuerstellung per Formular.
