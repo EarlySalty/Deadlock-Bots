@@ -824,3 +824,170 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
         let _ = self.adapter.send_raw_public(channel_id, &body).await;
     }
 }
+
+// ── Coaching-Anfragen-Anbindung ────────────────────────────────────────────
+
+pub struct CoachingReqGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
+    async fn coach_member_ids(&self, guild_id: u64) -> Vec<u64> {
+        use dl_community::coaching_requests::{COACH_ROLE_ID, OWNER_EXCLUDE_ID};
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.members
+                    .values()
+                    .filter(|m| {
+                        !m.user.bot
+                            && m.user.id.get() != OWNER_EXCLUDE_ID
+                            && m.roles.iter().any(|r| r.get() == COACH_ROLE_ID)
+                    })
+                    .map(|m| m.user.id.get())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.display_name().to_string())
+            })
+            .unwrap_or_else(|| format!("User {user_id}"))
+    }
+
+    async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool {
+        let guild_id = GuildId::new(guild_id);
+        let Some(guild) = self.adapter.cache.guild(guild_id) else {
+            return false;
+        };
+        if guild.owner_id.get() == user_id {
+            return true;
+        }
+        guild
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| {
+                m.roles.iter().any(|rid| {
+                    guild
+                        .roles
+                        .get(rid)
+                        .map(|r| r.permissions.administrator())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    async fn send_request_message(
+        &self,
+        channel_id: u64,
+        content: &str,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) -> Result<u64, String> {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
+        self.adapter
+            .send_raw_public(channel_id, &body)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn edit_request_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        let _ = self
+            .adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await;
+    }
+
+    async fn send_channel_text(&self, channel_id: u64, content: &str) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+
+    async fn send_dm(&self, user_id: u64, content: &str) -> bool {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return false;
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        self.adapter
+            .send_raw_public(channel.id.get(), &body)
+            .await
+            .is_ok()
+    }
+
+    async fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str) {
+        let _ = self
+            .adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                serenity::all::RoleId::new(role_id),
+                Some(reason),
+            )
+            .await;
+    }
+
+    async fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str) {
+        let _ = self
+            .adapter
+            .http
+            .remove_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                serenity::all::RoleId::new(role_id),
+                Some(reason),
+            )
+            .await;
+    }
+}

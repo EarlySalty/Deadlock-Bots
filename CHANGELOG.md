@@ -1,3 +1,11 @@
+## #113 — Rust-Neuaufbau: das Coaching-System
+
+**Ausgangslage:** Das Herzstück des Coaching-Angebots: Über das Panel füllt man ein 5-Felder-Formular aus (Rang, Held, Verfügbarkeit, Spielzeit, Probleme), eine AI fasst die Anfrage für die Coaches zusammen (und filtert Unsinn-Anfragen komplett aus), und der Post im Coaching-Kanal wird fair rotierend für 24 Stunden einem Coach reserviert — wer am längsten keine Zuweisung hatte, ist dran. Der Coach übernimmt per Knopf: Session wird angelegt, der Spieler bekommt die Coaching-Rolle und eine DM. Bricht der Coach ab, weil sich der Spieler nicht meldet, gibt es eine 7-Tage-Sperre.
+
+**Geändert:** Der komplette Kern ist in Rust portiert: gleiche Knopf-Kennungen (laufende Anfragen überleben den Umstieg), Formular und alle Antwort-Texte wortgleich, gleiche faire Rotations-Formel, gleiche Reservierungs- und Sperr-Regeln, gleiche Tabellen, AI-Zusammenfassung über die MiniMax-Anbindung mit demselben Unsinns-Filter. Drei ehrlich dokumentierte Lücken laufen vorerst in Python weiter: die Spiegelung zur Coaching-Website, der automatische Rollen-Ablauf nach 48 Stunden und die Feedback-Umfrage nach der Session.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Rotations-Formel (drei Fälle inklusive Gleichstand), Text-Kappungen, das Anfrage-Embed mit Reservierungs-Anzeige und alle Knopf-Kennungen sind getestet; die Analyse- und Ablauf-Schleifen folgen dem Original-Takt.
+
 ## #112 — Rust-Neuaufbau: der Onboarding-Wizard
 
 **Ausgangslage:** „Hier starten ➜" im Regelkanal öffnet einen privaten Thread und führt neue Mitglieder durch zehn Schritte: Willkommen, Regeln, (für Streamer ein Extra-Schritt), Voice-Lanes, Mitspieler-Suche, Server-Features, die optionalen Ton- und Alters-Tags und zuletzt die Steam-Verknüpfung. Im Rust-System antwortete der Knopf bisher mit einem Umbau-Hinweis.

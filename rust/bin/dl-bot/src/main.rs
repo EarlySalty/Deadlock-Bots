@@ -171,6 +171,18 @@ async fn main() -> anyhow::Result<()> {
         }));
     dl_community::onboarding::register(&mut router, wizard);
 
+    // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
+    let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
+        db.clone(),
+        Arc::new(modglue::CoachingReqGlue {
+            adapter: adapter.clone(),
+        }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        1289721245281292288,
+    );
+    dl_community::coaching_requests::register(&mut router, coaching_requests.clone());
+
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
     let faq_docs_path = std::env::var("FAQ_DOCS_PATH").unwrap_or_else(|_| "docs".to_string());
     let faq = dl_community::faq::FaqChat::new(
@@ -373,6 +385,7 @@ async fn main() -> anyhow::Result<()> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
+        dl_community::coaching_requests::spawn(coaching_requests.clone());
 
         // LFG-Lobby-Finder (5): Antworten im Suche-Kanal
         let lfg_responder = dl_activity::lfg::LfgResponder::new(
