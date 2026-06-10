@@ -1,3 +1,11 @@
+## #100 — Steam-Panel-Buttons repariert + Scam-Nachrichten werden wieder gelöscht
+
+**Ausgangslage:** Ein systematischer Bug-Audit über alle Bots hat zwei stille Fehler gefunden. Erstens: Die Buttons im öffentlichen Steam-Panel („Steam verknüpfen", „Rang prüfen") liefen seit dem Steam-Umzug auf einen Programmfehler — wer klickte, bekam einfach keine Reaktion. Ursache war ein Lesefehler beim Weiterreichen der Klick-Daten: Der Code griff auf das Feld „values" zu, erwischte dabei aber eine eingebaute Python-Funktion gleichen Namens statt der eigentlichen Auswahl-Werte, und stürzte beim Umwandeln ab. Zweitens: Der SecurityGuard übergab beim Löschen von Scam-Nachrichten einen Begründungs-Parameter, den die Discord-Bibliothek in der eingesetzten Version gar nicht kennt — die Löschung brach mit einem Typfehler ab, der von der Fehlerbehandlung nicht abgefangen wurde. Erkannte Scam-Nachrichten blieben dadurch in bestimmten Fällen einfach stehen.
+
+**Was wurde geändert:** Der Panel-Code liest die Auswahl-Werte jetzt korrekt aus dem Daten-Wörterbuch der Interaktion und prüft dabei den Typ. Der SecurityGuard löscht ohne den nicht unterstützten Parameter — die Begründung steht weiterhin vollständig im Moderations-Log.
+
+**Wie es jetzt funktioniert:** Klick auf „Steam verknüpfen" oder „Rang prüfen" leitet wieder sauber an den Steam-Dienst weiter und antwortet im Chat. Erkennt der SecurityGuard eine Scam-Nachricht (egal ob Einzelfall oder Nachrichten-Serie), wird sie wieder zuverlässig entfernt.
+
 ## #99 — Rust-Neuaufbau: die Feedback-DMs nach den ersten Voice-Runden
 
 **Ausgangslage:** Wer seine allererste Voice-Session (mindestens 5 Minuten, mit Mitspielern) beendet, bekommt eine freundliche DM mit Feedback-Knopf und einem 4-Fragen-Formular; nach mindestens vier verschiedenen Voice-Tagen folgt einmalig eine zweite, kürzere Nachfrage. Die Antworten landen in der Datenbank und beim Owner. Das war die letzte offene Lücke des Voice-Tracker-Ports.

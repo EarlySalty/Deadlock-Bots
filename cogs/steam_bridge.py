@@ -477,9 +477,11 @@ async def _forward_interaction(
         "guild_id": getattr(interaction.guild, "id", None) or 0,
         "channel_id": interaction.channel_id or 0,
     }
-    # Select-Menü-Werte, falls vorhanden
-    values = getattr(getattr(interaction, "data", None), "values", None)
-    if values:
+    # Select-Menü-Werte, falls vorhanden. interaction.data ist ein dict —
+    # getattr(...) liefert sonst die eingebaute dict.values-Methode.
+    data = getattr(interaction, "data", None)
+    values = data.get("values") if isinstance(data, dict) else None
+    if isinstance(values, (list, tuple)) and values:
         inner["values"] = list(values)
     event_data: dict[str, Any] = {"interaction": inner}
 

@@ -1125,9 +1125,10 @@ class SecurityGuard(commands.Cog):
             [single_msg],
         )
 
-        # Nachricht löschen
+        # Nachricht löschen — Message.delete() kennt in discord.py 2.7 kein
+        # reason-Argument; der Case-Kontext steht bereits im Moderations-Log.
         try:
-            await message.delete(reason=f"[SecurityGuard][case:{case_id}] scam (established account)")
+            await message.delete()
         except discord.HTTPException:
             pass  # Message delete failure is non-critical once moderation handling continues.
 
@@ -1462,7 +1463,9 @@ class SecurityGuard(commands.Cog):
                 continue
             seen.add(msg.message.id)
             try:
-                await msg.message.delete(reason=f"[SecurityGuard] {reason}")
+                # Kein reason-Argument: weder Message.delete noch
+                # PartialMessage.delete unterstützen es in discord.py 2.7.
+                await msg.message.delete()
                 deleted += 1
             except discord.NotFound:
                 log.debug("Message %s already removed before deletion step", msg.message.id)
