@@ -18,11 +18,19 @@ log = logging.getLogger(__name__)
 
 DEV_UPDATES_CHANNEL_ID = 1492910851483504821
 TWITCH_BOT_CHANNEL_ID = 1318329964713611385
+SERVER_ALERT_CHANNEL_ID = 1374364800817303632  # Admin-Channel (Decision Logs)
+SERVER_ALERT_PING_USER_ID = 662995601738170389
 CHANGELOG_API_TOKEN = os.getenv("CHANGELOG_API_TOKEN", "changeme-local")
 CHANGELOG_API_PORT = int(os.getenv("CHANGELOG_API_PORT", "8899"))
 MAX_FILE_BYTES = 24 * 1024 * 1024
 
 VALID_TARGETS = {"all", "twitch"}
+
+ALERT_LEVELS = {
+    "warn": ("⚠️", 0xFFA500),
+    "crit": ("🚨", 0xED4245),
+    "ok": ("✅", 0x57F287),
+}
 
 
 class ChangelogPublisher(commands.Cog):
@@ -39,6 +47,7 @@ class ChangelogPublisher(commands.Cog):
         app.router.add_post("/changelog/rich", self._rich_changelog_handler)
         app.router.add_post("/highlight-clips", self._highlight_handler)
         app.router.add_post("/discord/messages", self._fetch_messages_handler)
+        app.router.add_post("/alert", self._alert_handler)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
         self._site = web.TCPSite(self._runner, "127.0.0.1", CHANGELOG_API_PORT)
@@ -261,6 +270,59 @@ class ChangelogPublisher(commands.Cog):
             return web.json_response({"ok": True, "messages": msgs})
         except Exception as e:
             log.warning("fetch-messages failed for channel %s: %s", channel_id, e)
+            return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+    async def _alert_handler(self, request: web.Request) -> web.Response:
+        """Server-Health-Warnung in den Admin-Channel, mit User-Ping bei warn/crit.
+
+        Body: {token, title, content, level: "warn"|"crit"|"ok"}
+        """
+        try:
+            data = await request.json()
+        except Exception:
+            return web.json_response({"ok": False, "error": "invalid JSON"}, status=400)
+
+        if data.get("token") != CHANGELOG_API_TOKEN:
+            return web.json_response({"ok": False, "error": "unauthorized"}, status=401)
+
+        title = (data.get("title") or "").strip()
+        content = (data.get("content") or "").strip()
+        level = (data.get("level") or "warn").strip()
+        if level not in ALERT_LEVELS:
+            return web.json_response({"ok": False, "error": f"level must be one of {set(ALERT_LEVELS)}"}, status=400)
+        if not title or not content:
+            return web.json_response({"ok": False, "error": "title and content required"}, status=400)
+
+        channel = self.bot.get_channel(SERVER_ALERT_CHANNEL_ID)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(SERVER_ALERT_CHANNEL_ID)
+            except Exception:
+                pass
+        if channel is None or not hasattr(channel, "send"):
+            return web.json_response({"ok": False, "error": f"channel {SERVER_ALERT_CHANNEL_ID} not found"}, status=404)
+
+        icon, color = ALERT_LEVELS[level]
+        embed = discord.Embed(
+            title=f"{icon} {title}",
+            description=content[:4096],
+            color=color,
+            timestamp=datetime.datetime.now(datetime.timezone.utc),
+        )
+        embed.set_footer(text="Server-Monitor")
+
+        ping = None
+        allowed = None
+        if level in ("warn", "crit"):
+            ping = f"<@{SERVER_ALERT_PING_USER_ID}>"
+            allowed = discord.AllowedMentions(users=True, roles=False, everyone=False)
+
+        try:
+            await channel.send(content=ping, embed=embed, allowed_mentions=allowed)
+            log.info("Server-Alert (%s) gepostet: %s", level, title)
+            return web.json_response({"ok": True, "channel_id": SERVER_ALERT_CHANNEL_ID})
+        except Exception as e:
+            log.warning("Server-Alert post failed: %s", e)
             return web.json_response({"ok": False, "error": str(e)}, status=500)
 
     async def _http_handler(self, request: web.Request) -> web.Response:
