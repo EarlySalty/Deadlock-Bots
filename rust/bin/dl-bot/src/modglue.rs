@@ -476,3 +476,91 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
             .map(|m| m.display_name().to_string())
     }
 }
+
+// ── Clip-Einsendungen-Anbindung ────────────────────────────────────────────
+
+pub struct ClipGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::clips::ClipPort for ClipGlue {
+    async fn upsert_interface(
+        &self,
+        channel_id: u64,
+        existing_message_id: Option<u64>,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) -> Result<u64, String> {
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        if let Some(message_id) = existing_message_id {
+            let edited = self
+                .adapter
+                .http
+                .edit_message(
+                    ChannelId::new(channel_id),
+                    serenity::all::MessageId::new(message_id),
+                    &body,
+                    Vec::new(),
+                )
+                .await;
+            match edited {
+                Ok(message) => return Ok(message.id.get()),
+                Err(err) if err.to_string().contains("10008") => {} // Nachricht weg → neu posten
+                Err(err) => return Err(err.to_string()),
+            }
+        }
+        self.adapter
+            .send_raw_public(channel_id, &body)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_dump(
+        &self,
+        user_id: u64,
+        fallback_channel_id: u64,
+        caption: String,
+        filename: String,
+        content: String,
+    ) {
+        let attachment = serenity::all::CreateAttachment::bytes(content.into_bytes(), filename);
+        let dm = async {
+            let channel = self
+                .adapter
+                .http
+                .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+                .await
+                .map_err(|e| e.to_string())?;
+            channel
+                .send_files(
+                    &self.adapter.http,
+                    vec![attachment.clone()],
+                    serenity::all::CreateMessage::new().content(caption.clone()),
+                )
+                .await
+                .map_err(|e| e.to_string())
+        }
+        .await;
+        if let Err(err) = dm {
+            tracing::warn!(%err, "Clip-Dump-DM fehlgeschlagen — Fallback in den Submit-Kanal");
+            let _ = ChannelId::new(fallback_channel_id)
+                .send_files(
+                    &self.adapter.http,
+                    vec![attachment],
+                    serenity::all::CreateMessage::new().content("📦 **Wochen-Dump (Clips)**"),
+                )
+                .await;
+        }
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> String {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|g| g.name.to_string())
+            .unwrap_or_else(|| guild_id.to_string())
+    }
+}

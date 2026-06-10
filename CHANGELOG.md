@@ -1,3 +1,11 @@
+## #107 — Rust-Neuaufbau: die Clip-Einsendungen
+
+**Ausgangslage:** Im Clip-Kanal steht ein Einsende-Interface: Button drücken, Verwendungserlaubnis bestätigen, dann Link, Credit und Kontext ins Formular — mit Link-Prüfung und 60-Sekunden-Bremse gegen Spam. Die Einsendungen sammeln sich in einem Wochenfenster (Sonntag 0 Uhr bis Samstag 23 Uhr deutscher Zeit); nach Ablauf bekommt der Clip-Kurator genau einmal eine Text-Datei mit allen Einsendungen der Woche per DM.
+
+**Geändert:** Komplett in Rust portiert: gleiche Knopf-Kennungen (das bestehende Interface im Kanal funktioniert nach dem Umstieg weiter), gleiche Formular-Felder und Fehlertexte, gleiche Tabellen, gleiche Fenster-Berechnung inklusive Zeitzonen-Logik, gleiches Dump-Format. Das Interface aktualisiert sich weiter alle 5 Minuten (Fenster-Countdown im Embed), der Fenster-Wächter prüft alle 2 Minuten auf abgelaufene Fenster.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Fenster-Berechnung ist gegen konkrete Kalenderdaten getestet (inklusive „Sonntag selbst ist Fensterstart"), Dump-Format und URL-Prüfung ebenso, und ein Datenbank-Test spielt den kompletten Lebenszyklus durch: Fenster anlegen → Einsendung zuordnen → Dump markieren.
+
 ## #106 — Rust-Neuaufbau: die Exit-Umfrage
 
 **Ausgangslage:** Wer den Server verlässt, bekommt eine kurze Abschieds-Umfrage per DM — mit Fragen, die zum Nutzer-Typ passen: Kurzbesucher (unter 2 Tagen, nie im Voice, kaum Nachrichten) werden anders gefragt als langjährig Aktive (ab 14 Tagen mit regelmäßigen Sessions, vielen Nachrichten oder über einer Stunde Voice) oder stille Mitglieder. Gebannte und Nutzer mit Datenschutz-Opt-out werden übersprungen, und niemand wird öfter als alle 30 Tage befragt.

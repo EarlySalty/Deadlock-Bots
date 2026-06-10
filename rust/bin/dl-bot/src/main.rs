@@ -162,6 +162,15 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
+    // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
+    let clips = dl_community::clips::ClipSubmission::new(
+        db.clone(),
+        Arc::new(modglue::ClipGlue {
+            adapter: adapter.clone(),
+        }),
+    );
+    dl_community::clips::register(&mut router, clips.clone());
+
     // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
     let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
         db.clone(),
@@ -339,6 +348,7 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
+        dl_community::clips::spawn(clips.clone());
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
