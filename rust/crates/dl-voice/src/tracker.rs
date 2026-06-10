@@ -155,6 +155,8 @@ pub struct VoiceTracker {
     db: Db,
     snapshot: Arc<dyn VoiceSnapshot>,
     state: tokio::sync::Mutex<TrackerState>,
+    /// Feedback-DM-System (None = aus, wie Original mit VOICE_FEEDBACK_ENABLED=0).
+    feedback: tokio::sync::RwLock<Option<Arc<crate::feedback::VoiceFeedback>>>,
 }
 
 impl VoiceTracker {
@@ -163,7 +165,12 @@ impl VoiceTracker {
             db,
             snapshot,
             state: tokio::sync::Mutex::new(TrackerState::default()),
+            feedback: tokio::sync::RwLock::new(None),
         })
+    }
+
+    pub async fn set_feedback(&self, feedback: Arc<crate::feedback::VoiceFeedback>) {
+        *self.feedback.write().await = Some(feedback);
     }
 
     /// Konfiguration pro Guild aus kv_store (ns voice_cfg) — Default wird
@@ -432,10 +439,37 @@ impl VoiceTracker {
         if seconds <= 0 {
             return;
         }
+        // Erste Session? (VOR dem Insert prüfen, wie das Original)
+        let check_user = session.user_id;
+        let was_first_session = self
+            .db
+            .read(move |conn| {
+                use rusqlite::OptionalExtension;
+                conn.query_row(
+                    "SELECT 1 FROM voice_stats WHERE user_id = ?1
+                     UNION ALL
+                     SELECT 1 FROM voice_session_log WHERE user_id = ?1
+                     LIMIT 1",
+                    [check_user],
+                    |_| Ok(()),
+                )
+                .optional()
+            })
+            .await
+            .map(|found| found.is_none())
+            .unwrap_or(false);
         let points = calculate_points(seconds, session.peak_users.max(1));
         let started_iso = session.start_time.format("%Y-%m-%d %H:%M:%S").to_string();
         let ended_iso = end_time.format("%Y-%m-%d %H:%M:%S").to_string();
         let user_counts_json = serde_json::to_string(&session.user_counts).unwrap_or_default();
+        // Feedback-Daten VOR dem Move in den Write-Closure sichern
+        let feedback_data = (
+            session.guild_id,
+            session.user_id,
+            session.channel_id,
+            session.channel_name.clone(),
+            session.co_player_ids.iter().copied().collect::<Vec<_>>(),
+        );
         let co_player_ids_json =
             serde_json::to_string(&session.co_player_ids.iter().collect::<Vec<_>>())
                 .unwrap_or_default();
@@ -478,6 +512,20 @@ impl VoiceTracker {
             .await;
         if let Err(err) = result {
             tracing::error!(%err, user_id = session.user_id, "Voice-Session-Persistierung fehlgeschlagen");
+        }
+        if let Some(feedback) = self.feedback.read().await.clone() {
+            let (guild_id, user_id, channel_id, channel_name, co_player_ids) = feedback_data;
+            feedback
+                .on_session_end(
+                    guild_id,
+                    user_id,
+                    channel_id,
+                    channel_name,
+                    co_player_ids,
+                    seconds,
+                    was_first_session,
+                )
+                .await;
         }
     }
 

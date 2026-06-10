@@ -239,7 +239,7 @@ fn modal_data(modal: &crate::interactions::ModalSpec) -> Value {
                 "type": 4,
                 "custom_id": field.custom_id,
                 "label": field.label,
-                "style": 1,
+                "style": if field.paragraph { 2 } else { 1 },
                 "placeholder": field.placeholder,
                 "required": field.required,
                 "min_length": field.min_length,
@@ -420,6 +420,7 @@ mod tests {
                 required: true,
                 min_length: 1,
                 max_length: 32,
+                paragraph: false,
             }],
         };
         let data = modal_data(&modal);

@@ -115,6 +115,15 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
 
+    // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
+    let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
+        db.clone(),
+        Arc::new(dl_voice::glue::FeedbackGlue {
+            adapter: adapter.clone(),
+        }),
+    );
+    dl_voice::feedback::register(&mut router, voice_feedback.clone());
+
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
     let tag_service = dl_community::tags::TagService::new(db.clone());
 
@@ -214,6 +223,7 @@ async fn main() -> anyhow::Result<()> {
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
+        voice_tracker.set_feedback(voice_feedback.clone()).await;
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle

@@ -1,3 +1,11 @@
+## #99 — Rust-Neuaufbau: die Feedback-DMs nach den ersten Voice-Runden
+
+**Ausgangslage:** Wer seine allererste Voice-Session (mindestens 5 Minuten, mit Mitspielern) beendet, bekommt eine freundliche DM mit Feedback-Knopf und einem 4-Fragen-Formular; nach mindestens vier verschiedenen Voice-Tagen folgt einmalig eine zweite, kürzere Nachfrage. Die Antworten landen in der Datenbank und beim Owner. Das war die letzte offene Lücke des Voice-Tracker-Ports.
+
+**Geändert:** Komplett in Rust angeschlossen: Texte und Formular-Fragen wortgleich (das Formular kann jetzt auch im neuen System mehrzeilige Antworten — dafür wurde der Modal-Baukasten um mehrzeilige Felder erweitert), gleiche Auslöse-Regeln (Erst-Session-Erkennung VOR dem Speichern, Mitspieler-Pflicht, 5-Minuten-Grenze, Vier-Tage-Regel einmalig), gleiche Tabellen, gleicher Knopf — auch alte, vor dem Umstieg verschickte Feedback-DMs funktionieren weiter, weil der Knopf seine Anfrage über die Datenbank wiederfindet statt über den Prozess-Speicher.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Tests spielen beide Auslöser durch: Erst-Session verschickt genau eine DM (kurze oder einsame Sessions nicht), die zweite Nachfrage kommt erst ab vier Voice-Tagen und genau einmal. Namen werden ab elf Mitspielern als „+N weitere" gekappt wie im Original.
+
 ## #98 — Rust-Neuaufbau: die Min-Rang-Sperre im Panel
 
 **Ausgangslage:** Comp/Ranked-Lane-Besitzer können eine Rang-Untergrenze setzen — Rang-Rollen unterhalb der Schwelle verlieren das Verbinden-Recht, und der Lane-Name bekommt ab Emissary den Zusatz „• ab X". Der Panel-Knopf war im Rust-Port noch gesperrt.

@@ -9,6 +9,7 @@
 //! - TempVoice, Rank-Lanes, Voice-Status, Reaction-DM, Steam-Nudge folgen
 //!   in 4b/4c.
 
+pub mod feedback;
 pub mod glue;
 pub mod nudge;
 pub mod rank;

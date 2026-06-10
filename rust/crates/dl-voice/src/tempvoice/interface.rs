@@ -160,6 +160,7 @@ impl InteractionHandler for PanelHandler {
                             required: true,
                             min_length: 1,
                             max_length: 2,
+                            paragraph: false,
                         }],
                     }),
                     ..BridgeReply::default()
@@ -319,6 +320,7 @@ impl InteractionHandler for PanelHandler {
                             required: true,
                             min_length: 1,
                             max_length: 32,
+                            paragraph: false,
                         }],
                     }),
                     ..BridgeReply::default()
@@ -471,6 +473,7 @@ impl InteractionHandler for PanelHandler {
                             required: true,
                             min_length: 1,
                             max_length: 90,
+                            paragraph: false,
                         }],
                     }),
                     ..BridgeReply::default()

@@ -53,6 +53,8 @@ pub struct ModalField {
     pub required: bool,
     pub min_length: u16,
     pub max_length: u16,
+    /// true = mehrzeiliges Textfeld (Discord style 2).
+    pub paragraph: bool,
 }
 
 /// Antwort eines Handlers — deklarativ, damit Tests ohne Discord laufen.

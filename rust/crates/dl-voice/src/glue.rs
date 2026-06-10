@@ -756,3 +756,65 @@ impl crate::rank::RankPort for RankGlue {
             .map(|p| p.get())
     }
 }
+
+/// Feedback-DM-Anbindung.
+pub struct FeedbackGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl crate::feedback::FeedbackPort for FeedbackGlue {
+    async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>) {
+        let channel = match self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(err) => {
+                return if err.to_string().contains("50007") {
+                    ("forbidden".to_string(), None)
+                } else {
+                    ("error".to_string(), None)
+                }
+            }
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        body.insert(
+            "components".into(),
+            json!([{ "type": 1, "components": [{
+                "type": 2, "style": 1, "label": "Feedback geben", "emoji": {"name": "📝"},
+                "custom_id": crate::feedback::START_CUSTOM_ID,
+            }]}]),
+        );
+        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+            Ok(message_id) => ("sent".to_string(), Some(message_id)),
+            Err(err) if err.to_string().contains("50007") => ("forbidden".to_string(), None),
+            Err(_) => ("error".to_string(), None),
+        }
+    }
+
+    async fn forward_to_owner(&self, owner_id: u64, text: String) {
+        if let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": owner_id.to_string() }))
+            .await
+        {
+            let mut body = serde_json::Map::new();
+            body.insert("content".into(), json!(text));
+            let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+        }
+    }
+
+    async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| m.display_name().to_string())
+    }
+}

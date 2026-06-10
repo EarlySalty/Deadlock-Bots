@@ -265,6 +265,7 @@ fn friend_code_modal() -> ModalSpec {
             required: true,
             min_length: 1,
             max_length: 32,
+            paragraph: false,
         }],
     }
 }
