@@ -164,6 +164,15 @@ async fn main() -> anyhow::Result<()> {
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
+
+        // Voice-Status-Worker (4c): LiveMatch-Suffixe an Lane-Namen
+        let status_worker = dl_voice::status::VoiceStatusWorker::new(
+            db.clone(),
+            Arc::new(dl_voice::glue::StatusGlue {
+                adapter: adapter.clone(),
+            }),
+        );
+        dl_voice::status::spawn(status_worker);
         // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
         if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
             let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());

@@ -327,3 +327,86 @@ impl crate::nudge::NudgePort for NudgeGlue {
             .await;
     }
 }
+
+/// Voice-Status-Anbindung (Kategorien-Scan + Rename).
+pub struct StatusGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl crate::status::StatusPort for StatusGlue {
+    async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)> {
+        let mut result = Vec::new();
+        for guild_id in self.adapter.cache.guilds() {
+            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+                continue;
+            };
+            for (channel_id, channel) in &guild.channels {
+                if channel.kind != serenity::all::ChannelType::Voice {
+                    continue;
+                }
+                if crate::status::EXCLUDED_CHANNEL_IDS.contains(&channel_id.get()) {
+                    continue;
+                }
+                let in_target = channel
+                    .parent_id
+                    .map(|p| crate::status::TARGET_CATEGORY_IDS.contains(&p.get()))
+                    .unwrap_or(false);
+                if !in_target {
+                    continue;
+                }
+                let members: Vec<u64> = guild
+                    .voice_states
+                    .iter()
+                    .filter(|(_, vs)| vs.channel_id == Some(*channel_id))
+                    .filter(|(user_id, _)| {
+                        guild
+                            .members
+                            .get(user_id)
+                            .map(|m| !m.user.bot)
+                            .unwrap_or(true)
+                    })
+                    .map(|(user_id, _)| user_id.get())
+                    .collect();
+                result.push((
+                    guild_id.get(),
+                    channel_id.get(),
+                    channel.name.to_string(),
+                    members,
+                ));
+            }
+        }
+        result
+    }
+
+    async fn channel_info(&self, channel_id: u64) -> Option<(u64, String, Vec<u64>)> {
+        for guild_id in self.adapter.cache.guilds() {
+            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+                continue;
+            };
+            if let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) {
+                let members: Vec<u64> = guild
+                    .voice_states
+                    .iter()
+                    .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
+                    .map(|(user_id, _)| user_id.get())
+                    .collect();
+                return Some((guild_id.get(), channel.name.to_string(), members));
+            }
+        }
+        None
+    }
+
+    async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "name": name }),
+                Some("Deadlock Voice Status Update"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}

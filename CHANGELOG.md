@@ -1,3 +1,11 @@
+## #79 — Rust-Neuaufbau Phase 4c (Teil 2): der Live-Status an den Voice-Lanes
+
+**Ausgangslage:** Die Anzeige „Lane 1 - im Match Min 17 (4/6)" an den Voice-Kanälen kommt von einem Minuten-Worker, der Steam-Presence-Daten mit den Kanal-Mitgliedern abgleicht und daraus die größte zusammen spielende Gruppe ermittelt — inklusive Party-Aufstockung für Mitglieder ohne verknüpften Steam-Account.
+
+**Geändert:** Komplett in Rust portiert: Presence-Auswertung (mit Frische-Grenze von 3 Minuten, Minuten-Erkennung auch aus dem lokalisierten Steam-Text), Kohorten-Wahl (Match schlägt Lobby, bei Gleichstand die größere Gruppe, Server-Zuordnung vor Unbekannt), Party-Abgleich (beste Party nach Überlappung mit der Gruppe, gemeldeter Größe und Frische; fehlende unverknüpfte Mitspieler werden bis Partygröße aufgestockt) und die komplette Rename-Disziplin: 6 Minuten Abstand zwischen Umbenennungen (10 ab Match-Minute 25), Match-Ende und Status-Löschung dürfen den Abstand umgehen, und reine Mitgliederzahl-Änderungen ohne Spielstatus benennen NIE um. Auch die Standort-Tabelle, die anderen Diensten sagt, in welchem Kanal eine Steam-ID gerade sitzt, wird identisch gepflegt.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die gesamte Auswertungs-Kette ist mit Referenzwerten aus dem Python-Original abgesichert — dieselben Presence-Zeilen ergeben dieselbe Einstufung, dieselben Gruppen, dieselben Suffixe, dieselbe Umbenennen/Warten-Entscheidung in allen sechs Regelfällen. Der Worker läuft im selben 60-Sekunden-Takt gegen dieselben Tabellen.
+
 ## #78 — Rust-Neuaufbau Phase 4c (Teil 1): die Steam-Verknüpfungs-Erinnerung
 
 **Ausgangslage:** Wer ohne verknüpften Steam-Account regelmäßig im Voice ist, bekommt einmalig eine freundliche DM mit dem Verknüpfungs-Link — aber bewusst erst am zweiten Voice-Tag und erst nach 30 Minuten am Stück, damit niemand beim ersten Reinschnuppern angeschrieben wird.

@@ -11,5 +11,6 @@
 
 pub mod glue;
 pub mod nudge;
+pub mod status;
 pub mod tempvoice;
 pub mod tracker;
