@@ -66,12 +66,18 @@ async fn main() -> anyhow::Result<()> {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
             });
+            // AI-Scoring: MiniMax wenn konfiguriert, sonst Heuristik (NoAi)
+            let scorer: Arc<dyn dl_bridges::matcher::AiScorer> =
+                match dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()) {
+                    Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                    None => Arc::new(dl_bridges::matcher::NoAi),
+                };
             let matcher = dl_bridges::matcher::Matcher::new(
                 matcher_config,
                 twitch_client.clone(),
                 glue.clone(),
                 glue,
-                Arc::new(dl_bridges::matcher::NoAi),
+                scorer,
             );
             dl_bridges::matcher::register(&mut router, matcher.clone());
             Some(matcher)

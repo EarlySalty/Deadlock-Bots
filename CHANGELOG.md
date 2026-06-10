@@ -1,3 +1,11 @@
+## #84 — Rust-Neuaufbau Phase 6 (Teil 1): die KI-Anbindung — und der Streamer-Erkenner denkt wieder mit
+
+**Ausgangslage:** Mehrere Module brauchen die MiniMax-KI: der Streamer-Erkenner für unklare Namens-Paare, die Gruppensuche für die Zweitprüfung, später Moderation und Chat. Seit dem Rust-Port des Streamer-Erkenners lief dieser im reinen Heuristik-Modus.
+
+**Geändert:** Die KI-Anbindung ist in Rust portiert — beide Betriebsarten des Originals: der Token-Plan-Modus (Anthropic-kompatible Schnittstelle) und der Standard-Modus (klassische Chat-API), mit derselben Schlüssel-Suchreihenfolge und denselben Standard-Einstellungen. Die nicht konfigurierten OpenAI-/Gemini-Pfade wurden bewusst weggelassen. Direkt angeschlossen: Der Streamer-Erkenner bekommt seine KI-Zweitmeinung zurück — wortgleicher Prompt, Temperatur 0, knappes Antwort-Limit, JSON-Auswertung wie gehabt. Ohne konfigurierten Schlüssel fällt er automatisch auf die konservative Heuristik zurück.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Beide API-Betriebsarten sind gegen einen Mock-Server verifiziert — Kopfzeilen, Anfrage-Aufbau und Antwort-Auswertung (inklusive des Falls, dass die KI Denk-Fragmente mitliefert, die übersprungen werden). Damit ist die größte dokumentierte Lücke aus dem Brücken-Port geschlossen.
+
 ## #83 — Rust-Neuaufbau Phase 5 (Teil 2): die LFG-Erkennung
 
 **Ausgangslage:** Die Gruppensuche erkennt im LFG-Kanal automatisch, ob eine Nachricht eine Mitspieler-Suche ist — über eine Wortmuster-Heuristik, die auf 500 echten Kanal-Nachrichten kalibriert wurde („wer bock", „suche +2", „jemand wach?", inklusive Privat-Kontakt-Ausnahme), plus Bewertungs-Formeln für Rang-Nähe und Zeit-Übereinstimmung bei den Empfehlungen.

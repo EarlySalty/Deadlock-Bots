@@ -12,6 +12,7 @@ dl-core.workspace = true
 dl-db.workspace = true
 dl-bridges.workspace = true
 dl-activity.workspace = true
+dl-ai.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-discord.workspace = true
