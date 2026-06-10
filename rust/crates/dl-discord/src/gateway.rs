@@ -13,10 +13,12 @@ use serenity::async_trait;
 
 use crate::adapter::DiscordAdapter;
 use crate::dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
+use crate::interactions::InteractionRouter;
 
 struct Handler {
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
+    router: Arc<InteractionRouter>,
 }
 
 #[async_trait]
@@ -24,6 +26,10 @@ impl EventHandler for Handler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
+    }
+
+    async fn interaction_create(&self, _ctx: Context, interaction: serenity::all::Interaction) {
+        crate::dispatch::dispatch(&self.adapter, &self.router, &interaction).await;
     }
 
     async fn message(&self, ctx: Context, message: Message) {
@@ -120,6 +126,7 @@ pub async fn build_client(
     token: &str,
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
+    router: Arc<InteractionRouter>,
 ) -> serenity::Result<serenity::Client> {
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
@@ -132,6 +139,7 @@ pub async fn build_client(
         .event_handler(Handler {
             adapter,
             dispatcher,
+            router,
         })
         .await
 }

@@ -6,3 +6,4 @@
 //! - `twitch` (folgt in Phase 3b): live_bridge + streamer_link_matcher.
 
 pub mod steam;
+pub mod twitch;

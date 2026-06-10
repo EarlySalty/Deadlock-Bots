@@ -294,6 +294,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dl-bridges",
  "dl-broker",
  "dl-changelog",
  "dl-core",

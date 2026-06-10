@@ -45,6 +45,25 @@ async fn main() -> anyhow::Result<()> {
     let adapter = dl_discord::DiscordAdapter::new(&discord_token);
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
 
+    // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
+    let mut router = dl_discord::InteractionRouter::new();
+    let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
+    dl_bridges::steam::register(&mut router, steam_client.clone());
+    let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
+    let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
+    if let Some(twitch_client) = &twitch_client {
+        dl_bridges::twitch::register(&mut router, twitch_client.clone(), twitch_registry.clone());
+    } else {
+        tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge inaktiv");
+    }
+    let router = Arc::new(router);
+
+    // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
+    let _member_listener =
+        dl_bridges::steam::spawn_member_remove_listener(&dispatcher, steam_client.clone());
+    let _admin_listener =
+        dl_bridges::steam::spawn_admin_command_listener(&dispatcher, steam_client, adapter.clone());
+
     // Master-Broker :8770 — Token-Kette wie das Original
     let broker_token = env("MASTER_BROKER_TOKEN")
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
@@ -80,10 +99,26 @@ async fn main() -> anyhow::Result<()> {
     // Gateway: user-gated — Python hält die Session bis zum Cutover
     let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
     let gateway_task = if gateway_enabled {
-        let mut client =
-            dl_discord::gateway::build_client(&discord_token, adapter.clone(), dispatcher.clone())
-                .await
-                .context("Gateway-Client bauen")?;
+        // Aktive Twitch-Live-Ankündigungen rehydrieren (Klick-Routing)
+        if let Some(twitch_client) = &twitch_client {
+            dl_bridges::twitch::spawn_restore(twitch_client.clone(), twitch_registry.clone());
+        }
+        // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
+        if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
+            let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());
+            match dl_discord::dispatch::sync_commands(&adapter.http, &router, guild_id).await {
+                Ok(count) => tracing::info!(count, ?guild_id, "Slash-Commands synchronisiert"),
+                Err(err) => tracing::error!(%err, "Slash-Command-Sync fehlgeschlagen"),
+            }
+        }
+        let mut client = dl_discord::gateway::build_client(
+            &discord_token,
+            adapter.clone(),
+            dispatcher.clone(),
+            router.clone(),
+        )
+        .await
+        .context("Gateway-Client bauen")?;
         tracing::warn!(
             "Gateway AKTIV — sicherstellen, dass der Python-Bot die Events abgegeben hat"
         );

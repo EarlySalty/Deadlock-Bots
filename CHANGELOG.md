@@ -1,3 +1,11 @@
+## #74 — Rust-Neuaufbau Phase 3b: Twitch-Klick-Tracking und das letzte Glied der Klick-Kette
+
+**Ausgangslage:** #73 hatte das Klick-Routing gebaut, aber zwei Lücken gelassen: Die Twitch-Live-Buttons („Auf Twitch ansehen" unter Live-Ankündigungen) wurden noch nicht verarbeitet, und es fehlte die Übergabe von der echten Discord-Verbindung an das Routing — Klicks und Slash-Befehle kamen also noch nirgends an.
+
+**Geändert:** Beide Lücken sind zu. (1) Die Twitch-Live-Brücke: Ein Klick auf den Live-Button wird beim Twitch-Bot als Zählung verbucht (mit Einmal-Schlüssel pro Klick — doppelt zählt nicht) und der Nutzer bekommt seinen persönlichen Twitch-Link als nur für ihn sichtbare Antwort. Beim Start holt sich der Bot alle aktiven Live-Ankündigungen, damit auch Buttons unter älteren Nachrichten funktionieren — und wenn ein Klick auf eine unbekannte Ankündigung trifft, lädt er die Liste einmal frisch nach, statt ins Leere zu laufen (das konnte das Original nicht). (2) Die Discord-Verbindung reicht jetzt alle Klicks, Eingabefenster und Slash-Befehle ans Routing weiter — mit derselben 2-Sekunden-Regel wie bisher: Dauert eine Antwort länger, erscheint erst „Bot denkt nach", dann die echte Antwort.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Gegen einen Mock-Twitch-Bot getestet: Klick-Zählung mit korrektem Einmal-Schlüssel und feldgenauem Inhalt, Standard-Beschriftung bei leerem Button-Text, Nachlade-Verhalten bei unbekannten Klicks, Hinweis bei wirklich abgelaufenen Ankündigungen. Damit ist die Abhängigkeit aus #72 aufgelöst: Vermittler und Discord-Verbindung können beim Umschalten gemeinsam wandern, weil die Klick-Verarbeitung jetzt komplett in Rust existiert. Es fehlt aus Phase 3 noch der Streamer-Erkennungs-Scan (läuft alle 6 Stunden) — danach ist die Brücken-Phase komplett.
+
 ## #73 — Rust-Neuaufbau Phase 3a: Klick-Verarbeitung und Steam-Brücke
 
 **Ausgangslage:** Phase 2 hatte die offene Flanke benannt: Wer die Discord-Verbindung besitzt, muss auch alle Button-Klicks verarbeiten — sonst posten wir tote Knöpfe. Außerdem ist die Steam-Brücke (der „dünne Arm", über den /betainvite, /steam, Rang-Checks und die Link-Panels mit dem Rust-Steam-Bot reden) bisher Python.

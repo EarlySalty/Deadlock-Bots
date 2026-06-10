@@ -149,6 +149,17 @@ impl DiscordAdapter {
         Ok(message.id.get())
     }
 
+    /// Öffentliche Variante für den Interaction-Dispatch (Panel-Posts).
+    pub async fn send_raw_public(
+        &self,
+        channel_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<u64, String> {
+        self.send_raw(channel_id, body)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     fn is_unknown_channel(err: &serenity::Error) -> bool {
         // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
         // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).

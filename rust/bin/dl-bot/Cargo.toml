@@ -10,6 +10,7 @@ version = "0.1.0"
 [dependencies]
 dl-core.workspace = true
 dl-db.workspace = true
+dl-bridges.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-discord.workspace = true
