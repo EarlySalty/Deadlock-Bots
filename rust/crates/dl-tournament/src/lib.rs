@@ -6,3 +6,4 @@
 
 pub mod balancer;
 pub mod store;
+pub mod web;

@@ -8,6 +8,9 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
 dl-db.workspace = true
 hex.workspace = true
 rand.workspace = true
@@ -15,8 +18,11 @@ rusqlite.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+serde_json.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
+tower.workspace = true
 
 [lints]
 workspace = true

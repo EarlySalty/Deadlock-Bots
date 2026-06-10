@@ -486,12 +486,17 @@ dependencies = [
 name = "dl-tournament"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "axum",
+ "chrono",
  "dl-db",
  "hex",
  "rand 0.8.6",
  "rusqlite",
+ "serde_json",
  "tempfile",
  "tokio",
+ "tower",
  "tracing",
 ]
 
@@ -523,6 +528,7 @@ dependencies = [
  "dl-db",
  "dl-stats",
  "dl-tierlist",
+ "dl-tournament",
  "dl-webcore",
  "tokio",
  "tracing",

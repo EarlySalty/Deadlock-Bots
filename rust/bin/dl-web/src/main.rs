@@ -57,10 +57,28 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!(addr = %stats_addr, "Public-Stats gebunden");
     let stats_server = axum::serve(stats_listener, dl_stats::router(stats));
 
+    // Turnier-Website :8767
+    let turnier_store = dl_tournament::store::TournamentStore::new(db.clone());
+    turnier_store
+        .ensure_schema()
+        .await
+        .context("Turnier-Schema sicherstellen")?;
+    let turnier =
+        dl_tournament::web::TurnierWeb::from_env(turnier_store, |key| std::env::var(key).ok());
+    let turnier_host =
+        std::env::var("TURNIER_PUBLIC_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
+    let turnier_addr = format!("{turnier_host}:{}", cfg.ports.turnier_public);
+    let turnier_listener = tokio::net::TcpListener::bind(&turnier_addr)
+        .await
+        .with_context(|| format!("Turnier-Port binden: {turnier_addr}"))?;
+    tracing::info!(addr = %turnier_addr, "Turnier-Web gebunden");
+    let turnier_server = axum::serve(turnier_listener, dl_tournament::web::router(turnier));
+
     tracing::info!("dl-web läuft — beenden mit Ctrl+C");
     tokio::select! {
         result = tierlist_server => result.context("Tierlist-Server")?,
         result = stats_server => result.context("Public-Stats-Server")?,
+        result = turnier_server => result.context("Turnier-Server")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("dl-web beendet"),
     }
     Ok(())

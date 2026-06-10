@@ -61,6 +61,14 @@ pub fn team_name_key(name: &str) -> Result<String, String> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TeamRow {
+    pub id: i64,
+    pub name: String,
+    pub created_by: Option<u64>,
+    pub member_count: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Team {
     pub id: i64,
     pub name: String,
@@ -367,6 +375,175 @@ impl TournamentStore {
             .unwrap_or(false)
     }
 
+    /// Teams mit Mitgliederzahl, alphabetisch (wie list_teams_async).
+    pub async fn list_teams(&self, guild_id: u64) -> Vec<TeamRow> {
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT t.id, t.name, t.created_by, COALESCE(COUNT(s.user_id), 0)
+                       FROM customgames_tournament_teams t
+                       LEFT JOIN customgames_tournament_signups s
+                         ON s.guild_id = t.guild_id AND s.team_id = t.id
+                      WHERE t.guild_id = ?1
+                      GROUP BY t.id, t.name, t.created_by
+                      ORDER BY lower(t.name) ASC",
+                )?;
+                let rows = stmt.query_map([guild_id], |row| {
+                    Ok(TeamRow {
+                        id: row.get(0)?,
+                        name: row.get(1)?,
+                        created_by: row.get(2)?,
+                        member_count: row.get(3)?,
+                    })
+                })?;
+                rows.collect()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Alle Anmeldungen (Rang absteigend, frisch zuerst — wie list_signups_async).
+    pub async fn list_signups(&self, guild_id: u64) -> Vec<Signup> {
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT s.user_id, s.registration_mode, s.rank, s.rank_value,
+                            s.rank_subvalue, s.display_name, s.team_id, s.assigned_by_admin, t.name
+                       FROM customgames_tournament_signups s
+                       LEFT JOIN customgames_tournament_teams t
+                         ON t.guild_id = s.guild_id AND t.id = s.team_id
+                      WHERE s.guild_id = ?1
+                      ORDER BY s.rank_value DESC, s.updated_at DESC",
+                )?;
+                let rows = stmt.query_map([guild_id], |row| {
+                    Ok(Signup {
+                        user_id: row.get(0)?,
+                        registration_mode: row.get(1)?,
+                        rank: row.get(2)?,
+                        rank_value: row.get(3)?,
+                        rank_subvalue: row.get(4)?,
+                        display_name: row.get(5)?,
+                        team_id: row.get(6)?,
+                        assigned_by_admin: row.get::<_, i64>(7)? != 0,
+                        team_name: row.get(8)?,
+                        status: String::new(),
+                    })
+                })?;
+                rows.collect()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    pub async fn get_team(&self, guild_id: u64, team_id: i64) -> Option<TeamRow> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT id, name, created_by FROM customgames_tournament_teams
+                      WHERE guild_id = ?1 AND id = ?2",
+                    rusqlite::params![guild_id, team_id],
+                    |row| {
+                        Ok(TeamRow {
+                            id: row.get(0)?,
+                            name: row.get(1)?,
+                            created_by: row.get(2)?,
+                            member_count: 0,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Umbenennen (UNIQUE-Kollision → deutscher Fehlertext wie Original).
+    pub async fn rename_team(
+        &self,
+        guild_id: u64,
+        team_id: i64,
+        new_name: &str,
+    ) -> Result<bool, String> {
+        let name = clean_team_name(new_name)?;
+        let key = name.to_lowercase();
+        if self.get_team(guild_id, team_id).await.is_none() {
+            return Ok(false);
+        }
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE customgames_tournament_teams SET name = ?1, name_key = ?2
+                      WHERE guild_id = ?3 AND id = ?4",
+                    rusqlite::params![name, key, guild_id, team_id],
+                )
+                .map(|_| true)
+            })
+            .await
+            .map_err(|e| {
+                if e.to_string().contains("UNIQUE") {
+                    "Ein Team mit diesem Namen existiert bereits".to_string()
+                } else {
+                    e.to_string()
+                }
+            })
+    }
+
+    /// Team-Zuordnung setzen/lösen (assigned_by_admin folgt team_id wie Original).
+    pub async fn assign_signup_team(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        team_id: Option<i64>,
+    ) -> Result<bool, String> {
+        if let Some(team_id) = team_id {
+            if !self.team_exists(guild_id, team_id).await {
+                return Err("team_id does not exist in this guild".to_string());
+            }
+        }
+        let assigned = i64::from(team_id.is_some());
+        self.db
+            .write(move |conn| {
+                Ok(conn.execute(
+                    "UPDATE customgames_tournament_signups
+                        SET team_id = ?1, assigned_by_admin = ?2, updated_at = CURRENT_TIMESTAMP
+                      WHERE guild_id = ?3 AND user_id = ?4",
+                    rusqlite::params![team_id, assigned, guild_id, user_id],
+                )? > 0)
+            })
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Verifizierter Steam-Rang für die Web-Anmeldung.
+    pub async fn verified_steam_rank(&self, user_id: u64) -> Option<(String, i64)> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT deadlock_rank_name, deadlock_subrank FROM steam_links
+                      WHERE user_id = ?1 AND verified = 1
+                      ORDER BY primary_account DESC, deadlock_rank_updated_at DESC LIMIT 1",
+                    [user_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Option<String>>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                        ))
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+            .map(|(name, sub)| {
+                (
+                    name.unwrap_or_else(|| "initiate".to_string()),
+                    sub.unwrap_or(0),
+                )
+            })
+    }
+
     /// Neue Periode aktiviert sich und deaktiviert die bisherige.
     pub async fn create_period(
         &self,
@@ -408,6 +585,53 @@ impl TournamentStore {
                       WHERE guild_id = ?1 AND is_active = 1 ORDER BY id DESC LIMIT 1",
                     [guild_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// Aktive Periode als volles JSON-Objekt (Spalten wie das Original-Dict).
+    pub async fn active_period_json(&self, guild_id: u64) -> Option<serde_json::Value> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT id, guild_id, name, registration_start, registration_end,
+                            is_active, created_by, created_at
+                       FROM tournament_periods
+                      WHERE guild_id = ?1 AND is_active = 1 ORDER BY id DESC LIMIT 1",
+                    [guild_id],
+                    |row| {
+                        Ok(serde_json::json!({
+                            "id": row.get::<_, i64>(0)?,
+                            "guild_id": row.get::<_, i64>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "registration_start": row.get::<_, String>(3)?,
+                            "registration_end": row.get::<_, String>(4)?,
+                            "is_active": row.get::<_, i64>(5)?,
+                            "created_by": row.get::<_, Option<i64>>(6)?,
+                            "created_at": row.get::<_, Option<String>>(7)?,
+                        }))
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    /// (registration_start, registration_end) einer Periode.
+    pub async fn period_window(&self, guild_id: u64, period_id: i64) -> Option<(String, String)> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT registration_start, registration_end FROM tournament_periods
+                      WHERE guild_id = ?1 AND id = ?2",
+                    rusqlite::params![guild_id, period_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()
             })

@@ -1,3 +1,11 @@
+## #88 — Rust-Neuaufbau Phase 8 (Teil 3): die Turnier-Website
+
+**Ausgangslage:** Die öffentliche Turnier-Seite (Anmeldung per Discord-Login, Team-Verwaltung, Turnierbaum-Vorschau) lief als Web-Server im Bot-Prozess: Einmal-Login-Token, Sitzungs-Cookies mit CSRF-Schutz und elf API-Routen über dem Turnier-Unterbau.
+
+**Geändert:** Komplett in Rust portiert und in den Web-Prozess umgezogen: derselbe Login-Fluss (Weiterleitung zum Link-Dienst, Einmal-Token einlösen, 6-Stunden-Sitzung mit gleitender Verlängerung), dieselben Sicherheits-Kopfzeilen, derselbe Turnierbaum-Generator (Team-Schnitt aus Rang-Punkten, Setzliste Erster-gegen-Letzter, Freilose, Finale/Halbfinale-Beschriftung — inklusive der Original-Eigenheit, dass Unterrang 0 als Mitte gewertet wird) und alle Anmelde-Regeln: offener Zeitraum, verifizierter Steam-Account als Rang-Quelle, Team-Pflichten, Nur-Ersteller-Rechte bei Umbenennen und Rauswerfen. Eine dokumentierte Übergangs-Notiz: Die Turnier-Rollen-Prüfung lief bisher über den Discord-Zwischenspeicher des Bots und wurde stillschweigend übersprungen, wenn der nicht bereit war — der Web-Prozess hat keinen Discord-Zugang, also gilt vorerst genau dieses Original-Ausweichverhalten.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Rust-Version lief parallel zum Live-Original gegen dieselben echten Daten: die Übersichts-Antwort ist JSON-identisch, die Seite byte-identisch, abgewiesene Anfragen liefern dieselben Status-Codes. Dazu Tests für den kompletten Login-und-Anmelde-Fluss und den Turnierbaum mit Referenz-Ausgabe aus dem Python-Original.
+
 ## #87 — Rust-Neuaufbau Phase 8 (Teil 2): der Turnier-Unterbau
 
 **Ausgangslage:** Anmeldungen, Teams, Turnier-Zeiträume und die Einmal-Anmelde-Links der Turnier-Website werden in vier Tabellen verwaltet — mit Regeln wie „Team-Namen sind 2–32 Zeichen und pro Server einmalig (Groß/Klein egal)", „Team-Anmeldung braucht ein existierendes Team" und „eine neue Turnier-Phase deaktiviert automatisch die alte".
