@@ -246,10 +246,14 @@ class BetaInviteFlowView(discord.ui.View):
 # ---------------------------------------------------------------------------
 
 
-async def _post_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
+async def _post_event(
+    kind: str, data: dict[str, Any], *, timeout: float = 10.0
+) -> dict[str, Any] | None:
     """Sendet ein Event an POST /events/discord des steam-bot.
 
-    Gibt das geparste JSON-Dict zurück, oder None bei Fehler.
+    Gibt das geparste JSON-Dict zurück, oder None bei Fehler. `timeout` ist
+    grosszügiger zu wählen für lang laufende Commands (z.B. ein voller
+    Rank-/Friend-Sync über alle Freunde).
     """
     url = f"{_get_api_url()}/events/discord"
     token = _get_token()
@@ -264,7 +268,7 @@ async def _post_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
                 url,
                 json=payload,
                 headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10.0),
+                timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 if resp.status == 200:
                     return await resp.json()
@@ -377,6 +381,27 @@ async def _render_response(
             view=view,
             ephemeral=ephemeral,
         )
+
+
+def _slash_interaction(
+    interaction: discord.Interaction,
+    name: str,
+    options: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Baut das `interaction`-Wire-Objekt für einen Slash-Command.
+
+    Format-Vertrag mit der Rust-Seite (events.rs `dispatch_slash_command`):
+    `data.name` = Command-Name, `data.options.<key>` = Argumente.
+    """
+    data: dict[str, Any] = {"name": name}
+    if options:
+        data["options"] = options
+    return {
+        "custom_id": "",
+        "user_id": interaction.user.id,
+        "guild_id": getattr(interaction.guild, "id", None) or 0,
+        "data": data,
+    }
 
 
 async def _forward_interaction(
@@ -557,6 +582,185 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
             },
         )
         await _render_response(interaction, result)
+
+    # ------------------------------------------------------------------
+    # Slash-Commands: Account-Verknüpfung
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="account_verknüpfen",
+        description="Zeigt den Steam-OpenID-Link zur Account-Verknüpfung.",
+    )
+    async def account_verknuepfen(self, interaction: discord.Interaction) -> None:
+        """Einstieg in den Link-Flow (= Panel-Button steam_link_panel:open)."""
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "account_verknüpfen")},
+        )
+        await _render_response(interaction, result)
+
+    steam = app_commands.Group(name="steam", description="Steam-Links verwalten")
+
+    @steam.command(name="links", description="Zeigt deine gespeicherten Steam-Links.")
+    async def steam_links(self, interaction: discord.Interaction) -> None:
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "steam_links")},
+        )
+        await _render_response(interaction, result)
+
+    @steam.command(
+        name="whoami",
+        description="Prüft ID/Vanity/Profil-Link und zeigt Persona + SteamID.",
+    )
+    @app_commands.describe(steam="SteamID64, Vanity oder steamcommunity-Link")
+    async def steam_whoami(self, interaction: discord.Interaction, steam: str) -> None:
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "steam_whoami", {"steam": steam})},
+        )
+        await _render_response(interaction, result)
+
+    @steam.command(
+        name="setprimary",
+        description="Markiert einen verknüpften Steam-Account als Primär.",
+    )
+    @app_commands.describe(
+        steam="SteamID64, Vanity oder steamcommunity-Link",
+        name="Optionaler Anzeigename",
+    )
+    async def steam_setprimary(
+        self, interaction: discord.Interaction, steam: str, name: str | None = None
+    ) -> None:
+        options: dict[str, Any] = {"steam": steam}
+        if name:
+            options["name"] = name
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "steam_setprimary", options)},
+        )
+        await _render_response(interaction, result)
+
+    @steam.command(name="unlink", description="Entfernt einen Steam-Link.")
+    @app_commands.describe(steam="SteamID64, Vanity oder steamcommunity-Link")
+    async def steam_unlink(self, interaction: discord.Interaction, steam: str) -> None:
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "steam_unlink", {"steam": steam})},
+        )
+        await _render_response(interaction, result)
+
+    # ------------------------------------------------------------------
+    # Slash-Commands: Rang-Abfrage
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="steam_rank",
+        description="Fragt den Deadlock-Rang über die Steam PlayerCard ab.",
+    )
+    @app_commands.describe(target="SteamID64/Vanity/Link (leer = dein eigener Account)")
+    async def steam_rank(
+        self, interaction: discord.Interaction, target: str | None = None
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        options = {"target": target} if target else {}
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "steam_rank", options)},
+            timeout=60.0,
+        )
+        await _render_response(interaction, result, already_deferred=True)
+
+    @app_commands.command(
+        name="checkrank",
+        description="Prüft den Deadlock-Rang eines Discord-Users per @Mention.",
+    )
+    @app_commands.describe(user="Discord-User (leer = du selbst)")
+    async def checkrank(
+        self, interaction: discord.Interaction, user: discord.Member | None = None
+    ) -> None:
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        target = user or interaction.user
+        options = {
+            "target_user_id": target.id,
+            "target_mention": getattr(target, "mention", f"`{target}`"),
+        }
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "checkrank", options)},
+            timeout=120.0,
+        )
+        await _render_response(interaction, result, already_deferred=True)
+
+    # ------------------------------------------------------------------
+    # Slash-Commands: Admin-Sync
+    # ------------------------------------------------------------------
+
+    @app_commands.command(
+        name="steam_rank_sync",
+        description="(Admin) Synchronisiert Friend-Ranks und Rang-Rollen.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def steam_rank_sync(self, interaction: discord.Interaction) -> None:
+        await self._run_admin_sync(interaction, "steam_rank_sync")
+
+    @app_commands.command(
+        name="subrank_sync",
+        description="(Admin) Startet sofort den Deadlock Subrank-Auto-Sync.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def subrank_sync(self, interaction: discord.Interaction) -> None:
+        await self._run_admin_sync(interaction, "subrank_sync")
+
+    @app_commands.command(
+        name="sync_steam_friends",
+        description="(Admin) Synchronisiert die Steam-Freundesliste + Verified-Rollen.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def sync_steam_friends(self, interaction: discord.Interaction) -> None:
+        await self._run_admin_sync(interaction, "sync_steam_friends")
+
+    async def _run_admin_sync(
+        self, interaction: discord.Interaction, command_name: str
+    ) -> None:
+        """Gemeinsamer Pfad für die lang laufenden Admin-Sync-Commands."""
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, command_name)},
+            timeout=180.0,
+        )
+        await _render_response(interaction, result, already_deferred=True)
+
+    @app_commands.command(
+        name="publish_steam_panel",
+        description="(Admin) Steam-Verknüpfen-Panel in diesem Channel posten.",
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def publish_steam_panel(self, interaction: discord.Interaction) -> None:
+        """Postet das persistente Steam-Link-Panel (Rust liefert das Embed)."""
+        result = await _post_event(
+            "slash_command",
+            {"interaction": _slash_interaction(interaction, "publish_steam_panel")},
+        )
+        if result is None:
+            await interaction.response.send_message(
+                "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte erneut versuchen.",
+                ephemeral=True,
+            )
+            return
+
+        embed: discord.Embed | None = None
+        embed_dict = result.get("reply_embed")
+        if embed_dict and isinstance(embed_dict, dict):
+            try:
+                embed = discord.Embed.from_dict(embed_dict)
+            except Exception as exc:
+                log.warning("steam-bridge: Konnte Steam-Panel-Embed nicht parsen: %s", exc)
+
+        # Panel öffentlich posten + persistente Buttons anhängen.
+        await interaction.channel.send(embed=embed, view=SteamBridgePanelView())
+        await interaction.response.send_message("✅ Steam-Panel gepostet.", ephemeral=True)
 
     # ------------------------------------------------------------------
     # Member-Ereignisse

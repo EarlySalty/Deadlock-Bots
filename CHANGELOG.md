@@ -1,3 +1,13 @@
+## #65 — Steam-Slash-Commands wieder verfügbar
+
+**Ausgangslage:** Seit der Steam-Umstellung (Eintrag #62) fehlten die Slash-Commands rund um Steam — die alten Bausteine, die sie bereitstellten, sind abgeschaltet. Die Verknüpfungs-Buttons im Panel liefen weiter, aber Befehle wie `/account_verknüpfen`, `/steam links` oder `/checkrank` waren weg.
+
+**Geändert:** Der dünne Steam-Vermittler im Bot registriert die Commands jetzt selbst und leitet sie an den neuen Steam-Dienst weiter, der die eigentliche Arbeit macht. Wieder da: `/account_verknüpfen`, `/steam links`, `/steam whoami`, `/steam setprimary`, `/steam unlink`, `/steam_rank`, `/checkrank` sowie die Admin-Befehle `/steam_rank_sync`, `/subrank_sync`, `/sync_steam_friends` und `/publish_steam_panel`.
+
+**Wie's funktioniert:** Jeder Command schickt Name und Argumente in einem festen Format an den Steam-Dienst und rendert dessen Antwort (Text, Embed oder Login-Button). Befehle mit Eingabe (z. B. eine SteamID bei `/steam whoami`) übergeben diese mit; `/checkrank` löst die @-Mention vorher zum Discord-User auf. Die langlaufenden Admin-Syncs über die ganze Freundesliste bekommen ein größeres Zeitlimit und melden sich erst, wenn der Dienst fertig ist, statt vorzeitig abzubrechen.
+
+**Betroffen:** Alle, die ihren Steam-Account verwalten oder ihren Rang prüfen, sowie Admins, die einen Sofort-Sync auslösen.
+
 ## #64 — Voice-Nudge-DM repariert: Steam-Link-Button funktioniert wieder
 
 **Ausgangslage:** Seit der Steam-Umstellung (Eintrag #62) holte sich die freundliche Erinnerungs-DM ("verknüpf doch mal deinen Steam-Account"), die nach 30 Minuten im Voice verschickt wird, ihre Login-URL noch über den alten Weg: Sie suchte sich zur Laufzeit das passende Steam-Cog im Bot zusammen. Genau dieses Cog war aber abgeschaltet. Die Suche fand stattdessen den Nudge-Baustein selbst und lief dann beim Erzeugen der URL in einen Fehler — die DM kam entweder ohne funktionierenden Button oder gar nicht.
