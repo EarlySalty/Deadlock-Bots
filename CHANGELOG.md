@@ -1,3 +1,11 @@
+## #110 — Rust-Neuaufbau: die Gruppensuche ist durchgängig
+
+**Ausgangslage:** Nach Entscheidungslogik (#103) und Antwort-Bau (#109) fehlte das letzte Anschluss-Stück der Gruppensuche: Nachrichten aus dem Suche-Kanal einsammeln, den Rang bestimmen und das fertige Lobby-Finder-Embed posten.
+
+**Geändert:** Das Anschluss-Stück ist gebaut: Suche-Nachricht erkannt (nur außerhalb einer Lane, 60-Sekunden-Bremse) → Rang aus den Rollen, sonst aus dem Nachrichtentext geparst („Oracle 3", „emi II" — Kurzformen und römische Unterränge wie im Original) → Anfänger ohne Rang werden wie ein Alchemist 1 eingestuft → Lanes aller vier Kategorien aus dem Discord-Cache gescannt (Rang-Durchschnitt aus Rollen, Sonderfall Juice-Kammer zählt fix als Eternus, bekannte Mitspieler markiert) → Embed in den Ausgabe-Kanal. Damit ist die komplette Gruppensuche in Rust durchgängig: Erkennung → Einstufung → Routing → Auswahl → Antwort. Ehrlich dokumentierte Rest-Lücke: Das Admin-Entscheidungsprotokoll wird ins Server-Log geschrieben statt als eigenes Embed gepostet.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Der Text-Rang-Parser ist mit fünf Fällen getestet (inklusive „höchster Rang gewinnt"); insgesamt sichern 14 Tests die LFG-Kette ab.
+
 ## #109 — Rust-Neuaufbau: die LFG-Antwort komplett
 
 **Ausgangslage:** Nach der Routing-Entscheidung (#103) fehlte noch die sichtbare Antwort der Gruppensuche: das Lobby-Finder-Embed mit bis zu drei Vorschlägen (Punktesystem: bekannte Mitspieler, Routing-Treffer, Belegung, Rang-Nähe; eng passende Lanes gewinnen allein), die sechs Begrüßungs-Varianten (Anfänger mit Coaching-Tipp, gefundene Lobbys, leere Lage), die Feld-Texte (Belegung, Durchschnittsrang, „etwas über deinem Rang"-Warnung, anwesende Bekannte, Voll-Hinweis) und der „eigene Lobby aufmachen"-Verweis auf den passenden Sammel-Kanal.

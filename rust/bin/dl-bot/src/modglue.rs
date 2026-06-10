@@ -634,3 +634,193 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .unwrap_or_else(|| format!("user-{user_id}"))
     }
 }
+
+// ── LFG-Lobby-Finder-Anbindung ─────────────────────────────────────────────
+
+pub struct LfgGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+const LFG_CATEGORIES: [(u64, &str); 4] = [
+    (1289721245281292290, "Casual"),
+    (1412804540994162789, "Ranked"),
+    (1357422957017698478, "Street Brawl"),
+    (1465839366634209361, "New Player"),
+];
+const LFG_STAGINGS: [u64; 3] = [
+    1501089974093873232,
+    1412804671432818890,
+    1357422958544420944,
+];
+const JUICE_KAMMER_ID: u64 = 1493690350580138114;
+
+fn rank_from_role_names(names: &[String]) -> (String, i64, Option<i64>) {
+    let mut best: (String, i64, Option<i64>) = (String::new(), 0, None);
+    for name in names {
+        let lower = name.trim().to_lowercase();
+        let mut parts = lower.split_whitespace();
+        let Some(first) = parts.next() else { continue };
+        let Some((rank, value)) = dl_activity::lfg::RANK_NAMES
+            .iter()
+            .find(|(rank, _)| *rank == first)
+        else {
+            continue;
+        };
+        let sub: Option<i64> = parts
+            .next()
+            .and_then(|raw| raw.parse().ok())
+            .filter(|v| (1..=6).contains(v));
+        if *value > best.1 || (*value == best.1 && sub.is_some()) {
+            let mut display = rank.to_string();
+            if let Some(head) = display.get_mut(0..1) {
+                head.make_ascii_uppercase();
+            }
+            best = (display, *value, sub);
+        }
+    }
+    best
+}
+
+#[async_trait::async_trait]
+impl dl_activity::lfg::LfgPort for LfgGlue {
+    async fn scan_lanes(
+        &self,
+        guild_id: u64,
+        co_player_ids: &[u64],
+    ) -> Vec<dl_activity::lfg::LaneInfo> {
+        use dl_activity::lfg::{LaneInfo, LaneLabel};
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        let co_set: std::collections::HashSet<u64> = co_player_ids.iter().copied().collect();
+        let mut lanes = Vec::new();
+        for channel in guild.channels.values() {
+            if channel.kind != serenity::all::ChannelType::Voice {
+                continue;
+            }
+            let Some((category_id, label)) = channel.parent_id.and_then(|parent| {
+                LFG_CATEGORIES
+                    .iter()
+                    .find(|(id, _)| *id == parent.get())
+                    .copied()
+            }) else {
+                continue;
+            };
+            let label = match label {
+                "Ranked" => LaneLabel::Ranked,
+                "Street Brawl" => LaneLabel::StreetBrawl,
+                "New Player" => LaneLabel::NewPlayer,
+                _ => LaneLabel::Casual,
+            };
+            let member_ids: Vec<u64> = guild
+                .voice_states
+                .iter()
+                .filter(|(_, vs)| vs.channel_id == Some(channel.id))
+                .map(|(user_id, _)| user_id.get())
+                .collect();
+            let mut ranks: Vec<i64> = Vec::new();
+            let mut co_names: Vec<String> = Vec::new();
+            for user_id in &member_ids {
+                if let Some(member) = guild.members.get(&UserId::new(*user_id)) {
+                    if member.user.bot {
+                        continue;
+                    }
+                    let names: Vec<String> = member
+                        .roles
+                        .iter()
+                        .filter_map(|rid| guild.roles.get(rid).map(|r| r.name.to_string()))
+                        .collect();
+                    let (_, value, _) = rank_from_role_names(&names);
+                    if value > 0 {
+                        ranks.push(value);
+                    }
+                    if co_set.contains(user_id) {
+                        co_names.push(member.display_name().to_string());
+                    }
+                }
+            }
+            let member_count = member_ids.len();
+            let mut avg = if ranks.is_empty() {
+                0.0
+            } else {
+                ranks.iter().sum::<i64>() as f64 / ranks.len() as f64
+            };
+            let avg_label = if channel.id.get() == JUICE_KAMMER_ID {
+                avg = 11.0;
+                "Eternus".to_string()
+            } else if avg == 0.0 {
+                "Leer".to_string()
+            } else {
+                let tier = (avg.round() as i64).clamp(1, 11);
+                let mut name = dl_activity::lfg::RANK_NAMES
+                    .iter()
+                    .find(|(_, value)| *value == tier)
+                    .map(|(rank, _)| rank.to_string())
+                    .unwrap_or_else(|| "Unbekannt".to_string());
+                if let Some(head) = name.get_mut(0..1) {
+                    head.make_ascii_uppercase();
+                }
+                name
+            };
+            let mut limit = match channel.user_limit {
+                Some(0) | None => 99,
+                Some(value) => value as usize,
+            };
+            if label == LaneLabel::NewPlayer {
+                limit = limit.min(6);
+            }
+            lanes.push(LaneInfo {
+                channel_id: channel.id.get(),
+                label,
+                member_count,
+                user_limit: limit,
+                avg_rank_value: avg,
+                co_players_present: co_names.len(),
+                name: channel.name.to_string(),
+                avg_rank_label: avg_label,
+                category_id,
+                position: channel.position as i64,
+                is_staging: LFG_STAGINGS.contains(&channel.id.get()),
+                co_player_names: co_names,
+            });
+        }
+        lanes.sort_by_key(|lane| (lane.category_id, lane.position, lane.channel_id));
+        lanes
+    }
+
+    async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>) {
+        let names: Vec<String> = self
+            .adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members.get(&UserId::new(user_id)).map(|m| {
+                    m.roles
+                        .iter()
+                        .filter_map(|rid| g.roles.get(rid).map(|r| r.name.to_string()))
+                        .collect()
+                })
+            })
+            .unwrap_or_default();
+        rank_from_role_names(&names)
+    }
+
+    async fn member_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.voice_states
+                    .get(&UserId::new(user_id))
+                    .map(|vs| vs.channel_id.is_some())
+            })
+            .unwrap_or(false)
+    }
+
+    async fn post_embed(&self, channel_id: u64, embed: serde_json::Value) {
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+}

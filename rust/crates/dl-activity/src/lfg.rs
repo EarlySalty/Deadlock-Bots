@@ -932,6 +932,267 @@ pub fn build_lfg_reply(
     })
 }
 
+// ── Flow-Anschluss (wie on_message + _handle_lfg_request) ─────────────────
+
+/// Rang-Namen → Wert (Initiate=1 … Eternus=11), für Text-Parsing.
+pub const RANK_NAMES: [(&str, i64); 11] = [
+    ("initiate", 1),
+    ("seeker", 2),
+    ("alchemist", 3),
+    ("arcanist", 4),
+    ("ritualist", 5),
+    ("emissary", 6),
+    ("archon", 7),
+    ("oracle", 8),
+    ("phantom", 9),
+    ("ascendant", 10),
+    ("eternus", 11),
+];
+
+/// Rang aus dem Nachrichtentext ("Oracle 3", "emi II") — wie
+/// `_parse_rank_from_message` inkl. Kurz-Aliasse und römischer Subränge.
+pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>) {
+    const ALIASES: [(&str, &str); 12] = [
+        ("ini", "initiate"),
+        ("seek", "seeker"),
+        ("alch", "alchemist"),
+        ("arc", "arcanist"),
+        ("rit", "ritualist"),
+        ("emi", "emissary"),
+        ("emiss", "emissary"),
+        ("arch", "archon"),
+        ("asc", "ascendant"),
+        ("et", "eternus"),
+        ("arkanist", "arcanist"),
+        ("ascendent", "ascendant"),
+    ];
+    let parse_sub = |token: &str| -> Option<i64> {
+        let token = token.trim().trim_end_matches('+').to_lowercase();
+        if let Ok(value) = token.parse::<i64>() {
+            return (1..=6).contains(&value).then_some(value);
+        }
+        match token.as_str() {
+            "i" => Some(1),
+            "ii" => Some(2),
+            "iii" => Some(3),
+            "iv" => Some(4),
+            "v" => Some(5),
+            "vi" => Some(6),
+            _ => None,
+        }
+    };
+    let tokens: Vec<&str> = content_lower
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '+')
+        .filter(|t| !t.is_empty())
+        .collect();
+    let mut best: (String, i64, Option<i64>) = (String::new(), 0, None);
+    for (index, token) in tokens.iter().enumerate() {
+        let full_name = RANK_NAMES
+            .iter()
+            .find(|(rank, _)| rank == token)
+            .map(|(rank, _)| *rank)
+            .or_else(|| {
+                ALIASES
+                    .iter()
+                    .find(|(alias, _)| alias == token)
+                    .map(|(_, full)| *full)
+            });
+        let Some(full_name) = full_name else { continue };
+        let rank_value = RANK_NAMES
+            .iter()
+            .find(|(rank, _)| *rank == full_name)
+            .map(|(_, value)| *value)
+            .unwrap_or(0);
+        if rank_value == 0 {
+            continue;
+        }
+        let sub = tokens.get(index + 1).and_then(|next| parse_sub(next));
+        if rank_value > best.1 || (rank_value == best.1 && sub.is_some()) {
+            let mut display = full_name.to_string();
+            if let Some(first) = display.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            best = (display, rank_value, sub);
+        }
+    }
+    best
+}
+
+/// Discord-Seite des Flows (Cache-Scan + Posten; Tests mocken sie).
+#[async_trait::async_trait]
+pub trait LfgPort: Send + Sync {
+    /// Alle Lanes der vier Kategorien als fertige LaneInfo
+    /// (Rang-Durchschnitt aus Rollen, Co-Spieler-Markierung des Suchenden).
+    async fn scan_lanes(&self, guild_id: u64, co_player_ids: &[u64]) -> Vec<LaneInfo>;
+    /// (rank_name, rank_value, rank_sub) aus den Rollen des Users.
+    async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>);
+    async fn member_in_voice(&self, guild_id: u64, user_id: u64) -> bool;
+    async fn post_embed(&self, channel_id: u64, embed: serde_json::Value);
+}
+
+pub struct LfgResponder {
+    pub db: dl_db::Db,
+    pub port: std::sync::Arc<dyn LfgPort>,
+    cooldown: tokio::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
+}
+
+impl LfgResponder {
+    pub fn new(db: dl_db::Db, port: std::sync::Arc<dyn LfgPort>) -> std::sync::Arc<Self> {
+        std::sync::Arc::new(Self {
+            db,
+            port,
+            cooldown: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        })
+    }
+
+    /// Bekannte Mitspieler (≥ 2 gemeinsame Sessions, wie das Original).
+    async fn co_player_ids(&self, user_id: u64) -> Vec<u64> {
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT co_player_id FROM user_co_players
+                      WHERE user_id = ?1 AND sessions_together >= 2",
+                )?;
+                let rows = stmt.query_map([user_id], |row| row.get(0))?;
+                rows.collect()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Nachricht aus dem LFG-Kanal verarbeiten (wie on_message).
+    pub async fn handle_message(
+        self: &std::sync::Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        author_id: u64,
+        content: &str,
+    ) {
+        if channel_id != LFG_CHANNEL_ID {
+            return;
+        }
+        // Wer schon in einer Lane sitzt, sucht eine LOBBY — das übernimmt
+        // der (deaktivierte) Player-Finder, nicht der Lobby-Finder.
+        if self.port.member_in_voice(guild_id, author_id).await {
+            return;
+        }
+        let content_lower = content.to_lowercase();
+        if !keyword_lfg_intent(&content_lower) {
+            return;
+        }
+        {
+            let mut cooldown = self.cooldown.lock().await;
+            let now = std::time::Instant::now();
+            if let Some(last) = cooldown.get(&author_id) {
+                if now.duration_since(*last) < std::time::Duration::from_secs(60) {
+                    return;
+                }
+            }
+            cooldown.insert(author_id, now);
+        }
+
+        // Rang: Rollen zuerst, sonst aus dem Nachrichtentext
+        let (mut rank_name, mut rank_value, mut rank_sub) =
+            self.port.member_rank(guild_id, author_id).await;
+        let has_rank_role = rank_value > 0;
+        let mut has_explicit_rank = has_rank_role;
+        if rank_value == 0 {
+            let (msg_name, msg_value, msg_sub) = parse_rank_from_message(&content_lower);
+            if msg_value > 0 {
+                rank_name = msg_name;
+                rank_value = msg_value;
+                rank_sub = msg_sub;
+                has_explicit_rank = true;
+            }
+        }
+        let rank_display = if rank_value > 0 {
+            match rank_sub {
+                Some(sub) => format!("{rank_name} {sub}"),
+                None => rank_name.clone(),
+            }
+        } else {
+            "Unbekannt".to_string()
+        };
+        let is_new_player = is_new_player_request(&content_lower, rank_value, has_rank_role);
+        // Anfänger ohne Rang routen wie ein Alchemist 1 (Original-Fallback)
+        let (routing_value, routing_sub) = if is_new_player && !has_rank_role && rank_value == 0 {
+            has_explicit_rank = true;
+            (3, Some(1))
+        } else {
+            (rank_value, rank_sub)
+        };
+
+        let co_player_ids = self.co_player_ids(author_id).await;
+        let lanes = self.port.scan_lanes(guild_id, &co_player_ids).await;
+        let route = route_to_lane(&content_lower, routing_value, routing_sub, &lanes);
+        let suggestions = select_lobby_suggestions(
+            &lanes,
+            &route,
+            routing_value,
+            routing_sub,
+            is_new_player,
+            has_explicit_rank,
+        );
+        let best_label = route
+            .target_channel_id
+            .and_then(|id| lanes.iter().find(|l| l.channel_id == id))
+            .map(|l| l.label.clone());
+        let preferred_label = resolve_mode_label(
+            &route,
+            best_label.as_ref(),
+            is_new_player,
+            !suggestions.is_empty(),
+            has_explicit_rank,
+            routing_value,
+        );
+        let embed = build_lfg_reply(
+            &format!("<@{author_id}>"),
+            &rank_display,
+            routing_value,
+            routing_sub,
+            is_new_player,
+            &lanes,
+            &route,
+            &suggestions,
+            preferred_label,
+        );
+        self.port.post_embed(OUTPUT_CHANNEL_ID, embed).await;
+        tracing::info!(
+            author_id,
+            rank = %rank_display,
+            mode = ?route.mode,
+            suggestions = suggestions.len(),
+            "LFG-Antwort gepostet"
+        );
+    }
+}
+
+/// Message-Subscriber (Bot-Nachrichten filtert das Gateway).
+pub fn spawn_responder(
+    responder: std::sync::Arc<LfgResponder>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    responder
+                        .handle_message(
+                            event.guild_id.unwrap_or_default(),
+                            event.channel_id,
+                            event.author_id,
+                            &event.content,
+                        )
+                        .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1079,6 +1340,31 @@ mod tests {
             None,
             &lane(3, LaneLabel::Ranked, 0, 6, 0.0, 0)
         ));
+    }
+
+    #[test]
+    fn rang_aus_nachricht() {
+        assert_eq!(
+            parse_rank_from_message("suche leute, bin oracle 3"),
+            ("Oracle".to_string(), 8, Some(3))
+        );
+        assert_eq!(
+            parse_rank_from_message("emi ii lobby?"),
+            ("Emissary".to_string(), 6, Some(2))
+        );
+        assert_eq!(
+            parse_rank_from_message("wer bock auf et"),
+            ("Eternus".to_string(), 11, None)
+        );
+        assert_eq!(
+            parse_rank_from_message("einfach zocken"),
+            (String::new(), 0, None)
+        );
+        // höchster Rang gewinnt
+        assert_eq!(
+            parse_rank_from_message("von seeker bis phantom"),
+            ("Phantom".to_string(), 9, None)
+        );
     }
 
     #[test]

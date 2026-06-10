@@ -364,6 +364,15 @@ async fn main() -> anyhow::Result<()> {
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
 
+        // LFG-Lobby-Finder (5): Antworten im Suche-Kanal
+        let lfg_responder = dl_activity::lfg::LfgResponder::new(
+            db.clone(),
+            Arc::new(modglue::LfgGlue {
+                adapter: adapter.clone(),
+            }),
+        );
+        dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
+
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
