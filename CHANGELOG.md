@@ -1,3 +1,11 @@
+## #66 — Steam-Austritts-Ban wieder möglich (Broker-Ban-Route)
+
+**Ausgangslage:** Der neue Steam-Dienst sollte beim Verlassen des Servers nach einem Playtest-Invite wieder bannen können (Anti-Missbrauch gegen Invite-Farming) — aber der interne Vermittler, über den der Dienst Discord-Aktionen ausführt, kannte bisher nur Rollen vergeben/entziehen und DMs, kein Bannen.
+
+**Geändert:** Der interne Vermittler bekommt eine Ban-Route. Sie bannt per User-ID und funktioniert deshalb auch dann, wenn die Person den Server schon verlassen hat. Auth, Idempotenz und Server-Allowlist laufen wie bei den bestehenden Rollen-Routen.
+
+**Betroffen:** Server-Moderation — der automatische Ban beim Verlassen nach einem Invite greift wieder (die eigentliche Entscheidung trifft der Steam-Dienst).
+
 ## #65 — Steam-Slash-Commands wieder verfügbar
 
 **Ausgangslage:** Seit der Steam-Umstellung (Eintrag #62) fehlten die Slash-Commands rund um Steam — die alten Bausteine, die sie bereitstellten, sind abgeschaltet. Die Verknüpfungs-Buttons im Panel liefen weiter, aber Befehle wie `/account_verknüpfen`, `/steam links` oder `/checkrank` waren weg.
