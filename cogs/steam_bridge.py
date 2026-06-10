@@ -168,18 +168,27 @@ def _get_api_url() -> str:
 class _PanelButton(discord.ui.Button):
     """Einzelner Proxy-Button für den Link-Panel."""
 
-    def __init__(self, custom_id: str) -> None:
-        # Label/Stil sind irrelevant — der Rust-bot hat die echte Nachricht gepostet.
-        # Hier nur den custom_id-Handler registrieren, damit discord.py
-        # Panel-Klicks nach Bot-Restart wieder zuordnen kann.
+    def __init__(
+        self,
+        custom_id: str,
+        label: str = "​",  # Zero-Width-Space als Default für bereits gepostete Panels
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+    ) -> None:
         super().__init__(
-            label="​",  # Zero-Width-Space, unsichtbar
+            label=label,
             custom_id=custom_id,
-            style=discord.ButtonStyle.secondary,
+            style=style,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
         await _forward_interaction(interaction, self.custom_id)
+
+
+_PANEL_BUTTON_MAP: dict[str, tuple[str, discord.ButtonStyle]] = {
+    "steam_link_panel:open": ("🔗 Steam verknüpfen", discord.ButtonStyle.primary),
+    "steam_link_panel:friend_code": ("🔢 Freundescode eingeben", discord.ButtonStyle.secondary),
+    "steam_link_panel:rankcheck": ("📊 Rang prüfen", discord.ButtonStyle.secondary),
+}
 
 
 class SteamBridgePanelView(discord.ui.View):
@@ -188,7 +197,12 @@ class SteamBridgePanelView(discord.ui.View):
     def __init__(self) -> None:
         super().__init__(timeout=None)
         for cid in _PANEL_CUSTOM_IDS:
-            self.add_item(_PanelButton(custom_id=cid))
+            label_style = _PANEL_BUTTON_MAP.get(cid)
+            if label_style:
+                label, style = label_style
+                self.add_item(_PanelButton(custom_id=cid, label=label, style=style))
+            else:
+                self.add_item(_PanelButton(custom_id=cid))
 
 
 # ---------------------------------------------------------------------------
@@ -200,15 +214,20 @@ class _BetaInviteButton(discord.ui.Button):
     """Proxy-Button für einen betainvite:*-custom_id.
 
     Leitet jeden Klick als kind="interaction" an den Rust-steam-bot weiter.
-    Label und Stil werden bei der Registrierung leer/secondary gesetzt —
-    die echten Embeds und Beschriftungen kommen vollständig aus Rust.
+    Label und Stil können optional übergeben werden; Default bleibt Zero-Width-Space/
+    secondary damit alt gepostete persistente Views weiterhin funktionieren.
     """
 
-    def __init__(self, custom_id: str) -> None:
+    def __init__(
+        self,
+        custom_id: str,
+        label: str = "​",  # Zero-Width-Space als Default für persistente Views
+        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
+    ) -> None:
         super().__init__(
-            label="​",  # Zero-Width-Space, unsichtbar; echter Label stammt von Rust
+            label=label,
             custom_id=custom_id,
-            style=discord.ButtonStyle.secondary,
+            style=style,
         )
 
     async def callback(self, interaction: discord.Interaction) -> None:
@@ -225,7 +244,11 @@ class BetaInvitePanelView(discord.ui.View):
 
     def __init__(self) -> None:
         super().__init__(timeout=None)
-        self.add_item(_BetaInviteButton(custom_id=_BETAINVITE_PANEL_CUSTOM_ID))
+        self.add_item(_BetaInviteButton(
+            custom_id=_BETAINVITE_PANEL_CUSTOM_ID,
+            label="🎟️ Einladung starten",
+            style=discord.ButtonStyle.primary,
+        ))
 
 
 class BetaInviteFlowView(discord.ui.View):
@@ -359,7 +382,7 @@ async def _render_response(
         label = str(link_button_data.get("label") or "Öffnen")
         url = str(link_button_data.get("url") or "")
         if url:
-            view = discord.ui.View()
+            view = discord.ui.View(timeout=None)
             view.add_item(
                 discord.ui.Button(
                     style=discord.ButtonStyle.link,
@@ -367,6 +390,31 @@ async def _render_response(
                     url=url,
                 )
             )
+
+    # Interaktive Buttons aus der Rust-Antwort (custom_id + label + style)
+    _style_map: dict[str, discord.ButtonStyle] = {
+        "primary": discord.ButtonStyle.primary,
+        "secondary": discord.ButtonStyle.secondary,
+        "success": discord.ButtonStyle.success,
+        "danger": discord.ButtonStyle.danger,
+    }
+    buttons_data = result.get("buttons")
+    if buttons_data and isinstance(buttons_data, list):
+        if view is None:
+            view = discord.ui.View(timeout=None)
+        for btn_spec in buttons_data:
+            if not isinstance(btn_spec, dict):
+                continue
+            btn_custom_id = str(btn_spec.get("custom_id") or "")
+            btn_label = str(btn_spec.get("label") or "​")
+            btn_style_name = str(btn_spec.get("style") or "secondary").lower()
+            btn_style = _style_map.get(btn_style_name, discord.ButtonStyle.secondary)
+            if btn_custom_id:
+                view.add_item(_BetaInviteButton(
+                    custom_id=btn_custom_id,
+                    label=btn_label,
+                    style=btn_style,
+                ))
 
     if already_deferred:
         await interaction.followup.send(

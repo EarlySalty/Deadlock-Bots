@@ -1,3 +1,11 @@
+## #68 — Steam-Brücke rendert jetzt echte Buttons
+
+**Ausgangslage:** Die Antworten des Steam-Dienstes (Einladungs-Flow, Link-Panel) kamen in Discord ohne sichtbare Schaltflächen an — die Brücke registrierte nur unsichtbare Platzhalter-Buttons, und die Texte verwiesen auf Schaltflächen, die niemand sehen konnte.
+
+**Geändert:** Der Steam-Dienst liefert seine Buttons jetzt mit Beschriftung und Stil mit, und die Brücke baut daraus echte Discord-Schaltflächen an jeder Antwort. Die Panel-Buttons („🎟️ Einladung starten", „🔗 Steam verknüpfen", „🔢 Freundescode eingeben", „📊 Rang prüfen") haben sichtbare Beschriftungen bekommen.
+
+**Betroffen:** Alle, die den Einladungs-Flow oder das Steam-Panel nutzen — der Ablauf ist jetzt klickbar statt rätselhaft. Bereits gepostete Panels zeigen die neuen Beschriftungen erst nach einem Neu-Posten der Panels.
+
 ## #67 — Steam-Austritts-Ban wieder entfernt + Reparatur-Befehl durchgereicht
 
 **Ausgangslage:** Mit #66 hatte der interne Vermittler eine Ban-Route bekommen, damit der Steam-Dienst beim Server-Verlassen nach einem Playtest-Invite automatisch bannen kann. Diese Automatik ist auf Community-Entscheidung wieder gestrichen — den Server zu verlassen ist kein Bann-Grund.
