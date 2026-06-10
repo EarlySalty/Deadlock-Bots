@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::json;
-use serenity::all::{GuildId, RoleId, UserId};
+use serenity::all::{ChannelId, GuildId, RoleId, UserId};
 
 pub const ONBOARD_COMPLETE_ROLE_ID: u64 = 1304216250649415771;
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
@@ -117,5 +117,93 @@ pub fn register(
         "dma:fallback:beta",
     ] {
         router.on_custom_id(custom_id, handler.clone());
+    }
+}
+
+// ── Onboarding-Wizard-Anbindung ────────────────────────────────────────────
+
+pub struct WizardGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub tags: Arc<dl_community::tags::TagService>,
+    pub steam: Arc<dl_bridges::steam::SteamBotClient>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::onboarding::OnboardingPort for WizardGlue {
+    async fn create_onboarding_thread(
+        &self,
+        _guild_id: u64,
+        user_id: u64,
+        name: &str,
+    ) -> Result<u64, String> {
+        // privater Thread (type 12), 60-min-Auto-Archiv, invitable — wie Original
+        let body = serde_json::json!({
+            "name": name,
+            "type": 12,
+            "auto_archive_duration": 60,
+            "invitable": true,
+        });
+        let thread = self
+            .adapter
+            .http
+            .create_thread(
+                ChannelId::new(dl_community::onboarding::RULES_CHANNEL_ID),
+                body.as_object().expect("json object"),
+                Some("Onboarding-Thread"),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let _ = self
+            .adapter
+            .http
+            .add_thread_channel_member(thread.id, UserId::new(user_id))
+            .await;
+        Ok(thread.id.get())
+    }
+
+    async fn send_step(
+        &self,
+        channel_id: u64,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) {
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), serde_json::json!([embed]));
+        body.insert("components".into(), components);
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.display_name().to_string())
+            })
+            .unwrap_or_else(|| format!("User {user_id}"))
+    }
+
+    async fn steam_link_url(&self, user_id: u64) -> Option<String> {
+        self.steam.fetch_steam_link_url(user_id).await
+    }
+
+    async fn set_user_tag(&self, user_id: u64, key: &str, value: &str) {
+        if let Err(err) = self.tags.set_user_tag(user_id, key, value).await {
+            tracing::warn!(%err, user_id, key, "Onboarding-Tag konnte nicht gesetzt werden");
+        }
     }
 }

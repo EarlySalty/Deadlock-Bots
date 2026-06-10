@@ -162,6 +162,15 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
+    // Onboarding-Wizard (7): rp:panel:start + Thread-Schritte
+    let wizard =
+        dl_community::onboarding::OnboardingWizard::new(Arc::new(onboardglue::WizardGlue {
+            adapter: adapter.clone(),
+            tags: tag_service.clone(),
+            steam: steam_client.clone(),
+        }));
+    dl_community::onboarding::register(&mut router, wizard);
+
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
     let faq_docs_path = std::env::var("FAQ_DOCS_PATH").unwrap_or_else(|_| "docs".to_string());
     let faq = dl_community::faq::FaqChat::new(

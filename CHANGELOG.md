@@ -1,3 +1,11 @@
+## #112 — Rust-Neuaufbau: der Onboarding-Wizard
+
+**Ausgangslage:** „Hier starten ➜" im Regelkanal öffnet einen privaten Thread und führt neue Mitglieder durch zehn Schritte: Willkommen, Regeln, (für Streamer ein Extra-Schritt), Voice-Lanes, Mitspieler-Suche, Server-Features, die optionalen Ton- und Alters-Tags und zuletzt die Steam-Verknüpfung. Im Rust-System antwortete der Knopf bisher mit einem Umbau-Hinweis.
+
+**Geändert:** Der komplette Wizard ist portiert. Die Schritt-Texte wurden maschinell aus dem Original extrahiert und byte-genau eingebettet — kein Abtipp-Risiko. Gleiche Logik: Streamer-Schritt nur mit Creator-Rolle (Fußzeile zählt dann bis 10 statt 9), Ton/Alter speichern direkt ins Tag-System, der Steam-Schritt erzeugt den Einmal-Link erst beim Klick. Drei ehrliche Verbesserungen bzw. Annäherungen: Die Wizard-Knöpfe überleben jetzt Bot-Neustarts (das Original vergaß laufende Wizards nach einer Stunde), statt des automatischen Verifikations-Beobachters gibt es einen „Ich hab verknüpft ➜"-Knopf mit Live-Prüfung, und das gesonderte Streamer-Einrichtungs-Formular ist noch nicht portiert (der Schritt informiert und verweist weiter).
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Schritt-Navigation (inklusive Streamer-Überspringen), Fußzeilen-Zählung und die Knopf-Beschriftungen aller Sonder-Schritte sind getestet; die zehn Texte stecken als geprüfte Daten-Datei im Modul.
+
 ## #111 — Rust-Neuaufbau: der Nachrichten-Zähler
 
 **Ausgangslage:** Der alte Aktivitäts-Analyzer zählt jede Server-Nachricht pro Nutzer mit (Gesamtzahl, erste und letzte Nachricht). Auf diesem Zähler bauen mehrere Funktionen auf — unter anderem die Einstufung der Abschieds-Umfrage (wer „aktiv" war, bekommt andere Fragen). Nach dem Umstieg hätte niemand mehr gezählt, und die Einstufung wäre schleichend falsch geworden.
