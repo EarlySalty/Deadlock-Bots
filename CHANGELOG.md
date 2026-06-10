@@ -1,3 +1,11 @@
+## #87 — Rust-Neuaufbau Phase 8 (Teil 2): der Turnier-Unterbau
+
+**Ausgangslage:** Anmeldungen, Teams, Turnier-Zeiträume und die Einmal-Anmelde-Links der Turnier-Website werden in vier Tabellen verwaltet — mit Regeln wie „Team-Namen sind 2–32 Zeichen und pro Server einmalig (Groß/Klein egal)", „Team-Anmeldung braucht ein existierendes Team" und „eine neue Turnier-Phase deaktiviert automatisch die alte".
+
+**Geändert:** Der komplette Unterbau ist in Rust portiert — gleiche Tabellen, gleiche Prüfungen, gleiche Rückmeldungen (eingefügt/aktualisiert/unverändert, inklusive der Feinheit, dass ein fehlender Anzeigename den alten nicht überschreibt). Die Einmal-Token für den Website-Login verhalten sich identisch: einmal eingelöst oder abgelaufen heißt ungültig, alte Token werden beim Anlegen neuer weggeräumt.
+
+**Wie es jetzt funktioniert:** Sieben Tests decken die Regeln ab — Team-Anlage ist wiederholbar statt doppelt, Anmeldungs-Wechsel von Solo zu Team, Phasen-Wechsel deaktiviert den Vorgänger, Token sind strikt einmalig. Discord-Menüs und die Turnier-Website docken als Nächstes hier an.
+
 ## #86 — Rust-Neuaufbau Phase 8 (Teil 1): der Team-Balancer
 
 **Ausgangslage:** Für Custom Games und Turniere teilt der Balancer die anwesenden Spieler anhand ihrer Rang-Punkte in zwei gleich große Teams — er probiert alle Kombinationen durch und bewertet jede mit einer Formel aus Summen-Differenz, Durchschnitts-Differenz und Team-Varianz.

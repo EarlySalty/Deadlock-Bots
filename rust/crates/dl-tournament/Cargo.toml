@@ -8,6 +8,15 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
+dl-db.workspace = true
+hex.workspace = true
+rand.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
