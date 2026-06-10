@@ -1,0 +1,13 @@
+[package]
+name = "dl-tournament"
+description = "Turnier-Domäne: Team-Balancer, Custom Games, Turnier-Store"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+
+[lints]
+workspace = true

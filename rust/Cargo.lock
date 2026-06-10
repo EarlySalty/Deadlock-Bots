@@ -483,6 +483,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-tournament"
+version = "0.1.0"
+
+[[package]]
 name = "dl-voice"
 version = "0.1.0"
 dependencies = [

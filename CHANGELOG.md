@@ -1,3 +1,11 @@
+## #86 — Rust-Neuaufbau Phase 8 (Teil 1): der Team-Balancer
+
+**Ausgangslage:** Für Custom Games und Turniere teilt der Balancer die anwesenden Spieler anhand ihrer Rang-Punkte in zwei gleich große Teams — er probiert alle Kombinationen durch und bewertet jede mit einer Formel aus Summen-Differenz, Durchschnitts-Differenz und Team-Varianz.
+
+**Geändert:** Der Algorithmus ist in Rust portiert — verhaltensgleich bis in die Kombinations-Reihenfolge und mit Referenzwerten aus dem Python-Original auf neun Nachkommastellen abgesichert. Zwei Eigenheiten des Originals wurden dabei dokumentiert (und bewusst übernommen statt still „verbessert"): Bei großer Rang-Spreizung dominiert der Varianz-Anteil der Formel und der Balancer baut dann homogene statt gleich starker Teams — ob das so gewollt ist, ist eine fachliche Entscheidung für später. Und bei nur zwei oder drei Spielern liefert der Notfall-Pfad ein leeres zweites Team.
+
+**Wie es jetzt funktioniert:** Identisch zu vorher — gleiche Eingabe, gleiche Teams. Der Discord-Ablauf drumherum (Auswahl-Menü, Team-Kanäle, Verschieben) folgt mit dem Custom-Games-Port.
+
 ## #85 — Rust-Neuaufbau Phase 6 (Teil 2): der KI-Moderations-Kern
 
 **Ausgangslage:** Der KI-Moderator bewertet jede Nachricht im Haupt-Chat mit einem bewusst rau kalibrierten Regelwerk („Gaming-Ton ist normal, sei NICHT überempfindlich") und entscheidet dreistufig: eindeutige Fälle (explizites NSFW, Scam) werden ab 90 % Sicherheit sofort gelöscht, echte Verstöße ab 78 % als Vorschlag mit Bestätigen/Ban/Ablehnen-Buttons an die Mods gegeben, und Ragebait wird nur gezählt — vier Treffer in zwei Stunden eskalieren zu einem Mod-Vorschlag.
