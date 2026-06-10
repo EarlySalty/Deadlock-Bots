@@ -13,6 +13,7 @@ from discord.ext import commands
 from cogs import privacy_core as privacy
 from cogs.steam.friend_requests import queue_friend_request
 from cogs.steam.logging_utils import safe_log_extra
+from cogs.steam_bridge import fetch_steam_link_url
 from cogs.welcome_dm.step_steam_link import steam_link_detailed_description
 from service import db
 
@@ -212,40 +213,21 @@ async def _count_voice_minutes(member: discord.Member, minutes: int) -> bool:
 
 
 # ---------- OAuth/OpenID Hilfen ----------
-def _find_steamlink_cog(bot: commands.Bot):
-    # 1) explizit
-    for name in ("SteamLink", "SteamLinkOAuth", "SteamLinkOpenID"):
-        cog = bot.get_cog(name)
-        if cog:
-            return cog
-    # 2) heuristisch
-    for name, cog in bot.cogs.items():
-        low = name.lower()
-        if "steam" in low and ("oauth" in low or "link" in low or "openid" in low):
-            return cog
-    return None
-
-
 async def _fetch_oauth_urls(
     bot: commands.Bot, user: discord.User | discord.Member
 ) -> tuple[str | None, str | None]:
     """
-    Holt die gültige Steam-Start-URL vom SteamLink-OAuth-Cog.
+    Holt eine frische Steam-Start-URL (Einmal-Link, 15 min gültig) vom
+    Rust-steam-bot — derselbe Pfad wie der Panel-Button. Die frühere
+    Cog-Introspektion fand nach dem Block der Alt-Cogs nur noch sich selbst.
     Gibt (None, steam_start_url) zurück oder (None, None) als Fallback.
     """
-    cog = _find_steamlink_cog(bot)
-    if cog:
-        try:
-            if hasattr(cog, "steam_start_url_for"):
-                s = cog.steam_start_url_for(int(user.id))
-            else:
-                state = cog._mk_state(int(user.id))  # type: ignore[attr-defined]
-                s = cog._build_steam_login_url(state)  # type: ignore[attr-defined]
-        except Exception:
-            log.exception("fetch steam openid url failed")
-            s = None
-        return None, s or None
-    return None, None
+    try:
+        s = await fetch_steam_link_url(int(user.id))
+    except Exception:
+        log.exception("fetch steam openid url failed")
+        s = None
+    return None, s or None
 
 
 # ---------- View/Modal ----------

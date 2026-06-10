@@ -287,6 +287,33 @@ async def _post_event(kind: str, data: dict[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+async def fetch_steam_link_url(user_id: int) -> str | None:
+    """Holt eine frische Einmal-Login-URL (15 min gültig) vom Rust-steam-bot.
+
+    Öffentlicher Helfer für andere Cogs (z. B. steam_link_voice_nudge), damit
+    der Wire-Vertrag zum steam-bot an einer Stelle bleibt. Nutzt denselben
+    Pfad wie der Panel-Button `steam_link_panel:open`.
+    """
+    result = await _post_event(
+        "interaction",
+        {
+            "interaction": {
+                "custom_id": "steam_link_panel:open",
+                "user_id": int(user_id),
+                "guild_id": 0,
+                "channel_id": 0,
+            }
+        },
+    )
+    if not result:
+        return None
+    link_button = result.get("link_button")
+    if isinstance(link_button, dict):
+        url = str(link_button.get("url") or "")
+        return url or None
+    return None
+
+
 async def _render_response(
     interaction: discord.Interaction,
     result: dict[str, Any] | None,

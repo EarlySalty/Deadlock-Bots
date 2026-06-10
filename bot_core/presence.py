@@ -7,6 +7,7 @@ import os
 import time
 from typing import Any
 
+import aiohttp
 import discord
 
 from bot_core.boot_profile import log_event
@@ -232,6 +233,24 @@ class PresenceMixin:
 
         return None
 
+    async def _check_steam_bot_health(self) -> str | None:
+        """Prüft den Rust-steam-bot (Discord-Flows + Web-API, Port 8783) per /health.
+
+        Gibt einen Issue-Text zurück oder None wenn alles in Ordnung ist.
+        """
+        base = os.getenv("STEAM_BOT_API_URL", "http://127.0.0.1:8783").rstrip("/")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{base}/health",
+                    timeout=aiohttp.ClientTimeout(total=5),
+                ) as resp:
+                    if resp.status != 200:
+                        return f"steam-bot /health HTTP {resp.status}"
+        except Exception as exc:
+            return f"steam-bot nicht erreichbar: {exc}"
+        return None
+
     async def _check_steam_bridge_login_health(self) -> None:
         """Sauberer Self-Heal für die Steam Bridge anhand von Runtime-State und Task-Diagnostik."""
         if not self._steam_bridge_internal_self_heal_enabled:
@@ -411,8 +430,11 @@ class PresenceMixin:
                         issues.append("TempVoiceCore not loaded")
                     if not self.get_cog("TempVoiceInterface"):
                         issues.append("TempVoiceInterface not loaded")
-                    if "cogs.steam.steam_link_oauth" not in self.extensions:
-                        issues.append("SteamLinkOAuth (module) not loaded")
+                    # Steam-Linking lebt seit dem Cutover im Rust-steam-bot
+                    # (Port 8783), nicht mehr im geblockten Python-Cog.
+                    steam_bot_issue = await self._check_steam_bot_health()
+                    if steam_bot_issue:
+                        issues.append(steam_bot_issue)
 
                     if issues:
                         logging.warning(f"Critical Health Check: Issues found: {issues}")

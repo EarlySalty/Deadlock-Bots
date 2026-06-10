@@ -1,3 +1,16 @@
+## #64 — Voice-Nudge-DM repariert: Steam-Link-Button funktioniert wieder
+
+**Ausgangslage:** Seit der Steam-Umstellung (Eintrag #62) holte sich die freundliche Erinnerungs-DM ("verknüpf doch mal deinen Steam-Account"), die nach 30 Minuten im Voice verschickt wird, ihre Login-URL noch über den alten Weg: Sie suchte sich zur Laufzeit das passende Steam-Cog im Bot zusammen. Genau dieses Cog war aber abgeschaltet. Die Suche fand stattdessen den Nudge-Baustein selbst und lief dann beim Erzeugen der URL in einen Fehler — die DM kam entweder ohne funktionierenden Button oder gar nicht.
+
+**Geändert:** Die Erinnerungs-DM und der zugehörige Health-Check fragen jetzt direkt den neuen Steam-Dienst nach einer frischen Login-URL, statt im Bot nach einem Cog zu suchen.
+
+**Wie's funktioniert:**
+- Es gibt jetzt eine zentrale Stelle, die beim Steam-Dienst einen Einmal-Link anfordert (15 Minuten gültig) — denselben, den auch der Steam-Verknüpfen-Button im Server-Panel erzeugt. Die Nudge-DM nutzt genau diese Stelle, dadurch gibt es keinen zweiten, abweichenden Weg mehr, der kaputtgehen kann.
+- Der stündliche Selbsttest des Bots prüfte bislang, ob das alte (jetzt abgeschaltete) Steam-Modul geladen ist, und meldete deshalb dauerhaft einen Fehlalarm. Er prüft jetzt stattdessen, ob der neue Steam-Dienst auf seinem Health-Endpunkt antwortet.
+- Der nicht mehr benötigte Watchdog der alten Steam-Bridge wurde abgeschaltet.
+
+**Betroffen:** Alle, die nach längerer Zeit im Voice die Steam-Verknüpfungs-Erinnerung bekommen — der Button im DM führt wieder zuverlässig zum Login.
+
 ## #63 — Coaching: Coach-Roster-Sync zur Website + Termin-DMs
 
 **Ausgangslage:** Die Coaching-Website wusste nicht, wer eigentlich Coach ist — sie kannte nur die Coaches, die zufällig schon einmal eine Session gespiegelt hatten. Und für die neuen Coaching-Termine der Website gab es keinen Weg, Spieler in Discord zu benachrichtigen.
