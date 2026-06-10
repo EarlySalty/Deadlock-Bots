@@ -45,6 +45,26 @@ impl EventHandler for Handler {
                 Some(guild.member_permissions(member).administrator())
             })
             .unwrap_or(false);
+        let image_attachment_count = message
+            .attachments
+            .iter()
+            .filter(|a| {
+                a.content_type
+                    .as_deref()
+                    .map(|c| c.starts_with("image/"))
+                    .unwrap_or_else(|| {
+                        let name = a.filename.to_lowercase();
+                        [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                            .iter()
+                            .any(|ext| name.ends_with(ext))
+                    })
+            })
+            .count() as u32;
+        let author_joined_at = message.guild_id.and_then(|guild_id| {
+            let guild = ctx.cache.guild(guild_id)?;
+            let member = guild.members.get(&message.author.id)?;
+            member.joined_at.map(|t| t.unix_timestamp())
+        });
         self.dispatcher.publish_message(MessageEvent {
             guild_id: message.guild_id.map(|g| g.get()),
             channel_id: message.channel_id.get(),
@@ -56,6 +76,10 @@ impl EventHandler for Handler {
                 .unwrap_or_else(|| message.author.name.to_string()),
             author_is_admin,
             content: message.content.clone(),
+            attachment_count: message.attachments.len() as u32,
+            image_attachment_count,
+            author_created_at: message.author.id.created_at().unix_timestamp(),
+            author_joined_at,
         });
     }
 

@@ -21,6 +21,7 @@ use std::sync::Arc;
 use dl_db::Db;
 use serde_json::Value;
 
+pub mod guard;
 pub mod store;
 
 pub const SCAN_CHANNEL_IDS: [u64; 1] = [1289721245281292291];

@@ -1,3 +1,11 @@
+## #95 — Rust-Neuaufbau Phase 6 (Teil 4): der Sicherheits-Wächter
+
+**Ausgangslage:** Der Sicherheits-Wächter schützt den Server vor Scam-Wellen und gekaperten Accounts über drei Pfade: das deterministische Takeover-Muster (Bilder in mehreren Kanälen binnen 30 Sekunden — sofortige Quarantäne ohne KI-Urteil), Mehrkanal-Bursts junger Accounts (mit KI-Bestätigung ab 78 % Sicherheit) und Keyword-Einzeltreffer (Telegram-Werbung, Gewinnversprechen und Co.), bei denen etablierte Accounts einen reversiblen Vorschlag bekommen statt des direkten Vollzugs.
+
+**Geändert:** Alle drei Pfade sind in Rust portiert — gleiche Schwellen, gleiche Schlagwort-Liste, gleicher KI-Prompt, gleiche Fall-Akte in derselben Tabelle, gleiche Reihenfolge im Vollzug (Benachrichtigung an den Betroffenen, dann Aktion, dann Beweise löschen, öffentliche Notiz, Mod-Alarm mit Ban/Timeout-aufheben/Unban-Knöpfen). Der Ereignis-Verteiler liefert dafür jetzt auch Anhang-Zahlen und Account-Alter mit. Eine bewusst konservative Übergangs-Einschränkung: Die Bild-Inhalts-Prüfung (lief über ein externes Kommandozeilen-Werkzeug) ist noch nicht angebunden — Fälle, die nur über Bildinhalte bestätigt würden, landen deshalb als reversibler 60-Minuten-Vorschlag statt als automatischer Vollzug. Nie schärfer als das Original, im Zweifel milder.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Neun Tests decken die Detektions-Kerne ab — Takeover zündet bei Bildern in zwei Kanälen, nicht beim Doppelpost im selben Kanal und nicht außerhalb des Zeitfensters; die Burst-Regeln und Altersgrenzen entscheiden exakt wie das Original; kaputte KI-Antworten fallen sicher auf „kein Scam" zurück.
+
 ## #94 — Rust-Neuaufbau Phase 7 (Teil 1): die Onboarding-Knöpfe
 
 **Ausgangslage:** Neue Mitglieder durchlaufen das Onboarding über feste Knöpfe im Regelkanal — der wichtigste davon ist die Regelbestätigung, die die Zugangs-Rolle vergibt. Dazu kommen der Steam-Login-Knopf und die Hinweis-Knöpfe des DM-Assistenten.

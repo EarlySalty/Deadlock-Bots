@@ -118,6 +118,22 @@ async fn main() -> anyhow::Result<()> {
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
     let tag_service = dl_community::tags::TagService::new(db.clone());
 
+    // SecurityGuard (6): sg:*-Mod-Buttons am Router, Scan gateway-gated
+    router.on_prefix(
+        "sg:",
+        Arc::new(modglue::GuardReviewHandler {
+            adapter: adapter.clone(),
+        }),
+    );
+    let security_guard = dl_moderation::guard::SecurityGuard::new(
+        db.clone(),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
+        Arc::new(modglue::GuardGlue {
+            adapter: adapter.clone(),
+        }),
+    );
+
     // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
     onboardglue::register(
         &mut router,
@@ -223,6 +239,12 @@ async fn main() -> anyhow::Result<()> {
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
+
+        // SecurityGuard (6): Message-Subscriber (Takeover/Burst/Keyword)
+        if let Err(err) = security_guard.ensure_schema().await {
+            tracing::warn!(%err, "SecurityGuard: Schema-Anlage fehlgeschlagen");
+        }
+        dl_moderation::guard::spawn(security_guard.clone(), &dispatcher);
 
         // AI-Moderator (6): Scan-Kanal-Subscriber
         if let Some(moderator) = &moderator {

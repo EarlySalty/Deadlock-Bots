@@ -126,3 +126,209 @@ impl InteractionHandler for ReviewHandler {
         }
     }
 }
+
+// ── SecurityGuard-Anbindung ────────────────────────────────────────────────
+
+pub struct GuardGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_moderation::guard::GuardPort for GuardGlue {
+    async fn ban(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .ban_user(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                1, // 1 Tag Nachrichten löschen (wie delete_message_days=1)
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn timeout(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str) -> bool {
+        let until = chrono::Utc::now() + chrono::Duration::minutes(minutes);
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "communication_disabled_until": until.to_rfc3339() }),
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("SecurityGuard: Beweissicherung/Aufräumen"),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn send_dm(&self, user_id: u64, text: String) -> bool {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return false;
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        self.adapter
+            .send_raw_public(channel.id.get(), &body)
+            .await
+            .is_ok()
+    }
+
+    async fn post_mod_alert(
+        &self,
+        case: &dl_moderation::guard::Incident,
+        action: &dl_moderation::guard::GuardAction,
+    ) {
+        let (title, color) = match action {
+            dl_moderation::guard::GuardAction::Enforce => ("🛡️ Scam-Vollzug (Ban)", 0xED4245),
+            dl_moderation::guard::GuardAction::Propose => {
+                ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
+            }
+        };
+        let preview: String = case
+            .messages
+            .iter()
+            .filter(|m| !m.content.is_empty())
+            .map(|m| {
+                format!(
+                    "<#{}>: {}",
+                    m.channel_id,
+                    m.content.chars().take(150).collect::<String>()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+            .chars()
+            .take(900)
+            .collect();
+        let embed = json!({
+            "title": title,
+            "description": format!(
+                "**User:** <@{}> (`{}`)\n**Case:** `{}`\n**Grund:** {}\n**Kanäle/Nachrichten/Anhänge/Keyword:** {}/{}/{}/{}\n\n{}",
+                case.user_id, case.user_tag, case.case_id, case.reason,
+                case.meta[0], case.meta[1], case.meta[2], case.meta[3], preview
+            ),
+            "color": color,
+        });
+        let components = json!([{ "type": 1, "components": [
+            { "type": 2, "style": 4, "label": "Ban",
+              "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) },
+            { "type": 2, "style": 3, "label": "Timeout aufheben",
+              "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) },
+            { "type": 2, "style": 2, "label": "Unban",
+              "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) },
+        ]}]);
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        let _ = self
+            .adapter
+            .send_raw_public(dl_moderation::guard::MOD_CHANNEL_ID, &body)
+            .await;
+    }
+
+    async fn post_public_notice(&self, channel_id: u64, text: String) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+}
+
+/// sg:*-Mod-Buttons (Ban / Timeout aufheben / Unban) mit Rechte-Guard.
+pub struct GuardReviewHandler {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for GuardReviewHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if !interaction.author_can_manage_roles {
+            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+        }
+        let rest = interaction
+            .custom_id
+            .strip_prefix("sg:")
+            .unwrap_or_default();
+        let parts: Vec<&str> = rest.split(':').collect();
+        let (Some(action), Some(guild_id), Some(user_id)) = (
+            parts.first().copied(),
+            parts.get(1).and_then(|v| v.parse::<u64>().ok()),
+            parts.get(2).and_then(|v| v.parse::<u64>().ok()),
+        ) else {
+            return BridgeReply::ephemeral_text("Unbekannte Aktion.");
+        };
+        match action {
+            "ban" => {
+                let ok = self
+                    .adapter
+                    .http
+                    .ban_user(
+                        GuildId::new(guild_id),
+                        UserId::new(user_id),
+                        1,
+                        Some("SecurityGuard: Mod-Bestätigung"),
+                    )
+                    .await
+                    .is_ok();
+                BridgeReply::ephemeral_text(if ok {
+                    "Gebannt."
+                } else {
+                    "Ban fehlgeschlagen."
+                })
+            }
+            "untimeout" => {
+                let ok = self
+                    .adapter
+                    .http
+                    .edit_member(
+                        GuildId::new(guild_id),
+                        UserId::new(user_id),
+                        &json!({ "communication_disabled_until": null }),
+                        Some("SecurityGuard: Timeout aufgehoben"),
+                    )
+                    .await
+                    .is_ok();
+                BridgeReply::ephemeral_text(if ok {
+                    "Timeout aufgehoben."
+                } else {
+                    "Aufheben fehlgeschlagen."
+                })
+            }
+            "unban" => {
+                let ok = self
+                    .adapter
+                    .http
+                    .remove_ban(
+                        GuildId::new(guild_id),
+                        UserId::new(user_id),
+                        Some("SecurityGuard: Unban durch Mod"),
+                    )
+                    .await
+                    .is_ok();
+                BridgeReply::ephemeral_text(if ok {
+                    "Entbannt."
+                } else {
+                    "Unban fehlgeschlagen."
+                })
+            }
+            _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
+        }
+    }
+}
