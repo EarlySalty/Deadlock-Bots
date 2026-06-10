@@ -1,3 +1,11 @@
+## #81 — Rust-Neuaufbau Phase 4c (Teil 4): das Lane-Steuerungs-Panel
+
+**Ausgangslage:** Das Interface-Panel im Voice-Bereich ist die Schaltzentrale für Lane-Besitzer: Region, Besitz übernehmen, Limit, Kick/Bann/Entbannen, Schnell-Vorlagen, Presets, Rang-Präferenz und Umbenennen — alles über Buttons unter einer festen Nachricht.
+
+**Geändert:** Der Kern des Panels ist in Rust portiert, mit unveränderten Button-Kennungen — das bestehende Panel im Kanal funktioniert nach dem Umstieg ohne Neuposten weiter. Umgesetzt: Region DE/EU (sperrt bzw. entsperrt die English-Only-Rolle am Kanal und merkt sich die Wahl), Besitz-Übernahme mit den Original-Regeln (nur wenn der Besitzer weg ist, nur die drei am längsten Verbundenen, mindestens 20 Minuten im Kanal — mit denselben erklärenden Ablehnungs-Texten), Limit-Dialog mit Vorlagen-Obergrenzen (Street Brawl bleibt bei 4), Kick/Bann/Entbannen über Mitglieder-Auswahllisten (Bann gilt besitzerweit über alle Lanes), Duo/Trio/Reset-Schnellknöpfe, Preset speichern/laden, Rang-Präferenz für Chill-Lanes und Owner-Umbenennen. Dafür wurde die TempVoice-Engine um eine saubere Befehls-Fassade erweitert (Claim-Prüfung, Limit-Kappung, Region, Besitzwechsel mit Bann-Tausch).
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Jeder Button prüft zuerst „bist du in einer Lane?" und „gehört sie dir?" mit den bekannten Antworten. Workspace-weit bleiben alle Tests grün; die Claim-/Limit-/Bann-Logik sitzt in der getesteten Engine. Drei Panel-Funktionen sind bewusst noch nicht freigeschaltet und sagen das ehrlich an: Tag-Filter, Lurker-Modus und der Lanes-Modus-Wechsel — ihr Unterbau (Tag-Filter-System, Lurker-Verwaltung, Router-Lanes) folgt vor dem Voice-Umstieg.
+
 ## #80 — Rust-Neuaufbau Phase 4c (Teil 3): das Rang-Türsteher-System
 
 **Ausgangslage:** Comp/Ranked-Lanes haben einen Rang-Anker: Der Erstbesitzer (oder das erste rangierte Mitglied) bestimmt ein Score-Fenster von ±9 Unterrang-Punkten (anderthalb Hauptränge), und nur Rang-Rollen in diesem Fenster dürfen verbinden. Der Kanal heißt nach dem Anker („Phantom 3"). Wichtigste Eigenschaft: Es wird nie jemand rausgeworfen — nur die Verbinden-Rechte werden gesteuert.

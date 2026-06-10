@@ -6,6 +6,7 @@
 //! - [`engine`] — Event-Verarbeitung hinter dem [`engine::LanePort`]-Trait
 
 pub mod engine;
+pub mod interface;
 pub mod logic;
 pub mod store;
 

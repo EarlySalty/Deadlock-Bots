@@ -94,6 +94,18 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
 
+    // TempVoice-Engine (4b/4c) — Panel-Buttons brauchen den Router,
+    // der Event-Subscriber startet erst mit dem Gateway
+    let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
+        adapter: adapter.clone(),
+    });
+    let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
+        dl_voice::tempvoice::TempVoiceConfig::production(),
+        dl_voice::tempvoice::TempVoiceStore::new(db.clone()),
+        cache_snapshot.clone(),
+    );
+    dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
+
     let router = Arc::new(router);
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
@@ -147,19 +159,11 @@ async fn main() -> anyhow::Result<()> {
             dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
         }
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
-        let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
-            adapter: adapter.clone(),
-        });
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
-        let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
-            dl_voice::tempvoice::TempVoiceConfig::production(),
-            dl_voice::tempvoice::TempVoiceStore::new(db.clone()),
-            cache_snapshot,
-        );
         dl_voice::tempvoice::engine::spawn(tempvoice.clone(), &dispatcher);
 
         // Rank-Voice-Manager (4c): Anker + Rang-Rechte auf Comp-Lanes

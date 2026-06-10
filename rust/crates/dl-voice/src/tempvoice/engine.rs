@@ -43,6 +43,22 @@ pub trait LanePort: Send + Sync {
         user_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String>;
+    /// Rollen-Overwrite (Region: English-Only-Rolle deny); None löscht.
+    async fn set_role_connect(
+        &self,
+        channel_id: u64,
+        role_id: u64,
+        connect: Option<bool>,
+    ) -> Result<(), String>;
+    async fn set_user_limit(&self, channel_id: u64, limit: i64, reason: &str)
+        -> Result<(), String>;
+    async fn disconnect_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String>;
@@ -136,6 +152,8 @@ impl TempVoiceConfig {
     }
 }
 
+pub const ENGLISH_ONLY_ROLE_ID: u64 = 1309741866098491479;
+
 #[derive(Debug, Clone)]
 struct LaneState {
     owner_id: u64,
@@ -145,6 +163,7 @@ struct LaneState {
     min_rank: String,
     category_id: Option<u64>,
     prefix_from_rank: bool,
+    source_staging_id: Option<u64>,
 }
 
 #[derive(Default)]
@@ -194,6 +213,7 @@ impl TempVoiceEngine {
                                 .source_staging_id
                                 .map(|s| self.config.rules_for_staging(s).prefix_from_rank)
                                 .unwrap_or(false),
+                            source_staging_id: lane.source_staging_id,
                         },
                     );
                 }
@@ -290,6 +310,7 @@ impl TempVoiceEngine {
                         min_rank: "unknown".to_string(),
                         category_id,
                         prefix_from_rank: false,
+                        source_staging_id: None,
                     },
                 );
             }
@@ -479,6 +500,7 @@ impl TempVoiceEngine {
                     min_rank: "unknown".to_string(),
                     category_id,
                     prefix_from_rank: rules.prefix_from_rank,
+                    source_staging_id: Some(staging_id),
                 },
             );
             state.join_time.entry(lane_id).or_default();
@@ -517,6 +539,154 @@ impl TempVoiceEngine {
         self.apply_owner_bans(guild_id, lane_id, user_id).await;
         tracing::info!(lane_id, user_id, staging_id, base = %base, "TempVoice: Lane erstellt");
         Ok(())
+    }
+
+    /// Join-Reihenfolge der aktuellen Kanal-Member (ältester zuerst).
+    pub async fn join_order(&self, guild_id: u64, channel_id: u64) -> Vec<(u64, i64)> {
+        let members = self.port.channel_members(guild_id, channel_id).await;
+        let state = self.state.lock().await;
+        let times = state.join_time.get(&channel_id);
+        let mut ranked: Vec<(u64, i64)> = members
+            .into_iter()
+            .map(|user_id| {
+                let ts = times
+                    .and_then(|t| t.get(&user_id))
+                    .map(|t| t.and_utc().timestamp())
+                    .unwrap_or(i64::MAX);
+                (user_id, ts)
+            })
+            .collect();
+        ranked.sort_by_key(|(_, ts)| *ts);
+        ranked
+    }
+
+    /// Claim-Regeln wie evaluate_owner_claim: Owner weg UND Top-3 UND 20 min.
+    pub async fn evaluate_claim(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> Result<(), String> {
+        let owner = self.lane_owner(channel_id).await;
+        if owner == Some(user_id) {
+            return Err("Du bist bereits Owner dieser Lane.".to_string());
+        }
+        let ranked = self.join_order(guild_id, channel_id).await;
+        let now = Utc::now().timestamp();
+        let Some(position) = ranked.iter().position(|(id, _)| *id == user_id) else {
+            return Err(
+                "Owner-Claim derzeit nicht möglich: du bist nicht mehr sauber in dieser Lane erfasst."
+                    .to_string(),
+            );
+        };
+        let owner_present = owner
+            .map(|owner_id| ranked.iter().any(|(id, _)| *id == owner_id))
+            .unwrap_or(false);
+        let mut details: Vec<String> = Vec::new();
+        if owner_present {
+            details.push("der aktuelle Owner ist noch im Channel".to_string());
+        }
+        if position >= logic::OWNER_CLAIM_TOP_N {
+            details.push(format!(
+                "du bist aktuell Platz {} nach Verbindungszeit; claimen dürfen nur die ersten {}",
+                position + 1,
+                logic::OWNER_CLAIM_TOP_N
+            ));
+        }
+        let connected = ranked
+            .iter()
+            .find(|(id, _)| *id == user_id)
+            .map(|(_, ts)| {
+                if *ts == i64::MAX {
+                    0
+                } else {
+                    (now - ts).max(0)
+                }
+            })
+            .unwrap_or(0);
+        if connected < logic::OWNER_CLAIM_MIN_SECONDS {
+            details.push(format!(
+                "du bist erst seit {}m {}s im Channel; mindestens 20 Minuten sind nötig",
+                connected / 60,
+                connected % 60
+            ));
+        }
+        if details.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "Owner-Claim derzeit nicht möglich: {}.",
+                details.join("; ")
+            ))
+        }
+    }
+
+    /// Owner-Wechsel (Claim/Transfer): State + DB + Bann-Swap.
+    pub async fn claim_owner(&self, guild_id: u64, channel_id: u64, new_owner: u64) {
+        let previous = {
+            let mut state = self.state.lock().await;
+            let Some(lane) = state.lanes.get_mut(&channel_id) else {
+                return;
+            };
+            let previous = lane.owner_id;
+            if previous == new_owner {
+                return;
+            }
+            lane.owner_id = new_owner;
+            previous
+        };
+        if let Err(err) = self.store.set_owner(channel_id, new_owner).await {
+            tracing::warn!(%err, channel_id, "TempVoice: Claim-Persist fehlgeschlagen");
+        }
+        self.clear_owner_bans(channel_id, previous).await;
+        self.apply_owner_bans(guild_id, channel_id, new_owner).await;
+    }
+
+    /// Limit setzen (Street-Brawl-Regel kappt auf max_limit).
+    pub async fn set_limit(&self, channel_id: u64, requested: i64) -> Result<i64, String> {
+        let max_limit = {
+            let state = self.state.lock().await;
+            state.lanes.get(&channel_id).and_then(|lane| {
+                lane.source_staging_id
+                    .and_then(|s| self.config.staging_rules.get(&s))
+                    .and_then(|r| r.user_limit)
+            })
+        };
+        let effective = match max_limit {
+            Some(max) => requested.clamp(1, max),
+            None => requested.clamp(0, 99),
+        };
+        self.port
+            .set_user_limit(channel_id, effective, "TempVoice: Limit gesetzt")
+            .await?;
+        Ok(effective)
+    }
+
+    /// Region DE = English-Only-Rolle deny; EU = Overwrite weg. Persistiert Pref.
+    pub async fn set_region(&self, channel_id: u64, owner_id: u64, region: &str) {
+        let _ = self.store.set_region_pref(owner_id, region).await;
+        let connect = if region == "DE" { Some(false) } else { None };
+        let _ = self
+            .port
+            .set_role_connect(channel_id, ENGLISH_ONLY_ROLE_ID, connect)
+            .await;
+    }
+
+    /// (base_name, category_id) der Lane — fürs Interface.
+    pub async fn lane_snapshot(&self, channel_id: u64) -> Option<(String, u64)> {
+        let state = self.state.lock().await;
+        state
+            .lanes
+            .get(&channel_id)
+            .map(|lane| (lane.base_name.clone(), lane.category_id.unwrap_or(0)))
+    }
+
+    /// Owner-Rename: Basisnamen mitführen, damit refresh_name nicht zurücksetzt.
+    pub async fn set_base_name(&self, channel_id: u64, name: &str) {
+        let mut state = self.state.lock().await;
+        if let Some(lane) = state.lanes.get_mut(&channel_id) {
+            lane.base_name = logic::strip_suffixes(name);
+        }
     }
 
     pub async fn cleanup_lane(&self, channel_id: u64, reason: &str) {
@@ -647,6 +817,7 @@ mod tests {
         moved: StdMutex<Vec<(u64, u64)>>,
         renamed: StdMutex<Vec<(u64, String)>>,
         overwrites: StdMutex<Vec<(u64, u64, Option<bool>)>>,
+        limits: StdMutex<Vec<(u64, i64)>>,
         next_channel_id: StdMutex<u64>,
     }
 
@@ -720,6 +891,38 @@ mod tests {
                 .expect("lock")
                 .push((channel_id, user_id, connect));
             Ok(())
+        }
+        async fn set_role_connect(
+            &self,
+            channel_id: u64,
+            role_id: u64,
+            connect: Option<bool>,
+        ) -> Result<(), String> {
+            self.overwrites
+                .lock()
+                .expect("lock")
+                .push((channel_id, role_id, connect));
+            Ok(())
+        }
+        async fn set_user_limit(
+            &self,
+            channel_id: u64,
+            limit: i64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            self.limits.lock().expect("lock").push((channel_id, limit));
+            Ok(())
+        }
+        async fn disconnect_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn member_display_name(&self, _guild_id: u64, user_id: u64) -> Option<String> {
+            Some(format!("User {user_id}"))
         }
         async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
             self.voice

@@ -172,6 +172,94 @@ impl LanePort for CacheSnapshot {
         }
     }
 
+    async fn set_role_connect(
+        &self,
+        channel_id: u64,
+        role_id: u64,
+        connect: Option<bool>,
+    ) -> Result<(), String> {
+        let channel = ChannelId::new(channel_id);
+        match connect {
+            None => self
+                .adapter
+                .http
+                .delete_permission(
+                    channel,
+                    serenity::all::TargetId::new(role_id),
+                    Some("TempVoice: Sprachfilter frei"),
+                )
+                .await
+                .map_err(|e| e.to_string()),
+            Some(allow) => {
+                let (allow_bits, deny_bits) = if allow {
+                    (CONNECT_BIT, 0)
+                } else {
+                    (0, CONNECT_BIT)
+                };
+                self.adapter
+                    .http
+                    .create_permission(
+                        channel,
+                        serenity::all::TargetId::new(role_id),
+                        &json!({
+                            "type": 0,
+                            "allow": allow_bits.to_string(),
+                            "deny": deny_bits.to_string(),
+                        }),
+                        Some("TempVoice: Deutsch-Only"),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
+    }
+
+    async fn set_user_limit(
+        &self,
+        channel_id: u64,
+        limit: i64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "user_limit": limit }),
+                Some(reason),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn disconnect_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": null }),
+                Some(reason),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| m.display_name().to_string())
+    }
+
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         self.adapter
             .cache
