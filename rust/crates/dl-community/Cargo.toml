@@ -1,0 +1,21 @@
+[package]
+name = "dl-community"
+description = "Community-Dienste: Tag-System (User-/Mod-Tags), später FAQ, Clips, Surveys"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+chrono.workspace = true
+dl-db.workspace = true
+rusqlite.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

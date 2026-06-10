@@ -1,3 +1,11 @@
+## #89 — Rust-Neuaufbau Phase 6 (Teil 3): das Tag-System
+
+**Ausgangslage:** Tags sind das Bindeglied zwischen drei Systemen: Im Onboarding wählen Nutzer ihre Alters- und Ton-Präferenz („25+", „banter_ok", „ragebaiter-free"), die Lane-Filter im Voice-Bereich werten sie aus, und die Moderation vergibt den zeitlich befristeten „Ragebaiter"-Marker (14 Tage Standard-Laufzeit), der bei wiederholtem Fehlverhalten automatisch gesetzt wird.
+
+**Geändert:** Das Tag-System ist als zentrale Anlaufstelle in Rust portiert: gleiche Tabellen, gleiche Gültigkeits-Prüfungen (nur bekannte Schlüssel und Werte, normalisiert), gleiche Standard-Laufzeit, gleicher 5-Minuten-Aufräumlauf für abgelaufene Mod-Tags, und Änderungs-Ereignisse für die angeschlossenen Systeme — das Pendant zu den bisherigen Bot-internen Benachrichtigungen, an denen Lane-Filter und Moderation hängen.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Tests decken die Kernregeln ab: ungültige Tags werden abgewiesen, Wert-Wechsel feuern genau ein Ereignis (gleicher Wert keins), der Ragebaiter-Marker läuft nach 14 Tagen ab und wird vom Aufräumlauf entfernt, und ein Neustart stellt den kompletten Zustand aus der Datenbank wieder her. Damit ist der Unterbau für die noch offenen Lane-Tag-Filter und die Ragebaiter-Automatik der Moderation gelegt.
+
 ## #88 — Rust-Neuaufbau Phase 8 (Teil 3): die Turnier-Website
 
 **Ausgangslage:** Die öffentliche Turnier-Seite (Anmeldung per Discord-Login, Team-Verwaltung, Turnierbaum-Vorschau) lief als Web-Server im Bot-Prozess: Einmal-Login-Token, Sitzungs-Cookies mit CSRF-Schutz und elf API-Routen über dem Turnier-Unterbau.

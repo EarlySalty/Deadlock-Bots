@@ -18,6 +18,7 @@ members = [
     "crates/dl-ai",
     "crates/dl-moderation",
     "crates/dl-tournament",
+    "crates/dl-community",
     "bin/dl-bot",
     "bin/dl-web",
 ]
@@ -85,6 +86,7 @@ dl-activity = { path = "crates/dl-activity" }
 dl-ai = { path = "crates/dl-ai" }
 dl-moderation = { path = "crates/dl-moderation" }
 dl-tournament = { path = "crates/dl-tournament" }
+dl-community = { path = "crates/dl-community" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

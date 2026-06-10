@@ -395,6 +395,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-community"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dl-db",
+ "rusqlite",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dl-core"
 version = "0.1.0"
 dependencies = [
