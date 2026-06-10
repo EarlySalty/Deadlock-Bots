@@ -84,7 +84,7 @@ Crates entstehen erst in der Phase, die sie braucht — keine leeren Hüllen auf
 - Python-Code wird NIE gelöscht, nur deaktiviert.
 - Pro Cutover: Flip-Checkliste in `rust/docs/`, Go-Live nur nach Freigabe.
 
-## Phasen (Stand 2026-06-10, Einträge #69–#100)
+## Phasen (Stand 2026-06-10, Einträge #69–#114)
 
 | Phase | Inhalt | Stand |
 |---|---|---|
@@ -92,12 +92,12 @@ Crates entstehen erst in der Phase, die sie braucht — keine leeren Hüllen auf
 | 1 | dl-web: Public-Stats + Tierlist | ✅ komplett, live-gedifft — Cutover wartet (docs/02) |
 | 2 | dl-bot-Gerüst: Gateway, Dispatcher, Broker :8770, Changelog :8899 (+ /alert) | ✅ komplett |
 | 3 | dl-bridges: steam_bridge + twitch + Matcher (inkl. AI-Scoring) | ✅ komplett |
-| 4 | dl-voice: Tracker, TempVoice (+Panel/Tag-Filter/Lurker/Min-Rang), Status, Rank, Nudge, Feedback-DMs, Router | ✅ Kern komplett — Rest: NewPlayer-/Duo-Lanes, lane_sorting, tv_mode_switch |
-| 5 | dl-activity: Analyzer, LFG-Kern, player_finder (Flag aus) | 🔶 Kern — Rest: LFG-Antwort-Flow, website_invite, Analyzer-Nebenpfade |
-| 6 | dl-ai (MiniMax), dl-moderation (AI-Mod + SecurityGuard), Tags | 🔶 Kern — Rest: FAQ, Clips, Leave-Survey, Bug-Reporter, Rules, Rename |
-| 7 | Onboarding-Buttons + Coaching-Brücke | 🔶 Kern — Rest: Kanal-Flow, step_streamer, coaching_request/panel/survey |
-| 8 | dl-tournament: Balancer, Store, Turnier-Web :8767 (live-gedifft) | 🔶 Kern — Rest: turnier.py-Discord-UI, customgames-Flow |
-| 9 | Dashboard (sauber geschnitten) + Restpflege | ⬜ nicht begonnen |
+| 4 | dl-voice komplett: Tracker, TempVoice (Panel 100 %), Status, Rank, Nudge, Feedback-DMs, Router, Adaptive Lanes, Sortierung | ✅ komplett |
+| 5 | dl-activity: Analyzer, LFG durchgängig, player_finder (Flag aus), Website-Invites, member_events/message_activity-Writer | ✅ komplett — Rest: Text-Sessions, Invite-Attribution, Retention |
+| 6 | dl-ai, dl-moderation (AI-Mod + Guard), Tags, FAQ, Clips, Leave-Survey | ✅ komplett — bug_reporter bewusst nicht (Redesign), rename ersetzt |
+| 7 | Onboarding (Buttons + 10-Schritte-Wizard) + Coaching (Brücke + Anfragen/Claim) | ✅ Kern komplett — Rest: step_streamer, role_manager, survey, Website-Mirror |
+| 8 | dl-tournament: Balancer, Store, Web :8767 (live-gedifft), Panel-User-Flow | ✅ Kern komplett — Rest: Admin-Flow, customgames-Team-VCs |
+| 9 | Dashboard (sauber geschnitten) + Restpflege | ⬜ nicht begonnen — letzter Block |
 
 Bot-Cutover-Checkliste mit Teil-Cutover-Empfehlung: `docs/06-cutover-bot.md`
 — alle dort als Blocker markierten Punkte sind abgehakt.

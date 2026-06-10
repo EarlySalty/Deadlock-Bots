@@ -1,6 +1,6 @@
 # Bot-Cutover: dl-bot übernimmt vom Python-Bot
 
-Stand: 2026-06-10 (nach #108). Jeder Schritt ist user-gated — nichts hiervon
+Stand: 2026-06-10 (nach #114). Jeder Schritt ist user-gated — nichts hiervon
 passiert ohne Nanis Freigabe.
 
 ## Was dl-bot beim Flip übernimmt
@@ -28,6 +28,11 @@ passiert ohne Nanis Freigabe.
 | Leave-Survey (Exit-DM, Bucket A/B/C) | dl-community::leave_survey | leave_survey |
 | Clip-Einsendungen (Interface, Wochenfenster, Dump) | dl-community::clips | clip_submission |
 | FAQ-Chat + Ticket-Auto-Helfer | dl-community::faq + dl-ai | faq_chat |
+| Onboarding-Wizard (10 Schritte im Thread) | dl-community::onboarding | rules_channel + onboarding (Kern) |
+| Coaching-Anfragen (Panel→AI→Rotation→Claim) | dl-community::coaching_requests | coaching_panel + coaching_request |
+| LFG-Lobby-Finder (durchgängig) | dl-activity::lfg | lfg |
+| Nachrichten-Zähler + Beitritts-Protokoll | dl-activity::analyzer | (Teile von user_activity_analyzer) |
+| Turnier-Anmeldung (Panel-User-Flow) | dl-tournament::discord_ui | customgames/turnier (User-Teil) |
 
 dl-web übernimmt zusätzlich: Stats :8768, Tierlist :8771,
 **Turnier-Web :8767** (live-gedifft) — Blocklist: public_stats_cog,
@@ -58,12 +63,12 @@ Funktional kleiner als das Original — Nutzer merken ggf.:
   (konservativer: Vorschlag statt Auto-Aktion).
 - **LFG-Antwort-Flow** (Erkennung+Scores portiert, Routing-Antworten
   fehlen) und **Player-Finder** (per Flag aus — gewollt).
-- **Rules-Panel/StaticOnboarding** (rp:panel:start) — Python
-  weiterlaufen lassen; die Regelkanal-Buttons (wdm:*) sind in Rust.
-- **Coaching-Discord-UI** (coaching_request/panel/survey) — Python
-  weiterlaufen lassen; die Plattform-Brücke ist in Rust.
-- **Turnier-Discord-UI** (turnier.py) + customgames-Flow — Python
-  weiterlaufen lassen; Web + Store + Balancer sind in Rust.
+- **step_streamer-Formular** (Streamer-Setup im Onboarding) — der
+  Wizard-Schritt informiert und verweist; das Formular bleibt Python.
+- **Coaching-Nebenpfade** (role_manager 48h-Ablauf, survey,
+  Website-Mirror) — Python weiterlaufen lassen; Kern ist in Rust.
+- **Turnier-Admin-Flow** (Zeiträume/Teams/Panel-Post) + customgames-
+  Team-VCs — Python weiterlaufen lassen; User-Flow/Web/Store in Rust.
 - **Dashboard 8766** (Phase 9, nicht begonnen) — Python behält es.
 
 **WICHTIG — user_activity_analyzer MUSS geblocklistet werden:** Sein
