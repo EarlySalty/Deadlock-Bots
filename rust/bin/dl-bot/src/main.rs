@@ -51,11 +51,38 @@ async fn main() -> anyhow::Result<()> {
     dl_bridges::steam::register(&mut router, steam_client.clone());
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
-    if let Some(twitch_client) = &twitch_client {
-        dl_bridges::twitch::register(&mut router, twitch_client.clone(), twitch_registry.clone());
-    } else {
-        tracing::warn!("TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge inaktiv");
-    }
+    let matcher = match &twitch_client {
+        Some(twitch_client) => {
+            dl_bridges::twitch::register(
+                &mut router,
+                twitch_client.clone(),
+                twitch_registry.clone(),
+            );
+            // Streamer-Link-Matcher (Review-Buttons immer registrieren —
+            // offene Vorschläge überleben Neustarts über den State-File)
+            let matcher_config =
+                dl_bridges::matcher::MatcherConfig::from_env(|k| std::env::var(k).ok());
+            let glue = Arc::new(dl_bridges::glue::AdapterGlue {
+                adapter: adapter.clone(),
+                notify_channel_id: matcher_config.notify_channel_id,
+            });
+            let matcher = dl_bridges::matcher::Matcher::new(
+                matcher_config,
+                twitch_client.clone(),
+                glue.clone(),
+                glue,
+                Arc::new(dl_bridges::matcher::NoAi),
+            );
+            dl_bridges::matcher::register(&mut router, matcher.clone());
+            Some(matcher)
+        }
+        None => {
+            tracing::warn!(
+                "TWITCH_INTERNAL_API_TOKEN fehlt — Twitch-Live-Bridge + Matcher inaktiv"
+            );
+            None
+        }
+    };
     let router = Arc::new(router);
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
@@ -102,6 +129,11 @@ async fn main() -> anyhow::Result<()> {
         // Aktive Twitch-Live-Ankündigungen rehydrieren (Klick-Routing)
         if let Some(twitch_client) = &twitch_client {
             dl_bridges::twitch::spawn_restore(twitch_client.clone(), twitch_registry.clone());
+        }
+        // Streamer-Link-Matcher: 6h-Scan + Admin-Kommandos (brauchen Gateway-Cache)
+        if let Some(matcher) = &matcher {
+            dl_bridges::matcher::spawn_scan_loop(matcher.clone());
+            dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
         }
         // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
         if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {

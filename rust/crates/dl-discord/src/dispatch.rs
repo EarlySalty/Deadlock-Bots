@@ -54,6 +54,12 @@ async fn dispatch_command(
         interaction_id: cmd.id.get(),
         user_id: cmd.user.id.get(),
         author_name: username(&cmd.user),
+        author_can_manage_roles: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
         guild_id: cmd.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: cmd.channel_id.get(),
         ..BridgeInteraction::default()
@@ -92,6 +98,12 @@ async fn dispatch_component(
         interaction_id: component.id.get(),
         user_id: component.user.id.get(),
         author_name: username(&component.user),
+        author_can_manage_roles: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
         guild_id: component.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: component.channel_id.get(),
         message_id: Some(component.message.id.get()),
@@ -135,6 +147,12 @@ async fn dispatch_modal(
         interaction_id: modal.id.get(),
         user_id: modal.user.id.get(),
         author_name: username(&modal.user),
+        author_can_manage_roles: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
         guild_id: modal.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: modal.channel_id.get(),
         message_id: modal.message.as_ref().map(|m| m.id.get()),

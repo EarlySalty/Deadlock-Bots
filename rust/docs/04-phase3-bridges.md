@@ -1,6 +1,6 @@
-# Phase 3: dl-bridges — Steam-Brücke, Twitch-Live-Bridge, Interaction-Dispatch
+# Phase 3: dl-bridges — Steam-Brücke, Twitch-Live-Bridge, Interaction-Dispatch, Matcher
 
-Status: 3a+3b code-komplett (Commit-Historie #73/#74); 3c offen. Stand: 2026-06-10
+Status: KOMPLETT (3a #73, 3b #74, 3c #75). Stand: 2026-06-10
 
 ## Was existiert
 
@@ -29,11 +29,29 @@ Der `twitch-live:*`-Präfix-Handler verarbeitet jetzt die Klicks der vom
 Broker geposteten Buttons. Damit können Broker (:8770) + Gateway gemeinsam
 cutten, sobald Phase 3c fertig ist und die Cutover-Checkliste steht.
 
-## Offen (3c)
+## 3c: Streamer-Link-Matcher (`dl-bridges::matcher`)
 
-1. `streamer_link_matcher` (6h-Scan + Approval-Flow + !twitch_link_scan).
-2. `steam_link_voice_nudge` + `steam_verified_role` — fachlich Voice/DB-lastig,
-   Umsetzung zusammen mit Phase 4 (Voice-Dispatcher) sinnvoller; Entscheidung
-   beim 3c-Schnitt.
-3. Cutover-Checkliste Bot-Seite (Ports 8770/8899, Gateway-Übergabe,
-   Command-Sync, Blocklist-Einträge steam_bridge/twitch/changelog_publisher).
+Port von streamer_link_matcher.py: Namens-Normalisierung (NFKD-Deaccent,
+Leetspeak, Affix-Strip) und difflib-`SequenceMatcher.ratio` (Ratcliff/
+Obershelp) sind in Rust nachgebaut und mit **CPython-Referenzwerten** als
+Vertrags-Tests abgesichert. Scan-Kern hinter Ports (GuildPort/Notifier/
+AiScorer) — ohne Discord testbar; Review-Buttons (`slm:link|reject:{token}`)
+mit Mod-Guard, JSON-State (`data/streamer_link_state.json`, gleiche Struktur),
+6h-Loop (erste Iteration übersprungen), `!twitch_link_scan` +
+`!twitch_link_rescan_login`.
+
+**Bewusste Lücke:** AI-Scoring (MiniMax) hängt an dl-ai (Phase 6) — bis dahin
+Heuristik-Modus, identisch zum Original ohne AIConnector (nur eindeutige
+Exakt-Treffer erreichen Auto-Link ≥ 90).
+
+## Verschoben nach Phase 4/5
+
+`steam_link_voice_nudge` (Voice-Events + DB) und `steam_verified_role`
+(DB-Sweeps) sind fachlich Voice-/DB-Domänen — sie kommen mit dem
+Voice-Dispatcher (Phase 4) bzw. der DB-Schicht-Erweiterung (Phase 5).
+
+## Offen für den Bot-Cutover (eigene Checkliste vor Phase-4-Ende)
+
+Ports 8770/8899 übernehmen, Gateway-Übergabe (DL_BOT_GATEWAY=1 + Python-
+Blocklist), Command-Sync einmalig (DL_BOT_COMMAND_SYNC=1), Konsumenten-Smoke
+(Twitch-Bot → Broker-health).

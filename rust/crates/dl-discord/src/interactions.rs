@@ -29,6 +29,8 @@ pub struct BridgeInteraction {
     pub user_id: u64,
     /// Discord-Username (str(user)-Äquivalent, für Tracking-Zwecke).
     pub author_name: String,
+    /// manage_roles ODER administrator (für Mod-Guards wie den Review-Flow).
+    pub author_can_manage_roles: bool,
     pub guild_id: u64,
     pub channel_id: u64,
     /// Nachricht, an der die Komponente hing (None bei Slash-Commands).

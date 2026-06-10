@@ -1,3 +1,11 @@
+## #75 — Rust-Neuaufbau Phase 3 komplett: der Streamer-Erkenner
+
+**Ausgangslage:** Das letzte Stück der Brücken-Phase: Der Abgleich, der alle 6 Stunden neue Twitch-Streamer gegen die Discord-Mitgliederliste hält — mit Namens-Normalisierung (Akzente raus, Leetspeak übersetzt, Anhängsel wie „TTV" und „live" entfernt), Ähnlichkeits-Berechnung und der Drei-Wege-Entscheidung: automatisch verknüpfen, als Vorschlag mit Bestätigen/Ablehnen-Buttons an die Mods geben, oder verwerfen.
+
+**Geändert:** Komplett in Rust portiert, inklusive des Ähnlichkeits-Algorithmus aus Pythons Standardbibliothek (difflib), der Zeichen für Zeichen nachgebaut wurde. Damit das beweisbar stimmt, wurden Referenzwerte direkt aus dem laufenden Python-Original gezogen und als Tests eingebacken — „N4ni" wird zu „nani", „drag_skope | TTV" zu „dragskope", und die Ähnlichkeit von „dragskope" zu „dragscope" ist auf zwölf Nachkommastellen identisch. Der Merkzettel bewerteter Streamer nutzt dieselbe Datei wie bisher — offene Vorschläge überleben also auch den Umstieg. Die Review-Buttons laufen über das neue Klick-Routing samt Mod-Rechte-Prüfung.
+
+**Wie es jetzt funktioniert:** Wie bisher — alle 6 Stunden automatisch (der erste Lauf nach einem Neustart wird übersprungen, den Voll-Abgleich startet ein Admin bewusst per Kommando), nur eindeutige, exakte Namens-Treffer werden automatisch verknüpft, alles im Graubereich geht an die Mods. Eine ehrliche Übergangs-Einschränkung: Die KI-Zweitmeinung bei unklaren Fällen kommt erst mit der KI-Schicht in Phase 6 — bis dahin gilt die konservative Heuristik, exakt so, wie sich das Original verhält, wenn seine KI nicht verfügbar ist. Damit ist Phase 3 abgeschlossen; live geht das gesammelt mit dem Bot-Umstieg.
+
 ## #74 — Rust-Neuaufbau Phase 3b: Twitch-Klick-Tracking und das letzte Glied der Klick-Kette
 
 **Ausgangslage:** #73 hatte das Klick-Routing gebaut, aber zwei Lücken gelassen: Die Twitch-Live-Buttons („Auf Twitch ansehen" unter Live-Ankündigungen) wurden noch nicht verarbeitet, und es fehlte die Übergabe von der echten Discord-Verbindung an das Routing — Klicks und Slash-Befehle kamen also noch nirgends an.

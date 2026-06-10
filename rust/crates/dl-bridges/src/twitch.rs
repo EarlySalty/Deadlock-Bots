@@ -151,6 +151,44 @@ impl TwitchApiClient {
         }
     }
 
+    /// Unverknüpfte Streamer für den Link-Matcher.
+    pub async fn link_candidates(&self) -> Result<Vec<Value>, TwitchBridgeError> {
+        let data = self
+            .request(
+                reqwest::Method::GET,
+                "/streamers/link-candidates",
+                None,
+                None,
+            )
+            .await?;
+        Ok(data
+            .get("entries")
+            .and_then(Value::as_array)
+            .map(|entries| entries.iter().filter(|e| e.is_object()).cloned().collect())
+            .unwrap_or_default())
+    }
+
+    /// Discord-Profil an einen Streamer hängen (Matcher: Auto-/Review-Link).
+    pub async fn link_discord_profile(
+        &self,
+        login: &str,
+        discord_user_id: u64,
+        discord_display_name: &str,
+    ) -> Result<Value, TwitchBridgeError> {
+        let path = format!("/streamers/{}/discord-profile", login.to_lowercase());
+        self.request(
+            reqwest::Method::POST,
+            &path,
+            Some(&json!({
+                "discord_user_id": discord_user_id.to_string(),
+                "discord_display_name": discord_display_name,
+                "mark_member": true,
+            })),
+            None,
+        )
+        .await
+    }
+
     pub async fn active_announcements(&self) -> Result<Vec<Announcement>, TwitchBridgeError> {
         let payload = self
             .request(

@@ -59,6 +59,8 @@ async-trait = "0.1"
 # Discord (Gateway erst beim Cutover aktiv; REST sofort nutzbar)
 serenity = { version = "0.12", default-features = false, features = ["client", "http", "gateway", "rustls_backend", "model", "cache", "utils"] }
 rand = "0.8"
+# Namens-Normalisierung (streamer_link_matcher: NFKD-Deaccent)
+unicode-normalization = "0.1"
 
 # Tests
 tempfile = "3"
