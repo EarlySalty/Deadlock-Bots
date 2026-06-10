@@ -12,6 +12,7 @@ Env-Variablen:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any
@@ -21,7 +22,48 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from service import db
+
 log = logging.getLogger(__name__)
+
+# kv_store-Referenz der geposteten Panel-Message — gleicher Namespace wie die
+# alte Python-Implementierung (account_link_panel.py), damit ein bereits
+# gespeichertes Panel nahtlos übernommen wird.
+_PANEL_KV_NS = "steam_link_panel"
+_PANEL_KV_KEY = "panel_ref"
+
+
+async def _get_stored_panel_ref() -> tuple[int, int] | None:
+    row = await db.query_one_async(
+        "SELECT v FROM kv_store WHERE ns = ? AND k = ?",
+        (_PANEL_KV_NS, _PANEL_KV_KEY),
+    )
+    if not row:
+        return None
+    try:
+        raw = row[0] if not isinstance(row, dict) else row.get("v")
+        payload = json.loads(raw)
+        return int(payload["channel_id"]), int(payload["message_id"])
+    except Exception:
+        return None
+
+
+async def _store_panel_ref(channel_id: int, message_id: int) -> None:
+    await db.execute_async(
+        "INSERT OR REPLACE INTO kv_store (ns, k, v) VALUES (?, ?, ?)",
+        (
+            _PANEL_KV_NS,
+            _PANEL_KV_KEY,
+            json.dumps({"channel_id": int(channel_id), "message_id": int(message_id)}),
+        ),
+    )
+
+
+async def _clear_panel_ref() -> None:
+    await db.execute_async(
+        "DELETE FROM kv_store WHERE ns = ? AND k = ?",
+        (_PANEL_KV_NS, _PANEL_KV_KEY),
+    )
 
 # ---------------------------------------------------------------------------
 # Konfiguration
@@ -528,6 +570,71 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
             len(_PANEL_CUSTOM_IDS),
             len(_BETAINVITE_CUSTOM_IDS),
         )
+        # Panel-Restore läuft nach Ready: gespeicherte Panel-Message mit dem
+        # aktuellen Embed aus dem Rust-Bot auffrischen (wie account_link_panel).
+        asyncio.create_task(self._restore_panel())
+
+    async def _fetch_steam_panel_embed(self, user_id: int) -> discord.Embed | None:
+        """Holt das aktuelle Steam-Link-Panel-Embed vom Rust-steam-bot."""
+        result = await _post_event(
+            "slash_command",
+            {
+                "interaction": {
+                    "custom_id": "",
+                    "user_id": user_id,
+                    "guild_id": 0,
+                    "data": {"name": "publish_steam_panel"},
+                }
+            },
+        )
+        if result is None:
+            return None
+        embed_dict = result.get("reply_embed")
+        if embed_dict and isinstance(embed_dict, dict):
+            try:
+                return discord.Embed.from_dict(embed_dict)
+            except Exception as exc:
+                log.warning("steam-bridge: Konnte Steam-Panel-Embed nicht parsen: %s", exc)
+        return None
+
+    async def _restore_panel(self) -> None:
+        """Frischt die gespeicherte Panel-Message nach einem Restart auf."""
+        await self.bot.wait_until_ready()
+        ref = await _get_stored_panel_ref()
+        if not ref:
+            return
+        channel_id, message_id = ref
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            try:
+                channel = await self.bot.fetch_channel(channel_id)
+            except Exception:
+                log.warning("steam-bridge: Panel-Channel %s nicht gefunden.", channel_id)
+                return
+        if not isinstance(channel, (discord.TextChannel, discord.Thread)):
+            log.warning("steam-bridge: Panel-Channel %s ist kein Textkanal.", channel_id)
+            return
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except discord.NotFound:
+            await _clear_panel_ref()
+            return
+        except Exception:
+            log.warning("steam-bridge: Panel-Message %s nicht ladbar.", message_id, exc_info=True)
+            return
+
+        embed = await self._fetch_steam_panel_embed(self.bot.user.id)
+        if embed is None:
+            # Rust-Bot (noch) nicht erreichbar — Panel unangetastet lassen,
+            # die persistente View funktioniert auch ohne Embed-Refresh.
+            return
+        try:
+            await message.edit(embed=embed, view=SteamBridgePanelView())
+            log.info("steam-bridge: Panel-Message %s aufgefrischt.", message_id)
+        except Exception:
+            log.warning("steam-bridge: Panel-Message %s nicht aktualisierbar.", message_id, exc_info=True)
 
     # ------------------------------------------------------------------
     # Slash-Commands: Playtest-Invite-Funnel
@@ -557,8 +664,13 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
         description="Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
     )
     @app_commands.checks.has_permissions(manage_guild=True)
-    async def publish_betainvite_panel(self, interaction: discord.Interaction) -> None:
-        """Postet das persistente BetaInvite-Panel in den aktuellen Kanal.
+    @app_commands.describe(channel="Zielkanal fürs Panel (Standard: aktueller Kanal)")
+    async def publish_betainvite_panel(
+        self,
+        interaction: discord.Interaction,
+        channel: discord.TextChannel | None = None,
+    ) -> None:
+        """Postet das persistente BetaInvite-Panel (Zielkanal wählbar).
 
         Der Rust-steam-bot liefert den vollständigen Embed-Inhalt.
         Python hängt die persistente BetaInvitePanelView an die Nachricht.
@@ -606,6 +718,14 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
                         url=url,
                     )
                 )
+
+        if channel is not None:
+            # Panel in den gewählten Kanal posten, Bestätigung ephemer.
+            await channel.send(content=reply_text, embed=embed, view=view)
+            await interaction.response.send_message(
+                f"✅ Invite-Panel in {channel.mention} gepostet.", ephemeral=True
+            )
+            return
 
         await interaction.response.send_message(
             content=reply_text,
@@ -785,33 +905,66 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
 
     @app_commands.command(
         name="publish_steam_panel",
-        description="(Admin) Steam-Verknüpfen-Panel in diesem Channel posten.",
+        description="(Admin) Steam-Verknüpfen-Panel in diesem Channel posten / aktualisieren.",
     )
     @app_commands.checks.has_permissions(administrator=True)
-    async def publish_steam_panel(self, interaction: discord.Interaction) -> None:
-        """Postet das persistente Steam-Link-Panel (Rust liefert das Embed)."""
-        result = await _post_event(
-            "slash_command",
-            {"interaction": _slash_interaction(interaction, "publish_steam_panel")},
-        )
-        if result is None:
+    @app_commands.describe(
+        message_id="ID einer bestehenden Message, die editiert werden soll (optional)"
+    )
+    async def publish_steam_panel(
+        self, interaction: discord.Interaction, message_id: str | None = None
+    ) -> None:
+        """Postet/aktualisiert das persistente Steam-Link-Panel (Rust liefert das Embed)."""
+        embed = await self._fetch_steam_panel_embed(interaction.user.id)
+        if embed is None:
             await interaction.response.send_message(
                 "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte erneut versuchen.",
                 ephemeral=True,
             )
             return
 
-        embed: discord.Embed | None = None
-        embed_dict = result.get("reply_embed")
-        if embed_dict and isinstance(embed_dict, dict):
-            try:
-                embed = discord.Embed.from_dict(embed_dict)
-            except Exception as exc:
-                log.warning("steam-bridge: Konnte Steam-Panel-Embed nicht parsen: %s", exc)
+        view = SteamBridgePanelView()
 
-        # Panel öffentlich posten + persistente Buttons anhängen.
-        await interaction.channel.send(embed=embed, view=SteamBridgePanelView())
-        await interaction.response.send_message("✅ Steam-Panel gepostet.", ephemeral=True)
+        # Explizit angegebene Message editieren?
+        if message_id:
+            try:
+                mid = int(message_id)
+                msg = await interaction.channel.fetch_message(mid)
+                await msg.edit(embed=embed, view=view)
+                await _store_panel_ref(interaction.channel.id, msg.id)
+                await interaction.response.send_message(
+                    f"✅ Panel aktualisiert: `{msg.id}`", ephemeral=True
+                )
+                return
+            except (ValueError, discord.NotFound):
+                await interaction.response.send_message(
+                    "❌ Message nicht gefunden. Neues Panel wird gepostet.", ephemeral=True
+                )
+            except discord.Forbidden:
+                await interaction.response.send_message(
+                    "❌ Keine Berechtigung, diese Message zu editieren.", ephemeral=True
+                )
+                return
+
+        # Gespeicherte Panel-Message im selben Kanal? Dann editieren statt doppelt posten.
+        stored_ref = await _get_stored_panel_ref()
+        if stored_ref and stored_ref[0] == interaction.channel.id:
+            try:
+                msg = await interaction.channel.fetch_message(stored_ref[1])
+                await msg.edit(embed=embed, view=view)
+                if not interaction.response.is_done():
+                    await interaction.response.send_message(
+                        f"✅ Panel aktualisiert: `{msg.id}`", ephemeral=True
+                    )
+                return
+            except discord.NotFound:
+                await _clear_panel_ref()
+
+        # Neues Panel posten + Referenz für den Restart-Restore speichern.
+        msg = await interaction.channel.send(embed=embed, view=view)
+        await _store_panel_ref(interaction.channel.id, msg.id)
+        if not interaction.response.is_done():
+            await interaction.response.send_message("✅ Steam-Panel gepostet.", ephemeral=True)
 
     # ------------------------------------------------------------------
     # Member-Ereignisse
@@ -858,6 +1011,8 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
             return
 
         # Rust: AdminCommandPayload {name (ohne '!'), args (Roh-String), invoker_id}
+        # timeout > 15s: steam_status antwortet synchron und wartet Rust-seitig
+        # bis zu 15s auf den AUTH_STATUS-Task.
         result = await _post_event(
             "admin_command",
             {
@@ -867,6 +1022,7 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
                     "invoker_id": message.author.id,
                 }
             },
+            timeout=30.0,
         )
 
         if result is None:

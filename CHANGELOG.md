@@ -1,3 +1,16 @@
+## #116 — Steam-Panels: Restart-fest, editierbar, Zielkanal wählbar
+
+**Ausgangslage:** Beim Umbau auf den Rust-Steam-Bot war die Discord-Brücke schlanker geraten als das Original: Das Steam-Verknüpfen-Panel wurde nach einem Bot-Neustart nicht mehr aufgefrischt, `/publish_steam_panel` konnte keine bestehende Panel-Nachricht editieren (jeder Aufruf erzeugte ein neues Panel), und `/publish_betainvite_panel` konnte nur in den aktuellen Kanal posten.
+
+**Was wurde geändert:**
+
+- **Panel-Restore nach Neustart:** Beim Posten merkt sich der Bot jetzt Kanal- und Nachrichten-ID des Steam-Panels in der Datenbank (gleicher Speicherplatz wie früher — das alte Panel aus der Python-Zeit wurde beim ersten Start direkt übernommen und aufgefrischt). Nach jedem Neustart holt er das aktuelle Embed vom Steam-Bot und aktualisiert die bestehende Nachricht, statt sie veralten zu lassen.
+- **`/publish_steam_panel` kann editieren:** Optionaler `message_id`-Parameter zum gezielten Aktualisieren einer bestehenden Nachricht. Ohne Parameter wird zuerst geprüft, ob im selben Kanal schon ein gespeichertes Panel liegt — dann wird editiert statt doppelt gepostet.
+- **`/publish_betainvite_panel` mit Zielkanal:** Optionaler `channel`-Parameter postet das Invite-Panel direkt in den gewählten Kanal, Bestätigung kommt ephemer.
+- **`!steam_status` antwortet wieder im Kanal:** Der Admin-Befehl wartet jetzt lang genug auf die Antwort des Steam-Bots (synchroner Pfad) statt das Ergebnis per DM nachzureichen.
+
+**Wie es jetzt funktioniert:** Panel posten → Referenz wird gespeichert → jeder Neustart frischt die Nachricht automatisch auf; die Buttons bleiben durchgehend klickbar. Panels lassen sich per Parameter editieren oder gezielt in andere Kanäle setzen, ohne Duplikate zu erzeugen.
+
 ## #115 — Discord Go-Live-Sync repariert
 
 **Ausgangslage:** Wenn ein Partner-Streamer live ging, versuchte der Rust-Monitoring-Bot ein Discord-Embed über den Master-Broker zu posten — das schlug seit dem Rust-Cutover stumm fehl. Im Log stand `error decoding response body`, die Discord-Ankündigungen blieben einfach aus.
