@@ -260,6 +260,84 @@ impl LanePort for CacheSnapshot {
             .map(|m| m.display_name().to_string())
     }
 
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn remove_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .remove_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_nick(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        nick: Option<&str>,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "nick": nick }),
+                Some(reason),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn member_nick(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))?
+            .nick
+            .as_ref()
+            .map(|n| n.to_string())
+    }
+
+    async fn channel_user_limit(&self, guild_id: u64, channel_id: u64) -> Option<i64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))
+            .map(|c| c.user_limit.map(|l| l as i64).unwrap_or(0))
+    }
+
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         self.adapter
             .cache

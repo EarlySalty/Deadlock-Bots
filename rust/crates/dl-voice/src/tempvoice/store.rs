@@ -234,6 +234,58 @@ impl TempVoiceStore {
             .await
     }
 
+    // ── Lurker (tempvoice_lurkers) ──────────────────────────────────────────
+
+    pub async fn add_lurker(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+        original_nick: Option<String>,
+    ) -> Result<(), DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO tempvoice_lurkers(guild_id, channel_id, user_id, original_nick)
+                     VALUES(?1, ?2, ?3, ?4)
+                     ON CONFLICT(channel_id, user_id) DO UPDATE SET
+                       original_nick = excluded.original_nick",
+                    rusqlite::params![guild_id, channel_id, user_id, original_nick],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
+    /// Some(original_nick) wenn der User Lurker in diesem Kanal ist.
+    pub async fn get_lurker(&self, channel_id: u64, user_id: u64) -> Option<Option<String>> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT original_nick FROM tempvoice_lurkers
+                      WHERE channel_id = ?1 AND user_id = ?2",
+                    rusqlite::params![channel_id, user_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn remove_lurker(&self, channel_id: u64, user_id: u64) -> Result<(), DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM tempvoice_lurkers WHERE channel_id = ?1 AND user_id = ?2",
+                    rusqlite::params![channel_id, user_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
     // ── Region-Präferenz (DE/EU) ───────────────────────────────────────────
 
     pub async fn region_pref(&self, owner_id: u64) -> Result<String, DbError> {

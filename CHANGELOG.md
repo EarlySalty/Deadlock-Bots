@@ -1,3 +1,11 @@
+## #91 — Rust-Neuaufbau: der Lurker-Modus
+
+**Ausgangslage:** Der 👻-Lurker-Knopf im Lane-Panel war im Rust-Port noch gesperrt. Lurker sind stille Zuhörer: Sie bekommen die Lurker-Rolle, heißen sichtbar „Lurker", und das Lane-Limit wächst um eins, damit sie keinen Spielplatz blockieren — beim Verlassen wird alles automatisch zurückgebaut.
+
+**Geändert:** Komplett in Rust angeschlossen, mit derselben Umschalt-Logik (Knopf an = Rolle + Name + Limit hoch, Knopf aus = alles zurück inklusive des gespeicherten Original-Namens), demselben Datenbank-Merkzettel und denselben Sicherungen: Schlägt die Rollen-Vergabe fehl, wird der Datenbank-Eintrag zurückgerollt; der Namens-Wechsel ist unkritisch und bricht nichts ab. Auch das automatische Aufräumen beim Verlassen der Lane hängt jetzt am zentralen Ereignis-Verteiler.
+
+**Wie es jetzt funktioniert:** Wie vorher — Knopf drücken macht dich zum Lurker, nochmal drücken (oder die Lane verlassen) macht es rückgängig. Damit sind von den Panel-Funktionen nur noch der Lanes-Modus-Wechsel und die Min-Rang-Auswahl offen.
+
 ## #90 — Rust-Neuaufbau: Lane-Tag-Filter angeschlossen
 
 **Ausgangslage:** Lane-Besitzer können ihre Lane filtern („nur 25+", „Ragebaiter blockieren") — der Filter setzt Verbinden-Sperren für betroffene Nutzer und trennt sie beim Beitritt. Im Rust-Port war der Panel-Button bisher als „noch nicht freigeschaltet" markiert, weil das Tag-System fehlte.

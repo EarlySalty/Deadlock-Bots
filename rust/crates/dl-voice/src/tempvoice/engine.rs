@@ -59,6 +59,30 @@ pub trait LanePort: Send + Sync {
         reason: &str,
     ) -> Result<(), String>;
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
+    async fn remove_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
+    /// nick=None setzt den Nick zurück.
+    async fn set_nick(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        nick: Option<&str>,
+        reason: &str,
+    ) -> Result<(), String>;
+    async fn member_nick(&self, guild_id: u64, user_id: u64) -> Option<String>;
+    async fn channel_user_limit(&self, guild_id: u64, channel_id: u64) -> Option<i64>;
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String>;
@@ -156,6 +180,7 @@ impl TempVoiceConfig {
 }
 
 pub const ENGLISH_ONLY_ROLE_ID: u64 = 1309741866098491479;
+pub const LURKER_ROLE_ID: u64 = 1447747896253485127;
 
 #[derive(Debug, Clone)]
 struct LaneState {
@@ -348,6 +373,8 @@ impl TempVoiceEngine {
         if !self.is_managed_lane(guild_id, channel_id).await {
             return;
         }
+        self.cleanup_lurker_on_leave(guild_id, channel_id, user_id)
+            .await;
         let members = self.port.channel_members(guild_id, channel_id).await;
 
         let was_owner = {
@@ -824,6 +851,120 @@ impl TempVoiceEngine {
         Ok(())
     }
 
+    /// Lurker-Status umschalten (wie util.toggle_lurker) → Antworttext.
+    pub async fn toggle_lurker(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> (bool, String) {
+        let display = self
+            .port
+            .member_display_name(guild_id, user_id)
+            .await
+            .unwrap_or_else(|| format!("User {user_id}"));
+        let limit = self
+            .port
+            .channel_user_limit(guild_id, channel_id)
+            .await
+            .unwrap_or(0);
+
+        if let Some(original_nick) = self.store.get_lurker(channel_id, user_id).await {
+            // Lurker entfernen: Rolle weg, Nick zurück, Limit-1
+            if let Err(err) = self
+                .port
+                .remove_role(
+                    guild_id,
+                    user_id,
+                    LURKER_ROLE_ID,
+                    "TempVoice: Remove Lurker",
+                )
+                .await
+            {
+                return (false, format!("Konnte Rolle nicht entfernen: {err}"));
+            }
+            let _ = self
+                .port
+                .set_nick(
+                    guild_id,
+                    user_id,
+                    original_nick.as_deref(),
+                    "TempVoice: Restore Nick",
+                )
+                .await;
+            if limit > 0 {
+                let _ = self
+                    .port
+                    .set_user_limit(channel_id, (limit - 1).max(0), "TempVoice: Lurker removed")
+                    .await;
+            }
+            let _ = self.store.remove_lurker(channel_id, user_id).await;
+            return (true, format!("{display} ist kein Lurker mehr."));
+        }
+
+        // Lurker hinzufügen: DB zuerst (Rollback bei Rollen-Fehler), Nick, Limit+1
+        let original_nick = self.port.member_nick(guild_id, user_id).await;
+        if self
+            .store
+            .add_lurker(guild_id, channel_id, user_id, original_nick)
+            .await
+            .is_err()
+        {
+            return (
+                false,
+                "Datenbankfehler beim Hinzufügen des Lurker-Status.".to_string(),
+            );
+        }
+        if let Err(err) = self
+            .port
+            .add_role(guild_id, user_id, LURKER_ROLE_ID, "TempVoice: Make Lurker")
+            .await
+        {
+            let _ = self.store.remove_lurker(channel_id, user_id).await;
+            return (false, format!("Konnte Rolle nicht vergeben: {err}"));
+        }
+        let _ = self
+            .port
+            .set_nick(guild_id, user_id, Some("Lurker"), "TempVoice: Make Lurker")
+            .await;
+        if limit > 0 {
+            let _ = self
+                .port
+                .set_user_limit(channel_id, (limit + 1).min(99), "TempVoice: Lurker added")
+                .await;
+        }
+        (true, format!("{display} ist jetzt Lurker."))
+    }
+
+    /// Lurker-Aufräumen beim Verlassen (wie der on_voice_state_update-Block).
+    async fn cleanup_lurker_on_leave(&self, guild_id: u64, channel_id: u64, user_id: u64) {
+        let Some(original_nick) = self.store.get_lurker(channel_id, user_id).await else {
+            return;
+        };
+        let _ = self.store.remove_lurker(channel_id, user_id).await;
+        let _ = self
+            .port
+            .remove_role(guild_id, user_id, LURKER_ROLE_ID, "TempVoice: Lurker left")
+            .await;
+        let _ = self
+            .port
+            .set_nick(
+                guild_id,
+                user_id,
+                original_nick.as_deref(),
+                "TempVoice: Lurker left",
+            )
+            .await;
+        if let Some(limit) = self.port.channel_user_limit(guild_id, channel_id).await {
+            if limit > 0 {
+                let _ = self
+                    .port
+                    .set_user_limit(channel_id, (limit - 1).max(0), "TempVoice: Lurker left")
+                    .await;
+            }
+        }
+    }
+
     pub async fn cleanup_lane(&self, channel_id: u64, reason: &str) {
         {
             let mut state = self.state.lock().await;
@@ -1099,6 +1240,39 @@ mod tests {
         }
         async fn member_display_name(&self, _guild_id: u64, user_id: u64) -> Option<String> {
             Some(format!("User {user_id}"))
+        }
+        async fn add_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn remove_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_nick(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _nick: Option<&str>,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn member_nick(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            None
+        }
+        async fn channel_user_limit(&self, _guild_id: u64, _channel_id: u64) -> Option<i64> {
+            Some(6)
         }
         async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
             self.voice
