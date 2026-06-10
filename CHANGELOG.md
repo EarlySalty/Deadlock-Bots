@@ -1,3 +1,11 @@
+## #96 — Rust-Neuaufbau Phase 7 (Teil 2): die Coaching-Brücke
+
+**Ausgangslage:** Der Bot hält die Coaching-Plattform der Website synchron: Alle zehn Minuten übermittelt er das Coach-Roster (wer die Coach-Rolle trägt, mit Namen und Avatar), und jede Minute holt er fällige Termin-Benachrichtigungen ab und stellt sie als DM zu — Termin geplant, Erinnerung zwei Stunden vorher, Absage.
+
+**Geändert:** Beide Abläufe sind in Rust portiert: gleiche Schnittstellen und Kopfzeilen, gleiche Token-Kette, die DM-Texte wortgleich inklusive Berlin-Zeitformat („Mi, 10.06. um 19:00 Uhr", sommer- wie winterzeitfest), und die zwei wichtigen Schutzregeln des Originals: Ein leeres Coach-Roster wird nie übermittelt (sonst würde ein Discord-Schluckauf alle Coaches von der Website wischen), und Nutzer mit deaktivierten DMs werden als zugestellt bestätigt statt endlos erneut versucht.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Datums-Formatierung und alle drei DM-Texte sind mit Tests gegen das Original-Format abgesichert (inklusive Sommer-/Winterzeit-Wechsel). Die Loops starten erst mit der Gateway-Übernahme.
+
 ## #95 — Rust-Neuaufbau Phase 6 (Teil 4): der Sicherheits-Wächter
 
 **Ausgangslage:** Der Sicherheits-Wächter schützt den Server vor Scam-Wellen und gekaperten Accounts über drei Pfade: das deterministische Takeover-Muster (Bilder in mehreren Kanälen binnen 30 Sekunden — sofortige Quarantäne ohne KI-Urteil), Mehrkanal-Bursts junger Accounts (mit KI-Bestätigung ab 78 % Sicherheit) und Keyword-Einzeltreffer (Telegram-Werbung, Gewinnversprechen und Co.), bei denen etablierte Accounts einen reversiblen Vorschlag bekommen statt des direkten Vollzugs.

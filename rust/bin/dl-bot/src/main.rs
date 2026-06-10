@@ -246,6 +246,21 @@ async fn main() -> anyhow::Result<()> {
         }
         dl_moderation::guard::spawn(security_guard.clone(), &dispatcher);
 
+        // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Termin-DMs 60s
+        match dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok()) {
+            Some(client) => {
+                let sync = Arc::new(dl_community::coaching::CoachingSync {
+                    client,
+                    port: Arc::new(modglue::CoachingGlue {
+                        adapter: adapter.clone(),
+                        guild_id: 1289721245281292288,
+                    }),
+                });
+                dl_community::coaching::spawn(sync);
+            }
+            None => tracing::info!("Coaching-Sync inaktiv (kein interner Token)"),
+        }
+
         // AI-Moderator (6): Scan-Kanal-Subscriber
         if let Some(moderator) = &moderator {
             if let Err(err) = moderator.store.ensure_schema().await {

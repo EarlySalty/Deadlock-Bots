@@ -332,3 +332,59 @@ impl InteractionHandler for GuardReviewHandler {
         }
     }
 }
+
+// ── Coaching-Plattform-Anbindung ───────────────────────────────────────────
+
+pub struct CoachingGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub guild_id: u64,
+}
+
+#[async_trait::async_trait]
+impl dl_community::coaching::CoachingPort for CoachingGlue {
+    async fn coach_members(&self, role_id: u64) -> Vec<(u64, String, String, String)> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(self.guild_id)) else {
+            return Vec::new();
+        };
+        let role = serenity::all::RoleId::new(role_id);
+        guild
+            .members
+            .values()
+            .filter(|member| member.roles.contains(&role))
+            .map(|member| {
+                let avatar = member
+                    .user
+                    .avatar_url()
+                    .unwrap_or_else(|| member.user.default_avatar_url());
+                let avatar = if avatar.contains('?') {
+                    format!("{avatar}&size=256")
+                } else {
+                    format!("{avatar}?size=256")
+                };
+                (
+                    member.user.id.get(),
+                    member.user.name.to_string(),
+                    member.display_name().to_string(),
+                    avatar,
+                )
+            })
+            .collect()
+    }
+
+    async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+            Ok(_) => Ok(true),
+            // 50007 = Cannot send messages to this user (DMs zu) → ackbar
+            Err(err) if err.to_string().contains("50007") => Ok(false),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
