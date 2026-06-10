@@ -818,3 +818,88 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
             .map(|m| m.display_name().to_string())
     }
 }
+
+/// Router-Anbindung.
+pub struct RouterGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl crate::router::RouterPort for RouterGlue {
+    async fn category_lanes(&self, guild_id: u64, category_id: u64) -> Vec<(u64, Vec<u64>)> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .channels
+            .values()
+            .filter(|c| {
+                c.kind == serenity::all::ChannelType::Voice
+                    && c.parent_id == Some(ChannelId::new(category_id))
+            })
+            .map(|c| {
+                let members: Vec<u64> = guild
+                    .voice_states
+                    .iter()
+                    .filter(|(_, vs)| vs.channel_id == Some(c.id))
+                    .map(|(user_id, _)| user_id.get())
+                    .collect();
+                (c.id.get(), members)
+            })
+            .collect()
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .voice_states
+            .get(&UserId::new(user_id))?
+            .channel_id
+            .map(|c| c.get())
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Router: passende Lane gefunden"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_dm(&self, user_id: u64, text: String) {
+        if let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            let mut body = serde_json::Map::new();
+            body.insert("content".into(), json!(text));
+            let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+        }
+    }
+}

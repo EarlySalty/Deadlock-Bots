@@ -6,6 +6,14 @@
 
 **Wie es jetzt funktioniert:** Klick auf „Steam verknüpfen" oder „Rang prüfen" leitet wieder sauber an den Steam-Dienst weiter und antwortet im Chat. Erkennt der SecurityGuard eine Scam-Nachricht (egal ob Einzelfall oder Nachrichten-Serie), wird sie wieder zuverlässig entfernt.
 
+## #100 — Rust-Neuaufbau: der Lane-Router
+
+**Ausgangslage:** Der Router-Voice-Kanal sortiert Spieler nach ihrer gespeicherten Vorliebe (Ranked, Casual, Street Brawl) automatisch in eine passende Lane ein — bevorzugt zu bekannten Mitspielern aus dem Co-Spieler-Graphen, sonst in die erste Lane mit Platz, und wenn nichts passt, wird eine neue erstellt. Ranked verlangt eine verifizierte Rang-Rolle, sonst gibt es eine freundliche DM mit dem Verifikations-Hinweis.
+
+**Geändert:** Komplett in Rust angeschlossen — gleiche Vorlieben-Tabelle, gleiche Panel-Knöpfe (Modus-Wahl plus Auto-Join-Schalter, Kennungen unverändert), gleiche Auswahl-Logik samt Co-Spieler-Vorrang aus dem bereits portierten Aktivitäts-Graphen, gleiche Lane-Neuerstellung über die TempVoice-Maschine (die dafür gelernt hat, Lanes auch für Nutzer zu bauen, die im Router statt im Sammel-Kanal stehen). Wer den Modus im Panel wählt, während er im Router steht, wird sofort einsortiert. Damit ist der letzte als Umstiegs-Voraussetzung markierte Baustein abgehakt; einzige dokumentierte Rest-Lücke des Voice-Bereichs ist die separate Anfänger-Einsortierung samt ihrer Spezial-Lanes.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Lane-Wahl ist getestet — Sammel-Kanäle und volle oder leere Lanes werden nie gewählt, Mitspieler-Lanes gewinnen vor der erstbesten. Der Router hängt als Subscriber am zentralen Ereignis-Verteiler wie alle anderen Voice-Bausteine.
+
 ## #99 — Rust-Neuaufbau: die Feedback-DMs nach den ersten Voice-Runden
 
 **Ausgangslage:** Wer seine allererste Voice-Session (mindestens 5 Minuten, mit Mitspielern) beendet, bekommt eine freundliche DM mit Feedback-Knopf und einem 4-Fragen-Formular; nach mindestens vier verschiedenen Voice-Tagen folgt einmalig eine zweite, kürzere Nachfrage. Die Antworten landen in der Datenbank und beim Owner. Das war die letzte offene Lücke des Voice-Tracker-Ports.

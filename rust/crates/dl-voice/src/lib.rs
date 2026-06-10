@@ -13,6 +13,7 @@ pub mod feedback;
 pub mod glue;
 pub mod nudge;
 pub mod rank;
+pub mod router;
 pub mod status;
 pub mod tempvoice;
 pub mod tracker;

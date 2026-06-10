@@ -115,6 +115,25 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
 
+    // Aktivitäts-Analyzer (5) — auch Co-Spieler-Quelle für den Router
+    let activity = dl_activity::analyzer::ActivityAnalyzer::new(
+        db.clone(),
+        Arc::new(dl_activity::glue::CacheVoiceGroups {
+            adapter: adapter.clone(),
+        }),
+    );
+
+    // Lane-Router (4c-Rest) — Panel-Buttons brauchen den Interaction-Router
+    let lane_router = dl_voice::router::LaneRouter::new(
+        db.clone(),
+        Arc::new(dl_voice::glue::RouterGlue {
+            adapter: adapter.clone(),
+        }),
+        tempvoice.clone(),
+        Some(activity.clone()),
+    );
+    dl_voice::router::register(&mut router, lane_router.clone());
+
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
         db.clone(),
@@ -291,14 +310,11 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("AI-Moderator inaktiv (kein MiniMax-Key)");
         }
 
-        // Aktivitäts-Analyzer (5): Muster + Co-Spieler-Graph
-        let activity = dl_activity::analyzer::ActivityAnalyzer::new(
-            db.clone(),
-            Arc::new(dl_activity::glue::CacheVoiceGroups {
-                adapter: adapter.clone(),
-            }),
-        );
-        dl_activity::analyzer::spawn(activity);
+        // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
+        dl_activity::analyzer::spawn(activity.clone());
+
+        // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
+        dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
         // Voice-Status-Worker (4c): LiveMatch-Suffixe an Lane-Namen
         let status_worker = dl_voice::status::VoiceStatusWorker::new(

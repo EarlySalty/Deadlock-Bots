@@ -482,6 +482,19 @@ impl TempVoiceEngine {
 
     /// Join-to-create (Kern von `_create_lane`).
     async fn create_lane(self: &Arc<Self>, guild_id: u64, user_id: u64, staging_id: u64) {
+        self.create_lane_from(guild_id, user_id, staging_id, staging_id)
+            .await;
+    }
+
+    /// Lane nach Staging-Regeln erstellen, während der User in
+    /// `expected_channel_id` steht (Router-VC ≠ Staging).
+    pub async fn create_lane_from(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        staging_id: u64,
+        expected_channel_id: u64,
+    ) {
         // Doppel-Klick-Schutz pro User
         {
             let mut state = self.state.lock().await;
@@ -489,7 +502,9 @@ impl TempVoiceEngine {
                 return;
             }
         }
-        let result = self.create_lane_inner(guild_id, user_id, staging_id).await;
+        let result = self
+            .create_lane_inner(guild_id, user_id, staging_id, expected_channel_id)
+            .await;
         self.state.lock().await.creating.remove(&user_id);
         if let Err(err) = result {
             tracing::warn!(%err, user_id, staging_id, "TempVoice: Lane-Erstellung fehlgeschlagen");
@@ -501,9 +516,10 @@ impl TempVoiceEngine {
         guild_id: u64,
         user_id: u64,
         staging_id: u64,
+        expected_channel_id: u64,
     ) -> Result<(), String> {
-        // User noch im Staging?
-        if self.port.member_voice_channel(guild_id, user_id).await != Some(staging_id) {
+        // User noch im erwarteten Kanal (Staging bzw. Router-VC)?
+        if self.port.member_voice_channel(guild_id, user_id).await != Some(expected_channel_id) {
             return Ok(());
         }
         let rules = self.config.rules_for_staging(staging_id);
@@ -589,8 +605,8 @@ impl TempVoiceEngine {
             tracing::warn!(%err, lane_id, "TempVoice: Lane-Persist fehlgeschlagen");
         }
 
-        // Owner muss noch im Staging stehen, sonst Lane wieder abbauen
-        if self.port.member_voice_channel(guild_id, user_id).await != Some(staging_id) {
+        // Owner muss noch im erwarteten Kanal stehen, sonst Lane wieder abbauen
+        if self.port.member_voice_channel(guild_id, user_id).await != Some(expected_channel_id) {
             self.cleanup_lane(lane_id, "TempVoice: Owner nicht mehr im Staging")
                 .await;
             return Ok(());
