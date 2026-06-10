@@ -136,13 +136,20 @@ async fn main() -> anyhow::Result<()> {
             dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
         }
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
-        let voice_tracker = dl_voice::tracker::VoiceTracker::new(
-            db.clone(),
-            Arc::new(dl_voice::glue::CacheSnapshot {
-                adapter: adapter.clone(),
-            }),
-        );
+        let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
+            adapter: adapter.clone(),
+        });
+        let voice_tracker =
+            dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
+
+        // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
+        let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
+            dl_voice::tempvoice::TempVoiceConfig::production(),
+            dl_voice::tempvoice::TempVoiceStore::new(db.clone()),
+            cache_snapshot,
+        );
+        dl_voice::tempvoice::engine::spawn(tempvoice, &dispatcher);
         // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
         if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
             let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());

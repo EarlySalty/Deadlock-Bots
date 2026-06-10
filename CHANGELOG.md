@@ -1,3 +1,11 @@
+## #77 — Rust-Neuaufbau Phase 4b: TempVoice-Kern
+
+**Ausgangslage:** TempVoice ist mit Abstand das größte Einzelstück des Bots (~6.700 Zeilen): Beitritt in einen Sammel-Kanal erstellt automatisch eine eigene Voice-Lane, mit Besitzer-Logik, Bann-Listen, Rang-Namen und Aufräumen.
+
+**Geändert:** Der Verhaltens-Kern ist in Rust: Join-to-create aus allen drei Sammel-Kanälen (Chill mit Rang-Namen aus Präferenz oder Rollen, Street Brawl mit festen 4er-Lanes, Comp/Ranked), Besitzer-Lebenszyklus (Auto-Übergabe an das am längsten verbundene Mitglied beim Verlassen, Besitzer-Nachtrag bei herrenlosen Lanes), Owner-Bann-Listen als Kanal-Rechte, Löschen leerer Lanes, Namens-Schutzregeln (45-Sekunden-Fenster, nie bei Live-Match-Anzeige) und die Rang-Mathematik (Haupt- und Unterränge, Kurzformen wie „Asc 3", Durchschnittsrang) — alles mit Referenzwerten aus dem Python-Original abgesichert. Datenbank-Verträge unverändert: Lanes, Bann-Listen, Voreinstellungen und Rang-Präferenzen nutzen dieselben Tabellen, Erstbesitzer und Quell-Kanal bleiben bei Updates erhalten wie bisher.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** 21 Tests decken die Kernpfade ab — Lane-Erstellung mit Rang-Namen, Präferenz schlägt Rollen, Besitzer-Übergabe an den Ältesten, Löschung beim letzten Verlassen, Bann-Rechte beim Erstellen — gespielt gegen einen Discord-Mock und die echten Tabellen-Schemata. Bewusst noch offen (vor dem Voice-Umstieg): das Steuerungs-Panel mit seinen Buttons, Tag-Filter/Lurker-Sonderlogik und die Rang-Berechtigungs-Kopplung — sie folgen mit dem Rang-Lane-Manager.
+
 ## #76 — Rust-Neuaufbau Phase 4a: das Voice-Tracking-Fundament
 
 **Ausgangslage:** Das Voice-Session-Tracking ist die Datenbasis für die halbe Community-Statistik — Bestenlisten, Heatmaps, Mitspieler-Netzwerk und Gruppensuche lesen alle aus den Tabellen, die es schreibt. Im Original ist es einer von fünf Lauschern, die sich unkoordiniert dasselbe Voice-Ereignis teilen.
