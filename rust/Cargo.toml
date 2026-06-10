@@ -9,6 +9,9 @@ members = [
     "crates/dl-webcore",
     "crates/dl-stats",
     "crates/dl-tierlist",
+    "crates/dl-broker",
+    "crates/dl-changelog",
+    "crates/dl-discord",
     "bin/dl-bot",
     "bin/dl-web",
 ]
@@ -37,6 +40,7 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # HTTP-Server (dl-web; Broker folgt in Phase 2)
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
+tower = "0.5"
 # HTTP-Client (Dashboard-Relay, deadlock-api.com)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 # Serde
@@ -49,6 +53,11 @@ hmac = "0.12"
 sha2 = "0.10"
 base64 = "0.22"
 hex = "0.4"
+# Broker: dyn-fähige async Traits + Request-IDs
+async-trait = "0.1"
+# Discord (Gateway erst beim Cutover aktiv; REST sofort nutzbar)
+serenity = { version = "0.12", default-features = false, features = ["client", "http", "gateway", "rustls_backend", "model", "cache", "utils"] }
+rand = "0.8"
 
 # Tests
 tempfile = "3"
@@ -59,6 +68,9 @@ dl-db = { path = "crates/dl-db" }
 dl-webcore = { path = "crates/dl-webcore" }
 dl-stats = { path = "crates/dl-stats" }
 dl-tierlist = { path = "crates/dl-tierlist" }
+dl-broker = { path = "crates/dl-broker" }
+dl-changelog = { path = "crates/dl-changelog" }
+dl-discord = { path = "crates/dl-discord" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

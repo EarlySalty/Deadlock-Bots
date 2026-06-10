@@ -1,6 +1,6 @@
 [package]
-name = "dl-bot"
-description = "Discord-Gateway + Master-Broker + interne APIs (Phase 2+; aktuell Gerüst)"
+name = "dl-discord"
+description = "Discord-Glue: serenity-Adapter für Broker/Changelog-Ports, Event-Dispatcher, Gateway-Setup"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -8,14 +8,12 @@ repository.workspace = true
 version = "0.1.0"
 
 [dependencies]
-dl-core.workspace = true
-dl-db.workspace = true
+async-trait.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
-dl-discord.workspace = true
-dl-webcore.workspace = true
-anyhow.workspace = true
-axum.workspace = true
+serde_json.workspace = true
+serenity.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 

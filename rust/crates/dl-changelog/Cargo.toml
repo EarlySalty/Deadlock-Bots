@@ -1,0 +1,24 @@
+[package]
+name = "dl-changelog"
+description = "Changelog-Empfänger (:8899) — API-kompatibel zu cogs/changelog_publisher.py"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tower.workspace = true

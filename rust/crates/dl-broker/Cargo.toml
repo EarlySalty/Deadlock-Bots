@@ -1,0 +1,23 @@
+[package]
+name = "dl-broker"
+description = "Master-Broker: localhost-IPC für Discord-Aktionen — API-kompatibel zu service/master_broker.py (/internal/master/v1)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+async-trait.workspace = true
+axum.workspace = true
+hex.workspace = true
+rand.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true
