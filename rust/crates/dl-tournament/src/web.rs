@@ -515,7 +515,7 @@ async fn authorize(web: &Arc<TurnierWeb>, headers: &HeaderMap) -> Result<WebSess
 }
 
 /// fromisoformat-Äquivalent (Datum oder Datum+Zeit, lokale Zeit).
-fn parse_period_dt(raw: &str) -> Option<chrono::NaiveDateTime> {
+pub fn parse_period_dt(raw: &str) -> Option<chrono::NaiveDateTime> {
     let raw = raw.trim();
     chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S"))

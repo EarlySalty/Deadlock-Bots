@@ -5,5 +5,6 @@
 //! - Custom-Games-Flow, Turnier-Store und Turnier-Web (8767) folgen.
 
 pub mod balancer;
+pub mod discord_ui;
 pub mod store;
 pub mod web;

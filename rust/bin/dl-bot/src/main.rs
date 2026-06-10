@@ -171,6 +171,32 @@ async fn main() -> anyhow::Result<()> {
         }));
     dl_community::onboarding::register(&mut router, wizard);
 
+    // Turnier-User-Flow (8): Panel-Buttons + Solo/Team-Anmeldung
+    struct TurnierRoleGlue {
+        adapter: Arc<dl_discord::DiscordAdapter>,
+    }
+    #[async_trait::async_trait]
+    impl dl_tournament::discord_ui::TurnierPort for TurnierRoleGlue {
+        async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+            self.adapter
+                .cache
+                .guild(serenity::all::GuildId::new(guild_id))
+                .and_then(|g| {
+                    g.members
+                        .get(&serenity::all::UserId::new(user_id))
+                        .map(|m| m.roles.iter().map(|r| r.get()).collect())
+                })
+                .unwrap_or_default()
+        }
+    }
+    let turnier_ui = Arc::new(dl_tournament::discord_ui::TurnierUi {
+        store: Arc::new(dl_tournament::store::TournamentStore::new(db.clone())),
+        port: Arc::new(TurnierRoleGlue {
+            adapter: adapter.clone(),
+        }),
+    });
+    dl_tournament::discord_ui::register(&mut router, turnier_ui);
+
     // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         db.clone(),

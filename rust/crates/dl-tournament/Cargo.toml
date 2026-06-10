@@ -12,6 +12,7 @@ async-trait.workspace = true
 axum.workspace = true
 chrono.workspace = true
 dl-db.workspace = true
+dl-discord.workspace = true
 hex.workspace = true
 rand.workspace = true
 rusqlite.workspace = true

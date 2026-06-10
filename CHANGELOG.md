@@ -1,3 +1,11 @@
+## #114 — Rust-Neuaufbau: die Turnier-Anmeldung
+
+**Ausgangslage:** Das Turnier-Panel mit den drei Knöpfen (Anmelden, Abmelden, Mein Status): Anmelden prüft die Turnier-Rolle, den offenen Anmeldezeitraum und die Steam-Verknüpfung, zeigt den verifizierten Rang und bietet die Wahl zwischen Solo- und Team-Anmeldung — mit Team-Auswahlmenü (volle Teams markiert) oder Team-Neuerstellung per Formular.
+
+**Geändert:** Der komplette Spieler-Flow ist in Rust portiert — gleiche Knopf-Kennungen am Panel (das bestehende Panel funktioniert weiter), alle Texte und Prüfungen identisch, gleiche Datenbank über den bereits portierten Turnier-Speicher. Die Auswahlmenüs sind dabei robuster geworden: Sie überleben jetzt Bot-Neustarts (im Original verfielen sie nach 2 Minuten). Der Admin-Bereich (Zeiträume, Team-Verwaltung, Panel-Posten) bleibt als dokumentierte Lücke in Python — gleiche Datenbasis, kein Konflikt.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Zeitraum-Prüfung (offen/zu/abgelaufen/fehlend), Rang-Anzeige, Knopf-Kennungen und die Erfolgs-Embeds sind getestet; Anmeldungen laufen über denselben getesteten Speicher wie das Turnier-Web.
+
 ## #113 — Rust-Neuaufbau: das Coaching-System
 
 **Ausgangslage:** Das Herzstück des Coaching-Angebots: Über das Panel füllt man ein 5-Felder-Formular aus (Rang, Held, Verfügbarkeit, Spielzeit, Probleme), eine AI fasst die Anfrage für die Coaches zusammen (und filtert Unsinn-Anfragen komplett aus), und der Post im Coaching-Kanal wird fair rotierend für 24 Stunden einem Coach reserviert — wer am längsten keine Zuweisung hatte, ist dran. Der Coach übernimmt per Knopf: Session wird angelegt, der Spieler bekommt die Coaching-Rolle und eine DM. Bricht der Coach ab, weil sich der Spieler nicht meldet, gibt es eine 7-Tage-Sperre.

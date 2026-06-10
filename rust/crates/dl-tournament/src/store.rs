@@ -31,6 +31,24 @@ pub fn normalize_rank(raw: &str) -> &'static str {
         .unwrap_or(RANK_KEYS[0])
 }
 
+/// Anzeigename eines Rang-Keys (wie tstore.rank_label: capitalize).
+pub fn rank_label(rank_key: &str) -> &'static str {
+    match normalize_rank(rank_key) {
+        "initiate" => "Initiate",
+        "seeker" => "Seeker",
+        "alchemist" => "Alchemist",
+        "arcanist" => "Arcanist",
+        "ritualist" => "Ritualist",
+        "emissary" => "Emissary",
+        "archon" => "Archon",
+        "oracle" => "Oracle",
+        "phantom" => "Phantom",
+        "ascendant" => "Ascendant",
+        "eternus" => "Eternus",
+        _ => "Obscurus",
+    }
+}
+
 pub fn rank_value(rank_key: &str) -> i64 {
     let key = normalize_rank(rank_key);
     RANK_KEYS.iter().position(|k| *k == key).unwrap_or(0) as i64 + 1
