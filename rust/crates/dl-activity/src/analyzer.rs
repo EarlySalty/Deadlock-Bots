@@ -250,6 +250,48 @@ impl ActivityAnalyzer {
     }
 }
 
+/// member_events-Basis-Writer: join/remove aus dem Dispatcher persistieren.
+/// Bewusste Interim-Lücke (dokumentiert in docs/06): keine Invite-
+/// Attribution — `metadata` bleibt leer, die Join-Quellen-Auswertung zählt
+/// diese Joins als „Unbekannt", bis das Invite-Snapshot-Diffing portiert ist.
+pub fn spawn_member_events(
+    db: dl_db::Db,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = dispatcher.subscribe_members();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => {
+                    let (guild_id, user_id, event_type) = match event {
+                        dl_discord::MemberEvent::Join { guild_id, user_id } => {
+                            (guild_id, user_id, "join")
+                        }
+                        dl_discord::MemberEvent::Remove { guild_id, user_id } => {
+                            (guild_id, user_id, "leave")
+                        }
+                    };
+                    let result = db
+                        .write(move |conn| {
+                            conn.execute(
+                                "INSERT INTO member_events(user_id, guild_id, event_type, metadata)
+                                 VALUES(?1, ?2, ?3, NULL)",
+                                rusqlite::params![user_id, guild_id, event_type],
+                            )
+                            .map(|_| ())
+                        })
+                        .await;
+                    if let Err(err) = result {
+                        tracing::warn!(%err, "member_events-Insert fehlgeschlagen");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 pub fn spawn(analyzer: Arc<ActivityAnalyzer>) -> Vec<tokio::task::JoinHandle<()>> {
     let pattern = analyzer.clone();
     let pattern_task = tokio::spawn(async move {

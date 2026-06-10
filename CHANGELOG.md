@@ -1,3 +1,11 @@
+## #105 — Rust-Neuaufbau: Beitritts-Protokoll und eine wichtige Umstiegs-Korrektur
+
+**Ausgangslage:** Beim geplanten Teil-Umstieg wäre ein stilles Problem entstanden: Der alte Aktivitäts-Analyzer und sein neues Rust-Pendant hätten beide den Mitspieler-Zähler hochgezählt — alle Werte doppelt. Außerdem schreibt bisher nur der alte Analyzer die Beitritts-/Austritts-Ereignisse, auf denen die Join-Quellen-Auswertung und die Bindungs-Funktionen aufbauen.
+
+**Geändert:** Die Umstiegs-Checkliste warnt jetzt ausdrücklich, dass der alte Analyzer beim Umstieg abgeschaltet werden muss, und der Rust-Bot schreibt die Beitritts-/Austritts-Ereignisse selbst weiter (gleiche Tabelle). Ehrlich dokumentierte Übergangs-Lücke: Die Herkunfts-Zuordnung neuer Beitritte (welcher Einladungs-Link) fehlt noch — solche Beitritte zählen als „Unbekannt", bis das Einladungs-Abgleich-Verfahren portiert ist. Die Checkliste wurde außerdem auf den aktuellen Stand gebracht: Alle drei ursprünglichen Umstiegs-Voraussetzungen sind gebaut, es gibt keine Blocker mehr.
+
+**Wie es jetzt funktioniert:** Nach dem Umstieg gehen keine Beitritts-Daten verloren und nichts wird doppelt gezählt.
+
 ## #104 — Rust-Neuaufbau: die Website-Invites
 
 **Ausgangslage:** Jede Website-Unterseite (Landing, Streamer, Mitspieler, Coaching, Helden, Guides) hat ihren eigenen permanenten Einladungs-Link in den Server — so lässt sich nachvollziehen, über welche Seite neue Mitglieder kommen. Der Bot prüft beim Start, ob die gespeicherten Codes noch existieren, und erstellt fehlende neu. Dazu gehört die Join-Quellen-Auswertung, die Beitritte nach Herkunft aufschlüsselt (Website-Seite, Vanity-Link, Twitch-Streamer, persönliche Einladungen …).

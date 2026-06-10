@@ -327,6 +327,7 @@ async fn main() -> anyhow::Result<()> {
 
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
+        dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);

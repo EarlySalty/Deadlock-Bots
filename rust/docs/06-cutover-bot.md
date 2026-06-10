@@ -1,6 +1,6 @@
 # Bot-Cutover: dl-bot übernimmt vom Python-Bot
 
-Stand: 2026-06-10 (nach #98). Jeder Schritt ist user-gated — nichts hiervon
+Stand: 2026-06-10 (nach #104). Jeder Schritt ist user-gated — nichts hiervon
 passiert ohne Nanis Freigabe.
 
 ## Was dl-bot beim Flip übernimmt
@@ -12,7 +12,10 @@ passiert ohne Nanis Freigabe.
 | Twitch-Live-Buttons + Klick-Tracking | dl-bridges::twitch | twitch/live_bridge |
 | Streamer-Link-Matcher (6h + AI-Scoring) | dl-bridges::matcher + dl-ai | twitch/streamer_link_matcher |
 | Voice-Session-Tracking | dl-voice::tracker | voice_activity_tracker |
-| TempVoice (Join-to-create, Panel, Tag-Filter, Lurker, Min-Rang) | dl-voice::tempvoice | tempvoice/* (außer Router/Duo/NewPlayer, s. Lücken) |
+| TempVoice komplett (Panel 100 %, Tag-Filter, Lurker, Min-Rang, Mode-Switch) | dl-voice::tempvoice | tempvoice/core+interface+util |
+| Lane-Router + Adaptive Lanes (NewPlayer/Duo/Sortierung) | dl-voice::router + ::adaptive | tempvoice/router*+duo_lanes+new_player_lanes+lane_sorting |
+| Feedback-DMs (Erst-/Zweit-Session) | dl-voice::feedback | (Teil von voice_activity_tracker) |
+| Website-Invites (Lifecycle) | dl-community::invites | website_invite_cog |
 | LiveMatch-Suffixe | dl-voice::status | deadlock_voice_status |
 | Rang-Anker auf Comp-Lanes | dl-voice::rank | rank_voice_manager |
 | Steam-Link-Nudge | dl-voice::nudge | steam_link_voice_nudge |
@@ -45,9 +48,7 @@ tierlist_public_cog, turnier_public_cog.
 ## Bekannte Lücken beim Flip (bewusst, dokumentiert)
 
 Funktional kleiner als das Original — Nutzer merken ggf.:
-- **Router-/Duo-/NewPlayer-Lanes** + Panel `tv_mode_switch_*` (einzige
-  offene Panel-Funktion).
-- **Feedback-DMs** nach der ersten Voice-Session (+ vstats-Commands).
+- **vstats-/vleaderboard-Text-Commands** des Trackers (Anzeige-Only).
 - **Onboarding-Kanal-Flow**: Schritt-Navigation antwortet mit
   Umbau-Hinweis; Regelbestätigung/Rolle funktioniert.
 - **AI-Moderation**: Kontext-Backfill, Bild-Checks, Tone-Tag-Schwellen
@@ -62,14 +63,22 @@ Funktional kleiner als das Original — Nutzer merken ggf.:
   weiterlaufen lassen; Web + Store + Balancer sind in Rust.
 - **Dashboard 8766** (Phase 9, nicht begonnen) — Python behält es.
 
+**WICHTIG — user_activity_analyzer MUSS geblocklistet werden:** Sein
+10-min-Co-Spieler-Tracker und der Rust-Tracker schreiben beide
+inkrementell in `user_co_players` — parallel laufen = Doppelzählung.
+Rust übernimmt Patterns + Co-Spieler + member_events-Basis (join/leave);
+Interim-Lücken bis zum Analyzer-Rest-Port: Invite-Attribution der Joins
+(zählen als „Unbekannt"), Text-Sessions, Retention-Hooks.
+
 → Empfehlung: Teil-Cutover. Blocklist nur für die Tabelle oben; die
 Lücken-Cogs laufen im Python-Bot weiter (er bleibt ohne Gateway-Konflikt
 lauffähig, solange seine verbleibenden Cogs keine Voice/Message-Events
 der portierten Domänen anfassen — Voice-Events braucht KEINER der
 verbleibenden Cogs außer customgames/Router: vor dem Flip prüfen).
 
-## Vor dem Flip noch bauen (Reihenfolge nach Risiko)
+## Vor dem Flip noch bauen
 
-1. Router/Duo/NewPlayer-Lanes (einziger verbleibender Voice-Konsument).
-2. Feedback-DM-System (user-sichtbar nach Cutover).
-3. LFG-Routing-Antworten (user-sichtbar im LFG-Kanal).
+Keine Blocker mehr — alle drei ursprünglichen Voraussetzungen (Router-
+Lanes, Feedback-DMs, LFG-Routing) sind gebaut. Optional vor dem Flip:
+LFG-Antwort-Embed (sonst bleibt lfg.py in Python aktiv — Voice-frei,
+kein Konflikt).
