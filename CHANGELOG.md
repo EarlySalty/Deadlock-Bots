@@ -1,3 +1,11 @@
+## #109 — Rust-Neuaufbau: die LFG-Antwort komplett
+
+**Ausgangslage:** Nach der Routing-Entscheidung (#103) fehlte noch die sichtbare Antwort der Gruppensuche: das Lobby-Finder-Embed mit bis zu drei Vorschlägen (Punktesystem: bekannte Mitspieler, Routing-Treffer, Belegung, Rang-Nähe; eng passende Lanes gewinnen allein), die sechs Begrüßungs-Varianten (Anfänger mit Coaching-Tipp, gefundene Lobbys, leere Lage), die Feld-Texte (Belegung, Durchschnittsrang, „etwas über deinem Rang"-Warnung, anwesende Bekannte, Voll-Hinweis) und der „eigene Lobby aufmachen"-Verweis auf den passenden Sammel-Kanal.
+
+**Geändert:** Diese komplette Antwort-Schicht ist als reine, testbare Logik in Rust portiert — Texte wortgleich, Bewertungs-Formel zahlengleich, Auswahl-Regeln identisch (inklusive der Feinheit, dass mit bekanntem Rang genau EIN eng passender Vorschlag gezeigt wird statt dreien). Auch die Anfänger-Erkennung aus dem Nachrichtentext („bin neu", „Anfänger" …) ist dabei.
+
+**Wie es jetzt funktioniert:** Die LFG-Kette ist in Rust jetzt von der Erkennung über die Entscheidung bis zur fertigen Antwort durchgängig vorhanden und getestet; es fehlt nur noch das dünne Anschluss-Stück, das Nachrichten aus dem Suche-Kanal einsammelt und das Embed postet.
+
 ## #108 — Rust-Neuaufbau: der FAQ-Chat und der Ticket-Auto-Helfer
 
 **Ausgangslage:** Über das FAQ-Panel bekommt jeder auf Knopfdruck einen privaten Chat-Kanal, in dem ein Bot Fragen zum Server beantwortet — mit der Server-Dokumentation als Wissensbasis, strikten Sicherheitsregeln (keine internen Details, nichts erfinden) und Gesprächs-Gedächtnis für Rückfragen. Chats schließen nach 24 Stunden oder per Knopf. Zusätzlich liest der Ticket-Auto-Helfer die erste Nachricht in neuen Support-Tickets mit: Kann er das Anliegen aus der Doku klar lösen, antwortet er sofort — sonst schweigt er und überlässt das Ticket den Menschen.

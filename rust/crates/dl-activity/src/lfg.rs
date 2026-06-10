@@ -375,11 +375,22 @@ pub struct LaneInfo {
     pub avg_rank_value: f64,
     /// Anzahl bekannter Mitspieler des Suchenden in dieser Lane.
     pub co_players_present: usize,
+    /// Anzeige-Felder für den Antwort-Embed.
+    pub name: String,
+    pub avg_rank_label: String,
+    pub category_id: u64,
+    pub position: i64,
+    pub is_staging: bool,
+    /// Namen der anwesenden bekannten Mitspieler (max. 3 genutzt).
+    pub co_player_names: Vec<String>,
 }
 
 impl LaneInfo {
     fn has_space(&self) -> bool {
         self.member_count < self.user_limit
+    }
+    fn slots_free(&self) -> usize {
+        self.user_limit.saturating_sub(self.member_count)
     }
 }
 
@@ -529,6 +540,398 @@ pub fn route_to_lane(
     }
 }
 
+// ── Antwort-Schicht (wie _handle_lfg_request; Embed als JSON) ──────────────
+
+pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
+pub const OUTPUT_CHANNEL_ID: u64 = 1376335502919335936;
+pub const LFG_LOG_CHANNEL_ID: u64 = 1374364800817303632;
+pub const NEW_PLAYER_LANE_ID: u64 = 1470126503252721845;
+pub const COACH_REQUEST_CHANNEL_ID: u64 = 1494373349944459355;
+pub const STAGING_CASUAL_ID: u64 = 1501089974093873232;
+pub const STAGING_RANKED_ID: u64 = 1412804671432818890;
+pub const STAGING_STREET_BRAWL_ID: u64 = 1357422958544420944;
+pub const MAX_JOIN_LOBBIES_SHOWN: usize = 3;
+pub const RANK_WARNING_DIFF: f64 = 1.5;
+pub const LOBBY_MAYBE_FULL_THRESHOLD: usize = 6;
+
+/// Anfänger-Anfrage (wie _is_new_player_request + _detect_new_player_text).
+pub fn is_new_player_request(content_lower: &str, rank_value: i64, has_rank_role: bool) -> bool {
+    if rank_value > 0 && rank_value <= NEW_PLAYER_MAX_RANK {
+        return true;
+    }
+    if rank_value > NEW_PLAYER_MAX_RANK || has_rank_role {
+        return false;
+    }
+    let normalized: String = content_lower
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    [
+        "neuling",
+        "neuer spieler",
+        "bin neu",
+        "neu im spiel",
+        "anfänger",
+        "anfanger",
+        "noch nicht so gut",
+        "mit einem neuling",
+        "mit nem neuling",
+        "mit 'nem neuling",
+    ]
+    .iter()
+    .any(|phrase| normalized.contains(phrase))
+}
+
+/// Lobby-Bewertung für die Top-3 (wie _score_lobby_suggestion).
+pub fn score_lobby_suggestion(
+    lane: &LaneInfo,
+    route: &RouteResult,
+    rank_value: i64,
+    rank_sub: Option<i64>,
+    is_new_player: bool,
+    has_explicit_rank: bool,
+) -> f64 {
+    let mut score = 0.0;
+    if route.target_channel_id == Some(lane.channel_id) {
+        score += 1000.0;
+    }
+    if lane.co_players_present > 0 {
+        score += 250.0 + lane.co_players_present as f64 * 25.0;
+    }
+    if lane.member_count > 0 {
+        score += 200.0 + lane.member_count as f64 * 15.0;
+    }
+    if is_new_player && lane.label == LaneLabel::NewPlayer {
+        score += 1200.0;
+    }
+    if rank_value > 0 && lane.avg_rank_value > 0.0 {
+        let rank_diff =
+            (lane.avg_rank_value - (rank_value as f64 + rank_sub.unwrap_or(5) as f64 / 10.0)).abs();
+        if rank_diff > 3.0 {
+            score -= 500.0;
+        } else if has_explicit_rank {
+            score += (140.0 - rank_diff * 35.0).max(0.0);
+        } else {
+            score += (80.0 - rank_diff * 20.0).max(0.0);
+        }
+    }
+    if has_explicit_rank && lane.label == LaneLabel::Ranked {
+        score += 50.0;
+    }
+    score
+}
+
+/// Bis zu drei Lobby-Vorschläge (wie _select_lobby_suggestions): Kandidaten
+/// filtern, nach Score sortieren; mit Rang gewinnt EINE eng passende Lane
+/// (Toleranz 1,5 mit Subrang, sonst 2,0).
+pub fn select_lobby_suggestions(
+    lanes: &[LaneInfo],
+    route: &RouteResult,
+    rank_value: i64,
+    rank_sub: Option<i64>,
+    is_new_player: bool,
+    has_explicit_rank: bool,
+) -> Vec<LaneInfo> {
+    let use_rank_filtering = has_explicit_rank || (is_new_player && rank_value > 0);
+    let mut candidates: Vec<&LaneInfo> = Vec::new();
+    let mut seen: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    for lane in lanes {
+        if !lane.has_space() || lane.is_staging || !seen.insert(lane.channel_id) {
+            continue;
+        }
+        if !use_rank_filtering {
+            if lane.member_count > 0 {
+                candidates.push(lane);
+            }
+            continue;
+        }
+        if lane.member_count == 0 {
+            continue;
+        }
+        match lane.label {
+            LaneLabel::NewPlayer => {
+                if is_new_player {
+                    candidates.push(lane);
+                }
+            }
+            LaneLabel::StreetBrawl => {
+                let wants_brawl = route.target_channel_id.is_some()
+                    && lanes.iter().any(|l| {
+                        Some(l.channel_id) == route.target_channel_id
+                            && l.label == LaneLabel::StreetBrawl
+                    });
+                if wants_brawl && rank_fits_lane(rank_value, rank_sub, lane) {
+                    candidates.push(lane);
+                }
+            }
+            LaneLabel::Casual | LaneLabel::Ranked => {
+                if rank_value > 0 && !rank_fits_lane(rank_value, rank_sub, lane) {
+                    continue;
+                }
+                if rank_value > 0
+                    && lane.avg_rank_value > 0.0
+                    && (rank_value as f64 - lane.avg_rank_value).abs() > 3.0
+                {
+                    continue;
+                }
+                candidates.push(lane);
+            }
+        }
+    }
+    let mut ranked: Vec<&LaneInfo> = candidates;
+    ranked.sort_by(|a, b| {
+        let key = |lane: &LaneInfo| {
+            (
+                score_lobby_suggestion(
+                    lane,
+                    route,
+                    rank_value,
+                    rank_sub,
+                    is_new_player,
+                    use_rank_filtering,
+                ),
+                lane.member_count as f64,
+                lane.slots_free() as f64,
+                -(lane.position as f64),
+            )
+        };
+        let (sa, ma, fa, pa) = key(a);
+        let (sb, mb, fb, pb) = key(b);
+        (sb, mb, fb, pb)
+            .partial_cmp(&(sa, ma, fa, pa))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if rank_value > 0 {
+        let tolerance = if rank_sub.is_some() { 1.5 } else { 2.0 };
+        let requester = rank_value as f64 + rank_sub.unwrap_or(5) as f64 / 10.0;
+        if let Some(best_fit) = ranked.iter().find(|lane| {
+            lane.avg_rank_value > 0.0 && (lane.avg_rank_value - requester).abs() <= tolerance
+        }) {
+            return vec![(*best_fit).clone()];
+        }
+    }
+    ranked
+        .into_iter()
+        .take(MAX_JOIN_LOBBIES_SHOWN)
+        .cloned()
+        .collect()
+}
+
+/// Anzeige-Modus (wie _resolve_mode_label).
+pub fn resolve_mode_label(
+    route: &RouteResult,
+    best_label: Option<&LaneLabel>,
+    is_new_player: bool,
+    has_active: bool,
+    has_explicit_rank: bool,
+    rank_value: i64,
+) -> &'static str {
+    let label_name = |label: &LaneLabel| match label {
+        LaneLabel::Casual => "Casual",
+        LaneLabel::Ranked => "Ranked",
+        LaneLabel::StreetBrawl => "Street Brawl",
+        LaneLabel::NewPlayer => "New Player",
+    };
+    if is_new_player {
+        return "New Player";
+    }
+    if has_active {
+        if let Some(label) = best_label {
+            return label_name(label);
+        }
+    }
+    if let Some(label) = &route.suggested_label {
+        if *label == LaneLabel::Casual && has_explicit_rank && rank_value >= 6 {
+            return "Ranked";
+        }
+        return label_name(label);
+    }
+    if has_explicit_rank && rank_value >= 6 {
+        return "Ranked";
+    }
+    "Casual"
+}
+
+/// Intro-Text (wie _compose_intro_text — alle sechs Zweige wortgleich).
+pub fn compose_intro_text(
+    user_mention: &str,
+    rank_display: &str,
+    is_new_player: bool,
+    has_active: bool,
+    new_player_lane_occupied: bool,
+    lobby_count: usize,
+) -> String {
+    let rank_part = if !rank_display.is_empty() && rank_display != "Unbekannt" {
+        format!(" ({rank_display})")
+    } else {
+        String::new()
+    };
+    let np_lane = format!("<#{NEW_PLAYER_LANE_ID}>");
+    let coach_hint = format!(
+        "\n\n💡 Allgemeiner Tipp: Movement ist in Deadlock mega wichtig — übe ruhig Dash, Slide und Air-Dash. Wenn du gezielt besser werden willst, meld dich gerne in <#{COACH_REQUEST_CHANNEL_ID}>."
+    );
+    if is_new_player {
+        if has_active && new_player_lane_occupied {
+            return format!(
+                "Hey {user_mention}!{rank_part}\nWillkommen! In der {np_lane} sind schon Leute unterwegs — spring rein und spiel mit! Dort triffst du andere, die auch gerade anfangen oder entspannt spielen wollen:{coach_hint}"
+            );
+        }
+        if has_active {
+            return format!(
+                "Hey {user_mention}!{rank_part}\nWillkommen! Ich hab Lobbys gefunden, die gut zu dir passen. Schau am besten auch mal in die {np_lane} — da sind alle super nett und helfen gerne weiter:{coach_hint}"
+            );
+        }
+        return format!(
+            "Hey {user_mention}!{rank_part}\nWillkommen! Mach einfach in {np_lane} eine Lobby auf — sobald du drin bist, sehen andere dass jemand da ist und es kommen erfahrungsgemäß schnell Leute dazu. Trau dich ruhig, hier sind alle freundlich! 👋{coach_hint}"
+        );
+    }
+    if has_active {
+        let lobby_text = if lobby_count == 1 {
+            "Ich hab eine passende Lobby für dich gefunden"
+        } else {
+            "Ich hab passende Lobbys für dich gefunden"
+        };
+        return format!("Hey {user_mention}!{rank_part}\n{lobby_text} — schau rein und spiel mit:");
+    }
+    format!(
+        "Hey {user_mention}!{rank_part}\nGerade ist noch niemand in einer Lobby, aber das heißt nicht dass keiner Bock hat!\nMach einfach eine Lane auf — erfahrungsgemäß kommen schnell Leute dazu."
+    )
+}
+
+/// Feldtext einer vorgeschlagenen Lobby (wie _build_lobby_field_value).
+pub fn build_lobby_field_value(lane: &LaneInfo, warning_line: &str) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    if lane.member_count == 0 {
+        lines.push("Noch leer — eröffne sie doch".to_string());
+    } else {
+        lines.push(format!("{} im Voice", lane.member_count));
+    }
+    lines.push(format!("Ø-Rang: {}", lane.avg_rank_label));
+    if !warning_line.is_empty() {
+        lines.push(warning_line.to_string());
+    }
+    let co_names: Vec<&String> = lane.co_player_names.iter().take(3).collect();
+    if !co_names.is_empty() {
+        let verb = if co_names.len() > 1 { "sind" } else { "ist" };
+        lines.push(format!(
+            "👥 {} {verb} auch da",
+            co_names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if lane.member_count >= LOBBY_MAYBE_FULL_THRESHOLD {
+        lines.push(
+            "⚠️ Könnte schon voll sein — schau kurz rein, sonst eigene Lobby aufmachen."
+                .to_string(),
+        );
+    }
+    lines.push(format!(
+        "\nHier klicken zum Beitreten 👉 <#{}>",
+        lane.channel_id
+    ));
+    lines.join("\n")
+}
+
+/// Staging-Kanal je Ziel-Modus (wie _resolve_staging_channel; die
+/// Kategorie-Feinsuche für SB/NP übernimmt der Aufrufer über die Lanes).
+pub fn resolve_staging_channel(preferred_label: &str, lanes: &[LaneInfo]) -> u64 {
+    match preferred_label {
+        "Ranked" => STAGING_RANKED_ID,
+        "Street Brawl" => lanes
+            .iter()
+            .find(|lane| {
+                lane.label == LaneLabel::StreetBrawl
+                    && !lane.is_staging
+                    && lane.member_count < LOBBY_MAYBE_FULL_THRESHOLD
+            })
+            .map(|lane| lane.channel_id)
+            .unwrap_or(STAGING_STREET_BRAWL_ID),
+        "New Player" => lanes
+            .iter()
+            .find(|lane| {
+                lane.label == LaneLabel::NewPlayer && lane.member_count < LOBBY_MAYBE_FULL_THRESHOLD
+            })
+            .map(|lane| lane.channel_id)
+            .unwrap_or(NEW_PLAYER_LANE_ID),
+        _ => STAGING_CASUAL_ID,
+    }
+}
+
+/// Kompletter Antwort-Embed (wie der Embed-Teil von _handle_lfg_request).
+#[allow(clippy::too_many_arguments)]
+pub fn build_lfg_reply(
+    user_mention: &str,
+    rank_display: &str,
+    rank_value: i64,
+    rank_sub: Option<i64>,
+    is_new_player: bool,
+    lanes: &[LaneInfo],
+    route: &RouteResult,
+    suggestions: &[LaneInfo],
+    preferred_label: &str,
+) -> serde_json::Value {
+    use serde_json::json;
+    let has_active = !suggestions.is_empty();
+    let new_player_lane_occupied = lanes
+        .iter()
+        .any(|lane| lane.label == LaneLabel::NewPlayer && lane.member_count > 0);
+    let mut fields: Vec<serde_json::Value> = Vec::new();
+    let requester_float = rank_value as f64 + rank_sub.unwrap_or(5) as f64 / 10.0;
+    if has_active {
+        let shown = &suggestions[..suggestions.len().min(MAX_JOIN_LOBBIES_SHOWN)];
+        for (index, lane) in shown.iter().enumerate() {
+            let status = if lane.slots_free() <= 2 {
+                "🟡"
+            } else {
+                "🟢"
+            };
+            let warning = if lane.member_count > 0
+                && rank_value > 0
+                && lane.avg_rank_value - requester_float > RANK_WARNING_DIFF
+            {
+                "⚠️ etwas über deinem Rang"
+            } else {
+                ""
+            };
+            fields.push(json!({
+                "name": format!("{status} {}", lane.name),
+                "value": build_lobby_field_value(lane, warning),
+                "inline": false,
+            }));
+            if index < shown.len() - 1 {
+                fields.push(json!({ "name": "\u{200b}", "value": "\u{200b}", "inline": false }));
+            }
+        }
+    }
+    if !is_new_player || has_active {
+        let staging_id = resolve_staging_channel(preferred_label, lanes);
+        fields.push(json!({
+            "name": "Oder eigene Lobby aufmachen?",
+            "value": format!(
+                "Wenn nichts passt, mach in <#{staging_id}> eine **{preferred_label}**-Lane auf — erfahrungsgemäß kommen schnell Leute dazu."
+            ),
+            "inline": false,
+        }));
+    }
+    let _ = route;
+    json!({
+        "title": "🎮 Lobby-Finder",
+        "description": compose_intro_text(
+            user_mention,
+            rank_display,
+            is_new_player,
+            has_active,
+            new_player_lane_occupied,
+            suggestions.len(),
+        ),
+        "color": 0xE67E22,
+        "fields": fields,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -603,6 +1006,16 @@ mod tests {
             user_limit: limit,
             avg_rank_value: avg,
             co_players_present: co,
+            name: format!("Lane {id}"),
+            avg_rank_label: if avg > 0.0 {
+                format!("{avg:.0}")
+            } else {
+                "Leer".to_string()
+            },
+            category_id: 0,
+            position: id as i64,
+            is_staging: false,
+            co_player_names: (0..co).map(|i| format!("Co{i}")).collect(),
         }
     }
 
@@ -666,6 +1079,71 @@ mod tests {
             None,
             &lane(3, LaneLabel::Ranked, 0, 6, 0.0, 0)
         ));
+    }
+
+    #[test]
+    fn antwort_schicht() {
+        // Anfänger-Erkennung
+        assert!(is_new_player_request("bin neu hier", 0, false));
+        assert!(is_new_player_request("egal", 3, true)); // Rang ≤4 reicht
+        assert!(!is_new_player_request("bin neu", 0, true)); // Rolle ohne Rang-Wert? has_rank_role blockt Text-Pfad
+        assert!(!is_new_player_request("wer bock", 9, false));
+
+        // Auswahl: enge Rang-Passung gewinnt allein (Toleranz 2.0 ohne Subrang)
+        let lanes = vec![
+            lane(1, LaneLabel::Casual, 3, 8, 9.5, 0),
+            lane(2, LaneLabel::Casual, 2, 8, 6.2, 0),
+        ];
+        let route = route_to_lane("wer bock", 6, None, &lanes);
+        let picks = select_lobby_suggestions(&lanes, &route, 6, None, false, true);
+        assert_eq!(picks.len(), 1);
+        assert_eq!(picks[0].channel_id, 2); // 6.5 vs 6.2 passt eng
+
+        // Intro-Texte: Zweige + Mehrzahl
+        let intro = compose_intro_text("@u", "Phantom 2", false, true, false, 2);
+        assert!(intro.contains("passende Lobbys"));
+        assert!(intro.contains("(Phantom 2)"));
+        let intro = compose_intro_text("@u", "Unbekannt", true, false, false, 0);
+        assert!(intro.contains("Willkommen! Mach einfach in"));
+        assert!(intro.contains("Allgemeiner Tipp: Movement"));
+
+        // Feldtext: Warnung, Co-Spieler, Voll-Hinweis
+        let mut full = lane(5, LaneLabel::Casual, 6, 8, 7.0, 2);
+        full.co_player_names = vec!["A".into(), "B".into()];
+        let value = build_lobby_field_value(&full, "⚠️ etwas über deinem Rang");
+        assert!(value.contains("6 im Voice"));
+        assert!(value.contains("⚠️ etwas über deinem Rang"));
+        assert!(value.contains("👥 A, B sind auch da"));
+        assert!(value.contains("Könnte schon voll sein"));
+        assert!(value.contains("<#5>"));
+
+        // Staging-Auflösung
+        assert_eq!(resolve_staging_channel("Ranked", &[]), STAGING_RANKED_ID);
+        assert_eq!(resolve_staging_channel("Casual", &[]), STAGING_CASUAL_ID);
+        assert_eq!(
+            resolve_staging_channel("New Player", &[]),
+            NEW_PLAYER_LANE_ID
+        );
+
+        // Kompletter Embed
+        let reply = build_lfg_reply(
+            "@u",
+            "Phantom",
+            9,
+            Some(2),
+            false,
+            &lanes,
+            &route,
+            &picks,
+            "Casual",
+        );
+        assert_eq!(reply["title"], "🎮 Lobby-Finder");
+        let fields = reply["fields"].as_array().expect("fields");
+        assert!(fields.len() >= 2); // Lobby + eigene-Lobby-Hinweis
+        assert!(fields.last().expect("last")["value"]
+            .as_str()
+            .expect("str")
+            .contains("**Casual**-Lane"));
     }
 
     #[test]
