@@ -1,3 +1,11 @@
+## #85 — Rust-Neuaufbau Phase 6 (Teil 2): der KI-Moderations-Kern
+
+**Ausgangslage:** Der KI-Moderator bewertet jede Nachricht im Haupt-Chat mit einem bewusst rau kalibrierten Regelwerk („Gaming-Ton ist normal, sei NICHT überempfindlich") und entscheidet dreistufig: eindeutige Fälle (explizites NSFW, Scam) werden ab 90 % Sicherheit sofort gelöscht, echte Verstöße ab 78 % als Vorschlag mit Bestätigen/Ban/Ablehnen-Buttons an die Mods gegeben, und Ragebait wird nur gezählt — vier Treffer in zwei Stunden eskalieren zu einem Mod-Vorschlag.
+
+**Geändert:** Dieser Kern ist in Rust portiert: das Regelwerk wortgleich, die Antwort-Auswertung mit denselben Gültigkeits-Prüfungen und Grenzwert-Klemmungen, das komplette Schwellen-Routing, das Ragebait-Zeitfenster in denselben Tabellen, die Fall-Akte (wer, was, Kategorie, Sicherheit, Mod-Entscheidung) und die Review-Buttons mit unveränderten Kennungen. Pro Nutzer gilt weiter die 2-Sekunden-Bremse, Moderatoren werden nie gescannt.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Auswertung und Routing sind mit Testfällen abgesichert — auch die Eckfälle: „delete" außerhalb der Sofort-Kategorien wird trotz 95 % nur zum Vorschlag, ungültige KI-Antworten landen sicher bei „braucht Kontext" statt in einer Aktion. Bewusst noch offen: die Kontext-Nachladung bei Grenzfällen, Bild-Bewertung und die Ton-Tag-Sonderschwellen — sie folgen mit dem Tag-System.
+
 ## #84 — Rust-Neuaufbau Phase 6 (Teil 1): die KI-Anbindung — und der Streamer-Erkenner denkt wieder mit
 
 **Ausgangslage:** Mehrere Module brauchen die MiniMax-KI: der Streamer-Erkenner für unklare Namens-Paare, die Gruppensuche für die Zweitprüfung, später Moderation und Chat. Seit dem Rust-Port des Streamer-Erkenners lief dieser im reinen Heuristik-Modus.

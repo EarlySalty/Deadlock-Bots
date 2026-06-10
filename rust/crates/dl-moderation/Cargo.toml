@@ -1,0 +1,25 @@
+[package]
+name = "dl-moderation"
+description = "AI-Moderation: Klassifikation, Schwellen-Routing, Mod-Review-Cases, Ragebait-Fenster"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+dl-ai.workspace = true
+dl-db.workspace = true
+dl-discord.workspace = true
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

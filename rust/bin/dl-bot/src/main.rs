@@ -6,6 +6,8 @@
 //! bis zum koordinierten Cutover hält der Python-Bot die Discord-Session,
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
+mod modglue;
+
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -112,6 +114,24 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
 
+    // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
+    let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|generator| {
+        let moderator = dl_moderation::AiModerator::new(
+            db.clone(),
+            generator,
+            Arc::new(modglue::ModGlue {
+                adapter: adapter.clone(),
+            }),
+        );
+        router.on_prefix(
+            "aimod:",
+            Arc::new(modglue::ReviewHandler {
+                moderator: moderator.clone(),
+            }),
+        );
+        moderator
+    });
+
     let router = Arc::new(router);
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
@@ -187,6 +207,16 @@ async fn main() -> anyhow::Result<()> {
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
+
+        // AI-Moderator (6): Scan-Kanal-Subscriber
+        if let Some(moderator) = &moderator {
+            if let Err(err) = moderator.store.ensure_schema().await {
+                tracing::warn!(%err, "Moderation: Schema-Anlage fehlgeschlagen");
+            }
+            dl_moderation::spawn(moderator.clone(), &dispatcher);
+        } else {
+            tracing::info!("AI-Moderator inaktiv (kein MiniMax-Key)");
+        }
 
         // Aktivitäts-Analyzer (5): Muster + Co-Spieler-Graph
         let activity = dl_activity::analyzer::ActivityAnalyzer::new(

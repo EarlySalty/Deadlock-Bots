@@ -323,7 +323,9 @@ name = "dl-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
+ "chrono",
  "dl-activity",
  "dl-ai",
  "dl-bridges",
@@ -332,8 +334,11 @@ dependencies = [
  "dl-core",
  "dl-db",
  "dl-discord",
+ "dl-moderation",
  "dl-voice",
  "dl-webcore",
+ "serde_json",
+ "serenity",
  "tokio",
  "tracing",
 ]
@@ -419,6 +424,22 @@ dependencies = [
  "serde_json",
  "serenity",
  "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dl-moderation"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dl-ai",
+ "dl-db",
+ "dl-discord",
+ "rusqlite",
+ "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
 ]
