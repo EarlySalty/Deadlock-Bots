@@ -202,6 +202,11 @@ class MasterBroker:
             app.add_routes(
                 [
                     web.get("/internal/master/v1/health", self._handle_health),
+                    web.get("/internal/master/v1/discord/roles", self._handle_list_roles),
+                    web.get(
+                        "/internal/master/v1/discord/role-members",
+                        self._handle_role_members,
+                    ),
                     web.post("/internal/master/v1/discord/send-message", self._handle_send_message),
                     web.post(
                         "/internal/master/v1/discord/create-channel",
@@ -1116,6 +1121,94 @@ class MasterBroker:
                 channel_id,
                 message_id,
             )
+
+    def _reject_non_loopback(self, request: web.Request) -> web.Response | None:
+        """Nur-Loopback-Check ohne Token — für read-only Diagnose-Routen."""
+        peer = self._peer_host(request)
+        if not self._is_loopback_host(peer):
+            return self._error_response(
+                request=request,
+                status=403,
+                code="forbidden",
+                message="loopback requests only",
+            )
+        return None
+
+    async def _resolve_guild_for_diagnostics(
+        self, request: web.Request
+    ) -> "discord.Guild | None":
+        """Guild aus ?guild_id= auflösen, sonst erste Guild des Bots.
+
+        Sorgt für vollständigen Member-Cache (chunk), damit role.members
+        verlässlich ist.
+        """
+        try:
+            guild_id = int(request.query.get("guild_id") or 0)
+        except (TypeError, ValueError):
+            guild_id = 0
+        guild = None
+        if guild_id:
+            guild = self.bot.get_guild(guild_id)
+        elif self.bot.guilds:
+            guild = self.bot.guilds[0]
+        if guild is not None and not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                logger.exception("Diagnose-Route: guild.chunk() fehlgeschlagen")
+        return guild
+
+    async def _handle_list_roles(self, request: web.Request) -> web.Response:
+        """Read-only: alle Rollen der Guild (id, name, position, member_count).
+
+        Loopback-only, kein Token — reine Diagnose, keine Mutation.
+        """
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        guild = await self._resolve_guild_for_diagnostics(request)
+        if guild is None:
+            return self._error_response(
+                request=request, status=404, code="not_found", message="guild not found"
+            )
+        roles = [
+            {
+                "id": str(role.id),
+                "name": role.name,
+                "position": role.position,
+                "member_count": len(role.members),
+            }
+            for role in guild.roles
+        ]
+        return web.json_response(
+            {"ok": True, "guild_id": str(guild.id), "chunked": guild.chunked, "roles": roles}
+        )
+
+    async def _handle_role_members(self, request: web.Request) -> web.Response:
+        """Read-only: Mitglieder einer Rolle (?role_id=). Loopback-only, kein Token."""
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        try:
+            role_id = int(request.query.get("role_id") or 0)
+        except (TypeError, ValueError):
+            role_id = 0
+        guild = await self._resolve_guild_for_diagnostics(request)
+        if guild is None:
+            return self._error_response(
+                request=request, status=404, code="not_found", message="guild not found"
+            )
+        role = guild.get_role(role_id) if role_id else None
+        if role is None:
+            return self._error_response(
+                request=request, status=404, code="not_found", message=f"role {role_id} not found"
+            )
+        members = [
+            {"id": str(m.id), "display_name": m.display_name} for m in role.members
+        ]
+        return web.json_response(
+            {"ok": True, "role_id": str(role.id), "name": role.name, "members": members}
+        )
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         rejected = self._authorize(request)
