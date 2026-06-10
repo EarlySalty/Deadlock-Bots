@@ -6,3 +6,4 @@
 
 pub mod analyzer;
 pub mod glue;
+pub mod lfg;

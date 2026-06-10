@@ -1,3 +1,11 @@
+## #83 — Rust-Neuaufbau Phase 5 (Teil 2): die LFG-Erkennung
+
+**Ausgangslage:** Die Gruppensuche erkennt im LFG-Kanal automatisch, ob eine Nachricht eine Mitspieler-Suche ist — über eine Wortmuster-Heuristik, die auf 500 echten Kanal-Nachrichten kalibriert wurde („wer bock", „suche +2", „jemand wach?", inklusive Privat-Kontakt-Ausnahme), plus Bewertungs-Formeln für Rang-Nähe und Zeit-Übereinstimmung bei den Empfehlungen.
+
+**Geändert:** Die komplette Erkennungs-Heuristik, die Rang-Nähe-Bewertung (Unterrang-genau, drei Toleranz-Stufen), die Zeit-Übereinstimmung (typische Stunden ±2 mit Mitternachts-Übergang, typische Wochentage) und das Wunsch-Filter-Parsing („25+", „ragebaiter-free" — mit Ziffern-Grenzen, sodass „125+ hp" nicht zündet) sind in Rust portiert und mit Referenzfällen aus dem laufenden Python-Original abgesichert — 17 Beispiel-Nachrichten liefern exakt dieselbe Ja/Nein-Entscheidung.
+
+**Wie es jetzt funktioniert:** Diese Bausteine sind die testbare Grundlage; der sichtbare Ablauf (Nachricht erkennen → in die passende Lane lotsen → Mitspieler vorschlagen) folgt, sobald die KI-Zweitprüfung mit der KI-Schicht portiert ist.
+
 ## #82 — Rust-Neuaufbau Phase 5 (Teil 1): Aktivitätsmuster und Mitspieler-Graph
 
 **Ausgangslage:** Wer wann typischerweise im Voice ist und wer mit wem spielt, wird in zwei Tabellen gepflegt, aus denen Gruppensuche, Statistiken und Empfehlungen lesen. Zwei Schreiber füttern sie: ein 6-Stunden-Lauf für die Muster und ein 10-Minuten-Takt für die aktuellen Voice-Paarungen.
