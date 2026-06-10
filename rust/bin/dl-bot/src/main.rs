@@ -160,7 +160,20 @@ async fn main() -> anyhow::Result<()> {
             dl_voice::tempvoice::TempVoiceStore::new(db.clone()),
             cache_snapshot,
         );
-        dl_voice::tempvoice::engine::spawn(tempvoice, &dispatcher);
+        dl_voice::tempvoice::engine::spawn(tempvoice.clone(), &dispatcher);
+
+        // Rank-Voice-Manager (4c): Anker + Rang-Rechte auf Comp-Lanes
+        let rank_manager = dl_voice::rank::RankVoiceManager::new(
+            db.clone(),
+            Arc::new(dl_voice::glue::RankGlue {
+                adapter: adapter.clone(),
+            }),
+            Arc::new({
+                let tempvoice = tempvoice.clone();
+                move |channel_id| tempvoice.initial_owner_blocking(channel_id)
+            }),
+        );
+        dl_voice::rank::spawn(rank_manager, &dispatcher);
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);

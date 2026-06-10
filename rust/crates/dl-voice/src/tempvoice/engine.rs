@@ -139,8 +139,7 @@ impl TempVoiceConfig {
 #[derive(Debug, Clone)]
 struct LaneState {
     owner_id: u64,
-    /// Erstbesitzer — das Interface-Panel (4b2) nutzt ihn für Claim-Regeln.
-    #[allow(dead_code)]
+    /// Erstbesitzer — Anker-Priorität des Rank-Managers + Claim-Regeln.
     initial_owner_id: u64,
     base_name: String,
     min_rank: String,
@@ -202,6 +201,15 @@ impl TempVoiceEngine {
             }
             Err(err) => tracing::error!(%err, "TempVoice: Rehydrierung fehlgeschlagen"),
         }
+    }
+
+    /// Erstbesitzer der Lane (None wenn unbekannt) — blockierungsfrei für
+    /// den Rank-Manager (try_lock: bei Contention lieber None als Deadlock).
+    pub fn initial_owner_blocking(&self, channel_id: u64) -> Option<u64> {
+        self.state
+            .try_lock()
+            .ok()
+            .and_then(|state| state.lanes.get(&channel_id).map(|l| l.initial_owner_id))
     }
 
     pub async fn lane_owner(&self, channel_id: u64) -> Option<u64> {

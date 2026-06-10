@@ -410,3 +410,170 @@ impl crate::status::StatusPort for StatusGlue {
             .map_err(|e| e.to_string())
     }
 }
+
+/// Rank-Manager-Anbindung (Cache-Reads + Batch-Overwrites).
+pub struct RankGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl crate::rank::RankPort for RankGlue {
+    async fn channel_members_with_roles(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Vec<(u64, Vec<(u64, String)>)> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .voice_states
+            .iter()
+            .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
+            .filter_map(|(user_id, _)| {
+                let member = guild.members.get(user_id)?;
+                if member.user.bot {
+                    return None;
+                }
+                let roles = member
+                    .roles
+                    .iter()
+                    .filter_map(|rid| {
+                        guild
+                            .roles
+                            .get(rid)
+                            .map(|r| (rid.get(), r.name.to_string()))
+                    })
+                    .collect();
+                Some((user_id.get(), roles))
+            })
+            .collect()
+    }
+
+    async fn guild_roles(&self, guild_id: u64) -> Vec<(u64, String)> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.roles
+                    .iter()
+                    .map(|(id, role)| (id.get(), role.name.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn current_role_overwrites(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.channels.get(&ChannelId::new(channel_id)).map(|c| {
+                    c.permission_overwrites
+                        .iter()
+                        .filter_map(|ow| match ow.kind {
+                            serenity::all::PermissionOverwriteType::Role(role_id) => {
+                                Some(role_id.get())
+                            }
+                            _ => None,
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    async fn apply_overwrites(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        allowed_role_ids: &std::collections::HashSet<u64>,
+        removes: &std::collections::HashSet<u64>,
+    ) -> Result<(), String> {
+        const VIEW: u64 = 1 << 10;
+        const CONNECT: u64 = 1 << 20;
+        const SPEAK: u64 = 1 << 21;
+
+        // Bestehende Overwrites übernehmen, Rang-Batch einmischen (wie channel.edit)
+        let mut overwrites: Vec<serde_json::Value> = Vec::new();
+        let mut handled: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        if let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) {
+            if let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) {
+                for ow in &channel.permission_overwrites {
+                    let (kind, target_id) = match ow.kind {
+                        serenity::all::PermissionOverwriteType::Role(role_id) => {
+                            (0u8, role_id.get())
+                        }
+                        serenity::all::PermissionOverwriteType::Member(user_id) => {
+                            (1u8, user_id.get())
+                        }
+                        _ => continue,
+                    };
+                    if kind == 0
+                        && (removes.contains(&target_id) || allowed_role_ids.contains(&target_id))
+                    {
+                        continue; // wird unten neu gesetzt bzw. entfernt
+                    }
+                    if kind == 0 && target_id == guild_id {
+                        continue; // @everyone wird unten gesetzt
+                    }
+                    handled.insert(target_id);
+                    overwrites.push(json!({
+                        "id": target_id.to_string(),
+                        "type": kind,
+                        "allow": ow.allow.bits().to_string(),
+                        "deny": ow.deny.bits().to_string(),
+                    }));
+                }
+            }
+        }
+        // @everyone: deny connect, allow view (Rolle = guild_id)
+        overwrites.push(json!({
+            "id": guild_id.to_string(),
+            "type": 0,
+            "allow": VIEW.to_string(),
+            "deny": CONNECT.to_string(),
+        }));
+        for role_id in allowed_role_ids {
+            overwrites.push(json!({
+                "id": role_id.to_string(),
+                "type": 0,
+                "allow": (VIEW | CONNECT | SPEAK).to_string(),
+                "deny": "0",
+            }));
+        }
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("Rank System: Batch Permission Update"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "name": name }),
+                Some("Rank Voice Manager Rename"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))?
+            .parent_id
+            .map(|p| p.get())
+    }
+}

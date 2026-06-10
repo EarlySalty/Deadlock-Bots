@@ -1,3 +1,11 @@
+## #80 — Rust-Neuaufbau Phase 4c (Teil 3): das Rang-Türsteher-System
+
+**Ausgangslage:** Comp/Ranked-Lanes haben einen Rang-Anker: Der Erstbesitzer (oder das erste rangierte Mitglied) bestimmt ein Score-Fenster von ±9 Unterrang-Punkten (anderthalb Hauptränge), und nur Rang-Rollen in diesem Fenster dürfen verbinden. Der Kanal heißt nach dem Anker („Phantom 3"). Wichtigste Eigenschaft: Es wird nie jemand rausgeworfen — nur die Verbinden-Rechte werden gesteuert.
+
+**Geändert:** Komplett in Rust portiert: die Rang-Erkennung aus Rollennamen (Unterrang-Rollen wie „Asc 3" schlagen Haupt-Rollen, Kurzformen werden aufgelöst, Unterrang-Fallback aus dem verknüpften Steam-Account, sonst Mitte), die Fenster-Berechnung, die Anker-Wahl mit Erstbesitzer-Vorrang (direkt an die neue TempVoice-Engine angebunden), die Sammel-Aktualisierung der Kanal-Rechte in einem einzigen Discord-Aufruf (Jedermann-Sperre, erlaubte Unterrang-Rollen rein, nicht mehr erlaubte Rang-Rollen raus, fremde Einstellungen unangetastet) und die Wahl der „wirklich spielenden" Gruppe über dieselbe Presence-Kohorten-Logik wie der Live-Status. Anker überleben Neustarts über dieselbe Datenbank-Tabelle.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Fenster-Berechnung, Rollen-Erkennung, Rollen-Auswahl im Fenster und Namensgebung sind mit Referenzwerten aus dem Python-Original abgesichert (acht Testfälle, inklusive der Eckfälle Eternus 6 und Initiate 1). Das System hängt als weiterer Subscriber am zentralen Ereignis-Verteiler.
+
 ## #79 — Rust-Neuaufbau Phase 4c (Teil 2): der Live-Status an den Voice-Lanes
 
 **Ausgangslage:** Die Anzeige „Lane 1 - im Match Min 17 (4/6)" an den Voice-Kanälen kommt von einem Minuten-Worker, der Steam-Presence-Daten mit den Kanal-Mitgliedern abgleicht und daraus die größte zusammen spielende Gruppe ermittelt — inklusive Party-Aufstockung für Mitglieder ohne verknüpften Steam-Account.
