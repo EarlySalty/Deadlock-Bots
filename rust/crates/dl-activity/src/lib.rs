@@ -7,3 +7,4 @@
 pub mod analyzer;
 pub mod glue;
 pub mod lfg;
+pub mod player_finder;

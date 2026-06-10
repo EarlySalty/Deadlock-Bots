@@ -1,3 +1,11 @@
+## #97 — Rust-Neuaufbau Phase 5 (Teil 3): Player-Finder portiert (bleibt aus)
+
+**Ausgangslage:** Der Player-Finder schlägt auf eine Suche im LFG-Kanal passende Mitspieler vor — gefiltert nach typischer Spielzeit, Wochentag, Voice-Aktivität der letzten 14 Tage und Rang-Nähe (±3), sortiert nach Steam-Status (Lobby vor Match vor „im Spiel" vor Discord-online). Er steht vor einem kompletten Redesign.
+
+**Geändert:** Der Logik-Kern ist vereinbarungsgemäß nach Rust portiert, bleibt aber per Schalter deaktiviert (Standard: aus): alle Filter, die Kandidaten-Kette mit den drei „Lebenszeichen"-Bedingungen, die Status-Beschriftungen und ihre Rangfolge, die Datenbank-Zugriffe auf Muster, Aktivität und Steam-Presence (mit 2-Minuten-Frische-Grenze) sowie die 60-Sekunden-Abklingzeit pro Nutzer. Das geplante Redesign kann damit direkt auf der Rust-Basis aufsetzen statt auf dem Alt-Code.
+
+**Wie es jetzt funktioniert:** Gar nicht — und das ist Absicht. Der Schalter bleibt aus, bis das Redesign steht; die Logik ist mit Tests abgesichert, damit beim Redesign klar ist, was das Alt-Verhalten war.
+
 ## #96 — Rust-Neuaufbau Phase 7 (Teil 2): die Coaching-Brücke
 
 **Ausgangslage:** Der Bot hält die Coaching-Plattform der Website synchron: Alle zehn Minuten übermittelt er das Coach-Roster (wer die Coach-Rolle trägt, mit Namen und Avatar), und jede Minute holt er fällige Termin-Benachrichtigungen ab und stellt sie als DM zu — Termin geplant, Erinnerung zwei Stunden vorher, Absage.

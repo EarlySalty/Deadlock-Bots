@@ -246,6 +246,16 @@ async fn main() -> anyhow::Result<()> {
         }
         dl_moderation::guard::spawn(security_guard.clone(), &dispatcher);
 
+        // Player-Finder (5): portiert, aber per Flag deaktiviert (Redesign geplant)
+        if dl_activity::player_finder::enabled(|k| std::env::var(k).ok()) {
+            let _finder = dl_activity::player_finder::PlayerFinder::new(db.clone());
+            tracing::warn!(
+                "PLAYER_FINDER_ENABLED=1 gesetzt — Kern portiert, Message-Flow folgt mit dem Redesign"
+            );
+        } else {
+            tracing::info!("Player-Finder deaktiviert (PLAYER_FINDER_ENABLED nicht gesetzt)");
+        }
+
         // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Termin-DMs 60s
         match dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok()) {
             Some(client) => {
