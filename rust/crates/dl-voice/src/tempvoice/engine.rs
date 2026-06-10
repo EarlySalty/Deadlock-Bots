@@ -256,6 +256,35 @@ impl TempVoiceEngine {
         }
     }
 
+    /// Startup-Purge: bekannte Lanes ohne Mitglieder abbauen
+    /// (wie `_purge_empty_lanes_once`).
+    pub async fn purge_empty_lanes(&self) {
+        let lanes: Vec<u64> = {
+            let state = self.state.lock().await;
+            state.lanes.keys().copied().collect()
+        };
+        let guild_id = self.config.guild_id_hint;
+        let mut purged = 0usize;
+        for channel_id in lanes {
+            // Kanal existiert nicht mehr ODER ist leer → aufräumen
+            let exists = self.port.channel_name(guild_id, channel_id).await.is_some();
+            let empty = exists
+                && self
+                    .port
+                    .channel_members(guild_id, channel_id)
+                    .await
+                    .is_empty();
+            if !exists || empty {
+                self.cleanup_lane(channel_id, "TempVoice: Lane leer (Startup-Purge)")
+                    .await;
+                purged += 1;
+            }
+        }
+        if purged > 0 {
+            tracing::info!(purged, "TempVoice: leere Lanes beim Start geräumt");
+        }
+    }
+
     /// Erstbesitzer der Lane (None wenn unbekannt) — blockierungsfrei für
     /// den Rank-Manager (try_lock: bei Contention lieber None als Deadlock).
     pub fn initial_owner_blocking(&self, channel_id: u64) -> Option<u64> {
@@ -1103,6 +1132,13 @@ pub fn spawn_tag_listener(
 /// Engine als Dispatcher-Subscriber starten.
 pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
+    // Startup-Purge verzögert: erst wenn der Gateway-Cache gefüllt ist
+    // (sonst sähen alle Lanes leer aus und würden gelöscht)
+    let purge_engine = engine.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        purge_engine.purge_empty_lanes().await;
+    });
     tokio::spawn(async move {
         engine.rehydrate().await;
         loop {

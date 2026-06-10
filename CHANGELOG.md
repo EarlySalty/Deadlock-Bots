@@ -1,3 +1,11 @@
+## #92 — Rust-Neuaufbau: Aufräumdienst beim Start
+
+**Ausgangslage:** Nach einem Bot-Neustart können verwaiste Lanes übrig bleiben — Kanäle, die in der Datenbank als Lanes geführt werden, aber leer sind oder gar nicht mehr existieren.
+
+**Geändert:** Der Start-Aufräumlauf ist portiert: 30 Sekunden nach dem Start (wenn der Discord-Zwischenspeicher sicher gefüllt ist — sonst sähen fälschlich alle Lanes leer aus) werden bekannte Lanes geprüft und leere oder verschwundene abgebaut, inklusive Datenbank-Eintrag.
+
+**Wie es jetzt funktioniert:** Wie das Original mit seiner Start-Verzögerung — nur dass die Schutz-Wartezeit hier großzügiger gewählt ist, weil der Rust-Prozess schneller hochkommt als sein Discord-Zwischenspeicher.
+
 ## #91 — Rust-Neuaufbau: der Lurker-Modus
 
 **Ausgangslage:** Der 👻-Lurker-Knopf im Lane-Panel war im Rust-Port noch gesperrt. Lurker sind stille Zuhörer: Sie bekommen die Lurker-Rolle, heißen sichtbar „Lurker", und das Lane-Limit wächst um eins, damit sie keinen Spielplatz blockieren — beim Verlassen wird alles automatisch zurückgebaut.
