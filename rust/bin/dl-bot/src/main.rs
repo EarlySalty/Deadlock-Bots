@@ -316,6 +316,11 @@ async fn main() -> anyhow::Result<()> {
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
+        // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung
+        let adaptive = dl_voice::adaptive::AdaptiveLanes::new(cache_snapshot.clone());
+        tempvoice.set_adaptive(adaptive.clone()).await;
+        dl_voice::adaptive::spawn(adaptive, &dispatcher);
+
         // Voice-Status-Worker (4c): LiveMatch-Suffixe an Lane-Namen
         let status_worker = dl_voice::status::VoiceStatusWorker::new(
             db.clone(),

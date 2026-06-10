@@ -903,3 +903,132 @@ impl crate::router::RouterPort for RouterGlue {
         }
     }
 }
+
+#[async_trait::async_trait]
+impl crate::adaptive::AdaptivePort for CacheSnapshot {
+    async fn category_channels(
+        &self,
+        guild_id: u64,
+        category_id: u64,
+    ) -> Vec<(u64, String, usize, i64)> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .channels
+            .values()
+            .filter(|c| {
+                c.kind == serenity::all::ChannelType::Voice
+                    && c.parent_id == Some(ChannelId::new(category_id))
+            })
+            .map(|c| {
+                let members = guild
+                    .voice_states
+                    .values()
+                    .filter(|vs| vs.channel_id == Some(c.id))
+                    .count();
+                (c.id.get(), c.name.to_string(), members, c.position as i64)
+            })
+            .collect()
+    }
+
+    async fn member_role_pairs(&self, guild_id: u64, user_id: u64) -> Vec<(u64, String)> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| {
+                m.roles
+                    .iter()
+                    .filter_map(|rid| {
+                        guild
+                            .roles
+                            .get(rid)
+                            .map(|r| (rid.get(), r.name.to_string()))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Neue Spieler Lane: Anfänger einsortiert"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn rename_channel(&self, channel_id: u64, name: &str) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "name": name }),
+                Some("Adaptive Lanes: Name nachgezogen"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_channel(
+                ChannelId::new(channel_id),
+                Some("Adaptive Lanes: Lane leer"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn create_voice_channel(
+        &self,
+        guild_id: u64,
+        category_id: u64,
+        name: &str,
+    ) -> Result<u64, String> {
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), json!(name));
+        body.insert("type".into(), json!(2));
+        body.insert("parent_id".into(), json!(category_id.to_string()));
+        self.adapter
+            .http
+            .create_channel(
+                GuildId::new(guild_id),
+                &body,
+                Some("Adaptive Lanes: Lane nachgelegt"),
+            )
+            .await
+            .map(|c| c.id.get())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_channel_position(&self, channel_id: u64, position: i64) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "position": position }),
+                Some("Lane-Sortierung: Rang-Reihenfolge"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}

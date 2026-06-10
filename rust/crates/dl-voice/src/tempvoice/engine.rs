@@ -212,6 +212,8 @@ pub struct TempVoiceEngine {
     pub port: Arc<dyn LanePort>,
     /// Tag-Dienst (None → Filter inaktiv, wie Original ohne TagService-Cog).
     pub tags: tokio::sync::RwLock<Option<Arc<dl_community::tags::TagService>>>,
+    /// Anfänger-Routing-Hook (None = kein Reroute, wie Original ohne Cog).
+    pub adaptive: tokio::sync::RwLock<Option<Arc<crate::adaptive::AdaptiveLanes>>>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -226,6 +228,7 @@ impl TempVoiceEngine {
             store,
             port,
             tags: tokio::sync::RwLock::new(None),
+            adaptive: tokio::sync::RwLock::new(None),
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
     }
@@ -336,6 +339,14 @@ impl TempVoiceEngine {
 
     async fn on_join(self: &Arc<Self>, guild_id: u64, user_id: u64, channel_id: u64) {
         if self.config.staging_channels.contains(&channel_id) {
+            if let Some(adaptive) = self.adaptive.read().await.clone() {
+                if adaptive
+                    .maybe_route_new_player(guild_id, user_id, channel_id)
+                    .await
+                {
+                    return; // Anfänger umgeleitet — kein Join-to-create
+                }
+            }
             self.create_lane(guild_id, user_id, channel_id).await;
             return;
         }
@@ -775,6 +786,10 @@ impl TempVoiceEngine {
 
     pub async fn set_tag_service(&self, tags: Arc<dl_community::tags::TagService>) {
         *self.tags.write().await = Some(tags);
+    }
+
+    pub async fn set_adaptive(&self, adaptive: Arc<crate::adaptive::AdaptiveLanes>) {
+        *self.adaptive.write().await = Some(adaptive);
     }
 
     /// Blockier-Grund wie `_member_block_reason`: nur min_age + ragebaiter
