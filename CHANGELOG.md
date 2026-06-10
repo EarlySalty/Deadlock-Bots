@@ -1,3 +1,11 @@
+## #111 — Rust-Neuaufbau: der Nachrichten-Zähler
+
+**Ausgangslage:** Der alte Aktivitäts-Analyzer zählt jede Server-Nachricht pro Nutzer mit (Gesamtzahl, erste und letzte Nachricht). Auf diesem Zähler bauen mehrere Funktionen auf — unter anderem die Einstufung der Abschieds-Umfrage (wer „aktiv" war, bekommt andere Fragen). Nach dem Umstieg hätte niemand mehr gezählt, und die Einstufung wäre schleichend falsch geworden.
+
+**Geändert:** Der Rust-Bot führt den Zähler jetzt selbst weiter — gleiche Tabelle, gleiche Zähl-Logik (Hochzählen je Nutzer und Server, Kanal und Zeitstempel aktualisieren), gleicher Datenschutz (Opt-out-Nutzer werden nicht erfasst). Damit ist die zweite stille Daten-Abhängigkeit des Teil-Umstiegs geschlossen.
+
+**Wie es jetzt funktioniert:** Unverändert sichtbar — aber die Daten bleiben nach dem Umstieg korrekt.
+
 ## #110 — Rust-Neuaufbau: die Gruppensuche ist durchgängig
 
 **Ausgangslage:** Nach Entscheidungslogik (#103) und Antwort-Bau (#109) fehlte das letzte Anschluss-Stück der Gruppensuche: Nachrichten aus dem Suche-Kanal einsammeln, den Rang bestimmen und das fertige Lobby-Finder-Embed posten.

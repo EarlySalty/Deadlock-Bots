@@ -360,6 +360,7 @@ async fn main() -> anyhow::Result<()> {
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
+        dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);

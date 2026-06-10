@@ -292,6 +292,61 @@ pub fn spawn_member_events(
     })
 }
 
+/// message_activity-Writer: Nachrichten-Zähler je User×Guild (wie der
+/// on_message-Tracker des Originals; Privacy-Opt-out wird respektiert).
+/// Grundlage u. a. für die Leave-Survey-Einstufung (Bucket A/B/C).
+pub fn spawn_message_activity(
+    db: dl_db::Db,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    let Some(guild_id) = event.guild_id else {
+                        continue;
+                    };
+                    let (user_id, channel_id) = (event.author_id, event.channel_id);
+                    let result = db
+                        .write(move |conn| {
+                            use rusqlite::OptionalExtension;
+                            let opted_out: Option<i64> = conn
+                                .query_row(
+                                    "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
+                                    [user_id],
+                                    |row| row.get(0),
+                                )
+                                .optional()?
+                                .filter(|v| *v != 0);
+                            if opted_out.is_some() {
+                                return Ok(());
+                            }
+                            conn.execute(
+                                "INSERT INTO message_activity(
+                                   user_id, guild_id, channel_id, message_count,
+                                   last_message_at, first_message_at
+                                 ) VALUES (?1, ?2, ?3, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                                 ON CONFLICT(user_id, guild_id) DO UPDATE SET
+                                   message_count = message_count + 1,
+                                   last_message_at = CURRENT_TIMESTAMP,
+                                   channel_id = excluded.channel_id",
+                                rusqlite::params![user_id, guild_id, channel_id],
+                            )
+                            .map(|_| ())
+                        })
+                        .await;
+                    if let Err(err) = result {
+                        tracing::warn!(%err, "message_activity-Upsert fehlgeschlagen");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 pub fn spawn(analyzer: Arc<ActivityAnalyzer>) -> Vec<tokio::task::JoinHandle<()>> {
     let pattern = analyzer.clone();
     let pattern_task = tokio::spawn(async move {
