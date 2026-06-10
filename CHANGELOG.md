@@ -1,3 +1,11 @@
+## #98 — Rust-Neuaufbau: die Min-Rang-Sperre im Panel
+
+**Ausgangslage:** Comp/Ranked-Lane-Besitzer können eine Rang-Untergrenze setzen — Rang-Rollen unterhalb der Schwelle verlieren das Verbinden-Recht, und der Lane-Name bekommt ab Emissary den Zusatz „• ab X". Der Panel-Knopf war im Rust-Port noch gesperrt.
+
+**Geändert:** Komplett angeschlossen: Auswahlmenü mit allen Rängen (plus „Kein Min-Rang" zum Zurücksetzen), Rollen-Sperren exakt nach der Original-Punktelogik (Haupt- und Unterrang-Rollen, Kurzformen inklusive), Aufräumen der Sperren beim Zurücksetzen, Namens-Zusatz über die bestehende, getestete Namenslogik. Nur für Comp/Ranked-Lanes — Chill-Lanes lehnen mit klarer Ansage ab.
+
+**Wie es jetzt funktioniert:** Wie vorher — Besitzer wählt die Schwelle im Panel, niedrigere Ränge können nicht mehr verbinden. Im Panel ist damit nur noch der Lanes-Modus-Wechsel offen.
+
 ## #97 — Rust-Neuaufbau Phase 5 (Teil 3): Player-Finder portiert (bleibt aus)
 
 **Ausgangslage:** Der Player-Finder schlägt auf eine Suche im LFG-Kanal passende Mitspieler vor — gefiltert nach typischer Spielzeit, Wochentag, Voice-Aktivität der letzten 14 Tage und Rang-Nähe (±3), sortiert nach Steam-Status (Lobby vor Match vor „im Spiel" vor Discord-online). Er steht vor einem kompletten Redesign.

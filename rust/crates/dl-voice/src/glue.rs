@@ -411,6 +411,19 @@ impl LanePort for CacheSnapshot {
     async fn channel_created_at(&self, channel_id: u64) -> Option<i64> {
         Some(ChannelId::new(channel_id).created_at().unix_timestamp())
     }
+
+    async fn guild_role_names(&self, guild_id: u64) -> Vec<(u64, String)> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.roles
+                    .iter()
+                    .map(|(id, role)| (id.get(), role.name.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Nudge-Anbindung: Cache + REST + Steam-Bot-Client.

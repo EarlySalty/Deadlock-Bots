@@ -83,6 +83,8 @@ pub trait LanePort: Send + Sync {
     ) -> Result<(), String>;
     async fn member_nick(&self, guild_id: u64, user_id: u64) -> Option<String>;
     async fn channel_user_limit(&self, guild_id: u64, channel_id: u64) -> Option<i64>;
+    /// Alle Guild-Rollen (id, name) — für den Min-Rang-Rollen-Scan.
+    async fn guild_role_names(&self, guild_id: u64) -> Vec<(u64, String)>;
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String>;
@@ -994,6 +996,57 @@ impl TempVoiceEngine {
         }
     }
 
+    /// Min-Rang setzen: Rang-Rollen unter der Schwelle bekommen connect=deny,
+    /// ab Schwelle wird das Overwrite geräumt; "unknown" räumt alles
+    /// (wie `_apply_min_rank`). Aktualisiert auch das " • ab X"-Suffix.
+    pub async fn set_min_rank(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        min_rank: &str,
+    ) -> Result<(), String> {
+        let in_minrank = {
+            let state = self.state.lock().await;
+            state
+                .lanes
+                .get(&channel_id)
+                .and_then(|lane| lane.category_id)
+                .map(|category| self.config.minrank_categories.contains(&category))
+                .unwrap_or(false)
+        };
+        if !in_minrank {
+            return Err("Min-Rang gilt nur für Comp/Ranked-Lanes.".to_string());
+        }
+        let min_rank = min_rank.trim().to_lowercase();
+        if min_rank != "unknown" && logic::rank_index(&min_rank) == 0 {
+            return Err(format!("Unbekannter Rang: {min_rank}"));
+        }
+
+        let min_score = logic::rank_score(&min_rank);
+        let roles = self.port.guild_role_names(guild_id).await;
+        for (role_id, name) in roles {
+            let score = logic::rank_score(&name);
+            if score == 0 {
+                continue; // keine Rang-Rolle
+            }
+            let deny = min_rank != "unknown" && score < min_score;
+            let connect = if deny { Some(false) } else { None };
+            let _ = self
+                .port
+                .set_role_connect(channel_id, role_id, connect)
+                .await;
+        }
+
+        {
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.min_rank = min_rank.clone();
+            }
+        }
+        self.refresh_name(guild_id, channel_id).await;
+        Ok(())
+    }
+
     pub async fn cleanup_lane(&self, channel_id: u64, reason: &str) {
         {
             let mut state = self.state.lock().await;
@@ -1309,6 +1362,9 @@ mod tests {
         }
         async fn channel_user_limit(&self, _guild_id: u64, _channel_id: u64) -> Option<i64> {
             Some(6)
+        }
+        async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
+            vec![(1, "Phantom".to_string()), (2, "Seeker".to_string())]
         }
         async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
             self.voice

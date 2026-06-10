@@ -556,6 +556,7 @@ pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
         "tv_mode_switch_btn",
         "tv_mode_switch_select",
         "tv_minrank",
+        "tv_minrank_sel",
         "tv_subrank_perm",
         "tv_subrank",
     ] {
