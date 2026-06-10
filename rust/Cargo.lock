@@ -254,6 +254,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "dl-core",
  "dl-db",
  "dl-webcore",
  "rusqlite",
@@ -272,6 +273,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "chrono",
+ "dl-core",
  "dl-db",
  "dl-webcore",
  "reqwest",
@@ -292,6 +294,7 @@ dependencies = [
  "axum",
  "dl-core",
  "dl-db",
+ "dl-stats",
  "dl-tierlist",
  "dl-webcore",
  "tokio",

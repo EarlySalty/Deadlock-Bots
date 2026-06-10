@@ -1,3 +1,11 @@
+## #71 — Rust-Neuaufbau: Aktivitäts-Statistiken portiert — Phase 1 komplett
+
+**Ausgangslage:** Die öffentliche Statistik-Seite (Voice-Heatmaps, Rang-Verteilung, Bestenlisten, persönliche Statistiken mit Discord-Login) war mit 22 Endpunkten der zweite große Webdienst im Python-Bot-Prozess. Pikantes Detail aus der Analyse: Die „Rang-Schätzung über Mitspieler" für Spieler ohne verknüpften Steam-Account war seit jeher wirkungslos — sie lieferte Kategorien, die an jeder einzelnen Verwendungsstelle wieder herausgefiltert wurden. Ein stiller Bug, den nie jemand bemerkt hat, weil das Ergebnis „funktionierte".
+
+**Geändert:** Alle 22 Endpunkte sind nach Rust portiert (gehen noch NICHT live): die acht Analyse-Ansichten, beide Bestenlisten, die sechs persönlichen Me-Endpunkte samt Discord-Login-Flow und die Sicherheits-Schicht (CORS-Allowlist, Cache-Regeln, signierte Session-Cookies). Die wirkungslose Mitspieler-Heuristik wurde nicht mitgenommen — verhaltensgleich, aber ehrlich. Nebenbei wurde aus „eine Datenbank-Abfrage pro Sitzungszeile" (das Original fragte den Rang desselben Spielers hunderte Male pro Anfrage neu ab) ein Zwischenspeicher pro Anfrage.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Wieder Testport gegen laufende Python-Version, gleiche Datenbank: **18 von 18 vergleichbaren Endpunkten liefern identisches JSON** — inklusive Heatmap-Bucketing, Wochentrends, Rundungen und Fehlerfällen; die ausgelieferte HTML-Seite ist byte-identisch. Die login-pflichtigen Me-Endpunkte wurden mit selbst signierten Test-Sessions gegen eine Datenbank-Kopie durchgespielt (echte Logins bleiben beim Umschalten gültig, weil die Cookie-Signierung nachweislich byte-gleich ist). Damit ist Phase 1 des Neuaufbaus komplett: Tierlist + Statistiken warten fertig verifiziert auf die Umschalt-Freigabe — die Checkliste dafür liegt in `rust/docs/02-cutover-phase1.md`.
+
 ## #70 — Rust-Neuaufbau: Tierlist komplett portiert und auf echten Daten bewiesen
 
 **Ausgangslage:** Die öffentliche Tierlist (Hero-Winrates, Build-Votes, Admin-Pflege) lief als einer von sechs Webdiensten im Python-Bot-Prozess. Ihre Admin-Anmeldung griff dabei direkt in die internen Session-Daten des Dashboards — das funktioniert nur, solange alles in einem Prozess steckt, und genau diese Verquickung soll weg.

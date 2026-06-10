@@ -48,9 +48,19 @@ async fn main() -> anyhow::Result<()> {
         dl_tierlist::router(tierlist).into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
+    // Public-Stats :8768
+    let stats = dl_stats::StatsApp::new(db.clone(), dashboard.clone(), &web_cfg);
+    let stats_addr = format!("{}:{}", web_cfg.stats_host, cfg.ports.public_stats);
+    let stats_listener = tokio::net::TcpListener::bind(&stats_addr)
+        .await
+        .with_context(|| format!("Public-Stats-Port binden: {stats_addr}"))?;
+    tracing::info!(addr = %stats_addr, "Public-Stats gebunden");
+    let stats_server = axum::serve(stats_listener, dl_stats::router(stats));
+
     tracing::info!("dl-web läuft — beenden mit Ctrl+C");
     tokio::select! {
         result = tierlist_server => result.context("Tierlist-Server")?,
+        result = stats_server => result.context("Public-Stats-Server")?,
         _ = tokio::signal::ctrl_c() => tracing::info!("dl-web beendet"),
     }
     Ok(())

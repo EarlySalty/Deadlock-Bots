@@ -4,84 +4,12 @@ use serde_json::Value;
 
 /// Rundet auf 2 Nachkommastellen exakt wie Pythons `round()`.
 pub fn py_round2(x: f64) -> f64 {
-    py_round_decimal(x, 2)
+    dl_core::pyfloat::py_round(x, 2)
 }
 
 /// Rundet auf 4 Nachkommastellen (Winrate-Normalisierung beim Refresh).
 pub fn py_round4(x: f64) -> f64 {
-    py_round_decimal(x, 4)
-}
-
-/// Pythons `round(x, nd)`: Half-to-even auf der EXAKTEN Dezimaldarstellung
-/// des Doubles — nicht auf `x * 10^nd` (der Multiplikationsfehler kippt
-/// Grenzfälle wie 50.365 in die falsche Richtung, Python rundet dezimal
-/// korrekt). Wir formatieren den exakten Wert mit 35 Nachkommastellen
-/// (jede Binärbruch-Expansion ist bis dahin eindeutig entschieden) und
-/// runden auf der Ziffernfolge.
-fn py_round_decimal(x: f64, nd: usize) -> f64 {
-    if !x.is_finite() {
-        return x;
-    }
-    let neg = x.is_sign_negative();
-    let s = format!("{:.35}", x.abs());
-    let Some((int_part, frac_part)) = s.split_once('.') else {
-        return x;
-    };
-    if nd >= frac_part.len() {
-        return x;
-    }
-
-    let mut digits: Vec<u8> = int_part
-        .bytes()
-        .chain(frac_part.bytes())
-        .map(|b| b - b'0')
-        .collect();
-    let mut int_len = int_part.len();
-    let cut = int_len + nd; // Index der ersten weggerundeten Ziffer
-
-    let first_dropped = digits[cut];
-    let round_up = match first_dropped.cmp(&5) {
-        std::cmp::Ordering::Less => false,
-        std::cmp::Ordering::Greater => true,
-        std::cmp::Ordering::Equal => {
-            if digits[cut + 1..].iter().any(|d| *d != 0) {
-                true
-            } else {
-                // exakter Tie → zur geraden Ziffer
-                digits[cut - 1] % 2 == 1
-            }
-        }
-    };
-    digits.truncate(cut);
-    if round_up {
-        let mut i = cut;
-        loop {
-            if i == 0 {
-                digits.insert(0, 1);
-                int_len += 1;
-                break;
-            }
-            i -= 1;
-            if digits[i] == 9 {
-                digits[i] = 0;
-            } else {
-                digits[i] += 1;
-                break;
-            }
-        }
-    }
-
-    let mut out = String::with_capacity(digits.len() + 2);
-    if neg {
-        out.push('-');
-    }
-    for (i, d) in digits.iter().enumerate() {
-        if i == int_len {
-            out.push('.');
-        }
-        out.push((b'0' + d) as char);
-    }
-    out.parse::<f64>().unwrap_or(x)
+    dl_core::pyfloat::py_round(x, 4)
 }
 
 pub fn now_ts() -> i64 {

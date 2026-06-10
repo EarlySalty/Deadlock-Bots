@@ -7,5 +7,6 @@
 
 pub mod config;
 pub mod observability;
+pub mod pyfloat;
 
 pub use config::{Config, ConfigError, Ports};

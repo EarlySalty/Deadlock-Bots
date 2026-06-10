@@ -10,6 +10,7 @@ version = "0.1.0"
 [dependencies]
 dl-core.workspace = true
 dl-db.workspace = true
+dl-stats.workspace = true
 dl-tierlist.workspace = true
 dl-webcore.workspace = true
 anyhow.workspace = true
