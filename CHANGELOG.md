@@ -1,3 +1,11 @@
+## #70 — Rust-Neuaufbau: Tierlist komplett portiert und auf echten Daten bewiesen
+
+**Ausgangslage:** Die öffentliche Tierlist (Hero-Winrates, Build-Votes, Admin-Pflege) lief als einer von sechs Webdiensten im Python-Bot-Prozess. Ihre Admin-Anmeldung griff dabei direkt in die internen Session-Daten des Dashboards — das funktioniert nur, solange alles in einem Prozess steckt, und genau diese Verquickung soll weg.
+
+**Geändert:** Die komplette Tierlist ist jetzt in Rust nachgebaut (geht noch NICHT live, läuft parallel zur Python-Version): alle öffentlichen Endpunkte (Heldenliste, Tierlist in drei Rang-Buckets, Verlauf), das Build-Voting mit 5-Sekunden-Sperre pro Absender, die Admin-Endpunkte und der automatische Daten-Abruf von der Deadlock-API. Zwei Dinge wurden dabei sauberer gelöst: Die Admin-Anmeldung fragt jetzt über eine offizielle interne Schnittstelle beim Dashboard nach statt heimlich in dessen Speicher zu greifen, und die Session-Cookies werden byte-identisch zum Original signiert — ein Nutzer bleibt beim späteren Umschalten eingeloggt.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Rust-Version wurde auf einem Testport gegen die laufende Python-Version gestellt — gleiche Datenbank, gleiche Anfragen. Ergebnis: alle sieben Lese-Endpunkte liefern **identisches JSON** bis aufs letzte Feld, alle Fehlerfälle (ungültige Build-ID, unbekannter Build, fehlende Anmeldung) antworten mit denselben Statuscodes und Texten, und das Voting wurde gegen eine Datenbank-Kopie durchgespielt (Stimme zählt, Sperre greift). Dafür musste sogar Pythons Rundungsverhalten exakt nachgebaut werden — die naive Variante rundete 50.365 in die falsche Richtung. Umgeschaltet wird erst nach Freigabe; bis dahin bedient weiterhin Python den Live-Betrieb.
+
 ## #69 — Rust-Neuaufbau gestartet: das Fundament steht
 
 **Ausgangslage:** Der Bot ist über die Jahre zu einem 71.000-Zeilen-Python-Prozess gewachsen, der neben Discord auch sechs Webdienste gleichzeitig betreibt. Vieles ist doppelt (drei identische Server-Hüllen, zwei parallele Turnier-APIs, doppeltes Einladungs-Tracking), die Konfiguration ist über 38 Dateien verstreut — und ein Bot-Neustart reißt alle Websites mit, weil alles in einem Prozess steckt.

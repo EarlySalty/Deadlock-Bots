@@ -1,40 +1,57 @@
-//! dl-web — wird der Web-Prozess für Public-Stats :8768, Tierlist :8771,
-//! Turnier :8767 und Admin-Dashboard :8766. Phase-0-Stand: Gerüst, das
-//! Konfiguration und DB-Vertrag verifiziert. Es wird noch kein Port gebunden.
+//! dl-web — Web-Prozess für die öffentlichen Dienste.
+//!
+//! Phase-1-Stand: Tierlist (:8771) ist vollständig portiert; Public-Stats,
+//! Turnier und Dashboard folgen. Es bindet nur, was implementiert ist —
+//! der Go-Live passiert über die Port-ENVs (Test: abweichende Ports setzen,
+//! Cutover: Python-Pendant deaktivieren und Original-Ports übernehmen).
 
 use anyhow::Context;
+use dl_webcore::{DashboardClient, WebConfig};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dl_core::observability::init_tracing("info");
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
+    let web_cfg = WebConfig::from_env();
     let db = dl_db::Db::open(&cfg.db_path)
         .with_context(|| format!("gemeinsame DB öffnen: {}", cfg.db_path.display()))?;
 
-    // Smoke-Check gegen den DB-Vertrag: rein lesend.
-    let tables: i64 = db
-        .read(|c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .await
-        .context("DB-Smoke-Check")?;
-
-    tracing::info!(
-        db = %cfg.db_path.display(),
-        tabellen = tables,
-        public_stats = cfg.ports.public_stats,
-        tierlist = cfg.ports.tierlist_public,
-        turnier = cfg.ports.turnier_public,
-        dashboard = cfg.ports.dashboard,
-        "dl-web-Gerüst läuft (Phase 0) — es wird noch kein Port gebunden, beenden mit Ctrl+C"
+    let dashboard = DashboardClient::new(
+        web_cfg.dashboard_base.clone(),
+        web_cfg.relay_token.clone(),
+        web_cfg.twitch_token.clone(),
     );
 
-    tokio::signal::ctrl_c().await.context("Signal-Handler")?;
-    tracing::info!("dl-web beendet");
+    // Tierlist :8771
+    let tierlist = dl_tierlist::TierlistApp::new(
+        db.clone(),
+        dashboard.clone(),
+        dl_tierlist::DEADLOCK_API_BASE,
+    );
+    let tierlist_addr = format!("{}:{}", web_cfg.tierlist_host, cfg.ports.tierlist_public);
+    let tierlist_listener = tokio::net::TcpListener::bind(&tierlist_addr)
+        .await
+        .with_context(|| format!("Tierlist-Port binden: {tierlist_addr}"))?;
+    tracing::info!(addr = %tierlist_addr, refresh = web_cfg.tierlist_refresh_enabled, "Tierlist gebunden");
+
+    if web_cfg.tierlist_refresh_enabled {
+        tokio::spawn(dl_tierlist::refresh_loop(tierlist.clone()));
+    } else {
+        tracing::warn!(
+            "Tierlist-Refresh-Loop DEAKTIVIERT (DL_TIERLIST_REFRESH=0) — nur Lesen/Votes"
+        );
+    }
+
+    let tierlist_server = axum::serve(
+        tierlist_listener,
+        dl_tierlist::router(tierlist).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
+
+    tracing::info!("dl-web läuft — beenden mit Ctrl+C");
+    tokio::select! {
+        result = tierlist_server => result.context("Tierlist-Server")?,
+        _ = tokio::signal::ctrl_c() => tracing::info!("dl-web beendet"),
+    }
     Ok(())
 }

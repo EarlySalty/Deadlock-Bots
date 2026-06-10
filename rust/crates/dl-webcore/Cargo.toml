@@ -1,0 +1,23 @@
+[package]
+name = "dl-webcore"
+description = "Gemeinsame Web-Infrastruktur: Session-Codec, Dashboard-Relay-Client, Fehler-Envelope (ersetzt 4× kopierte Python-Auth)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+axum.workspace = true
+base64.workspace = true
+hex.workspace = true
+hmac.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

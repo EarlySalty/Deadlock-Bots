@@ -6,6 +6,9 @@ resolver = "2"
 members = [
     "crates/dl-core",
     "crates/dl-db",
+    "crates/dl-webcore",
+    "crates/dl-stats",
+    "crates/dl-tierlist",
     "bin/dl-bot",
     "bin/dl-web",
 ]
@@ -31,12 +34,31 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # erfolgreich auf exakt dieselbe data/deadlock.sqlite3 zu (WAL, Koexistenz
 # mit dem laufenden Python-Prozess ist bewiesen).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# HTTP-Server (dl-web; Broker folgt in Phase 2)
+axum = "0.8"
+tower-http = { version = "0.6", features = ["fs"] }
+# HTTP-Client (Dashboard-Relay, deadlock-api.com)
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# Serde
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Zeit (ISO-Strings kompatibel zu Python datetime.isoformat)
+chrono = "0.4"
+# Session-Signierung (HMAC-SHA256, Vertrag mit public_stats.py)
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"
+hex = "0.4"
+
 # Tests
 tempfile = "3"
 
 # Interne Crates
 dl-core = { path = "crates/dl-core" }
 dl-db = { path = "crates/dl-db" }
+dl-webcore = { path = "crates/dl-webcore" }
+dl-stats = { path = "crates/dl-stats" }
+dl-tierlist = { path = "crates/dl-tierlist" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
