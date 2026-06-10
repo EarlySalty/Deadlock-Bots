@@ -668,7 +668,7 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
     async def publish_betainvite_panel(
         self,
         interaction: discord.Interaction,
-        channel: discord.TextChannel | None = None,
+        channel: discord.TextChannel | discord.Thread | None = None,
     ) -> None:
         """Postet das persistente BetaInvite-Panel (Zielkanal wählbar).
 
