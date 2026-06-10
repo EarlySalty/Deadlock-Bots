@@ -1,3 +1,15 @@
+## #69 — Rust-Neuaufbau gestartet: das Fundament steht
+
+**Ausgangslage:** Der Bot ist über die Jahre zu einem 71.000-Zeilen-Python-Prozess gewachsen, der neben Discord auch sechs Webdienste gleichzeitig betreibt. Vieles ist doppelt (drei identische Server-Hüllen, zwei parallele Turnier-APIs, doppeltes Einladungs-Tracking), die Konfiguration ist über 38 Dateien verstreut — und ein Bot-Neustart reißt alle Websites mit, weil alles in einem Prozess steckt.
+
+**Geändert:** Unter `rust/` beginnt der komplette Neuaufbau in Rust — nach dem bewährten Muster von Steam- und Twitch-Bot: Der Python-Bot läuft unverändert weiter, fertige Teile übernehmen einzeln und erst nach Freigabe. Phase 0 legt das Fundament:
+
+- **Zwei getrennte Prozesse** statt einem: Bot (Discord + interne Schnittstellen) und Web (alle Websites + Dashboard). Künftige Bot-Neustarts treffen die Websites damit nicht mehr.
+- **Eine zentrale Konfiguration** statt 166 verstreuter Umgebungs-Zugriffe — beim Start einmal gelesen und geprüft, mit denselben Variablennamen wie bisher.
+- **Eine Datenbank-Schicht** auf die bestehende gemeinsame Datenbank: ein serialisierter Schreibkanal, beliebig viele parallele Leser, und sie weigert sich, bei falschem Pfad stillschweigend eine leere Datenbank anzulegen (klassische Fehlerquelle).
+
+**Wie es jetzt funktioniert:** Beide Rust-Prozesse starten, lesen die echte Bot-Datenbank (116 Tabellen erkannt, rein lesend geprüft) und warten sauber auf ihr Stopp-Signal — sie binden noch keinen Port und übernehmen noch keine Funktion. Die Datenbank bleibt der Vertrag zwischen Alt und Neu: Rust ändert kein Schema, bevor ein Bereich offiziell übernommen wird. Der vollständige Plan mit Phasen, Architektur-Entscheidungen und Schema-Snapshot liegt in `rust/docs/`; 14 automatische Tests plus Format- und Lint-Prüfung sichern jede weitere Phase ab.
+
 ## #68 — Steam-Brücke rendert jetzt echte Buttons
 
 **Ausgangslage:** Die Antworten des Steam-Dienstes (Einladungs-Flow, Link-Panel) kamen in Discord ohne sichtbare Schaltflächen an — die Brücke registrierte nur unsichtbare Platzhalter-Buttons, und die Texte verwiesen auf Schaltflächen, die niemand sehen konnte.

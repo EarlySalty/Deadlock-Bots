@@ -1,0 +1,18 @@
+[package]
+name = "dl-web"
+description = "Öffentliche Websites + Admin-Dashboard (Phase 1+; aktuell Gerüst)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+dl-core.workspace = true
+dl-db.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

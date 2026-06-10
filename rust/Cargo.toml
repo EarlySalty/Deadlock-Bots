@@ -1,0 +1,42 @@
+# Rust-Rewrite der Deadlock-Bots (Strangler-Fig neben dem Python-Original).
+# Architektur: 2 Binaries (dl-bot, dl-web) + Domain-Library-Crates.
+# Plan und Verträge: siehe rust/docs/00-rewrite-plan.md
+[workspace]
+resolver = "2"
+members = [
+    "crates/dl-core",
+    "crates/dl-db",
+    "bin/dl-bot",
+    "bin/dl-web",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.85"
+repository = "https://github.com/NaniDerEchte2/Deadlock-Bots"
+
+# Eine gepinnte Version pro Dependency — einzige Quelle der Wahrheit für den
+# gesamten Workspace. Crates übernehmen via `<dep>.workspace = true`.
+[workspace.dependencies]
+# Async-Runtime
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
+# Fehler-Typen (Domänen) / Fehler-Kontext (Binaries)
+thiserror = "2"
+anyhow = "1"
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+# SQLite — bewusst rusqlite wie im Steam-Bot-Rewrite: greift dort bereits
+# erfolgreich auf exakt dieselbe data/deadlock.sqlite3 zu (WAL, Koexistenz
+# mit dem laufenden Python-Prozess ist bewiesen).
+rusqlite = { version = "0.32", features = ["bundled"] }
+# Tests
+tempfile = "3"
+
+# Interne Crates
+dl-core = { path = "crates/dl-core" }
+dl-db = { path = "crates/dl-db" }
+
+[workspace.lints.clippy]
+unwrap_used = "warn"
