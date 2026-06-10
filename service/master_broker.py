@@ -243,10 +243,6 @@ class MasterBroker:
                         "/internal/master/v1/discord/send-dm",
                         self._handle_send_dm,
                     ),
-                    web.post(
-                        "/internal/master/v1/discord/member/ban",
-                        self._handle_ban_member,
-                    ),
                 ]
             )
 
@@ -2301,124 +2297,6 @@ class MasterBroker:
         return await self._run_idempotent_action(
             request=request,
             action="discord.remove_role",
-            idempotency_key=idempotency_key,
-            payload_hash=payload_hash,
-            operation=_operation,
-        )
-
-    async def _handle_ban_member(self, request: web.Request) -> web.Response:
-        """Bannt einen User aus einer Guild.
-
-        Funktioniert auch für bereits ausgetretene Mitglieder, da per User-ID
-        gebannt wird (discord.Object). Body: {guild_id, user_id, reason?}.
-        Gleiche Auth-/Idempotenz-/Allowlist-Behandlung wie die Rollen-Routen.
-        """
-        rejected = self._authorize(request)
-        if rejected is not None:
-            return rejected
-
-        try:
-            payload = await self._read_json_object(request)
-            idempotency_key = self._extract_idempotency_key(request, payload)
-            guild_id = self._parse_positive_payload_int(payload, "guild_id")
-            user_id = self._parse_positive_payload_int(payload, "user_id")
-            reason = str(payload.get("reason") or "").strip() or "master-broker:ban"
-        except ValueError as exc:
-            return self._error_response(
-                request=request,
-                status=400,
-                code="bad_request",
-                message=str(exc),
-            )
-        except Exception:
-            return self._error_response(
-                request=request,
-                status=400,
-                code="bad_request",
-                message="invalid JSON payload",
-            )
-
-        operation_payload = {
-            "guild_id": guild_id,
-            "user_id": user_id,
-            "reason": reason,
-        }
-        guild_allowlist_rejected = self._allowlist_check(
-            request=request,
-            idempotency_key=idempotency_key,
-            scope="guild",
-            value=guild_id,
-            enabled=self._guild_allowlist_enabled,
-            allowed_ids=self._allowed_guild_ids,
-        )
-        if guild_allowlist_rejected is not None:
-            return guild_allowlist_rejected
-
-        payload_hash = self._payload_hash(operation_payload)
-
-        async def _operation() -> web.Response:
-            guild = None
-            try:
-                guild = self.bot.get_guild(guild_id)
-            except Exception:
-                guild = None
-
-            if guild is None:
-                fetch_guild = getattr(self.bot, "fetch_guild", None)
-                if callable(fetch_guild):
-                    try:
-                        guild = await fetch_guild(guild_id)
-                    except Exception:
-                        guild = None
-
-            if guild is None:
-                return self._error_response(
-                    request=request,
-                    status=404,
-                    code="not_found",
-                    message=f"guild {guild_id} not found",
-                    idempotency_key=idempotency_key,
-                )
-
-            try:
-                # Ban per User-ID — der User muss kein Mitglied mehr sein.
-                await guild.ban(
-                    discord.Object(id=user_id),
-                    reason=reason,
-                    delete_message_seconds=0,
-                )
-            except discord.NotFound:
-                return self._error_response(
-                    request=request,
-                    status=404,
-                    code="not_found",
-                    message=f"user {user_id} not found",
-                    idempotency_key=idempotency_key,
-                )
-            except Exception as exc:
-                logger.error(
-                    "Master broker ban_member failed (guild=%s user=%s): %s",
-                    guild_id,
-                    user_id,
-                    exc,
-                )
-                return self._error_response(
-                    request=request,
-                    status=502,
-                    code="discord_error",
-                    message="failed to ban member",
-                    idempotency_key=idempotency_key,
-                )
-
-            return self._success_response(
-                request=request,
-                idempotency_key=idempotency_key,
-                result={"guild_id": guild_id, "user_id": user_id},
-            )
-
-        return await self._run_idempotent_action(
-            request=request,
-            action="discord.ban_member",
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
             operation=_operation,

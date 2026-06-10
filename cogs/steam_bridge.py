@@ -90,6 +90,7 @@ _DEFER_THRESHOLD_SECONDS = 2.0
 _ADMIN_COMMANDS: frozenset[str] = frozenset(
     [
         "!steam_status",
+        "!steam_friend_request",
         "!steam_lobby_convar",
         "!steam_lobby_apply",
         "!steam_lobby_event",

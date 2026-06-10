@@ -1,3 +1,11 @@
+## #67 — Steam-Austritts-Ban wieder entfernt + Reparatur-Befehl durchgereicht
+
+**Ausgangslage:** Mit #66 hatte der interne Vermittler eine Ban-Route bekommen, damit der Steam-Dienst beim Server-Verlassen nach einem Playtest-Invite automatisch bannen kann. Diese Automatik ist auf Community-Entscheidung wieder gestrichen — den Server zu verlassen ist kein Bann-Grund.
+
+**Geändert:** Die Ban-Route ist komplett ausgebaut (der Vermittler kann wieder nur Rollen, Nachrichten, DMs, Kanäle und Invites). Zusätzlich reicht die Steam-Brücke den neuen Admin-Befehl zum erneuten Senden einer Steam-Freundschaftsanfrage an den Steam-Dienst durch — das Werkzeug, mit dem versehentlich gekündigte Freundschaften (siehe Steam-Bot #22) wieder angeknüpft werden.
+
+**Betroffen:** Niemand verliert etwas — gebannt wegen Austritt wird nicht mehr, und Admins haben einen Reparatur-Befehl mehr.
+
 ## #66 — Steam-Austritts-Ban wieder möglich (Broker-Ban-Route)
 
 **Ausgangslage:** Der neue Steam-Dienst sollte beim Verlassen des Servers nach einem Playtest-Invite wieder bannen können (Anti-Missbrauch gegen Invite-Farming) — aber der interne Vermittler, über den der Dienst Discord-Aktionen ausführt, kannte bisher nur Rollen vergeben/entziehen und DMs, kein Bannen.
