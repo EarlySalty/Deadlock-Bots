@@ -285,6 +285,21 @@ async fn main() -> anyhow::Result<()> {
             tracing::info!("Player-Finder deaktiviert (PLAYER_FINDER_ENABLED nicht gesetzt)");
         }
 
+        // Website-Invites (5): permanente Codes je Unterseite sicherstellen
+        let website_invites = dl_community::invites::WebsiteInvites {
+            store: dl_community::invites::InviteStore { db: db.clone() },
+            port: Arc::new(modglue::InviteGlue {
+                adapter: adapter.clone(),
+            }),
+            guild_id: 1289721245281292288,
+            welcome_channel_id: dl_community::invites::DEFAULT_WELCOME_CHANNEL_ID,
+        };
+        tokio::spawn(async move {
+            // kurz warten bis das Gateway steht (Invite-Liste braucht REST)
+            tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+            website_invites.ensure_invites().await;
+        });
+
         // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Termin-DMs 60s
         match dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok()) {
             Some(client) => {

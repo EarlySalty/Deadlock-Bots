@@ -388,3 +388,38 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
         }
     }
 }
+
+// ── Website-Invite-Anbindung ───────────────────────────────────────────────
+
+pub struct InviteGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::invites::InvitePort for InviteGlue {
+    async fn guild_invite_codes(&self, guild_id: u64) -> Vec<String> {
+        self.adapter
+            .http
+            .get_guild_invites(GuildId::new(guild_id))
+            .await
+            .map(|invites| invites.into_iter().map(|i| i.code).collect())
+            .unwrap_or_default()
+    }
+
+    async fn create_permanent_invite(
+        &self,
+        channel_id: u64,
+        reason: &str,
+    ) -> Result<String, String> {
+        self.adapter
+            .http
+            .create_invite(
+                ChannelId::new(channel_id),
+                &json!({ "max_age": 0, "max_uses": 0, "unique": true }),
+                Some(reason),
+            )
+            .await
+            .map(|invite| invite.code)
+            .map_err(|e| e.to_string())
+    }
+}

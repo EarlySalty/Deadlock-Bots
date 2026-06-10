@@ -1,3 +1,11 @@
+## #104 — Rust-Neuaufbau: die Website-Invites
+
+**Ausgangslage:** Jede Website-Unterseite (Landing, Streamer, Mitspieler, Coaching, Helden, Guides) hat ihren eigenen permanenten Einladungs-Link in den Server — so lässt sich nachvollziehen, über welche Seite neue Mitglieder kommen. Der Bot prüft beim Start, ob die gespeicherten Codes noch existieren, und erstellt fehlende neu. Dazu gehört die Join-Quellen-Auswertung, die Beitritte nach Herkunft aufschlüsselt (Website-Seite, Vanity-Link, Twitch-Streamer, persönliche Einladungen …).
+
+**Geändert:** Beides in Rust portiert: gleiche Speicher-Verträge (inklusive der Landing/Haupt-Spiegelung), gleicher Start-Lebenszyklus (tote Codes werden ersetzt, lebende bleiben unangetastet), und die komplette Herkunfts-Klassifikation samt Balken-Anzeige wortgleich. Die Auswertung liest dieselben Beitritts-Ereignisse, die der bestehende Python-Analyzer weiter schreibt.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Acht Klassifikations-Fälle und der Speicher-Vertrag (inklusive Spiegelung) sind getestet. Der Start-Check wartet 20 Sekunden nach dem Hochfahren, damit die Discord-Verbindung steht.
+
 ## #103 — Rust-Neuaufbau: das LFG-Routing-Herz
 
 **Ausgangslage:** Wenn die Gruppensuche eine Mitspieler-Anfrage erkennt, entscheidet eine Routing-Logik, wohin der Suchende gelotst wird: Street-Brawl- und Ranked-Absicht aus Schlüsselwörtern (Ranked zählt erst ab Emissary), Anfänger primär in die Neue-Spieler-Lanes mit Casual-Rückfall, Rang-Toleranzen je Lane-Typ (±2 Ranked, ±3 Casual), und Lanes mit bekannten Mitspielern gewinnen vor der vollsten passenden.

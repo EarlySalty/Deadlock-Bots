@@ -5,4 +5,5 @@
 //! - FAQ, Clips, Leave-Survey, Bug-Reporter folgen.
 
 pub mod coaching;
+pub mod invites;
 pub mod tags;
