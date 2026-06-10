@@ -84,20 +84,23 @@ Crates entstehen erst in der Phase, die sie braucht — keine leeren Hüllen auf
 - Python-Code wird NIE gelöscht, nur deaktiviert.
 - Pro Cutover: Flip-Checkliste in `rust/docs/`, Go-Live nur nach Freigabe.
 
-## Phasen
+## Phasen (Stand 2026-06-10, Einträge #69–#100)
 
-| Phase | Inhalt | Cutover-Risiko |
+| Phase | Inhalt | Stand |
 |---|---|---|
-| 0 | Workspace, dl-core, dl-db, Docs, Check-Script | — |
-| 1 | dl-web: Public-Stats + Tierlist (read-heavy, kein Discord) | niedrig |
-| 2 | dl-bot-Gerüst: Gateway, Dispatcher, Broker :8770, Changelog :8899 | mittel |
-| 3 | dl-bridges: steam_bridge + steam_*-Cogs + twitch | mittel |
-| 4 | dl-voice (Redesign um den Dispatcher) | hoch |
-| 5 | dl-activity + lfg + player_finder (Flag aus) | mittel |
-| 6 | dl-community + dl-ai + dl-moderation | mittel |
-| 7 | dl-onboarding + dl-coaching | mittel |
-| 8 | dl-tournament (Web + Cogs) | mittel |
-| 9 | Dashboard (sauber geschnitten) + Restpflege | hoch |
+| 0 | Workspace, dl-core, dl-db, Docs, Check-Script | ✅ komplett |
+| 1 | dl-web: Public-Stats + Tierlist | ✅ komplett, live-gedifft — Cutover wartet (docs/02) |
+| 2 | dl-bot-Gerüst: Gateway, Dispatcher, Broker :8770, Changelog :8899 (+ /alert) | ✅ komplett |
+| 3 | dl-bridges: steam_bridge + twitch + Matcher (inkl. AI-Scoring) | ✅ komplett |
+| 4 | dl-voice: Tracker, TempVoice (+Panel/Tag-Filter/Lurker/Min-Rang), Status, Rank, Nudge, Feedback-DMs, Router | ✅ Kern komplett — Rest: NewPlayer-/Duo-Lanes, lane_sorting, tv_mode_switch |
+| 5 | dl-activity: Analyzer, LFG-Kern, player_finder (Flag aus) | 🔶 Kern — Rest: LFG-Antwort-Flow, website_invite, Analyzer-Nebenpfade |
+| 6 | dl-ai (MiniMax), dl-moderation (AI-Mod + SecurityGuard), Tags | 🔶 Kern — Rest: FAQ, Clips, Leave-Survey, Bug-Reporter, Rules, Rename |
+| 7 | Onboarding-Buttons + Coaching-Brücke | 🔶 Kern — Rest: Kanal-Flow, step_streamer, coaching_request/panel/survey |
+| 8 | dl-tournament: Balancer, Store, Turnier-Web :8767 (live-gedifft) | 🔶 Kern — Rest: turnier.py-Discord-UI, customgames-Flow |
+| 9 | Dashboard (sauber geschnitten) + Restpflege | ⬜ nicht begonnen |
+
+Bot-Cutover-Checkliste mit Teil-Cutover-Empfehlung: `docs/06-cutover-bot.md`
+— alle dort als Blocker markierten Punkte sind abgehakt.
 
 ## Nicht portiert (bleibt im Python-Original erhalten, wird nicht gelöscht)
 
