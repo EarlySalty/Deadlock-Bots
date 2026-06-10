@@ -305,6 +305,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-bridges"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "dl-discord",
+ "reqwest",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dl-broker"
 version = "0.1.0"
 dependencies = [

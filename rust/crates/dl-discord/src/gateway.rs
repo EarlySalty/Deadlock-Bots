@@ -5,11 +5,14 @@
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use serenity::all::{Context, EventHandler, GatewayIntents, Message, Ready, VoiceState};
+use serenity::all::{
+    Context, EventHandler, GatewayIntents, GuildId, GuildMemberUpdateEvent, Member, Message, Ready,
+    User, VoiceState,
+};
 use serenity::async_trait;
 
 use crate::adapter::DiscordAdapter;
-use crate::dispatcher::{Dispatcher, MessageEvent, VoiceEvent};
+use crate::dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
 
 struct Handler {
     adapter: Arc<DiscordAdapter>,
@@ -23,21 +26,62 @@ impl EventHandler for Handler {
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
     }
 
-    async fn message(&self, _ctx: Context, message: Message) {
+    async fn message(&self, ctx: Context, message: Message) {
         if message.author.bot {
             return;
         }
+        // Admin-Flag aus dem Cache (für !steam_*-Admin-Kommandos u. ä.)
+        let author_is_admin = message
+            .guild_id
+            .and_then(|guild_id| {
+                let guild = ctx.cache.guild(guild_id)?;
+                let member = guild.members.get(&message.author.id)?;
+                Some(guild.member_permissions(member).administrator())
+            })
+            .unwrap_or(false);
         self.dispatcher.publish_message(MessageEvent {
             guild_id: message.guild_id.map(|g| g.get()),
             channel_id: message.channel_id.get(),
             message_id: message.id.get(),
             author_id: message.author.id.get(),
             author_display_name: message
-                .author_nick(&_ctx)
+                .author_nick(&ctx)
                 .await
                 .unwrap_or_else(|| message.author.name.to_string()),
+            author_is_admin,
             content: message.content.clone(),
         });
+    }
+
+    async fn guild_member_addition(&self, _ctx: Context, member: Member) {
+        self.dispatcher.publish_member(MemberEvent::Join {
+            guild_id: member.guild_id.get(),
+            user_id: member.user.id.get(),
+        });
+    }
+
+    async fn guild_member_removal(
+        &self,
+        _ctx: Context,
+        guild_id: GuildId,
+        user: User,
+        _member: Option<Member>,
+    ) {
+        self.dispatcher.publish_member(MemberEvent::Remove {
+            guild_id: guild_id.get(),
+            user_id: user.id.get(),
+        });
+    }
+
+    async fn guild_member_update(
+        &self,
+        _ctx: Context,
+        _old: Option<Member>,
+        _new: Option<Member>,
+        _event: GuildMemberUpdateEvent,
+    ) {
+        // Bewusst leer — Platzhalter, damit der Intent dokumentiert ist;
+        // Onboarding (Phase 7) hängt sich hier ein.
     }
 
     async fn voice_state_update(&self, _ctx: Context, old: Option<VoiceState>, new: VoiceState) {

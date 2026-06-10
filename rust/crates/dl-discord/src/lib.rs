@@ -13,6 +13,11 @@
 pub mod adapter;
 pub mod dispatcher;
 pub mod gateway;
+pub mod interactions;
 
 pub use adapter::DiscordAdapter;
-pub use dispatcher::{Dispatcher, MessageEvent, VoiceEvent};
+pub use dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
+pub use interactions::{
+    BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, InteractionHandler,
+    InteractionRouter,
+};

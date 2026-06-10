@@ -1,3 +1,11 @@
+## #73 — Rust-Neuaufbau Phase 3a: Klick-Verarbeitung und Steam-Brücke
+
+**Ausgangslage:** Phase 2 hatte die offene Flanke benannt: Wer die Discord-Verbindung besitzt, muss auch alle Button-Klicks verarbeiten — sonst posten wir tote Knöpfe. Außerdem ist die Steam-Brücke (der „dünne Arm", über den /betainvite, /steam, Rang-Checks und die Link-Panels mit dem Rust-Steam-Bot reden) bisher Python.
+
+**Geändert:** Zwei Bausteine in Rust: (1) Ein zentrales Klick- und Befehls-Routing — Buttons werden über exakte Kennungen oder Präfixe (z. B. alle `betainvite:`-Schritte mit einem Eintrag) an ihre Verarbeiter geleitet, Slash-Befehle kommen aus einer Registry, die gleichzeitig die Discord-Definitionen fürs Synchronisieren liefert. (2) Die komplette Steam-Brücke: alle 14 Slash-Befehle, beide Panels samt Alt-Kennungen früher geposteter Panels, der gesamte Einladungs-Funnel, das Freundescode-Eingabefenster (einzige lokale UI — alles andere wird 1:1 durchgereicht) und die `!steam_*`-Admin-Kommandos.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Für die Tests wurde ein Mock-Steam-Bot hochgefahren, der jede Anfrage aufzeichnet: Das Leitungsformat (Ereignis-Art, Nutzer/Server/Kanal, Befehlsname samt Argumenten, Freundescode als Werteliste) ist feldgenau identisch zum Python-Original, ebenso die Rückrichtung — Text, Embed, Sichtbarkeit, Link-Button und interaktive Buttons aus der Steam-Bot-Antwort. Auch der Ausfall-Fall („Steam-Bot nicht erreichbar") antwortet wortgleich. Live geht davon noch nichts — es fehlt bewusst das letzte Stück (die Übergabe der Klicks von der echten Discord-Verbindung an dieses Routing), das zusammen mit der Twitch-Brücke in Phase 3b kommt.
+
 ## #72 — Rust-Neuaufbau Phase 2: Vermittler, Changelog-Dienst und Event-Fundament
 
 **Ausgangslage:** Andere Bots (z. B. der Twitch-Bot) führen Discord-Aktionen über den internen „Master-Broker" aus — eine lokale Schnittstelle mit Doppel-Absicherung (nur localhost + Token) und Schutz gegen versehentliche Doppel-Ausführung: Jede Aktion trägt einen Einmal-Schlüssel; Wiederholungen liefern das gespeicherte Ergebnis statt z. B. eine Nachricht zweimal zu senden. Dazu kommt der Changelog-Empfänger, über den diese Ankündigungen hier gepostet werden. Beides hing bisher am Python-Prozess.

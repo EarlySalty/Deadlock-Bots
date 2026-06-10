@@ -1,0 +1,233 @@
+//! Interaction- und Slash-Command-Routing.
+//!
+//! Ersetzt discord.py-Konstrukte aus dem Original:
+//! - persistente Views (`bot.add_view` + custom_id-Matching) → [`InteractionRouter`]
+//!   mit Exakt-/Präfix-Matchern,
+//! - `@app_commands.command` → [`CommandSpec`]-Registry, aus der sowohl die
+//!   Discord-Command-Definitionen (Sync) als auch der Dispatch gespeist werden.
+//!
+//! Handler liefern eine [`BridgeReply`] — die Gateway-Schicht übersetzt sie in
+//! die eigentliche Interaction-Response (inkl. der 2-Sekunden-Defer-Schwelle,
+//! die das Python-Original für langsame Antworten nutzt).
+
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use serde_json::Value;
+
+/// Eingehende Interaction in normalisierter Form.
+#[derive(Debug, Clone, Default)]
+pub struct BridgeInteraction {
+    /// custom_id des Buttons/Selects/Modals ("" bei Slash-Commands).
+    pub custom_id: String,
+    /// Slash-Command-Name (qualifiziert, z. B. "steam links"); leer bei Komponenten.
+    pub command: String,
+    /// Slash-Command-Optionen bzw. Modal-/Select-Werte.
+    pub options: HashMap<String, Value>,
+    pub values: Vec<String>,
+    pub user_id: u64,
+    pub guild_id: u64,
+    pub channel_id: u64,
+}
+
+/// Modal-Definition (z. B. Steam-Freundescode).
+#[derive(Debug, Clone)]
+pub struct ModalSpec {
+    pub custom_id: String,
+    pub title: String,
+    pub fields: Vec<ModalField>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModalField {
+    pub custom_id: String,
+    pub label: String,
+    pub placeholder: String,
+    pub required: bool,
+    pub min_length: u16,
+    pub max_length: u16,
+}
+
+/// Antwort eines Handlers — deklarativ, damit Tests ohne Discord laufen.
+#[derive(Debug, Clone, Default)]
+pub struct BridgeReply {
+    pub content: Option<String>,
+    /// Roh-Embeds im Discord-API-Format.
+    pub embeds: Vec<Value>,
+    /// Komplette components-Struktur (Action-Rows) im Discord-API-Format.
+    pub components: Option<Value>,
+    pub ephemeral: bool,
+    /// Statt einer Nachricht ein Modal öffnen (nur als Erst-Antwort möglich).
+    pub modal: Option<ModalSpec>,
+    /// Antwort in den Kanal posten statt als Interaction-Reply
+    /// (publish_steam_panel-Muster: Panel öffentlich, Bestätigung ephemeral).
+    pub channel_message: Option<ChannelMessage>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChannelMessage {
+    pub embeds: Vec<Value>,
+    pub components: Option<Value>,
+    /// Bestätigungstext als ephemere Interaction-Antwort.
+    pub confirmation: String,
+}
+
+impl BridgeReply {
+    pub fn ephemeral_text(text: impl Into<String>) -> Self {
+        Self {
+            content: Some(text.into()),
+            ephemeral: true,
+            ..Self::default()
+        }
+    }
+}
+
+#[async_trait::async_trait]
+pub trait InteractionHandler: Send + Sync {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply;
+}
+
+/// Nachrichten direkt in einen Kanal senden (für Listener außerhalb von
+/// Interactions, z. B. die !steam_*-Admin-Kommandos). Implementiert vom
+/// DiscordAdapter; Tests nutzen Mocks.
+#[async_trait::async_trait]
+pub trait ChannelSender: Send + Sync {
+    async fn send_to_channel(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        embeds: &[Value],
+    ) -> Result<u64, String>;
+}
+
+enum Matcher {
+    Exact(String),
+    Prefix(String),
+}
+
+impl Matcher {
+    fn matches(&self, custom_id: &str) -> bool {
+        match self {
+            Matcher::Exact(id) => custom_id == id,
+            Matcher::Prefix(prefix) => custom_id.starts_with(prefix.as_str()),
+        }
+    }
+}
+
+/// Slash-Command-Definition — Quelle für Sync UND Dispatch.
+#[derive(Debug, Clone)]
+pub struct CommandSpec {
+    /// Discord-API-Definition (name, description, options, permissions …).
+    pub definition: Value,
+}
+
+#[derive(Default)]
+pub struct InteractionRouter {
+    component_routes: Vec<(Matcher, Arc<dyn InteractionHandler>)>,
+    command_routes: HashMap<String, Arc<dyn InteractionHandler>>,
+    command_specs: Vec<CommandSpec>,
+}
+
+impl InteractionRouter {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Registriert einen Handler für eine exakte custom_id.
+    pub fn on_custom_id(&mut self, id: impl Into<String>, handler: Arc<dyn InteractionHandler>) {
+        self.component_routes
+            .push((Matcher::Exact(id.into()), handler));
+    }
+
+    /// Registriert einen Handler für ein custom_id-Präfix (z. B. "twitch-live:").
+    pub fn on_prefix(&mut self, prefix: impl Into<String>, handler: Arc<dyn InteractionHandler>) {
+        self.component_routes
+            .push((Matcher::Prefix(prefix.into()), handler));
+    }
+
+    /// Registriert einen Slash-Command (qualifizierter Name, z. B. "steam links").
+    pub fn on_command(
+        &mut self,
+        qualified_name: impl Into<String>,
+        spec: CommandSpec,
+        handler: Arc<dyn InteractionHandler>,
+    ) {
+        self.command_routes.insert(qualified_name.into(), handler);
+        self.command_specs.push(spec);
+    }
+
+    /// Discord-Command-Definitionen für den Bulk-Sync.
+    pub fn command_definitions(&self) -> Vec<Value> {
+        // Subcommands ("steam links") teilen sich eine Top-Level-Definition —
+        // Duplikate nach name dedupen, letzter gewinnt.
+        let mut by_name: HashMap<String, Value> = HashMap::new();
+        for spec in &self.command_specs {
+            if let Some(name) = spec.definition.get("name").and_then(Value::as_str) {
+                by_name.insert(name.to_string(), spec.definition.clone());
+            }
+        }
+        by_name.into_values().collect()
+    }
+
+    pub fn resolve_component(&self, custom_id: &str) -> Option<Arc<dyn InteractionHandler>> {
+        self.component_routes
+            .iter()
+            .find(|(matcher, _)| matcher.matches(custom_id))
+            .map(|(_, handler)| handler.clone())
+    }
+
+    pub fn resolve_command(&self, qualified_name: &str) -> Option<Arc<dyn InteractionHandler>> {
+        self.command_routes.get(qualified_name).cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    struct Echo(&'static str);
+
+    #[async_trait::async_trait]
+    impl InteractionHandler for Echo {
+        async fn handle(&self, _interaction: BridgeInteraction) -> BridgeReply {
+            BridgeReply::ephemeral_text(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn exakt_vor_praefix_nach_registrierungsreihenfolge() {
+        let mut router = InteractionRouter::new();
+        router.on_custom_id("betainvite:panel:start", Arc::new(Echo("exact")));
+        router.on_prefix("betainvite:", Arc::new(Echo("prefix")));
+
+        let handler = router
+            .resolve_component("betainvite:panel:start")
+            .expect("handler");
+        let reply = handler.handle(BridgeInteraction::default()).await;
+        assert_eq!(reply.content.as_deref(), Some("exact"));
+
+        let handler = router
+            .resolve_component("betainvite:intent:community")
+            .expect("prefix-handler");
+        let reply = handler.handle(BridgeInteraction::default()).await;
+        assert_eq!(reply.content.as_deref(), Some("prefix"));
+
+        assert!(router.resolve_component("unbekannt").is_none());
+    }
+
+    #[test]
+    fn command_definitionen_dedupen_nach_name() {
+        let mut router = InteractionRouter::new();
+        let spec = |name: &str| CommandSpec {
+            definition: json!({ "name": name, "description": "x" }),
+        };
+        router.on_command("steam links", spec("steam"), Arc::new(Echo("a")));
+        router.on_command("steam unlink", spec("steam"), Arc::new(Echo("b")));
+        router.on_command("betainvite", spec("betainvite"), Arc::new(Echo("c")));
+        assert_eq!(router.command_definitions().len(), 2);
+        assert!(router.resolve_command("steam links").is_some());
+        assert!(router.resolve_command("steam unlink").is_some());
+        assert!(router.resolve_command("gibtsnicht").is_none());
+    }
+}

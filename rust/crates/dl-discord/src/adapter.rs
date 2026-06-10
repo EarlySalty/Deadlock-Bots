@@ -448,6 +448,27 @@ impl DiscordPort for DiscordAdapter {
 }
 
 #[async_trait::async_trait]
+impl crate::interactions::ChannelSender for DiscordAdapter {
+    async fn send_to_channel(
+        &self,
+        channel_id: u64,
+        content: Option<&str>,
+        embeds: &[Value],
+    ) -> Result<u64, String> {
+        let mut body = Map::new();
+        if let Some(content) = content {
+            body.insert("content".into(), json!(content));
+        }
+        if !embeds.is_empty() {
+            body.insert("embeds".into(), json!(embeds));
+        }
+        self.send_raw(channel_id, &body)
+            .await
+            .map_err(|err| err.to_string())
+    }
+}
+
+#[async_trait::async_trait]
 impl ChangelogDiscord for DiscordAdapter {
     async fn send(
         &self,

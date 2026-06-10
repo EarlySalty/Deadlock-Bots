@@ -37,7 +37,17 @@ pub struct MessageEvent {
     pub message_id: u64,
     pub author_id: u64,
     pub author_display_name: String,
+    /// Aus dem Gateway-Cache berechnet; ohne Cache false.
+    pub author_is_admin: bool,
     pub content: String,
+}
+
+/// Mitglieder-Ereignisse (join/remove) — Konsumenten: steam-bridge,
+/// Onboarding (Phase 7), Aktivitäts-Analytik (Phase 5).
+#[derive(Debug, Clone)]
+pub enum MemberEvent {
+    Join { guild_id: u64, user_id: u64 },
+    Remove { guild_id: u64, user_id: u64 },
 }
 
 const CHANNEL_CAPACITY: usize = 1024;
@@ -45,6 +55,7 @@ const CHANNEL_CAPACITY: usize = 1024;
 pub struct Dispatcher {
     voice_tx: broadcast::Sender<VoiceEvent>,
     message_tx: broadcast::Sender<MessageEvent>,
+    member_tx: broadcast::Sender<MemberEvent>,
 }
 
 impl Default for Dispatcher {
@@ -57,9 +68,11 @@ impl Dispatcher {
     pub fn new() -> Self {
         let (voice_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
             message_tx,
+            member_tx,
         }
     }
 
@@ -71,6 +84,10 @@ impl Dispatcher {
         self.message_tx.subscribe()
     }
 
+    pub fn subscribe_members(&self) -> broadcast::Receiver<MemberEvent> {
+        self.member_tx.subscribe()
+    }
+
     pub fn publish_voice(&self, event: VoiceEvent) {
         // send schlägt nur fehl, wenn niemand subscribed ist — kein Fehler.
         let _ = self.voice_tx.send(event);
@@ -78,6 +95,10 @@ impl Dispatcher {
 
     pub fn publish_message(&self, event: MessageEvent) {
         let _ = self.message_tx.send(event);
+    }
+
+    pub fn publish_member(&self, event: MemberEvent) {
+        let _ = self.member_tx.send(event);
     }
 }
 
@@ -114,6 +135,7 @@ mod tests {
             message_id: 2,
             author_id: 3,
             author_display_name: "x".into(),
+            author_is_admin: false,
             content: "hallo".into(),
         });
     }
