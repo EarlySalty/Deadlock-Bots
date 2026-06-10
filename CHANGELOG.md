@@ -1,3 +1,11 @@
+## #76 — Rust-Neuaufbau Phase 4a: das Voice-Tracking-Fundament
+
+**Ausgangslage:** Das Voice-Session-Tracking ist die Datenbasis für die halbe Community-Statistik — Bestenlisten, Heatmaps, Mitspieler-Netzwerk und Gruppensuche lesen alle aus den Tabellen, die es schreibt. Im Original ist es einer von fünf Lauschern, die sich unkoordiniert dasselbe Voice-Ereignis teilen.
+
+**Geändert:** Der Tracking-Kern ist als erster Subscriber des zentralen Ereignis-Verteilers in Rust portiert: Sessions starten ab zwei aktiven (ungestummten) Nicht-Bots im Kanal, Stummschalten beendet die Aktivität — außer für Mitglieder mit der Schonfrist-Rolle, die drei Minuten Karenz bekommen. Beim Ende werden Punkte berechnet (1 pro Minute plus Bonus bei vollen Kanälen), Gesamtwerte hochgezählt und die Session mit Mitspielern, Nutzerverlauf und Spitzenbelegung in die Historie geschrieben — feldgenau in dieselben Tabellen und Formate wie bisher, inklusive der Datenschutz-Regel: Wer widersprochen hat, wird nie erfasst. Die drei Wartungs-Schleifen (Keep-Alive, Schonfrist-Ablauf, Aufräumen verwaister Sessions) laufen wie im Original.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Acht Tests spielen den Lebenszyklus komplett durch — Beitritt zu zweit startet Sessions, allein nicht, Stummschalten ohne Rolle beendet, mit Rolle hält die Karenz, Opt-out wird nie erfasst, verwaiste Sessions räumt der Wächter auf — und prüfen die Datenbank-Schreibvorgänge gegen das echte Tabellen-Schema; die Punkteformel ist mit Referenzwerten aus dem Python-Original abgesichert. Bewusst noch offen für 4b: das Feedback-Nachrichten-System nach der ersten Session und die Statistik-Befehle — beides kommt, bevor der Voice-Bereich umgeschaltet wird.
+
 ## #75 — Rust-Neuaufbau Phase 3 komplett: der Streamer-Erkenner
 
 **Ausgangslage:** Das letzte Stück der Brücken-Phase: Der Abgleich, der alle 6 Stunden neue Twitch-Streamer gegen die Discord-Mitgliederliste hält — mit Namens-Normalisierung (Akzente raus, Leetspeak übersetzt, Anhängsel wie „TTV" und „live" entfernt), Ähnlichkeits-Berechnung und der Drei-Wege-Entscheidung: automatisch verknüpfen, als Vorschlag mit Bestätigen/Ablehnen-Buttons an die Mods geben, oder verwerfen.

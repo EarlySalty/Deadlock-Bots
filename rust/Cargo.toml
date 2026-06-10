@@ -13,6 +13,7 @@ members = [
     "crates/dl-changelog",
     "crates/dl-discord",
     "crates/dl-bridges",
+    "crates/dl-voice",
     "bin/dl-bot",
     "bin/dl-web",
 ]
@@ -75,6 +76,7 @@ dl-broker = { path = "crates/dl-broker" }
 dl-changelog = { path = "crates/dl-changelog" }
 dl-discord = { path = "crates/dl-discord" }
 dl-bridges = { path = "crates/dl-bridges" }
+dl-voice = { path = "crates/dl-voice" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

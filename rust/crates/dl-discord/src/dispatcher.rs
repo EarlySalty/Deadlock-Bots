@@ -27,6 +27,15 @@ pub enum VoiceEvent {
         from_channel_id: u64,
         to_channel_id: u64,
     },
+    /// Zustandsänderung im selben Kanal (Mute/Deaf) — der Tracker braucht
+    /// das für die Grace-Period-Logik.
+    Update {
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+        was_muted: bool,
+        is_muted: bool,
+    },
 }
 
 /// Normalisiertes Nachrichten-Ereignis (Bots bereits herausgefiltert).

@@ -300,6 +300,7 @@ dependencies = [
  "dl-core",
  "dl-db",
  "dl-discord",
+ "dl-voice",
  "dl-webcore",
  "tokio",
  "tracing",
@@ -422,6 +423,23 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "dl-voice"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dl-db",
+ "dl-discord",
+ "rusqlite",
+ "serde_json",
+ "serenity",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

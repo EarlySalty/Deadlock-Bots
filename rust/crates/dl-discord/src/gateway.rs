@@ -114,7 +114,17 @@ impl EventHandler for Handler {
                 from_channel_id: from,
                 to_channel_id: to,
             },
-            _ => return, // Mute/Deaf-Änderungen ohne Kanalwechsel
+            (Some(channel_id), Some(_)) => {
+                let muted = |vs: &VoiceState| vs.mute || vs.deaf || vs.self_mute || vs.self_deaf;
+                VoiceEvent::Update {
+                    guild_id,
+                    user_id,
+                    channel_id,
+                    was_muted: old.as_ref().map(&muted).unwrap_or(false),
+                    is_muted: muted(&new),
+                }
+            }
+            (None, None) => return,
         };
         self.dispatcher.publish_voice(event);
     }

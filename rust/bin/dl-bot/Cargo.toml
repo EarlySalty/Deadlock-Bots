@@ -14,6 +14,7 @@ dl-bridges.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-discord.workspace = true
+dl-voice.workspace = true
 dl-webcore.workspace = true
 anyhow.workspace = true
 axum.workspace = true
