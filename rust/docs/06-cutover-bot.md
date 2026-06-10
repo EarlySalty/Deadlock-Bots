@@ -1,6 +1,6 @@
 # Bot-Cutover: dl-bot übernimmt vom Python-Bot
 
-Stand: 2026-06-10 (nach #104). Jeder Schritt ist user-gated — nichts hiervon
+Stand: 2026-06-10 (nach #108). Jeder Schritt ist user-gated — nichts hiervon
 passiert ohne Nanis Freigabe.
 
 ## Was dl-bot beim Flip übernimmt
@@ -25,6 +25,9 @@ passiert ohne Nanis Freigabe.
 | Tag-System | dl-community::tags | tags/* |
 | Coaching-Brücke (Roster + Termin-DMs) | dl-community::coaching | coaching_platform_sync |
 | Onboarding-Buttons (Regeln→Rolle, Steam, DM-Hinweise) | bin: onboardglue | welcome_dm (Buttons) |
+| Leave-Survey (Exit-DM, Bucket A/B/C) | dl-community::leave_survey | leave_survey |
+| Clip-Einsendungen (Interface, Wochenfenster, Dump) | dl-community::clips | clip_submission |
+| FAQ-Chat + Ticket-Auto-Helfer | dl-community::faq + dl-ai | faq_chat |
 
 dl-web übernimmt zusätzlich: Stats :8768, Tierlist :8771,
 **Turnier-Web :8767** (live-gedifft) — Blocklist: public_stats_cog,
@@ -55,8 +58,8 @@ Funktional kleiner als das Original — Nutzer merken ggf.:
   (konservativer: Vorschlag statt Auto-Aktion).
 - **LFG-Antwort-Flow** (Erkennung+Scores portiert, Routing-Antworten
   fehlen) und **Player-Finder** (per Flag aus — gewollt).
-- **FAQ-Chat, Clips, Leave-Survey, Bug-Reporter, Rules, Rename** —
-  Python-Cogs weiterlaufen lassen (kein Konflikt, eigene Domänen).
+- **Rules-Panel/StaticOnboarding** (rp:panel:start) — Python
+  weiterlaufen lassen; die Regelkanal-Buttons (wdm:*) sind in Rust.
 - **Coaching-Discord-UI** (coaching_request/panel/survey) — Python
   weiterlaufen lassen; die Plattform-Brücke ist in Rust.
 - **Turnier-Discord-UI** (turnier.py) + customgames-Flow — Python
