@@ -1,3 +1,11 @@
+## #82 — Rust-Neuaufbau Phase 5 (Teil 1): Aktivitätsmuster und Mitspieler-Graph
+
+**Ausgangslage:** Wer wann typischerweise im Voice ist und wer mit wem spielt, wird in zwei Tabellen gepflegt, aus denen Gruppensuche, Statistiken und Empfehlungen lesen. Zwei Schreiber füttern sie: ein 6-Stunden-Lauf für die Muster und ein 10-Minuten-Takt für die aktuellen Voice-Paarungen.
+
+**Geändert:** Beide Schreiber sind in Rust portiert: Der Muster-Lauf wertet die letzten 14 Tage aus (typische Top-3-Stunden und -Wochentage, Sitzungs-Zähler, Minuten, letzte Aktivität — bis auf die Reihenfolge bei Gleichstand identisch zur Python-Sortierung) und überschreibt idempotent. Der 10-Minuten-Takt erfasst alle Paarungen in Voice-Kanälen mit mindestens zwei echten Mitgliedern bidirektional samt Anzeigenamen. Dabei wurde ein stiller Zähl-Fehler des Originals NICHT übernommen: Der alte 6-Stunden-Lauf addierte zusätzlich die kompletten 2-Wochen-Mitspieler-Aggregate bei jedem Lauf erneut auf — viermal am Tag dieselben Sitzungen obendrauf, zusätzlich zum 10-Minuten-Takt. Im Rust-Port schreibt nur noch der korrekte, inkrementelle Pfad.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Die Muster-Berechnung ist mit Referenzwerten aus dem Python-Original abgesichert, das Mitspieler-Tracking mit Datenbank-Tests gegen das echte Schema (beidseitige Einträge, Akkumulation über mehrere Takte, Namens-Pflege). Beide Läufe starten erst mit der Gateway-Übernahme.
+
 ## #81 — Rust-Neuaufbau Phase 4c (Teil 4): das Lane-Steuerungs-Panel
 
 **Ausgangslage:** Das Interface-Panel im Voice-Bereich ist die Schaltzentrale für Lane-Besitzer: Region, Besitz übernehmen, Limit, Kick/Bann/Entbannen, Schnell-Vorlagen, Presets, Rang-Präferenz und Umbenennen — alles über Buttons unter einer festen Nachricht.

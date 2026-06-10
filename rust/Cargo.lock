@@ -289,11 +289,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-activity"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "dl-db",
+ "dl-discord",
+ "rusqlite",
+ "serde_json",
+ "serenity",
+ "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "dl-bot"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dl-activity",
  "dl-bridges",
  "dl-broker",
  "dl-changelog",

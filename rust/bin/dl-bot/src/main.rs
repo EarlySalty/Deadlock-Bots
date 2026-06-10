@@ -182,6 +182,15 @@ async fn main() -> anyhow::Result<()> {
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
 
+        // Aktivitäts-Analyzer (5): Muster + Co-Spieler-Graph
+        let activity = dl_activity::analyzer::ActivityAnalyzer::new(
+            db.clone(),
+            Arc::new(dl_activity::glue::CacheVoiceGroups {
+                adapter: adapter.clone(),
+            }),
+        );
+        dl_activity::analyzer::spawn(activity);
+
         // Voice-Status-Worker (4c): LiveMatch-Suffixe an Lane-Namen
         let status_worker = dl_voice::status::VoiceStatusWorker::new(
             db.clone(),
