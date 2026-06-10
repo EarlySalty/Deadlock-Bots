@@ -85,6 +85,12 @@ pub trait LanePort: Send + Sync {
     async fn channel_user_limit(&self, guild_id: u64, channel_id: u64) -> Option<i64>;
     /// Alle Guild-Rollen (id, name) — für den Min-Rang-Rollen-Scan.
     async fn guild_role_names(&self, guild_id: u64) -> Vec<(u64, String)>;
+    async fn set_channel_category(
+        &self,
+        channel_id: u64,
+        category_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String>;
@@ -1078,6 +1084,78 @@ impl TempVoiceEngine {
         Ok(())
     }
 
+    /// Lane in einen anderen Modus umziehen (wie `switch_lane_mode`).
+    /// Rückgabe: Fehlertext oder None bei Erfolg.
+    pub async fn switch_lane_mode(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        owner_id: u64,
+        new_mode: &str,
+    ) -> Option<String> {
+        let category_id = match new_mode {
+            "ranked" => 1412804540994162789,
+            "casual" => 1289721245281292290,
+            "street_brawl" => 1357422957017698478,
+            "off_topic" => 1513468298728308757,
+            _ => return Some("Unbekannter Modus.".to_string()),
+        };
+        if new_mode == "ranked" {
+            let roles = self.port.member_role_names(guild_id, owner_id).await;
+            if logic::member_rank_index(&roles) == 0 {
+                return Some(
+                    "Ranked braucht einen verifizierten Rang. Info: <#1474827277610254570>"
+                        .to_string(),
+                );
+            }
+        }
+        if let Err(err) = self
+            .port
+            .set_channel_category(
+                channel_id,
+                category_id,
+                &format!("Modus-Wechsel → {new_mode}"),
+            )
+            .await
+        {
+            return Some(format!("Fehler beim Verschieben: {err}"));
+        }
+        // DB + State nachziehen
+        {
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.category_id = Some(category_id);
+            }
+        }
+        let _ = self
+            .store
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE tempvoice_lanes SET category_id = ?1 WHERE channel_id = ?2",
+                    rusqlite::params![category_id, channel_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+        // Name: Ranked → Rang des Owners, sonst gespeicherter Basisname
+        let new_name = if new_mode == "ranked" {
+            let roles = self.port.member_role_names(guild_id, owner_id).await;
+            logic::rank_prefix_for(&roles).unwrap_or_else(|| "Ranked Lane".to_string())
+        } else {
+            let snapshot = self.lane_snapshot(channel_id).await;
+            snapshot
+                .map(|(base, _)| base)
+                .unwrap_or_else(|| "Lane".to_string())
+        };
+        let _ = self
+            .port
+            .rename_channel(channel_id, &new_name, &format!("Modus → {new_mode}"))
+            .await;
+        self.set_base_name(channel_id, &new_name).await;
+        None
+    }
+
     pub async fn cleanup_lane(&self, channel_id: u64, reason: &str) {
         {
             let mut state = self.state.lock().await;
@@ -1396,6 +1474,18 @@ mod tests {
         }
         async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
             vec![(1, "Phantom".to_string()), (2, "Seeker".to_string())]
+        }
+        async fn set_channel_category(
+            &self,
+            channel_id: u64,
+            category_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            self.categories
+                .lock()
+                .expect("lock")
+                .insert(channel_id, category_id);
+            Ok(())
         }
         async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
             self.voice

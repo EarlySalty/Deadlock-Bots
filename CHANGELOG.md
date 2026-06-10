@@ -1,3 +1,11 @@
+## #102 — Rust-Neuaufbau: der Modus-Wechsel — das Lane-Panel ist komplett
+
+**Ausgangslage:** Der letzte gesperrte Panel-Knopf: Lane-Besitzer können ihre bestehende Lane in einen anderen Modus umziehen (Ranked, Casual, Street Brawl, Off Topic) — die Lane wandert in die Ziel-Kategorie, der Datenbank-Eintrag zieht nach, und der Name passt sich an (Ranked übernimmt den Rang des Besitzers, sonst kehrt der gespeicherte Basisname zurück).
+
+**Geändert:** In Rust angeschlossen mit Auswahlmenü, demselben Ranked-Gate (verifizierter Rang nötig, sonst Hinweis auf den Info-Kanal) und derselben Umzugs-Reihenfolge. Damit sind **alle** Funktionen des Lane-Panels im neuen System verfügbar.
+
+**Wie es jetzt funktioniert:** Knopf → Modus wählen → Lane zieht um. Der Voice-Bereich ist damit funktional vollständig portiert.
+
 ## #101 — Rust-Neuaufbau: Anfänger-Lanes, Off-Topic-Duo und die Rang-Sortierung
 
 **Ausgangslage:** Drei Spezial-Systeme rund um die Voice-Lanes fehlten noch im Rust-Port: Die Anfänger-Einsortierung (wer höchstens Arcanist ist — verifiziert oder mit Unverifiziert-Rolle — wird beim Betreten der Sammel-Kanäle in die Neue-Spieler-Kategorie umgeleitet, mit 4-Minuten-Rückkehr-Fenster in den normalen Ablauf), die selbst-wachsenden Lanes („Neue Spieler Lane" legt ab 6 Personen nach, „Off Topic Voice" ab 2 genau eine zweite; Leere werden abgebaut und Nummern rücken nach) und die Rang-Sortierung der Chill-Lanes (Lanes mit Rang-Namen werden nach Haupt- und Unterrang auf ihre Plätze sortiert).

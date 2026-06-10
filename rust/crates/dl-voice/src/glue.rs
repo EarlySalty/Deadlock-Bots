@@ -424,6 +424,24 @@ impl LanePort for CacheSnapshot {
             })
             .unwrap_or_default()
     }
+
+    async fn set_channel_category(
+        &self,
+        channel_id: u64,
+        category_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "parent_id": category_id.to_string() }),
+                Some(reason),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Nudge-Anbindung: Cache + REST + Steam-Bot-Client.
