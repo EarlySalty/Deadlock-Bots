@@ -423,3 +423,56 @@ impl dl_community::invites::InvitePort for InviteGlue {
             .map_err(|e| e.to_string())
     }
 }
+
+// ── Leave-Survey-Anbindung ─────────────────────────────────────────────────
+
+pub struct SurveyGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::leave_survey::SurveyPort for SurveyGlue {
+    async fn send_survey_dm(
+        &self,
+        user_id: u64,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) -> String {
+        let channel = match self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(err) if err.to_string().contains("50007") => return "blocked".to_string(),
+            Err(_) => return "failed".to_string(),
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+            Ok(_) => "sent".to_string(),
+            Err(err) if err.to_string().contains("50007") => "blocked".to_string(),
+            Err(_) => "failed".to_string(),
+        }
+    }
+
+    async fn post_log(&self, text: String) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        let _ = self
+            .adapter
+            .send_raw_public(dl_community::leave_survey::LOGS_CHANNEL_ID, &body)
+            .await;
+    }
+
+    async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| m.display_name().to_string())
+    }
+}

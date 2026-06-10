@@ -410,9 +410,12 @@ name = "dl-community"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "chrono",
  "chrono-tz",
  "dl-db",
+ "dl-discord",
+ "rand 0.8.6",
  "reqwest",
  "rusqlite",
  "serde_json",

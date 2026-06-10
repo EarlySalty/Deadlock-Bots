@@ -6,4 +6,5 @@
 
 pub mod coaching;
 pub mod invites;
+pub mod leave_survey;
 pub mod tags;

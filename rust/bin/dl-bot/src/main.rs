@@ -162,6 +162,16 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
+    // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
+    let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
+        db.clone(),
+        Arc::new(modglue::SurveyGlue {
+            adapter: adapter.clone(),
+        }),
+        "Deutsche Deadlock Community",
+    );
+    dl_community::leave_survey::register(&mut router, leave_survey.clone());
+
     // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
     onboardglue::register(
         &mut router,
@@ -328,6 +338,7 @@ async fn main() -> anyhow::Result<()> {
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
+        dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);

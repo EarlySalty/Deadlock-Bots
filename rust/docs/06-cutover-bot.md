@@ -76,6 +76,12 @@ lauffähig, solange seine verbleibenden Cogs keine Voice/Message-Events
 der portierten Domänen anfassen — Voice-Events braucht KEINER der
 verbleibenden Cogs außer customgames/Router: vor dem Flip prüfen).
 
+**Nicht portiert (ersetzt):** `rename_manager` (DB-Rename-Queue mit
+1s-Worker) — die Rust-Module rennen Kanäle direkt um und tragen ihre
+Rename-Disziplin selbst (Voice-Status 360/600s-Cooldown, Rank-Manager
+60s, TempVoice Create-Fenster). Der Python-rename_manager kann beim
+Teil-Cutover weiterlaufen (seine Queue-Füller sind geblocklistet).
+
 ## Vor dem Flip noch bauen
 
 Keine Blocker mehr — alle drei ursprünglichen Voraussetzungen (Router-

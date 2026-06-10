@@ -1,3 +1,11 @@
+## #106 — Rust-Neuaufbau: die Exit-Umfrage
+
+**Ausgangslage:** Wer den Server verlässt, bekommt eine kurze Abschieds-Umfrage per DM — mit Fragen, die zum Nutzer-Typ passen: Kurzbesucher (unter 2 Tagen, nie im Voice, kaum Nachrichten) werden anders gefragt als langjährig Aktive (ab 14 Tagen mit regelmäßigen Sessions, vielen Nachrichten oder über einer Stunde Voice) oder stille Mitglieder. Gebannte und Nutzer mit Datenschutz-Opt-out werden übersprungen, und niemand wird öfter als alle 30 Tage befragt.
+
+**Geändert:** Komplett in Rust portiert: gleiche Typ-Einstufung, gleiche Grund-Auswahllisten und Nachfragen (wortgleich), gleiche Tabelle samt Einmal-Token für den Web-Fragebogen. Die Auswahl-Kennungen der Knöpfe sind unverändert — auch Umfrage-DMs, die noch vom alten Bot verschickt wurden, funktionieren nach dem Umstieg weiter, weil die Antwort über die Datenbank ihrer offenen Umfrage zugeordnet wird.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Verlassen → Sperren-Checks → Einstufung → DM mit Grund-Auswahl → Nachfrage-Formular → Antwort und Zeitpunkt landen in der Datenbank, eine Zusammenfassung im Log-Kanal. Die Einstufungs-Regeln und alle Texte sind mit Tests abgesichert (8 Klassifikations-Fälle).
+
 ## #105 — Rust-Neuaufbau: Beitritts-Protokoll und eine wichtige Umstiegs-Korrektur
 
 **Ausgangslage:** Beim geplanten Teil-Umstieg wäre ein stilles Problem entstanden: Der alte Aktivitäts-Analyzer und sein neues Rust-Pendant hätten beide den Mitspieler-Zähler hochgezählt — alle Werte doppelt. Außerdem schreibt bisher nur der alte Analyzer die Beitritts-/Austritts-Ereignisse, auf denen die Join-Quellen-Auswertung und die Bindungs-Funktionen aufbauen.
