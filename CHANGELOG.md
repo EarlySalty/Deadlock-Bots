@@ -1,3 +1,11 @@
+## #94 — Rust-Neuaufbau Phase 7 (Teil 1): die Onboarding-Knöpfe
+
+**Ausgangslage:** Neue Mitglieder durchlaufen das Onboarding über feste Knöpfe im Regelkanal — der wichtigste davon ist die Regelbestätigung, die die Zugangs-Rolle vergibt. Dazu kommen der Steam-Login-Knopf und die Hinweis-Knöpfe des DM-Assistenten.
+
+**Geändert:** Die bestehenden Knöpfe sind mit unveränderten Kennungen in Rust angeschlossen: Regelbestätigung vergibt die Onboarding-Rolle (mit ehrlicher Rückmeldung, falls die Vergabe scheitert), der Steam-Knopf holt einen frischen Einmal-Login-Link vom Steam-Dienst, und die vier Assistenten-Hinweise (Steam, FAQ, Streamer, Beta) antworten wortgleich wie bisher. Die Schritt-Navigation des geführten Kanal-Flows sagt übergangsweise ehrlich, dass sie umgebaut wird — der volle Flow folgt.
+
+**Wie es jetzt funktioniert:** Die Knöpfe unter den bestehenden Nachrichten im Regelkanal funktionieren nach dem Umstieg weiter — insbesondere kommt jedes neue Mitglied über die Regelbestätigung an seine Rolle.
+
 ## #93 — Rust-Neuaufbau: Server-Warnungen auch im neuen Empfänger
 
 **Ausgangslage:** Parallel zum Umbau bekam der Changelog-Empfänger eine neue Aufgabe: Der Server-Monitor postet Speicher-Warnungen als Embed in den Admin-Kanal (mit Ping bei Warnung/Kritisch, Entwarnung ohne) — Lehre aus dem Speicher-Vorfall vom 10. Juni.

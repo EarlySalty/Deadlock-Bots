@@ -7,6 +7,7 @@
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
 mod modglue;
+mod onboardglue;
 
 use std::sync::Arc;
 
@@ -116,6 +117,13 @@ async fn main() -> anyhow::Result<()> {
 
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
     let tag_service = dl_community::tags::TagService::new(db.clone());
+
+    // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
+    onboardglue::register(
+        &mut router,
+        adapter.clone(),
+        dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+    );
 
     // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
     let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|generator| {
