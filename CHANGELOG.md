@@ -1,3 +1,11 @@
+## #93 — Rust-Neuaufbau: Server-Warnungen auch im neuen Empfänger
+
+**Ausgangslage:** Parallel zum Umbau bekam der Changelog-Empfänger eine neue Aufgabe: Der Server-Monitor postet Speicher-Warnungen als Embed in den Admin-Kanal (mit Ping bei Warnung/Kritisch, Entwarnung ohne) — Lehre aus dem Speicher-Vorfall vom 10. Juni.
+
+**Geändert:** Die neue Warn-Route ist im Rust-Empfänger nachgezogen — gleicher Pfad, gleiche Prüfungen (Token, Pflichtfelder, nur die drei bekannten Stufen), gleiche Embeds mit Stufen-Symbol und -Farbe, gleicher Admin-Ping bei Warnung und Kritisch. Damit bleibt der Server-Monitor auch nach dem Bot-Umstieg ohne Anpassung funktionsfähig.
+
+**Wie es jetzt funktioniert:** Unverändert — der Monitor schickt seine Meldung an den lokalen Empfänger, der Admin-Kanal bekommt das Embed, bei ernsten Stufen klingelt der Ping.
+
 ## #92 — Rust-Neuaufbau: Aufräumdienst beim Start
 
 **Ausgangslage:** Nach einem Bot-Neustart können verwaiste Lanes übrig bleiben — Kanäle, die in der Datenbank als Lanes geführt werden, aber leer sind oder gar nicht mehr existieren.

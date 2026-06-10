@@ -88,6 +88,7 @@ pub fn router(state: SharedChangelog) -> Router {
         .route("/changelog/rich", post(handle_rich))
         .route("/highlight-clips", post(handle_highlights))
         .route("/discord/messages", post(handle_fetch_messages))
+        .route("/alert", post(handle_alert))
         .with_state(state)
 }
 
@@ -143,6 +144,65 @@ fn parse_channel_id(raw: Option<&Value>) -> Result<Option<u64>, Response> {
         // Falsy Werte (0, "", false) zählen wie in Python als "nicht gesetzt"
         Some(Value::Bool(false)) => Ok(None),
         Some(_) => Err(err(400, "channel_id must be an integer")),
+    }
+}
+
+pub const SERVER_ALERT_CHANNEL_ID: u64 = 1374364800817303632;
+pub const SERVER_ALERT_PING_USER_ID: u64 = 662995601738170389;
+
+/// `POST /alert` — Server-Health-Warnung vom Monitor (memwatch):
+/// {token, title, content, level: warn|crit|ok}; warn/crit pingen den Admin.
+async fn handle_alert(State(state): State<SharedChangelog>, body: Option<Json<Value>>) -> Response {
+    let data = match parse_body(&state, body.as_ref()) {
+        Ok(data) => data,
+        Err(response) => return response,
+    };
+    let title = data
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let content = data
+        .get("content")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim();
+    let level = data
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or("warn")
+        .trim();
+    let (icon, color) = match level {
+        "warn" => ("⚠️", 0xFFA500),
+        "crit" => ("🚨", 0xED4245),
+        "ok" => ("✅", 0x57F287),
+        _ => {
+            return err(400, "level must be one of {'warn', 'crit', 'ok'}");
+        }
+    };
+    if title.is_empty() || content.is_empty() {
+        return err(400, "title and content required");
+    }
+    let description: String = content.chars().take(4096).collect();
+    let embed = json!({
+        "title": format!("{icon} {title}"),
+        "description": description,
+        "color": color,
+        "timestamp": utc_now_iso(),
+        "footer": { "text": "Server-Monitor" },
+    });
+    // warn/crit pingen den Admin (User-Mentions pingen ohne allowed_mentions per Default)
+    let ping = matches!(level, "warn" | "crit").then(|| format!("<@{SERVER_ALERT_PING_USER_ID}>"));
+    match state
+        .discord
+        .send(SERVER_ALERT_CHANNEL_ID, ping.as_deref(), &[embed], false)
+        .await
+    {
+        Ok(_) => Json(json!({ "ok": true, "channel_id": SERVER_ALERT_CHANNEL_ID })).into_response(),
+        Err(ChangelogError::ChannelNotFound(channel_id)) => {
+            err(404, &format!("channel {channel_id} not found"))
+        }
+        Err(error) => err(500, &error.to_string()),
     }
 }
 
