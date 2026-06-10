@@ -10,5 +10,6 @@
 //!   in 4b/4c.
 
 pub mod glue;
+pub mod nudge;
 pub mod tempvoice;
 pub mod tracker;

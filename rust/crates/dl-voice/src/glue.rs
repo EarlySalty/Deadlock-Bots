@@ -246,3 +246,84 @@ impl LanePort for CacheSnapshot {
         Some(ChannelId::new(channel_id).created_at().unix_timestamp())
     }
 }
+
+/// Nudge-Anbindung: Cache + REST + Steam-Bot-Client.
+pub struct NudgeGlue {
+    pub adapter: Arc<DiscordAdapter>,
+    pub steam: Arc<dl_bridges::steam::SteamBotClient>,
+    pub log_channel_id: u64,
+}
+
+#[async_trait::async_trait]
+impl crate::nudge::NudgePort for NudgeGlue {
+    async fn is_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.voice_states
+                    .get(&UserId::new(user_id))
+                    .and_then(|vs| vs.channel_id)
+            })
+            .is_some()
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        embeds: &[serde_json::Value],
+        components: &serde_json::Value,
+    ) -> Result<(u64, u64), String> {
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!(embeds));
+        body.insert("components".into(), components.clone());
+        let message_id = self
+            .adapter
+            .send_raw_public(channel.id.get(), &body)
+            .await?;
+        Ok((channel.id.get(), message_id))
+    }
+
+    async fn send_log(&self, text: String) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        let _ = self
+            .adapter
+            .send_raw_public(self.log_channel_id, &body)
+            .await;
+    }
+
+    async fn fetch_steam_link_url(&self, user_id: u64) -> Option<String> {
+        self.steam.fetch_steam_link_url(user_id).await
+    }
+
+    async fn delete_message(&self, channel_id: u64, message_id: u64) {
+        let _ = self
+            .adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                Some("Nudge: vom User geschlossen"),
+            )
+            .await;
+    }
+}

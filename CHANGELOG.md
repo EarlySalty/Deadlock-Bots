@@ -1,3 +1,11 @@
+## #78 — Rust-Neuaufbau Phase 4c (Teil 1): die Steam-Verknüpfungs-Erinnerung
+
+**Ausgangslage:** Wer ohne verknüpften Steam-Account regelmäßig im Voice ist, bekommt einmalig eine freundliche DM mit dem Verknüpfungs-Link — aber bewusst erst am zweiten Voice-Tag und erst nach 30 Minuten am Stück, damit niemand beim ersten Reinschnuppern angeschrieben wird.
+
+**Geändert:** Komplett in Rust portiert, als weiterer Subscriber des Ereignis-Verteilers: gleiche Ausnahmen (Datenschutz-Widerspruch, ausgenommene Rollen, bereits verknüpft, bereits erinnert), gleiche Merkzettel in denselben Datenbank-Feldern (Erst-Sichtung, Erledigt-Status, DM-Referenz), gleicher DM-Inhalt samt Datenschutz-Erklärung, frischem Steam-Login-Link vom Steam-Dienst und Schließen-Button — dessen Kennung unverändert bleibt, damit auch die Schließen-Buttons ALTER, vor dem Umstieg verschickter DMs weiter funktionieren.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Tests decken die Kernregeln ab: Tag eins wird nur vorgemerkt (keine DM), ab Tag zwei startet die 30-Minuten-Beobachtung, wer verknüpft oder erledigt ist wird übersprungen, und der Versand schreibt Erledigt-Status und DM-Referenz korrekt in die Datenbank. Nebenbefund dieser Etappe: Der „voice_reaction_dm"-Baustein stellte sich als falsch einsortierter Twitch-Verkaufs-Melder heraus (liest die Twitch-Bot-Datenbank, standardmäßig aus) — der gehört in den Twitch-Bot-Umbau und wird dort übernommen, nicht hier.
+
 ## #77 — Rust-Neuaufbau Phase 4b: TempVoice-Kern
 
 **Ausgangslage:** TempVoice ist mit Abstand das größte Einzelstück des Bots (~6.700 Zeilen): Beitritt in einen Sammel-Kanal erstellt automatisch eine eigene Voice-Lane, mit Besitzer-Logik, Bann-Listen, Rang-Namen und Aufräumen.

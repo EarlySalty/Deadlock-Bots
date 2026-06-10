@@ -83,6 +83,17 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+    // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
+    let nudge = dl_voice::nudge::VoiceNudge::new(
+        db.clone(),
+        Arc::new(dl_voice::glue::NudgeGlue {
+            adapter: adapter.clone(),
+            steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+            log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
+        }),
+    );
+    dl_voice::nudge::register(&mut router, nudge.clone());
+
     let router = Arc::new(router);
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
@@ -150,6 +161,9 @@ async fn main() -> anyhow::Result<()> {
             cache_snapshot,
         );
         dl_voice::tempvoice::engine::spawn(tempvoice, &dispatcher);
+
+        // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
+        dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
         // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
         if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
             let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());
