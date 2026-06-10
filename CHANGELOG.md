@@ -1,3 +1,11 @@
+## #90 — Rust-Neuaufbau: Lane-Tag-Filter angeschlossen
+
+**Ausgangslage:** Lane-Besitzer können ihre Lane filtern („nur 25+", „Ragebaiter blockieren") — der Filter setzt Verbinden-Sperren für betroffene Nutzer und trennt sie beim Beitritt. Im Rust-Port war der Panel-Button bisher als „noch nicht freigeschaltet" markiert, weil das Tag-System fehlte.
+
+**Geändert:** Mit dem neuen Tag-System ist der Filter jetzt vollständig angeschlossen: Speichern in derselben Tabelle, Durchsetzung beim Beitritt (Sperre plus Trennung), sofortige Anwendung beim Speichern über das Panel (zwei Auswahlmenüs: Alters-Filter, Ragebaiter-Block), und die Sofort-Reaktion, wenn die Moderation jemandem den Ragebaiter-Marker verpasst, während er in einer geschützten Lane sitzt. Die Aufhebe-Logik respektiert Besitzer-Banns: Wer zusätzlich vom Besitzer gebannt ist, behält seine Sperre auch wenn der Filter ihn freigeben würde. Zwei Original-Eigenheiten sind dokumentiert übernommen: Der gespeicherte „Ton"-Filter wurde auch bisher nie durchgesetzt (toter Zweig), und ohne Tag-Dienst bleibt der Filter wirkungslos.
+
+**Wie es jetzt funktioniert:** Wie im Original — Besitzer stellt den Filter im Panel ein, betroffene Nutzer können nicht mehr verbinden und werden getrennt, alle Komponenten laufen über die getestete Engine und das getestete Tag-System.
+
 ## #89 — Rust-Neuaufbau Phase 6 (Teil 3): das Tag-System
 
 **Ausgangslage:** Tags sind das Bindeglied zwischen drei Systemen: Im Onboarding wählen Nutzer ihre Alters- und Ton-Präferenz („25+", „banter_ok", „ragebaiter-free"), die Lane-Filter im Voice-Bereich werten sie aus, und die Moderation vergibt den zeitlich befristeten „Ragebaiter"-Marker (14 Tage Standard-Laufzeit), der bei wiederholtem Fehlverhalten automatisch gesetzt wird.

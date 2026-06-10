@@ -11,6 +11,7 @@ version = "0.1.0"
 async-trait.workspace = true
 chrono.workspace = true
 dl-bridges.workspace = true
+dl-community.workspace = true
 dl-db.workspace = true
 dl-discord.workspace = true
 rusqlite.workspace = true

@@ -550,6 +550,8 @@ pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
         "tv_rename_btn",
         "tv_rename_modal",
         "tv_tag_filter",
+        "tv_tagf_age",
+        "tv_tagf_rb",
         "tv_lurker",
         "tv_mode_switch_btn",
         "tv_mode_switch_select",

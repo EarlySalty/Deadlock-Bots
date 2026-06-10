@@ -114,6 +114,9 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
 
+    // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
+    let tag_service = dl_community::tags::TagService::new(db.clone());
+
     // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
     let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|generator| {
         let moderator = dl_moderation::AiModerator::new(
@@ -191,6 +194,11 @@ async fn main() -> anyhow::Result<()> {
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
         dl_voice::tempvoice::engine::spawn(tempvoice.clone(), &dispatcher);
+        // Tag-Filter: Dienst anbinden + Ragebaiter-Sofort-Durchsetzung
+        tag_service.rehydrate().await;
+        tempvoice.set_tag_service(tag_service.clone()).await;
+        dl_community::tags::spawn_cleanup(tag_service.clone());
+        dl_voice::tempvoice::engine::spawn_tag_listener(tempvoice.clone(), tag_service.clone());
 
         // Rank-Voice-Manager (4c): Anker + Rang-Rechte auf Comp-Lanes
         let rank_manager = dl_voice::rank::RankVoiceManager::new(

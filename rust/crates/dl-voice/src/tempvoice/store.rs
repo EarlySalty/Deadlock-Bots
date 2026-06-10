@@ -3,6 +3,22 @@
 use dl_db::{Db, DbError};
 use rusqlite::OptionalExtension;
 
+/// Tag-Filter einer Lane (Original: LaneTagFilter). `required_tone_tag`
+/// wird wie im Original gespeichert, aber NICHT durchgesetzt —
+/// `_member_block_reason` prüft nur min_age und ragebaiter (toter Zweig).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LaneTagFilter {
+    pub min_age_tag: Option<String>,
+    pub required_tone_tag: Option<String>,
+    pub deny_ragebaiter: bool,
+}
+
+impl LaneTagFilter {
+    pub fn is_enabled(&self) -> bool {
+        self.min_age_tag.is_some() || self.required_tone_tag.is_some() || self.deny_ragebaiter
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneRecord {
     pub channel_id: u64,
@@ -109,6 +125,59 @@ impl TempVoiceStore {
                     })
                 })?;
                 rows.collect()
+            })
+            .await
+    }
+
+    // ── Lane-Tag-Filter (tempvoice_lane_tag_filter) ─────────────────────────
+
+    pub async fn lane_tag_filter(&self, channel_id: u64) -> LaneTagFilter {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT min_age_tag, required_tone_tag, deny_ragebaiter
+                       FROM tempvoice_lane_tag_filter WHERE channel_id = ?1",
+                    [channel_id],
+                    |row| {
+                        Ok(LaneTagFilter {
+                            min_age_tag: row.get(0)?,
+                            required_tone_tag: row.get(1)?,
+                            deny_ragebaiter: row.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    pub async fn set_lane_tag_filter(
+        &self,
+        channel_id: u64,
+        filter: LaneTagFilter,
+    ) -> Result<(), DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO tempvoice_lane_tag_filter(
+                       channel_id, min_age_tag, required_tone_tag, deny_ragebaiter, updated_at
+                     ) VALUES(?1, ?2, ?3, ?4, CURRENT_TIMESTAMP)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                       min_age_tag = excluded.min_age_tag,
+                       required_tone_tag = excluded.required_tone_tag,
+                       deny_ragebaiter = excluded.deny_ragebaiter,
+                       updated_at = CURRENT_TIMESTAMP",
+                    rusqlite::params![
+                        channel_id,
+                        filter.min_age_tag,
+                        filter.required_tone_tag,
+                        i64::from(filter.deny_ragebaiter),
+                    ],
+                )
+                .map(|_| ())
             })
             .await
     }

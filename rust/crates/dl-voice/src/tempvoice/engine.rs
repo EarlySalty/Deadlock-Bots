@@ -80,6 +80,8 @@ pub struct StagingRules {
 
 #[derive(Debug, Clone)]
 pub struct TempVoiceConfig {
+    /// Haupt-Guild (für Abläufe ohne Event-Kontext, z. B. Tag-Listener).
+    pub guild_id_hint: u64,
     pub staging_channels: HashSet<u64>,
     pub fixed_lane_ids: HashSet<u64>,
     pub tempvoice_categories: HashSet<u64>,
@@ -118,6 +120,7 @@ impl TempVoiceConfig {
         );
 
         Self {
+            guild_id_hint: 1289721245281292288,
             staging_channels: HashSet::from([staging_casual, staging_street_brawl, staging_comp]),
             fixed_lane_ids: HashSet::from([
                 1493690350580138114, // permanenter Chill-Voice
@@ -172,12 +175,16 @@ struct EngineState {
     /// channel → user → join-Zeit
     join_time: HashMap<u64, HashMap<u64, NaiveDateTime>>,
     creating: HashSet<u64>,
+    /// channel → von Tag-Filtern geblockte User (Schutz vor Bann-Löschung)
+    tag_blocked: HashMap<u64, HashSet<u64>>,
 }
 
 pub struct TempVoiceEngine {
     pub config: TempVoiceConfig,
     pub store: TempVoiceStore,
     pub port: Arc<dyn LanePort>,
+    /// Tag-Dienst (None → Filter inaktiv, wie Original ohne TagService-Cog).
+    pub tags: tokio::sync::RwLock<Option<Arc<dl_community::tags::TagService>>>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -191,6 +198,7 @@ impl TempVoiceEngine {
             config,
             store,
             port,
+            tags: tokio::sync::RwLock::new(None),
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
     }
@@ -331,6 +339,8 @@ impl TempVoiceEngine {
             }
             self.apply_owner_bans(guild_id, channel_id, user_id).await;
         }
+        self.apply_tag_filter(guild_id, channel_id, Some(vec![user_id]), true)
+            .await;
         self.refresh_name(guild_id, channel_id).await;
     }
 
@@ -689,6 +699,131 @@ impl TempVoiceEngine {
         }
     }
 
+    pub async fn set_tag_service(&self, tags: Arc<dl_community::tags::TagService>) {
+        *self.tags.write().await = Some(tags);
+    }
+
+    /// Blockier-Grund wie `_member_block_reason`: nur min_age + ragebaiter
+    /// (required_tone_tag ist im Original toter Zweig — s. Store-Doku).
+    async fn member_block_reason(
+        &self,
+        tags: &Arc<dl_community::tags::TagService>,
+        user_id: u64,
+        filter: &super::store::LaneTagFilter,
+    ) -> Option<&'static str> {
+        if let Some(min_age) = &filter.min_age_tag {
+            let user_tags = tags.get_user_tags(user_id).await;
+            if user_tags.get("age").map(String::as_str) != Some(min_age.as_str()) {
+                return Some("min_age");
+            }
+        }
+        if filter.deny_ragebaiter && tags.has_active_mod_tag(user_id, "ragebaiter").await {
+            return Some("ragebaiter");
+        }
+        None
+    }
+
+    /// Filter auf Mitglieder anwenden (wie `_apply_tag_filter`).
+    pub async fn apply_tag_filter(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        target_members: Option<Vec<u64>>,
+        disconnect_blocked: bool,
+    ) {
+        let filter = self.store.lane_tag_filter(channel_id).await;
+        let members = match target_members {
+            Some(members) => members,
+            None => self.port.channel_members(guild_id, channel_id).await,
+        };
+        if !filter.is_enabled() {
+            for user_id in members {
+                self.set_tag_block(channel_id, user_id, false).await;
+            }
+            return;
+        }
+        let Some(tags) = self.tags.read().await.clone() else {
+            return; // wie Original ohne TagService-Cog
+        };
+        for user_id in members {
+            let blocked = self
+                .member_block_reason(&tags, user_id, &filter)
+                .await
+                .is_some();
+            self.set_tag_block(channel_id, user_id, blocked).await;
+            if blocked && disconnect_blocked {
+                let _ = self
+                    .port
+                    .disconnect_member(guild_id, user_id, "TempVoice: Tag-Filter enforced")
+                    .await;
+            }
+        }
+    }
+
+    /// Connect-Overwrite setzen/räumen mit Bann-Schutz beim Räumen
+    /// (wie `_set_tag_filter_permission`).
+    async fn set_tag_block(&self, channel_id: u64, user_id: u64, deny: bool) {
+        if deny {
+            let fresh = {
+                let mut state = self.state.lock().await;
+                state
+                    .tag_blocked
+                    .entry(channel_id)
+                    .or_default()
+                    .insert(user_id)
+            };
+            if fresh {
+                let _ = self
+                    .port
+                    .set_member_connect(channel_id, user_id, Some(false))
+                    .await;
+            }
+            return;
+        }
+        let was_blocked = {
+            let mut state = self.state.lock().await;
+            state
+                .tag_blocked
+                .get_mut(&channel_id)
+                .map(|set| set.remove(&user_id))
+                .unwrap_or(false)
+        };
+        if !was_blocked {
+            return;
+        }
+        // Owner-Bann hat Vorrang: Overwrite dann NICHT löschen
+        if let Some(owner_id) = self.lane_owner(channel_id).await {
+            if self
+                .store
+                .is_banned_by_owner(owner_id, user_id)
+                .await
+                .unwrap_or(false)
+            {
+                return;
+            }
+        }
+        let _ = self
+            .port
+            .set_member_connect(channel_id, user_id, None)
+            .await;
+    }
+
+    /// Filter speichern + sofort durchsetzen (Panel-Save).
+    pub async fn save_tag_filter(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        filter: super::store::LaneTagFilter,
+    ) -> Result<(), String> {
+        self.store
+            .set_lane_tag_filter(channel_id, filter)
+            .await
+            .map_err(|e| e.to_string())?;
+        self.apply_tag_filter(guild_id, channel_id, None, true)
+            .await;
+        Ok(())
+    }
+
     pub async fn cleanup_lane(&self, channel_id: u64, reason: &str) {
         {
             let mut state = self.state.lock().await;
@@ -781,6 +916,47 @@ impl TempVoiceEngine {
             let _ = self.port.set_member_connect(channel_id, banned, None).await;
         }
     }
+}
+
+/// Ragebaiter-Tag gesetzt → Lane des Users sofort nachziehen
+/// (wie `on_mod_tag_added`: nur wenn der Lane-Filter deny_ragebaiter hat).
+pub fn spawn_tag_listener(
+    engine: Arc<TempVoiceEngine>,
+    tags: Arc<dl_community::tags::TagService>,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = tags.subscribe();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(dl_community::tags::TagEvent::ModTagAdded { user_id, tag, .. })
+                    if tag == "ragebaiter" =>
+                {
+                    // Lane des Users finden (über alle bekannten Lanes)
+                    let lanes: Vec<(u64, u64)> = {
+                        let state = engine.state.lock().await;
+                        state.lanes.keys().map(|id| (*id, user_id)).collect()
+                    };
+                    for (channel_id, user_id) in lanes {
+                        let filter = engine.store.lane_tag_filter(channel_id).await;
+                        if !filter.deny_ragebaiter {
+                            continue;
+                        }
+                        // Nur anwenden, wenn der User wirklich in dieser Lane sitzt
+                        let guild_id = engine.config.guild_id_hint;
+                        let members = engine.port.channel_members(guild_id, channel_id).await;
+                        if members.contains(&user_id) {
+                            engine
+                                .apply_tag_filter(guild_id, channel_id, Some(vec![user_id]), true)
+                                .await;
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Engine als Dispatcher-Subscriber starten.
