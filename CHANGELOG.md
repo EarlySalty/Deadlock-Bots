@@ -1,3 +1,11 @@
+## #108 — Rust-Neuaufbau: der FAQ-Chat und der Ticket-Auto-Helfer
+
+**Ausgangslage:** Über das FAQ-Panel bekommt jeder auf Knopfdruck einen privaten Chat-Kanal, in dem ein Bot Fragen zum Server beantwortet — mit der Server-Dokumentation als Wissensbasis, strikten Sicherheitsregeln (keine internen Details, nichts erfinden) und Gesprächs-Gedächtnis für Rückfragen. Chats schließen nach 24 Stunden oder per Knopf. Zusätzlich liest der Ticket-Auto-Helfer die erste Nachricht in neuen Support-Tickets mit: Kann er das Anliegen aus der Doku klar lösen, antwortet er sofort — sonst schweigt er und überlässt das Ticket den Menschen.
+
+**Geändert:** Komplett in Rust portiert: gleiche Knopf-Kennungen, gleiche System-Anweisungen wortgleich (inklusive der Invite- und Coaching-Sonderregeln), gleiche Tabellen, gleiches Gedächtnis-Fenster (letzte 10 Nachrichten), gleiche Schweige-Regel (KEIN_TREFFER-Protokoll). Die Antworten laufen über die bestehende MiniMax-Anbindung. Zwei ehrlich dokumentierte Annäherungen: Der Ticket-Helfer springt auf die erste Nachricht im Ticket-Kanal an statt auf dessen Erstellung (sichtbar gleiches Verhalten), und die optionale Patchnotes-Anreicherung der Antworten fehlt noch.
+
+**Wie es jetzt funktioniert (und wie das bewiesen ist):** Prompt-Aufbau, Doku-Sammlung (alphabetisch, nur Markdown) und der komplette Session-Lebenszyklus (anlegen, Verlauf kappen, schließen, Ablauf) sind mit Tests abgesichert.
+
 ## #107 — Rust-Neuaufbau: die Clip-Einsendungen
 
 **Ausgangslage:** Im Clip-Kanal steht ein Einsende-Interface: Button drücken, Verwendungserlaubnis bestätigen, dann Link, Credit und Kontext ins Formular — mit Link-Prüfung und 60-Sekunden-Bremse gegen Spam. Die Einsendungen sammeln sich in einem Wochenfenster (Sonntag 0 Uhr bis Samstag 23 Uhr deutscher Zeit); nach Ablauf bekommt der Clip-Kurator genau einmal eine Text-Datei mit allen Einsendungen der Woche per DM.

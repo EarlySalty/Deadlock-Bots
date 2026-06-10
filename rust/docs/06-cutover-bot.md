@@ -76,6 +76,14 @@ lauffähig, solange seine verbleibenden Cogs keine Voice/Message-Events
 der portierten Domänen anfassen — Voice-Events braucht KEINER der
 verbleibenden Cogs außer customgames/Router: vor dem Flip prüfen).
 
+**Nicht portiert (bewusst):** `bug_reporter` — das ist keine reine
+Ticket-Annahme, sondern ein Codex-Selbstreparatur-System (Auto-Restart,
+Cog-Reload via lokalem Codex-CLI mit gpt-4o-mini/gemini). Es ist ans
+Python-Runtime-Modell gebunden (Cog-Reload existiert in Rust nicht),
+OpenAI ist auf diesem Host nicht konfiguriert und die Codex-Auth des
+gpt-Users ist abgelaufen — faktisch inaktiv. Vor einem Port braucht das
+ein Redesign (z. B. MiniMax + systemd-Restart statt Cog-Reload).
+
 **Nicht portiert (ersetzt):** `rename_manager` (DB-Rename-Queue mit
 1s-Worker) — die Rust-Module rennen Kanäle direkt um und tragen ihre
 Rename-Disziplin selbst (Voice-Status 360/600s-Cooldown, Rank-Manager

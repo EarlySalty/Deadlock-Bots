@@ -162,6 +162,19 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
 
+    // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
+    let faq_docs_path = std::env::var("FAQ_DOCS_PATH").unwrap_or_else(|_| "docs".to_string());
+    let faq = dl_community::faq::FaqChat::new(
+        db.clone(),
+        Arc::new(modglue::FaqGlue {
+            adapter: adapter.clone(),
+        }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        dl_community::faq::load_docs(std::path::Path::new(&faq_docs_path)),
+    );
+    dl_community::faq::register(&mut router, faq.clone());
+
     // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
     let clips = dl_community::clips::ClipSubmission::new(
         db.clone(),
@@ -349,6 +362,7 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
+        dl_community::faq::spawn(faq.clone(), &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);

@@ -564,3 +564,73 @@ impl dl_community::clips::ClipPort for ClipGlue {
             .unwrap_or_else(|| guild_id.to_string())
     }
 }
+
+// ── FAQ-Chat-Anbindung ─────────────────────────────────────────────────────
+
+pub struct FaqGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::faq::FaqPort for FaqGlue {
+    async fn create_faq_channel(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_name: &str,
+    ) -> Result<u64, String> {
+        let bot_id = self.adapter.cache.current_user().id.get();
+        // VIEW=1024, SEND=2048, HISTORY=65536, MANAGE_CHANNELS=16
+        let body = json!({
+            "name": channel_name,
+            "type": 0,
+            "parent_id": dl_community::faq::FAQ_CATEGORY_ID.to_string(),
+            "permission_overwrites": [
+                { "id": guild_id.to_string(), "type": 0, "deny": "1024" },
+                { "id": user_id.to_string(), "type": 1, "allow": "68608" },
+                { "id": bot_id.to_string(), "type": 1, "allow": "68624" },
+            ],
+        });
+        self.adapter
+            .http
+            .create_channel(
+                GuildId::new(guild_id),
+                body.as_object().expect("json object"),
+                Some("FAQ Chat"),
+            )
+            .await
+            .map(|c| c.id.get())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn send_message(
+        &self,
+        channel_id: u64,
+        content: &str,
+        components: Option<serde_json::Value>,
+    ) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        if let Some(components) = components {
+            body.insert("components".into(), components);
+        }
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+
+    async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
+        self.adapter
+            .cache
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))
+            .and_then(|c| c.parent_id.map(|p| p.get()))
+    }
+
+    async fn user_name(&self, user_id: u64) -> String {
+        self.adapter
+            .cache
+            .user(UserId::new(user_id))
+            .map(|u| u.name.to_string())
+            .unwrap_or_else(|| format!("user-{user_id}"))
+    }
+}

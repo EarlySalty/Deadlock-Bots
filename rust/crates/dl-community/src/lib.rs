@@ -6,6 +6,7 @@
 
 pub mod clips;
 pub mod coaching;
+pub mod faq;
 pub mod invites;
 pub mod leave_survey;
 pub mod tags;
