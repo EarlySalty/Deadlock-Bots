@@ -1,3 +1,11 @@
+## #103 — Rust-Neuaufbau: das LFG-Routing-Herz
+
+**Ausgangslage:** Wenn die Gruppensuche eine Mitspieler-Anfrage erkennt, entscheidet eine Routing-Logik, wohin der Suchende gelotst wird: Street-Brawl- und Ranked-Absicht aus Schlüsselwörtern (Ranked zählt erst ab Emissary), Anfänger primär in die Neue-Spieler-Lanes mit Casual-Rückfall, Rang-Toleranzen je Lane-Typ (±2 Ranked, ±3 Casual), und Lanes mit bekannten Mitspielern gewinnen vor der vollsten passenden.
+
+**Geändert:** Diese Entscheidungslogik ist vollständig in Rust portiert und mit sieben Referenz-Entscheidungen aus dem laufenden Python-Original abgesichert — jedes Szenario (Casual, Ranked, zu niedriger Rang für Ranked, Street Brawl, Anfänger-Rückfall, Mitspieler-Vorrang, alles voll) liefert exakt dieselbe Entscheidung. Der sichtbare Antwort-Teil (Embed mit Empfehlung und Spielervorschlägen im Ausgabe-Kanal) folgt als letzter Schritt auf dieser Basis.
+
+**Wie es jetzt funktioniert:** Noch unverändert über den Python-Bot — die Rust-Seite hält jetzt aber die komplette Entscheidungskette (Erkennung → Bewertung → Routing) getestet vor.
+
 ## #102 — Rust-Neuaufbau: der Modus-Wechsel — das Lane-Panel ist komplett
 
 **Ausgangslage:** Der letzte gesperrte Panel-Knopf: Lane-Besitzer können ihre bestehende Lane in einen anderen Modus umziehen (Ranked, Casual, Street Brawl, Off Topic) — die Lane wandert in die Ziel-Kategorie, der Datenbank-Eintrag zieht nach, und der Name passt sich an (Ranked übernimmt den Rang des Besitzers, sonst kehrt der gespeicherte Basisname zurück).

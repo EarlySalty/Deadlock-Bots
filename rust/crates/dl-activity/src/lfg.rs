@@ -352,6 +352,183 @@ pub fn parse_tag_filters(message: &str) -> TagFilters {
     }
 }
 
+// ── Lane-Routing (wie _route_to_lane; Referenz-Entscheidungen im Test) ─────
+
+pub const LANE_RANK_TOLERANCE_RANKED: f64 = 2.0;
+pub const LANE_RANK_TOLERANCE_CASUAL: f64 = 3.0;
+pub const NEW_PLAYER_MAX_RANK: i64 = 4;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LaneLabel {
+    Casual,
+    Ranked,
+    StreetBrawl,
+    NewPlayer,
+}
+
+#[derive(Debug, Clone)]
+pub struct LaneInfo {
+    pub channel_id: u64,
+    pub label: LaneLabel,
+    pub member_count: usize,
+    pub user_limit: usize,
+    pub avg_rank_value: f64,
+    /// Anzahl bekannter Mitspieler des Suchenden in dieser Lane.
+    pub co_players_present: usize,
+}
+
+impl LaneInfo {
+    fn has_space(&self) -> bool {
+        self.member_count < self.user_limit
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteMode {
+    /// Lane mit bekannten Mitspielern.
+    CoPlayerLane,
+    /// Vollste passende besetzte Lane.
+    JoinExisting,
+    /// Leere passende Lane bzw. neue Lane im vorgeschlagenen Modus.
+    CreateNew,
+}
+
+#[derive(Debug, Clone)]
+pub struct RouteResult {
+    pub mode: RouteMode,
+    pub target_channel_id: Option<u64>,
+    pub suggested_label: Option<LaneLabel>,
+}
+
+/// Intent aus Keywords (ranked nur ab Emissary/Rang 6 — wie das Original).
+pub fn detect_intent(content_lower: &str, rank_value: i64) -> (bool, bool) {
+    let ranked = ["ranked", "grind", "comp", "competitive", "tryhard"]
+        .iter()
+        .any(|kw| content_lower.contains(kw));
+    let street_brawl = ["street brawl", "streetbrawl", "brawl"]
+        .iter()
+        .any(|kw| content_lower.contains(kw));
+    let ranked = ranked && rank_value >= 6;
+    (ranked, street_brawl)
+}
+
+/// Rang-Fit je Lane-Typ (wie _rank_fits_lane; Subrank-Default 5).
+pub fn rank_fits_lane(requester_rank: i64, requester_sub: Option<i64>, lane: &LaneInfo) -> bool {
+    if lane.member_count == 0 {
+        return true;
+    }
+    let req_val = requester_rank as f64 + requester_sub.unwrap_or(5) as f64 / 10.0;
+    match lane.label {
+        LaneLabel::Ranked => (req_val - lane.avg_rank_value).abs() <= LANE_RANK_TOLERANCE_RANKED,
+        LaneLabel::Casual | LaneLabel::StreetBrawl => {
+            (req_val - lane.avg_rank_value).abs() <= LANE_RANK_TOLERANCE_CASUAL
+        }
+        LaneLabel::NewPlayer => requester_rank <= NEW_PLAYER_MAX_RANK || requester_rank == 0,
+    }
+}
+
+/// Routing-Entscheidung wie `_route_to_lane`.
+pub fn route_to_lane(
+    content_lower: &str,
+    rank_value: i64,
+    rank_sub: Option<i64>,
+    lanes: &[LaneInfo],
+) -> RouteResult {
+    let (ranked_intent, sb_intent) = detect_intent(content_lower, rank_value);
+    let eligible: Vec<&LaneInfo> = if sb_intent {
+        lanes
+            .iter()
+            .filter(|l| l.label == LaneLabel::StreetBrawl && l.has_space())
+            .collect()
+    } else if ranked_intent {
+        lanes
+            .iter()
+            .filter(|l| {
+                l.label == LaneLabel::Ranked
+                    && l.has_space()
+                    && rank_fits_lane(rank_value, rank_sub, l)
+            })
+            .collect()
+    } else if rank_value > 0 && rank_value <= NEW_PLAYER_MAX_RANK {
+        // Anfänger: primär New-Player-Lanes, Fallback Casual+NP
+        let np: Vec<&LaneInfo> = lanes
+            .iter()
+            .filter(|l| {
+                l.label == LaneLabel::NewPlayer
+                    && l.has_space()
+                    && rank_fits_lane(rank_value, rank_sub, l)
+            })
+            .collect();
+        if np.is_empty() {
+            lanes
+                .iter()
+                .filter(|l| {
+                    matches!(l.label, LaneLabel::Casual | LaneLabel::NewPlayer)
+                        && l.has_space()
+                        && rank_fits_lane(rank_value, rank_sub, l)
+                })
+                .collect()
+        } else {
+            np
+        }
+    } else {
+        lanes
+            .iter()
+            .filter(|l| {
+                matches!(l.label, LaneLabel::Casual | LaneLabel::NewPlayer)
+                    && l.has_space()
+                    && rank_fits_lane(rank_value, rank_sub, l)
+            })
+            .collect()
+    };
+
+    // Co-Spieler-Lane gewinnt (meiste Co-Spieler, dann meiste Mitglieder)
+    let co_lanes: Vec<&&LaneInfo> = eligible
+        .iter()
+        .filter(|l| l.co_players_present > 0)
+        .collect();
+    if let Some(best) = co_lanes
+        .iter()
+        .max_by_key(|l| (l.co_players_present, l.member_count))
+    {
+        return RouteResult {
+            mode: RouteMode::CoPlayerLane,
+            target_channel_id: Some(best.channel_id),
+            suggested_label: None,
+        };
+    }
+    let occupied: Vec<&&LaneInfo> = eligible.iter().filter(|l| l.member_count > 0).collect();
+    if let Some(best) = occupied.iter().max_by_key(|l| l.member_count) {
+        return RouteResult {
+            mode: RouteMode::JoinExisting,
+            target_channel_id: Some(best.channel_id),
+            suggested_label: None,
+        };
+    }
+    if let Some(first) = eligible.first() {
+        return RouteResult {
+            mode: RouteMode::CreateNew,
+            target_channel_id: Some(first.channel_id),
+            suggested_label: None,
+        };
+    }
+    // Nichts passt → neue Lane im vorgeschlagenen Modus
+    let label = if sb_intent {
+        LaneLabel::StreetBrawl
+    } else if ranked_intent {
+        LaneLabel::Ranked
+    } else if rank_value > 0 && rank_value <= NEW_PLAYER_MAX_RANK {
+        LaneLabel::NewPlayer
+    } else {
+        LaneLabel::Casual
+    };
+    RouteResult {
+        mode: RouteMode::CreateNew,
+        target_channel_id: None,
+        suggested_label: Some(label),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -409,6 +586,86 @@ mod tests {
         // nichts
         assert_eq!(time_match_score(&[8], &[0], 14, 5), 0.0);
         assert_eq!(time_match_score(&[], &[], 14, 5), 0.0);
+    }
+
+    fn lane(
+        id: u64,
+        label: LaneLabel,
+        members: usize,
+        limit: usize,
+        avg: f64,
+        co: usize,
+    ) -> LaneInfo {
+        LaneInfo {
+            channel_id: id,
+            label,
+            member_count: members,
+            user_limit: limit,
+            avg_rank_value: avg,
+            co_players_present: co,
+        }
+    }
+
+    /// Referenz-Entscheidungen aus dem laufenden CPython-Original.
+    #[test]
+    fn routing_wie_python() {
+        let base = vec![
+            lane(1, LaneLabel::Casual, 3, 8, 5.0, 0),
+            lane(2, LaneLabel::Casual, 1, 8, 5.5, 0),
+            lane(3, LaneLabel::Ranked, 2, 6, 9.0, 0),
+            lane(4, LaneLabel::StreetBrawl, 1, 4, 3.0, 0),
+            lane(5, LaneLabel::Casual, 0, 8, 0.0, 0),
+        ];
+        // casual phantom → join_existing (vollste Casual = 1)
+        let r = route_to_lane("wer bock", 6, Some(3), &base);
+        assert_eq!(r.mode, RouteMode::JoinExisting);
+        assert_eq!(r.target_channel_id, Some(1));
+        // ranked phantom → join Ranked
+        let r = route_to_lane("ranked grind", 9, Some(2), &base);
+        assert_eq!(r.mode, RouteMode::JoinExisting);
+        assert_eq!(r.target_channel_id, Some(3));
+        // ranked-Intent unter Rang 6 fällt auf den Anfänger/Casual-Pfad
+        let r = route_to_lane("ranked pls", 4, Some(1), &base);
+        assert_eq!(r.mode, RouteMode::JoinExisting);
+        // street brawl
+        let r = route_to_lane("street brawl anyone", 7, None, &base);
+        assert_eq!(r.mode, RouteMode::JoinExisting);
+        assert_eq!(r.target_channel_id, Some(4));
+        // Anfänger ohne NP-Lane → Casual-Fallback
+        let r = route_to_lane("wer bock", 2, Some(1), &base);
+        assert_eq!(r.mode, RouteMode::JoinExisting);
+        // Co-Spieler-Lane gewinnt trotz weniger Mitgliedern
+        let co = vec![
+            lane(1, LaneLabel::Casual, 3, 8, 5.0, 0),
+            lane(6, LaneLabel::Casual, 2, 8, 5.0, 2),
+        ];
+        let r = route_to_lane("wer bock", 6, Some(3), &co);
+        assert_eq!(r.mode, RouteMode::CoPlayerLane);
+        assert_eq!(r.target_channel_id, Some(6));
+        // alles voll → create_new mit Casual-Vorschlag
+        let full = vec![lane(1, LaneLabel::Casual, 8, 8, 6.0, 0)];
+        let r = route_to_lane("wer bock", 6, Some(3), &full);
+        assert_eq!(r.mode, RouteMode::CreateNew);
+        assert_eq!(r.suggested_label, Some(LaneLabel::Casual));
+    }
+
+    #[test]
+    fn intent_und_rank_fit() {
+        assert_eq!(detect_intent("ranked grind", 9), (true, false));
+        assert_eq!(detect_intent("ranked grind", 4), (false, false)); // zu niedrig
+        assert_eq!(detect_intent("streetbrawl!", 2), (false, true));
+        // Ranked ±2, Casual ±3, NP nur bis Rang 4, leere Lane passt immer
+        let ranked = lane(1, LaneLabel::Ranked, 2, 6, 9.0, 0);
+        assert!(rank_fits_lane(7, Some(5), &ranked)); // 7.5 vs 9.0
+        assert!(!rank_fits_lane(6, Some(1), &ranked)); // 6.1 vs 9.0
+        let np = lane(2, LaneLabel::NewPlayer, 2, 6, 2.0, 0);
+        assert!(rank_fits_lane(4, None, &np));
+        assert!(!rank_fits_lane(5, None, &np));
+        assert!(rank_fits_lane(
+            11,
+            None,
+            &lane(3, LaneLabel::Ranked, 0, 6, 0.0, 0)
+        ));
     }
 
     #[test]
