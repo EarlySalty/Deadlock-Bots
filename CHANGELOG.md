@@ -1,3 +1,11 @@
+## #118 — Master-Broker: Discord-User-Auflösung für den Twitch-Bot
+
+**Ausgangslage:** Der Twitch-Bot (Rust) übernimmt nach einer Streamer-Autorisierung das Partner-Setup — dazu gehört, den Discord-Anzeigenamen des Streamers nachzuschlagen und ihm die Streamer-Rolle zu geben. Rollen vergeben konnte der Broker schon, einen Discord-User nur anhand seiner ID auflösen (Name/Anzeigename) aber nicht.
+
+**Was wurde geändert:** Neue interne Broker-Route `resolve-user`: nimmt eine Discord-User-ID entgegen und liefert Name, globalen Anzeigenamen und Server-Anzeigenamen zurück. Nicht auffindbare User kommen als „nicht gefunden" zurück statt als Fehler — der Aufrufer behandelt das wie bisher der Python-Pfad (kein Name verfügbar, weiter ohne).
+
+**Wie es jetzt funktioniert:** Streamer autorisiert den Twitch-Bot → der Rust-Prozess fragt den Broker nach dem Anzeigenamen (Cache zuerst, dann Discord-API) und lässt ihn die Streamer-Rolle setzen. Nur intern erreichbar (Loopback + Token), reine Lese-Operation ohne Seiteneffekte.
+
 ## #117 — Streamer-Abgleich: neue Namen sichtbar + manueller Discord-Link
 
 **Ausgangslage:** Das Summary-Embed nach einem Abgleich zeigte nur Zahlen — welche Streamer konkret neu dazugekommen sind, war nicht erkennbar. Wer keinen automatischen Discord-Match bekam, verschwand kommentarlos im "Ohne Treffer"-Topf; ein nachträgliches manuelles Verknüpfen war nur über DB-Direktzugriff möglich.

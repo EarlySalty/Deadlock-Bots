@@ -248,6 +248,10 @@ class MasterBroker:
                         "/internal/master/v1/discord/send-dm",
                         self._handle_send_dm,
                     ),
+                    web.post(
+                        "/internal/master/v1/discord/resolve-user",
+                        self._handle_resolve_user,
+                    ),
                 ]
             )
 
@@ -2393,6 +2397,52 @@ class MasterBroker:
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
             operation=_operation,
+        )
+
+    async def _handle_resolve_user(self, request: web.Request) -> web.Response:
+        """Read-only: Discord-User auflösen (Name/Anzeigename).
+
+        Body: {user_id}. Antwortet immer 200; nicht auffindbare User kommen
+        als result.found=false zurück (kein 404 — Aufrufer behandeln "nicht
+        gefunden" wie Pythons resolve_discord_display_name als None).
+        """
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            payload = await self._read_json_object(request)
+            user_id = self._parse_positive_payload_int(payload, "user_id")
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+        except Exception:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="invalid JSON payload",
+            )
+
+        user = await self._resolve_user(user_id)
+        if user is None:
+            return self._success_response(
+                request=request,
+                result={"found": False},
+            )
+        return self._success_response(
+            request=request,
+            result={
+                "found": True,
+                "user_id": str(getattr(user, "id", user_id)),
+                "name": getattr(user, "name", None),
+                "global_name": getattr(user, "global_name", None),
+                "display_name": getattr(user, "display_name", None),
+            },
         )
 
     async def _handle_send_dm(self, request: web.Request) -> web.Response:
