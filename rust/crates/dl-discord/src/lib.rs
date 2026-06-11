@@ -20,5 +20,5 @@ pub use adapter::DiscordAdapter;
 pub use dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
 pub use interactions::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, InteractionHandler,
-    InteractionRouter,
+    InteractionRouter, ModalField, ModalSpec,
 };

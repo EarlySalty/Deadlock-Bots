@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec};
 use serde_json::{json, Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
@@ -240,35 +240,39 @@ pub struct LinkState {
     path: PathBuf,
     pub processed: Map<String, Value>,
     pub pending: Map<String, Value>,
+    /// Offene manuelle Verknüpfungs-Prompts (kein Auto-Match) — für Neustart-Restore.
+    pub manual_pending: Map<String, Value>,
 }
 
 impl LinkState {
     pub fn load(path: PathBuf) -> Self {
-        let (processed, pending) = std::fs::read_to_string(&path)
+        let (processed, pending, manual_pending) = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
             .map(|data| {
-                (
-                    data.get("processed")
+                let get = |key: &str| {
+                    data.get(key)
                         .and_then(Value::as_object)
                         .cloned()
-                        .unwrap_or_default(),
-                    data.get("pending")
-                        .and_then(Value::as_object)
-                        .cloned()
-                        .unwrap_or_default(),
-                )
+                        .unwrap_or_default()
+                };
+                (get("processed"), get("pending"), get("manual_pending"))
             })
             .unwrap_or_default();
         Self {
             path,
             processed,
             pending,
+            manual_pending,
         }
     }
 
     pub fn save(&self) {
-        let payload = json!({ "processed": self.processed, "pending": self.pending });
+        let payload = json!({
+            "processed": self.processed,
+            "pending": self.pending,
+            "manual_pending": self.manual_pending,
+        });
         if let Some(parent) = self.path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
@@ -362,6 +366,8 @@ pub struct ScanStats {
     pub review: u64,
     pub skipped: u64,
     pub errors: u64,
+    /// Alle in diesem Lauf erstmals geprüften Logins (für das Summary-Embed).
+    pub new_logins: Vec<String>,
 }
 
 pub struct Matcher {
@@ -492,6 +498,7 @@ impl Matcher {
                 }
             }
             stats.checked += 1;
+            stats.new_logins.push(login.clone());
             let is_monitored = entry
                 .get("is_monitored_only")
                 .and_then(Value::as_bool)
@@ -513,6 +520,7 @@ impl Matcher {
                 )
                 .await;
                 stats.skipped += 1;
+                self.post_manual_link_prompt(&login).await;
                 continue;
             };
             if used_member_ids.contains(&member.user_id) {
@@ -560,6 +568,7 @@ impl Matcher {
                 )
                 .await;
                 stats.skipped += 1;
+                self.post_manual_link_prompt(&login).await;
             }
         }
 
@@ -783,14 +792,166 @@ impl Matcher {
         }
         BridgeReply::ephemeral_text(format!("Verknüpft: {login}"))
     }
+
+    async fn post_manual_link_prompt(self: &Arc<Self>, login: &str) {
+        let embed = json!({
+            "title": "🔗 Kein Discord-Match",
+            "description": format!(
+                "**Twitch:** `{login}`\nKein Discord-Account automatisch gefunden.\nDiscord-Name oder numerische ID eingeben, um manuell zu verknüpfen."
+            ),
+            "color": 0xE67E22u32,
+        });
+        let components = json!([{ "type": 1, "components": [{
+            "type": 2,
+            "style": 1,
+            "label": "Discord eingeben",
+            "custom_id": format!("slm:manual:{login}"),
+        }]}]);
+        let posted = self.notifier.notify(embed, Some(components)).await;
+        let (channel_val, message_val) = match posted {
+            Some((ch, msg)) => (json!(ch), json!(msg)),
+            None => (Value::Null, Value::Null),
+        };
+        let mut state = self.state.lock().await;
+        state.manual_pending.insert(
+            login.to_lowercase(),
+            json!({"login": login, "message_id": message_val, "channel_id": channel_val}),
+        );
+    }
+
+    /// Modaleingabe verarbeiten: Member via Name oder ID suchen, Profil verknüpfen.
+    pub async fn handle_manual_submit(
+        self: &Arc<Self>,
+        login: &str,
+        interaction: &BridgeInteraction,
+    ) -> BridgeReply {
+        if !interaction.author_can_manage_roles {
+            return BridgeReply::ephemeral_text("Nur Mods mit Rollen-Rechten.");
+        }
+        let value = interaction
+            .options
+            .get("discord_input")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+
+        let (channel_id, message_id) = {
+            let state = self.state.lock().await;
+            let rec = state.manual_pending.get(&login.to_lowercase());
+            (
+                rec.and_then(|r| r.get("channel_id")).and_then(Value::as_u64),
+                rec.and_then(|r| r.get("message_id")).and_then(Value::as_u64),
+            )
+        };
+
+        let Some(members) = self.guild.members(self.config.guild_id).await else {
+            return BridgeReply::ephemeral_text("Guild nicht gefunden.");
+        };
+
+        let member = if value.chars().all(|c| c.is_ascii_digit()) && !value.is_empty() {
+            let id: u64 = value.parse().unwrap_or(0);
+            members.iter().find(|m| m.user_id == id).cloned()
+        } else {
+            let vl = value.to_lowercase();
+            members
+                .iter()
+                .find(|m| {
+                    !m.is_bot
+                        && (m.name.to_lowercase() == vl
+                            || m.global_name
+                                .as_deref()
+                                .map(|n| n.to_lowercase() == vl)
+                                .unwrap_or(false)
+                            || m.nick
+                                .as_deref()
+                                .map(|n| n.to_lowercase() == vl)
+                                .unwrap_or(false))
+                })
+                .cloned()
+        };
+
+        let Some(member) = member else {
+            return BridgeReply::ephemeral_text(format!(
+                "Kein Member für `{value}` gefunden. Bitte numerische Discord-ID eingeben."
+            ));
+        };
+
+        let display = member.display().to_string();
+        let user_id = member.user_id;
+
+        if let Err(err) = self
+            .client
+            .link_discord_profile(login, user_id, &display)
+            .await
+        {
+            return BridgeReply::ephemeral_text(format!(
+                "DB-Write fehlgeschlagen: `{}`",
+                err.to_string().chars().take(160).collect::<String>()
+            ));
+        }
+
+        let role_note = self
+            .guild
+            .grant_role(self.config.guild_id, user_id, self.config.role_id)
+            .await;
+        {
+            let mut state = self.state.lock().await;
+            state.processed.remove(&login.to_lowercase());
+            state.mark(
+                login,
+                "linked",
+                json!({"discord_user_id": user_id.to_string(), "by": interaction.author_name})
+                    .as_object()
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            state.manual_pending.remove(&login.to_lowercase());
+            state.save();
+        }
+
+        if let (Some(channel_id), Some(message_id)) = (channel_id, message_id) {
+            self.notifier
+                .finalize_review(
+                    channel_id,
+                    message_id,
+                    format!(
+                        "Manuell verknüpft von {} → <@{user_id}>. {role_note}",
+                        interaction.author_name
+                    ),
+                    0x2ECC71,
+                )
+                .await;
+        }
+
+        BridgeReply::ephemeral_text(format!(
+            "✅ **{login}** → <@{user_id}> verknüpft. {role_note}"
+        ))
+    }
 }
 
 fn summary_embed(stats: &ScanStats, trigger: &str) -> Value {
+    let logins_text = if stats.new_logins.is_empty() {
+        String::new()
+    } else {
+        let shown: Vec<&str> = stats.new_logins.iter().map(String::as_str).take(10).collect();
+        let rest = stats.new_logins.len().saturating_sub(10);
+        let names = shown
+            .iter()
+            .map(|l| format!("`{l}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        if rest > 0 {
+            format!("\n**Neu:** {names} +{rest} weitere")
+        } else {
+            format!("\n**Neu:** {names}")
+        }
+    };
     json!({
         "title": "📊 Streamer-Abgleich gelaufen",
         "description": format!(
-            "**Auslöser:** {trigger}\n**Geprüft:** {}\n**Auto-verknüpft:** {}\n**Vorschläge:** {}\n**Ohne Treffer:** {}\n**Fehler:** {}",
-            stats.checked, stats.auto, stats.review, stats.skipped, stats.errors
+            "**Auslöser:** {trigger}\n**Geprüft:** {}\n**Auto-verknüpft:** {}\n**Vorschläge:** {}\n**Ohne Treffer:** {}\n**Fehler:** {}{}",
+            stats.checked, stats.auto, stats.review, stats.skipped, stats.errors, logins_text
         ),
         "color": 0x3498DB,
     })
@@ -828,6 +989,31 @@ impl InteractionHandler for ReviewHandler {
             "reject" => {
                 self.matcher
                     .confirm_pending(token, false, &interaction.author_name)
+                    .await
+            }
+            "manual" => {
+                // token = login; Button öffnet Modal
+                BridgeReply {
+                    modal: Some(ModalSpec {
+                        custom_id: format!("slm:manual_submit:{token}"),
+                        title: "Discord-Account verknüpfen".to_string(),
+                        fields: vec![ModalField {
+                            custom_id: "discord_input".to_string(),
+                            label: "Discord-Name oder ID".to_string(),
+                            placeholder: "z.B. username oder 123456789012345678".to_string(),
+                            required: true,
+                            min_length: 2,
+                            max_length: 100,
+                            paragraph: false,
+                        }],
+                    }),
+                    ..BridgeReply::default()
+                }
+            }
+            "manual_submit" => {
+                // token = login; Modaleingabe verarbeiten
+                self.matcher
+                    .handle_manual_submit(token, &interaction)
                     .await
             }
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
