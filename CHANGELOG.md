@@ -1,3 +1,11 @@
+## #117 — Streamer-Abgleich: neue Namen sichtbar + manueller Discord-Link
+
+**Ausgangslage:** Das Summary-Embed nach einem Abgleich zeigte nur Zahlen — welche Streamer konkret neu dazugekommen sind, war nicht erkennbar. Wer keinen automatischen Discord-Match bekam, verschwand kommentarlos im "Ohne Treffer"-Topf; ein nachträgliches manuelles Verknüpfen war nur über DB-Direktzugriff möglich.
+
+**Was wurde geändert:** Im Summary-Embed erscheint jetzt eine "Neu:"-Zeile mit den Twitch-Logins aller in diesem Lauf erstmals geprüften Streamer (bis zu 10, danach "+X weitere"). Für jeden Streamer ohne Discord-Treffer — egal ob kein Member gefunden oder Score zu niedrig — wird zusätzlich ein eigenes Embed mit einem "Discord eingeben"-Button gepostet. Der Button öffnet ein Modal, in das Name oder numerische ID eingetippt werden kann; der Bot sucht erst nach exaktem Username/Displayname/Nick, fällt bei Nichttreffer auf ID-Suche zurück. Nach erfolgreichem Eintragen wird die Streamer-Rolle vergeben, der State als "linked" markiert und der Button dauerhaft deaktiviert. Persistent Views werden nach Bot-Neustart wiederhergestellt, sodass offene Eingabe-Prompts nicht verloren gehen.
+
+**Wie es jetzt funktioniert:** Neuer Streamer taucht auf → Abgleich läuft → Summary zeigt Namen → wenn kein Match: orangefarbenes Embed mit Name und Button erscheint → Mod klickt, tippt Discord-Name oder ID ein → Bot verknüpft und vergibt Rolle → Embed wird grün und Button verschwindet.
+
 ## #116 — Steam-Panels: Restart-fest, editierbar, Zielkanal wählbar
 
 **Ausgangslage:** Beim Umbau auf den Rust-Steam-Bot war die Discord-Brücke schlanker geraten als das Original: Das Steam-Verknüpfen-Panel wurde nach einem Bot-Neustart nicht mehr aufgefrischt, `/publish_steam_panel` konnte keine bestehende Panel-Nachricht editieren (jeder Aufruf erzeugte ein neues Panel), und `/publish_betainvite_panel` konnte nur in den aktuellen Kanal posten.

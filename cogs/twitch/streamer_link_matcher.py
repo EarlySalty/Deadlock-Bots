@@ -175,17 +175,19 @@ class _LinkState:
         self._lock = asyncio.Lock()
         self.processed: dict[str, dict[str, Any]] = {}
         self.pending: dict[str, dict[str, Any]] = {}
+        self.manual_pending: dict[str, dict[str, Any]] = {}
 
     def load(self) -> None:
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
             self.processed = dict(data.get("processed") or {})
             self.pending = dict(data.get("pending") or {})
+            self.manual_pending = dict(data.get("manual_pending") or {})
         except FileNotFoundError:
-            self.processed, self.pending = {}, {}
+            self.processed, self.pending, self.manual_pending = {}, {}, {}
         except Exception:
             log.exception("streamer_link state load failed; starting empty")
-            self.processed, self.pending = {}, {}
+            self.processed, self.pending, self.manual_pending = {}, {}, {}
 
     async def save(self) -> None:
         async with self._lock:
@@ -195,7 +197,10 @@ class _LinkState:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self._path.with_suffix(".tmp")
         tmp.write_text(
-            json.dumps({"processed": self.processed, "pending": self.pending}, ensure_ascii=False, indent=0),
+            json.dumps(
+                {"processed": self.processed, "pending": self.pending, "manual_pending": self.manual_pending},
+                ensure_ascii=False, indent=0,
+            ),
             encoding="utf-8",
         )
         tmp.replace(self._path)
@@ -325,6 +330,106 @@ class PendingLinkView(discord.ui.View):
         await self.cog.confirm_pending(interaction, self.token, approve=False)
 
 
+# --- Manueller Link-Dialog (kein Auto-Match) ----------------------------------
+
+class ManualLinkModal(discord.ui.Modal, title="Discord-Account verknüpfen"):
+    discord_input = discord.ui.TextInput(
+        label="Discord-Name oder ID",
+        placeholder="z.B. username oder 123456789012345678",
+        min_length=2,
+        max_length=100,
+    )
+
+    def __init__(self, cog: "StreamerLinkMatcher", login: str) -> None:
+        super().__init__()
+        self.cog = cog
+        self.login = login
+
+    async def on_submit(self, interaction: discord.Interaction) -> None:
+        value = self.discord_input.value.strip()
+        guild = self.cog._guild()
+        if guild is None:
+            await interaction.response.send_message("Guild nicht gefunden.", ephemeral=True)
+            return
+
+        member: discord.Member | None = None
+        if value.isdigit():
+            member = guild.get_member(int(value))
+        if member is None:
+            vl = value.lower()
+            for m in guild.members:
+                if m.bot:
+                    continue
+                if (
+                    m.name.lower() == vl
+                    or (m.global_name or "").lower() == vl
+                    or (m.nick or "").lower() == vl
+                ):
+                    member = m
+                    break
+
+        if member is None:
+            await interaction.response.send_message(
+                f"Kein Member für `{value}` gefunden. Bitte numerische Discord-ID eingeben.",
+                ephemeral=True,
+            )
+            return
+
+        display = member.global_name or member.name
+        try:
+            await self.cog._client.link_discord_profile(
+                self.login, discord_user_id=str(member.id), discord_display_name=display
+            )
+        except Exception as exc:
+            await interaction.response.send_message(
+                f"DB-Write fehlgeschlagen: `{str(exc)[:160]}`", ephemeral=True
+            )
+            return
+
+        role_note = await self.cog._grant_role(guild, member)
+        self.cog.state.processed.pop(self.login.lower(), None)
+        self.cog.state.mark(self.login, "linked", discord_user_id=str(member.id), by=str(interaction.user))
+        self.cog.state.manual_pending.pop(self.login.lower(), None)
+        await self.cog.state.save()
+
+        await interaction.response.send_message(
+            f"✅ **{self.login}** → {member.mention} verknüpft. {role_note}"
+        )
+        try:
+            if interaction.message:
+                embed = interaction.message.embeds[0] if interaction.message.embeds else discord.Embed()
+                embed.color = discord.Color(0x2ECC71)
+                embed.add_field(
+                    name="Status",
+                    value=f"Manuell verknüpft von {interaction.user.mention} → {member.mention}. {role_note}",
+                    inline=False,
+                )
+                await interaction.message.edit(embed=embed, view=None)
+        except Exception:
+            log.debug("Konnte Manual-Link-Message nicht finalisieren", exc_info=True)
+
+
+class ManualLinkView(discord.ui.View):
+    def __init__(self, cog: "StreamerLinkMatcher", login: str) -> None:
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.login = login
+        btn = discord.ui.Button(
+            label="Discord eingeben",
+            style=discord.ButtonStyle.primary,
+            custom_id=f"slm:manual:{login}",
+        )
+        btn.callback = self._on_click
+        self.add_item(btn)
+
+    async def _on_click(self, interaction: discord.Interaction) -> None:
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if perms is None or not (perms.manage_roles or perms.administrator):
+            await interaction.response.send_message("Nur Mods mit Rollen-Rechten.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ManualLinkModal(self.cog, self.login))
+
+
 # --- Cog ---------------------------------------------------------------------
 
 class StreamerLinkMatcher(commands.Cog):
@@ -362,6 +467,13 @@ class StreamerLinkMatcher(commands.Cog):
                     self.bot.add_view(PendingLinkView(self, token), message_id=int(message_id))
                 except Exception:
                     log.debug("Konnte Review-View %s nicht reaktivieren", token, exc_info=True)
+        for login, rec in list(self.state.manual_pending.items()):
+            message_id = rec.get("message_id")
+            if message_id:
+                try:
+                    self.bot.add_view(ManualLinkView(self, login), message_id=int(message_id))
+                except Exception:
+                    log.debug("Konnte Manual-Link-View %s nicht reaktivieren", login, exc_info=True)
         if self.enabled and self.scan_interval_hours > 0:
             self.incremental_scan.change_interval(hours=self.scan_interval_hours)
             self.incremental_scan.start()
@@ -468,8 +580,8 @@ class StreamerLinkMatcher(commands.Cog):
                 best_ratio, best_member = ratio, member
         return best_member, best_ratio, False
 
-    async def _run_scan(self, *, trigger: str) -> dict[str, int]:
-        stats = {"checked": 0, "auto": 0, "review": 0, "skipped": 0, "errors": 0, "ai_calls": 0}
+    async def _run_scan(self, *, trigger: str) -> dict[str, Any]:
+        stats: dict[str, Any] = {"checked": 0, "auto": 0, "review": 0, "skipped": 0, "errors": 0, "ai_calls": 0, "new_logins": []}
         if not self.enabled or self._client is None:
             return stats
         guild = self._guild()
@@ -502,6 +614,7 @@ class StreamerLinkMatcher(commands.Cog):
             if self.state.is_handled(login):
                 continue
             stats["checked"] += 1
+            stats["new_logins"].append(login)
             is_monitored = bool(entry.get("is_monitored_only"))
             login_key = norm_key(login)
             if not login_key:
@@ -513,6 +626,7 @@ class StreamerLinkMatcher(commands.Cog):
             if member is None or ratio < self.fuzzy_floor:
                 self.state.mark(login, "no_match", reason=f"kein Member (beste Ähnlichkeit {ratio:.2f})")
                 stats["skipped"] += 1
+                await self._post_manual_link_prompt(login)
                 continue
             if member.id in used_member_ids:
                 # Member schon in diesem Lauf einem anderen Streamer zugeordnet.
@@ -553,6 +667,7 @@ class StreamerLinkMatcher(commands.Cog):
             else:
                 self.state.mark(login, "no_match", reason=f"Score {score} < {self.review_threshold}")
                 stats["skipped"] += 1
+                await self._post_manual_link_prompt(login)
 
         await self.state.save()
         await self._notify(self._summary_embed(stats, trigger))
@@ -689,9 +804,36 @@ class StreamerLinkMatcher(commands.Cog):
         except Exception:
             log.debug("Konnte Review-Nachricht nicht finalisieren", exc_info=True)
 
+    async def _post_manual_link_prompt(self, login: str) -> None:
+        embed = discord.Embed(
+            title="🔗 Kein Discord-Match",
+            description=(
+                f"**Twitch:** `{login}`\n"
+                "Kein Discord-Account automatisch gefunden.\n"
+                "Discord-Name oder numerische ID eingeben, um manuell zu verknüpfen."
+            ),
+            color=0xE67E22,
+        )
+        view = ManualLinkView(self, login)
+        msg = await self._notify(embed, view=view)
+        self.state.manual_pending[login.lower()] = {
+            "login": login,
+            "message_id": msg.id if msg else None,
+            "channel_id": msg.channel.id if msg else None,
+        }
+
     # ---- Embeds ----
 
-    def _summary_embed(self, stats: dict[str, int], trigger: str) -> discord.Embed:
+    def _summary_embed(self, stats: dict[str, Any], trigger: str) -> discord.Embed:
+        logins: list[str] = stats.get("new_logins") or []
+        logins_text = ""
+        if logins:
+            shown = logins[:10]
+            rest = len(logins) - len(shown)
+            names = ", ".join(f"`{l}`" for l in shown)
+            logins_text = f"\n**Neu:** {names}"
+            if rest > 0:
+                logins_text += f" +{rest} weitere"
         return discord.Embed(
             title="📊 Streamer-Abgleich gelaufen",
             description=(
@@ -702,6 +844,7 @@ class StreamerLinkMatcher(commands.Cog):
                 f"**Ohne Treffer:** {stats['skipped']}\n"
                 f"**AI-Aufrufe:** {stats['ai_calls']}\n"
                 f"**Fehler:** {stats['errors']}"
+                f"{logins_text}"
             ),
             color=0x3498DB,
         )
