@@ -1,3 +1,11 @@
+## #119 — Broker: GET /discord/members für Rust-Streamer-Link-Matcher
+
+**Ausgangslage:** Der Streamer-Link-Matcher soll neu in Rust (tb-bot) laufen statt als Python-Cog im Discord-Bot. Dafür braucht der Rust-Code Zugriff auf alle Guild-Member mit Name, globalem Anzeigenamen und Server-Nickname — bisher gab der Broker nur Role-Member-Listen (mit Role-Filter) oder einzelne User-Auflösungen zurück.
+
+**Was wurde geändert:** Neuer read-only Endpoint `GET /internal/master/v1/discord/members` im Master-Broker — liefert alle Nicht-Bot-Member der primären Guild als JSON-Array mit `id`, `name`, `global_name`, `nick`. Loopback-only wie die anderen Diagnose-Routen, kein Token erforderlich. Trigger `guild.chunk()` wenn der Member-Cache noch nicht vollständig befüllt ist.
+
+**Wie es jetzt funktioniert:** Der Rust tb-bot ruft beim Streamer-Abgleich einmalig alle Guild-Member ab und baut daraus intern einen Matching-Index. Die Python-Seite ist damit auf das Bereitstellen der Member-Daten beschränkt — die eigentliche Abgleich-Logik läuft komplett in Rust.
+
 ## #118 — Master-Broker: Discord-User-Auflösung für den Twitch-Bot
 
 **Ausgangslage:** Der Twitch-Bot (Rust) übernimmt nach einer Streamer-Autorisierung das Partner-Setup — dazu gehört, den Discord-Anzeigenamen des Streamers nachzuschlagen und ihm die Streamer-Rolle zu geben. Rollen vergeben konnte der Broker schon, einen Discord-User nur anhand seiner ID auflösen (Name/Anzeigename) aber nicht.

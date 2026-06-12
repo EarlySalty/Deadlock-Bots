@@ -207,6 +207,10 @@ class MasterBroker:
                         "/internal/master/v1/discord/role-members",
                         self._handle_role_members,
                     ),
+                    web.get(
+                        "/internal/master/v1/discord/members",
+                        self._handle_list_members,
+                    ),
                     web.post("/internal/master/v1/discord/send-message", self._handle_send_message),
                     web.post(
                         "/internal/master/v1/discord/create-channel",
@@ -1213,6 +1217,33 @@ class MasterBroker:
         return web.json_response(
             {"ok": True, "role_id": str(role.id), "name": role.name, "members": members}
         )
+
+    async def _handle_list_members(self, request: web.Request) -> web.Response:
+        """Read-only: alle nicht-Bot-Mitglieder der Guild. Loopback-only, kein Token."""
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        guild = await self._resolve_guild_for_diagnostics(request)
+        if guild is None:
+            return self._error_response(
+                request=request, status=404, code="not_found", message="guild not found"
+            )
+        if not guild.chunked:
+            try:
+                await guild.chunk()
+            except Exception:
+                pass
+        members = [
+            {
+                "id": str(m.id),
+                "name": m.name,
+                "global_name": m.global_name or None,
+                "nick": m.nick or None,
+            }
+            for m in guild.members
+            if not m.bot
+        ]
+        return web.json_response({"ok": True, "members": members})
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         rejected = self._authorize(request)

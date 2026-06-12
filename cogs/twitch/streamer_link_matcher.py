@@ -602,16 +602,22 @@ class StreamerLinkMatcher(commands.Cog):
             stats["errors"] += 1
             return stats
 
+        new_candidates = [
+            e for e in candidates
+            if str(e.get("twitch_login") or "").strip().lower()
+            and not self.state.is_handled(str(e.get("twitch_login") or "").strip().lower())
+        ]
+        if not new_candidates:
+            log.debug("StreamerLinkMatcher: keine neuen Kandidaten – Scan übersprungen")
+            return stats
+
         exact, bucket = self._build_member_index(guild)
         used_member_ids: set[int] = set()
         ai_available = self.bot.get_cog("AIConnector") is not None
 
-        for entry in candidates:
+        for entry in new_candidates:
             login = str(entry.get("twitch_login") or "").strip().lower()
             if not login:
-                continue
-            # Bereits bewertet/offen -> nie erneut scoren (Backfill einmal, dann nur Neue).
-            if self.state.is_handled(login):
                 continue
             stats["checked"] += 1
             stats["new_logins"].append(login)
