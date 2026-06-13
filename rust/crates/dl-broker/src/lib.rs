@@ -125,6 +125,10 @@ pub fn router(state: SharedBroker) -> Router {
             get(handlers::role_members),
         )
         .route(
+            "/internal/master/v1/discord/member-access",
+            get(handlers::member_access),
+        )
+        .route(
             "/internal/master/v1/discord/send-message",
             post(handlers::send_message),
         )

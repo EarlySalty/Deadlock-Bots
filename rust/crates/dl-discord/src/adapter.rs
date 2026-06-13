@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dl_broker::port::{
-    DiscordPort, GuildRoles, InviteInfo, MemberInfo, PortError, RichMessage, RoleInfo, RoleMembers,
-    ViewSpec,
+    DiscordPort, GuildRoles, InviteInfo, MemberAccess, MemberInfo, PortError, RichMessage, RoleInfo,
+    RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -455,6 +455,50 @@ impl DiscordPort for DiscordAdapter {
             name: role.name.clone(),
             members,
         })
+    }
+
+    async fn member_access(
+        &self,
+        guild_id: Option<u64>,
+        user_id: u64,
+    ) -> Result<MemberAccess, PortError> {
+        // Kandidaten-Gilden: eine bestimmte oder alle Bot-Gilden (wie Pythons
+        // Fallback auf bot.guilds, wenn keine konfiguriert sind).
+        let guild_ids: Vec<GuildId> = match guild_id {
+            Some(id) => vec![GuildId::new(id)],
+            None => self.cache.guilds(),
+        };
+        let target = UserId::new(user_id);
+
+        let mut access = MemberAccess {
+            user_id,
+            ..Default::default()
+        };
+        for gid in guild_ids {
+            let Some(guild) = self.cache.guild(gid) else {
+                continue;
+            };
+            let Some(member) = guild.members.get(&target) else {
+                continue;
+            };
+            // Admin-Permission wird über ALLE Gilden ge-OR-t.
+            if guild.member_permissions(member).administrator() {
+                access.is_administrator = true;
+            }
+            // Anzeigename + Rollen aus der ersten Gilde mit Treffer
+            // (entspricht _fetch_discord_member_role_ids: erste Fundstelle).
+            if !access.found {
+                access.found = true;
+                access.display_name = Some(member.display_name().to_string());
+                access.role_ids = member
+                    .roles
+                    .iter()
+                    .map(|role| role.get())
+                    .filter(|rid| *rid != gid.get()) // @everyone hat die Gilden-ID
+                    .collect();
+            }
+        }
+        Ok(access)
     }
 }
 

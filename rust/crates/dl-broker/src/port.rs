@@ -94,6 +94,21 @@ pub struct RoleMembers {
     pub members: Vec<MemberInfo>,
 }
 
+/// Zugriffsstatus eines Mitglieds für die Dashboard-Auth: Admin-Permission
+/// und Rollen-IDs, aus dem Member-Cache abgeleitet (ersetzt Pythons
+/// `guild.get_member(...).guild_permissions` / `.roles`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MemberAccess {
+    /// Ob das Mitglied in (mind.) einer geprüften Gilde gefunden wurde.
+    pub found: bool,
+    pub user_id: u64,
+    pub display_name: Option<String>,
+    /// `administrator`-Permission in irgendeiner geprüften Gilde.
+    pub is_administrator: bool,
+    /// Rollen-IDs aus der ersten Gilde mit Treffer (ohne `@everyone`).
+    pub role_ids: Vec<u64>,
+}
+
 #[async_trait::async_trait]
 pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
@@ -146,4 +161,11 @@ pub trait DiscordPort: Send + Sync {
         guild_id: Option<u64>,
         role_id: u64,
     ) -> Result<RoleMembers, PortError>;
+    /// Zugriffsstatus eines Mitglieds (Admin + Rollen) für die Dashboard-Auth.
+    /// guild_id None = über alle Bot-Gilden aggregieren.
+    async fn member_access(
+        &self,
+        guild_id: Option<u64>,
+        user_id: u64,
+    ) -> Result<MemberAccess, PortError>;
 }

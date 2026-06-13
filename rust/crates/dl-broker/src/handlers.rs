@@ -148,6 +148,45 @@ pub async fn role_members(
     }
 }
 
+/// Zugriffsstatus eines Mitglieds (Admin + Rollen) für den Dashboard-Login.
+/// Loopback-only, ohne Token — wie die übrigen Diagnose-Routen.
+pub async fn member_access(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    let guild_id = params
+        .get("guild_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    let user_id = params
+        .get("user_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if user_id == 0 {
+        return bad_request(&rid, "user_id must be a positive integer");
+    }
+    match state.port.member_access(guild_id, user_id).await {
+        Ok(access) => respond(
+            200,
+            json!({
+                "ok": true,
+                "found": access.found,
+                "user_id": access.user_id.to_string(),
+                "display_name": access.display_name,
+                "is_administrator": access.is_administrator,
+                "role_ids": access.role_ids.iter().map(u64::to_string).collect::<Vec<_>>(),
+            }),
+        ),
+        Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+    }
+}
+
 // ── Aktionen (Token + Idempotenz) ──────────────────────────────────────────
 
 /// Gemeinsamer Einstieg: Auth + JSON-Objekt + Idempotency-Key.
