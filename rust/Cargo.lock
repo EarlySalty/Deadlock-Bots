@@ -437,6 +437,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-dashboard"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64",
+ "chrono",
+ "dl-core",
+ "dl-db",
+ "dl-webcore",
+ "rand 0.8.6",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tracing",
+]
+
+[[package]]
 name = "dl-db"
 version = "0.1.0"
 dependencies = [
