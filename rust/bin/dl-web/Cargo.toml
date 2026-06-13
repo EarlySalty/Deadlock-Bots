@@ -13,6 +13,7 @@ dl-db.workspace = true
 dl-stats.workspace = true
 dl-tierlist.workspace = true
 dl-tournament.workspace = true
+dl-dashboard.workspace = true
 dl-webcore.workspace = true
 anyhow.workspace = true
 axum.workspace = true

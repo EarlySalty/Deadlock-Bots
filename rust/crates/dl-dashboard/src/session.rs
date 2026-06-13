@@ -88,7 +88,8 @@ impl SessionStore {
     }
 
     /// Importiert eine extern erzeugte Session (Twitch-Dashboard-SSO). Eine
-    /// bereits vergebene ID wird abgelehnt (`false`).
+    /// bereits vergebene ID wird überschrieben (Upsert, wie im Original).
+    /// `false` nur bei leerer ID.
     pub fn import(
         &self,
         session_id: &str,
@@ -102,9 +103,6 @@ impl SessionStore {
         }
         let mut map = self.guard();
         prune_expired(&mut map, now);
-        if map.contains_key(session_id) {
-            return false;
-        }
         map.insert(
             session_id.to_string(),
             Session {
@@ -205,7 +203,7 @@ mod tests {
     }
 
     #[test]
-    fn import_ist_einmalig_pro_id() {
+    fn import_upsert_und_leere_id() {
         let store = SessionStore::new(100);
         let ok = store.import(
             "ext-id",
@@ -214,8 +212,15 @@ mod tests {
             1000.0,
         );
         assert!(ok);
-        // Gleiche ID erneut → abgelehnt.
+        // Leere ID → abgelehnt.
         assert!(!store.import(
+            "  ",
+            login("twitch_dashboard_import", AccessLevel::Full),
+            None,
+            1000.0
+        ));
+        // Gleiche ID erneut → Upsert (überschreibt, wie im Original).
+        assert!(store.import(
             "ext-id",
             login("twitch_dashboard_import", AccessLevel::Full),
             None,

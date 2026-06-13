@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dl_broker::port::{
-    DiscordPort, GuildRoles, InviteInfo, MemberAccess, MemberInfo, PortError, RichMessage, RoleInfo,
-    RoleMembers, ViewSpec,
+    DiscordPort, GuildRoles, InviteInfo, MemberAccess, MemberInfo, PortError, RichMessage,
+    RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};

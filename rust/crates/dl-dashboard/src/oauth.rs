@@ -8,13 +8,13 @@
 
 use std::time::Duration;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// Antwort des Token-Endpunkts (nur die genutzten Felder).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TokenResponse {
     pub access_token: String,
     #[serde(default)]
@@ -24,7 +24,7 @@ pub struct TokenResponse {
 }
 
 /// Discord-Nutzer aus `/users/@me`.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiscordUser {
     pub id: String,
     #[serde(default)]
@@ -54,10 +54,30 @@ impl DiscordUser {
         }
     }
 
+    /// Name für die delegierten Endpunkte: globaler Name, sonst Username,
+    /// sonst `User <id>` (KEIN Discriminator-Suffix — anders als
+    /// [`display_name`](Self::display_name), das den Admin-Login betrifft).
+    pub fn delegated_name(&self) -> String {
+        if let Some(global) = self.global_name.as_deref().map(str::trim) {
+            if !global.is_empty() {
+                return global.to_string();
+            }
+        }
+        let username = self.username.trim();
+        if !username.is_empty() {
+            return username.to_string();
+        }
+        format!("User {}", self.id)
+    }
+
     /// Vollständige Avatar-URL (animierte Avatare als GIF) oder `None`.
     pub fn avatar_url(&self) -> Option<String> {
         let avatar = self.avatar.as_deref().filter(|a| !a.is_empty())?;
-        let ext = if avatar.starts_with("a_") { "gif" } else { "png" };
+        let ext = if avatar.starts_with("a_") {
+            "gif"
+        } else {
+            "png"
+        };
         Some(format!(
             "https://cdn.discordapp.com/avatars/{}/{}.{}",
             self.id, avatar, ext
@@ -108,6 +128,19 @@ impl OAuthClient {
         format!("{}/oauth2/authorize?{}", self.api_base, query)
     }
 
+    /// Authorize-URL OHNE `state` — für die turnier/twitch-`authorize-url`-
+    /// Endpunkte, deren Aufrufer den State selbst verwaltet.
+    pub fn authorize_url_no_state(&self, scope: &str, redirect_uri: &str) -> String {
+        let client_id = self.client_id.as_deref().unwrap_or_default();
+        let query = form_urlencode(&[
+            ("client_id", client_id),
+            ("redirect_uri", redirect_uri),
+            ("response_type", "code"),
+            ("scope", scope),
+        ]);
+        format!("{}/oauth2/authorize?{}", self.api_base, query)
+    }
+
     /// Tauscht einen Authorization-Code gegen ein Access-Token.
     pub async fn exchange_code(&self, code: &str, redirect_uri: &str) -> Option<TokenResponse> {
         let (Some(client_id), Some(client_secret)) =
@@ -146,7 +179,9 @@ impl OAuthClient {
 
     /// Holt die verknüpften Connections (z. B. Steam) zum Access-Token.
     pub async fn fetch_connections(&self, access_token: &str) -> Option<Vec<Value>> {
-        let value = self.get_authed("/users/@me/connections", access_token).await?;
+        let value = self
+            .get_authed("/users/@me/connections", access_token)
+            .await?;
         match value {
             Value::Array(items) => Some(items),
             _ => Some(Vec::new()),
@@ -256,7 +291,9 @@ mod tests {
         assert!(url.contains("response_type=code"));
         // Space → '+', '/' und ':' prozentkodiert.
         assert!(url.contains("scope=identify+guilds.members.read"));
-        assert!(url.contains("redirect_uri=https%3A%2F%2Fdeutsche-deadlock-community.de%2Fcallback%2Fdiscord"));
+        assert!(url.contains(
+            "redirect_uri=https%3A%2F%2Fdeutsche-deadlock-community.de%2Fcallback%2Fdiscord"
+        ));
         assert!(url.contains("state=STATE-123"));
     }
 

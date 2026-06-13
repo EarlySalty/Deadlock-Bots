@@ -16,9 +16,11 @@ pub const DEFAULT_TURNIER_MOD_ROLE_ID: u64 = 1401891955931222110;
 
 const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
 const DEFAULT_OAUTH_STATE_TTL_SECONDS: i64 = 21_600; // 6 Stunden
-const DEFAULT_DISCORD_REDIRECT_URI: &str = "https://deutsche-deadlock-community.de/callback/discord";
+const DEFAULT_DISCORD_REDIRECT_URI: &str =
+    "https://deutsche-deadlock-community.de/callback/discord";
 const DEFAULT_LISTEN_BASE_URL: &str = "http://127.0.0.1:8766";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
+const DEFAULT_BROKER_BASE: &str = "http://127.0.0.1:8770";
 
 /// Zugriffsstufe einer Dashboard-Session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +60,8 @@ pub struct DashboardConfig {
     pub public_base_url: Option<String>,
     pub listen_base_url: String,
     pub discord_api_base: String,
+    /// Basis-URL des Master-Brokers (Member-Access-Lookup für den Login).
+    pub broker_base: String,
     /// Tokens für die turnier-/allgemeinen internen Routen
     /// (initiate/consume/authorize-url/session).
     pub turnier_tokens: Vec<String>,
@@ -122,6 +126,8 @@ impl DashboardConfig {
                 .unwrap_or_else(|| DEFAULT_LISTEN_BASE_URL.to_string()),
             discord_api_base: get("DISCORD_API_BASE")
                 .unwrap_or_else(|| DISCORD_API_BASE.to_string()),
+            broker_base: get("MASTER_BROKER_BASE_URL")
+                .unwrap_or_else(|| DEFAULT_BROKER_BASE.to_string()),
             turnier_tokens,
             twitch_tokens,
         }
@@ -228,7 +234,10 @@ mod tests {
     fn guild_und_origin_listen() {
         let map = HashMap::from([
             ("MASTER_DASHBOARD_AUTH_GUILD_IDS", "111, 222 333"),
-            ("MASTER_DASHBOARD_ALLOWED_ORIGINS", "https://a.de, https://b.de"),
+            (
+                "MASTER_DASHBOARD_ALLOWED_ORIGINS",
+                "https://a.de, https://b.de",
+            ),
         ]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
         assert_eq!(cfg.auth_guild_ids, vec![111, 222, 333]);

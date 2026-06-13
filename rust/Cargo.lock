@@ -458,6 +458,7 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -585,6 +586,7 @@ dependencies = [
  "anyhow",
  "axum",
  "dl-core",
+ "dl-dashboard",
  "dl-db",
  "dl-stats",
  "dl-tierlist",

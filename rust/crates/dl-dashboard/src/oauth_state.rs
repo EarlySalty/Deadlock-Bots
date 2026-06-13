@@ -151,6 +151,22 @@ impl OAuthStateStore {
             .await
     }
 
+    /// Überschreibt die Metadaten eines States (für das Zurückschreiben des
+    /// OAuth-Ergebnisses nach dem Callback — `_store_oauth_state_result`).
+    pub async fn update_metadata(&self, state: &str, metadata: &Value) -> Result<(), DbError> {
+        let state = state.trim().to_string();
+        let json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE oauth_states SET metadata = ? WHERE state = ?",
+                    params![json, state],
+                )?;
+                Ok(())
+            })
+            .await
+    }
+
     /// Markiert den State als eingelöst. `true`, wenn er vorher gültig war —
     /// atomar, sodass paralleles Einlösen nur einmal gelingt.
     pub async fn consume(&self, state: &str, now: i64) -> Result<bool, DbError> {
@@ -311,7 +327,10 @@ mod tests {
     #[tokio::test]
     async fn abgelaufener_state_ist_ungueltig() {
         let store = store().await;
-        store.create(new_state("exp", None), 1000).await.expect("ok");
+        store
+            .create(new_state("exp", None), 1000)
+            .await
+            .expect("ok");
         // now nach Ablauf (1000 + 3600).
         assert!(store.validate("exp", 5000).await.expect("ok").is_none());
         assert!(!store.consume("exp", 5000).await.expect("ok"));
@@ -328,7 +347,10 @@ mod tests {
             .expect("ok");
         assert_eq!(created.requesting_service.as_deref(), Some("turnier"));
         assert_eq!(
-            created.metadata.as_ref().and_then(|m| m.get("redirect_uri")),
+            created
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get("redirect_uri")),
             Some(&json!("https://x"))
         );
     }

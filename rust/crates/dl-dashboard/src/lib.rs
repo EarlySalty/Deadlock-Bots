@@ -17,16 +17,25 @@
 //! Die Routen-Schicht (Auth-Provider, Analytics, Turnier-Admin, Steuerung)
 //! baut auf diesen Bausteinen auf und kommt schrittweise dazu.
 
+// axum-Response als Err-Variante ist groß, aber bewusst: die Guards geben die
+// fertige Fehlerantwort zurück (wie in dl-broker/dl-stats).
+#![allow(clippy::result_large_err)]
+
+pub mod auth;
+pub mod authority;
 pub mod config;
 pub mod oauth;
 pub mod oauth_state;
 pub mod session;
 pub mod token;
+pub mod web;
 
+pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};
 pub use config::{AccessLevel, DashboardConfig};
 pub use oauth::{DiscordUser, OAuthClient, TokenResponse};
 pub use oauth_state::{NewOAuthState, OAuthState, OAuthStateStore};
 pub use session::{NewSession, Session, SessionStore};
+pub use web::{router, DashboardApp, SESSION_COOKIE};
 
 /// Aktuelle Unix-Zeit in ganzen Sekunden (für `oauth_states`-TTLs).
 pub fn now_unix() -> i64 {

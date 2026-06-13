@@ -69,6 +69,8 @@ serenity = { version = "0.12", default-features = false, features = ["client", "
 rand = "0.8"
 # Namens-Normalisierung (streamer_link_matcher: NFKD-Deaccent)
 unicode-normalization = "0.1"
+# URL-Parsing (Dashboard-Redirect-Validierung, Sicherheits-Check)
+url = "2"
 
 # Tests
 tempfile = "3"
