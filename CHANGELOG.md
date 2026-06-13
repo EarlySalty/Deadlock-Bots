@@ -1,3 +1,11 @@
+## #120 — DNS-Resolver: aiodns ergänzt, Warn-Flut im Log beseitigt
+
+**Ausgangslage:** Beim Aufbau jeder HTTP-Verbindung versucht der Bot, einen asynchronen DNS-Resolver mit festen öffentlichen Nameservern (1.1.1.1 / 8.8.8.8 / 9.9.9.9) zu verwenden. Dieser Resolver braucht die Bibliothek `aiodns`, die aber nie in der Umgebung installiert war. Folge: Der Versuch schlug jedes Mal fehl, der Code fiel still auf den Standard-Resolver zurück — und schrieb dabei jedes Mal eine Warnung ins Log. Das passierte rund einmal pro Minute, also etwa 1.600 identische Warnzeilen in 24 Stunden, die echte Fehler im Log zugemüllt haben.
+
+**Was wurde geändert:** `aiodns` (4.0.4) wurde als Abhängigkeit ergänzt und in die Laufzeitumgebung installiert. Am Code selbst nichts geändert — der asynchrone Resolver war bereits vorgesehen, ihm fehlte nur die Bibliothek.
+
+**Wie es jetzt funktioniert:** Der asynchrone Resolver wird jetzt erfolgreich aufgebaut und tatsächlich genutzt; der Fallback-Pfad mit der Warnung läuft nicht mehr an. DNS-Auflösungen laufen damit nicht-blockierend über die festen Nameserver statt über den thread-basierten Standard-Resolver. Verifiziert: nach dem Neustart über 90 Sekunden keine einzige der Warnungen mehr, Bot sauber hochgefahren.
+
 ## #119 — Broker: GET /discord/members für Rust-Streamer-Link-Matcher
 
 **Ausgangslage:** Der Streamer-Link-Matcher soll neu in Rust (tb-bot) laufen statt als Python-Cog im Discord-Bot. Dafür braucht der Rust-Code Zugriff auf alle Guild-Member mit Name, globalem Anzeigenamen und Server-Nickname — bisher gab der Broker nur Role-Member-Listen (mit Role-Filter) oder einzelne User-Auflösungen zurück.
