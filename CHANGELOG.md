@@ -1,3 +1,11 @@
+## #128 — Rust-Neuaufbau: öffentliche Patchnotes-Schnittstelle
+
+**Ausgangslage:** Die Community-Website holt sich die übersetzten Deadlock-Patchnotes über eine öffentliche Schnittstelle des Dashboards (ohne Anmeldung). Diese lief bisher über Python.
+
+**Was wurde geändert:** Die Patchnotes-Schnittstelle ist in Rust nachgebaut. Sie liefert alle Patches, für die eine deutsche Übersetzung vorliegt, in der gewohnten Reihenfolge (neueste zuerst) und erkennt je Patch wie bisher, welche Abschnitte enthalten sind (Allgemein, Items, Helden). Die für den Website-Abruf nötigen Zugriffs- und Zwischenspeicher-Hinweise (CORS und Cache) werden mitgeliefert, inklusive der Vorab-Anfrage (OPTIONS), die der Browser vor dem eigentlichen Abruf stellt.
+
+**Wie es jetzt funktioniert:** Die Schnittstelle liest dieselbe Tabelle mit derselben Bedingung und Sortierung wie zuvor und gibt dieselbe Form zurück, damit die Website unverändert weiterläuft. Geprüft gegen eine Kopie der echten Datenbank: alle Patches kommen mit korrekten Feldern und Zugriffs-Hinweisen zurück, die Vorab-Anfrage wird sauber beantwortet. Die zweite öffentliche Schnittstelle — die Live-Mitgliederzahlen des Servers — braucht Daten direkt aus dem laufenden Bot und folgt separat.
+
 ## #127 — Rust-Neuaufbau: Heldenkonfiguration speichern (mit Schutz vor Fremd-Absenden)
 
 **Ausgangslage:** Auf der Heldenkonfigurations-Seite lässt sich die globale Ziel-Build-Bezeichnung setzen. Die Anzeige war schon in Rust (#125), das Speichern lief aber noch über Python. Schreibende Aktionen im Admin-Bereich brauchen zudem einen Schutz dagegen, dass eine fremde Webseite im Namen eines angemeldeten Admins heimlich Änderungen auslöst.
