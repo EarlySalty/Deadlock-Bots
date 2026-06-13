@@ -1,3 +1,11 @@
+## #125 — Rust-Neuaufbau: Dashboard-Heldenkonfiguration (Anzeige)
+
+**Ausgangslage:** Im Admin-Bereich gibt es eine Seite für die Deadlock-Heldenkonfiguration: die global eingestellte Ziel-Build-Bezeichnung und die Liste aller Helden samt ihrer hinterlegten Build-Schnappschüsse. Diese Anzeige lief bisher über das Python-Dashboard.
+
+**Was wurde geändert:** Die Anzeige-Seite ist in Rust nachgebaut — die globale Konfiguration und die vollständige Heldenliste mit ihren Builds. Builds werden je Held gruppiert und in der gewohnten Reihenfolge ausgegeben; hat ein Held keine eigenen Builds, aber einen früher hinterlegten Ursprungs-Build, erscheint wie bisher ein „Legacy"-Vorschlag. Diese Seite ist Vollzugriffs-Mitgliedern vorbehalten — ein neuer Zugriffs-Schutz prüft, dass nur eine angemeldete Sitzung mit vollem Dashboard-Zugriff sie laden kann (sonst Abweisung mit demselben Status wie zuvor).
+
+**Wie es jetzt funktioniert:** Die Abfragen treffen dieselben Tabellen und denselben Konfigurations-Speicher wie das Original, die Antwort hat dieselbe Form, damit die bestehende Oberfläche unverändert weiterläuft. Geprüft ist das gegen eine Kopie der echten Datenbank: ohne gültige Sitzung wird die Seite abgewiesen, mit Vollzugriffs-Sitzung kommen die echten Werte (Konfiguration und alle Helden mit ihren Builds) zurück. Das Bearbeiten und Speichern von Helden samt automatischem Abgleich gegen die externe Build-Quelle ist bewusst noch nicht dabei und folgt separat; bis dahin bleibt dafür das Python-Dashboard zuständig.
+
 ## #124 — Rust-Neuaufbau: Dashboard-Auswertungen (Voice, Austritte, Mitspieler-Netz)
 
 **Ausgangslage:** Nach den ersten beiden Auswertungs-Schnittstellen (#123) folgen drei größere: die **Voice-Historie** (Zeiten und Sitzungen über einen Zeitraum, mit Aufschlüsselung nach Stunde/Wochentag/Woche/Monat und einer Detailansicht pro Nutzer), die **Austritts-Umfragen** (Übersicht über Gründe und Antwortquoten) und das **Mitspieler-Netz** (wer mit wem wie oft im Voice war, als Graph). Diese lasen bisher aus dem Python-Dashboard.
