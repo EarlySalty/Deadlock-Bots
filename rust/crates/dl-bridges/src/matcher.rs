@@ -13,7 +13,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec,
+};
 use serde_json::{json, Map, Value};
 use unicode_normalization::UnicodeNormalization;
 
@@ -840,8 +842,10 @@ impl Matcher {
             let state = self.state.lock().await;
             let rec = state.manual_pending.get(&login.to_lowercase());
             (
-                rec.and_then(|r| r.get("channel_id")).and_then(Value::as_u64),
-                rec.and_then(|r| r.get("message_id")).and_then(Value::as_u64),
+                rec.and_then(|r| r.get("channel_id"))
+                    .and_then(Value::as_u64),
+                rec.and_then(|r| r.get("message_id"))
+                    .and_then(Value::as_u64),
             )
         };
 
@@ -934,7 +938,12 @@ fn summary_embed(stats: &ScanStats, trigger: &str) -> Value {
     let logins_text = if stats.new_logins.is_empty() {
         String::new()
     } else {
-        let shown: Vec<&str> = stats.new_logins.iter().map(String::as_str).take(10).collect();
+        let shown: Vec<&str> = stats
+            .new_logins
+            .iter()
+            .map(String::as_str)
+            .take(10)
+            .collect();
         let rest = stats.new_logins.len().saturating_sub(10);
         let names = shown
             .iter()
@@ -1012,9 +1021,7 @@ impl InteractionHandler for ReviewHandler {
             }
             "manual_submit" => {
                 // token = login; Modaleingabe verarbeiten
-                self.matcher
-                    .handle_manual_submit(token, &interaction)
-                    .await
+                self.matcher.handle_manual_submit(token, &interaction).await
             }
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
         }
