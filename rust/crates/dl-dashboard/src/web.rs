@@ -138,6 +138,44 @@ impl DashboardApp {
         }
     }
 
+    /// Gate für mutierende Routen (POST/PUT/PATCH/DELETE): Session + Origin-
+    /// Prüfung + CSRF-Token, dann ggf. Voll-Zugriff. Reihenfolge/Status wie
+    /// `_check_auth` (401 Session, 403 Origin/CSRF/Full). Gibt die Session
+    /// für das Audit-Log zurück.
+    pub(crate) fn guard_mutate(
+        &self,
+        headers: &HeaderMap,
+        require_full: bool,
+    ) -> Result<crate::session::Session, Response> {
+        let Some(session) = self.session_from_headers(headers) else {
+            return Err(err_text(401, "Authentication required"));
+        };
+        if !self.allowed_origin(headers) {
+            return Err(err_text(403, "Origin validation failed"));
+        }
+        if !check_csrf(headers, &session) {
+            return Err(err_text(403, "CSRF validation failed"));
+        }
+        if require_full && !session.has_full_access() {
+            return Err(err_text(403, "Full dashboard access required"));
+        }
+        Ok(session)
+    }
+
+    /// `_is_allowed_request_origin`: ohne konfigurierte Origins offen (CSRF-
+    /// Token bleibt die eigentliche Absicherung), sonst muss der Origin-Header
+    /// in der Liste stehen.
+    fn allowed_origin(&self, headers: &HeaderMap) -> bool {
+        let allowed = &self.cfg().allowed_origins;
+        if allowed.is_empty() {
+            return true;
+        }
+        match request_origin(headers) {
+            Some(origin) => allowed.iter().any(|a| a == &origin),
+            None => false,
+        }
+    }
+
     fn login_states(&self) -> MutexGuard<'_, HashMap<String, LoginState>> {
         self.inner
             .login_states
@@ -224,7 +262,7 @@ pub fn router(app: DashboardApp) -> Router {
         // Deadlock-Konfiguration (Phase 9c) — Read-Seite, Full-Access.
         .route(
             "/api/deadlock/config",
-            get(crate::deadlock::deadlock_config),
+            get(crate::deadlock::deadlock_config).post(crate::deadlock::deadlock_config_update),
         )
         .route(
             "/api/deadlock/heroes",
@@ -1072,6 +1110,38 @@ fn header_token(headers: &HeaderMap) -> Option<&str> {
     headers
         .get("X-Internal-Token")
         .and_then(|v| v.to_str().ok())
+}
+
+fn request_origin(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// `X-CSRF-Token` == Session-CSRF-Token (konstante Zeit), wie `_check_csrf`.
+fn check_csrf(headers: &HeaderMap, session: &crate::session::Session) -> bool {
+    let provided = headers
+        .get("X-CSRF-Token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    match provided {
+        Some(token) => constant_time_eq(token.as_bytes(), session.csrf_token.as_bytes()),
+        None => false,
+    }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {

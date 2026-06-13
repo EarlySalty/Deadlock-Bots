@@ -5,6 +5,7 @@
 //! 1:1 zum Original. Die Schreib-/Sync-Pfade (Upsert/Delete/Sync gegen die
 //! externe Build-API) folgen separat.
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::response::Response;
@@ -49,6 +50,84 @@ pub async fn deadlock_config(State(app): State<DashboardApp>, headers: HeaderMap
         return resp;
     }
     ok_json(json!({ "global_target_build_name": global_target_build_name(&app).await }))
+}
+
+/// Validiert einen Ziel-Build-Namen wie `_normalize_deadlock_target_name`:
+/// None/null → "", kein String → Fehler, max 120 Zeichen, keine Steuerzeichen.
+fn normalize_target_name(raw: Option<&Value>, field: &str) -> Result<String, Response> {
+    match raw {
+        None | Some(Value::Null) => Ok(String::new()),
+        Some(Value::String(s)) => {
+            let value = s.trim();
+            if value.is_empty() {
+                return Ok(String::new());
+            }
+            if value.chars().count() > 120 {
+                return Err(err_text(
+                    400,
+                    &format!("{field} must be at most 120 characters"),
+                ));
+            }
+            if value.chars().any(|c| (c as u32) < 32 || c as u32 == 127) {
+                return Err(err_text(
+                    400,
+                    &format!("{field} contains unsupported control characters"),
+                ));
+            }
+            Ok(value.to_string())
+        }
+        Some(_) => Err(err_text(400, &format!("{field} must be string"))),
+    }
+}
+
+pub async fn deadlock_config_update(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true) {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    // dict.get(k1, dict.get(k2)): k1 nur fallen lassen, wenn der Schlüssel fehlt.
+    let has_snake = payload
+        .as_object()
+        .map(|o| o.contains_key("global_target_build_name"))
+        .unwrap_or(false);
+    let raw = if has_snake {
+        payload.get("global_target_build_name")
+    } else {
+        payload.get("globalTargetBuildName")
+    };
+    let name = match normalize_target_name(raw, "global_target_build_name") {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+
+    let previous = global_target_build_name(&app).await;
+    if let Err(err) = app
+        .db()
+        .kv_set("deadlock", "global_target_build_name", name.clone())
+        .await
+    {
+        tracing::error!(%err, "global_target_build_name speichern fehlgeschlagen");
+        return err_text(500, "Saving config failed");
+    }
+    tracing::info!(
+        target: "audit",
+        action = "config.global_target_build_name",
+        user_id = session.user_id,
+        display_name = %session.display_name,
+        access = session.access_level.as_str(),
+        from = %previous,
+        to = %name,
+        "AUDIT deadlock"
+    );
+    ok_json(json!({ "global_target_build_name": name }))
 }
 
 pub async fn deadlock_heroes(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
@@ -150,5 +229,32 @@ pub async fn deadlock_heroes(State(app): State<DashboardApp>, headers: HeaderMap
             tracing::error!(%err, "deadlock_heroes fehlgeschlagen");
             err_text(500, "Deadlock heroes unavailable")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_regeln() {
+        assert_eq!(normalize_target_name(None, "f").ok(), Some(String::new()));
+        assert_eq!(
+            normalize_target_name(Some(&Value::Null), "f").ok(),
+            Some(String::new())
+        );
+        assert_eq!(
+            normalize_target_name(Some(&json!("  Build A  ")), "f").ok(),
+            Some("Build A".to_string())
+        );
+        assert_eq!(
+            normalize_target_name(Some(&json!("   ")), "f").ok(),
+            Some(String::new())
+        );
+        assert!(normalize_target_name(Some(&json!(5)), "f").is_err());
+        assert!(normalize_target_name(Some(&json!(true)), "f").is_err());
+        let long = "x".repeat(121);
+        assert!(normalize_target_name(Some(&json!(long)), "f").is_err());
+        assert!(normalize_target_name(Some(&json!("a\u{0007}b")), "f").is_err());
     }
 }
