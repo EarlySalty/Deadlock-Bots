@@ -29,6 +29,7 @@ pub mod deadlock;
 pub mod names;
 pub mod oauth;
 pub mod oauth_state;
+pub mod public;
 pub mod session;
 pub mod survey;
 pub mod token;

@@ -18,7 +18,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, options, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 
@@ -272,6 +272,15 @@ pub fn router(app: DashboardApp) -> Router {
         .route(
             "/api/leave-survey/{token}",
             get(crate::survey::leave_survey_get),
+        )
+        // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
+        .route(
+            "/api/public/patch-notes",
+            get(crate::public::patch_notes).options(crate::public::public_cors),
+        )
+        .route(
+            "/api/public/guild-stats",
+            options(crate::public::public_cors),
         )
         .with_state(app)
 }
