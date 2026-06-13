@@ -201,6 +201,7 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/message-activity",
             get(crate::analytics::message_activity),
         )
+        .route("/api/voice-history", get(crate::analytics::voice_history))
         .route("/api/leave-surveys", get(crate::analytics::leave_surveys))
         .route(
             "/api/co-player-network",
