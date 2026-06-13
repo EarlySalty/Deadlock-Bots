@@ -1,3 +1,11 @@
+## #121 — Steam-Bridge: Discord-Anzeigename an den Steam-Bot mitsenden
+
+**Ausgangslage:** Wenn jemand im Steam-Einladungs-Funnel auf einen Button klickt, reicht die Bridge die Interaktion an den (Rust-)Steam-Bot weiter. Der Anzeigename des Nutzers wurde dabei nicht mitgeschickt — der Steam-Bot kannte nur die numerische Discord-ID. An Stellen, die den Namen erwarten (z.B. die Supporter-Bestätigung nach einer Ko-fi-Spende), erschien dadurch die nackte ID statt des Namens.
+
+**Was wurde geändert:** Die Bridge legt den Discord-Anzeigenamen (`display_name`) jetzt mit in die weitergeleitete Interaktion (Feld `data.discord_name`), das der Steam-Bot ohnehin ausliest.
+
+**Wie es jetzt funktioniert:** Der Steam-Bot nutzt den echten Anzeigenamen, wo er ihn braucht; fehlt er ausnahmsweise, fällt er weiterhin sauber auf die ID zurück. Rein interne Kopplung zwischen Bridge und Steam-Bot — für Nutzer ändert sich nichts Sichtbares außer korrekten Namen in Bestätigungen.
+
 ## #120 — DNS-Resolver: aiodns ergänzt, Warn-Flut im Log beseitigt
 
 **Ausgangslage:** Beim Aufbau jeder HTTP-Verbindung versucht der Bot, einen asynchronen DNS-Resolver mit festen öffentlichen Nameservern (1.1.1.1 / 8.8.8.8 / 9.9.9.9) zu verwenden. Dieser Resolver braucht die Bibliothek `aiodns`, die aber nie in der Umgebung installiert war. Folge: Der Versuch schlug jedes Mal fehl, der Code fiel still auf den Standard-Resolver zurück — und schrieb dabei jedes Mal eine Warnung ins Log. Das passierte rund einmal pro Minute, also etwa 1.600 identische Warnzeilen in 24 Stunden, die echte Fehler im Log zugemüllt haben.

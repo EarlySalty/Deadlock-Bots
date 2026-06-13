@@ -525,6 +525,9 @@ async def _forward_interaction(
     values = data.get("values") if isinstance(data, dict) else None
     if isinstance(values, (list, tuple)) and values:
         inner["values"] = list(values)
+    # Anzeigename mitsenden, damit der Rust-Funnel ihn z.B. für den Supporter-
+    # Namen nutzen kann statt der numerischen ID (liest payload.data.discord_name).
+    inner["data"] = {"discord_name": interaction.user.display_name}
     event_data: dict[str, Any] = {"interaction": inner}
 
     # Wir starten den API-Call und warten maximal _DEFER_THRESHOLD_SECONDS.
