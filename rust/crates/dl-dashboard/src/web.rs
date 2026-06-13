@@ -128,6 +128,16 @@ impl DashboardApp {
         }
     }
 
+    /// Gate für Routen mit `required=True, require_full_access=True`: immer
+    /// erzwungen, gültige Session mit Voll-Zugriff nötig (401/403 wie Original).
+    pub(crate) fn guard_full(&self, headers: &HeaderMap) -> Result<(), Response> {
+        match self.session_from_headers(headers) {
+            Some(session) if session.has_full_access() => Ok(()),
+            Some(_) => Err(err_text(403, "Full dashboard access required")),
+            None => Err(err_text(401, "Authentication required")),
+        }
+    }
+
     fn login_states(&self) -> MutexGuard<'_, HashMap<String, LoginState>> {
         self.inner
             .login_states
@@ -210,6 +220,15 @@ pub fn router(app: DashboardApp) -> Router {
         .route(
             "/api/co-player-network/",
             get(crate::analytics::co_player_network),
+        )
+        // Deadlock-Konfiguration (Phase 9c) — Read-Seite, Full-Access.
+        .route(
+            "/api/deadlock/config",
+            get(crate::deadlock::deadlock_config),
+        )
+        .route(
+            "/api/deadlock/heroes",
+            get(crate::deadlock::deadlock_heroes),
         )
         .with_state(app)
 }

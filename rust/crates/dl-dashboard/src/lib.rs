@@ -25,6 +25,7 @@ pub mod analytics;
 pub mod auth;
 pub mod authority;
 pub mod config;
+pub mod deadlock;
 pub mod names;
 pub mod oauth;
 pub mod oauth_state;
