@@ -21,9 +21,11 @@
 // fertige Fehlerantwort zurück (wie in dl-broker/dl-stats).
 #![allow(clippy::result_large_err)]
 
+pub mod analytics;
 pub mod auth;
 pub mod authority;
 pub mod config;
+pub mod names;
 pub mod oauth;
 pub mod oauth_state;
 pub mod session;
@@ -32,6 +34,7 @@ pub mod web;
 
 pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};
 pub use config::{AccessLevel, DashboardConfig};
+pub use names::{display_name_or_default, BrokerNameResolver, NameResolver};
 pub use oauth::{DiscordUser, OAuthClient, TokenResponse};
 pub use oauth_state::{NewOAuthState, OAuthState, OAuthStateStore};
 pub use session::{NewSession, Session, SessionStore};

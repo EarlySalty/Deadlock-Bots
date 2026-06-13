@@ -25,6 +25,7 @@ use serde_json::{json, Map, Value};
 use crate::auth::{self, InternalReject};
 use crate::authority::{decide_access, BrokerMemberLookup, MemberLookup};
 use crate::config::{AccessLevel, DashboardConfig};
+use crate::names::{BrokerNameResolver, NameResolver};
 use crate::oauth::{extract_steam_connection_ids, DiscordUser, OAuthClient};
 use crate::oauth_state::{NewOAuthState, OAuthStateStore};
 use crate::session::{NewSession, SessionStore};
@@ -45,10 +46,12 @@ pub struct DashboardApp {
 
 struct Inner {
     cfg: DashboardConfig,
+    db: dl_db::Db,
     oauth: OAuthClient,
     states: OAuthStateStore,
     sessions: SessionStore,
     lookup: Arc<dyn MemberLookup>,
+    names: Arc<dyn NameResolver>,
     /// In-Memory-States des Admin-Logins (≠ DB-gestützte delegierte States).
     login_states: Mutex<HashMap<String, LoginState>>,
     /// Per-IP-Zeitstempel für die Callback-Ratenbegrenzung.
@@ -62,36 +65,67 @@ struct LoginState {
 }
 
 impl DashboardApp {
-    /// Baut die App mit einem expliziten Mitglieds-Lookup (für Tests).
-    pub fn new(cfg: DashboardConfig, db: dl_db::Db, lookup: Arc<dyn MemberLookup>) -> Self {
+    /// Baut die App mit explizitem Mitglieds-Lookup und Namens-Resolver
+    /// (für Tests).
+    pub fn new(
+        cfg: DashboardConfig,
+        db: dl_db::Db,
+        lookup: Arc<dyn MemberLookup>,
+        names: Arc<dyn NameResolver>,
+    ) -> Self {
         let oauth = OAuthClient::new(
             cfg.discord_client_id.clone(),
             cfg.discord_client_secret.clone(),
             cfg.discord_api_base.clone(),
         );
-        let states = OAuthStateStore::new(db, cfg.oauth_state_ttl_secs);
+        let states = OAuthStateStore::new(db.clone(), cfg.oauth_state_ttl_secs);
         let sessions = SessionStore::new(cfg.session_ttl_secs);
         Self {
             inner: Arc::new(Inner {
                 cfg,
+                db,
                 oauth,
                 states,
                 sessions,
                 lookup,
+                names,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
             }),
         }
     }
 
-    /// Produktions-Konstruktor: Mitglieds-Lookup geht über den Master-Broker.
+    /// Produktions-Konstruktor: Lookup und Namensauflösung gehen über den
+    /// Master-Broker.
     pub fn from_config(cfg: DashboardConfig, db: dl_db::Db) -> Self {
         let lookup = Arc::new(BrokerMemberLookup::new(cfg.broker_base.clone()));
-        Self::new(cfg, db, lookup)
+        let names = Arc::new(BrokerNameResolver::new(cfg.broker_base.clone()));
+        Self::new(cfg, db, lookup, names)
     }
 
     fn cfg(&self) -> &DashboardConfig {
         &self.inner.cfg
+    }
+
+    pub(crate) fn db(&self) -> &dl_db::Db {
+        &self.inner.db
+    }
+
+    pub(crate) fn names(&self) -> &Arc<dyn NameResolver> {
+        &self.inner.names
+    }
+
+    /// Auth-Gate für lesende `/api`-Routen: ohne erzwungene Auth offen, sonst
+    /// gültige Session nötig (wie `_check_auth` ohne CSRF/Full-Access).
+    pub(crate) fn guard_read(&self, headers: &HeaderMap) -> Result<(), Response> {
+        if !self.cfg().auth_enforced() {
+            return Ok(());
+        }
+        if self.session_from_headers(headers).is_some() {
+            Ok(())
+        } else {
+            Err(err_text(401, "Authentication required"))
+        }
     }
 
     fn login_states(&self) -> MutexGuard<'_, HashMap<String, LoginState>> {
@@ -160,6 +194,12 @@ pub fn router(app: DashboardApp) -> Router {
         .route(
             "/internal/twitch/v1/discord/import-session",
             post(import_session),
+        )
+        // Analytics-Reads (Phase 9b) — Session-gegatet, reine DB-Reads.
+        .route("/api/member-events", get(crate::analytics::member_events))
+        .route(
+            "/api/message-activity",
+            get(crate::analytics::message_activity),
         )
         .with_state(app)
 }
@@ -941,11 +981,11 @@ async fn lookup_role_strings(
 
 // ── kleine Helfer (Antworten, Parsing, Cookies) ─────────────────────────────
 
-fn ok_json(value: Value) -> Response {
+pub(crate) fn ok_json(value: Value) -> Response {
     (StatusCode::OK, Json(value)).into_response()
 }
 
-fn err_json(status: u16, code: &str) -> Response {
+pub(crate) fn err_json(status: u16, code: &str) -> Response {
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         Json(json!({ "error": code })),
@@ -953,7 +993,7 @@ fn err_json(status: u16, code: &str) -> Response {
         .into_response()
 }
 
-fn err_text(status: u16, msg: &str) -> Response {
+pub(crate) fn err_text(status: u16, msg: &str) -> Response {
     (
         StatusCode::from_u16(status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
         msg.to_string(),
