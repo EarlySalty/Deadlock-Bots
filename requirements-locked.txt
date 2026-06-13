@@ -135,9 +135,9 @@ aiohttp==3.13.5 \
     #   aiohttp-jinja2
     #   aiohttp-session
     #   discord-py
-aiohttp-basicauth==1.1.0 \
-    --hash=sha256:abcf94d35f568e087d57a012339a84e7ae17659afcdb9a8b4b1bea74bb0c2be8 \
-    --hash=sha256:f8a358e9fcd7146a3ca5f99ee3ef7c5fb89a21f11f9494b6a217c329ba6e2b1a
+aiohttp-basicauth==1.2.0 \
+    --hash=sha256:2a30373b0b799987eb61c215db3b62e4b4900a718d4a2b2170a15ee946854e71 \
+    --hash=sha256:cc489f3fae191c1eca5bead09a152a23b57527bb74774e6d410aaeadb7cc63bb
     # via -r requirements.txt
 aiohttp-jinja2==1.6 \
     --hash=sha256:0df405ee6ad1b58e5a068a105407dc7dcc1704544c559f1938babde954f945c7 \
