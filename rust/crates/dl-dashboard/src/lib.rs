@@ -30,6 +30,7 @@ pub mod names;
 pub mod oauth;
 pub mod oauth_state;
 pub mod session;
+pub mod survey;
 pub mod token;
 pub mod web;
 

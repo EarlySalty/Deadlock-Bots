@@ -230,6 +230,11 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/deadlock/heroes",
             get(crate::deadlock::deadlock_heroes),
         )
+        // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
+        .route(
+            "/api/leave-survey/{token}",
+            get(crate::survey::leave_survey_get),
+        )
         .with_state(app)
 }
 
