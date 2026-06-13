@@ -1,3 +1,11 @@
+## #126 — Rust-Neuaufbau: Austritts-Umfrage-Link (Anzeige)
+
+**Ausgangslage:** Wer den Server verlässt, bekommt per DM einen Link zu einer kurzen Austritts-Umfrage. Beim Öffnen des Links lädt die Seite die zugehörigen Daten (Anzeigename, Nutzergruppe, ggf. vorausgewählter Grund) und zeigt, ob schon abgesendet wurde. Dieser öffentliche Abruf lief bisher über das Python-Dashboard.
+
+**Was wurde geändert:** Der Anzeige-Teil des Umfrage-Links ist in Rust nachgebaut. Der Aufruf braucht keine Anmeldung — er ist allein über das im Link enthaltene Token abgesichert; ungültig aufgebaute oder über 30 Tage alte Token werden wie bisher abgewiesen.
+
+**Wie es jetzt funktioniert:** Das Token wird auf das erlaubte Format geprüft und dann gegen dieselbe Tabelle mit demselben 30-Tage-Fenster nachgeschlagen wie zuvor; die Antwort hat dieselbe Form, damit das bestehende Umfrage-Formular unverändert weiterläuft. Geprüft gegen eine Kopie der echten Datenbank: ein gültiges Token liefert die Daten, ein unbekanntes oder falsch aufgebautes Token wird sauber abgewiesen. Das eigentliche Absenden der Umfrage inklusive Bild-Anhängen folgt separat; bis dahin bleibt dafür das Python-Dashboard zuständig.
+
 ## #125 — Rust-Neuaufbau: Dashboard-Heldenkonfiguration (Anzeige)
 
 **Ausgangslage:** Im Admin-Bereich gibt es eine Seite für die Deadlock-Heldenkonfiguration: die global eingestellte Ziel-Build-Bezeichnung und die Liste aller Helden samt ihrer hinterlegten Build-Schnappschüsse. Diese Anzeige lief bisher über das Python-Dashboard.
