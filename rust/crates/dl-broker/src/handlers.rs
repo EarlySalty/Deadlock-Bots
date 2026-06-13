@@ -187,6 +187,39 @@ pub async fn member_access(
     }
 }
 
+/// Anzeigenamen zu mehreren User-IDs (`?user_ids=1,2,3`). Loopback-only,
+/// ohne Token — für die Dashboard-Analytics-Namensauflösung.
+pub async fn resolve_names(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    let user_ids: Vec<u64> = params
+        .get("user_ids")
+        .map(|raw| {
+            raw.split(',')
+                .filter_map(|s| s.trim().parse::<u64>().ok())
+                .filter(|v| *v > 0)
+                .collect()
+        })
+        .unwrap_or_default();
+    match state.port.resolve_names(&user_ids).await {
+        Ok(members) => {
+            let names: serde_json::Map<String, serde_json::Value> = members
+                .into_iter()
+                .map(|m| (m.user_id.to_string(), json!(m.display_name)))
+                .collect();
+            respond(200, json!({ "ok": true, "names": names }))
+        }
+        Err(_) => respond(200, json!({ "ok": true, "names": {} })),
+    }
+}
+
 // ── Aktionen (Token + Idempotenz) ──────────────────────────────────────────
 
 /// Gemeinsamer Einstieg: Auth + JSON-Objekt + Idempotency-Key.

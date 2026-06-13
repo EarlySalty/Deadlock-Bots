@@ -168,4 +168,8 @@ pub trait DiscordPort: Send + Sync {
         guild_id: Option<u64>,
         user_id: u64,
     ) -> Result<MemberAccess, PortError>;
+    /// Anzeigenamen zu mehreren User-IDs aus dem Cache (für Dashboard-
+    /// Analytics). Nur gefundene Mitglieder werden zurückgegeben; der Aufrufer
+    /// füllt fehlende selbst auf (`User <id>`).
+    async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError>;
 }

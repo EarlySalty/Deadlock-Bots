@@ -129,6 +129,10 @@ pub fn router(state: SharedBroker) -> Router {
             get(handlers::member_access),
         )
         .route(
+            "/internal/master/v1/discord/resolve-names",
+            get(handlers::resolve_names),
+        )
+        .route(
             "/internal/master/v1/discord/send-message",
             post(handlers::send_message),
         )

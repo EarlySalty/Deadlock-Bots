@@ -500,6 +500,27 @@ impl DiscordPort for DiscordAdapter {
         }
         Ok(access)
     }
+
+    async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError> {
+        let guild_ids = self.cache.guilds();
+        let mut out = Vec::new();
+        for &user_id in user_ids {
+            let target = UserId::new(user_id);
+            for gid in &guild_ids {
+                let Some(guild) = self.cache.guild(*gid) else {
+                    continue;
+                };
+                if let Some(member) = guild.members.get(&target) {
+                    out.push(MemberInfo {
+                        user_id,
+                        display_name: member.display_name().to_string(),
+                    });
+                    break; // erste Fundstelle genügt
+                }
+            }
+        }
+        Ok(out)
+    }
 }
 
 #[async_trait::async_trait]
