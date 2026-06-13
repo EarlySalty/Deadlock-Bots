@@ -6,6 +6,46 @@ der Routen steuert die **Python-Runtime**, die nach dem Vollumstieg nicht
 mehr existiert. Das Dashboard braucht das geplante Redesign, und dafür
 eine Design-Entscheidung von Nani (unten).
 
+## Fortschritt
+
+- **2026-06-13 — Design-Entscheidung getroffen (Nani: „mach alles fertig"):**
+  Bot-Steuerung wird **Option (a)** — systemd-Units + Blocklist-Editor +
+  Feature-Flags. Kein Cog-Reload-Nachbau.
+- **2026-06-13 — Phase 9a AUTH-PROVIDER KOMPLETT** (Crate `dl-dashboard`,
+  Changelog #122). Gebaut + getestet (35 Unit-Tests) + Ende-zu-Ende gegen
+  den laufenden Prozess bewiesen:
+  - OAuth-Client, DB-State-Store (`oauth_states`), In-Memory-Session-Store
+    (`master_dash_session`), Zugriffsentscheidung (Owner/Admin/Mod → Full,
+    Community-Mod → TurnierOnly), interne Token-Guards, Redirect-Allowlist.
+  - Alle 15 Auth-Routen: Admin-Login (`/auth/discord/login` →
+    `/callback/discord`), delegiertes Relay (`initiate`/`consume-result`),
+    turnier/twitch `authorize-url`+`session`, `steam-link-session`,
+    Twitch-SSO `validate-session`/`import-session`, `/api/auth/me`, Logout.
+  - NEU am Broker: `GET /internal/master/v1/discord/member-access` (Rollen +
+    Admin-Status aus dem Cache; dl-web hat keinen Gateway).
+  - Befund: ALLE rollenliefernden Endpunkte gehen über den Bot-Cache
+    (Broker), nicht über den OAuth-Scope `guilds.members.read`.
+  - In `dl-web` auf :8766 gebunden (Connect-Info für Loopback-Prüfung). SPA
+    ist vorerst Platzhalter. dl-web läuft NICHT als Dienst (Python 8766 aktiv).
+
+## Nächste Schritte (offen)
+
+1. **9b Analytics-Reads** — voice-stats, voice-history, user-retention,
+   leave-surveys, member-events, message-activity, co-player-network,
+   server-stats. Reine DB-Reads, aber teils groß (voice-history ~344 Z.).
+   Brauchen ein gemeinsames `/api`-Auth-Gate (Session aus Cookie via
+   `session_from_headers` + ggf. Full-Access-Prüfung; CSRF nur bei
+   Mutationen). **`message_activity` + Co-Player brauchen Namensauflösung
+   per User-ID → Broker-Bulk** (`_resolve_display_names` nutzt den
+   Bot-Cache; entweder `GET /discord/members` einmal cachen oder einen
+   Bulk-Resolve-Endpunkt ergänzen).
+2. **9c** deadlock/config + heroes (klein, kv/Tabellen).
+3. **9d** Turnier-Admin (`tournament/*` + `turnier/*`) über
+   `dl-tournament::store` — schließt zugleich die Admin-Lücke aus #114.
+4. **9e** Survey-Web (`leave-survey/{token}`) + public guild-stats/patch-notes.
+5. **9f** Steuerung neu (systemd-Restart `dl-bot`/`dl-web`,
+   `cog_blocklist.json`-Editor, Log-Tail) — Option (a).
+
 ## Routen-Inventar (~70 Routen, 7 Gruppen)
 
 | Gruppe | Routen | Rust-Einschätzung |
