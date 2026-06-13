@@ -1,3 +1,11 @@
+## #127 — Rust-Neuaufbau: Heldenkonfiguration speichern (mit Schutz vor Fremd-Absenden)
+
+**Ausgangslage:** Auf der Heldenkonfigurations-Seite lässt sich die globale Ziel-Build-Bezeichnung setzen. Die Anzeige war schon in Rust (#125), das Speichern lief aber noch über Python. Schreibende Aktionen im Admin-Bereich brauchen zudem einen Schutz dagegen, dass eine fremde Webseite im Namen eines angemeldeten Admins heimlich Änderungen auslöst.
+
+**Was wurde geändert:** Das Speichern der globalen Ziel-Build-Bezeichnung ist jetzt in Rust. Dafür wurde der allgemeine Schutz für schreibende Admin-Aktionen mitgebaut: Jede Änderung verlangt ein gültiges Sitzungs-Token *und* ein passendes Anti-Fälschungs-Token (CSRF), das nur die echte Admin-Oberfläche kennt — fehlt es, wird die Aktion abgewiesen. Die Eingabe wird wie bisher geprüft (getrimmt, höchstens 120 Zeichen, keine Steuerzeichen) und jede Änderung im Protokoll vermerkt (wer, von welchem Wert auf welchen).
+
+**Wie es jetzt funktioniert:** Eine Speicher-Anfrage ohne das Anti-Fälschungs-Token wird mit demselben Status abgewiesen wie zuvor; mit gültiger Sitzung und Token wird der Wert normalisiert, gespeichert und zurückgegeben. Geprüft gegen eine Kopie der echten Datenbank: ohne Token abgewiesen, mit Token gespeichert und sofort über die Anzeige bestätigt, falscher Werttyp sauber abgelehnt. Dieser Schutz ist zugleich die Grundlage für die noch ausstehenden Schreib-Bereiche (Turnier-Verwaltung, Bot-Steuerung). Das Bearbeiten einzelner Helden samt Abgleich gegen die externe Build-Quelle folgt weiterhin separat.
+
 ## #126 — Rust-Neuaufbau: Austritts-Umfrage-Link (Anzeige)
 
 **Ausgangslage:** Wer den Server verlässt, bekommt per DM einen Link zu einer kurzen Austritts-Umfrage. Beim Öffnen des Links lädt die Seite die zugehörigen Daten (Anzeigename, Nutzergruppe, ggf. vorausgewählter Grund) und zeigt, ob schon abgesendet wurde. Dieser öffentliche Abruf lief bisher über das Python-Dashboard.
