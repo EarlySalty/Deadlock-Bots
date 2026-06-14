@@ -1263,4 +1263,49 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
             Err(err) => MoveOutcome::Failed(err.to_string()),
         }
     }
+
+    async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> Option<(String, usize)> {
+        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let channel = ChannelId::new(channel_id);
+        let name = guild.channels.get(&channel)?.name.to_string();
+        // Nicht-Bot-Mitglieder im Voice-Channel zählen.
+        let count = guild
+            .voice_states
+            .iter()
+            .filter(|(_, vs)| vs.channel_id == Some(channel))
+            .filter(|(uid, _)| guild.members.get(uid).map(|m| !m.user.bot).unwrap_or(false))
+            .count();
+        Some((name, count))
+    }
+
+    async fn delete_channel(&self, channel_id: u64) -> bool {
+        self.adapter
+            .http
+            .delete_channel(ChannelId::new(channel_id), Some("Team-Balancer: Match beendet"))
+            .await
+            .is_ok()
+    }
+
+    async fn can_manage_channels(&self, guild_id: u64, user_id: u64) -> bool {
+        // Python: @commands.has_permissions(manage_channels=True) (+ Admin/Owner).
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return false;
+        };
+        if guild.owner_id.get() == user_id {
+            return true;
+        }
+        guild
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| {
+                m.roles.iter().any(|rid| {
+                    guild
+                        .roles
+                        .get(rid)
+                        .map(|r| r.permissions.manage_channels() || r.permissions.administrator())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
 }

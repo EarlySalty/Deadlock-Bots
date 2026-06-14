@@ -113,6 +113,13 @@ pub trait BalancePort: Send + Sync {
     ) -> Option<u64>;
     /// Verschiebt ein Mitglied in den Channel (nur wenn es in Voice ist).
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64) -> MoveOutcome;
+    /// Name + Anzahl Nicht-Bot-Mitglieder eines Channels; `None`, wenn der
+    /// Channel nicht (mehr) existiert.
+    async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> Option<(String, usize)>;
+    /// Löscht einen Channel; `true` bei Erfolg.
+    async fn delete_channel(&self, channel_id: u64) -> bool;
+    /// Hat der Aufrufer `Kanäle verwalten` (für `!balance cleanup`)?
+    async fn can_manage_channels(&self, guild_id: u64, user_id: u64) -> bool;
 }
 
 /// Eine Antwort des Listeners (Text und/oder Embed).
@@ -137,17 +144,14 @@ impl BalanceReply {
 }
 
 /// Ein laufendes Match (in-memory, wie Pythons `active_matches`).
-///
-/// Wird in `start` geschrieben; gelesen erst von `matches`/`end`/`cleanup`
-/// (Slice 3) — daher vorerst komplett `dead_code`-erlaubt.
-#[allow(dead_code)]
 struct MatchInfo {
     guild_id: u64,
     team1_channel_id: u64,
     team2_channel_id: u64,
     players: Vec<u64>,
     started_at: i64,
-    /// Ausgangs-Voice-Channel des Aufrufers — für den Rück-Move beim `end`.
+    /// Wird wie im Original gespeichert, aber nie gelesen (Legacy-Feld).
+    #[allow(dead_code)]
     original_channel_id: Option<u64>,
 }
 
@@ -180,10 +184,14 @@ impl BalanceCommands {
             return None;
         }
         let sub = parts.next().unwrap_or_default().to_lowercase();
+        let args: Vec<&str> = parts.collect();
         let reply = match sub.as_str() {
             "" => BalanceReply::embed(help_embed()),
             "auto" | "voice" => self.auto_preview(guild_id, user_id).await,
             "start" => self.start(guild_id, user_id).await,
+            "matches" => self.matches_list().await,
+            "cleanup" => self.cleanup(guild_id, user_id, args.first().copied()).await,
+            "end" => self.end(guild_id, args.first().copied(), args.get(1).copied()).await,
             other => BalanceReply::text(format!(
                 "`!balance {other}` ist in Rust noch nicht verfügbar (folgt)."
             )),
@@ -327,6 +335,184 @@ impl BalanceCommands {
         });
         BalanceReply::embed(embed)
     }
+
+    /// `matches`: listet alle aktiven Matches mit Channel-Belegung und Laufzeit.
+    async fn matches_list(&self) -> BalanceReply {
+        // Metadaten unter dem Lock kopieren (kein await im std-Mutex).
+        let mut snapshot: Vec<(String, u64, u64, u64, i64)> = {
+            let m = self.matches.lock().expect("matches");
+            m.iter()
+                .map(|(id, i)| (id.clone(), i.guild_id, i.team1_channel_id, i.team2_channel_id, i.started_at))
+                .collect()
+        };
+        if snapshot.is_empty() {
+            return BalanceReply::text("📭 Keine aktiven Matches");
+        }
+        snapshot.sort_by(|a, b| a.0.cmp(&b.0)); // stabile Reihenfolge nach Match-ID
+        let now = chrono::Utc::now().timestamp();
+        let mut fields = Vec::new();
+        for (id, gid, ch1, ch2, started) in snapshot {
+            let mut lines = Vec::new();
+            for ch_id in [ch1, ch2] {
+                match self.port.channel_member_count(gid, ch_id).await {
+                    Some((name, count)) => lines.push(format!("{name}: {count} Spieler")),
+                    None => lines.push(format!("{ch_id}: gelöscht")),
+                }
+            }
+            let (min, sec) = dur_min_sec(now - started);
+            fields.push(json!({
+                "name": format!("Match {id}"),
+                "value": format!("Dauer: {min}min {sec}s\n{}", lines.join("\n")),
+                "inline": false
+            }));
+        }
+        BalanceReply::embed(json!({
+            "title": "🎮 Aktive Deadlock Matches",
+            "color": 0x2ECC71,
+            "fields": fields
+        }))
+    }
+
+    /// `cleanup <hours>`: löscht Team-Channels von Matches, die älter als `hours`
+    /// sind (Default 2, 1–24). `manage_channels`-gated.
+    async fn cleanup(&self, guild_id: u64, user_id: u64, hours_arg: Option<&str>) -> BalanceReply {
+        if !self.port.can_manage_channels(guild_id, user_id).await {
+            return BalanceReply::text("❌ Dafür brauchst du die Berechtigung „Kanäle verwalten“.");
+        }
+        let hours: i64 = hours_arg.and_then(|s| s.parse().ok()).unwrap_or(2);
+        if !(1..=24).contains(&hours) {
+            return BalanceReply::text("❌ Stunden müssen zwischen 1–24 liegen");
+        }
+        let cutoff = chrono::Utc::now().timestamp() - hours * 3600;
+        let targets: Vec<(String, u64, u64)> = {
+            let m = self.matches.lock().expect("matches");
+            m.iter()
+                .filter(|(_, i)| i.started_at < cutoff)
+                .map(|(id, i)| (id.clone(), i.team1_channel_id, i.team2_channel_id))
+                .collect()
+        };
+        if targets.is_empty() {
+            return BalanceReply::text(format!("🧹 Keine Matches älter als {hours}h gefunden"));
+        }
+        let mut deleted_ch = 0u32;
+        for (id, ch1, ch2) in &targets {
+            for ch_id in [*ch1, *ch2] {
+                if self.port.delete_channel(ch_id).await {
+                    deleted_ch += 1;
+                    tokio::time::sleep(CREATE_SLEEP).await; // 0.4s Rate-Limit-Schoner
+                }
+            }
+            self.matches.lock().expect("matches").remove(id);
+        }
+        BalanceReply::text(format!(
+            "🧹 {} Matches bereinigt ({deleted_ch} Channels gelöscht)",
+            targets.len()
+        ))
+    }
+
+    /// `end <id> [skip]`: optionale Debrief-Lane + Move, löscht die Team-Channels
+    /// und entfernt das Match (Port von `balance_end`).
+    async fn end(&self, guild_id: u64, match_id: Option<&str>, skip_arg: Option<&str>) -> BalanceReply {
+        let _ = guild_id; // Gilde steckt im MatchInfo, nicht im Aufruf.
+        let Some(match_id) = match_id else {
+            return BalanceReply::text("❌ Bitte Match-ID angeben: `!balance end <id>`");
+        };
+        let info = {
+            let m = self.matches.lock().expect("matches");
+            m.get(match_id).map(|i| {
+                (i.guild_id, i.team1_channel_id, i.team2_channel_id, i.players.clone(), i.started_at)
+            })
+        };
+        let Some((gid, ch1, ch2, players, started)) = info else {
+            return BalanceReply::text(format!("❌ Match `{match_id}` nicht gefunden."));
+        };
+        let skip_debrief = matches!(
+            skip_arg.map(|s| s.to_lowercase()).as_deref(),
+            Some("true" | "1" | "yes" | "y" | "ja" | "skip")
+        );
+
+        // 1) Optionale Nachbesprechungs-Lane + Move der noch in Team-Channels Sitzenden.
+        let mut debrief_ch: Option<u64> = None;
+        let mut moved = 0u32;
+        let mut move_fail: Vec<String> = Vec::new();
+        if !skip_debrief {
+            debrief_ch = self
+                .port
+                .create_match_channel(gid, &format!("💬 Nachbesprechung • {match_id}"), MATCH_CATEGORY_ID)
+                .await;
+            if let Some(debrief) = debrief_ch {
+                for uid in &players {
+                    let cur = self.port.caller_voice_channel(gid, *uid).await;
+                    if cur != Some(ch1) && cur != Some(ch2) {
+                        continue; // nur bewegen, wer noch im Match-Channel sitzt
+                    }
+                    match self.port.move_member(gid, *uid, debrief).await {
+                        MoveOutcome::Moved => {
+                            moved += 1;
+                            tokio::time::sleep(MOVE_SLEEP).await;
+                        }
+                        MoveOutcome::NotInVoice => move_fail.push(format!("<@{uid}> (nicht in Voice)")),
+                        MoveOutcome::Failed(err) => move_fail.push(format!("<@{uid}> ({err})")),
+                    }
+                }
+            }
+        }
+
+        // 2) Team-Channels löschen (Namen vorher ziehen für die Anzeige).
+        let mut deleted: Vec<String> = Vec::new();
+        let mut failed: Vec<String> = Vec::new();
+        for ch_id in [ch1, ch2] {
+            let name = self.port.channel_member_count(gid, ch_id).await.map(|(n, _)| n);
+            if self.port.delete_channel(ch_id).await {
+                deleted.push(name.unwrap_or_else(|| ch_id.to_string()));
+                tokio::time::sleep(CREATE_SLEEP).await;
+            } else {
+                failed.push(format!("{} (nicht gefunden)", name.unwrap_or_else(|| ch_id.to_string())));
+            }
+        }
+
+        // 3) Match entfernen.
+        self.matches.lock().expect("matches").remove(match_id);
+
+        // 4) Ergebnis-Embed (grün mit Debrief, sonst orange).
+        let mut fields = Vec::new();
+        if let Some(debrief) = debrief_ch {
+            fields.push(json!({
+                "name": "💬 Nachbesprechungs-Lane",
+                "value": format!("<#{debrief}>\nSpieler bewegt: {moved}/{}", players.len()),
+                "inline": false
+            }));
+            if !move_fail.is_empty() {
+                let shown = move_fail.iter().take(6).cloned().collect::<Vec<_>>().join("\n");
+                let extra = if move_fail.len() > 6 {
+                    format!("\n… und {} weitere", move_fail.len() - 6)
+                } else {
+                    String::new()
+                };
+                fields.push(json!({ "name": "⚠️ Nicht bewegt", "value": format!("{shown}{extra}"), "inline": false }));
+            }
+        }
+        if !deleted.is_empty() {
+            fields.push(json!({ "name": "🗑️ Gelöschte Team-Channels", "value": deleted.join("\n"), "inline": false }));
+        }
+        if !failed.is_empty() {
+            fields.push(json!({ "name": "⚠️ Nicht gelöscht", "value": failed.join("\n"), "inline": false }));
+        }
+        let (min, sec) = dur_min_sec(chrono::Utc::now().timestamp() - started);
+        fields.push(json!({ "name": "📊 Dauer", "value": format!("{min}min {sec}s"), "inline": true }));
+        fields.push(json!({ "name": "👥 Spieler", "value": players.len().to_string(), "inline": true }));
+        BalanceReply::embed(json!({
+            "title": format!("🏁 Match {match_id} beendet"),
+            "color": if debrief_ch.is_some() { 0x2ECC71 } else { 0xE67E22 },
+            "fields": fields
+        }))
+    }
+}
+
+/// Laufzeit wie Pythons `timedelta.seconds`: Rest innerhalb eines Tages → min/sek.
+fn dur_min_sec(elapsed_secs: i64) -> (i64, i64) {
+    let within_day = elapsed_secs.rem_euclid(86_400);
+    (within_day / 60, within_day % 60)
 }
 
 /// Hilfe-Embed der `!balance`-Gruppe (Port des Root-Embeds).
@@ -340,12 +526,12 @@ fn help_embed() -> Value {
                 "name": "Befehle",
                 "value": "`!balance auto` – nur Anzeige (keine Channels)\n\
                           `!balance voice` – Alias von auto\n\
-                          `!balance start` – Channels erstellen & Spieler moven (folgt)\n\
+                          `!balance start` – Channels erstellen & Spieler moven\n\
+                          `!balance matches` – aktive Matches\n\
+                          `!balance end <id> [skip]` – Match beenden (+ Debrief)\n\
+                          `!balance cleanup <hours>` – alte Matches löschen\n\
                           `!balance manual @u1 …` – manuelle Auswahl (folgt)\n\
-                          `!balance status [@user]` – Rank-Status (folgt)\n\
-                          `!balance matches` – aktive Matches (folgt)\n\
-                          `!balance end <id>` – Match beenden (folgt)\n\
-                          `!balance cleanup <hours>` – alte Matches löschen (folgt)",
+                          `!balance status [@user]` – Rank-Status (folgt)",
                 "inline": false
             },
             {
@@ -505,6 +691,15 @@ mod tests {
         async fn move_member(&self, _g: u64, _u: u64, _ch: u64) -> MoveOutcome {
             MoveOutcome::Moved
         }
+        async fn channel_member_count(&self, _g: u64, _ch: u64) -> Option<(String, usize)> {
+            Some(("Team-Channel".to_string(), 0))
+        }
+        async fn delete_channel(&self, _ch: u64) -> bool {
+            true
+        }
+        async fn can_manage_channels(&self, _g: u64, _u: u64) -> bool {
+            self.admin
+        }
     }
 
     #[tokio::test]
@@ -557,5 +752,70 @@ mod tests {
         let fields = reply.embeds[0]["fields"].as_array().unwrap();
         let move_field = fields.iter().find(|f| f["name"] == "Move").unwrap();
         assert!(move_field["value"].as_str().unwrap().contains("2/2"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn matches_und_end_lifecycle() {
+        let cmds = BalanceCommands::new(MockPort::admin(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
+        cmds.reply_for("!balance start", 1, 1).await.unwrap();
+        assert_eq!(cmds.matches.lock().unwrap().len(), 1);
+
+        // matches listet das laufende Match.
+        let list = cmds.reply_for("!balance matches", 1, 1).await.unwrap();
+        assert_eq!(list.embeds.len(), 1);
+        let fields = list.embeds[0]["fields"].as_array().unwrap();
+        assert!(fields.iter().any(|f| f["name"] == "Match 001"));
+
+        // end 001 beendet es und entfernt es aus dem Speicher.
+        let ended = cmds.reply_for("!balance end 001", 1, 1).await.unwrap();
+        assert!(ended.embeds[0]["title"].as_str().unwrap().contains("Match 001 beendet"));
+        assert!(cmds.matches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn end_meldet_fehlende_und_unbekannte_id() {
+        let cmds = BalanceCommands::new(MockPort::new(vec![]));
+        let no_id = cmds.reply_for("!balance end", 1, 1).await.unwrap();
+        assert!(no_id.content.unwrap().contains("Match-ID angeben"));
+        let unknown = cmds.reply_for("!balance end 042", 1, 1).await.unwrap();
+        assert!(unknown.content.unwrap().contains("nicht gefunden"));
+    }
+
+    #[tokio::test]
+    async fn cleanup_ohne_recht_blockt() {
+        let cmds = BalanceCommands::new(MockPort::new(vec![]));
+        let reply = cmds.reply_for("!balance cleanup 2", 1, 1).await.unwrap();
+        assert!(reply.content.unwrap().contains("Kanäle verwalten"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cleanup_loescht_alte_matches() {
+        let cmds = BalanceCommands::new(MockPort::admin(vec![]));
+        // Künstlich „altes“ Match (3h) direkt einsetzen.
+        let old_start = chrono::Utc::now().timestamp() - 3 * 3600;
+        cmds.matches.lock().unwrap().insert(
+            "009".to_string(),
+            MatchInfo {
+                guild_id: 1,
+                team1_channel_id: 7001,
+                team2_channel_id: 7002,
+                players: vec![1, 2],
+                started_at: old_start,
+                original_channel_id: None,
+            },
+        );
+        // cleanup 1 → älter als 1h → gelöscht.
+        let reply = cmds.reply_for("!balance cleanup 1", 1, 1).await.unwrap();
+        let text = reply.content.unwrap();
+        assert!(text.contains("1 Matches bereinigt"), "text: {text}");
+        assert!(text.contains("2 Channels gelöscht"), "text: {text}");
+        assert!(cmds.matches.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn cleanup_ohne_alte_matches_meldet_leer() {
+        let cmds = BalanceCommands::new(MockPort::admin(vec![]));
+        let reply = cmds.reply_for("!balance cleanup 2", 1, 1).await.unwrap();
+        assert!(reply.content.unwrap().contains("Keine Matches älter als 2h"));
     }
 }
