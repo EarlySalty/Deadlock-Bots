@@ -216,11 +216,11 @@ async fn main() -> anyhow::Result<()> {
     dl_tournament::discord_ui::register(&mut router, turnier_ui);
 
     // Team-Balancer (!balance): Prefix-Listener, Spawn ist gateway-gated.
-    let balance_commands = Arc::new(dl_tournament::balance_cmd::BalanceCommands {
-        port: Arc::new(modglue::BalanceGlue {
+    let balance_commands = Arc::new(dl_tournament::balance_cmd::BalanceCommands::new(Arc::new(
+        modglue::BalanceGlue {
             adapter: adapter.clone(),
-        }),
-    });
+        },
+    )));
 
     // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(

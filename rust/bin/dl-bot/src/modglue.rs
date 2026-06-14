@@ -1182,4 +1182,85 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
             })
             .collect()
     }
+
+    async fn is_admin(&self, guild_id: u64, user_id: u64) -> bool {
+        // Python: @commands.has_permissions(manage_guild=True) → „Server verwalten“
+        // (oder Administrator, oder Server-Owner).
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return false;
+        };
+        if guild.owner_id.get() == user_id {
+            return true;
+        }
+        guild
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| {
+                m.roles.iter().any(|rid| {
+                    guild
+                        .roles
+                        .get(rid)
+                        .map(|r| r.permissions.manage_guild() || r.permissions.administrator())
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    }
+
+    async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        Some(guild.voice_states.get(&UserId::new(user_id))?.channel_id?.get())
+    }
+
+    async fn create_match_channel(
+        &self,
+        guild_id: u64,
+        name: &str,
+        category_id: u64,
+    ) -> Option<u64> {
+        let mut body = serde_json::Map::new();
+        body.insert("name".into(), json!(name));
+        body.insert("type".into(), json!(2)); // 2 = Voice-Channel
+        body.insert("parent_id".into(), json!(category_id.to_string()));
+        self.adapter
+            .http
+            .create_channel(GuildId::new(guild_id), &body, Some("Team-Balancer: Match-Channel"))
+            .await
+            .ok()
+            .map(|c| c.id.get())
+    }
+
+    async fn move_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+    ) -> dl_tournament::balance_cmd::MoveOutcome {
+        use dl_tournament::balance_cmd::MoveOutcome;
+        // Nur verschieben, wenn das Mitglied gerade in einem Voice-Channel ist —
+        // sonst liefert Discord 40032 („Target user is not connected to voice“).
+        let in_voice = self
+            .adapter
+            .cache
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| g.voice_states.get(&UserId::new(user_id)).and_then(|vs| vs.channel_id))
+            .is_some();
+        if !in_voice {
+            return MoveOutcome::NotInVoice;
+        }
+        match self
+            .adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": channel_id.to_string() }),
+                Some("Team-Balancer: Move"),
+            )
+            .await
+        {
+            Ok(_) => MoveOutcome::Moved,
+            Err(err) => MoveOutcome::Failed(err.to_string()),
+        }
+    }
 }

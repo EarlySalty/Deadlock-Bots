@@ -8,12 +8,21 @@
 //! `auto`/`voice` sind wie im Original NICHT permission-gated (reine Vorschau);
 //! die gateenden Subcommands prüfen ihre Rechte später selbst.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dl_discord::{ChannelSender, Dispatcher};
 use serde_json::{json, Value};
 
 use crate::balancer::best_split;
+
+/// Pflicht-Kategorie für die beiden Team-Voice-Channels (`MATCH_CATEGORY_ID`).
+const MATCH_CATEGORY_ID: u64 = 1289721245281292290;
+/// Pause zwischen den zwei Channel-Erstellungen (Rate-Limit-Schoner).
+const CREATE_SLEEP: Duration = Duration::from_millis(400);
+/// Pause zwischen einzelnen Member-Moves (`MOVE_SLEEP`).
+const MOVE_SLEEP: Duration = Duration::from_millis(350);
 
 /// Rang-Namen nach Wert (0..=11), wie `DEADLOCK_RANKS` im Original.
 const RANK_NAMES: [&str; 12] = [
@@ -77,12 +86,33 @@ pub struct VoiceMember {
     pub role_ids: Vec<u64>,
 }
 
-/// Discord-Anbindung des Balancers (vom Bot über den Cache erfüllt).
+/// Ergebnis eines Member-Moves.
+pub enum MoveOutcome {
+    Moved,
+    NotInVoice,
+    Failed(String),
+}
+
+/// Discord-Anbindung des Balancers (vom Bot über den Cache/HTTP erfüllt).
 #[async_trait::async_trait]
 pub trait BalancePort: Send + Sync {
     /// Nicht-Bot-Mitglieder im Voice-Channel des Aufrufers (leer, wenn er in
     /// keinem ist).
     async fn caller_voice_members(&self, guild_id: u64, user_id: u64) -> Vec<VoiceMember>;
+    /// Hat der Aufrufer `Server verwalten` (für `!balance start`)?
+    async fn is_admin(&self, guild_id: u64, user_id: u64) -> bool;
+    /// Aktueller Voice-Channel des Aufrufers (für die Rück-Move-Referenz).
+    async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+    /// Erstellt einen Voice-Channel unter `category_id`; `None` bei Fehler oder
+    /// wenn die Kategorie fehlt. Gibt die Channel-ID zurück.
+    async fn create_match_channel(
+        &self,
+        guild_id: u64,
+        name: &str,
+        category_id: u64,
+    ) -> Option<u64>;
+    /// Verschiebt ein Mitglied in den Channel (nur wenn es in Voice ist).
+    async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64) -> MoveOutcome;
 }
 
 /// Eine Antwort des Listeners (Text und/oder Embed).
@@ -106,11 +136,42 @@ impl BalanceReply {
     }
 }
 
+/// Ein laufendes Match (in-memory, wie Pythons `active_matches`).
+///
+/// Wird in `start` geschrieben; gelesen erst von `matches`/`end`/`cleanup`
+/// (Slice 3) — daher vorerst komplett `dead_code`-erlaubt.
+#[allow(dead_code)]
+struct MatchInfo {
+    guild_id: u64,
+    team1_channel_id: u64,
+    team2_channel_id: u64,
+    players: Vec<u64>,
+    started_at: i64,
+    /// Ausgangs-Voice-Channel des Aufrufers — für den Rück-Move beim `end`.
+    original_channel_id: Option<u64>,
+}
+
 pub struct BalanceCommands {
     pub port: Arc<dyn BalancePort>,
+    matches: Mutex<HashMap<String, MatchInfo>>,
+    counter: Mutex<u32>,
 }
 
 impl BalanceCommands {
+    pub fn new(port: Arc<dyn BalancePort>) -> Self {
+        Self {
+            port,
+            matches: Mutex::new(HashMap::new()),
+            counter: Mutex::new(0),
+        }
+    }
+
+    fn next_match_id(&self) -> String {
+        let mut c = self.counter.lock().expect("balance counter");
+        *c += 1;
+        format!("{:03}", *c)
+    }
+
     /// Verarbeitet eine Nachricht; `None`, wenn es kein `!balance`-Befehl ist.
     pub async fn reply_for(&self, content: &str, guild_id: u64, user_id: u64) -> Option<BalanceReply> {
         let mut parts = content.split_whitespace();
@@ -122,6 +183,7 @@ impl BalanceCommands {
         let reply = match sub.as_str() {
             "" => BalanceReply::embed(help_embed()),
             "auto" | "voice" => self.auto_preview(guild_id, user_id).await,
+            "start" => self.start(guild_id, user_id).await,
             other => BalanceReply::text(format!(
                 "`!balance {other}` ist in Rust noch nicht verfügbar (folgt)."
             )),
@@ -150,6 +212,120 @@ impl BalanceCommands {
         let team_a: Vec<(&str, i64)> = idx_a.iter().map(|&i| (players[i].0.as_str(), players[i].1)).collect();
         let team_b: Vec<(&str, i64)> = idx_b.iter().map(|&i| (players[i].0.as_str(), players[i].1)).collect();
         BalanceReply::embed(team_embed(&team_a, &team_b, "🎯 Vorschau – Team Balance (ohne Move)"))
+    }
+
+    /// `start`: erstellt 2 Match-Voice-Channels, verschiebt die Teams und merkt
+    /// sich das Match (Port von `_run_balance_and_start`). `manage_guild`-gated.
+    async fn start(&self, guild_id: u64, user_id: u64) -> BalanceReply {
+        if !self.port.is_admin(guild_id, user_id).await {
+            return BalanceReply::text("❌ Dafür brauchst du die Berechtigung „Server verwalten“.");
+        }
+        let members = self.port.caller_voice_members(guild_id, user_id).await;
+        if members.len() < 4 {
+            return BalanceReply::text(format!(
+                "❌ Mindestens 4 Spieler benötigt (aktuell: {})",
+                members.len()
+            ));
+        }
+        let mut players: Vec<(u64, String, i64)> = members
+            .into_iter()
+            .map(|m| (m.user_id, m.display_name, rank_from_roles(&m.role_ids)))
+            .collect();
+        players.sort_by_key(|p| std::cmp::Reverse(p.2));
+        let values: Vec<i64> = players.iter().map(|p| p.2).collect();
+        let (idx_a, idx_b) = best_split(&values);
+
+        // Zwei Channels in der Match-Kategorie erstellen (Pflicht).
+        let match_id = self.next_match_id();
+        let Some(ch1) = self
+            .port
+            .create_match_channel(guild_id, &format!("🟠 Team Amber • {match_id}"), MATCH_CATEGORY_ID)
+            .await
+        else {
+            return BalanceReply::text(format!(
+                "❌ Konnte Channels nicht erstellen (Kategorie `{MATCH_CATEGORY_ID}` fehlt oder fehlende Berechtigung)."
+            ));
+        };
+        tokio::time::sleep(CREATE_SLEEP).await;
+        let Some(ch2) = self
+            .port
+            .create_match_channel(guild_id, &format!("🔵 Team Sapphire • {match_id}"), MATCH_CATEGORY_ID)
+            .await
+        else {
+            return BalanceReply::text("❌ Konnte den zweiten Channel nicht erstellen.");
+        };
+
+        // Spieler verschieben: Team A → ch1, Team B → ch2.
+        let original = self.port.caller_voice_channel(guild_id, user_id).await;
+        let (mut moved_a, mut moved_b) = (0u32, 0u32);
+        let mut failed: Vec<String> = Vec::new();
+        let move_list: Vec<(usize, u64)> = idx_a
+            .iter()
+            .map(|&i| (i, ch1))
+            .chain(idx_b.iter().map(|&i| (i, ch2)))
+            .collect();
+        for (i, target) in move_list {
+            let (uid, name, _) = &players[i];
+            match self.port.move_member(guild_id, *uid, target).await {
+                MoveOutcome::Moved => {
+                    if target == ch1 {
+                        moved_a += 1;
+                    } else {
+                        moved_b += 1;
+                    }
+                }
+                MoveOutcome::NotInVoice => failed.push(format!("{name} (nicht in Voice)")),
+                MoveOutcome::Failed(err) => failed.push(format!("{name} ({err})")),
+            }
+            tokio::time::sleep(MOVE_SLEEP).await;
+        }
+
+        // Match merken (in-memory).
+        let player_ids: Vec<u64> = idx_a.iter().chain(idx_b.iter()).map(|&i| players[i].0).collect();
+        self.matches.lock().expect("matches").insert(
+            match_id.clone(),
+            MatchInfo {
+                guild_id,
+                team1_channel_id: ch1,
+                team2_channel_id: ch2,
+                players: player_ids,
+                started_at: chrono::Utc::now().timestamp(),
+                original_channel_id: original,
+            },
+        );
+
+        // Ergebnis-Embed (Balance + Move-Resultat).
+        let team_a: Vec<(&str, i64)> = idx_a.iter().map(|&i| (players[i].1.as_str(), players[i].2)).collect();
+        let team_b: Vec<(&str, i64)> = idx_b.iter().map(|&i| (players[i].1.as_str(), players[i].2)).collect();
+        let mut embed = team_embed(
+            &team_a,
+            &team_b,
+            &format!("🎮 Match {match_id} – Teams erstellt & Spieler verschoben"),
+        );
+        if let Some(fields) = embed["fields"].as_array_mut() {
+            fields.push(json!({
+                "name": "Move",
+                "value": format!("<#{ch1}>: {moved_a}/{}\n<#{ch2}>: {moved_b}/{}", team_a.len(), team_b.len()),
+                "inline": false
+            }));
+            if !failed.is_empty() {
+                let shown = failed.iter().take(6).cloned().collect::<Vec<_>>().join("\n");
+                let extra = if failed.len() > 6 {
+                    format!("\n… und {} weitere", failed.len() - 6)
+                } else {
+                    String::new()
+                };
+                fields.push(json!({
+                    "name": "⚠️ Nicht bewegt",
+                    "value": format!("{shown}{extra}"),
+                    "inline": false
+                }));
+            }
+        }
+        embed["footer"] = json!({
+            "text": format!("Match-ID: {match_id} • Beenden: !balance end {match_id}")
+        });
+        BalanceReply::embed(embed)
     }
 }
 
@@ -271,7 +447,7 @@ mod tests {
     fn rang_name_nach_wert() {
         assert_eq!(rank_name(0), "Obscurus");
         assert_eq!(rank_name(11), "Eternus");
-        assert_eq!(rank_name(99), "Obscurus"); // außerhalb → clamp
+        assert_eq!(rank_name(99), "Obscurus"); // außerhalb → Obscurus
     }
 
     #[test]
@@ -285,18 +461,29 @@ mod tests {
         assert!(balance.contains("0.00"));
     }
 
-    struct MockPort(Vec<(u64, i64)>);
+    struct MockPort {
+        members: Vec<(u64, i64)>,
+        admin: bool,
+    }
+
+    impl MockPort {
+        fn new(members: Vec<(u64, i64)>) -> Arc<Self> {
+            Arc::new(Self { members, admin: false })
+        }
+        fn admin(members: Vec<(u64, i64)>) -> Arc<Self> {
+            Arc::new(Self { members, admin: true })
+        }
+    }
 
     #[async_trait::async_trait]
     impl BalancePort for MockPort {
         async fn caller_voice_members(&self, _g: u64, _u: u64) -> Vec<VoiceMember> {
-            self.0
+            self.members
                 .iter()
                 .map(|&(id, val)| VoiceMember {
                     user_id: id,
                     display_name: format!("U{id}"),
-                    // Wert val direkt als „Rolle" abbilden geht nicht — wir geben
-                    // die passende Rang-Rollen-ID zurück.
+                    // Den Wert auf die passende Rang-Rollen-ID abbilden.
                     role_ids: DISCORD_RANK_ROLES
                         .iter()
                         .find(|(_, v)| *v == val)
@@ -305,22 +492,31 @@ mod tests {
                 })
                 .collect()
         }
+        async fn is_admin(&self, _g: u64, _u: u64) -> bool {
+            self.admin
+        }
+        async fn caller_voice_channel(&self, _g: u64, _u: u64) -> Option<u64> {
+            Some(999)
+        }
+        async fn create_match_channel(&self, _g: u64, name: &str, _cat: u64) -> Option<u64> {
+            // Distinkte IDs je Team, damit ch1 != ch2.
+            Some(if name.contains("Amber") { 7001 } else { 7002 })
+        }
+        async fn move_member(&self, _g: u64, _u: u64, _ch: u64) -> MoveOutcome {
+            MoveOutcome::Moved
+        }
     }
 
     #[tokio::test]
     async fn auto_zu_wenige_spieler() {
-        let cmds = BalanceCommands {
-            port: Arc::new(MockPort(vec![(1, 5), (2, 5), (3, 5)])),
-        };
+        let cmds = BalanceCommands::new(MockPort::new(vec![(1, 5), (2, 5), (3, 5)]));
         let reply = cmds.reply_for("!balance auto", 1, 1).await.unwrap();
         assert!(reply.content.unwrap().contains("Mindestens 4"));
     }
 
     #[tokio::test]
     async fn auto_baut_zwei_teams() {
-        let cmds = BalanceCommands {
-            port: Arc::new(MockPort(vec![(1, 11), (2, 1), (3, 11), (4, 1)])),
-        };
+        let cmds = BalanceCommands::new(MockPort::new(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
         let reply = cmds.reply_for("!balance auto", 1, 1).await.unwrap();
         assert_eq!(reply.embeds.len(), 1);
         let balance = reply.embeds[0]["fields"][2]["value"].as_str().unwrap();
@@ -330,18 +526,36 @@ mod tests {
 
     #[tokio::test]
     async fn nicht_balance_befehl_ist_none() {
-        let cmds = BalanceCommands {
-            port: Arc::new(MockPort(vec![])),
-        };
+        let cmds = BalanceCommands::new(MockPort::new(vec![]));
         assert!(cmds.reply_for("hallo welt", 1, 1).await.is_none());
     }
 
     #[tokio::test]
     async fn unbekannter_subcommand_meldet_folgt() {
-        let cmds = BalanceCommands {
-            port: Arc::new(MockPort(vec![])),
-        };
-        let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
+        let cmds = BalanceCommands::new(MockPort::new(vec![]));
+        let reply = cmds.reply_for("!balance gibtsnicht", 1, 1).await.unwrap();
         assert!(reply.content.unwrap().contains("noch nicht verfügbar"));
+    }
+
+    #[tokio::test]
+    async fn start_ohne_admin_blockt() {
+        let cmds = BalanceCommands::new(MockPort::new(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
+        let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
+        assert!(reply.content.unwrap().contains("Server verwalten"));
+    }
+
+    // start_paused: die Rate-Limit-Sleeps laufen instant durch.
+    #[tokio::test(start_paused = true)]
+    async fn start_erstellt_match_und_bewegt() {
+        let cmds = BalanceCommands::new(MockPort::admin(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
+        let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
+        assert_eq!(reply.embeds.len(), 1);
+        assert!(reply.embeds[0]["title"].as_str().unwrap().contains("Match 001"));
+        // Match wurde in-memory gemerkt.
+        assert_eq!(cmds.matches.lock().unwrap().len(), 1);
+        // Move-Feld: alle 4 bewegt (2/2 + 2/2).
+        let fields = reply.embeds[0]["fields"].as_array().unwrap();
+        let move_field = fields.iter().find(|f| f["name"] == "Move").unwrap();
+        assert!(move_field["value"].as_str().unwrap().contains("2/2"));
     }
 }

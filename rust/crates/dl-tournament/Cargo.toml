@@ -23,6 +23,8 @@ serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# test-util für tokio::test(start_paused) — Rate-Limit-Sleeps im Balancer-Test instant.
+tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 
 [lints]
