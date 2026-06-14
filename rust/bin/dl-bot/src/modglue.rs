@@ -659,6 +659,33 @@ impl dl_community::feedback_hub::FeedbackPort for FeedbackGlue {
             Err(err) => Err(err.to_string()),
         }
     }
+
+    async fn post_rich(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
 }
 
 // ── LFG-Lobby-Finder-Anbindung ─────────────────────────────────────────────

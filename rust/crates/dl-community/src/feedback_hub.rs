@@ -9,21 +9,41 @@
 
 use std::sync::Arc;
 
+use dl_db::Db;
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 /// Empfänger der anonymen Feedback-DMs (wie `FEEDBACK_RECIPIENT_ID`).
 pub const FEEDBACK_RECIPIENT_ID: u64 = 662995601738170389;
 
-/// Minimaler Port: eine DM (Text) an einen User senden.
+/// Kanal, in dem das `!fhub`-Panel lebt (wie `FEEDBACK_CHANNEL_ID`).
+pub const FEEDBACK_CHANNEL_ID: u64 = 1289721245281292291;
+
+/// KV-Ablage der Panel-Nachricht (Python: `kv("feedback_hub", ...)`),
+/// damit `!fhub` ein bestehendes Panel editiert statt zu duplizieren.
+const PANEL_KV_NS: &str = "feedback_hub";
+const PANEL_KV_KEY: &str = "interface_message_id";
+
+/// Minimaler Port: DM (Text) senden sowie eine Panel-Nachricht
+/// (Embed + Button-Komponenten) posten bzw. editieren.
 #[async_trait::async_trait]
 pub trait FeedbackPort: Send + Sync {
     async fn send_dm_text(&self, user_id: u64, text: String) -> Result<(), String>;
+    /// Postet eine Nachricht mit `embeds`/`components` und gibt die ID zurück.
+    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
+    /// Editiert eine bestehende Nachricht; `Err`, wenn sie nicht mehr existiert.
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String>;
 }
 
 pub struct FeedbackHub {
     pub port: Arc<dyn FeedbackPort>,
+    pub db: Db,
 }
 
 struct FeedbackHandler {
@@ -117,4 +137,107 @@ pub fn register(router: &mut InteractionRouter, hub: Arc<FeedbackHub>) {
     let handler = Arc::new(FeedbackHandler { hub });
     router.on_custom_id("feedback_hub:open_modal", handler.clone());
     router.on_custom_id("feedback_hub:submit", handler);
+}
+
+/// Baut den Panel-Body (Embed + Button) — identisch zum Python-`FeedbackHubView`.
+fn panel_body() -> Map<String, Value> {
+    let embed = json!({
+        "title": "Feedback Hub",
+        "description":
+            "Teile uns dein anonymes Feedback zu dem Server mit, zu den Spielern \
+             oder deinem Spielerlebnis. Deine Antworten werden nur intern weitergegeben.",
+        // Discord-Blurple (discord.Colour.blurple())
+        "color": 0x5865F2,
+        "fields": [{
+            "name": "So funktioniert's",
+            "value":
+                "Klicke auf den Button, beantworte die Fragen im Formular und bestätige. \
+                 Dein Feedback bleibt anonym und trägt zur Verbesserung des Servers bei.",
+            "inline": false,
+        }],
+    });
+    let components = json!([{
+        "type": 1,
+        "components": [{
+            "type": 2,        // Button
+            "style": 1,       // Primary
+            "label": "Anonymes Feedback senden",
+            "custom_id": "feedback_hub:open_modal",
+        }],
+    }]);
+    let mut body = Map::new();
+    body.insert("embeds".into(), json!([embed]));
+    body.insert("components".into(), components);
+    body
+}
+
+impl FeedbackHub {
+    /// Postet (oder editiert) das Feedback-Panel im `FEEDBACK_CHANNEL_ID`.
+    /// Idempotent: ist eine Panel-Nachricht gemerkt, wird sie editiert; nur
+    /// wenn das fehlschlägt (z. B. gelöscht), wird eine neue gepostet.
+    async fn post_panel(&self) {
+        let body = panel_body();
+        let stored = self
+            .db
+            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok());
+        if let Some(message_id) = stored {
+            if self
+                .port
+                .edit_rich(FEEDBACK_CHANNEL_ID, message_id, body.clone())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        match self.port.post_rich(FEEDBACK_CHANNEL_ID, body).await {
+            Ok(message_id) => {
+                if let Err(err) = self
+                    .db
+                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
+                    .await
+                {
+                    tracing::warn!(%err, "Feedback-Panel-ID konnte nicht gespeichert werden");
+                }
+            }
+            Err(err) => tracing::warn!(%err, "Feedback-Panel konnte nicht gepostet werden"),
+        }
+    }
+}
+
+/// Message-Listener für das `!fhub`-Panel (Python: `@commands.command("fhub")`,
+/// `manage_guild`). Folgt dem `spawn_admin_command_listener`-Muster: eigener
+/// `MessageEvent`-Subscriber, admin-gated, postet bzw. editiert das Panel.
+///
+/// Hinweis zur Treue: Python gated auf `manage_guild`; hier wird `author_is_admin`
+/// (Administrator) genutzt — konsistent mit den anderen Admin-Command-Listenern.
+/// Nicht-Admins werden still ignoriert (kein „fehlende Berechtigung"-Reply).
+pub fn spawn(hub: Arc<FeedbackHub>, dispatcher: &dl_discord::Dispatcher) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    if event.guild_id.is_none() || !event.author_is_admin {
+                        continue;
+                    }
+                    let first = event
+                        .content
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .to_lowercase();
+                    if first == "!fhub" {
+                        hub.post_panel().await;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }

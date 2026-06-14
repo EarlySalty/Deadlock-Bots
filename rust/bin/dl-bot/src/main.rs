@@ -237,8 +237,9 @@ async fn main() -> anyhow::Result<()> {
         port: Arc::new(modglue::FeedbackGlue {
             adapter: adapter.clone(),
         }),
+        db: db.clone(),
     });
-    dl_community::feedback_hub::register(&mut router, feedback_hub);
+    dl_community::feedback_hub::register(&mut router, feedback_hub.clone());
 
     // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
     let clips = dl_community::clips::ClipSubmission::new(
@@ -448,6 +449,8 @@ async fn main() -> anyhow::Result<()> {
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         dl_community::coaching_requests::spawn(coaching_requests.clone());
+        // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
+        dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
         // LFG-Lobby-Finder (5): Antworten im Suche-Kanal
         let lfg_responder = dl_activity::lfg::LfgResponder::new(
