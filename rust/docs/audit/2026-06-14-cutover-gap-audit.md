@@ -363,3 +363,45 @@ Slash-Wrapper) — bewusst je eigener Pass:
   wird beim Cutover ersatzlos fallengelassen, nicht nach Rust portiert. Der in
   einer fruehen Scheibe bereits begonnene Daten-Layer (`dl-community/bug_reports.rs`)
   wurde wieder entfernt. KEIN Blocker mehr.
+
+### Stand nach weiterer Verifikation (laufend gepflegt)
+
+- **Streamer-Partner-Onboarding → ERLEDIGT, vereinfacht.** `/streamer` (alter
+  `StreamerOnboarding`-Cog) ist toter Code (Loader ueberspringt `.py` in bereits
+  geladenen Paketen → nie geladen); `streamer_link_matcher` war schon portiert
+  (`dl-bridges/matcher.rs`). Statt des 2-Schritt-Twitch-Flows: `/streamer`
+  verweist auf die Website + merkt sich die Discord-ID 1 h, ein Watcher mappt
+  einen neu auftauchenden Streamer (`dl-bridges/streamer_intent.rs`, Commits
+  7cfb7ad + bfc58b8). Siehe Memory `project-streamer-link-simplified`.
+- **text_stats / text_conversation_log (war [degraded]) → ERLEDIGT.**
+  `dl-activity/text_stats.rs` (Commits 481dd04 + 3a7478c): Konversations-
+  Sessions, Punkte, Co-Teilnehmer, Idle-Flush; `MessageEvent` bekam `is_reply`.
+- **bug_reporter → DROP** (siehe oben), Memory `project-bug-reporter-dropped`.
+
+- **`!balance` / Custom-Games-Team-Balancer (`deadlock_team_balancer.py`, live)
+  → Backend KOMPLETT portiert, nur die Admin-Befehlsschicht offen.** Verifiziert:
+  der Balancing-Algorithmus (`_balance_score`/`_best_split`) ist `balancer.rs`
+  (Tests mit CPython-Referenzwerten), der Store (`customgames_tournament_teams/
+  signups`, Perioden, Auth-Tokens) ist `store.rs`, der Turnier-USER-Flow
+  (`turnier.py`: Panel `turnier_panel_*`, Team-Signup, `/turnier`) ist
+  `discord_ui.rs`. OFFEN ist nur die `!balance`-Admin-Prefix-Gruppe:
+  - `auto`/`voice` — Voice-Member → Raenge → `best_split` → Vorschau-Embed
+    (read-only; **die natuerliche erste Scheibe**, braucht nur einen Port fuer
+    Voice-Member + Rang-aus-Rollen, kein Channel-Move).
+  - `start`/`manual` — erstellt 2 Match-Voice-Channels + moved Spieler.
+  - `status`/`matches`/`end`/`cleanup` — Match-Lifecycle-Verwaltung.
+  - `turnierpanel`/`turnierstatus`/`turnierliste`/`austragen` — groesstenteils
+    Admin-Aliase auf den schon portierten Turnier-Flow (Ueberschneidung pruefen).
+  Naechster Pass: `!balance auto` als read-only Erst-Scheibe.
+
+### Konsolidierte Restliste (nach allen Verifikationen)
+
+1. `!balance`-Admin-Befehlsschicht (Backend fertig; Algorithmus/Store/Turnier-UI da).
+2. `dm_assistant` Free-Text-AI-DM-Assistent — in Rust nicht vorhanden.
+3. Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]` (Infra).
+4. Kleinkram-Slash: `/faqclose`, `/faqpanel`, `/coaching-analysieren`,
+   Owner-only `/coaching-session-beenden` + `/coaching-survey-senden`.
+5. By-design deferred (KEIN Rust-Port): Web-Control-Routen (status/restart/
+   cogs-reload/logs/standalone → Frontend-Panel-Hiding), Steam-Hero-Sync.
+6. Bewusste Drops: bug_reporter, steam_verified_role (anderer Owner),
+   build_publisher (gehoert in den steam-bot).
