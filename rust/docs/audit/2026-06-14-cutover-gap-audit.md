@@ -318,3 +318,46 @@ gilt: erst pruefen, ob der Cog ueberhaupt geladen ist.
   dokumentiert). Der widersprechende `on_ready`-Befund (intentionally-dropped)
   war korrekt; der `periodic assigner`-Blocker-Befund hat den Lade-Ausschluss
   uebersehen. NICHT portieren.
+
+- **`build_publisher` (background-loops, war [BLOCKER]) → gehoert in den
+  Rust-steam-bot, NICHT in dl-bot.** Der Cog ist ein reiner DB-Queue-Worker
+  ohne jeden Discord-Bezug (keine Commands/Listener/DMs): sein `_publisher_loop`
+  (10 min) liest aus `hero_build_clones` (Status `pending`) und legt
+  `BUILD_PUBLISH`-Tasks in `steam_tasks` an; sein `_monitor_loop` (2 min) liest
+  abgeschlossene Tasks zurueck und aktualisiert den Clone-Status. Konsumiert wird
+  die Queue vom LIVE Rust-steam-bot. Verifikation im Steam-Bot-Repo
+  (`Deadlock-Steam-Bot/rust/`): `steam-persistence/src/builds.rs` hat bereits
+  ALLE Primitive — `insert_publish_task` (415), `has_pending_publish_task` (315,
+  Duplikat-Schutz), `cancel_pending_publish_tasks`, `get_pending_publish_task_id`,
+  Clone-CRUD — und `steam-core/.../handlers/builds/mod.rs` betreibt mit
+  `MAINTAIN_BUILD_CATALOG`/`BUILD_CATALOG_CYCLE` schon einen Producer-Pfad, der
+  konfigurierte Builds mit `hero_build_clones` abgleicht und `BUILD_PUBLISH`-Tasks
+  erzeugt. **Folge:** Ein Port nach dl-bot wuerde einen zweiten, parallelen
+  Producer auf dieselbe `steam_tasks`-Queue setzen → Doppel-Publishing (dieselbe
+  Klasse Fehler wie steam_verified_role: zwei Owner auf einer Ressource). Der
+  korrekte Zielort ist der steam-bot, der `steam_tasks` und den GC ohnehin
+  besitzt; ob `MAINTAIN_BUILD_CATALOG` den Dashboard-Clone-Pfad
+  (`hero_build_clones`, befuellt aus `service/dashboard.py`) bereits vollstaendig
+  abdeckt oder dort noch ein dedizierter Queue-Drain fehlt, ist eine
+  Cross-Repo-Entscheidung fuer den Steam-Bot — NICHT nach dl-bot portieren.
+
+### Re-Triage der verbleibenden Bot-Cutover-Blocker (Stand nach den UI-/Cog-Ports)
+
+Erledigt in dieser Port-Serie (alle in dl-bot, noch nicht cutover): `/faq`,
+`/coaching-anfrage`, `/coaching-status`, `/turnier`, `/meine-tags`,
+UPDATE_MESSAGE-Infra, `dl-broker` resolve-user + members, feedback_hub
+(Button+Modal+`!fhub`-Panel), coaching_survey (Voice-Ende → Reward-Rolle +
+Survey-DM), retention Miss-You-DM (Loop + Embed-DM + Feedback-Modal).
+
+Echte verbleibende Blocker, jeweils GROSSE Multi-File-Subsysteme (kein
+Slash-Wrapper) — bewusst je eigener Pass:
+
+- **Streamer-Partner-Onboarding** (`/streamer`): die Slash-Spitze in
+  `welcome_dm/step_streamer.py:795` ist trivial, dahinter haengt aber das ganze
+  Partner-Subsystem (`StreamerIntroView`, 2-Schritt-DM-Flow, Partner-Blacklist,
+  Twitch-Integration `TwitchPartnerIntegrationUnavailable`, ~850 Z.). Dazu der
+  separate `twitch/streamer_link_matcher.py` (6-h-Loop + `twitch_link_scan`/
+  `_rescan_login`-Prefix-Commands + Link-Views/Modal).
+- **Ticket-/Bug-Reporter** (`/ticket` + `bugreporter:create`): `bug_reporter.py`
+  (~1272 Z.), AI-gestuetzte Triage + dynamische Channel-Erstellung — der
+  groesste Einzelblock.
