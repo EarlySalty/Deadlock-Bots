@@ -9,11 +9,16 @@
 //!   als `persistent_ragebait`-Vorschlag)
 //! - `needs_context`/`ok` → nichts
 //!
+//! Der Ragebaiter-Free-Warnhinweis ist portiert: in Kanälen mit
+//! `required_tone_tag = "ragebaiter_free"` (aus `tempvoice_lane_tag_filter`)
+//! bekommt ein `ragebait_ok`-Treffer mit Confidence 0.40–0.78 eine
+//! niederschwellige Verwarn-DM; ein zweiter Treffer innerhalb von 30 min
+//! eskaliert stattdessen zum Mod-Vorschlag.
+//!
 //! Bewusste Lücken (dokumentiert): Kontext-Backfill-Eskalation (12
-//! Nachrichten bei 0.55–0.78), Bild-Anhänge (multimodal), Tone-Tag-
-//! Schwellen und der Ragebaiter-Free-Warnhinweis — folgen mit dem
-//! Tag-System; der Admin-Skip nähert manage_messages über das
-//! Administrator-Flag des Dispatchers an.
+//! Nachrichten bei 0.55–0.78), Bild-Anhänge (multimodal) und die übrigen
+//! Tone-Tag-Schwellen — folgen mit dem Tag-System; der Admin-Skip nähert
+//! manage_messages über das Administrator-Flag des Dispatchers an.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -34,6 +39,11 @@ pub const AUTO_DELETE_CONFIDENCE: f64 = 0.90;
 pub const PROPOSE_CONFIDENCE: f64 = 0.78;
 pub const PER_USER_COOLDOWN_SECONDS: f64 = 2.0;
 pub const MAX_PROMPT_CHARS: usize = 4000;
+/// Niederschwellige Confidence-Untergrenze für die Ragebaiter-Free-Warnung
+/// (Original: RAGEBAITER_FREE_PROPOSE_CONFIDENCE).
+pub const RAGEBAITER_FREE_PROPOSE_CONFIDENCE: f64 = 0.40;
+/// Fenster, in dem nicht erneut gewarnt, sondern eskaliert wird (30 min).
+pub const RAGEBAITER_FREE_WARNING_WINDOW_SECONDS: i64 = 1800;
 
 pub const AUTO_DELETE_CATEGORIES: [&str; 5] =
     ["nsfw_explicit", "csam", "raping", "epstein_child", "scam"];
@@ -225,6 +235,8 @@ pub trait ModPort: Send + Sync {
     /// Review-Embed mit aimod:*-Buttons posten → message_id.
     async fn post_review(&self, case: &store::CaseDraft, buttons_case_id: &str) -> Option<u64>;
     async fn post_log(&self, text: String);
+    /// Reine Text-DM an einen User (Original: `_send_ragebaiter_free_hint`).
+    async fn send_dm(&self, user_id: u64, text: String);
 }
 
 /// Ergebnis einer Review-Aktion (Button-Reply-Text für den Mod).
@@ -240,6 +252,9 @@ pub struct AiModerator {
     pub generator: Arc<dyn dl_ai::TextGenerator>,
     pub port: Arc<dyn ModPort>,
     cooldown: tokio::sync::Mutex<HashMap<u64, std::time::Instant>>,
+    /// (user_id, channel_id) → letzter Ragebaiter-Free-Warnzeitpunkt (Unix).
+    /// Doppel-Schutz wie das Original-Dict `_ragebaiter_free_warnings`.
+    ragebaiter_free_warnings: tokio::sync::Mutex<HashMap<(u64, u64), i64>>,
 }
 
 impl AiModerator {
@@ -253,7 +268,86 @@ impl AiModerator {
             generator,
             port,
             cooldown: tokio::sync::Mutex::new(HashMap::new()),
+            ragebaiter_free_warnings: tokio::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Tone-Tag des Kanals aus `tempvoice_lane_tag_filter` (Original:
+    /// `_get_required_tone_tag_sync`). Tabelle/Spalte werden von dl-voice
+    /// gepflegt — hier nur lesend.
+    async fn required_tone_tag(&self, channel_id: u64) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        let raw: Option<String> = self
+            .store
+            .db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT required_tone_tag FROM tempvoice_lane_tag_filter WHERE channel_id = ?1",
+                    [channel_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+            .flatten();
+        raw.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty())
+    }
+
+    /// Niederschwellige Verwarn-DM im Ragebaiter-Free-Channel, mit Doppel-Schutz
+    /// (Original: `_maybe_handle_ragebaiter_free_warning`). → true, wenn der
+    /// Pfad behandelt wurde (Warnung gesendet ODER eskaliert).
+    async fn maybe_handle_ragebaiter_free_warning(
+        &self,
+        guild_id: u64,
+        event: &dl_discord::MessageEvent,
+        verdict: &AiVerdict,
+    ) -> bool {
+        if self.required_tone_tag(event.channel_id).await.as_deref() != Some("ragebaiter_free") {
+            return false;
+        }
+        if !(RAGEBAITER_FREE_PROPOSE_CONFIDENCE..PROPOSE_CONFIDENCE).contains(&verdict.confidence) {
+            return false;
+        }
+        let now = chrono::Utc::now().timestamp();
+        let key = (event.author_id, event.channel_id);
+        let recently_warned = {
+            let mut warnings = self.ragebaiter_free_warnings.lock().await;
+            warnings.retain(|_, ts| now - *ts <= RAGEBAITER_FREE_WARNING_WINDOW_SECONDS);
+            match warnings.get(&key) {
+                Some(_) => true,
+                None => {
+                    warnings.insert(key, now);
+                    false
+                }
+            }
+        };
+        if recently_warned {
+            // Innerhalb von 30 min schon gewarnt → statt erneuter Warnung ein
+            // Mod-Vorschlag (Original: eskaliert zu `propose`).
+            let escalated = AiVerdict {
+                verdict: "propose".to_string(),
+                category: verdict.category.clone(),
+                confidence: RAGEBAITER_FREE_PROPOSE_CONFIDENCE.max(verdict.confidence),
+                reason: format!(
+                    "{}\nHinweis fuer Ragebaiter-Free-Channel bereits innerhalb von 30 Minuten erfolgt.",
+                    verdict.reason
+                )
+                .chars()
+                .take(900)
+                .collect(),
+            };
+            self.create_proposal(guild_id, event, &escalated).await;
+        } else {
+            self.port
+                .send_dm(
+                    event.author_id,
+                    "Hinweis: Dieser Voice ist als `Ragebaiter-Free` markiert, bitte Provokationen reduzieren.".to_string(),
+                )
+                .await;
+        }
+        true
     }
 
     pub async fn handle_message(self: &Arc<Self>, event: &dl_discord::MessageEvent) {
@@ -363,7 +457,12 @@ impl AiModerator {
                             .collect(),
                     };
                     self.create_proposal(guild_id, event, &escalated).await;
+                    return;
                 }
+                // Keine Eskalation: in Ragebaiter-Free-Kanälen ggf. eine
+                // niederschwellige Verwarn-DM (mit Doppel-Schutz).
+                self.maybe_handle_ragebaiter_free_warning(guild_id, event, &verdict)
+                    .await;
             }
         }
     }

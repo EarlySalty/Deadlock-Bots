@@ -91,6 +91,20 @@ impl dl_moderation::ModPort for ModGlue {
             .send_raw_public(dl_moderation::LOG_CHANNEL_ID, &body)
             .await;
     }
+
+    async fn send_dm(&self, user_id: u64, text: String) {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return;
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+    }
 }
 
 /// Review-Buttons: aimod:accept|ban|deny:{case_id} (Mod-Guard via Rechte).
@@ -175,6 +189,25 @@ impl InteractionHandler for ReviewHandler {
 
 // ── SecurityGuard-Anbindung ────────────────────────────────────────────────
 
+/// Zeitspanne `now - past` lesbar (Original: `_fmt_delta`): „Xd Yh" / „Xh Ym"
+/// / „Xm", `n/a` ohne Zeitpunkt. Eingaben in Unix-Sekunden.
+fn fmt_delta(now: i64, past: Option<i64>) -> String {
+    let Some(past) = past else {
+        return "n/a".to_string();
+    };
+    let total = (now - past).max(0);
+    let days = total / 86_400;
+    let hours = (total % 86_400) / 3_600;
+    let minutes = (total % 3_600) / 60;
+    if days > 0 {
+        format!("{days}d {hours}h")
+    } else if hours > 0 {
+        format!("{hours}h {minutes}m")
+    } else {
+        format!("{minutes}m")
+    }
+}
+
 pub struct GuardGlue {
     pub adapter: Arc<DiscordAdapter>,
 }
@@ -237,6 +270,32 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             .is_ok()
     }
 
+    async fn send_dm_with_appeal(&self, user_id: u64, text: String, case_id: &str) -> bool {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return false;
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        // „Einspruch"-Button → läuft über den registrierten sg:-Prefix in den
+        // GuardReviewHandler (öffnet das Einspruch-Modal).
+        body.insert(
+            "components".into(),
+            json!([{ "type": 1, "components": [
+                { "type": 2, "style": 1, "label": "Einspruch",
+                  "custom_id": format!("sg:appeal:{case_id}") },
+            ]}]),
+        );
+        self.adapter
+            .send_raw_public(channel.id.get(), &body)
+            .await
+            .is_ok()
+    }
+
     async fn post_mod_alert(
         &self,
         case: &dl_moderation::guard::Incident,
@@ -267,23 +326,69 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             .chars()
             .take(900)
             .collect();
+
+        // Angereicherte Log-Felder (Original: `_log_incident`): Account-Alter,
+        // Zeit seit Join, Aktivitätsfenster, Signale, Aktionen.
+        let now = chrono::Utc::now().timestamp();
+        let is_ban = matches!(action, dl_moderation::guard::GuardAction::Enforce);
+        let action_ok_text = if case.action_ok { "yes" } else { "failed" };
+        let action_text = if is_ban {
+            format!("Ban: {action_ok_text}")
+        } else {
+            let minutes = match action {
+                dl_moderation::guard::GuardAction::Propose => {
+                    dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
+                }
+                _ => dl_moderation::guard::TIMEOUT_MINUTES,
+            };
+            format!("Timeout {minutes}m: {action_ok_text}")
+        };
+        let reason_value: String = if case.reason.is_empty() {
+            "auto-detected burst".to_string()
+        } else {
+            case.reason.chars().take(1000).collect()
+        };
+        // meta = [channel_count, message_count, attachment_count, keyword_hit].
+        let mut fields = vec![
+            json!({ "name": "Member", "value": format!("<@{}> ({})", case.user_id, case.user_id), "inline": false }),
+            json!({ "name": "Case ID", "value": case.case_id, "inline": true }),
+            json!({ "name": "Account age", "value": fmt_delta(now, Some(case.account_created_at)), "inline": true }),
+            json!({ "name": "Time since join", "value": fmt_delta(now, case.joined_at), "inline": true }),
+            json!({ "name": "Activity window", "value": format!(
+                "{} msgs / {} channels in {}s",
+                case.meta[1], case.meta[0], dl_moderation::guard::WINDOW_SECONDS
+            ), "inline": false }),
+            json!({ "name": "Signals", "value": format!(
+                "Keywords: {} | Attachments: {}",
+                case.meta[3] != 0, case.meta[2]
+            ), "inline": true }),
+            json!({ "name": "Actions", "value": format!(
+                "{action_text}\nDeleted: {}\nDM sent: {}",
+                case.deleted_count, if case.dm_sent { "yes" } else { "no" }
+            ), "inline": true }),
+            json!({ "name": "Reason", "value": reason_value, "inline": false }),
+        ];
+        if !preview.is_empty() {
+            fields.push(json!({ "name": "Nachrichten", "value": preview, "inline": false }));
+        }
         let embed = json!({
             "title": title,
-            "description": format!(
-                "**User:** <@{}> (`{}`)\n**Case:** `{}`\n**Grund:** {}\n**Kanäle/Nachrichten/Anhänge/Keyword:** {}/{}/{}/{}\n\n{}",
-                case.user_id, case.user_tag, case.case_id, case.reason,
-                case.meta[0], case.meta[1], case.meta[2], case.meta[3], preview
-            ),
             "color": color,
+            "fields": fields,
         });
-        let components = json!([{ "type": 1, "components": [
-            { "type": 2, "style": 4, "label": "Ban",
-              "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) },
-            { "type": 2, "style": 3, "label": "Timeout aufheben",
-              "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) },
-            { "type": 2, "style": 2, "label": "Entbannen",
-              "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) },
-        ]}]);
+        // Ban/Timeout-aufheben immer (Mod-Aktionen); „Entbannen" wie das
+        // Original (`UnbanView`) nur, wenn tatsächlich gebannt wurde.
+        let mut buttons = vec![
+            json!({ "type": 2, "style": 4, "label": "Ban",
+                    "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) }),
+            json!({ "type": 2, "style": 3, "label": "Timeout aufheben",
+                    "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) }),
+        ];
+        if is_ban && case.action_ok {
+            buttons.push(json!({ "type": 2, "style": 2, "label": "Entbannen",
+                "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) }));
+        }
+        let components = json!([{ "type": 1, "components": buttons }]);
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
@@ -300,21 +405,89 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
     }
 }
 
-/// sg:*-Mod-Buttons (Ban / Timeout aufheben / Unban) mit Rechte-Guard.
+/// sg:*-Mod-Buttons (Ban / Timeout aufheben / Unban) mit Rechte-Guard,
+/// plus der User-seitige Einspruch-Flow (appeal / appealsubmit — ohne
+/// Rechte-Guard, da vom betroffenen User in der DM ausgelöst).
 pub struct GuardReviewHandler {
     pub adapter: Arc<DiscordAdapter>,
+}
+
+impl GuardReviewHandler {
+    /// Einspruch-Button → Einspruch-Modal (Original: AppealView → AppealModal).
+    fn open_appeal_modal(case_id: &str) -> BridgeReply {
+        BridgeReply {
+            modal: Some(dl_discord::ModalSpec {
+                custom_id: format!("sg:appealsubmit:{case_id}"),
+                title: "Einspruch".to_string(),
+                fields: vec![dl_discord::ModalField {
+                    custom_id: "reason".to_string(),
+                    label: "Grund für den Einspruch".to_string(),
+                    placeholder: "Erkläre, warum dieser Bann überprüft werden sollte.".to_string(),
+                    required: true,
+                    min_length: dl_moderation::guard::APPEAL_MIN_CHARS,
+                    max_length: dl_moderation::guard::APPEAL_MAX_CHARS,
+                    paragraph: true,
+                }],
+            }),
+            ..BridgeReply::default()
+        }
+    }
+
+    /// Einspruch-Modal abgeschickt → Embed in den Mod-Kanal + Bestätigung an
+    /// den User (Original: `handle_appeal_submission`).
+    async fn submit_appeal(&self, interaction: &BridgeInteraction, case_id: &str) -> BridgeReply {
+        let appeal_text = interaction
+            .options
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .replace('`', "'")
+            .trim()
+            .to_string();
+        let safe_appeal: String = if appeal_text.is_empty() {
+            "(leer)".to_string()
+        } else {
+            appeal_text.chars().take(1000).collect()
+        };
+        let embed = json!({
+            "title": "Einspruch eingegangen",
+            "color": 0x3498DB,
+            "fields": [
+                { "name": "Mitglied", "value": format!("<@{0}> ({0})", interaction.user_id), "inline": false },
+                { "name": "Fall-ID", "value": case_id, "inline": true },
+                { "name": "Begründung des Einspruchs", "value": safe_appeal, "inline": false },
+            ],
+        });
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        let _ = self
+            .adapter
+            .send_raw_public(dl_moderation::guard::MOD_CHANNEL_ID, &body)
+            .await;
+        BridgeReply::ephemeral_text("Dein Einspruch wurde an das Mod-Team weitergeleitet.")
+    }
 }
 
 #[async_trait::async_trait]
 impl InteractionHandler for GuardReviewHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        if !interaction.author_can_manage_roles {
-            return BridgeReply::ephemeral_text("Keine Berechtigung.");
-        }
         let rest = interaction
             .custom_id
             .strip_prefix("sg:")
             .unwrap_or_default();
+        // Einspruch-Flow (vom betroffenen User, kein Mod-Recht nötig):
+        // custom_id `sg:appeal:{case_id}` / `sg:appealsubmit:{case_id}`.
+        if let Some(case_id) = rest.strip_prefix("appeal:") {
+            return Self::open_appeal_modal(case_id);
+        }
+        if let Some(case_id) = rest.strip_prefix("appealsubmit:") {
+            return self.submit_appeal(&interaction, case_id).await;
+        }
+
+        // Alle übrigen sg:*-Aktionen sind Mod-Buttons → Rechte-Guard.
+        if !interaction.author_can_manage_roles {
+            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+        }
         let parts: Vec<&str> = rest.split(':').collect();
         let (Some(action), Some(guild_id), Some(user_id)) = (
             parts.first().copied(),

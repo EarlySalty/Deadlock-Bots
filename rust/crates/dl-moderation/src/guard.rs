@@ -38,6 +38,9 @@ pub const TAKEOVER_IMAGE_CHANNELS: usize = 2;
 pub const TIMEOUT_MINUTES: i64 = 1440;
 pub const PROPOSAL_TIMEOUT_MINUTES: i64 = 60;
 pub const HISTORY_MAX: usize = 20;
+/// Einspruch-Modal-Grenzen (Original: APPEAL_MIN_CHARS / APPEAL_MAX_CHARS).
+pub const APPEAL_MIN_CHARS: u16 = 4;
+pub const APPEAL_MAX_CHARS: u16 = 800;
 
 pub const KEYWORDS: [&str; 15] = [
     "telegram",
@@ -254,6 +257,9 @@ pub trait GuardPort: Send + Sync {
     async fn timeout(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str) -> bool;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool;
     async fn send_dm(&self, user_id: u64, text: String) -> bool;
+    /// User-DM mit „Einspruch"-Button (`sg:appeal:{case_id}`). Original:
+    /// `_send_user_dm` mit AppealView — Enforce/Propose, nicht Takeover.
+    async fn send_dm_with_appeal(&self, user_id: u64, text: String, case_id: &str) -> bool;
     /// Mod-Alarm mit sg:*-Buttons in den Mod-Kanal.
     async fn post_mod_alert(&self, case: &Incident, action: &GuardAction);
     /// Kurze öffentliche Notiz in den betroffenen Kanal.
@@ -270,6 +276,16 @@ pub struct Incident {
     pub reason: String,
     pub meta: [i64; 4],
     pub messages: Vec<RecentMsg>,
+    /// Account-Erstellung (Unix) — für „Account age" im Log.
+    pub account_created_at: i64,
+    /// Guild-Join (Unix) — für „Time since join" im Log.
+    pub joined_at: Option<i64>,
+    /// Wurde die User-DM zugestellt? (Log-Feld „DM sent").
+    pub dm_sent: bool,
+    /// Hat Ban/Timeout geklappt? (Log-Feld „Actions").
+    pub action_ok: bool,
+    /// Wie viele Nachrichten gelöscht? (Log-Feld „Deleted").
+    pub deleted_count: i64,
 }
 
 pub struct SecurityGuard {
@@ -488,7 +504,7 @@ impl SecurityGuard {
         action: GuardAction,
     ) {
         let case_id = format!("sg-{}-{}", event.author_id, chrono::Utc::now().timestamp());
-        let incident = Incident {
+        let mut incident = Incident {
             case_id: case_id.clone(),
             guild_id,
             user_id: event.author_id,
@@ -501,18 +517,35 @@ impl SecurityGuard {
             reason: reason.clone(),
             meta,
             messages: messages.clone(),
+            account_created_at: event.author_created_at,
+            joined_at: event.author_joined_at,
+            dm_sent: false,
+            action_ok: false,
+            deleted_count: 0,
         };
         self.persist(&incident).await;
 
         // Takeover hat eine eigene DM (Hinweis auf möglichen Hack, reversibel),
-        // alle anderen Pfade die generische Sicherheits-Muster-DM.
-        let dm_text = match action {
-            GuardAction::Takeover => takeover_dm_text(&case_id),
-            _ => format!(
-                "Dein Account hat auf der Deutschen Deadlock Community ein Sicherheits-Muster ausgelöst.\nGrund: {reason}\nCase: {case_id}\nWenn das ein Irrtum ist, melde dich beim Mod-Team."
-            ),
+        // alle anderen Pfade die generische Sicherheits-Muster-DM mit
+        // Einspruch-Button (Original: `_send_user_dm` mit AppealView).
+        let dm_sent = match action {
+            GuardAction::Takeover => {
+                self.port
+                    .send_dm(event.author_id, takeover_dm_text(&case_id))
+                    .await
+            }
+            _ => {
+                self.port
+                    .send_dm_with_appeal(
+                        event.author_id,
+                        format!(
+                            "Dein Account hat auf der Deutschen Deadlock Community ein Sicherheits-Muster ausgelöst.\nGrund: {reason}\nCase: {case_id}\nWenn du das für einen Fehler hältst, nutze den Einspruch-Button."
+                        ),
+                        &case_id,
+                    )
+                    .await
+            }
         };
-        let _ = self.port.send_dm(event.author_id, dm_text).await;
 
         let acted = match action {
             GuardAction::Enforce => self.port.ban(guild_id, event.author_id, &reason).await,
@@ -533,21 +566,37 @@ impl SecurityGuard {
             tracing::warn!(case_id, "SecurityGuard: Aktion fehlgeschlagen");
         }
 
+        let mut deleted = 0i64;
         for msg in &messages {
-            let _ = self
+            if self
                 .port
                 .delete_message(msg.channel_id, msg.message_id)
-                .await;
+                .await
+            {
+                deleted += 1;
+            }
         }
-        if let Some(last) = messages.last() {
-            self.port
-                .post_public_notice(
-                    last.channel_id,
-                    "🛡️ Eine Scam-Nachricht wurde entfernt und der Account in Quarantäne genommen."
-                        .to_string(),
-                )
-                .await;
+        // Öffentliche Scam-Notice in JEDEN betroffenen Kanal, dedupliziert über
+        // alle Burst-Channels (Original: `_post_public_scam_notice`).
+        let action_text = if matches!(action, GuardAction::Enforce) {
+            "gebannt"
+        } else {
+            "vorübergehend gesperrt"
+        };
+        let mut seen_channels: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        for msg in &messages {
+            if seen_channels.insert(msg.channel_id) {
+                self.port
+                    .post_public_notice(
+                        msg.channel_id,
+                        format!("🔒 Scam erkannt — Account wurde automatisch {action_text}."),
+                    )
+                    .await;
+            }
         }
+        incident.dm_sent = dm_sent;
+        incident.action_ok = acted;
+        incident.deleted_count = deleted;
         self.port.post_mod_alert(&incident, &action).await;
     }
 
