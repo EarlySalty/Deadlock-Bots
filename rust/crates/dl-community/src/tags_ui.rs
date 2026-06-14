@@ -187,6 +187,212 @@ fn command_spec() -> CommandSpec {
     }
 }
 
+// ── Mod-Tags (`/mod-tag set|remove|list`) ────────────────────────────────────
+// Port von `cogs/tags/mod_commands.py`. Der Mod-Gate läuft serverseitig über
+// `default_member_permissions` = MANAGE_MESSAGES (wie andere Mod-Commands);
+// der Rollen-Fallback (MOD_ROLE_ID) und der Log-Channel-Post des Originals
+// entfallen, weil der Router-`register` weder einen Channel-Sender noch
+// Rollen-Kontext bekommt (kein main.rs-Eingriff).
+
+/// MANAGE_MESSAGES (0x2000) als Discord-Permission-Bitstring.
+const MANAGE_MESSAGES: &str = "8192";
+
+#[derive(Clone, Copy)]
+enum ModAction {
+    Set,
+    Remove,
+    List,
+}
+
+struct ModTagHandler {
+    service: Arc<TagService>,
+    action: ModAction,
+}
+
+/// Mention-Form einer User-ID (`<@id>`). Die User-Option kommt aus dem
+/// Dispatch als JSON-Number (siehe `option_to_pair`).
+fn opt_user_id(interaction: &BridgeInteraction, key: &str) -> Option<u64> {
+    interaction.options.get(key).and_then(Value::as_u64)
+}
+
+/// Expiry-Anzeige wie Python `_format_expiry`: `unbegrenzt` oder das UTC-Datum.
+fn format_expiry(expires_at: Option<chrono::DateTime<chrono::Utc>>) -> String {
+    match expires_at {
+        None => "unbegrenzt".to_string(),
+        Some(dt) => dt.format("%Y-%m-%d").to_string(),
+    }
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for ModTagHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let Some(target) = opt_user_id(&interaction, "user") else {
+            return BridgeReply::ephemeral_text("Kein User angegeben.");
+        };
+        match self.action {
+            ModAction::Set => {
+                let tag = interaction
+                    .options
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let reason = interaction
+                    .options
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .map(str::to_string);
+                let expires_in_days = interaction.options.get("expires_in_days").and_then(Value::as_i64);
+                if let Some(days) = expires_in_days {
+                    if days <= 0 {
+                        return BridgeReply::ephemeral_text(
+                            "`expires_in_days` muss größer als 0 sein.",
+                        );
+                    }
+                }
+                // expires_in_days → festes Datum; sonst greift in add_mod_tag die
+                // Default-Laufzeit (ragebaiter: 14 Tage).
+                let expires_at = expires_in_days
+                    .map(|d| chrono::Utc::now() + chrono::Duration::days(d));
+                match self
+                    .service
+                    .add_mod_tag(target, tag, interaction.user_id, reason, expires_at)
+                    .await
+                {
+                    Ok(()) => BridgeReply::ephemeral_text(format!(
+                        "Mod-Tag `{tag}` wurde für <@{target}> gesetzt."
+                    )),
+                    Err(_) => BridgeReply::ephemeral_text(format!(
+                        "Unbekanntes Mod-Tag `{tag}`."
+                    )),
+                }
+            }
+            ModAction::Remove => {
+                let tag = interaction
+                    .options
+                    .get("tag")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                if !self.service.has_active_mod_tag(target, tag).await {
+                    return BridgeReply::ephemeral_text(format!(
+                        "<@{target}> hat kein aktives Mod-Tag `{tag}`."
+                    ));
+                }
+                let _ = self
+                    .service
+                    .remove_mod_tag(target, tag, interaction.user_id)
+                    .await;
+                BridgeReply::ephemeral_text(format!(
+                    "Mod-Tag `{tag}` wurde von <@{target}> entfernt."
+                ))
+            }
+            ModAction::List => {
+                let rows = self.service.active_mod_tags(target).await;
+                let title = format!("Mod-Tags für {target}");
+                if rows.is_empty() {
+                    let embed = json!({
+                        "title": title,
+                        "description": "Keine aktiven Mod-Tags.",
+                        "color": 0xE67E22, // discord.Color.orange()
+                    });
+                    return BridgeReply {
+                        embeds: vec![embed],
+                        ephemeral: true,
+                        ..Default::default()
+                    };
+                }
+                let fields: Vec<Value> = rows
+                    .iter()
+                    .map(|row| {
+                        json!({
+                            "name": row.tag,
+                            "value": format!(
+                                "Reason: {}\nExpires: {}\nSet by: <@{}>",
+                                row.reason.as_deref().unwrap_or("-"),
+                                format_expiry(row.expires_at),
+                                row.set_by,
+                            ),
+                            "inline": false,
+                        })
+                    })
+                    .collect();
+                let embed = json!({
+                    "title": title,
+                    "color": 0xE67E22,
+                    "fields": fields,
+                });
+                BridgeReply {
+                    embeds: vec![embed],
+                    ephemeral: true,
+                    ..Default::default()
+                }
+            }
+        }
+    }
+}
+
+/// Vollständige `mod-tag`-Gruppendefinition (alle Subcommands). Der Router
+/// dedupt CommandSpecs nach `name` (letzter gewinnt), darum trägt jeder
+/// `on_command`-Aufruf dieselbe komplette Definition.
+fn mod_tag_group_spec() -> CommandSpec {
+    let tag_option = json!({
+        "type": 3, // STRING
+        "name": "tag",
+        "description": "Mod-Tag",
+        "required": true,
+        "choices": [{ "name": "Ragebaiter", "value": "ragebaiter" }],
+    });
+    let user_option = json!({
+        "type": 6, // USER
+        "name": "user",
+        "description": "Betroffener User",
+        "required": true,
+    });
+    CommandSpec {
+        definition: json!({
+            "name": "mod-tag",
+            "description": "Moderationsbefehle für Mod-Tags.",
+            "type": 1,
+            "dm_permission": false,
+            "default_member_permissions": MANAGE_MESSAGES,
+            "options": [
+                {
+                    "type": 1, // SUB_COMMAND
+                    "name": "set",
+                    "description": "Setzt ein Mod-Tag für einen User.",
+                    "options": [
+                        user_option,
+                        tag_option,
+                        {
+                            "type": 3, // STRING
+                            "name": "reason",
+                            "description": "Optionaler Grund",
+                            "required": false,
+                        },
+                        {
+                            "type": 4, // INTEGER
+                            "name": "expires_in_days",
+                            "description": "Ablauf in Tagen",
+                            "required": false,
+                        },
+                    ],
+                },
+                {
+                    "type": 1,
+                    "name": "remove",
+                    "description": "Entfernt ein Mod-Tag von einem User.",
+                    "options": [user_option, tag_option],
+                },
+                {
+                    "type": 1,
+                    "name": "list",
+                    "description": "Zeigt aktive Mod-Tags eines Users.",
+                    "options": [user_option],
+                },
+            ],
+        }),
+    }
+}
+
 /// Registriert `/meine-tags` + die Select-/Reset-Komponenten-Handler.
 pub fn register(router: &mut InteractionRouter, service: Arc<TagService>) {
     router.on_command(
@@ -214,8 +420,35 @@ pub fn register(router: &mut InteractionRouter, service: Arc<TagService>) {
     router.on_custom_id(
         "tags:reset",
         Arc::new(TagsHandler {
-            service,
+            service: service.clone(),
             action: Action::Reset,
+        }),
+    );
+
+    // /mod-tag set|remove|list — qualifizierte Subcommand-Namen; jeder Spec
+    // trägt die volle Gruppendefinition (Router dedupt nach name).
+    router.on_command(
+        "mod-tag set",
+        mod_tag_group_spec(),
+        Arc::new(ModTagHandler {
+            service: service.clone(),
+            action: ModAction::Set,
+        }),
+    );
+    router.on_command(
+        "mod-tag remove",
+        mod_tag_group_spec(),
+        Arc::new(ModTagHandler {
+            service: service.clone(),
+            action: ModAction::Remove,
+        }),
+    );
+    router.on_command(
+        "mod-tag list",
+        mod_tag_group_spec(),
+        Arc::new(ModTagHandler {
+            service,
+            action: ModAction::List,
         }),
     );
 }
@@ -234,6 +467,35 @@ mod tests {
         let opts = sel["components"][0]["options"].as_array().unwrap();
         assert_eq!(opts[0]["default"], json!(false)); // UNSET
         assert_eq!(opts[1]["default"], json!(true)); // 25+
+    }
+
+    #[test]
+    fn mod_tag_spec_enthaelt_alle_subcommands() {
+        let spec = mod_tag_group_spec();
+        let def = &spec.definition;
+        assert_eq!(def["name"], json!("mod-tag"));
+        assert_eq!(def["default_member_permissions"], json!("8192"));
+        let subs: Vec<&str> = def["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|o| o["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(subs, vec!["set", "remove", "list"]);
+        // set hat user/tag/reason/expires_in_days
+        let set_opts = def["options"][0]["options"].as_array().unwrap();
+        assert_eq!(set_opts.len(), 4);
+        assert_eq!(set_opts[0]["type"], json!(6)); // USER
+        assert_eq!(set_opts[1]["choices"][0]["value"], json!("ragebaiter"));
+    }
+
+    #[test]
+    fn format_expiry_wie_python() {
+        assert_eq!(format_expiry(None), "unbegrenzt");
+        let dt = chrono::DateTime::parse_from_rfc3339("2026-06-14T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert_eq!(format_expiry(Some(dt)), "2026-06-14");
     }
 
     #[test]

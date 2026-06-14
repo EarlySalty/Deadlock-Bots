@@ -78,6 +78,16 @@ struct ModTagState {
     expires_at: Option<DateTime<Utc>>,
 }
 
+/// Aktiver Mod-Tag mit Detailspalten (für `/mod-tag list`, Port von
+/// Pythons `_fetch_active_mod_tag_rows`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModTagInfo {
+    pub tag: String,
+    pub set_by: u64,
+    pub reason: Option<String>,
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
 #[derive(Default)]
 struct TagCache {
     user_tags: HashMap<u64, HashMap<String, String>>,
@@ -331,6 +341,41 @@ impl TagService {
         Ok(())
     }
 
+    /// Aktive Mod-Tags eines Users mit Details, frisch aus der DB gelesen
+    /// (Python `_fetch_active_mod_tag_rows`): nach `mod_tag` sortiert, bereits
+    /// abgelaufene (`expires_at <= now`) werden gefiltert.
+    pub async fn active_mod_tags(&self, user_id: u64) -> Vec<ModTagInfo> {
+        let rows: Vec<(String, u64, Option<String>, Option<String>)> = self
+            .db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT mod_tag, set_by, reason, expires_at FROM user_mod_tags
+                      WHERE user_id = ?1 ORDER BY mod_tag",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![user_id], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+                })?;
+                rows.collect::<Result<_, _>>()
+            })
+            .await
+            .unwrap_or_default();
+        let now = Utc::now();
+        rows.into_iter()
+            .filter_map(|(tag, set_by, reason, expires_raw)| {
+                let expires_at = expires_raw.as_deref().and_then(parse_expiry);
+                if expires_at.map(|e| e <= now).unwrap_or(false) {
+                    return None;
+                }
+                Some(ModTagInfo {
+                    tag,
+                    set_by,
+                    reason,
+                    expires_at,
+                })
+            })
+            .collect()
+    }
+
     pub async fn has_active_mod_tag(&self, user_id: u64, tag: &str) -> bool {
         let Ok(tag) = validate_mod_tag(tag) else {
             return false;
@@ -495,6 +540,30 @@ mod tests {
         assert_eq!(removed, vec![(200, "ragebaiter".to_string())]);
         assert!(!service.has_active_mod_tag(200, "ragebaiter").await);
         assert!(service.has_active_mod_tag(100, "ragebaiter").await);
+    }
+
+    #[tokio::test]
+    async fn active_mod_tags_filtert_abgelaufene() {
+        let (_dir, service) = service().await;
+        service
+            .add_mod_tag(100, "ragebaiter", 777, Some("Spam".into()), None)
+            .await
+            .expect("add");
+        // Abgelaufen → darf in der Liste nicht auftauchen.
+        let past = Utc::now() - chrono::Duration::hours(1);
+        service
+            .add_mod_tag(200, "ragebaiter", 777, None, Some(past))
+            .await
+            .expect("add");
+
+        let active = service.active_mod_tags(100).await;
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].tag, "ragebaiter");
+        assert_eq!(active[0].set_by, 777);
+        assert_eq!(active[0].reason.as_deref(), Some("Spam"));
+        assert!(active[0].expires_at.is_some()); // Default-Laufzeit gesetzt
+
+        assert!(service.active_mod_tags(200).await.is_empty());
     }
 
     #[tokio::test]

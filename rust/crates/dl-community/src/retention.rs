@@ -18,7 +18,9 @@ use std::time::Duration;
 use chrono::Timelike;
 use dl_db::{Db, DbError};
 use dl_discord::interactions::{ModalField, ModalSpec};
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+};
 use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
 
@@ -220,6 +222,41 @@ impl RetentionTracker {
                     )?;
                 }
                 Ok(count)
+            })
+            .await
+    }
+
+    /// Opt-out setzen (Python `retention_optout`): legt den Tracking-Eintrag
+    /// bei Bedarf an und setzt `opted_out=1`. Der Miss-You-Sender liest die
+    /// Spalte bereits (siehe [`Self::find_inactive_users`]).
+    pub async fn set_opted_out(&self, user_id: u64, guild_id: u64) -> Result<(), DbError> {
+        let now = chrono::Utc::now().timestamp();
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO user_retention_tracking (user_id, guild_id, opted_out, updated_at)
+                     VALUES (?1, ?2, 1, ?3)
+                     ON CONFLICT(user_id) DO UPDATE SET opted_out = 1, updated_at = ?3",
+                    params![user_id, guild_id, now],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
+    /// Opt-in (Python `retention_optin`): setzt `opted_out=0` für einen
+    /// bestehenden Eintrag. Wie das Original wird hier nichts neu angelegt.
+    pub async fn clear_opted_out(&self, user_id: u64) -> Result<(), DbError> {
+        let now = chrono::Utc::now().timestamp();
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE user_retention_tracking
+                       SET opted_out = 0, updated_at = ?1
+                     WHERE user_id = ?2",
+                    params![now, user_id],
+                )
+                .map(|_| ())
             })
             .await
     }
@@ -489,8 +526,71 @@ impl InteractionHandler for FeedbackHandler {
     }
 }
 
-/// Registriert den Feedback-Button + das Feedback-Modal der Miss-You-DM.
+/// Self-Service-Slash-Commands `/retention-optout` + `/retention-optin`
+/// (Python `retention_optout`/`retention_optin`): der User steuert selbst, ob
+/// er die „Wir-vermissen-dich"-DMs bekommt.
+struct OptOutHandler {
+    tracker: RetentionTracker,
+    opt_out: bool,
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for OptOutHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if self.opt_out {
+            let _ = self
+                .tracker
+                .set_opted_out(interaction.user_id, interaction.guild_id)
+                .await;
+            BridgeReply::ephemeral_text(
+                "✅ Du erhältst ab jetzt keine 'Wir vermissen dich'-Nachrichten mehr.",
+            )
+        } else {
+            let _ = self.tracker.clear_opted_out(interaction.user_id).await;
+            BridgeReply::ephemeral_text(
+                "✅ Du erhältst wieder 'Wir vermissen dich'-Nachrichten wenn du länger inaktiv bist.",
+            )
+        }
+    }
+}
+
+fn optout_command_spec(name: &str, description: &str) -> CommandSpec {
+    CommandSpec {
+        definition: json!({
+            "name": name,
+            "description": description,
+            "type": 1,
+        }),
+    }
+}
+
+/// Registriert den Feedback-Button + das Feedback-Modal der Miss-You-DM sowie
+/// die Opt-out-/Opt-in-Slash-Commands.
 pub fn register(router: &mut InteractionRouter, db: Db, port: Arc<dyn RetentionPort>) {
+    let tracker = RetentionTracker::new(db.clone());
+    router.on_command(
+        "retention-optout",
+        optout_command_spec(
+            "retention-optout",
+            "Deaktiviere 'Wir vermissen dich'-Nachrichten",
+        ),
+        Arc::new(OptOutHandler {
+            tracker: tracker.clone(),
+            opt_out: true,
+        }),
+    );
+    router.on_command(
+        "retention-optin",
+        optout_command_spec(
+            "retention-optin",
+            "Aktiviere 'Wir vermissen dich'-Nachrichten wieder",
+        ),
+        Arc::new(OptOutHandler {
+            tracker,
+            opt_out: false,
+        }),
+    );
+
     let handler = Arc::new(FeedbackHandler { db, port });
     router.on_prefix(FEEDBACK_BTN_PREFIX, handler.clone());
     router.on_prefix(FEEDBACK_MODAL_PREFIX, handler);
@@ -668,6 +768,59 @@ mod tests {
             .await
             .unwrap();
         assert!((avg - 2.0).abs() < 0.01, "avg_weekly = {avg}");
+    }
+
+    #[tokio::test]
+    async fn optout_legt_an_und_optin_setzt_zurueck() {
+        let (_d, t) = mk().await;
+        // Opt-out ohne Vor-Eintrag → legt Zeile mit opted_out=1 an.
+        t.set_opted_out(42, 7).await.unwrap();
+        let (gid, opted): (i64, i64) = t
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT guild_id, opted_out FROM user_retention_tracking WHERE user_id=42",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!((gid, opted), (7, 1));
+
+        // Opt-in → setzt opted_out=0 für den bestehenden Eintrag.
+        t.clear_opted_out(42).await.unwrap();
+        let opted: i64 = t
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT opted_out FROM user_retention_tracking WHERE user_id=42",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(opted, 0);
+    }
+
+    #[tokio::test]
+    async fn optin_ohne_eintrag_legt_nichts_an() {
+        let (_d, t) = mk().await;
+        // Wie das Python-UPDATE: ohne bestehende Zeile passiert nichts.
+        t.clear_opted_out(999).await.unwrap();
+        let n: i64 = t
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM user_retention_tracking WHERE user_id=999",
+                    [],
+                    |r| r.get(0),
+                )
+            })
+            .await
+            .unwrap();
+        assert_eq!(n, 0);
     }
 
     #[tokio::test]
