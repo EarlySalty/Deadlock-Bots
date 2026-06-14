@@ -12,8 +12,16 @@ Slash-Commands + ganze Cogs fehlen).
 
 _12 Luecken (von 14 geprueft)._
 
-- **[BLOCKER]** `GET /api/status` <missing>
-  - Core polling endpoint of the admin SPA: service/static/dashboard.html fetches /api/status to populate bot info, cog tree, namespaces, blocked list, lifecycle snapshot, health checks, standalone snapshot, auth/csrf token. grep over rust/ (crates/+bin/) finds NO route or handler for /api/status; dl-da
+- `GET /api/status` <by-design deferred> (war [BLOCKER] — Original-Fund)
+  - Core polling endpoint der ALTEN Python-Admin-SPA (service/static/dashboard.html):
+    füllt Bot-Info, Cog-Tree, Namespaces, Blocklist, Lifecycle-Snapshot,
+    Health-Checks, Standalone-Snapshot, Auth/CSRF-Token. Das RUST-Dashboard ist
+    ein eigenes, schlankeres Frontend mit eigenem Auth/CSRF (web.rs:248
+    `/api/auth/me`, web.rs:249 `/auth/discord/login`, Session-Modul + check_csrf)
+    — es braucht `/api/status` NICHT: Auth/CSRF kommen aus `/api/auth/me`, die
+    Cog-Management-/Standalone-/Lifecycle-Panels sind im Rust-Frontend gar nicht
+    vorhanden (Panel-Hiding). Gehört zu Restliste #5 (status/restart/cogs-reload/
+    logs/standalone), NICHT zu den echten Cutover-Blockern.
   - Py: `service/dashboard.py:6642 (route reg line 415)`
 - **[BLOCKER]** `POST /api/deadlock/heroes (upsert hero)` <missing>  ✅ ERLEDIGT 6fc0456 (DB-Core; Steam-Sync deferred)
   - require_full_access admin write: creates/updates a deadlock_heroes row + replaces build snapshot + optional sync. Rust deadlock.rs (grep) has only deadlock_config, deadlock_config_update, deadlock_heroes(GET) — NO upsert_hero. web.rs:308 registers /api/deadlock/heroes with GET only (no .post()). SPA
@@ -439,3 +447,19 @@ Slash-Wrapper) — bewusst je eigener Pass:
    cogs-reload/logs/standalone → Frontend-Panel-Hiding), Steam-Hero-Sync.
 6. Bewusste Drops: bug_reporter, steam_verified_role (anderer Owner),
    build_publisher (gehoert in den steam-bot).
+
+### Cutover-Readiness (finaler Verifikations-Sweep, 2026-06-14)
+
+Alle [BLOCKER]-Einträge gegen den realen Rust-Code gegengeprüft. Ergebnis:
+**kein echter funktionaler Cutover-Blocker mehr offen.** Items 1–4 der Restliste
+sind portiert (`!balance`, `dm_assistant`, Schema-Bootstrap, `/faqpanel`), die
+übrigen [BLOCKER]-Inline-Marker waren Original-Funde und sind erledigt
+(`/faq`+on_message konsolidiert, coaching-voice-end-Loop, `/turnier`,
+`/meine-tags`, `/coaching-anfrage`, `/streamer` vereinfacht, Broker-Routen) oder
+bewusst zurückgestellt/gedroppt (Items 5–6, inkl. `/api/status`: Rust-Dashboard
+hat eigenes Auth via `/api/auth/me`, die Control-Panels sind ausgeblendet).
+
+Offen bleibt allein **der Cutover selbst** (Task #8): den systemd-Service von
+`main_bot.py` auf die gebaute `dl-bot`-Binary umstellen + end-to-end
+verifizieren. Das ist eine bewusste Betriebs-Entscheidung und braucht User-Go —
+nicht autonom auszuführen.
