@@ -145,6 +145,8 @@ async fn main() -> anyhow::Result<()> {
 
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
     let tag_service = dl_community::tags::TagService::new(db.clone());
+    // /meine-tags-Selbstverwaltung (Slash + Select/Reset-Komponenten).
+    dl_community::tags_ui::register(&mut router, tag_service.clone());
 
     // SecurityGuard (6): sg:*-Mod-Buttons am Router, Scan gateway-gated
     router.on_prefix(

@@ -15,3 +15,4 @@ pub mod privacy;
 pub mod privacy_ui;
 pub mod retention;
 pub mod tags;
+pub mod tags_ui;
