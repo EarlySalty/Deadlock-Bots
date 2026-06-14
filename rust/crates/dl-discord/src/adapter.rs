@@ -337,6 +337,34 @@ impl DiscordPort for DiscordAdapter {
             .map_err(|err| PortError::Discord(err.to_string()))
     }
 
+    async fn create_role(
+        &self,
+        guild_id: u64,
+        name: &str,
+        mentionable: bool,
+        reason: &str,
+    ) -> Result<u64, PortError> {
+        // Idempotenz: existiert die Rolle bereits (case-sensitiv nach Name,
+        // analog Python `discord.utils.get(name=...)`), deren ID zurückgeben.
+        // Best-effort — wenn der Cache nicht ready ist (GuildNotFound o. ä.),
+        // wird die Suche übersprungen und einfach neu angelegt.
+        if let Ok(existing) = self.list_roles(Some(guild_id)).await {
+            if let Some(role) = existing.roles.iter().find(|r| r.name == name) {
+                return Ok(role.id);
+            }
+        }
+        let role = self
+            .http
+            .create_role(
+                GuildId::new(guild_id),
+                &json!({ "name": name, "mentionable": mentionable }),
+                Some(reason),
+            )
+            .await
+            .map_err(|err| PortError::Discord(err.to_string()))?;
+        Ok(role.id.get())
+    }
+
     async fn remove_role(
         &self,
         guild_id: u64,

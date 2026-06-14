@@ -1,3 +1,11 @@
+## #143 — Master-Broker kann jetzt Discord-Rollen anlegen
+
+**Ausgangslage:** Andere Bots im Verbund (z. B. der Twitch-Bot) haben keinen eigenen Discord-Zugang — sie lassen alle Discord-Aktionen über den zentralen Master-Broker laufen. Der konnte Mitglieder zu bestehenden Rollen hinzufügen, aber keine neue Rolle erstellen. Für die automatische Anlage der Twitch-„ist live"-Ping-Rolle fehlte genau das.
+
+**Was geändert wurde:** Der Broker hat einen neuen internen Endpunkt, der eine neue, erwähnbare Rolle in der Guild anlegt und ihre ID zurückgibt.
+
+**Wie es funktioniert:** Der aufrufende Bot schickt Guild, Rollenname und einen Audit-Grund. Der Broker sucht zuerst (best effort) eine gleichnamige Rolle, um Duplikate zu vermeiden, und legt nur sonst eine neue an. Der Endpunkt ist wie alle Broker-Aktionen nur lokal erreichbar (Loopback + interner Token) und gegen doppelte Aufrufe abgesichert. Voraussetzung ist, dass der Bot in der Guild die Berechtigung „Rollen verwalten" hat — fehlt sie, meldet Discord einen Fehler, der sauber durchgereicht wird.
+
 ## #142 — TempVoice-Panel: tote Knöpfe reagieren wieder (Lurker, Tag-Filter, Mindest-Rang, Modus)
 
 **Problem:** Seit der Umstellung der Bot-Anbindung auf das neue System antwortete ein Teil der Knöpfe im TempVoice-Bedienpanel nur noch mit „Diese Funktion ist im neuen System noch nicht freigeschaltet" — also gar nicht. Betroffen waren: **Lurker** (still/ohne Limit-Slot beitreten), **Tag-Filter** (Lane nach Mindest-Alter/Tonfall/Ragebaiter filtern), der zweistufige **Mindest-Rang** (Haupt-Rang → Sub-Rang) und **Modus wechseln** (Casual/Ranked/Street Brawl/Off Topic). Die Knöpfe waren zwar da und nahmen Klicks an, dahinter lag aber kein Handler — die eigentliche Logik war schon umgezogen, wurde aber von keinem Knopf aufgerufen.

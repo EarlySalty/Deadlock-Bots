@@ -171,6 +171,14 @@ pub trait DiscordPort: Send + Sync {
         role_id: u64,
         reason: &str,
     ) -> Result<(), PortError>;
+    /// Legt eine neue Guild-Rolle an (idempotent über den Namen) → role_id.
+    async fn create_role(
+        &self,
+        guild_id: u64,
+        name: &str,
+        mentionable: bool,
+        reason: &str,
+    ) -> Result<u64, PortError>;
     async fn remove_role(
         &self,
         guild_id: u64,

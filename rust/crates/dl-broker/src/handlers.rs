@@ -982,6 +982,99 @@ pub async fn remove_role(
     role_action(state, peer, headers, body, false).await
 }
 
+pub async fn create_role(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let parsed = (|| -> Result<(u64, String, bool, String), String> {
+        let guild_id = payload::positive_int(&payload, "guild_id")?;
+        let name = payload
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if name.is_empty() {
+            return Err("name is required".to_string());
+        }
+        if name.chars().count() > 100 {
+            return Err("name exceeds Discord limit (100)".to_string());
+        }
+        let mentionable = payload
+            .get("mentionable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true);
+        let reason = payload
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or("master-broker:create-role")
+            .to_string();
+        Ok((guild_id, name, mentionable, reason))
+    })();
+    let (guild_id, name, mentionable, reason) = match parsed {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+
+    if let Err(resp) = allowlist_check(&rid, Some(&idem), "guild", guild_id, &state.guild_allowlist)
+    {
+        return resp;
+    }
+
+    let mut op = Map::new();
+    op.insert("guild_id".into(), json!(guild_id));
+    op.insert("name".into(), json!(name));
+    op.insert("mentionable".into(), json!(mentionable));
+    op.insert("reason".into(), json!(reason));
+    let hash = payload_hash(&op);
+
+    run_idempotent(&state, &rid, "discord.create_role", &idem, &hash, || async {
+        match state
+            .port
+            .create_role(guild_id, &name, mentionable, &reason)
+            .await
+        {
+            Ok(role_id) => (
+                200,
+                success_body(
+                    &rid,
+                    Some(&idem),
+                    json!({
+                        "guild_id": guild_id.to_string(),
+                        "role_id": role_id,
+                        "name": name,
+                    }),
+                ),
+            ),
+            Err(PortError::GuildNotFound) => (
+                404,
+                error_body(
+                    &rid,
+                    Some(&idem),
+                    "not_found",
+                    &format!("guild {guild_id} not found"),
+                ),
+            ),
+            Err(err) => {
+                tracing::error!(%err, guild_id, "create_role fehlgeschlagen");
+                (
+                    502,
+                    error_body(&rid, Some(&idem), "discord_error", &err.to_string()),
+                )
+            }
+        }
+    })
+    .await
+}
+
 pub async fn move_voice(
     State(state): State<SharedBroker>,
     peer: Peer,

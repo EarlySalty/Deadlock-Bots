@@ -173,6 +173,10 @@ pub fn router(state: SharedBroker) -> Router {
             post(handlers::remove_role),
         )
         .route(
+            "/internal/master/v1/discord/role/create",
+            post(handlers::create_role),
+        )
+        .route(
             "/internal/master/v1/discord/member/move-voice",
             post(handlers::move_voice),
         )
