@@ -15,7 +15,9 @@
 use std::sync::Arc;
 
 use dl_discord::interactions::{ModalField, ModalSpec};
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+};
 use serde_json::{json, Value};
 
 use crate::store::{self, TournamentStore};
@@ -50,6 +52,37 @@ pub fn is_period_open(period: Option<&Value>, now_local: chrono::NaiveDateTime) 
     match (parse("registration_start"), parse("registration_end")) {
         (Some(start), Some(end)) => start <= now_local && now_local <= end,
         _ => false,
+    }
+}
+
+/// `_fmt_dt`: ISO-Datum → „TT.MM.JJJJ HH:MM Uhr", sonst „—".
+fn fmt_dt(raw: Option<&str>) -> String {
+    match raw.and_then(crate::web::parse_period_dt) {
+        Some(dt) => dt.format("%d.%m.%Y %H:%M Uhr").to_string(),
+        None => "—".to_string(),
+    }
+}
+
+/// `_period_status_str`: Kein Zeitraum / Geschlossen / Startet … / Abgelaufen / Offen.
+fn period_status_str(period: Option<&Value>, now: chrono::NaiveDateTime) -> String {
+    let Some(p) = period else {
+        return "Kein Zeitraum".to_string();
+    };
+    if p.get("is_active").and_then(Value::as_i64).unwrap_or(0) == 0 {
+        return "⛔ Geschlossen".to_string();
+    }
+    let parse = |k: &str| p.get(k).and_then(Value::as_str).and_then(crate::web::parse_period_dt);
+    match (parse("registration_start"), parse("registration_end")) {
+        (Some(start), Some(end)) => {
+            if now < start {
+                format!("⏳ Startet {}", fmt_dt(p.get("registration_start").and_then(Value::as_str)))
+            } else if now > end {
+                "⛔ Abgelaufen".to_string()
+            } else {
+                "🟢 Offen".to_string()
+            }
+        }
+        _ => "Unbekannt".to_string(),
     }
 }
 
@@ -111,6 +144,10 @@ struct TurnierHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for TurnierHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        // /turnier-Slash → Dashboard-Embed.
+        if interaction.command == "turnier" {
+            return self.dashboard(interaction).await;
+        }
         let ui = &self.ui;
         match interaction.custom_id.as_str() {
             "turnier_panel_anmelden" => {
@@ -204,6 +241,121 @@ Nutze `/account_verknüpfen` auf dem Server, um dein Konto zu verbinden.",
 }
 
 impl TurnierHandler {
+    /// `/turnier`-Dashboard (Port von `turnier_cmd`): Zeitraum- + Nutzer-Status
+    /// plus die schon portierten Panel-Buttons (anmelden/abmelden/status, je
+    /// nach Lage). Admin-Tools bleiben die dokumentierte Python-Lücke.
+    async fn dashboard(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let ui = &self.ui;
+        let now = chrono::Local::now().naive_local();
+        let period = ui.store.active_period_json(interaction.guild_id).await;
+        let summary = ui.store.summary(interaction.guild_id).await.ok();
+        let signup = ui
+            .store
+            .get_signup(interaction.guild_id, interaction.user_id)
+            .await;
+        let period_open = is_period_open(period.as_ref(), now);
+        // Aktive Periode (is_active != 0) — None deckt „kein/inaktiv" ab.
+        let active_period = period.as_ref().filter(|p| {
+            p.get("is_active").and_then(Value::as_i64).unwrap_or(0) != 0
+        });
+
+        let mut fields: Vec<Value> = Vec::new();
+        let mut description = String::new();
+
+        if let Some(p) = active_period {
+            fields.push(json!({
+                "name": "📅 Zeitraum",
+                "value": p.get("name").and_then(Value::as_str).unwrap_or("—"),
+                "inline": false,
+            }));
+            fields.push(json!({
+                "name": "Status",
+                "value": period_status_str(period.as_ref(), now),
+                "inline": true,
+            }));
+            fields.push(json!({
+                "name": "🕐 Ende",
+                "value": fmt_dt(p.get("registration_end").and_then(Value::as_str)),
+                "inline": true,
+            }));
+            let g = |k: &str| {
+                summary
+                    .as_ref()
+                    .and_then(|s| s.get(k))
+                    .and_then(Value::as_i64)
+                    .unwrap_or(0)
+            };
+            fields.push(json!({
+                "name": "👥 Anmeldungen",
+                "value": format!(
+                    "**{}** gesamt  |  Solo: {}  |  Team: {}",
+                    g("signups_total"), g("solo_count"), g("team_count")
+                ),
+                "inline": false,
+            }));
+        } else {
+            description = "Kein aktiver Anmeldezeitraum.".to_string();
+        }
+
+        if let Some(s) = &signup {
+            let rank_name = store::rank_label(&s.rank);
+            let mode = if s.registration_mode == "team" {
+                "Team"
+            } else {
+                "Solo"
+            };
+            let team = s.team_name.clone().unwrap_or_else(|| "—".to_string());
+            fields.push(json!({
+                "name": "✅ Du bist angemeldet",
+                "value": format!(
+                    "Rang: **{}**  |  Modus: {mode}  |  Team: {team}",
+                    rank_display(rank_name, s.rank_subvalue)
+                ),
+                "inline": false,
+            }));
+        } else {
+            let roles = ui
+                .port
+                .member_role_ids(interaction.guild_id, interaction.user_id)
+                .await;
+            if !roles.contains(&TURNIER_ROLE_ID) {
+                fields.push(json!({
+                    "name": "⚠️ Fehlende Rolle",
+                    "value": format!("Du benötigst die <@&{TURNIER_ROLE_ID}> Rolle."),
+                    "inline": false,
+                }));
+            } else if period_open {
+                fields.push(json!({
+                    "name": "📋 Status",
+                    "value": "Noch nicht angemeldet. Klicke **Anmelden**.",
+                    "inline": false,
+                }));
+            }
+        }
+
+        let mut embed = json!({ "title": "🏆 Deadlock Turnier", "color": 0xF1C40F, "fields": fields });
+        if !description.is_empty() {
+            embed["description"] = json!(description);
+        }
+
+        // Buttons je nach Lage (Original-IDs, schon portierte Handler).
+        let mut buttons: Vec<Value> = Vec::new();
+        if period_open && signup.is_none() {
+            buttons.push(json!({ "type": 2, "style": 1, "label": "Anmelden", "custom_id": "turnier_panel_anmelden" }));
+        }
+        if signup.is_some() {
+            buttons.push(json!({ "type": 2, "style": 4, "label": "Abmelden", "custom_id": "turnier_panel_abmelden" }));
+        }
+        buttons.push(json!({ "type": 2, "style": 2, "label": "Status", "custom_id": "turnier_panel_status" }));
+
+        BridgeReply {
+            embeds: vec![embed],
+            components: Some(json!([{ "type": 1, "components": buttons }])),
+            ephemeral: true,
+            ..BridgeReply::default()
+        }
+    }
+
     /// tn:solo/team/pick/create-Flow (Besitzer steckt am ID-Ende).
     async fn handle_flow(&self, interaction: BridgeInteraction) -> BridgeReply {
         let ui = &self.ui;
@@ -401,6 +553,18 @@ fn team_create_modal(rank: &str, rank_sub: i64, user_id: u64) -> ModalSpec {
 
 pub fn register(router: &mut InteractionRouter, ui: Arc<TurnierUi>) {
     let handler = Arc::new(TurnierHandler { ui });
+    router.on_command(
+        "turnier",
+        CommandSpec {
+            definition: json!({
+                "name": "turnier",
+                "description": "Turnier-Dashboard: Anmelden, Status und Verwaltung",
+                "type": 1,
+                "dm_permission": false,
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("turnier_panel_anmelden", handler.clone());
     router.on_custom_id("turnier_panel_abmelden", handler.clone());
     router.on_custom_id("turnier_panel_status", handler.clone());
