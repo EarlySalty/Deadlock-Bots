@@ -505,6 +505,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-repostats"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "dl-stats"
 version = "0.1.0"
 dependencies = [

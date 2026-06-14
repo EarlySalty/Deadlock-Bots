@@ -1,0 +1,14 @@
+[package]
+name = "dl-repostats"
+version = "0.1.0"
+edition = "2021"
+description = "Sammelt Git-Aktivität (Commits/Churn/Datei-Änderungen) über die eigenen Repos in Tagesbuckets und schreibt sie als kompaktes JSON-Artefakt fürs Admin-Dashboard."
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+
+[lints]
+workspace = true

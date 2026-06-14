@@ -1,0 +1,11 @@
+[Unit]
+Description=Deadlock Repo-Stats Collector (Git-Aktivität → data/repo_activity.json)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
+ExecStart=/home/naniadm/Documents/Deadlock-Bots/rust/target/release/dl-repostats
+Nice=10
+
+[Install]
+WantedBy=default.target

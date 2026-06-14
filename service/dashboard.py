@@ -87,6 +87,12 @@ except Exception:
 _DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "static" / "dashboard.html"
 _TURNIER_HTML_PATH = Path(__file__).resolve().parent / "static" / "turnier.html"
 _LEAVE_SURVEY_UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "data" / "leave_survey_uploads"
+# Repo-Aktivitäts-Artefakt (vom Rust-Collector `dl-repostats` geschrieben) und
+# das Binary für den On-Demand-Refresh aus dem Dashboard.
+_REPO_ACTIVITY_PATH = Path(__file__).resolve().parent.parent / "data" / "repo_activity.json"
+_REPO_ACTIVITY_BIN = (
+    Path(__file__).resolve().parent.parent / "rust" / "target" / "release" / "dl-repostats"
+)
 LEAVE_SURVEY_TOKEN_MAX_AGE_DAYS = 30
 LEAVE_SURVEY_MAX_IMAGES = 5
 LEAVE_SURVEY_MAX_IMAGE_BYTES = 5 * 1024 * 1024
@@ -425,6 +431,11 @@ class DashboardServer:
                         self._handle_leave_survey_image,
                     ),
                     web.get("/api/member-events", self._handle_member_events),
+                    web.get("/api/repo-activity", self._handle_repo_activity),
+                    web.post(
+                        "/api/repo-activity/refresh",
+                        self._handle_repo_activity_refresh,
+                    ),
                     web.get("/api/message-activity", self._handle_message_activity),
                     web.get("/api/co-player-network", self._handle_co_player_network),
                     web.get("/api/co-player-network/", self._handle_co_player_network),
@@ -6577,6 +6588,56 @@ class DashboardServer:
         guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
         count = await tstore.clear_all_signups_async(guild_id)
         return self._json(self._stringify_ids({"ok": True, "cleared": count}))
+
+    async def _handle_repo_activity(self, request: web.Request) -> web.Response:
+        """Liefert das vom Rust-Collector `dl-repostats` erzeugte Aktivitäts-
+        Artefakt (Tagesbuckets pro Repo) verbatim aus. Re-Parsen unnötig: die
+        Datei ist klein und vertrauenswürdig (lokal erzeugt)."""
+        self._check_auth(request)
+        path = _REPO_ACTIVITY_PATH
+        if not path.exists():
+            return self._json(
+                {
+                    "available": False,
+                    "repos": [],
+                    "excludes": [],
+                    "error": "Noch keine Daten — der Collector (dl-repostats) lief noch nicht.",
+                }
+            )
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError as exc:
+            raise web.HTTPInternalServerError(
+                text=f"repo_activity.json unlesbar: {self._safe_log_value(exc)}"
+            )
+        return web.Response(text=raw, content_type="application/json")
+
+    async def _handle_repo_activity_refresh(self, request: web.Request) -> web.Response:
+        """Stößt einen frischen Collector-Lauf an (On-Demand „Neu sammeln") und
+        gibt das aktualisierte Artefakt zurück. Auth + CSRF laufen über
+        `_check_auth` (POST)."""
+        self._check_auth(request)
+        binary = _REPO_ACTIVITY_BIN
+        if not binary.exists():
+            raise web.HTTPServiceUnavailable(
+                text="dl-repostats-Binary nicht gebaut (cargo build --release -p dl-repostats)."
+            )
+        safe_remote = self._safe_log_value(request.remote)
+        logger.info("AUDIT master-dashboard repo-activity refresh from %s", safe_remote)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                str(binary),
+                cwd=str(Path(__file__).resolve().parent.parent),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            raise web.HTTPGatewayTimeout(text="Collector-Lauf hat zu lange gedauert (>60s).")
+        if proc.returncode != 0:
+            detail = stderr.decode("utf-8", errors="replace").strip()[:500]
+            raise web.HTTPInternalServerError(text=f"Collector-Lauf fehlgeschlagen: {detail}")
+        return await self._handle_repo_activity(request)
 
     async def _handle_status(self, request: web.Request) -> web.Response:
         self._check_auth(request)

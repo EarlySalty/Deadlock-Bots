@@ -1355,6 +1355,62 @@
             display: block;
         }
 
+        /* ─── Tab: Entwicklung (Repo-Aktivität) ─── */
+        .dev-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+            gap: 0.8rem;
+            margin-top: 1rem;
+        }
+        .dev-kpi {
+            background: #161616;
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 8px;
+            padding: 0.9rem 1rem;
+        }
+        .dev-kpi .kpi-label {
+            color: #adb5bd;
+            font-size: 0.78rem;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+        .dev-kpi .kpi-value {
+            font-size: 1.7rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            margin-top: 0.2rem;
+        }
+        .dev-kpi .kpi-delta {
+            font-size: 0.82rem;
+            margin-top: 0.25rem;
+            font-variant-numeric: tabular-nums;
+        }
+        .kpi-delta.up { color: #51cf66; }
+        .kpi-delta.down { color: #ff6b6b; }
+        .kpi-delta.flat { color: #adb5bd; }
+        .dev-table-wrap { overflow-x: auto; }
+        .dev-table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+        .dev-table th, .dev-table td {
+            padding: 0.5rem 0.6rem;
+            text-align: left;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            white-space: nowrap;
+        }
+        .dev-table th.num, .dev-table td.num {
+            text-align: right;
+            font-variant-numeric: tabular-nums;
+        }
+        .dev-table tbody tr:hover { background: rgba(255,255,255,0.03); }
+        .dev-repo-dot {
+            display: inline-block;
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            margin-right: 0.5rem;
+            vertical-align: middle;
+        }
+        .dev-add { color: #51cf66; }
+        .dev-del { color: #ff6b6b; }
     </style>
 </head>
 <body>
@@ -1412,6 +1468,7 @@
         <button class="tab-btn" data-tab="deadlock">Deadlock Heroes</button>
         <button class="tab-btn" data-tab="cogs">Cogs</button>
         <button class="tab-btn" data-tab="logs">Logs</button>
+        <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
         <a class="tab-btn" href="/turnier" style="margin-left:auto;text-decoration:none;">🏆 Turnier</a>
     </nav>
 
@@ -1797,6 +1854,72 @@
         </section>
 
     </div><!-- end tab: logs -->
+
+    <!-- ════════════════════════════════════════════════
+         TAB: Entwicklung (Repo-Aktivität)
+    ════════════════════════════════════════════════ -->
+    <div class="tab-panel" data-tab="entwicklung">
+        <section>
+            <div class="section-header">
+                <h2>Entwicklung — Repo-Aktivität</h2>
+                <div class="section-actions">
+                    <div class="segmented" id="repo-period-buttons">
+                        <button data-period="7">7 Tage</button>
+                        <button data-period="30" class="active">30 Tage</button>
+                        <button data-period="90">90 Tage</button>
+                        <button data-period="0">Gesamt</button>
+                    </div>
+                    <button class="reload" id="repo-activity-refresh">Neu laden</button>
+                    <button class="reload" id="repo-activity-collect" title="Frisch aus den Repos sammeln (~6s)">Neu sammeln</button>
+                    <span class="voice-meta" id="repo-activity-updated">Letzte Sammlung: -</span>
+                </div>
+            </div>
+
+            <div class="dev-kpi-grid" id="repo-kpi-grid"></div>
+
+            <div class="card" style="margin-top:1rem;">
+                <div class="section-header" style="margin-bottom:0.5rem;">
+                    <h3 style="margin:0;">Verlauf</h3>
+                    <div class="section-actions">
+                        <div class="segmented" id="repo-metric-buttons">
+                            <button data-metric="c" class="active">Commits</button>
+                            <button data-metric="lines">Code-Zeilen</button>
+                            <button data-metric="f">Dateien</button>
+                        </div>
+                        <div class="segmented" id="repo-gran-buttons">
+                            <button data-gran="week" class="active">Woche</button>
+                            <button data-gran="month">Monat</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="chart-container">
+                    <canvas id="repo-activity-chart"></canvas>
+                </div>
+            </div>
+
+            <div class="card" style="margin-top:1rem;">
+                <h3 style="margin-top:0;">Pro Repository (im gewählten Zeitraum)</h3>
+                <div class="dev-table-wrap">
+                    <table class="dev-table" id="repo-activity-table">
+                        <thead>
+                            <tr>
+                                <th>Repository</th>
+                                <th class="num">Commits</th>
+                                <th class="num">Zeilen +</th>
+                                <th class="num">Zeilen −</th>
+                                <th class="num">Dateien</th>
+                                <th>Verlauf (Commits/Woche)</th>
+                                <th>Zeitraum (gesamt)</th>
+                            </tr>
+                        </thead>
+                        <tbody></tbody>
+                    </table>
+                </div>
+            </div>
+
+            <p class="voice-meta" id="repo-activity-excludes" style="margin-top:0.8rem;"></p>
+        </section>
+    </div><!-- end tab: entwicklung -->
 
 
     <script>
@@ -5736,6 +5859,237 @@ async function fetchStandaloneLogs(key, limit = 200) {
     });
 
 
+    // ─── Tab: Entwicklung (Repo-Aktivität) ───────────
+    (function () {
+        const REPO_COLORS = ['#4dabf7', '#845ef7', '#ff922b', '#51cf66', '#ff6b6b', '#22b8cf', '#fcc419'];
+        let data = null;
+        let period = 30;     // Tage; 0 = Gesamt
+        let metric = 'c';    // 'c' | 'lines' | 'f'
+        let gran = 'week';   // 'week' | 'month'
+        let chart = null;
+
+        const $ = (id) => document.getElementById(id);
+        const fmtInt = (n) => (n || 0).toLocaleString('de-DE');
+        const dayStr = (d) => d.toISOString().slice(0, 10);
+        function shiftDays(n) {
+            const d = new Date();
+            d.setUTCHours(0, 0, 0, 0);
+            d.setUTCDate(d.getUTCDate() - n);
+            return dayStr(d);
+        }
+        function tomorrowStr() {
+            const d = new Date();
+            d.setUTCHours(0, 0, 0, 0);
+            d.setUTCDate(d.getUTCDate() + 1);
+            return dayStr(d);
+        }
+        const metricVal = (day) => (metric === 'c' ? day.c : metric === 'f' ? day.f : day.a + day.r);
+        function mondayOf(ds) {
+            const d = new Date(ds + 'T00:00:00Z');
+            const wd = (d.getUTCDay() + 6) % 7;
+            d.setUTCDate(d.getUTCDate() - wd);
+            return dayStr(d);
+        }
+        const bucketKey = (ds) => (gran === 'month' ? ds.slice(0, 7) : mondayOf(ds));
+        function bucketLabel(key) {
+            if (gran === 'month') return key;
+            const parts = key.split('-');
+            return `${parts[2]}.${parts[1]}.`;
+        }
+        function fmtDate(iso) {
+            if (!iso) return '-';
+            try { return new Date(iso).toLocaleString('de-DE'); } catch (e) { return iso; }
+        }
+
+        function sumWindow(from, to) {
+            const acc = { c: 0, a: 0, r: 0, f: 0 };
+            if (!data || !data.repos) return acc;
+            data.repos.forEach((repo) => repo.days.forEach((day) => {
+                if (day.d >= from && day.d < to) {
+                    acc.c += day.c; acc.a += day.a; acc.r += day.r; acc.f += day.f;
+                }
+            }));
+            return acc;
+        }
+
+        function renderKPIs() {
+            const grid = $('repo-kpi-grid');
+            if (!grid) return;
+            let cur, prev, hasDelta;
+            if (period === 0) {
+                cur = sumWindow('0000-00-00', '9999-99-99');
+                hasDelta = false;
+            } else {
+                const from = shiftDays(period);
+                cur = sumWindow(from, tomorrowStr());
+                prev = sumWindow(shiftDays(period * 2), from);
+                hasDelta = true;
+            }
+            const cards = [
+                { label: 'Commits', value: cur.c, prev: prev && prev.c },
+                { label: 'Zeilen +', value: cur.a, prev: prev && prev.a, cls: 'dev-add' },
+                { label: 'Zeilen −', value: cur.r, prev: prev && prev.r, cls: 'dev-del' },
+                { label: 'Datei-Änderungen', value: cur.f, prev: prev && prev.f },
+            ];
+            grid.innerHTML = cards.map((card) => {
+                let delta = '';
+                if (hasDelta) {
+                    const d = card.value - card.prev;
+                    const pct = card.prev ? Math.round((d / card.prev) * 100) : (card.value ? 100 : 0);
+                    const dir = d > 0 ? 'up' : d < 0 ? 'down' : 'flat';
+                    const arrow = d > 0 ? '▲' : d < 0 ? '▼' : '–';
+                    const sign = d > 0 ? '+' : '';
+                    delta = `<div class="kpi-delta ${dir}">${arrow} ${sign}${fmtInt(d)} (${sign}${pct}%) vs. Vorperiode</div>`;
+                }
+                return `<div class="dev-kpi">
+                    <div class="kpi-label">${card.label}</div>
+                    <div class="kpi-value ${card.cls || ''}">${fmtInt(card.value)}</div>
+                    ${delta}
+                </div>`;
+            }).join('');
+        }
+
+        function renderChart() {
+            const canvas = $('repo-activity-chart');
+            if (!canvas || !data || !data.repos) return;
+            const cutoff = period === 0 ? '0000-00-00' : shiftDays(period);
+            const keysSet = new Set();
+            const perRepo = data.repos.map((repo) => {
+                const m = {};
+                repo.days.forEach((day) => {
+                    if (day.d < cutoff) return;
+                    const k = bucketKey(day.d);
+                    keysSet.add(k);
+                    m[k] = (m[k] || 0) + metricVal(day);
+                });
+                return m;
+            });
+            const keys = [...keysSet].sort();
+            const datasets = data.repos.map((repo, i) => ({
+                label: repo.name,
+                data: keys.map((k) => perRepo[i][k] || 0),
+                backgroundColor: REPO_COLORS[i % REPO_COLORS.length],
+                borderWidth: 0,
+                stack: 'all',
+            }));
+            if (chart) chart.destroy();
+            chart = new Chart(canvas, {
+                type: 'bar',
+                data: { labels: keys.map(bucketLabel), datasets },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: { mode: 'index', intersect: false },
+                    scales: {
+                        x: { stacked: true, ticks: { color: '#adb5bd' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                        y: { stacked: true, beginAtZero: true, ticks: { color: '#adb5bd' }, grid: { color: 'rgba(255,255,255,0.05)' } },
+                    },
+                    plugins: { legend: { labels: { color: '#f5f5f5' } } },
+                },
+            });
+        }
+
+        function sparkline(repo, cutoff) {
+            const weeks = {};
+            repo.days.forEach((day) => {
+                if (day.d < cutoff) return;
+                const k = mondayOf(day.d);
+                weeks[k] = (weeks[k] || 0) + day.c;
+            });
+            const keys = Object.keys(weeks).sort();
+            if (!keys.length) return '<span class="voice-meta">–</span>';
+            const vals = keys.map((k) => weeks[k]);
+            const max = Math.max(...vals, 1);
+            const W = 120, H = 26, n = vals.length;
+            const step = n > 1 ? W / (n - 1) : 0;
+            const pts = vals.map((v, i) => `${(i * step).toFixed(1)},${(H - (v / max) * (H - 3) - 1.5).toFixed(1)}`).join(' ');
+            return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none">`
+                + `<polyline points="${pts}" fill="none" stroke="#4dabf7" stroke-width="1.5" /></svg>`;
+        }
+
+        function renderTable() {
+            const tbody = document.querySelector('#repo-activity-table tbody');
+            if (!tbody || !data || !data.repos) return;
+            const cutoff = period === 0 ? '0000-00-00' : shiftDays(period);
+            const rows = data.repos.map((repo, i) => {
+                let c = 0, a = 0, r = 0, f = 0;
+                repo.days.forEach((day) => {
+                    if (day.d >= cutoff) { c += day.c; a += day.a; r += day.r; f += day.f; }
+                });
+                return { repo, i, c, a, r, f };
+            }).sort((x, y) => y.c - x.c);
+            tbody.innerHTML = rows.map(({ repo, i, c, a, r, f }) => `
+                <tr>
+                    <td><span class="dev-repo-dot" style="background:${REPO_COLORS[i % REPO_COLORS.length]}"></span>${repo.name}</td>
+                    <td class="num">${fmtInt(c)}</td>
+                    <td class="num dev-add">${fmtInt(a)}</td>
+                    <td class="num dev-del">${fmtInt(r)}</td>
+                    <td class="num">${fmtInt(f)}</td>
+                    <td>${sparkline(repo, cutoff)}</td>
+                    <td class="voice-meta">${repo.first_commit || '–'} … ${repo.last_commit || '–'} · ${fmtInt(repo.total_commits)} ges.</td>
+                </tr>`).join('');
+        }
+
+        function renderAll() {
+            const grid = $('repo-kpi-grid');
+            if (!data || data.available === false) {
+                if (grid) grid.innerHTML = `<div class="voice-meta">${(data && data.error) || 'Keine Daten verfügbar.'}</div>`;
+                return;
+            }
+            const upd = $('repo-activity-updated');
+            if (upd) upd.textContent = 'Letzte Sammlung: ' + fmtDate(data.generated_at);
+            const exEl = $('repo-activity-excludes');
+            if (exEl) exEl.textContent = 'Vom Code-Churn ausgeschlossen (Noise-Filter): ' + (data.excludes || []).join(', ');
+            renderKPIs();
+            renderChart();
+            renderTable();
+        }
+
+        async function load(forceCollect) {
+            try {
+                data = await fetchJSON('/api/repo-activity' + (forceCollect ? '/refresh' : ''), forceCollect ? { method: 'POST' } : {});
+                renderAll();
+            } catch (e) {
+                const grid = $('repo-kpi-grid');
+                if (grid) grid.innerHTML = `<div class="voice-meta">Fehler: ${e.message}</div>`;
+            }
+        }
+
+        function wireSegmented(containerId, attr, setter) {
+            const c = $(containerId);
+            if (!c) return;
+            c.querySelectorAll('button').forEach((btn) => {
+                btn.addEventListener('click', () => {
+                    c.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
+                    btn.classList.add('active');
+                    setter(btn.dataset[attr]);
+                    renderAll();
+                });
+            });
+        }
+        wireSegmented('repo-period-buttons', 'period', (v) => { period = parseInt(v, 10); });
+        wireSegmented('repo-metric-buttons', 'metric', (v) => { metric = v; });
+        wireSegmented('repo-gran-buttons', 'gran', (v) => { gran = v; });
+
+        const refreshBtn = $('repo-activity-refresh');
+        if (refreshBtn) refreshBtn.addEventListener('click', () => load(false));
+        const collectBtn = $('repo-activity-collect');
+        if (collectBtn) collectBtn.addEventListener('click', async () => {
+            collectBtn.disabled = true;
+            collectBtn.textContent = 'Sammle…';
+            await load(true);
+            collectBtn.disabled = false;
+            collectBtn.textContent = 'Neu sammeln';
+        });
+
+        // Vom Tab-Switch aufgerufen: erstmals laden, danach nur neu rendern
+        // (Chart.js braucht ein sichtbares Canvas für korrekte Größe).
+        window.loadRepoActivity = function () {
+            if (!data) load(false);
+            else renderAll();
+        };
+    })();
+
     // ─── Tab Switching ───────────────────────────────
     (function() {
         var btns = document.querySelectorAll('.tab-btn');
@@ -5752,6 +6106,9 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 if (target === 'activity') {
                     if (typeof loadVoiceHistory === 'function') loadVoiceHistory();
                     if (typeof loadCoNetwork === 'function') loadCoNetwork();
+                }
+                if (target === 'entwicklung') {
+                    if (typeof loadRepoActivity === 'function') loadRepoActivity();
                 }
                 if (target === 'services') {
                     if (typeof loadTournamentOverview === 'function') loadTournamentOverview();
