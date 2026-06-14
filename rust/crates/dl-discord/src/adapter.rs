@@ -43,6 +43,23 @@ impl DiscordAdapter {
         let _ = self.cache.set(cache);
     }
 
+    /// Lädt die Application-ID per REST und setzt sie auf dem Http-Client.
+    ///
+    /// Nötig für Interaction-Followups: die gehen an
+    /// `POST /webhooks/{application_id}/{token}`. Dieser Adapter-`Http` ist eine
+    /// EIGENE Instanz, getrennt vom serenity-Client-`Http` (der die ID beim READY
+    /// bekommt) — ohne gesetzte ID schlägt jeder Followup nach einem Defer mit
+    /// „Application id was expected but missing" fehl, und der User sieht nichts.
+    /// Einmalig beim Start aufzurufen; idempotent.
+    pub async fn init_application_id(&self) -> serenity::Result<()> {
+        if self.http.application_id().is_some() {
+            return Ok(());
+        }
+        let info = self.http.get_current_application_info().await?;
+        self.http.set_application_id(info.id);
+        Ok(())
+    }
+
     /// Der Gateway-Cache. Vor dem Koppeln ein leerer Fallback (Lookups → None).
     pub fn cache(&self) -> &Cache {
         self.cache.get().map(Arc::as_ref).unwrap_or_else(|| {

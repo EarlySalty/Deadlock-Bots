@@ -1,3 +1,13 @@
+## #141 — Beta-Einladung: langsame Button-Klicks geben endlich wieder Antwort
+
+**Problem:** Seit die Discord-Anbindung des Bots auf das neue (Rust-)System umgestellt wurde, kam bei Button-Klicks, deren Verarbeitung länger als ~2 Sekunden dauert, **gar keine** sichtbare Antwort mehr. Der Bot setzt bei solchen langsamen Aktionen korrekt eine kurze „lädt…"-Anzeige, aber die eigentliche Antwort danach verfiel still. Besonders betroffen war der Beta-Einladungs-Flow: der Schritt „Freundschaft prüfen" spricht immer mit Steam (Freundschafts-Check plus Einladungs-Anfrage an den Spiel-Koordinator) und braucht damit fast immer mehr als 2 Sekunden — der User klickte und sah nichts, egal ob die Einladung rausgegangen wäre oder Steam sie ablehnt (z. B. weil das Steam-Konto noch eingeschränkt/Limited ist).
+
+**Was wurde geändert:** Die Nachreich-Nachricht nach der „lädt…"-Anzeige adressiert Discord über die Anwendungs-Identität des Bots. Die REST-Verbindung des Bots — eine eigene Verbindung getrennt von der Gateway-Verbindung — hatte diese Identität nie gesetzt bekommen, weshalb Discord jede solche Nachreich-Nachricht ablehnte, bevor sie überhaupt rausging. Der Bot setzt diese Identität jetzt einmalig beim Start.
+
+**Wie es jetzt funktioniert:** Langsamer Button-Klick → kurze „lädt…"-Anzeige → die echte Antwort wird zuverlässig nachgereicht: Einladung verschickt, bereits im Besitz, oder der Hinweis „dein Steam-Konto ist noch eingeschränkt — sobald 5 $ ausgegeben sind, holt der Bot die Einladung automatisch nach". Schnelle Klicks (unter ~2 Sekunden) waren nie betroffen, weil deren Antwort auf einem anderen Weg rausgeht, der die Identität nicht braucht.
+
+**Betroffen:** Alle, die die Beta-Einladung bestätigen, sowie weitere Aktionen, die länger als ~2 Sekunden brauchen.
+
 ## #140 — „Rang prüfen"-Button: genug Zeit für die Antwort
 
 **Problem:** Der „Rang prüfen"-Button im Steam-Panel lieferte kein Ergebnis. Neben der eigentlichen Abruf-Logik (im Steam-Dienst nachgezogen) gab es ein Timing-Problem auf Bot-Seite: Button-Klicks räumten dem Steam-Dienst nur wenige Sekunden für die Antwort ein. Ein echter Rang-Abruf (Profilkarte über den Spiel-Datendienst) dauert aber länger — der Bot hätte die Antwort also abgeschnitten, bevor sie fertig war.

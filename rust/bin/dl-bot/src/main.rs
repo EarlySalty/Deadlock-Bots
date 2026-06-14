@@ -51,6 +51,12 @@ async fn main() -> anyhow::Result<()> {
         anyhow::bail!("DISCORD_TOKEN fehlt — dl-bot kann ohne Bot-Token nichts ausrichten");
     };
     let adapter = dl_discord::DiscordAdapter::new(&discord_token);
+    // Application-ID auf dem REST-Http-Client setzen — sonst scheitern
+    // Interaction-Followups nach einem Defer (POST /webhooks/{app_id}/{token})
+    // mit „Application id was expected but missing", und der User sieht nichts.
+    if let Err(err) = adapter.init_application_id().await {
+        tracing::error!(%err, "Application-ID nicht setzbar — Interaction-Followups schlagen fehl");
+    }
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
