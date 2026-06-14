@@ -1,3 +1,13 @@
+## #131 — Rust-Neuaufbau: Server-Statistik + Fix der Beitritts-Quellen-Erkennung
+
+**Ausgangslage:** Die Server-Statistik im Admin-Bereich zeigt aggregierte Zahlen (Mitglieder-Ereignisse, Nachrichten, Voice-Stunden, aktive Nutzer, 30-Tage-Wachstum) und eine Aufschlüsselung, woher neue Mitglieder kommen (öffentlich/Website/Twitch/persönliche Einladung/Bot/unbekannt). Beim Prüfen fiel auf: Beitritte über Twitch-Streamer-Einladungen wurden kaum als „Twitch" gezählt — sie landeten in „persönlich" oder „unbekannt".
+
+**Ursache (zwei Probleme):** (1) Die Zuordnung Einladungscode→Streamer, die für die Twitch-Erkennung nötig ist, liegt in der Datenbank des Twitch-Bots — die Tabelle, aus der die Deadlock-Auswertung sie lesen würde, existiert in der gemeinsamen Datenbank gar nicht und wird nie befüllt. (2) Selbst mit Daten gab es einen Logik-Fehler: Website-Beitritte wurden nachträglich korrekt umsortiert, für Twitch fehlte genau diese Korrektur — ein einmal als „persönlich" markierter Streamer-Beitritt blieb für immer falsch einsortiert.
+
+**Was wurde geändert:** Die Server-Statistik ist in Rust nachgebaut, inklusive der Quellen-Aufschlüsselung. Die Klassifikation ist als eigene, getestete Logik herausgezogen und um die **fehlende Twitch-Korrektur ergänzt**: Lässt sich eine Einladung einem Streamer zuordnen (und ist es keine Website-Quelle), zählt der Beitritt jetzt zuverlässig als Twitch — analog zur schon vorhandenen Website-Korrektur. Die Live-Vanity-Links kommen über die neue Bot-Auskunft (statt direktem Bot-Cache).
+
+**Wie es jetzt funktioniert:** Die Aggregate treffen dieselben Tabellen mit denselben Zeitfenstern wie zuvor; die Quellen-Klassifikation läuft über die korrigierte Logik. Geprüft gegen eine Kopie der echten Datenbank: die Buckets summieren sauber auf alle Beitritte, und die Korrektur greift schon sichtbar (Website-Beitritte werden zur Laufzeit richtig erkannt). Damit der Twitch-Teil auch *Daten* bekommt, fehlt noch der letzte Schritt — eine Brücke, die die Streamer↔Einladung-Zuordnung aus der Twitch-Datenbank in die gemeinsame Datenbank spiegelt; danach zählt die rückwirkende Neu-Einsortierung die bisher falsch zugeordneten Beitritte korrekt um. Die Klassifikations-Logik dafür steht und ist getestet; sie greift automatisch, sobald die Daten da sind.
+
 ## #130 — Rust-Neuaufbau: öffentliche Live-Server-Zahlen
 
 **Ausgangslage:** Die Community-Website zeigt Live-Kennzahlen des Discord-Servers — Mitgliederzahl, gerade online, gerade im Voice. Diese öffentliche Schnittstelle war bei der Patchnotes-Umstellung (#128) bewusst zurückgestellt, weil sie Daten direkt aus dem laufenden Bot braucht (die Website-Anzeige selbst blieb so lange auf Python).
