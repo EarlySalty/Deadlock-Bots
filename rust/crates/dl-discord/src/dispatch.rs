@@ -20,6 +20,9 @@ use crate::interactions::{BridgeInteraction, BridgeReply, InteractionRouter};
 /// Discord-Antwort-Typen (Interaction-Callback).
 const CB_MESSAGE: u8 = 4;
 const CB_DEFER: u8 = 5;
+/// `UPDATE_MESSAGE` — editiert die Nachricht, an der die Komponente hängt
+/// (nur für Button/Select-Interaktionen gültig).
+const CB_UPDATE_MESSAGE: u8 = 7;
 const CB_MODAL: u8 = 9;
 const EPHEMERAL_FLAG: u64 = 64;
 
@@ -70,6 +73,7 @@ async fn dispatch_command(
         cmd.id.get(),
         &cmd.token,
         cmd.channel_id.get(),
+        false, // Slash: kein UPDATE_MESSAGE
     )
     .await;
 }
@@ -115,6 +119,7 @@ async fn dispatch_component(
         component.id.get(),
         &component.token,
         component.channel_id.get(),
+        true, // Komponente: update_message erlaubt (in-place editieren)
     )
     .await;
 }
@@ -164,6 +169,7 @@ async fn dispatch_modal(
         modal.id.get(),
         &modal.token,
         modal.channel_id.get(),
+        false, // Modal-Submit: kein UPDATE_MESSAGE
     )
     .await;
 }
@@ -275,13 +281,15 @@ async fn respond(
     interaction_id: u64,
     token: &str,
     channel_id: u64,
+    allow_update: bool,
 ) {
     let http = adapter.http.clone();
     tokio::pin!(handler_future);
 
     let reply = match tokio::time::timeout(DEFER_THRESHOLD, &mut handler_future).await {
         Ok(reply) => {
-            send_initial(adapter, &http, reply, interaction_id, token, channel_id).await;
+            send_initial(adapter, &http, reply, interaction_id, token, channel_id, allow_update)
+                .await;
             return;
         }
         Err(_) => {
@@ -331,6 +339,7 @@ async fn send_initial(
     interaction_id: u64,
     token: &str,
     channel_id: u64,
+    allow_update: bool,
 ) {
     if let Some(modal) = &reply.modal {
         let response = json!({ "type": CB_MODAL, "data": modal_data(modal) });
@@ -356,7 +365,13 @@ async fn send_initial(
         }
         return;
     }
-    let response = json!({ "type": CB_MESSAGE, "data": message_data(&reply) });
+    // Komponenten-Handler mit update_message → die bestehende Nachricht editieren.
+    let cb = if reply.update_message && allow_update {
+        CB_UPDATE_MESSAGE
+    } else {
+        CB_MESSAGE
+    };
+    let response = json!({ "type": cb, "data": message_data(&reply) });
     if let Err(err) = http
         .create_interaction_response(interaction_id.into(), token, &response, build_files(&reply))
         .await

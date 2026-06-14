@@ -75,6 +75,11 @@ pub struct BridgeReply {
     /// bestehende Handler bleiben unverändert. Der Dispatch reicht sie als
     /// `Vec<CreateAttachment>` an serenity durch (Multipart erledigt serenity).
     pub attachments: Vec<BridgeAttachment>,
+    /// Nur für Komponenten-Interaktionen (Button/Select): die bestehende
+    /// Nachricht in-place editieren statt eine neue zu senden (Discord-Callback
+    /// `UPDATE_MESSAGE`/Typ 7). Bei Slash/Modal ignoriert. Update-Antworten
+    /// sollten `ephemeral` nicht setzen (die Nachricht behält ihre Sichtbarkeit).
+    pub update_message: bool,
 }
 
 /// Ein Datei-Anhang für eine Interaction-Antwort (In-Memory-Bytes).
