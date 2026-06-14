@@ -5,6 +5,7 @@ FAQ Chat Bot - Privater Chat für FAQ mit MiniMax.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from datetime import datetime, timedelta
@@ -85,6 +86,11 @@ ANTWORTVERHALTEN:
 - Für Feedback: verweise auf das anonyme Feedback-Formular.
 - Halte Antworten informativ aber nicht übermässig lang.
 
+COMMUNITY-STRESS / KONFLIKTE:
+- Wenn es um Streit mit anderen Mitgliedern, Beschwerden über andere User, Meldungen über Verhalten oder Drama geht: misch dich inhaltlich nicht ein. Sag kurz, dass sich das Team bzw. die Moderation um solche Sachen kümmert, und bleib neutral.
+- Bei Erpressung, Drohungen oder Forderungen gegen den Server / das Team: antworte knapp und bestimmt, dass darauf nicht eingegangen wird – keine Zugeständnisse, keine rechtlichen Aussagen.
+- Bei frechem oder unfreundlichem Ton: bleib ruhig, setz eine kurze sachliche Grenze und hilf trotzdem bei der eigentlichen Frage.
+
 INVITE / ONBOARDING – SONDERREGEL:
 Wenn jemand fragt warum er keinen Invite hat, Deadlock nicht herunterladen kann, keinen Zugang zum Beta-Kanal hat oder einen Channel nicht sieht:
 Gehe sofort die Checkliste durch:
@@ -138,6 +144,21 @@ async def _ensure_db_tables() -> None:
         tx.execute("""
             CREATE INDEX IF NOT EXISTS idx_faq_sessions_expires
             ON faq_chat_sessions(expires_at, status)
+        """)
+        # Ticket-Auto-Hilfe protokolliert hier Antworten UND Schweige-Entscheidungen,
+        # damit das Verhalten an echten Ausgaben nachvollziehbar bleibt.
+        tx.execute("""
+            CREATE TABLE IF NOT EXISTS server_faq_logs(
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              guild_id INTEGER,
+              channel_id INTEGER,
+              user_id INTEGER,
+              question TEXT NOT NULL,
+              answer TEXT,
+              model TEXT,
+              metadata TEXT
+            )
         """)
 
 
@@ -255,13 +276,30 @@ class FAQChatView(discord.ui.View):
 
 
 TICKET_AUTO_HELP_SYSTEM_PROMPT = """
-Du bist ein automatischer Ticket-Helfer. Entscheide anhand der Dokumentation ob du die Frage des Users lösen kannst.
+Du bist ein automatischer Ticket-Helfer in einem bereits geöffneten Support-Ticket. Der User hat sein Anliegen gerade als erste Nachricht geschrieben. Entscheide anhand der Dokumentation, wie du reagierst.
 
-REGEL:
-- Wenn du die Frage aus der Dokumentation klar und vollständig beantworten kannst: antworte direkt und hilfreich.
-- Wenn die Frage außerhalb deines Wissens liegt, unklar ist, oder menschlichen Support erfordert: antworte NUR mit dem Token KEIN_TREFFER und nichts weiter.
-- Erfinde keine Informationen. Wenn du dir nicht sicher bist: KEIN_TREFFER.
-- Antworte auf Deutsch, kurz und direkt.
+DU HILFST AKTIV (antworte direkt und hilfreich) bei:
+- Sach- und How-to-Fragen zum Server, zu Kanälen, Rollen, Bots, Abläufen.
+- Konkreten Problemen ("X funktioniert nicht", "ich habe Y gemacht, aber Z passiert"), z. B. Steam-Verknüpfung, Twitch-/Stream-Anbindung, Onboarding/Invite, Rang-Anzeige, Coaching-Zugang.
+- Bei solchen Problemen nennst du die dokumentierten Schritte und die häufigsten Ursachen. Wenn die Doku ein Thema nur teilweise abdeckt, gib trotzdem die sinnvollen Selbsthilfe-Schritte, solange du nichts erfindest.
+
+DU SCHWEIGST (antworte NUR mit dem Token KEIN_TREFFER und sonst nichts) bei:
+- Zwischenmenschlichem Stress in der Community: Streit mit anderen Mitgliedern, Beschwerden über andere User, Meldungen über Verhalten, Drama, persönliche Konflikte. Das klären Menschen, nicht du.
+- Anliegen, die eine menschliche Entscheidung brauchen (Moderation, Strafe, Einzelfall, Sonderwunsch) oder klar außerhalb der dokumentierten Themen liegen.
+- Sachfragen, bei denen du unsicher bist und etwas erfinden müsstest.
+
+DU ZIEHST EINE GRENZE (kurz und bestimmt antworten, NICHT schweigen) bei:
+- Erpressung, Drohungen oder Forderungen gegen den Server / das Team (z. B. "ich fordere dich auf ...", Druck, Ultimaten). Sag knapp und klar, dass auf Erpressung oder solche Forderungen nicht eingegangen wird und sich das Team bei berechtigten Anliegen meldet. Geh inhaltlich nicht auf die Forderung ein, mach keine Zugeständnisse und keine rechtlichen Aussagen.
+- Frechem oder unfreundlichem Ton bei einer echten Sachfrage. Bleib ruhig, setz eine kurze sachliche Grenze (ohne zu beleidigen) und beantworte die eigentliche Frage trotzdem.
+
+WICHTIG:
+- Du bist BEREITS in einem Ticket. Verweise NIEMALS auf "#ticket-eroeffnen", "/ticket" oder "mach ein Ticket auf" – das ist hier sinnlos. Menschlicher Support sieht dieses Ticket ohnehin.
+- Erfinde keine Informationen, Kanäle, Rollen oder Schritte, die nicht dokumentiert sind.
+- Antworte auf Deutsch, kurz und direkt, ohne Marketing-Floskeln.
+
+BEISPIELE FÜR DEN TON:
+- User (Erpressung): "Wenn ihr X nicht sofort macht, sorge ich dafür, dass ..." → "Auf Forderungen oder Druck dieser Art gehen wir hier nicht ein. Wenn du ein echtes Anliegen hast, schildere es sachlich – das Team sieht das Ticket."
+- User (frech + Sachfrage): "Sag mir endlich wie ich den Bot verbinde, oder kriegt ihr das nicht hin?" → "Lass uns das sachlich klären, dann geht es schneller. Zum Verbinden: <die dokumentierten Schritte>."
 """.strip()
 
 
@@ -610,10 +648,16 @@ class FAQChat(commands.Cog):
         log.info("FAQ auto-help: Ticket #%s – analysiere '%s...'", message.channel.name, problem[:60])
 
         async with message.channel.typing():
-            answer = await self._ticket_auto_answer(problem)
+            answer, decision, model = await self._ticket_auto_answer(problem)
+
+        await self._log_ticket_exchange(message, problem, answer, decision, model)
 
         if answer is None:
-            log.info("FAQ auto-help: kein Treffer für Ticket #%s – schweige", message.channel.name)
+            log.info(
+                "FAQ auto-help: kein Treffer für Ticket #%s (%s) – schweige",
+                message.channel.name,
+                decision,
+            )
             return
 
         log.info("FAQ auto-help: Antwort für Ticket #%s gepostet", message.channel.name)
@@ -622,11 +666,41 @@ class FAQChat(commands.Cog):
         except discord.HTTPException:
             await message.channel.send(answer, suppress_embeds=True)
 
-    async def _ticket_auto_answer(self, problem: str) -> str | None:
-        """Gibt eine Antwort zurück wenn der Bot helfen kann, sonst None."""
+    async def _log_ticket_exchange(
+        self,
+        message: discord.Message,
+        question: str,
+        answer: str | None,
+        decision: str,
+        model: str | None,
+    ) -> None:
+        """Speichert Ticket-Auto-Hilfe-Interaktionen (Antwort + Schweige-Entscheidung)."""
+        meta = {"mode": "ticket_auto_help", "decision": decision}
+        if model:
+            meta["model"] = model
+        try:
+            await service_db.execute_async(
+                "INSERT INTO server_faq_logs "
+                "(guild_id, channel_id, user_id, question, answer, model, metadata) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    message.guild.id if message.guild else None,
+                    message.channel.id,
+                    message.author.id,
+                    question,
+                    answer,
+                    model,
+                    json.dumps(meta, ensure_ascii=False, separators=(",", ":")),
+                ),
+            )
+        except Exception:
+            log.exception("FAQ auto-help: konnte Ticket-Exchange nicht protokollieren")
+
+    async def _ticket_auto_answer(self, problem: str) -> tuple[str | None, str, str | None]:
+        """Liefert (Antwort, Entscheidung, Modell). Antwort ist None, wenn der Bot schweigt."""
         ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")
         if not ai:
-            return None
+            return None, "no_ai", None
 
         full_prompt = (
             f"Dokumentation:\n{DOCS_CONTEXT}\n\n"
@@ -634,7 +708,7 @@ class FAQChat(commands.Cog):
         )
 
         try:
-            answer_text, _ = await ai.generate_text(
+            answer_text, meta = await ai.generate_text(
                 provider=PRIMARY_PROVIDER,
                 prompt=full_prompt,
                 system_prompt=TICKET_AUTO_HELP_SYSTEM_PROMPT,
@@ -644,14 +718,15 @@ class FAQChat(commands.Cog):
             )
         except Exception as exc:
             log.warning("FAQ auto-help: AI-Fehler: %s", exc)
-            return None
+            return None, "error", None
 
+        model = meta.get("model") if isinstance(meta, dict) else None
         if not answer_text:
-            return None
+            return None, "empty", model
         answer_text = answer_text.strip()
         if "KEIN_TREFFER" in answer_text:
-            return None
-        return answer_text
+            return None, "kein_treffer", model
+        return answer_text, "answered", model
 
     async def _generate_answer(self, session_id: str, new_question: str) -> tuple[str, str | None]:
         ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")

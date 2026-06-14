@@ -10,6 +10,8 @@ Der Bot merkt sich den bisherigen Verlauf innerhalb derselben Session. Das heiss
 
 Ein weiterer sichtbarer Bereich ist die Ticket-Auto-Hilfe. Wenn in einer dafuer vorgesehenen Ticket-Kategorie ein neues Ticket aufgemacht wird und der User seine erste Nachricht schreibt, versucht der FAQ-Bot sofort einen stillen Erstcheck. Falls die Frage klar aus der Server-Doku beantwortbar ist, postet er direkt eine Antwort. Wenn nicht, bleibt er absichtlich still und uebergibt implizit an menschlichen Support.
 
+Dabei kuemmert er sich nur um sach- und problembezogene Anliegen, also echte Fragen und konkrete "X funktioniert nicht"-Faelle. Bei zwischenmenschlichem Stress, Streit oder Beschwerden ueber andere Mitglieder haelt er sich bewusst raus; das uebernehmen Menschen. Da er bereits im Ticket antwortet, verweist er nicht zurueck auf das Ticket-System.
+
 Wichtig ist der Zeitrahmen: FAQ-Sessions bleiben 24 Stunden aktiv. Danach schliesst der Bot sie automatisch. Das gilt sowohl fur die privaten FAQ-Chats als auch fur die Thread-basierten Sitzungen.
 
 ## Kosten / Premium
