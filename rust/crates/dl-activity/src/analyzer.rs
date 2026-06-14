@@ -250,10 +250,123 @@ impl ActivityAnalyzer {
     }
 }
 
-/// member_events-Basis-Writer: join/remove aus dem Dispatcher persistieren.
-/// Bewusste Interim-Lücke (dokumentiert in docs/06): keine Invite-
-/// Attribution — `metadata` bleibt leer, die Join-Quellen-Auswertung zählt
-/// diese Joins als „Unbekannt", bis das Invite-Snapshot-Diffing portiert ist.
+/// Website-Unterseiten-Slugs (wie `dl-dashboard::server_stats`) für den
+/// Website-Override in `classify`.
+const WEBSITE_SLUGS: [&str; 6] = [
+    "landing",
+    "streamer",
+    "mitspieler",
+    "coaching",
+    "helden",
+    "guides",
+];
+
+fn table_exists(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    Ok(conn
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some())
+}
+
+/// Lädt die Lookups für `classify`: `invite_code → streamer_login` (aus
+/// `twitch_streamer_invites`) und `invite_code → website-slug` (aus dem
+/// `website_invites`-KV). Beide tabellen-existenz-geschützt.
+async fn load_lookups(db: &Db) -> (HashMap<String, String>, HashMap<String, String>) {
+    db.read(|conn| {
+        let mut twitch = HashMap::new();
+        if table_exists(conn, "twitch_streamer_invites")? {
+            let mut s =
+                conn.prepare("SELECT streamer_login, invite_code FROM twitch_streamer_invites")?;
+            let mut rows = s.query([])?;
+            while let Some(r) = rows.next()? {
+                let login = r
+                    .get::<_, Option<String>>(0)?
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                let code = r
+                    .get::<_, Option<String>>(1)?
+                    .unwrap_or_default()
+                    .trim()
+                    .to_lowercase();
+                if !login.is_empty() && !code.is_empty() {
+                    twitch.entry(code).or_insert(login);
+                }
+            }
+        }
+        let mut website = HashMap::new();
+        if table_exists(conn, "kv_store")? {
+            let mut s = conn.prepare("SELECT k, v FROM kv_store WHERE ns='website_invites'")?;
+            let mut rows = s.query([])?;
+            while let Some(r) = rows.next()? {
+                let k: String = r.get(0)?;
+                let v: Option<String> = r.get(1)?;
+                let slug = if k == "main" {
+                    "landing".to_string()
+                } else {
+                    k.trim().to_lowercase()
+                };
+                if !WEBSITE_SLUGS.contains(&slug.as_str()) {
+                    continue;
+                }
+                if let Some(code) = v
+                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                    .and_then(|p| {
+                        p.get("code")
+                            .and_then(|c| c.as_str())
+                            .map(|c| c.trim().to_string())
+                    })
+                    .filter(|c| !c.is_empty())
+                {
+                    website.entry(code.to_lowercase()).or_insert(slug);
+                }
+            }
+        }
+        Ok((twitch, website))
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// Verfeinert die rohen Join-Metadaten über `classify` (Twitch-/Website-
+/// Override) und schreibt das Ergebnis zurück in die Felder.
+fn apply_classify(
+    mut meta: serde_json::Value,
+    tw: &HashMap<String, String>,
+    web: &HashMap<String, String>,
+) -> serde_json::Value {
+    let c = crate::join_source::classify(&meta, tw, web);
+    if let serde_json::Value::Object(ref mut m) = meta {
+        m.insert(
+            "join_source_bucket".into(),
+            serde_json::Value::from(c.bucket),
+        );
+        m.insert("join_source_kind".into(), serde_json::Value::from(c.kind));
+        m.insert("join_source_label".into(), serde_json::Value::from(c.label));
+        if let Some(login) = c.twitch_login {
+            m.insert(
+                "twitch_streamer_login".into(),
+                serde_json::Value::from(login),
+            );
+        }
+        if let Some(code) = c.invite_code {
+            m.insert("invite_code".into(), serde_json::Value::from(code));
+        }
+        if let Some(url) = c.invite_url {
+            m.insert("invite_url".into(), serde_json::Value::from(url));
+        }
+    }
+    meta
+}
+
+/// member_events-Writer: join/leave/ban/unban persistieren. Joins tragen jetzt
+/// die volle Beitrittsquellen-Klassifikation (Invite-Snapshot-Diff aus dem
+/// Gateway → `classify`-Verfeinerung). Bots und Privacy-Opt-out übersprungen.
 pub fn spawn_member_events(
     db: dl_db::Db,
     dispatcher: &dl_discord::Dispatcher,
@@ -263,25 +376,7 @@ pub fn spawn_member_events(
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    let (guild_id, user_id, event_type) = match event {
-                        dl_discord::MemberEvent::Join { guild_id, user_id } => {
-                            (guild_id, user_id, "join")
-                        }
-                        dl_discord::MemberEvent::Remove { guild_id, user_id } => {
-                            (guild_id, user_id, "leave")
-                        }
-                    };
-                    let result = db
-                        .write(move |conn| {
-                            conn.execute(
-                                "INSERT INTO member_events(user_id, guild_id, event_type, metadata)
-                                 VALUES(?1, ?2, ?3, NULL)",
-                                rusqlite::params![user_id, guild_id, event_type],
-                            )
-                            .map(|_| ())
-                        })
-                        .await;
-                    if let Err(err) = result {
+                    if let Err(err) = handle_member_event(&db, event).await {
                         tracing::warn!(%err, "member_events-Insert fehlgeschlagen");
                     }
                 }
@@ -290,6 +385,118 @@ pub fn spawn_member_events(
             }
         }
     })
+}
+
+async fn handle_member_event(
+    db: &Db,
+    event: dl_discord::MemberEvent,
+) -> Result<(), dl_db::DbError> {
+    use dl_discord::MemberEvent as M;
+    match event {
+        M::Join {
+            guild_id,
+            user_id,
+            display_name,
+            account_created_at,
+            join_position,
+            is_bot,
+            metadata,
+        } => {
+            if is_bot {
+                return Ok(());
+            }
+            let (tw, web) = load_lookups(db).await;
+            let refined = apply_classify(metadata, &tw, &web);
+            let meta_str = serde_json::to_string(&refined).unwrap_or_else(|_| "{}".to_string());
+            let created = chrono::DateTime::from_timestamp(account_created_at, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
+            db.write(move |conn| {
+                use rusqlite::OptionalExtension;
+                let opted: Option<i64> = conn
+                    .query_row(
+                        "SELECT opted_out FROM user_privacy WHERE user_id=?1",
+                        [user_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?
+                    .filter(|v| *v != 0);
+                if opted.is_some() {
+                    return Ok(());
+                }
+                conn.execute(
+                    "INSERT INTO member_events(user_id, guild_id, event_type, display_name,
+                       account_created_at, join_position, metadata)
+                     VALUES(?1, ?2, 'join', ?3, ?4, ?5, ?6)",
+                    rusqlite::params![
+                        user_id,
+                        guild_id,
+                        display_name,
+                        created,
+                        join_position,
+                        meta_str
+                    ],
+                )
+                .map(|_| ())
+            })
+            .await
+        }
+        M::Remove { guild_id, user_id } => {
+            insert_simple_event(db, guild_id, user_id, "leave", None).await
+        }
+        M::Ban {
+            guild_id,
+            user_id,
+            display_name,
+            is_bot,
+        } => {
+            if is_bot {
+                return Ok(());
+            }
+            insert_simple_event(db, guild_id, user_id, "ban", Some(display_name)).await
+        }
+        M::Unban {
+            guild_id,
+            user_id,
+            display_name,
+            is_bot,
+        } => {
+            if is_bot {
+                return Ok(());
+            }
+            insert_simple_event(db, guild_id, user_id, "unban", Some(display_name)).await
+        }
+    }
+}
+
+async fn insert_simple_event(
+    db: &Db,
+    guild_id: u64,
+    user_id: u64,
+    event_type: &str,
+    display_name: Option<String>,
+) -> Result<(), dl_db::DbError> {
+    let event_type = event_type.to_string();
+    db.write(move |conn| {
+        use rusqlite::OptionalExtension;
+        let opted: Option<i64> = conn
+            .query_row(
+                "SELECT opted_out FROM user_privacy WHERE user_id=?1",
+                [user_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .filter(|v| *v != 0);
+        if opted.is_some() {
+            return Ok(());
+        }
+        conn.execute(
+            "INSERT INTO member_events(user_id, guild_id, event_type, display_name)
+             VALUES(?1, ?2, ?3, ?4)",
+            rusqlite::params![user_id, guild_id, event_type, display_name],
+        )
+        .map(|_| ())
+    })
+    .await
 }
 
 /// message_activity-Writer: Nachrichten-Zähler je User×Guild (wie der
@@ -422,6 +629,73 @@ mod tests {
             groups: StdMutex::new(Vec::new()),
         });
         (dir, ActivityAnalyzer::new(db, voice.clone()), voice)
+    }
+
+    #[tokio::test]
+    async fn member_writer_klassifiziert_und_gated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("m.sqlite3")).expect("db");
+        db.write(|c| {
+            c.execute_batch(
+                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
+                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);
+                 CREATE TABLE twitch_streamer_invites(streamer_login TEXT, invite_code TEXT);
+                 INSERT INTO twitch_streamer_invites VALUES('coolstreamer','ABC123');
+                 INSERT INTO user_privacy(user_id, opted_out) VALUES(999, 1);",
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        let join = |uid: u64, is_bot: bool| dl_discord::MemberEvent::Join {
+            guild_id: 1,
+            user_id: uid,
+            display_name: "X".into(),
+            account_created_at: 1_700_000_000,
+            join_position: Some(42),
+            is_bot,
+            metadata: serde_json::json!({
+                "join_source_bucket": "personal",
+                "join_source_kind": "invite_link",
+                "invite_code": "ABC123",
+            }),
+        };
+
+        handle_member_event(&db, join(10, false)).await.unwrap(); // Twitch-Invite
+        handle_member_event(&db, join(999, false)).await.unwrap(); // opt-out
+        handle_member_event(&db, join(11, true)).await.unwrap(); // Bot
+        handle_member_event(
+            &db,
+            dl_discord::MemberEvent::Ban {
+                guild_id: 1,
+                user_id: 12,
+                display_name: "Y".into(),
+                is_bot: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let (bucket, cnt_opt, cnt_bot, ban_type): (String, i64, i64, String) = db
+            .read(|c| {
+                Ok((
+                    c.query_row(
+                        "SELECT json_extract(metadata,'$.join_source_bucket') FROM member_events WHERE user_id=10",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=999", [], |r| r.get(0))?,
+                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=11", [], |r| r.get(0))?,
+                    c.query_row("SELECT event_type FROM member_events WHERE user_id=12", [], |r| r.get(0))?,
+                ))
+            })
+            .await
+            .unwrap();
+        assert_eq!(bucket, "twitch", "Twitch-Override beim Schreiben angewandt");
+        assert_eq!(cnt_opt, 0, "Opt-out-User wird nicht geschrieben");
+        assert_eq!(cnt_bot, 0, "Bot wird nicht geschrieben");
+        assert_eq!(ban_type, "ban");
     }
 
     #[tokio::test]

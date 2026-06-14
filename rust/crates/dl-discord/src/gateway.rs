@@ -6,19 +6,21 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serenity::all::{
-    Context, EventHandler, GatewayIntents, GuildId, GuildMemberUpdateEvent, Member, Message, Ready,
-    User, VoiceState,
+    Context, EventHandler, GatewayIntents, GuildId, GuildMemberUpdateEvent, InviteCreateEvent,
+    InviteDeleteEvent, Member, Message, Ready, User, VoiceState,
 };
 use serenity::async_trait;
 
 use crate::adapter::DiscordAdapter;
 use crate::dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
 use crate::interactions::InteractionRouter;
+use crate::invite_tracker::InviteTracker;
 
 struct Handler {
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
+    invite_tracker: Arc<InviteTracker>,
 }
 
 #[async_trait]
@@ -26,6 +28,15 @@ impl EventHandler for Handler {
     async fn ready(&self, _ctx: Context, ready: Ready) {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
+    }
+
+    async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
+        // Invite-Snapshots primen, damit der erste Join nach Start klassifiziert
+        // werden kann (sonst „baseline_missing"). Joins treffen erst nach READY ein.
+        for gid in &guilds {
+            self.invite_tracker.prime(&ctx.http, gid.get()).await;
+        }
+        tracing::info!(guilds = guilds.len(), "Invite-Snapshots geprimt");
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: serenity::all::Interaction) {
@@ -83,10 +94,21 @@ impl EventHandler for Handler {
         });
     }
 
-    async fn guild_member_addition(&self, _ctx: Context, member: Member) {
+    async fn guild_member_addition(&self, ctx: Context, member: Member) {
+        // Beitrittsquelle per Invite-uses-Delta erkennen (rohe Metadaten).
+        let metadata = self.invite_tracker.on_join(&ctx.http, &member).await;
+        let join_position = ctx
+            .cache
+            .guild(member.guild_id)
+            .map(|g| g.members.len() as i64);
         self.dispatcher.publish_member(MemberEvent::Join {
             guild_id: member.guild_id.get(),
             user_id: member.user.id.get(),
+            display_name: member.display_name().to_string(),
+            account_created_at: member.user.id.created_at().unix_timestamp(),
+            join_position,
+            is_bot: member.user.bot,
+            metadata,
         });
     }
 
@@ -112,6 +134,36 @@ impl EventHandler for Handler {
     ) {
         // Bewusst leer — Platzhalter, damit der Intent dokumentiert ist;
         // Onboarding (Phase 7) hängt sich hier ein.
+    }
+
+    async fn guild_ban_addition(&self, _ctx: Context, guild_id: GuildId, banned_user: User) {
+        self.dispatcher.publish_member(MemberEvent::Ban {
+            guild_id: guild_id.get(),
+            user_id: banned_user.id.get(),
+            display_name: banned_user.name.to_string(),
+            is_bot: banned_user.bot,
+        });
+    }
+
+    async fn guild_ban_removal(&self, _ctx: Context, guild_id: GuildId, unbanned_user: User) {
+        self.dispatcher.publish_member(MemberEvent::Unban {
+            guild_id: guild_id.get(),
+            user_id: unbanned_user.id.get(),
+            display_name: unbanned_user.name.to_string(),
+            is_bot: unbanned_user.bot,
+        });
+    }
+
+    async fn invite_create(&self, _ctx: Context, data: InviteCreateEvent) {
+        self.invite_tracker.on_invite_create(&data).await;
+    }
+
+    async fn invite_delete(&self, _ctx: Context, data: InviteDeleteEvent) {
+        if let Some(guild_id) = data.guild_id {
+            self.invite_tracker
+                .on_invite_delete(guild_id.get(), &data.code)
+                .await;
+        }
     }
 
     async fn voice_state_update(&self, _ctx: Context, old: Option<VoiceState>, new: VoiceState) {
@@ -174,6 +226,7 @@ pub async fn build_client(
             adapter,
             dispatcher,
             router,
+            invite_tracker: Arc::new(InviteTracker::new()),
         })
         .await
 }

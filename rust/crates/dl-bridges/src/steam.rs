@@ -639,7 +639,9 @@ pub fn spawn_member_remove_listener(
                         .post_event("member_remove", data, DEFAULT_TIMEOUT)
                         .await;
                 }
-                Ok(MemberEvent::Join { .. }) => {}
+                Ok(MemberEvent::Join { .. })
+                | Ok(MemberEvent::Ban { .. })
+                | Ok(MemberEvent::Unban { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "steam-bridge: Member-Events verpasst");
                 }

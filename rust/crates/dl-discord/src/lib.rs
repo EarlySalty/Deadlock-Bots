@@ -15,6 +15,7 @@ pub mod dispatch;
 pub mod dispatcher;
 pub mod gateway;
 pub mod interactions;
+pub mod invite_tracker;
 
 pub use adapter::DiscordAdapter;
 pub use dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
@@ -22,3 +23,4 @@ pub use interactions::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, InteractionHandler,
     InteractionRouter, ModalField, ModalSpec,
 };
+pub use invite_tracker::InviteTracker;

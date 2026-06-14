@@ -57,12 +57,40 @@ pub struct MessageEvent {
     pub author_joined_at: Option<i64>,
 }
 
-/// Mitglieder-Ereignisse (join/remove) — Konsumenten: steam-bridge,
-/// Onboarding (Phase 7), Aktivitäts-Analytik (Phase 5).
+/// Mitglieder-Ereignisse — Konsumenten: steam-bridge, Onboarding (Phase 7),
+/// Aktivitäts-Analytik (Phase 5), Leave-Survey.
 #[derive(Debug, Clone)]
 pub enum MemberEvent {
-    Join { guild_id: u64, user_id: u64 },
-    Remove { guild_id: u64, user_id: u64 },
+    Join {
+        guild_id: u64,
+        user_id: u64,
+        display_name: String,
+        /// Account-Erstellung (Unix-Sekunden, aus der Snowflake).
+        account_created_at: i64,
+        /// Mitgliederzahl der Gilde zum Join-Zeitpunkt (aus dem Cache).
+        join_position: Option<i64>,
+        is_bot: bool,
+        /// Roh-Detektion der Beitrittsquelle (`join_source_*` + `invite_*` +
+        /// `avatar_url`/`is_pending`) als JSON; der Writer verfeinert sie über
+        /// `classify` (Twitch-/Website-Override) und persistiert sie.
+        metadata: serde_json::Value,
+    },
+    Remove {
+        guild_id: u64,
+        user_id: u64,
+    },
+    Ban {
+        guild_id: u64,
+        user_id: u64,
+        display_name: String,
+        is_bot: bool,
+    },
+    Unban {
+        guild_id: u64,
+        user_id: u64,
+        display_name: String,
+        is_bot: bool,
+    },
 }
 
 const CHANNEL_CAPACITY: usize = 1024;
