@@ -8,4 +8,5 @@
 pub mod glue;
 pub mod matcher;
 pub mod steam;
+pub mod streamer_intent;
 pub mod twitch;

@@ -92,6 +92,16 @@ async fn main() -> anyhow::Result<()> {
             None
         }
     };
+
+    // Streamer-Partner-Verknüpfung (vereinfacht): /streamer verweist auf die
+    // Website und merkt sich die Discord-ID im 1-h-Fenster. Der Korrelations-
+    // Watcher (mappt neu auftauchende Streamer auf die Absicht) folgt.
+    let streamer_intents = dl_bridges::streamer_intent::StreamerIntents::new(db.clone());
+    if let Err(err) = streamer_intents.ensure_schema().await {
+        tracing::warn!(%err, "streamer_link_intents-Schema konnte nicht angelegt werden");
+    }
+    dl_bridges::streamer_intent::register(&mut router, streamer_intents);
+
     // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
     let nudge = dl_voice::nudge::VoiceNudge::new(
         db.clone(),

@@ -11,10 +11,12 @@ version = "0.1.0"
 async-trait.workspace = true
 chrono.workspace = true
 dl-core.workspace = true
+dl-db.workspace = true
 dl-discord.workspace = true
 hex.workspace = true
 rand.workspace = true
 reqwest.workspace = true
+rusqlite.workspace = true
 serde_json.workspace = true
 serenity.workspace = true
 thiserror.workspace = true
@@ -24,6 +26,7 @@ unicode-normalization.workspace = true
 
 [dev-dependencies]
 axum.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

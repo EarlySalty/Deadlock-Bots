@@ -95,6 +95,7 @@ dependencies = [
  "matchit",
  "memchr",
  "mime",
+ "multer",
  "percent-encoding",
  "pin-project-lite",
  "serde_core",
@@ -349,6 +350,7 @@ dependencies = [
  "dl-tournament",
  "dl-voice",
  "dl-webcore",
+ "rusqlite",
  "serde_json",
  "serenity",
  "tokio",
@@ -363,12 +365,15 @@ dependencies = [
  "axum",
  "chrono",
  "dl-core",
+ "dl-db",
  "dl-discord",
  "hex",
  "rand 0.8.6",
  "reqwest",
+ "rusqlite",
  "serde_json",
  "serenity",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -572,6 +577,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-twitch-invite-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dl-activity",
+ "dl-db",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+]
+
+[[package]]
 name = "dl-voice"
 version = "0.1.0"
 dependencies = [
@@ -622,6 +641,15 @@ dependencies = [
  "sha2",
  "thiserror 2.0.18",
  "tracing",
+]
+
+[[package]]
+name = "encoding_rs"
+version = "0.8.35"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75030f3c4f45dafd7586dd6780965a8c7e8e285a5ecb86713e63a79c5b2766f3"
+dependencies = [
+ "cfg-if",
 ]
 
 [[package]]
@@ -1266,6 +1294,23 @@ dependencies = [
  "libc",
  "wasi",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "multer"
+version = "3.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "83e87776546dc87511aa5ee218730c92b666d7264ab6ed41f9d215af9cd5224b"
+dependencies = [
+ "bytes",
+ "encoding_rs",
+ "futures-util",
+ "http",
+ "httparse",
+ "memchr",
+ "mime",
+ "spin",
+ "version_check",
 ]
 
 [[package]]
@@ -1930,6 +1975,12 @@ dependencies = [
  "libc",
  "windows-sys 0.61.2",
 ]
+
+[[package]]
+name = "spin"
+version = "0.9.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6980e8d7511241f8acf4aebddbb1ff938df5eebe98691418c4468d0b72a96a67"
 
 [[package]]
 name = "stable_deref_trait"
