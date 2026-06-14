@@ -1,3 +1,13 @@
+## #134 — Bot-Texte: durchgängig echte Umlaute und überall Deutsch
+
+**Ausgangslage:** An vielen nutzersichtbaren Stellen standen Umlaut-Ersatzschreibungen (ae/oe/ue/ss statt echtem ä/ö/ü/ß) — entstanden, weil Texte mal mit, mal ohne echte Umlaute getippt wurden. Zusätzlich waren einzelne Abläufe noch auf Englisch, obwohl der Bot sonst durchgängig Deutsch spricht. Am deutlichsten beim Ban-/Einspruch-Ablauf: Ein gesperrtes Mitglied bekam eine englische Ban-Nachricht mit einem „Appeal"-Button, ein englisches Eingabefeld und als Bestätigung „Your appeal was sent to the moderators." — mitten in einem ansonsten deutschen Bot. Auch die Voice-Tracker-Admin-Befehle und die Moderations-Buttons fürs Team waren teils englisch/gemischt.
+
+**Was geändert wurde:** Alle betroffenen Anzeigetexte nutzen jetzt echte Umlaute, und die englischen Stellen sind ins Deutsche übersetzt. Der komplette Einspruch-Ablauf ist deutsch: die Ban-/Timeout-Nachricht, der „Einspruch"-Button, das Eingabefeld, die Bestätigung („Dein Einspruch wurde an das Mod-Team weitergeleitet.") und das Embed, das beim Mod-Team ankommt. Ebenso eingedeutscht: die Voice-Tracker-Konfiguration (Anzeige plus alle Erfolgs-/Fehlermeldungen), die Moderations-Buttons (Annehmen / Ablehnen / Entbannen) und kleinere Onboarding- und Umfrage-Texte.
+
+**Wie es funktioniert:** Reine Text- und Sprachkorrektur, keine Logikänderung. Die Umlaute wurden gezielt pro Wort im jeweiligen Anzeigetext ersetzt — nicht pauschal, damit englische Begriffe, technische Bezeichner und Befehlsnamen unangetastet bleiben. Bewusst englisch bleiben etablierte Begriffe (z. B. Timeout, Ban) sowie alles, was nur intern in Logs steht und kein Mitglied zu sehen bekommt. Abläufe, Buttons und Reihenfolge sind identisch — es liest sich nur sauberer und einheitlich auf Deutsch.
+
+**Betroffen:** gesperrte Mitglieder (kompletter Einspruch-Ablauf), neue Mitglieder (Onboarding-Hinweise), das Mod-Team (Voice-Konfiguration und Moderations-Buttons) sowie generell alle, die DMs und Embeds des Bots lesen.
+
 ## #133 — Coaching-Panel: Fragen kommen in den Channel statt in die DMs
 
 **Ausgangslage:** Im Coaching-Panel stand zwar schon die Regel „keine DMs/Freundschaftsanfragen an die Coaches", trotzdem landeten Follow-up-Fragen rund ums Coaching regelmäßig als DM. Die Antwort blieb dann bei einer Person hängen — andere mit demselben Anliegen hatten nichts davon, und Leute mit hilfreichem Input wurden gar nicht erst erreicht.
