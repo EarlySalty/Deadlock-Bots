@@ -43,6 +43,15 @@ impl RetentionTracker {
                        miss_you_count INTEGER NOT NULL DEFAULT 0,
                        opted_out INTEGER NOT NULL DEFAULT 0,
                        updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
+                     );
+                     CREATE TABLE IF NOT EXISTS user_retention_messages(
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       user_id INTEGER NOT NULL,
+                       guild_id INTEGER NOT NULL,
+                       message_type TEXT NOT NULL,
+                       sent_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
+                       delivery_status TEXT NOT NULL DEFAULT 'sent',
+                       error_message TEXT
                      );",
                 )?;
                 Ok(())

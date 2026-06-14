@@ -1188,3 +1188,160 @@ pub async fn voice_history(
         "recent_sessions": recent_sessions,
     }))
 }
+
+/// `GET /api/user-retention` — Retention-Kennzahlen + Inaktiv-Kandidaten
+/// (Port von `_handle_user_retention`). Schwellen wie `RetentionConfig`.
+/// v1-Vereinfachung ggü. Python: der Ausschluss-Rollen-Filter (Bot-Cache)
+/// entfällt — Kandidaten werden rein über die DB-Schwellen bestimmt. Beide
+/// Retention-Tabellen werden existenz-geschützt gelesen.
+pub async fn user_retention(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if let Err(resp) = app.guard_read(&headers) {
+        return resp;
+    }
+    const MIN_WEEKLY: f64 = 0.5;
+    const MIN_DAYS: i64 = 3;
+    const INACTIVITY: i64 = 14;
+    const MIN_BETWEEN: i64 = 30;
+    const MAX_MISS: i64 = 1;
+
+    let data = app
+        .db()
+        .read(move |conn| {
+            let exists = |name: &str| -> rusqlite::Result<bool> {
+                Ok(conn
+                    .query_row(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                        [name],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some())
+            };
+            if !exists("user_retention_tracking")? {
+                return Ok((0i64, 0i64, 0i64, 0i64, 0i64, 0i64, Vec::<Value>::new()));
+            }
+            let has_msgs = exists("user_retention_messages")?;
+
+            let total_tracked: i64 =
+                conn.query_row("SELECT COUNT(*) FROM user_retention_tracking", [], |r| r.get(0))?;
+            let opted_out: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM user_retention_tracking WHERE opted_out=1",
+                [],
+                |r| r.get(0),
+            )?;
+            let regular_active: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM user_retention_tracking WHERE avg_weekly_sessions>=?1 AND total_active_days>=?2",
+                params![MIN_WEEKLY, MIN_DAYS],
+                |r| r.get(0),
+            )?;
+            let (miss_you_sent, feedback_received): (i64, i64) = if has_msgs {
+                (
+                    conn.query_row("SELECT COUNT(*) FROM user_retention_messages WHERE message_type='miss_you'", [], |r| r.get(0))?,
+                    conn.query_row("SELECT COUNT(*) FROM user_retention_messages WHERE message_type='feedback'", [], |r| r.get(0))?,
+                )
+            } else {
+                (0, 0)
+            };
+
+            let where_sql = "avg_weekly_sessions>=?1 AND total_active_days>=?2
+                AND (strftime('%s','now')-last_active_at)/86400 >= ?3 AND opted_out=0
+                AND (last_miss_you_sent_at IS NULL OR (strftime('%s','now')-last_miss_you_sent_at)/86400 >= ?4)
+                AND (miss_you_count IS NULL OR miss_you_count < ?5)";
+            let inactive_candidates: i64 = conn.query_row(
+                &format!("SELECT COUNT(*) FROM user_retention_tracking WHERE {where_sql}"),
+                params![MIN_WEEKLY, MIN_DAYS, INACTIVITY, MIN_BETWEEN, MAX_MISS],
+                |r| r.get(0),
+            )?;
+
+            let (status_sql, at_sql) = if has_msgs {
+                (
+                    "(SELECT m.delivery_status FROM user_retention_messages m WHERE m.user_id=urt.user_id AND m.message_type='miss_you' ORDER BY m.sent_at DESC LIMIT 1)",
+                    "(SELECT m.sent_at FROM user_retention_messages m WHERE m.user_id=urt.user_id AND m.message_type='miss_you' ORDER BY m.sent_at DESC LIMIT 1)",
+                )
+            } else {
+                ("NULL", "NULL")
+            };
+            let sql = format!(
+                "SELECT urt.user_id, urt.guild_id, urt.last_active_at, urt.total_active_days,
+                        urt.avg_weekly_sessions,
+                        (strftime('%s','now')-urt.last_active_at)/86400 AS days_inactive,
+                        {status_sql} AS last_message_status, {at_sql} AS last_message_at,
+                        urt.last_miss_you_sent_at, urt.miss_you_count
+                   FROM user_retention_tracking urt
+                  WHERE {where_sql}
+                  ORDER BY days_inactive DESC LIMIT 50"
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let cands: Vec<Value> = stmt
+                .query_map(
+                    params![MIN_WEEKLY, MIN_DAYS, INACTIVITY, MIN_BETWEEN, MAX_MISS],
+                    |r| {
+                        Ok(json!({
+                            "user_id": r.get::<_, i64>(0)?,
+                            "guild_id": r.get::<_, i64>(1)?,
+                            "last_active_at": r.get::<_, Option<i64>>(2)?,
+                            "total_active_days": r.get::<_, Option<i64>>(3)?,
+                            "avg_weekly_sessions": r.get::<_, Option<f64>>(4)?,
+                            "days_inactive": r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0),
+                            "last_message_status": r.get::<_, Option<String>>(6)?,
+                            "last_message_at": r.get::<_, Option<i64>>(7)?,
+                            "last_miss_you_sent_at": r.get::<_, Option<i64>>(8)?,
+                            "miss_you_count": r.get::<_, Option<i64>>(9)?,
+                        }))
+                    },
+                )?
+                .collect::<rusqlite::Result<_>>()?;
+            Ok((
+                total_tracked,
+                opted_out,
+                regular_active,
+                inactive_candidates,
+                miss_you_sent,
+                feedback_received,
+                cands,
+            ))
+        })
+        .await;
+
+    let (
+        total_tracked,
+        opted_out,
+        regular_active,
+        inactive_candidates,
+        miss_you_sent,
+        feedback_received,
+        mut candidates,
+    ) = match data {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!(%err, "user_retention fehlgeschlagen");
+            return err_text(500, "Failed to load user retention data");
+        }
+    };
+
+    let ids: Vec<u64> = candidates
+        .iter()
+        .filter_map(|c| c["user_id"].as_i64().and_then(|i| u64::try_from(i).ok()))
+        .collect();
+    let names = app.names().resolve(&ids).await;
+    for c in candidates.iter_mut() {
+        let uid = c["user_id"]
+            .as_i64()
+            .and_then(|i| u64::try_from(i).ok())
+            .unwrap_or(0);
+        c["display_name"] = json!(display_name_or_default(&names, uid));
+    }
+
+    ok_json(json!({
+        "summary": {
+            "total_tracked": total_tracked,
+            "opted_out": opted_out,
+            "regular_active": regular_active,
+            "inactive_candidates": inactive_candidates,
+            "miss_you_sent": miss_you_sent,
+            "feedback_received": feedback_received,
+        },
+        "candidates": candidates,
+        "recent": candidates,
+    }))
+}
