@@ -118,16 +118,7 @@ impl LanePort for CacheSnapshot {
         name: &str,
         reason: &str,
     ) -> Result<(), String> {
-        self.adapter
-            .http
-            .edit_channel(
-                ChannelId::new(channel_id),
-                &json!({ "name": name }),
-                Some(reason),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        crate::rename_queue::enqueue_or_direct(&self.adapter, channel_id, name, reason).await
     }
 
     async fn set_member_connect(
@@ -595,16 +586,13 @@ impl crate::status::StatusPort for StatusGlue {
     }
 
     async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
-        self.adapter
-            .http
-            .edit_channel(
-                ChannelId::new(channel_id),
-                &json!({ "name": name }),
-                Some("Deadlock Voice Status Update"),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        crate::rename_queue::enqueue_or_direct(
+            &self.adapter,
+            channel_id,
+            name,
+            "Deadlock Voice Status Update",
+        )
+        .await
     }
 }
 
@@ -752,16 +740,13 @@ impl crate::rank::RankPort for RankGlue {
     }
 
     async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
-        self.adapter
-            .http
-            .edit_channel(
-                ChannelId::new(channel_id),
-                &json!({ "name": name }),
-                Some("Rank Voice Manager Rename"),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        crate::rename_queue::enqueue_or_direct(
+            &self.adapter,
+            channel_id,
+            name,
+            "Rank Voice Manager Rename",
+        )
+        .await
     }
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
@@ -991,16 +976,13 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
     }
 
     async fn rename_channel(&self, channel_id: u64, name: &str) -> Result<(), String> {
-        self.adapter
-            .http
-            .edit_channel(
-                ChannelId::new(channel_id),
-                &json!({ "name": name }),
-                Some("Adaptive Lanes: Name nachgezogen"),
-            )
-            .await
-            .map(|_| ())
-            .map_err(|e| e.to_string())
+        crate::rename_queue::enqueue_or_direct(
+            &self.adapter,
+            channel_id,
+            name,
+            "Adaptive Lanes: Name nachgezogen",
+        )
+        .await
     }
 
     async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
@@ -1044,6 +1026,41 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
                 ChannelId::new(channel_id),
                 &json!({ "position": position }),
                 Some("Lane-Sortierung: Rang-Reihenfolge"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Worker-seitige Anbindung der Rename-Queue: liest den aktuellen Channel-Namen
+/// aus dem Gateway-Cache und führt die eigentliche Discord-Umbenennung aus.
+pub struct RenameExecGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl crate::rename_queue::RenameExec for RenameExecGlue {
+    async fn current_name(&self, channel_id: u64) -> Option<String> {
+        let cid = ChannelId::new(channel_id);
+        for guild_id in self.adapter.cache.guilds() {
+            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+                continue;
+            };
+            if let Some(channel) = guild.channels.get(&cid) {
+                return Some(channel.name.to_string());
+            }
+        }
+        None
+    }
+
+    async fn edit_name(&self, channel_id: u64, name: &str, reason: &str) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "name": name }),
+                Some(reason),
             )
             .await
             .map(|_| ())

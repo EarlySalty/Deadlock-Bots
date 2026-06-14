@@ -318,6 +318,18 @@ async fn main() -> anyhow::Result<()> {
             dl_bridges::matcher::spawn_scan_loop(matcher.clone());
             dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
         }
+        // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
+        // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
+        // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
+        // drainiert FIFO mit >=360s Abstand pro Channel.
+        dl_voice::rename_queue::init(db.clone());
+        dl_voice::rename_queue::spawn_worker(
+            db.clone(),
+            Arc::new(dl_voice::glue::RenameExecGlue {
+                adapter: adapter.clone(),
+            }),
+        );
+
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
