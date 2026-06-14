@@ -2,12 +2,15 @@
 //! die Community-Website. Hier zunächst die Patchnotes (reine DB); die
 //! Live-Guild-Stats brauchen Bot-Daten und folgen separat.
 
+use std::time::Duration;
+
 use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use serde_json::json;
+use serde_json::{json, Value};
 
+use crate::now_unix_f64;
 use crate::web::DashboardApp;
 
 const ALLOW_ORIGIN: &str = "https://deutsche-deadlock-community.de";
@@ -80,6 +83,45 @@ pub async fn patch_notes(State(app): State<DashboardApp>) -> Response {
         }
         Err(err) => with_cors(json!({ "error": err.to_string() }), 500, 120),
     }
+}
+
+async fn fetch_guild_stats(base: &str) -> Option<Value> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .ok()?;
+    let url = format!(
+        "{}/internal/master/v1/discord/guild-stats",
+        base.trim_end_matches('/')
+    );
+    let resp = client.get(&url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let data: Value = resp.json().await.ok()?;
+    if data.get("found").and_then(Value::as_bool) != Some(true) {
+        return None;
+    }
+    Some(data)
+}
+
+pub async fn guild_stats(State(app): State<DashboardApp>) -> Response {
+    let now = now_unix_f64();
+    if let Some(cached) = app.guild_stats_cached(now) {
+        return with_cors(cached, 200, 30);
+    }
+    let Some(data) = fetch_guild_stats(app.broker_base()).await else {
+        // Kein Gateway/Guild → wie das Original 503.
+        return with_cors(json!({ "error": "No guild data available" }), 503, 30);
+    };
+    let body = json!({
+        "member_count": data.get("member_count").and_then(Value::as_u64).unwrap_or(0),
+        "online_count": data.get("online_count").and_then(Value::as_u64).unwrap_or(0),
+        "voice_count": data.get("voice_count").and_then(Value::as_u64).unwrap_or(0),
+        "cached_at": chrono::Utc::now().to_rfc3339(),
+    });
+    app.set_guild_stats_cache(body.clone(), now);
+    with_cors(body, 200, 30)
 }
 
 /// CORS-Preflight (OPTIONS) für die öffentlichen Endpunkte.

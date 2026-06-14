@@ -18,7 +18,7 @@ use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, options, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::{json, Map, Value};
 
@@ -56,6 +56,8 @@ struct Inner {
     login_states: Mutex<HashMap<String, LoginState>>,
     /// Per-IP-Zeitstempel für die Callback-Ratenbegrenzung.
     rate: Mutex<HashMap<String, Vec<f64>>>,
+    /// 30-Sekunden-Cache der öffentlichen Guild-Stats (Wert, Zeitpunkt).
+    guild_stats_cache: Mutex<Option<(Value, f64)>>,
 }
 
 struct LoginState {
@@ -91,6 +93,7 @@ impl DashboardApp {
                 names,
                 login_states: Mutex::new(HashMap::new()),
                 rate: Mutex::new(HashMap::new()),
+                guild_stats_cache: Mutex::new(None),
             }),
         }
     }
@@ -117,6 +120,32 @@ impl DashboardApp {
 
     pub(crate) fn tournament_default_guild(&self) -> u64 {
         self.cfg().tournament_default_guild
+    }
+
+    pub(crate) fn broker_base(&self) -> &str {
+        &self.cfg().broker_base
+    }
+
+    /// Frischer (≤30 s) Guild-Stats-Cache-Wert, sonst `None`.
+    pub(crate) fn guild_stats_cached(&self, now: f64) -> Option<Value> {
+        let guard = self
+            .inner
+            .guild_stats_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        match guard.as_ref() {
+            Some((value, ts)) if now - *ts < 30.0 => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_guild_stats_cache(&self, value: Value, now: f64) {
+        let mut guard = self
+            .inner
+            .guild_stats_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        *guard = Some((value, now));
     }
 
     /// Auth-Gate für lesende `/api`-Routen: ohne erzwungene Auth offen, sonst
@@ -301,7 +330,7 @@ pub fn router(app: DashboardApp) -> Router {
         )
         .route(
             "/api/public/guild-stats",
-            options(crate::public::public_cors),
+            get(crate::public::guild_stats).options(crate::public::public_cors),
         )
         .with_state(app)
 }
