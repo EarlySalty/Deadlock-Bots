@@ -7,6 +7,7 @@
 pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
+pub mod dm_assistant;
 pub mod faq;
 pub mod feedback_hub;
 pub mod invites;

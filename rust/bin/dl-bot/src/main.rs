@@ -496,6 +496,15 @@ async fn main() -> anyhow::Result<()> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
+        // KI-DM-Assistent: beantwortet Freitext-DMs an den Bot (MiniMax + Fallback).
+        let dm_assistant = dl_community::dm_assistant::DmAssistant::new(
+            dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+                .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+            Arc::new(modglue::DmGlue {
+                adapter: adapter.clone(),
+            }),
+        );
+        dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
         dl_community::coaching_requests::spawn(coaching_requests.clone(), &dispatcher);
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);

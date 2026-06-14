@@ -308,7 +308,9 @@ _5 Luecken (von 10 geprueft)._
     Test-Fixtures; zur Laufzeit legt `bootstrap_schema` diese Kerntabellen jetzt
     selbst an, statt sich darauf zu verlassen, dass Python sie schon erzeugt hat.
   - Py: `service/db.py:620 (voice_stats), 628 (voice_session_log), 945 (user_co_players), 931 (user_activity_patterns), 957 (member_events), 671 (steam_links), 709 (live_player_state); message_activity at db.py:990`
-- [degraded] `text_stats + text_conversation_log writer (text gamification + conversation memory)` <missing>
+- `text_stats + text_conversation_log writer (text gamification + conversation memory)` ✅ ERLEDIGT (veraltete Notiz)
+  - `dl-activity/src/text_stats.rs` schreibt beide Tabellen (Konversations-Punkte
+    + Verlauf), in `main.rs:481-487` gespawnt. Die Notiz unten war vor dem Port.
   - Python user_activity_analyzer.on_message writes text_stats (per-user total_messages/total_points, fed to the public text leaderboard) and text_conversation_log (per-conversation session log). NO Rust code writes either: grep for INSERT/UPDATE text_stats / text_conversation_log across rust/crates+bin
   - Py: `cogs/user_activity_analyzer.py:705 (INSERT text_stats), 685 (INSERT text_conversation_log), on_message listener at 1445; cog auto-loaded (bot_core/cog_loader.py discover, NOT in cog_blocklist.json)`
 ## Korrekturen (Post-Audit-Verifikation)
@@ -410,7 +412,13 @@ Slash-Wrapper) — bewusst je eigener Pass:
 ### Konsolidierte Restliste (nach allen Verifikationen)
 
 1. ~~`!balance`-Admin-Befehlsschicht~~ — ERLEDIGT (`balance_cmd.rs`, 4 Scheiben).
-2. `dm_assistant` Free-Text-AI-DM-Assistent — in Rust nicht vorhanden.
+2. ~~`dm_assistant` Free-Text-AI-DM-Assistent~~ — ERLEDIGT
+   (`dl-community/src/dm_assistant.rs`): DM-on_message-Listener beantwortet
+   Freitext-DMs per `TextGenerator` (MiniMax statt Gemini/OpenAI), parst das
+   `{intent, message, action}`-JSON, hängt bei `action` ein streamer/beta/steam-
+   Embed an und fällt bei KI-Ausfall auf das `dma:fallback:*`-Button-Menü zurück.
+   Cooldown (max 3/60 s, min 10 s Abstand) wie das Original. In `main.rs`
+   gespawnt; die Fallback-Buttons sind schon im Onboarding-Glue behandelt.
 3. ~~Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]`~~ —
    ERLEDIGT (`dl_db::Db::bootstrap_schema`, beim Start in `main.rs`).
 4. Kleinkram-Slash (verifiziert, teils erledigt/abgedeckt):
