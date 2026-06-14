@@ -1375,15 +1375,17 @@ pub async fn voice_stats(
                 )?;
             let rows = |sql: &str| -> rusqlite::Result<Vec<Value>> {
                 let mut stmt = conn.prepare(sql)?;
-                stmt.query_map(params![limit], |r| {
-                    Ok(json!({
+                let mut out = Vec::new();
+                let mut q = stmt.query(params![limit])?;
+                while let Some(r) = q.next()? {
+                    out.push(json!({
                         "user_id": r.get::<_, i64>(0)?,
                         "total_seconds": r.get::<_, Option<i64>>(1)?.unwrap_or(0),
                         "total_points": r.get::<_, Option<i64>>(2)?.unwrap_or(0),
                         "last_update": r.get::<_, Option<String>>(3)?,
-                    }))
-                })?
-                .collect()
+                    }));
+                }
+                Ok(out)
             };
             let top_time = rows(
                 "SELECT user_id, total_seconds, total_points, last_update FROM voice_stats
