@@ -1043,4 +1043,33 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             )
             .await;
     }
+
+    async fn member_voice_channel_in_category(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        category_id: u64,
+    ) -> Option<u64> {
+        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let channel_id = guild.voice_states.get(&UserId::new(user_id))?.channel_id?;
+        let parent = guild.channels.get(&channel_id)?.parent_id?;
+        (parent.get() == category_id).then(|| channel_id.get())
+    }
+
+    async fn send_dm_embed(&self, user_id: u64, embed: serde_json::Value) -> bool {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return false;
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        self.adapter
+            .send_raw_public(channel.id.get(), &body)
+            .await
+            .is_ok()
+    }
 }

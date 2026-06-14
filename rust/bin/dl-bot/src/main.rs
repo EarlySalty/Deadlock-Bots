@@ -448,7 +448,7 @@ async fn main() -> anyhow::Result<()> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
-        dl_community::coaching_requests::spawn(coaching_requests.clone());
+        dl_community::coaching_requests::spawn(coaching_requests.clone(), &dispatcher);
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 

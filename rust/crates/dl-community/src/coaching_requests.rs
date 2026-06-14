@@ -10,9 +10,16 @@
 //! Spieler 7 Tage. custom_ids unverändert (`coaching_panel_start`,
 //! `coaching_request_modal`, `coach_claim_/release_/cancel_*`).
 //!
-//! Dokumentierte Lücken: Website-Spiegelung der Sessions,
-//! Rollen-Ablauf-Manager (coaching_role_manager) und die
-//! Feedback-Umfrage (coaching_survey) — laufen vorerst in Python weiter.
+//! Die Feedback-Umfrage (`coaching_survey`) ist hier mit portiert: ein
+//! 60-s-Poll plus ein Voice-Event-Listener erkennen das Ende einer Session
+//! (User + Coach nicht mehr im selben Coaching-VC), vergeben die Reward-Rolle,
+//! nehmen die Active-Rolle weg und schicken die Survey-DM.
+//!
+//! Dokumentierte Lücken: Website-Spiegelung der Sessions und der
+//! Rollen-Ablauf-Manager (coaching_role_manager) — laufen vorerst in Python
+//! weiter. Die beiden Owner-only-Slash-Befehle des Survey-Cogs
+//! (`coaching-survey-senden`, `coaching-session-beenden`) sind manuelle
+//! Overrides des Automatik-Flows und bleiben vorerst aus.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,6 +37,12 @@ pub const COACH_ROLE_ID: u64 = 1494372744286965941;
 pub const COACHING_ACTIVE_ROLE_ID: u64 = 1371929762913587292;
 pub const COACHING_REWARD_ROLE_ID: u64 = 1500793970714873927;
 pub const REQUEST_CHANNEL_ID: u64 = 1461682293105229979;
+/// Kategorie der Coaching-Voice-Channels (`settings.coaching_voice_category_id`).
+pub const COACHING_VOICE_CATEGORY_ID: u64 = 1459526231686119600;
+/// Feedback-Kanal, auf den die Survey-DM verlinkt (`coaching_feedback_channel_id`).
+pub const COACHING_FEEDBACK_CHANNEL_ID: u64 = 1494756126644895885;
+/// Reward-Rolle gilt 5 Tage (wie Python: `5 * 24 * 60 * 60`).
+pub const REWARD_ROLE_DURATION_SECS: i64 = 5 * 24 * 60 * 60;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
 pub const ROLE_EXPIRY_HOURS: i64 = 48;
@@ -191,6 +204,16 @@ pub trait CoachingPort: Send + Sync {
     async fn send_dm(&self, user_id: u64, content: &str) -> bool;
     async fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str);
     async fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str);
+    /// Voice-Channel des Mitglieds, falls es in einem VC unter `category_id`
+    /// sitzt; sonst `None` (für die Coaching-Voice-Erkennung).
+    async fn member_voice_channel_in_category(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        category_id: u64,
+    ) -> Option<u64>;
+    /// DM mit Embed senden (Survey-Aufforderung); `true` bei Erfolg.
+    async fn send_dm_embed(&self, user_id: u64, embed: Value) -> bool;
 }
 
 pub struct CoachingRequests {
@@ -606,6 +629,217 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 .await;
         }
     }
+
+    /// Survey-Poll (Python `_scan_active_sessions`, 60-s-Loop): alle aktiven
+    /// Sessions ohne gesendete Umfrage prüfen.
+    pub async fn scan_survey_sessions(&self) {
+        for session in self.load_survey_sessions(None).await {
+            self.process_survey_session(session).await;
+        }
+    }
+
+    /// Voice-getriggerte Prüfung (Python `on_voice_state_update`): nur die
+    /// Sessions, an denen dieses Mitglied als User oder Coach beteiligt ist.
+    pub async fn survey_sessions_for_member(&self, member_id: u64) {
+        for session in self.load_survey_sessions(Some(member_id)).await {
+            self.process_survey_session(session).await;
+        }
+    }
+
+    async fn load_survey_sessions(&self, member: Option<u64>) -> Vec<SurveySession> {
+        self.db
+            .read(move |conn| {
+                let map = |row: &rusqlite::Row| {
+                    Ok(SurveySession {
+                        id: row.get(0)?,
+                        coach_id: row
+                            .get::<_, Option<String>>(1)?
+                            .and_then(|s| s.parse::<u64>().ok()),
+                        user_id: row.get::<_, i64>(2)? as u64,
+                        voice_started_at: row.get(3)?,
+                        request_id: row.get(4)?,
+                    })
+                };
+                let mut out = Vec::new();
+                match member {
+                    Some(mid) => {
+                        let mut stmt = conn.prepare(
+                            "SELECT id, coach_id, discord_user_id, voice_started_at, request_id
+                               FROM coaching_sessions
+                              WHERE status='active' AND survey_sent_at IS NULL
+                                AND (discord_user_id=?1 OR coach_id=?2)",
+                        )?;
+                        let rows =
+                            stmt.query_map(rusqlite::params![mid as i64, mid.to_string()], map)?;
+                        for r in rows {
+                            out.push(r?);
+                        }
+                    }
+                    None => {
+                        let mut stmt = conn.prepare(
+                            "SELECT id, coach_id, discord_user_id, voice_started_at, request_id
+                               FROM coaching_sessions
+                              WHERE status='active' AND survey_sent_at IS NULL",
+                        )?;
+                        let rows = stmt.query_map([], map)?;
+                        for r in rows {
+                            out.push(r?);
+                        }
+                    }
+                }
+                Ok(out)
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Kern-Logik (Python `_process_session_voice_state`): sitzen User und Coach
+    /// noch im selben Coaching-VC, läuft die Session (Tracking-Update). Sind sie
+    /// es nicht mehr und war zuvor eine Voice-Session aktiv, gilt sie als beendet
+    /// → Active-Rolle weg, Reward-Rolle (5 Tage) und Survey-DM.
+    async fn process_survey_session(&self, session: SurveySession) {
+        let guild = self.guild_id;
+        let user_vc = self
+            .port
+            .member_voice_channel_in_category(guild, session.user_id, COACHING_VOICE_CATEGORY_ID)
+            .await;
+        let coach_vc = match session.coach_id {
+            Some(cid) => {
+                self.port
+                    .member_voice_channel_in_category(guild, cid, COACHING_VOICE_CATEGORY_ID)
+                    .await
+            }
+            None => None,
+        };
+        let now = chrono::Utc::now().timestamp();
+
+        // Beide noch im selben Coaching-VC → Voice-Tracking aktualisieren.
+        if user_vc.is_some() && user_vc == coach_vc {
+            let vc = user_vc.unwrap_or_default() as i64;
+            let id = session.id.clone();
+            let _ = self
+                .db
+                .write(move |conn| {
+                    conn.execute(
+                        "UPDATE coaching_sessions
+                            SET voice_channel_id=?1,
+                                voice_started_at=COALESCE(voice_started_at, ?2),
+                                voice_last_seen_at=?2
+                          WHERE id=?3",
+                        rusqlite::params![vc, now, id],
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            return;
+        }
+
+        // Noch nie gemeinsam im Voice → es gibt keine Session zu beenden.
+        if session.voice_started_at.is_none() {
+            return;
+        }
+
+        // Voice-Session beendet → atomar abschließen. Der WHERE-Filter macht den
+        // Claim wettlaufsicher: Poll und Voice-Listener können dieselbe Session
+        // gleichzeitig sehen, aber nur einer trifft `status='active'`.
+        let reward_expiry = now + REWARD_ROLE_DURATION_SECS;
+        let id = session.id.clone();
+        let claimed = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE coaching_sessions
+                        SET status='completed', completed_at=?1, survey_sent_at=?1,
+                            reward_role_expires_at=?2, voice_last_seen_at=?1
+                      WHERE id=?3 AND status='active' AND survey_sent_at IS NULL",
+                    rusqlite::params![now, reward_expiry, id],
+                )
+            })
+            .await
+            .unwrap_or(0);
+        if claimed == 0 {
+            return;
+        }
+
+        let coach_name = match session.coach_id {
+            Some(cid) => self.port.member_display_name(guild, cid).await,
+            None => "Coach".to_string(),
+        };
+
+        self.port
+            .remove_role(
+                guild,
+                session.user_id,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching Session beendet",
+            )
+            .await;
+        self.port
+            .add_role(
+                guild,
+                session.user_id,
+                COACHING_REWARD_ROLE_ID,
+                "Coaching abgeschlossen - Feedback-Berechtigung",
+            )
+            .await;
+        if !self
+            .port
+            .send_dm_embed(session.user_id, survey_embed(&coach_name, guild))
+            .await
+        {
+            tracing::warn!(
+                user_id = session.user_id,
+                "Coaching-Survey-DM konnte nicht zugestellt werden"
+            );
+        }
+
+        let rid = session.request_id;
+        let _ = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE coaching_requests
+                        SET status='completed', role_removed_at=?1, updated_at=?1
+                      WHERE id=?2",
+                    rusqlite::params![now, rid],
+                )
+                .map(|_| ())
+            })
+            .await;
+    }
+}
+
+/// Eine aktive Coaching-Session, deren Feedback-Umfrage noch aussteht.
+struct SurveySession {
+    id: String,
+    coach_id: Option<u64>,
+    user_id: u64,
+    voice_started_at: Option<i64>,
+    request_id: i64,
+}
+
+/// Survey-Embed wie Python `send_survey_dm` (grün, Link in den Feedback-Kanal).
+fn survey_embed(coach_name: &str, guild_id: u64) -> Value {
+    let url = format!("https://discord.com/channels/{guild_id}/{COACHING_FEEDBACK_CHANNEL_ID}");
+    json!({
+        "title": "🎮 Coaching abgeschlossen!",
+        "description": format!(
+            "Deine Coaching-Session mit **{coach_name}** ist beendet. \
+             Wir hoffen, es hat dir geholfen!"
+        ),
+        // discord.Color.green()
+        "color": 0x2ECC71,
+        "fields": [{
+            "name": "⭐ Gib uns Feedback",
+            "value": format!(
+                "Du hast nun für **5 Tage** Zugriff auf unseren Feedback-Kanal. \
+                 Bitte teile deine Erfahrungen dort mit uns:\n\n\
+                 👉 [**HIER FEEDBACK ABGEBEN**]({url})\n\n\
+                 Dein Feedback hilft uns die Qualität der Coaches sicherzustellen!"
+            ),
+            "inline": false,
+        }],
+    })
 }
 
 // ── Interaction-Handler ────────────────────────────────────────────────────
@@ -1010,7 +1244,10 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
 }
 
 /// Loops: Analyse (30 s) + Reservierungs-Ablauf (60 s wie Original).
-pub fn spawn(coaching: Arc<CoachingRequests>) -> Vec<tokio::task::JoinHandle<()>> {
+pub fn spawn(
+    coaching: Arc<CoachingRequests>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let analyze = {
         let coaching = coaching.clone();
         tokio::spawn(async move {
@@ -1020,14 +1257,39 @@ pub fn spawn(coaching: Arc<CoachingRequests>) -> Vec<tokio::task::JoinHandle<()>
             }
         })
     };
-    let expiry = tokio::spawn(async move {
+    let expiry = {
+        let coaching = coaching.clone();
+        tokio::spawn(async move {
+            loop {
+                coaching.expire_reservations().await;
+                coaching.expire_roles().await;
+                // Survey-Poll wie Python `_run_survey_checks` (60-s-Takt).
+                coaching.scan_survey_sessions().await;
+                tokio::time::sleep(Duration::from_secs(60)).await;
+            }
+        })
+    };
+    // Voice-Listener (Python `on_voice_state_update`): reagiert sofort, wenn
+    // User oder Coach den Coaching-VC verlässt, statt bis zu 60 s zu warten.
+    let mut voice = dispatcher.subscribe_voice();
+    let survey_voice = tokio::spawn(async move {
         loop {
-            coaching.expire_reservations().await;
-            coaching.expire_roles().await;
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            match voice.recv().await {
+                Ok(event) => {
+                    let user_id = match event {
+                        dl_discord::VoiceEvent::Join { user_id, .. }
+                        | dl_discord::VoiceEvent::Leave { user_id, .. }
+                        | dl_discord::VoiceEvent::Move { user_id, .. }
+                        | dl_discord::VoiceEvent::Update { user_id, .. } => user_id,
+                    };
+                    coaching.survey_sessions_for_member(user_id).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
         }
     });
-    vec![analyze, expiry]
+    vec![analyze, expiry, survey_voice]
 }
 
 #[cfg(test)]
