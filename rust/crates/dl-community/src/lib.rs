@@ -11,4 +11,5 @@ pub mod faq;
 pub mod invites;
 pub mod leave_survey;
 pub mod onboarding;
+pub mod privacy;
 pub mod tags;
