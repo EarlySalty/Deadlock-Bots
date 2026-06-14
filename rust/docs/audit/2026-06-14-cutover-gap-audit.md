@@ -358,6 +358,8 @@ Slash-Wrapper) — bewusst je eigener Pass:
   Twitch-Integration `TwitchPartnerIntegrationUnavailable`, ~850 Z.). Dazu der
   separate `twitch/streamer_link_matcher.py` (6-h-Loop + `twitch_link_scan`/
   `_rescan_login`-Prefix-Commands + Link-Views/Modal).
-- **Ticket-/Bug-Reporter** (`/ticket` + `bugreporter:create`): `bug_reporter.py`
-  (~1272 Z.), AI-gestuetzte Triage + dynamische Channel-Erstellung — der
-  groesste Einzelblock.
+- **Ticket-/Bug-Reporter** (`/ticket` + `bugreporter:create`): **WIRD NICHT
+  MIGRIERT — fliegt raus** (Projekt-Entscheidung). `bug_reporter.py` (~1272 Z.)
+  wird beim Cutover ersatzlos fallengelassen, nicht nach Rust portiert. Der in
+  einer fruehen Scheibe bereits begonnene Daten-Layer (`dl-community/bug_reports.rs`)
+  wurde wieder entfernt. KEIN Blocker mehr.

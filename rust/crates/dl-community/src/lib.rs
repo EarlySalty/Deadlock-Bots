@@ -4,7 +4,6 @@
 //!   versorgt TempVoice-Tag-Filter, Moderation (Ragebaiter) und Onboarding.
 //! - FAQ, Clips, Leave-Survey, Bug-Reporter folgen.
 
-pub mod bug_reports;
 pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
