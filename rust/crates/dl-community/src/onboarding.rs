@@ -144,6 +144,22 @@ pub trait OnboardingPort: Send + Sync {
     async fn steam_link_url(&self, user_id: u64) -> Option<String>;
     /// Tag setzen (TagService).
     async fn set_user_tag(&self, user_id: u64, key: &str, value: &str);
+    /// Merkt den Onboarding-Channel, bis die Verified-Rolle vergeben wird
+    /// (`onboarding_pending_verify`); für den Abschluss-Trigger.
+    async fn register_pending_verify(&self, user_id: u64, channel_id: u64);
+    /// Holt + entfernt den gemerkten Channel (oder `None`).
+    async fn pop_pending_verify(&self, user_id: u64) -> Option<u64>;
+    /// Schickt eine reine Text-Nachricht in einen Channel.
+    async fn send_text(&self, channel_id: u64, content: String);
+}
+
+/// Abschluss-Nachricht nach erfolgreicher Verifizierung (Text wie im Original).
+fn completion_message(user_id: u64) -> String {
+    format!(
+        "<@{user_id}> ✅ **Verifizierung erfolgreich!**\n\nNice, jetzt weißt du alles! \
+         Falls doch mal Fragen sind: einfach ein Ticket aufmachen oder einen Mod fragen. \
+         Viel Spaß! 🎮"
+    )
 }
 
 pub struct OnboardingWizard {
@@ -173,7 +189,13 @@ impl OnboardingWizard {
     async fn post_step(&self, channel_id: u64, step: usize, guild_id: u64, user_id: u64) {
         let is_streamer = self.is_streamer(guild_id, user_id).await;
         let verified = if step == ACCOUNT_STEP {
-            self.is_verified(guild_id, user_id).await
+            let v = self.is_verified(guild_id, user_id).await;
+            if !v {
+                // Noch nicht verifiziert → Channel merken, damit die Abschluss-
+                // Nachricht bei Rollen-Vergabe automatisch kommt.
+                self.port.register_pending_verify(user_id, channel_id).await;
+            }
+            v
         } else {
             false
         };
@@ -185,6 +207,40 @@ impl OnboardingWizard {
             )
             .await;
     }
+
+    /// Reagiert auf einen Rollen-Zugewinn: kam die Verified-Rolle dazu und ist
+    /// ein Onboarding-Channel gemerkt, kommt die Abschluss-Nachricht.
+    pub async fn handle_role_gained(&self, user_id: u64, role_ids: &[u64]) {
+        if !role_ids.contains(&VERIFIED_ROLE_ID) {
+            return;
+        }
+        if let Some(channel_id) = self.port.pop_pending_verify(user_id).await {
+            self.port
+                .send_text(channel_id, completion_message(user_id))
+                .await;
+        }
+    }
+}
+
+/// Subscriber: Onboarding-Verifikations-Abschluss aus `RoleEvent::Gained`.
+pub fn spawn_verify_completion(
+    wizard: Arc<OnboardingWizard>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut events = dispatcher.subscribe_roles();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(dl_discord::RoleEvent::Gained {
+                    user_id, role_ids, ..
+                }) => {
+                    wizard.handle_role_gained(user_id, &role_ids).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 struct OnboardingHandler {

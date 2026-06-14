@@ -15,6 +15,7 @@ async-trait.workspace = true
 dl-core.workspace = true
 dl-community.workspace = true
 dl-db.workspace = true
+rusqlite.workspace = true
 dl-bridges.workspace = true
 dl-activity.workspace = true
 dl-ai.workspace = true

@@ -168,7 +168,10 @@ async fn main() -> anyhow::Result<()> {
             adapter: adapter.clone(),
             tags: tag_service.clone(),
             steam: steam_client.clone(),
+            db: db.clone(),
         }));
+    // Verifikations-Abschluss: RoleEvent::Gained(Verified) → Abschluss-Nachricht.
+    dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
     dl_community::onboarding::register(&mut router, wizard);
 
     // Turnier-User-Flow (8): Panel-Buttons + Solo/Team-Anmeldung

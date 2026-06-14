@@ -93,12 +93,24 @@ pub enum MemberEvent {
     },
 }
 
+/// Rollen-Zugewinn eines Mitglieds (aus `guild_member_update` diffiert) —
+/// Konsument: Onboarding-Verifikations-Abschluss.
+#[derive(Debug, Clone)]
+pub enum RoleEvent {
+    Gained {
+        guild_id: u64,
+        user_id: u64,
+        role_ids: Vec<u64>,
+    },
+}
+
 const CHANNEL_CAPACITY: usize = 1024;
 
 pub struct Dispatcher {
     voice_tx: broadcast::Sender<VoiceEvent>,
     message_tx: broadcast::Sender<MessageEvent>,
     member_tx: broadcast::Sender<MemberEvent>,
+    role_tx: broadcast::Sender<RoleEvent>,
 }
 
 impl Default for Dispatcher {
@@ -112,10 +124,12 @@ impl Dispatcher {
         let (voice_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (message_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (role_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
             message_tx,
             member_tx,
+            role_tx,
         }
     }
 
@@ -131,6 +145,10 @@ impl Dispatcher {
         self.member_tx.subscribe()
     }
 
+    pub fn subscribe_roles(&self) -> broadcast::Receiver<RoleEvent> {
+        self.role_tx.subscribe()
+    }
+
     pub fn publish_voice(&self, event: VoiceEvent) {
         // send schlägt nur fehl, wenn niemand subscribed ist — kein Fehler.
         let _ = self.voice_tx.send(event);
@@ -142,6 +160,10 @@ impl Dispatcher {
 
     pub fn publish_member(&self, event: MemberEvent) {
         let _ = self.member_tx.send(event);
+    }
+
+    pub fn publish_role(&self, event: RoleEvent) {
+        let _ = self.role_tx.send(event);
     }
 }
 

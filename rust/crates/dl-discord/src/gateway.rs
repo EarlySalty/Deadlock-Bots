@@ -128,12 +128,33 @@ impl EventHandler for Handler {
     async fn guild_member_update(
         &self,
         _ctx: Context,
-        _old: Option<Member>,
-        _new: Option<Member>,
-        _event: GuildMemberUpdateEvent,
+        old: Option<Member>,
+        new: Option<Member>,
+        event: GuildMemberUpdateEvent,
     ) {
-        // Bewusst leer — Platzhalter, damit der Intent dokumentiert ist;
-        // Onboarding (Phase 7) hängt sich hier ein.
+        // Neu hinzugekommene Rollen diffen (Onboarding-Verifikations-Abschluss).
+        // Vorher-Rollen aus dem Cache (old); ohne Cache kein Diff möglich.
+        let Some(old) = old else {
+            return;
+        };
+        let after_roles: &[serenity::all::RoleId] = new
+            .as_ref()
+            .map(|m| m.roles.as_slice())
+            .unwrap_or(&event.roles);
+        let gained: Vec<u64> = after_roles
+            .iter()
+            .filter(|r| !old.roles.contains(r))
+            .map(|r| r.get())
+            .collect();
+        if gained.is_empty() {
+            return;
+        }
+        self.dispatcher
+            .publish_role(crate::dispatcher::RoleEvent::Gained {
+                guild_id: event.guild_id.get(),
+                user_id: event.user.id.get(),
+                role_ids: gained,
+            });
     }
 
     async fn guild_ban_addition(&self, _ctx: Context, guild_id: GuildId, banned_user: User) {

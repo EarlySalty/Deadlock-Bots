@@ -126,6 +126,7 @@ pub struct WizardGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
     pub steam: Arc<dl_bridges::steam::SteamBotClient>,
+    pub db: dl_db::Db,
 }
 
 #[async_trait::async_trait]
@@ -205,5 +206,55 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
         if let Err(err) = self.tags.set_user_tag(user_id, key, value).await {
             tracing::warn!(%err, user_id, key, "Onboarding-Tag konnte nicht gesetzt werden");
         }
+    }
+
+    async fn register_pending_verify(&self, user_id: u64, channel_id: u64) {
+        let _ = self
+            .db
+            .write(move |conn| {
+                conn.execute_batch(
+                    "CREATE TABLE IF NOT EXISTS onboarding_pending_verify(
+                       user_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
+                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
+                )?;
+                conn.execute(
+                    "INSERT INTO onboarding_pending_verify(user_id, channel_id) VALUES(?1, ?2)
+                     ON CONFLICT(user_id) DO UPDATE SET channel_id=excluded.channel_id,
+                       updated_at=CURRENT_TIMESTAMP",
+                    rusqlite::params![user_id, channel_id],
+                )?;
+                Ok(())
+            })
+            .await;
+    }
+
+    async fn pop_pending_verify(&self, user_id: u64) -> Option<u64> {
+        self.db
+            .write(move |conn| {
+                use rusqlite::OptionalExtension;
+                let channel: Option<i64> = conn
+                    .query_row(
+                        "SELECT channel_id FROM onboarding_pending_verify WHERE user_id=?1",
+                        rusqlite::params![user_id],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                if channel.is_some() {
+                    conn.execute(
+                        "DELETE FROM onboarding_pending_verify WHERE user_id=?1",
+                        rusqlite::params![user_id],
+                    )?;
+                }
+                Ok(channel.map(|c| c as u64))
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn send_text(&self, channel_id: u64, content: String) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), serde_json::Value::from(content));
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
     }
 }
