@@ -1,3 +1,13 @@
+## #148 — Coaching-Status erreicht die Website wieder
+
+**Problem:** Die Coaching-Plattform auf der Website zeigt den Stand der Coaching-Anfragen und -Sessions (offen, reserviert, übernommen, abgesagt, abgeschlossen). Nach der Umstellung der Bot-Anbindung wurde dieser Stand **nicht mehr an die Website gemeldet** — der Bot verarbeitete die Anfragen zwar weiter, spiegelte jeden Zustandswechsel aber nicht mehr an die Website-Schnittstelle. Ergebnis: die Website-Ansicht wäre nach dem Cutover stehengeblieben. Außerdem wurde eine Änderung der Coach-Rollen-Zugehörigkeit nur alle 10 Minuten zur Website synchronisiert, nicht zeitnah.
+
+**Was wurde geändert:** Der Bot spiegelt jeden Coaching-Lebenszyklus-Schritt wieder an die Website (Anfrage erstellt/analysiert, für alle geöffnet, von einem Coach übernommen, abgesagt, Session abgeschlossen) — best-effort im Hintergrund, mit demselben Datensatz-Format wie zuvor. Zusätzlich löst das **Hinzukommen** eines Coaches (Coach-Rolle vergeben) jetzt einen zeitnahen Roster-Abgleich aus (mit kurzer Sammelpause, damit mehrere Änderungen zu einem Lauf gebündelt werden) statt erst beim 10-Minuten-Timer.
+
+**Wie es jetzt funktioniert:** Sobald sich an einer Coaching-Anfrage etwas ändert, ist der neue Stand kurz darauf auch auf der Website sichtbar; neue Coaches erscheinen zeitnah im Website-Roster. (Das Entfernen einer Coach-Rolle wird weiterhin vom regelmäßigen 10-Minuten-Abgleich erfasst.)
+
+**Betroffen:** Nutzer der Coaching-Plattform auf der Website und das Coach-Team.
+
 ## #147 — Erinnerungs-DMs abbestellbar + Mod-Tag- & Rang-Befehle zurück
 
 **Problem:** Nach der Umstellung fehlten mehrere Befehle, die es vorher gab. Am wichtigsten: Wer die automatischen **„Wir vermissen dich"-Erinnerungs-DMs** (an länger inaktive Stamm-Mitglieder) nicht (mehr) wollte, hatte **keine Möglichkeit mehr, sie abzustellen** — der Bot verschickte sie weiter, aber der Aus-Schalter war weg. Außerdem fehlten dem Mod-Team die **`/mod-tag`**-Befehle (Mitglieder mit Tags wie „Ragebaiter" markieren/entfernen/auflisten) und die **`!rrang`**-Verwaltung des Rang-Voice-Systems (u. a. das Rang-System pro Sprachkanal an-/ausschalten) sowie der Admin-Test `!nudgesend`.
