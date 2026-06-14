@@ -55,6 +55,9 @@ pub struct MessageEvent {
     /// Anhänge gesamt / davon Bilder (für Spam-/Takeover-Detektion).
     pub attachment_count: u32,
     pub image_attachment_count: u32,
+    /// URLs der Bild-Anhänge (gleiche Filterung wie `image_attachment_count`)
+    /// — für die Vision-Klassifikation der Moderation.
+    pub image_attachment_urls: Vec<String>,
     /// Account-Erstellung (Unix, aus der Snowflake) und Guild-Join (Cache).
     pub author_created_at: i64,
     pub author_joined_at: Option<i64>,
@@ -208,6 +211,7 @@ mod tests {
             is_reply: false,
             attachment_count: 0,
             image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
             author_created_at: 0,
             author_joined_at: None,
         });

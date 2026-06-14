@@ -56,7 +56,7 @@ impl EventHandler for Handler {
                 Some(guild.member_permissions(member).administrator())
             })
             .unwrap_or(false);
-        let image_attachment_count = message
+        let image_attachment_urls: Vec<String> = message
             .attachments
             .iter()
             .filter(|a| {
@@ -70,7 +70,9 @@ impl EventHandler for Handler {
                             .any(|ext| name.ends_with(ext))
                     })
             })
-            .count() as u32;
+            .map(|a| a.url.clone())
+            .collect();
+        let image_attachment_count = image_attachment_urls.len() as u32;
         let author_joined_at = message.guild_id.and_then(|guild_id| {
             let guild = ctx.cache.guild(guild_id)?;
             let member = guild.members.get(&message.author.id)?;
@@ -90,6 +92,7 @@ impl EventHandler for Handler {
             is_reply: message.message_reference.is_some(),
             attachment_count: message.attachments.len() as u32,
             image_attachment_count,
+            image_attachment_urls,
             author_created_at: message.author.id.created_at().unix_timestamp(),
             author_joined_at,
         });

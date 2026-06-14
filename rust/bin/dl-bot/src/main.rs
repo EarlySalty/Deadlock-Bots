@@ -176,10 +176,14 @@ async fn main() -> anyhow::Result<()> {
             adapter: adapter.clone(),
         }),
     );
+    let guard_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
     let security_guard = dl_moderation::guard::SecurityGuard::new(
         db.clone(),
-        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+        guard_client
+            .clone()
             .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
+        // Derselbe Client liefert das best-effort Takeover-Bild-Label.
+        guard_client.map(|c| c as Arc<dyn dl_ai::VisionGenerator>),
         Arc::new(modglue::GuardGlue {
             adapter: adapter.clone(),
         }),
@@ -311,10 +315,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
-    let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|generator| {
+    let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|client| {
+        // Derselbe Client bedient Text- und Vision-Pfad (Bild-only-Moderation).
+        let vision: Arc<dyn dl_ai::VisionGenerator> = client.clone();
         let moderator = dl_moderation::AiModerator::new(
             db.clone(),
-            generator,
+            client as Arc<dyn dl_ai::TextGenerator>,
+            Some(vision),
             Arc::new(modglue::ModGlue {
                 adapter: adapter.clone(),
             }),

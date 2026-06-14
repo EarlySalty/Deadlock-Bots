@@ -1,3 +1,13 @@
+## #150 — Bild-Moderation: reine Bild-Nachrichten werden wieder geprüft
+
+**Problem:** Die KI-Moderation bewertete bisher nur den Text einer Nachricht. Eine Nachricht ganz ohne Text — nur mit einem Bild-Anhang — wurde komplett übersprungen. Damit rutschte rein bildbasierter Scam (gefälschte Krypto-Auszahlungen, Casino-/Wett-Promos, Promo-Codes) und bildbasiertes NSFW durch die automatische Erkennung. Auch der Account-Takeover-Alarm (verdächtige Bild-Flut über mehrere Kanäle in Sekunden) lieferte den Mods keinerlei Bild-Einschätzung mehr, sondern nur den deterministischen Muster-Treffer.
+
+**Was wurde geändert:** Nachrichten mit Bild-Anhängen gehen jetzt durch die Bild-Erkennung (Vision). Die Moderation schickt zusätzlich zum Text bis zu vier Bilder an das KI-Modell und wertet dieselbe Klassifikation aus wie beim Text. Eine Nachricht wird nur noch dann ignoriert, wenn sie weder Text noch Bilder hat. Beim Account-Takeover holt der Schutz zusätzlich ein begleitendes Bild-Urteil ein und hängt es als Kontext an die Mod-Meldung.
+
+**Wie es jetzt funktioniert:** Beim Eingang einer Nachricht werden die Bild-Anhang-URLs mitgeführt (gefiltert auf echte Bild-Anhänge). Hat die Nachricht Bilder, läuft sie über den Bild-Pfad: Text plus die ersten vier Bilder gehen an das Modell, das mit demselben Schema antwortet (Urteil, Kategorie, Konfidenz) — und es gelten exakt dieselben Schwellen wie beim Text (automatisches Löschen erst ab sehr hoher Konfidenz, Mod-Vorschlag ab der bekannten Vorschlags-Schwelle). Es wird also nicht schärfer gehandelt als zuvor, nur die bisher blinde Bild-Spur ist abgedeckt. Der Takeover-Pfad bleibt deterministisch und reversibel; das KI-Bild-Urteil dort ist reines Mod-Kontext-Label und entscheidet die Quarantäne nicht mit. Greift das Modell mal nicht, fällt die Bewertung still aus statt zu blockieren.
+
+**Betroffen:** Alle Mitglieder (bildbasierter Scam/NSFW wird wieder automatisch erfasst) und das Mod-Team (bessere Takeover-Meldungen).
+
 ## #149 — Verbund-Broker kann „ist dieser Nutzer noch auf dem Server?" beantworten
 
 **Problem:** Der Steam-Bot räumt die Steam-Verknüpfung eines Mitglieds auf, wenn es den Discord-Server verlässt (Freundschaft beenden, Verknüpfung archivieren). Verpasst er das Austritts-Ereignis (z. B. weil er gerade neu startet), gibt es einen stündlichen Nachlauf, der verwaiste Verknüpfungen aufspürt. Dafür muss er aber zuverlässig wissen, ob ein Nutzer **wirklich** weg ist — und genau diese Auskunft konnte der zentrale Master-Broker bisher nicht geben. Es ließ sich nur „aus dem Gedächtnis" (Cache) raten, ohne sicher zwischen „bestätigt weg", „noch da" und „weiß ich gerade nicht" zu unterscheiden.

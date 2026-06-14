@@ -12,11 +12,16 @@
 //!    Account + ≥ 24 h auf dem Server) bekommen einen Vorschlag, junge den
 //!    Vollzug.
 //!
-//! Bewusste Lücke (dokumentiert): Die Bild-Scam-Bestätigung lief über die
-//! externe `mmx`-Vision-CLI — hier noch nicht angebunden. Folge: Bursts,
-//! die NUR über Bilder bestätigt würden, landen als reversibler
-//! Holding-Vorschlag statt als Auto-Vollzug (konservativer als das
-//! Original, nie schärfer).
+//! Takeover-Bild-Label (Original: `_finalize_takeover_ai_label`): Bei einem
+//! Takeover mit Bild-Anhängen holt der Guard best-effort ein MiniMax-Vision-
+//! Label (`generate_multimodal`) und hängt es als Mod-Kontext an den Grund —
+//! KEIN Gate, die Quarantäne bleibt deterministisch.
+//!
+//! Bewusste Lücke (dokumentiert): Die KI-Bild-Scam-*Bestätigung* des
+//! Burst-Pfads (junge Accounts) lief im Original über die externe
+//! `mmx`-Vision-CLI und ist hier weiterhin text-only. Folge: Bursts, die NUR
+//! über Bilder bestätigt würden, landen als reversibler Holding-Vorschlag
+//! statt als Auto-Vollzug (konservativer als das Original, nie schärfer).
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -68,6 +73,15 @@ Telegram/contact requests, profit-sharing, referral schemes, or similar). \
 Reply only with valid JSON, no other text: \
 {\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence\"}";
 
+/// Vision-Prompt wortgleich zum Original (`VISION_SCAM_PROMPT`). Liefert
+/// dasselbe JSON-Schema wie der Text-Scam-Check.
+pub const VISION_SCAM_PROMPT: &str =
+    "You are a scam detector for a Discord gaming server. Look at the image. \
+Decide if it shows financial/crypto/casino/gambling/giveaway scam content \
+(fake withdrawals, betting bonuses, promo codes, fake celebrity crypto promos, \
+trading/earnings proof). Reply ONLY with valid JSON, no other text: \
+{\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence\"}";
+
 // ── Pure Detektion ─────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
@@ -78,6 +92,8 @@ pub struct RecentMsg {
     pub content: String,
     pub attachment_count: u32,
     pub image_count: u32,
+    /// URLs der Bild-Anhänge — für das Takeover-Vision-Label.
+    pub image_urls: Vec<String>,
 }
 
 pub fn contains_suspicious_text(text: &str) -> bool {
@@ -291,6 +307,10 @@ pub struct Incident {
 pub struct SecurityGuard {
     pub db: Db,
     pub generator: Option<Arc<dyn dl_ai::TextGenerator>>,
+    /// Optionaler Vision-Pfad für das Takeover-Bild-Label (Original:
+    /// `_finalize_takeover_ai_label` → `_ai_check_image_scam`). Best-effort,
+    /// kein Gate: ändert die Quarantäne nie, liefert nur Mod-Kontext.
+    pub vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
     pub port: Arc<dyn GuardPort>,
     history: tokio::sync::Mutex<HashMap<u64, VecDeque<RecentMsg>>>,
     active: tokio::sync::Mutex<std::collections::HashSet<u64>>,
@@ -300,11 +320,13 @@ impl SecurityGuard {
     pub fn new(
         db: Db,
         generator: Option<Arc<dyn dl_ai::TextGenerator>>,
+        vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn GuardPort>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             generator,
+            vision,
             port,
             history: tokio::sync::Mutex::new(HashMap::new()),
             active: tokio::sync::Mutex::new(std::collections::HashSet::new()),
@@ -354,6 +376,7 @@ impl SecurityGuard {
                 content: event.content.clone(),
                 attachment_count: event.attachment_count,
                 image_count: event.image_attachment_count,
+                image_urls: event.image_attachment_urls.clone(),
             });
             while entry.len() > HISTORY_MAX {
                 entry.pop_front();
@@ -389,7 +412,7 @@ impl SecurityGuard {
         recent: &[RecentMsg],
         now: i64,
     ) -> bool {
-        // 1. Takeover (alle Accounts, kein AI)
+        // 1. Takeover (alle Accounts, deterministisch, kein AI-Gate)
         if let Some((reason, burst)) = detect_takeover(recent, now) {
             let meta = [
                 burst
@@ -401,6 +424,12 @@ impl SecurityGuard {
                 burst.iter().map(|m| m.image_count as i64).sum(),
                 0,
             ];
+            // Best-effort-KI-Bild-Label (kein Gate) als Mod-Kontext an den
+            // Grund anhängen — wie das Original-Feld „MiniMax-Einschätzung".
+            let reason = match self.takeover_ai_label(&burst).await {
+                Some(label) => format!("{reason}\nMiniMax-Einschaetzung: {label}"),
+                None => reason,
+            };
             self.execute(guild_id, event, burst, reason, meta, GuardAction::Takeover)
                 .await;
             return true;
@@ -463,6 +492,7 @@ impl SecurityGuard {
                     content: event.content.clone(),
                     attachment_count: event.attachment_count,
                     image_count: event.image_attachment_count,
+                    image_urls: event.image_attachment_urls.clone(),
                 }];
                 let meta = [1, 1, event.attachment_count as i64, 1];
                 self.execute(guild_id, event, single, reason, meta, action)
@@ -490,6 +520,46 @@ impl SecurityGuard {
             })
             .await;
         parse_scam_json(raw.as_deref())
+    }
+
+    /// Best-effort-Bild-Label für den Takeover-Alarm (Original:
+    /// `_takeover_ai_label` → `_ai_check_image_scam`). KEIN Gate: ändert die
+    /// Quarantäne nie, liefert den Mods nur Kontext, ob MiniMax die Bilder
+    /// ebenfalls als Scam einschätzt. Gibt None zurück, wenn kein Vision-
+    /// Generator verdrahtet ist oder keine Bilder vorliegen.
+    async fn takeover_ai_label(&self, burst: &[RecentMsg]) -> Option<String> {
+        let vision = self.vision.as_ref()?;
+        let image_urls: Vec<String> = burst
+            .iter()
+            .flat_map(|m| m.image_urls.iter().cloned())
+            .take(4)
+            .collect();
+        if image_urls.is_empty() {
+            return None;
+        }
+        let raw = vision
+            .generate_multimodal(dl_ai::GenerateMultimodalRequest {
+                prompt: VISION_SCAM_PROMPT.to_string(),
+                image_urls,
+                system_prompt: None,
+                model: None,
+                max_output_tokens: Some(200),
+                temperature: 0.2,
+            })
+            .await;
+        if raw.is_none() {
+            return Some("nicht verfuegbar".to_string());
+        }
+        let (is_scam, confidence, reason) = parse_scam_json(raw.as_deref());
+        if reason == "parse_error" {
+            return Some("nicht verfuegbar".to_string());
+        }
+        let verdict = if is_scam { "Scam" } else { "kein Scam" };
+        let reason = if reason.is_empty() { "-" } else { &reason };
+        Some(format!(
+            "{verdict} ({:.0}%) — {reason}",
+            confidence * 100.0
+        ))
     }
 
     /// Vollzug oder Vorschlag: DM → Aktion → Nachrichten löschen →
@@ -677,6 +747,7 @@ mod tests {
             content: content.to_string(),
             attachment_count: images,
             image_count: images,
+            image_urls: (0..images).map(|i| format!("https://img/{i}")).collect(),
         }
     }
 

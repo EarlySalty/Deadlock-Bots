@@ -15,10 +15,15 @@
 //! niederschwellige Verwarn-DM; ein zweiter Treffer innerhalb von 30 min
 //! eskaliert stattdessen zum Mod-Vorschlag.
 //!
+//! Bild-only-Nachrichten (Original: `image_attachments`) laufen über die
+//! Vision-Klassifikation (`generate_multimodal`, gleicher System-Prompt,
+//! Temperatur 0.2): leerer Text wird nur dann übersprungen, wenn auch keine
+//! Bild-Anhänge vorliegen oder kein Vision-Generator verdrahtet ist.
+//!
 //! Bewusste Lücken (dokumentiert): Kontext-Backfill-Eskalation (12
-//! Nachrichten bei 0.55–0.78), Bild-Anhänge (multimodal) und die übrigen
-//! Tone-Tag-Schwellen — folgen mit dem Tag-System; der Admin-Skip nähert
-//! manage_messages über das Administrator-Flag des Dispatchers an.
+//! Nachrichten bei 0.55–0.78) und die übrigen Tone-Tag-Schwellen — folgen
+//! mit dem Tag-System; der Admin-Skip nähert manage_messages über das
+//! Administrator-Flag des Dispatchers an.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -250,6 +255,10 @@ pub enum ReviewOutcome {
 pub struct AiModerator {
     pub store: store::ModerationStore,
     pub generator: Arc<dyn dl_ai::TextGenerator>,
+    /// Optionaler Vision-Pfad für Bild-only-Nachrichten (Original:
+    /// `generate_multimodal`). Ohne Vision-Generator werden reine Bild-
+    /// nachrichten wie bisher übersprungen.
+    pub vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
     pub port: Arc<dyn ModPort>,
     cooldown: tokio::sync::Mutex<HashMap<u64, std::time::Instant>>,
     /// (user_id, channel_id) → letzter Ragebaiter-Free-Warnzeitpunkt (Unix).
@@ -261,11 +270,13 @@ impl AiModerator {
     pub fn new(
         db: Db,
         generator: Arc<dyn dl_ai::TextGenerator>,
+        vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn ModPort>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store: store::ModerationStore { db },
             generator,
+            vision,
             port,
             cooldown: tokio::sync::Mutex::new(HashMap::new()),
             ragebaiter_free_warnings: tokio::sync::Mutex::new(HashMap::new()),
@@ -360,7 +371,16 @@ impl AiModerator {
         if event.author_is_admin {
             return; // Original skippt manage_messages — Annäherung
         }
-        if event.content.trim().is_empty() {
+        // Original (`ai_moderator.py`): überspringe nur, wenn WEDER Text NOCH
+        // Bild-Anhänge vorliegen. Reine Bild-Nachrichten laufen über die
+        // Vision-Klassifikation (sofern ein Vision-Generator verdrahtet ist).
+        let has_text = !event.content.trim().is_empty();
+        let image_urls: Vec<String> = if self.vision.is_some() {
+            event.image_attachment_urls.clone()
+        } else {
+            Vec::new()
+        };
+        if !has_text && image_urls.is_empty() {
             return;
         }
         {
@@ -374,18 +394,50 @@ impl AiModerator {
             cooldown.insert(event.author_id, now);
         }
 
-        let prompt: String = event.content.chars().take(MAX_PROMPT_CHARS).collect();
-        let raw = self
-            .generator
-            .generate_text(dl_ai::GenerateRequest {
-                prompt,
-                system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
-                model: None,
-                max_output_tokens: Some(300),
-                temperature: 0.0,
+        let verdict = if image_urls.is_empty() {
+            // Text-only — wie bisher reiner Text-Pfad.
+            let prompt: String = event.content.chars().take(MAX_PROMPT_CHARS).collect();
+            let raw = self
+                .generator
+                .generate_text(dl_ai::GenerateRequest {
+                    prompt,
+                    system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
+                    model: None,
+                    max_output_tokens: Some(300),
+                    temperature: 0.0,
+                })
+                .await;
+            parse_ai_verdict(raw.as_deref())
+        } else {
+            // Mit Bild-Anhängen → multimodaler Pfad. Prompt-Payload analog zum
+            // Original (`_build_prompt_payload`): user_message + attachment_count
+            // als kompaktes JSON. Vision-Generator ist hier garantiert gesetzt.
+            let Some(vision) = &self.vision else {
+                return;
+            };
+            let focus: String = if has_text {
+                event.content.chars().take(1000).collect()
+            } else {
+                "[kein Text]".to_string()
+            };
+            let prompt = serde_json::json!({
+                "user_tag": event.author_display_name.chars().take(80).collect::<String>(),
+                "user_message": focus,
+                "attachment_count": image_urls.len(),
             })
-            .await;
-        let verdict = parse_ai_verdict(raw.as_deref());
+            .to_string();
+            let raw = vision
+                .generate_multimodal(dl_ai::GenerateMultimodalRequest {
+                    prompt,
+                    image_urls,
+                    system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
+                    model: None,
+                    max_output_tokens: Some(300),
+                    temperature: 0.2,
+                })
+                .await;
+            parse_ai_verdict(raw.as_deref())
+        };
 
         match decide_action(&verdict, PROPOSE_CONFIDENCE) {
             ModAction::Ignore => {}

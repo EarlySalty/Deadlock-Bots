@@ -30,11 +30,36 @@ pub struct GenerateRequest {
     pub temperature: f64,
 }
 
+/// Multimodal-Anfrage: Text + bis zu 4 Bild-URLs (Port von
+/// `generate_multimodal` aus `cogs/ai_connector.py`). Default-Temperatur im
+/// Original ist 0.2 — Konsumenten setzen sie explizit.
+#[derive(Debug, Clone)]
+pub struct GenerateMultimodalRequest {
+    pub prompt: String,
+    pub image_urls: Vec<String>,
+    pub system_prompt: Option<String>,
+    pub model: Option<String>,
+    pub max_output_tokens: Option<u32>,
+    pub temperature: f64,
+}
+
 /// Text-Generierung — Konsumenten hängen am Trait (Tests mocken ihn).
 #[async_trait::async_trait]
 pub trait TextGenerator: Send + Sync {
     async fn generate_text(&self, request: GenerateRequest) -> Option<String>;
 }
+
+/// Bild-/Multimodal-Generierung (analog `TextGenerator`). Eigener Trait, damit
+/// die Moderation gezielt nur diese Fähigkeit mocken/injizieren kann.
+#[async_trait::async_trait]
+pub trait VisionGenerator: Send + Sync {
+    async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String>;
+}
+
+/// Gültige Bild-URL-Präfixe (Original: `valid_prefixes` in `generate_multimodal`).
+const VALID_IMAGE_PREFIXES: [&str; 3] = ["http://", "https://", "data:image/"];
+/// Maximale Bildanzahl pro Request (Original: `valid_images[:4]`).
+const MAX_MULTIMODAL_IMAGES: usize = 4;
 
 pub struct MiniMaxClient {
     http: reqwest::Client,
@@ -149,6 +174,169 @@ impl TextGenerator for MiniMaxClient {
 
         if self.token_plan {
             // Anthropic-Format: content-Fragmente vom Typ "text"
+            let fragments: Vec<&str> = data
+                .get("content")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+                        .filter_map(|item| item.get("text").and_then(Value::as_str))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if fragments.is_empty() {
+                return None;
+            }
+            Some(fragments.concat().trim().to_string())
+        } else {
+            data.get("choices")
+                .and_then(Value::as_array)
+                .and_then(|choices| choices.first())
+                .and_then(|choice| choice.get("message"))
+                .and_then(|message| message.get("content"))
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        }
+    }
+}
+
+impl MiniMaxClient {
+    /// `data:image/...;base64,<data>` → (media_type, base64-data). Sonst None.
+    /// Spiegelt `_parse_data_image_uri` aus dem Original 1:1.
+    fn parse_data_image_uri(image_url: &str) -> Option<(String, String)> {
+        if !image_url.starts_with("data:image/") {
+            return None;
+        }
+        let (header, data) = image_url.split_once(',')?;
+        if !header.contains(";base64") {
+            return None;
+        }
+        // header[5:] → ab "data:" alles bis zum ersten ';' ist der Media-Type.
+        let after_prefix = &header[5..];
+        let media_type = after_prefix
+            .split(';')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let media_type = if media_type.is_empty() {
+            "image/png".to_string()
+        } else {
+            media_type
+        };
+        if !media_type.starts_with("image/") {
+            return None;
+        }
+        Some((media_type, data.to_string()))
+    }
+
+    /// Anthropic-`/v1`-Content-Blöcke: Text zuerst, dann Bilder als
+    /// base64- oder url-`source` (Original: `_build_token_plan_content`).
+    fn build_token_plan_content(prompt: &str, image_urls: &[String]) -> Value {
+        let mut content = vec![json!({ "type": "text", "text": prompt })];
+        for image_url in image_urls {
+            if let Some((media_type, data)) = Self::parse_data_image_uri(image_url) {
+                content.push(json!({
+                    "type": "image",
+                    "source": { "type": "base64", "media_type": media_type, "data": data },
+                }));
+            } else {
+                content.push(json!({
+                    "type": "image",
+                    "source": { "type": "url", "url": image_url },
+                }));
+            }
+        }
+        Value::Array(content)
+    }
+
+    /// Standard-`chatcompletion_v2`-User-Content: ohne Bilder reiner Text,
+    /// sonst Text + `image_url`-Blöcke (Original: `_build_standard_user_content`).
+    fn build_standard_user_content(prompt: &str, image_urls: &[String]) -> Value {
+        if image_urls.is_empty() {
+            return Value::String(prompt.to_string());
+        }
+        let mut content = vec![json!({ "type": "text", "text": prompt })];
+        for image_url in image_urls {
+            content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": image_url },
+            }));
+        }
+        Value::Array(content)
+    }
+}
+
+#[async_trait::async_trait]
+impl VisionGenerator for MiniMaxClient {
+    async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String> {
+        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+
+        // Wie das Original: nur valide Präfixe, auf die ersten 4 kappen.
+        let images: Vec<String> = request
+            .image_urls
+            .iter()
+            .filter(|url| VALID_IMAGE_PREFIXES.iter().any(|p| url.starts_with(p)))
+            .take(MAX_MULTIMODAL_IMAGES)
+            .cloned()
+            .collect();
+
+        let response = if self.token_plan {
+            self.http
+                .post(format!("{}/messages", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&json!({
+                    "model": model,
+                    "system": request.system_prompt.unwrap_or_default(),
+                    "messages": [{
+                        "role": "user",
+                        "content": Self::build_token_plan_content(&request.prompt, &images),
+                    }],
+                    "max_tokens": max_tokens,
+                    "temperature": request.temperature,
+                }))
+                .send()
+                .await
+        } else {
+            let mut messages = Vec::new();
+            if let Some(system) = &request.system_prompt {
+                messages.push(json!({ "role": "system", "content": system }));
+            }
+            messages.push(json!({
+                "role": "user",
+                "content": Self::build_standard_user_content(&request.prompt, &images),
+            }));
+            self.http
+                .post(format!("{}/text/chatcompletion_v2", self.base_url))
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&json!({
+                    "model": model,
+                    "messages": messages,
+                    "max_tokens": max_tokens,
+                    "temperature": request.temperature,
+                }))
+                .send()
+                .await
+        };
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "MiniMax-Multimodal-Request fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "MiniMax-Multimodal-API-Fehler");
+            return None;
+        }
+        let data: Value = response.json().await.ok()?;
+
+        if self.token_plan {
             let fragments: Vec<&str> = data
                 .get("content")
                 .and_then(Value::as_array)
@@ -336,5 +524,87 @@ mod tests {
         let (_, standard_body) = &captured[1];
         assert_eq!(standard_body["messages"][0]["role"], "system");
         assert_eq!(standard_body["messages"][1]["content"], "ping");
+    }
+
+    #[test]
+    fn multimodal_content_format() {
+        // Token-Plan: data:-URI → base64-source, http → url-source.
+        let images = vec![
+            "data:image/jpeg;base64,QUJD".to_string(),
+            "https://example.com/a.png".to_string(),
+        ];
+        let content = MiniMaxClient::build_token_plan_content("frage", &images);
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "frage");
+        assert_eq!(content[1]["type"], "image");
+        assert_eq!(content[1]["source"]["type"], "base64");
+        assert_eq!(content[1]["source"]["media_type"], "image/jpeg");
+        assert_eq!(content[1]["source"]["data"], "QUJD");
+        assert_eq!(content[2]["source"]["type"], "url");
+        assert_eq!(content[2]["source"]["url"], "https://example.com/a.png");
+
+        // Standard ohne Bilder → reiner String; mit Bildern → image_url-Blöcke.
+        assert_eq!(
+            MiniMaxClient::build_standard_user_content("frage", &[]),
+            serde_json::Value::String("frage".to_string())
+        );
+        let std_content = MiniMaxClient::build_standard_user_content("frage", &images);
+        assert_eq!(std_content[1]["type"], "image_url");
+        assert_eq!(std_content[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+    }
+
+    /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.
+    #[tokio::test]
+    async fn multimodal_filtert_und_kappt() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/messages",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().expect("lock").push(body);
+                    Json(json!({ "content": [ { "type": "text", "text": "Scam" } ]}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let base = format!("http://{addr}");
+
+        let client = MiniMaxClient::new(&base, "tp-key", true, "MiniMax-M3");
+        let text = client
+            .generate_multimodal(GenerateMultimodalRequest {
+                prompt: "p".into(),
+                image_urls: vec![
+                    "ftp://nope".into(), // ungültiges Präfix → gefiltert
+                    "https://1".into(),
+                    "https://2".into(),
+                    "https://3".into(),
+                    "https://4".into(),
+                    "https://5".into(), // > 4 → gekappt
+                ],
+                system_prompt: Some("sys".into()),
+                model: None,
+                max_output_tokens: Some(300),
+                temperature: 0.2,
+            })
+            .await;
+        assert_eq!(text.as_deref(), Some("Scam"));
+        let captured = captured.lock().expect("lock");
+        let content = captured[0]["messages"][0]["content"]
+            .as_array()
+            .expect("array");
+        // 1 Text-Block + genau 4 Bild-Blöcke (5./ungültige gefiltert).
+        assert_eq!(content.len(), 5);
+        assert_eq!(content[1]["source"]["url"], "https://1");
+        assert_eq!(content[4]["source"]["url"], "https://4");
     }
 }
