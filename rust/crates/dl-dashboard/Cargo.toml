@@ -12,6 +12,7 @@ dl-core.workspace = true
 dl-db.workspace = true
 dl-webcore.workspace = true
 dl-tournament.workspace = true
+dl-activity.workspace = true
 rusqlite.workspace = true
 axum.workspace = true
 tower-http.workspace = true

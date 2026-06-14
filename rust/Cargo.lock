@@ -444,6 +444,7 @@ dependencies = [
  "axum",
  "base64",
  "chrono",
+ "dl-activity",
  "dl-core",
  "dl-db",
  "dl-tournament",

@@ -277,6 +277,7 @@ pub fn router(app: DashboardApp) -> Router {
             post(import_session),
         )
         // Analytics-Reads (Phase 9b) — Session-gegatet, reine DB-Reads.
+        .route("/api/server-stats", get(crate::server_stats::server_stats))
         .route("/api/member-events", get(crate::analytics::member_events))
         .route(
             "/api/message-activity",
