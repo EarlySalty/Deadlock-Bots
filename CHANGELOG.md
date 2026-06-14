@@ -1,3 +1,11 @@
+## #130 — Rust-Neuaufbau: öffentliche Live-Server-Zahlen
+
+**Ausgangslage:** Die Community-Website zeigt Live-Kennzahlen des Discord-Servers — Mitgliederzahl, gerade online, gerade im Voice. Diese öffentliche Schnittstelle war bei der Patchnotes-Umstellung (#128) bewusst zurückgestellt, weil sie Daten direkt aus dem laufenden Bot braucht (die Website-Anzeige selbst blieb so lange auf Python).
+
+**Was wurde geändert:** Die Schnittstelle ist jetzt in Rust. Da der Web-Prozess selbst keine Discord-Verbindung hat, fragt er die Zahlen beim Bot ab — dafür hat der Bot eine neue, rein lesende interne Auskunft bekommen, die Mitglieder-, Online- und Voice-Zahl (sowie den Vanity-Link) aus seinem Live-Zustand liefert. Die Antwort wird wie bisher 30 Sekunden zwischengespeichert, damit häufige Website-Aufrufe den Bot nicht belasten, und trägt die nötigen Zugriffs- und Cache-Hinweise für den Browser.
+
+**Wie es jetzt funktioniert:** Beim Aufruf liefert der Web-Prozess entweder den noch frischen Zwischenspeicher oder holt die aktuellen Zahlen einmal beim Bot und merkt sie sich für 30 Sekunden. Die Online-Zahl ergibt sich aus den als nicht-offline gemeldeten Mitgliedern, die Voice-Zahl aus den aktuell in Sprachkanälen befindlichen Nutzern — genau wie zuvor. Ist der Bot gerade nicht verbunden, kommt dieselbe „keine Daten verfügbar"-Antwort wie im Original statt eines Fehlers. Geprüft über einen nachgestellten Bot: korrekte Zahlen, Zwischenspeicher und Zugriffs-Hinweise. Damit sind alle öffentlichen Schnittstellen in Rust. Derselbe neue Bot-Auskunftsweg speist als Nächstes die interne Server-Statistik im Admin-Bereich.
+
 ## #129 — Rust-Neuaufbau: Turnier-Verwaltung (Admin-Aktionen)
 
 **Ausgangslage:** Im Admin-Dashboard lässt sich ein Turnier verwalten — Anmeldezeitraum anlegen und schließen, Teams anlegen und löschen, Spieler einem Team zuweisen, einzeln entfernen oder alle Anmeldungen leeren. Der Spieler-Anmelde-Flow lief schon in Rust (#114), die Verwaltungs-Aktionen aber noch über Python (das war die offen dokumentierte Lücke aus #114).
