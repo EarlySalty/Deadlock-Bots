@@ -198,6 +198,30 @@ pub fn parse_scam_json(text: Option<&str>) -> (bool, f64, String) {
     (is_scam, confidence, reason)
 }
 
+/// Takeover-DM-Text (Original: `_send_takeover_dm`). Dauer aus `TIMEOUT_MINUTES`
+/// abgeleitet (1440 → „24 Stunden"). Als Plain-Text, wie die übrige Guard-DM.
+pub fn takeover_dm_text(case_id: &str) -> String {
+    let hours = TIMEOUT_MINUTES / 60;
+    let dauer = if TIMEOUT_MINUTES % 60 == 0 && hours > 0 {
+        if hours == 1 {
+            "1 Stunde".to_string()
+        } else {
+            format!("{hours} Stunden")
+        }
+    } else {
+        format!("{TIMEOUT_MINUTES} Minuten")
+    };
+    format!(
+        "Du wurdest vorübergehend stummgeschaltet.\n\
+         Grund: Dein Account hat in Sekunden Bilder in mehreren Kanälen gepostet — ein typisches \
+         Muster für einen gekaperten Account. Falls du gehackt wurdest: Passwort ändern, \
+         2FA aktivieren und beim Mod-Team melden, sobald du den Account zurück hast.\n\
+         Dauer: {dauer}\n\
+         Case: {case_id}\n\
+         Falls das ein Irrtum war, wende dich ans Mod-Team — der Timeout wird aufgehoben."
+    )
+}
+
 pub fn is_new_account(created_at: i64, now: i64) -> bool {
     now - created_at < ACCOUNT_MAX_AGE_HOURS * 3600
 }
@@ -218,6 +242,9 @@ pub enum GuardAction {
     Enforce,
     /// Reversibler 60-min-Holding-Timeout mit Mod-Review.
     Propose,
+    /// Account-Takeover-Quarantäne: reversibler 24h-Timeout + eigene
+    /// Takeover-DM (Original: `_handle_takeover`/`_send_takeover_dm`).
+    Takeover,
 }
 
 /// Discord-Seite (Tests mocken sie).
@@ -358,7 +385,7 @@ impl SecurityGuard {
                 burst.iter().map(|m| m.image_count as i64).sum(),
                 0,
             ];
-            self.execute(guild_id, event, burst, reason, meta, GuardAction::Enforce)
+            self.execute(guild_id, event, burst, reason, meta, GuardAction::Takeover)
                 .await;
             return true;
         }
@@ -383,11 +410,14 @@ impl SecurityGuard {
                 } else {
                     GuardAction::Propose
                 };
+                // `action` ist hier ausschließlich Enforce oder Propose
+                // (zwei Zeilen darüber gesetzt); der Takeover-Pfad läuft
+                // separat über `run_detection` und kommt hier nie an.
                 let full_reason = match action {
                     GuardAction::Enforce => {
                         format!("{reason}; AI conf {:.0}%: {ai_reason}", confidence * 100.0)
                     }
-                    GuardAction::Propose => format!(
+                    GuardAction::Propose | GuardAction::Takeover => format!(
                         "{reason}; AI unbestätigt ({:.0}%: {ai_reason})",
                         confidence * 100.0
                     ),
@@ -466,6 +496,7 @@ impl SecurityGuard {
             action: match action {
                 GuardAction::Enforce => "ban".to_string(),
                 GuardAction::Propose => "timeout-proposal".to_string(),
+                GuardAction::Takeover => "takeover-quarantine".to_string(),
             },
             reason: reason.clone(),
             meta,
@@ -473,21 +504,28 @@ impl SecurityGuard {
         };
         self.persist(&incident).await;
 
-        let _ = self
-            .port
-            .send_dm(
-                event.author_id,
-                format!(
-                    "Dein Account hat auf der Deutschen Deadlock Community ein Sicherheits-Muster ausgelöst.\nGrund: {reason}\nCase: {case_id}\nWenn das ein Irrtum ist, melde dich beim Mod-Team."
-                ),
-            )
-            .await;
+        // Takeover hat eine eigene DM (Hinweis auf möglichen Hack, reversibel),
+        // alle anderen Pfade die generische Sicherheits-Muster-DM.
+        let dm_text = match action {
+            GuardAction::Takeover => takeover_dm_text(&case_id),
+            _ => format!(
+                "Dein Account hat auf der Deutschen Deadlock Community ein Sicherheits-Muster ausgelöst.\nGrund: {reason}\nCase: {case_id}\nWenn das ein Irrtum ist, melde dich beim Mod-Team."
+            ),
+        };
+        let _ = self.port.send_dm(event.author_id, dm_text).await;
 
         let acted = match action {
             GuardAction::Enforce => self.port.ban(guild_id, event.author_id, &reason).await,
             GuardAction::Propose => {
                 self.port
                     .timeout(guild_id, event.author_id, PROPOSAL_TIMEOUT_MINUTES, &reason)
+                    .await
+            }
+            // Reversibler 24h-Timeout statt Ban (Original: `_apply_timeout`,
+            // timeout_minutes=1440). Mod kann eskalieren oder aufheben.
+            GuardAction::Takeover => {
+                self.port
+                    .timeout(guild_id, event.author_id, TIMEOUT_MINUTES, &reason)
                     .await
             }
         };
@@ -663,6 +701,15 @@ mod tests {
             now
         ));
         assert!(!is_established_account(now - 800 * hour, None, now));
+    }
+
+    #[test]
+    fn takeover_dm_24h() {
+        let text = takeover_dm_text("sg-1-2");
+        // 1440 min → "24 Stunden", Case-ID enthalten, Hack-Hinweis vorhanden.
+        assert!(text.contains("24 Stunden"));
+        assert!(text.contains("sg-1-2"));
+        assert!(text.contains("gekaperten Account"));
     }
 
     #[test]

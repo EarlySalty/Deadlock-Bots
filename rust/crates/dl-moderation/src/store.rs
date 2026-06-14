@@ -2,6 +2,7 @@
 //! (Schema wie SCHEMA_SQL des Originals — das Original legt selbst an).
 
 use dl_db::{Db, DbError};
+use rusqlite::OptionalExtension;
 
 #[derive(Debug, Clone)]
 pub struct CaseDraft {
@@ -11,6 +12,21 @@ pub struct CaseDraft {
     pub user_id: u64,
     pub user_tag: String,
     pub content: String,
+    pub category: String,
+    pub confidence: f64,
+    pub reason: String,
+    pub action: String,
+}
+
+/// Persistierter Case (für den Review-Flow: löschen/timeouten/bannen).
+#[derive(Debug, Clone)]
+pub struct CaseRecord {
+    pub case_id: String,
+    pub guild_id: u64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub user_id: u64,
+    pub user_tag: String,
     pub category: String,
     pub confidence: f64,
     pub reason: String,
@@ -131,6 +147,57 @@ impl ModerationStore {
             .await;
     }
 
+    /// Wie `resolve_case`, aber mit Pflicht-Begründung (`mod_deny_reason`) —
+    /// für den Deny-Flow (Original: `_mark_case_denied_sync`).
+    pub async fn resolve_case_denied(&self, case_id: &str, mod_id: u64, reason: &str) {
+        let (case_id, reason) = (case_id.to_string(), reason.to_string());
+        let _ = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE ai_moderation_cases
+                        SET action = 'denied', mod_id = ?1,
+                            mod_action_at = CURRENT_TIMESTAMP, mod_deny_reason = ?2
+                      WHERE case_id = ?3",
+                    rusqlite::params![mod_id, reason, case_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+    }
+
+    /// Case laden (für den Review-Flow). None, wenn nicht vorhanden.
+    pub async fn fetch_case(&self, case_id: &str) -> Option<CaseRecord> {
+        let case_id = case_id.to_string();
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT case_id, guild_id, channel_id, message_id, user_id, user_tag,
+                            ai_category, ai_confidence, ai_reason, action
+                       FROM ai_moderation_cases WHERE case_id = ?1",
+                    [case_id],
+                    |row| {
+                        Ok(CaseRecord {
+                            case_id: row.get(0)?,
+                            guild_id: row.get::<_, i64>(1)? as u64,
+                            channel_id: row.get::<_, i64>(2)? as u64,
+                            message_id: row.get::<_, i64>(3)? as u64,
+                            user_id: row.get::<_, i64>(4)? as u64,
+                            user_tag: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
+                            category: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
+                            confidence: row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
+                            reason: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
+                            action: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     /// Hit zählen → (Anzahl im 120-min-Fenster, Previews ältester→neuester).
     pub async fn insert_ragebait_hit(
         &self,
@@ -212,6 +279,50 @@ mod tests {
             .await
             .expect("case");
         assert_eq!((action.as_str(), mod_id, review), ("accepted", 777, 999));
+    }
+
+    #[tokio::test]
+    async fn fetch_und_deny_mit_grund() {
+        let (_dir, store) = store().await;
+        let case_id = store
+            .insert_case(CaseDraft {
+                guild_id: 1,
+                channel_id: 2,
+                message_id: 3,
+                user_id: 100,
+                user_tag: "Anna".into(),
+                content: "x".into(),
+                category: "scam".into(),
+                confidence: 0.9,
+                reason: "Scam".into(),
+                action: "proposed".into(),
+            })
+            .await;
+        let case = store.fetch_case(&case_id).await.expect("case");
+        assert_eq!(case.action, "proposed");
+        assert_eq!((case.channel_id, case.message_id, case.user_id), (2, 3, 100));
+
+        store.resolve_case_denied(&case_id, 777, "kein Verstoss").await;
+        let denied = store.fetch_case(&case_id).await.expect("case");
+        assert_eq!(denied.action, "denied");
+
+        let reason: Option<String> = store
+            .db
+            .read({
+                let case_id = case_id.clone();
+                move |conn| {
+                    conn.query_row(
+                        "SELECT mod_deny_reason FROM ai_moderation_cases WHERE case_id = ?1",
+                        [case_id],
+                        |row| row.get(0),
+                    )
+                }
+            })
+            .await
+            .expect("reason");
+        assert_eq!(reason.as_deref(), Some("kein Verstoss"));
+
+        assert!(store.fetch_case("gibtsnicht").await.is_none());
     }
 
     #[tokio::test]

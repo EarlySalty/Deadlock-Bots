@@ -38,6 +38,19 @@ impl dl_moderation::ModPort for ModGlue {
             .is_ok()
     }
 
+    async fn ban_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .ban_user(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                1, // 1 Tag Nachrichten löschen (wie delete_message_days=1)
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
     async fn post_review(
         &self,
         case: &dl_moderation::store::CaseDraft,
@@ -81,8 +94,23 @@ impl dl_moderation::ModPort for ModGlue {
 }
 
 /// Review-Buttons: aimod:accept|ban|deny:{case_id} (Mod-Guard via Rechte).
+/// `deny` öffnet ein Modal (Pflicht-Grund) → Submit kommt als
+/// `aimod:denysubmit:{case_id}` über dieselbe Prefix-Route zurück.
 pub struct ReviewHandler {
     pub moderator: Arc<dl_moderation::AiModerator>,
+}
+
+impl ReviewHandler {
+    fn outcome_reply(outcome: dl_moderation::ReviewOutcome) -> BridgeReply {
+        use dl_moderation::ReviewOutcome;
+        match outcome {
+            ReviewOutcome::NotFound => BridgeReply::ephemeral_text("Case nicht gefunden."),
+            ReviewOutcome::AlreadyHandled => {
+                BridgeReply::ephemeral_text("Case wurde bereits bearbeitet.")
+            }
+            ReviewOutcome::Done(text) => BridgeReply::ephemeral_text(text),
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -100,27 +128,45 @@ impl InteractionHandler for ReviewHandler {
         };
         match action {
             "accept" => {
-                self.moderator
-                    .store
-                    .resolve_case(case_id, "accepted", interaction.user_id)
-                    .await;
-                BridgeReply::ephemeral_text(
-                    "Akzeptiert — Nachricht löschen/Timeout bitte im Case prüfen.",
-                )
+                let outcome = self.moderator.accept_case(case_id, interaction.user_id).await;
+                Self::outcome_reply(outcome)
             }
             "ban" => {
-                self.moderator
-                    .store
-                    .resolve_case(case_id, "banned", interaction.user_id)
-                    .await;
-                BridgeReply::ephemeral_text("Als Ban markiert — Ban bitte manuell ausführen.")
+                let outcome = self.moderator.ban_case(case_id, interaction.user_id).await;
+                Self::outcome_reply(outcome)
             }
-            "deny" => {
-                self.moderator
-                    .store
-                    .resolve_case(case_id, "denied", interaction.user_id)
+            // Button: Modal mit Pflicht-Grund öffnen (Original: DenyReasonModal,
+            // required, min 4 / max 500, mehrzeilig).
+            "deny" => BridgeReply {
+                modal: Some(dl_discord::ModalSpec {
+                    custom_id: format!("aimod:denysubmit:{case_id}"),
+                    title: "Moderation ablehnen".to_string(),
+                    fields: vec![dl_discord::ModalField {
+                        custom_id: "reason".to_string(),
+                        label: "Warum lehnst du ab?".to_string(),
+                        placeholder: "Kurze Begruendung fuer die Ablehnung.".to_string(),
+                        required: true,
+                        min_length: 4,
+                        max_length: 500,
+                        paragraph: true,
+                    }],
+                }),
+                ..BridgeReply::default()
+            },
+            // Modal-Submit: Grund speichern + Log posten.
+            "denysubmit" => {
+                let reason = interaction
+                    .options
+                    .get("reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                let outcome = self
+                    .moderator
+                    .deny_case(case_id, interaction.user_id, &reason)
                     .await;
-                BridgeReply::ephemeral_text("Vorschlag abgelehnt.")
+                Self::outcome_reply(outcome)
             }
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
         }
@@ -200,6 +246,9 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             dl_moderation::guard::GuardAction::Enforce => ("🛡️ Scam-Vollzug (Ban)", 0xED4245),
             dl_moderation::guard::GuardAction::Propose => {
                 ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
+            }
+            dl_moderation::guard::GuardAction::Takeover => {
+                ("⚠️ Account-Takeover erkannt — Quarantäne (24h-Timeout, reversibel)", 0xE74C3C)
             }
         };
         let preview: String = case

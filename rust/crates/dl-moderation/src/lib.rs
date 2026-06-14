@@ -221,9 +221,18 @@ pub fn decide_action(verdict: &AiVerdict, proposal_threshold: f64) -> ModAction 
 pub trait ModPort: Send + Sync {
     async fn delete_message(&self, channel_id: u64, message_id: u64, reason: &str) -> bool;
     async fn timeout_member(&self, guild_id: u64, user_id: u64, minutes: i64) -> bool;
+    async fn ban_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool;
     /// Review-Embed mit aimod:*-Buttons posten → message_id.
     async fn post_review(&self, case: &store::CaseDraft, buttons_case_id: &str) -> Option<u64>;
     async fn post_log(&self, text: String);
+}
+
+/// Ergebnis einer Review-Aktion (Button-Reply-Text für den Mod).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewOutcome {
+    NotFound,
+    AlreadyHandled,
+    Done(String),
 }
 
 pub struct AiModerator {
@@ -391,6 +400,128 @@ impl AiModerator {
         if let Some(message_id) = self.port.post_review(&draft, &case_id).await {
             self.store.set_review_message(&case_id, message_id).await;
         }
+    }
+
+    // ── Review-Aktionen (aimod:accept|ban|deny) ─────────────────────────────
+    //
+    // Spiegelt `handle_accept_interaction`/`handle_ban_interaction`/
+    // `handle_deny_submit` aus `cogs/ai_moderator.py`: gleiche Idempotenz-
+    // Checks, gleiche Reihenfolge (Aktion → DB-Status → Action-Log).
+
+    /// Annehmen: Nachricht löschen + Member 24h timeouten + Log posten.
+    pub async fn accept_case(&self, case_id: &str, mod_id: u64) -> ReviewOutcome {
+        let Some(case) = self.store.fetch_case(case_id).await else {
+            return ReviewOutcome::NotFound;
+        };
+        if matches!(case.action.as_str(), "accepted" | "denied") {
+            return ReviewOutcome::AlreadyHandled;
+        }
+        let deleted = self
+            .port
+            .delete_message(
+                case.channel_id,
+                case.message_id,
+                &format!("AI-Moderator Case {}", case.case_id),
+            )
+            .await;
+        let timed_out = self
+            .port
+            .timeout_member(case.guild_id, case.user_id, TIMEOUT_MINUTES)
+            .await;
+        self.store.resolve_case(case_id, "accepted", mod_id).await;
+        self.post_action_log(&case, "accepted", mod_id, &[
+            (deleted, "Delete fehlgeschlagen"),
+            (timed_out, "Timeout fehlgeschlagen"),
+        ], None)
+        .await;
+        ReviewOutcome::Done("Moderationsvorschlag akzeptiert.".to_string())
+    }
+
+    /// Ban: Nachricht löschen + Member bannen + Log posten.
+    pub async fn ban_case(&self, case_id: &str, mod_id: u64) -> ReviewOutcome {
+        let Some(case) = self.store.fetch_case(case_id).await else {
+            return ReviewOutcome::NotFound;
+        };
+        if matches!(case.action.as_str(), "accepted" | "denied" | "banned") {
+            return ReviewOutcome::AlreadyHandled;
+        }
+        let deleted = self
+            .port
+            .delete_message(
+                case.channel_id,
+                case.message_id,
+                &format!("AI-Moderator Case {}", case.case_id),
+            )
+            .await;
+        let banned = self
+            .port
+            .ban_member(
+                case.guild_id,
+                case.user_id,
+                &format!("AI-Moderator Ban {}", case.case_id),
+            )
+            .await;
+        self.store.resolve_case(case_id, "banned", mod_id).await;
+        self.post_action_log(&case, "banned", mod_id, &[
+            (deleted, "Delete fehlgeschlagen"),
+            (banned, "Ban fehlgeschlagen"),
+        ], None)
+        .await;
+        ReviewOutcome::Done("User gebannt.".to_string())
+    }
+
+    /// Ablehnen: Pflicht-Grund speichern + Log posten (keine Member-Aktion).
+    pub async fn deny_case(&self, case_id: &str, mod_id: u64, reason: &str) -> ReviewOutcome {
+        let Some(case) = self.store.fetch_case(case_id).await else {
+            return ReviewOutcome::NotFound;
+        };
+        if matches!(case.action.as_str(), "accepted" | "denied") {
+            return ReviewOutcome::AlreadyHandled;
+        }
+        self.store.resolve_case_denied(case_id, mod_id, reason).await;
+        self.post_action_log(&case, "denied", mod_id, &[], Some(reason))
+            .await;
+        ReviewOutcome::Done("Moderationsvorschlag abgelehnt.".to_string())
+    }
+
+    /// Action-Log wie `_post_action_log`/`_build_log_embed` (hier als Text-
+    /// Zeile im selben Stil wie der bestehende Auto-Delete-Log).
+    async fn post_action_log(
+        &self,
+        case: &store::CaseRecord,
+        action: &str,
+        mod_id: u64,
+        notes: &[(bool, &str)],
+        deny_reason: Option<&str>,
+    ) {
+        let label = match action {
+            "accepted" => "✅ Accepted",
+            "banned" => "🔨 Banned",
+            "denied" => "❌ Denied",
+            other => other,
+        };
+        let mut text = format!(
+            "{label} ({}, {:.0}%): <@{}> in <#{}> durch <@{}> — {}",
+            case.category,
+            case.confidence * 100.0,
+            case.user_id,
+            case.channel_id,
+            mod_id,
+            case.reason,
+        );
+        if let Some(reason) = deny_reason {
+            let trimmed: String = reason.chars().take(200).collect();
+            text.push_str(&format!("\nDeny-Grund: {trimmed}"));
+        }
+        let failures: Vec<&str> = notes
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, note)| *note)
+            .collect();
+        if !failures.is_empty() {
+            text.push_str(&format!(" ({})", failures.join("; ")));
+        }
+        self.port.post_log(text).await;
     }
 }
 
