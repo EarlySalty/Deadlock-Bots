@@ -28,6 +28,30 @@ const WEBSITE_SLUGS: [&str; 6] = [
     "guides",
 ];
 
+/// Zeitpunkt, ab dem die Invite-Quellen-Erkennung live war (Commit „Join
+/// Analyzer", 2026-02-18 ~16:22 — erste echte Detektion). Davor gab es KEINE
+/// Erkennung; quellenlose Joims aus dieser Zeit sind nicht „unbekannt", sondern
+/// schlicht „vor dem Tracking". Format = `member_events.timestamp`
+/// (`%Y-%m-%d %H:%M:%S`), daher lexikographischer Vergleich = chronologisch.
+const TRACKING_LIVE_SINCE: &str = "2026-02-18 16:22:08";
+
+/// Effektiver Anzeige-Bucket: hebt quellenlose Alt-Joins aus `unknown` in einen
+/// eigenen `pretracking`-Bucket, damit der historische Bestand die
+/// Unbekannt-Quote nicht künstlich aufbläht. Greift NUR bei `unknown` und nur,
+/// wenn der Join entweder explizit nachträglich verbucht wurde
+/// (`kind == "backfilled"`) oder VOR dem Tracking-Start liegt. Echte
+/// Erkennungs-Fehlschläge nach dem Stichtag bleiben bewusst `unknown` (ehrlich
+/// sichtbar — sonst würde ein künftiger stummer Ausfall versteckt).
+fn effective_bucket(c: &join_source::Classified, timestamp: Option<&str>) -> String {
+    if c.bucket == "unknown" {
+        let before_tracking = timestamp.map(|t| t < TRACKING_LIVE_SINCE).unwrap_or(false);
+        if c.kind == "backfilled" || before_tracking {
+            return "pretracking".to_string();
+        }
+    }
+    c.bucket.clone()
+}
+
 fn parse_guild_filter(params: &HashMap<String, String>) -> Result<Option<i64>, Response> {
     match params.get("guild_id").map(|s| s.trim()) {
         None | Some("") => Ok(None),
@@ -335,11 +359,12 @@ fn build_member_sources(data: SourceData) -> Value {
 
     for row in &data.joins {
         let c = join_source::classify(&row.metadata, &data.twitch_lookup, &data.website_lookup);
-        *bucket_counts.entry(c.bucket.clone()).or_insert(0) += 1;
+        let bucket = effective_bucket(&c, row.timestamp.as_deref());
+        *bucket_counts.entry(bucket.clone()).or_insert(0) += 1;
         let code = c.invite_code.clone();
         let url = c.invite_url.clone();
 
-        match c.bucket.as_str() {
+        match bucket.as_str() {
             "public" => {
                 if matches!(
                     c.kind.as_str(),
@@ -476,13 +501,18 @@ fn build_member_sources(data: SourceData) -> Value {
         }
 
         if recent.len() < 20 {
+            let label = if bucket == "pretracking" {
+                "Vor Tracking".to_string()
+            } else {
+                c.label.clone()
+            };
             recent.push(json!({
                 "user_id": row.user_id,
                 "display_name": row.display_name.clone().filter(|s| !s.is_empty())
                     .unwrap_or_else(|| format!("User {}", row.user_id)),
                 "timestamp": row.timestamp,
-                "bucket": c.bucket,
-                "label": c.label,
+                "bucket": bucket,
+                "label": label,
                 "invite_code": code,
                 "invite_url": url,
                 "twitch_streamer_login": c.twitch_login,
@@ -531,11 +561,13 @@ fn build_member_sources(data: SourceData) -> Value {
         "unknown_joins": count("unknown"),
         "bucket_counts": {
             "public": count("public"), "website": count("website"), "twitch": count("twitch"),
-            "personal": count("personal"), "bot_invite": count("bot_invite"), "unknown": count("unknown"),
+            "personal": count("personal"), "bot_invite": count("bot_invite"),
+            "pretracking": count("pretracking"), "unknown": count("unknown"),
         },
         "bucket_labels": {
             "public": "Public", "website": "Website", "twitch": "Twitch",
-            "personal": "Persönlich", "bot_invite": "Bot Invites", "unknown": "Unbekannt",
+            "personal": "Persönlich", "bot_invite": "Bot Invites",
+            "pretracking": "Vor Tracking", "unknown": "Unbekannt",
         },
         "public_breakdown": public_breakdown,
         "website_breakdown": website_breakdown,
@@ -620,5 +652,65 @@ async fn fetch_public_links(app: &DashboardApp, guild: Option<i64>) -> Vec<Value
             "url": format!("https://discord.gg/{code}"),
         })],
         None => Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dl_activity::join_source::Classified;
+
+    fn classified(bucket: &str, kind: &str) -> Classified {
+        Classified {
+            bucket: bucket.to_string(),
+            kind: kind.to_string(),
+            label: String::new(),
+            twitch_login: None,
+            invite_code: None,
+            invite_url: None,
+        }
+    }
+
+    #[test]
+    fn unknown_vor_stichtag_wird_pretracking() {
+        let c = classified("unknown", "unknown");
+        assert_eq!(
+            effective_bucket(&c, Some("2026-01-15 10:00:00")),
+            "pretracking"
+        );
+    }
+
+    #[test]
+    fn backfilled_immer_pretracking_auch_nach_stichtag() {
+        // Nachträglich verbuchte Alt-Joins (kind=backfilled) sind „Vor Tracking",
+        // egal wann das Backfill-Event datiert ist.
+        let c = classified("unknown", "backfilled");
+        assert_eq!(
+            effective_bucket(&c, Some("2026-04-20 10:00:00")),
+            "pretracking"
+        );
+    }
+
+    #[test]
+    fn echter_unknown_nach_stichtag_bleibt_unknown() {
+        // DER ehrlichkeitskritische Fall: ein künftiger Erkennungs-Fehlschlag
+        // darf NICHT als „Vor Tracking" versteckt werden.
+        let c = classified("unknown", "unknown");
+        assert_eq!(effective_bucket(&c, Some("2026-07-01 10:00:00")), "unknown");
+    }
+
+    #[test]
+    fn unknown_ohne_timestamp_bleibt_unknown() {
+        let c = classified("unknown", "unknown");
+        assert_eq!(effective_bucket(&c, None), "unknown");
+    }
+
+    #[test]
+    fn attribuierte_buckets_bleiben_unveraendert() {
+        // Auch ein alter Join mit echter Quelle bleibt seine Quelle.
+        for b in ["public", "website", "twitch", "personal", "bot_invite"] {
+            let c = classified(b, "x");
+            assert_eq!(effective_bucket(&c, Some("2026-01-01 00:00:00")), b);
+        }
     }
 }

@@ -1,3 +1,13 @@
+## #137 — Server-Statistik: „Vor Tracking" sauber von „Unbekannt" getrennt
+
+**Ausgangslage:** Im Mitgliederquellen-Donut stand „Unbekannt" bei ~30 % (621 von 2020 Beitritten) — auffällig hoch. Die Analyse zeigt: das sind fast ausschließlich Beitritte von *bevor* der Bot überhaupt erfassen konnte, woher jemand kam. Die Quellen-Erkennung (welche Einladung wurde benutzt) ging erst am 18.02.2026 live; alles davor wurde pauschal „unbekannt" gestempelt. Diese Quelle lässt sich rückwirkend nicht rekonstruieren — sie wurde damals nirgends festgehalten, und Discord verrät selbst im Nachhinein nicht, über welche Einladung jemand kam.
+
+**Was wurde geändert:** Diese Alt-Beitritte bekommen eine eigene, ehrliche Kategorie „Vor Tracking", statt im „Unbekannt"-Topf zu liegen. „Unbekannt" ist damit echten, jüngeren Erkennungs-Fehlschlägen vorbehalten — aktuell praktisch null, weil die Erkennung seit dem Frühjahr sauber läuft.
+
+**Wie es funktioniert:** Ein quellenloser Beitritt zählt als „Vor Tracking", wenn er entweder nachträglich verbucht wurde oder zeitlich vor dem Erkennungs-Start (18.02.2026, 16:22 Uhr) liegt. Bewusst zeit- statt nur markergebunden: ein *künftiger* echter Ausfall der Erkennung bleibt sichtbar „Unbekannt" und wird nicht stillschweigend als „Vor Tracking" weggebügelt. In Zahlen: „Unbekannt" 621 → 0, „Vor Tracking" 621 (30,7 %); alle anderen Töpfe unverändert. Greift mit der neuen (Rust-)Auswertung, der Donut zeigt es, sobald diese aktiv ist.
+
+**Betroffen:** Betrachter der Server-Statistik im Admin-Bereich.
+
 ## #136 — Support-Bot prüft im Ticket den echten Twitch-Status statt zu raten
 
 **Ausgangslage:** Seit #132 hilft der Ticket-Bot gezielt bei Problemen. Aber bei „der Bot kommt nicht in meinen Stream" oder „ich habe autorisiert, aber es steht auf inaktiv" konnte er nur allgemeine Schritte nennen — den tatsächlichen Autorisierungs-Stand des Fragenden kannte er nicht und musste raten.
