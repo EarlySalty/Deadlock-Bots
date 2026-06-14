@@ -1,3 +1,13 @@
+## #147 — Erinnerungs-DMs abbestellbar + Mod-Tag- & Rang-Befehle zurück
+
+**Problem:** Nach der Umstellung fehlten mehrere Befehle, die es vorher gab. Am wichtigsten: Wer die automatischen **„Wir vermissen dich"-Erinnerungs-DMs** (an länger inaktive Stamm-Mitglieder) nicht (mehr) wollte, hatte **keine Möglichkeit mehr, sie abzustellen** — der Bot verschickte sie weiter, aber der Aus-Schalter war weg. Außerdem fehlten dem Mod-Team die **`/mod-tag`**-Befehle (Mitglieder mit Tags wie „Ragebaiter" markieren/entfernen/auflisten) und die **`!rrang`**-Verwaltung des Rang-Voice-Systems (u. a. das Rang-System pro Sprachkanal an-/ausschalten) sowie der Admin-Test `!nudgesend`.
+
+**Was wurde geändert:** Neu sind die Slash-Befehle **`/retention-optout`** (keine Erinnerungs-DMs mehr) und **`/retention-optin`** (wieder aktivieren) — der gewählte Zustand wird gespeichert, und der Versand-Mechanismus überspringt abgemeldete Nutzer bereits. Für Mods: **`/mod-tag set|remove|list`** (an die bestehende Tag-Logik angebunden, serverseitig auf „Nachrichten verwalten" beschränkt) und die **`!rrang`**-Befehlsgruppe (`toggle` schaltet das Rang-System je Kanal um und merkt sich das dauerhaft; dazu Status-/Anker-/Rollen-/Kanal-Übersichten und ein manuelles „aktualisieren"). `!nudgesend`/`!t30` schickt die Steam-Verknüpfungs-Erinnerung testweise an ein Ziel (respektiert Opt-out und ausgenommene Rollen).
+
+**Wie es jetzt funktioniert:** Jeder kann seine Erinnerungs-DMs selbst per `/retention-optout` aus- und per `/retention-optin` wieder anschalten. Mods vergeben/entfernen/listen Mod-Tags direkt per Slash-Befehl und steuern das Rang-Voice-System wieder über `!rrang`.
+
+**Betroffen:** Alle, die Erinnerungs-DMs steuern wollen, sowie das Mod-Team.
+
 ## #146 — Verbund-Broker liefert Discord-Nachrichten-IDs wieder als Text
 
 **Problem:** Über den zentralen Master-Broker posten andere Bots (u. a. der Twitch-Bot) ihre Discord-Nachrichten und bekommen danach eine Bestätigung mit der ID der erstellten Nachricht zurück. Beim Umbau des Brokers von Python auf das neue System wurde diese ID versehentlich als reine Zahl ausgeliefert statt — wie zuvor und wie es die Discord-API selbst tut — als Text. Discord-IDs sind so groß, dass viele Systeme sie als Zahl nicht mehr verlustfrei darstellen; aufrufende Bots erwarten deshalb Text. Der Twitch-Bot verwarf die Antwort dadurch als unlesbar, merkte sich die erstellte Nachricht nie und postete „ist live"-Pings mehrfach (siehe Twitch-Bot #221).
