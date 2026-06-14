@@ -175,11 +175,11 @@ class CoachingPanelCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="❓ Fragen zum Coaching?",
+            name="❓ Fragen nach dem Coaching?",
             value=(
-                "Hau sie einfach in <#1426220702054355077> raus statt per DM. "
-                "Dann sehen alle die Antwort und andere mit dem gleichen Thema "
-                "lesen direkt mit."
+                "Hau sie einfach in <#1426220702054355077> raus statt per DM an "
+                "deinen Coach. Dann sehen alle die Antwort und andere mit dem "
+                "gleichen Thema lesen direkt mit."
             ),
             inline=False,
         )
