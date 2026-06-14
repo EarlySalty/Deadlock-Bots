@@ -7,8 +7,10 @@
 //! Strings gewandelt (`_stringify_ids`). Die lesenden overview/bracket-Routen
 //! brauchen Bot-Daten (Gilden-Namen/Member) und folgen separat.
 
+use std::collections::HashMap;
+
 use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use dl_tournament::store::TournamentStore;
@@ -363,6 +365,97 @@ async fn decorate_signup(
         "mention": mention,
         "rank_label": capitalize(&signup.rank),
     })
+}
+
+/// Gilde aus Query-Param (GET-Variante von [`resolve_guild`]).
+fn resolve_guild_query(
+    app: &DashboardApp,
+    params: &HashMap<String, String>,
+) -> Result<u64, Response> {
+    let payload = json!({ "guild_id": params.get("guild_id") });
+    resolve_guild(app, &payload)
+}
+
+async fn decorate_signups(
+    app: &DashboardApp,
+    guild: u64,
+    signups: Vec<dl_tournament::store::Signup>,
+) -> Vec<Value> {
+    let mut out = Vec::with_capacity(signups.len());
+    for s in signups {
+        out.push(decorate_signup(app, guild, s).await);
+    }
+    out
+}
+
+/// `GET /api/turnier/overview` — Turnier-Übersicht (Port von
+/// `_handle_turnier_overview`). v1: `guard_read` statt `_check_turnier_auth`
+/// (Turnier-Mod∨Voll) — jede Admin-Dashboard-Session sieht die Übersicht; die
+/// `guilds`-Namensliste (Bot-Daten) ist auf die aufgelöste Gilde reduziert.
+pub async fn overview(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = app.guard_read(&headers) {
+        return resp;
+    }
+    let guild = match resolve_guild_query(&app, &params) {
+        Ok(g) => g,
+        Err(resp) => return resp,
+    };
+    let s = store(&app);
+    let teams = s.list_teams(guild).await;
+    let signups = s.list_signups(guild).await;
+    let summary = s.summary(guild).await.unwrap_or(Value::Null);
+    let active_period = s.active_period_json(guild).await.unwrap_or(Value::Null);
+    let periods = s.list_periods(guild).await.unwrap_or_default();
+    let decorated = decorate_signups(&app, guild, signups).await;
+    let teams_out: Vec<Value> = teams
+        .iter()
+        .map(|t| {
+            json!({
+                "id": t.id,
+                "name": t.name,
+                "created_by": t.created_by,
+                "member_count": t.member_count,
+            })
+        })
+        .collect();
+    let payload = json!({
+        "guild_id": guild.to_string(),
+        "guilds": [{ "id": guild.to_string(), "name": Value::Null }],
+        "summary": summary,
+        "teams": teams_out,
+        "signups": decorated,
+        "active_period": active_period,
+        "periods": periods,
+    });
+    ok_json(stringify_ids(payload))
+}
+
+/// `GET /api/turnier/bracket` — Bracket (Port von `_handle_turnier_bracket`),
+/// nutzt die schon portierte [`dl_tournament::web::generate_bracket`].
+pub async fn bracket(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = app.guard_read(&headers) {
+        return resp;
+    }
+    let guild = match resolve_guild_query(&app, &params) {
+        Ok(g) => g,
+        Err(resp) => return resp,
+    };
+    let s = store(&app);
+    let teams = s.list_teams(guild).await;
+    let signups = s.list_signups(guild).await;
+    let bracket = dl_tournament::web::generate_bracket(&signups, &teams);
+    ok_json(stringify_ids(json!({
+        "guild_id": guild.to_string(),
+        "bracket": bracket,
+    })))
 }
 
 #[cfg(test)]

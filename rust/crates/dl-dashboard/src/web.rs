@@ -326,6 +326,8 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/api/turnier/assign", post(crate::tournament::assign))
         .route("/api/turnier/remove", post(crate::tournament::remove))
         .route("/api/turnier/clear", post(crate::tournament::clear))
+        .route("/api/turnier/overview", get(crate::tournament::overview))
+        .route("/api/turnier/bracket", get(crate::tournament::bracket))
         // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
         .route(
             "/api/public/patch-notes",
