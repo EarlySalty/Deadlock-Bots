@@ -65,6 +65,16 @@ pub struct MemberInfo {
     pub display_name: String,
 }
 
+/// Einzeln aufgelöster Discord-User (für den Broker-Endpunkt `resolve-user`).
+/// `display_name` folgt der Discord-Präzedenz (global_name → username).
+#[derive(Debug, Clone)]
+pub struct ResolvedUser {
+    pub user_id: u64,
+    pub name: String,
+    pub global_name: Option<String>,
+    pub display_name: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InviteInfo {
     pub invite_url: String,
@@ -186,6 +196,9 @@ pub trait DiscordPort: Send + Sync {
     /// Analytics). Nur gefundene Mitglieder werden zurückgegeben; der Aufrufer
     /// füllt fehlende selbst auf (`User <id>`).
     async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError>;
+    /// Einen einzelnen Discord-User auflösen (Cache, sonst API). `Ok(None)` =
+    /// nicht gefunden — kein Fehler; der Aufrufer behandelt das wie "unbekannt".
+    async fn resolve_user(&self, user_id: u64) -> Result<Option<ResolvedUser>, PortError>;
     /// Live-Kennzahlen einer Gilde (Mitglieder-/Online-/Voice-Zahl, Vanity).
     /// guild_id None = erste Bot-Gilde.
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError>;

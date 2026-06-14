@@ -220,6 +220,42 @@ pub async fn resolve_names(
     }
 }
 
+/// Einen einzelnen Discord-User auflösen (`POST .../discord/resolve-user`).
+/// Token-authentifiziert (Body `{user_id}`); antwortet immer 200 mit
+/// `{ok, result:{found,...}}` (nicht gefunden → `found:false`), wie
+/// `_handle_resolve_user`. Wird vom Twitch-Bot-Relay konsumiert.
+pub async fn resolve_user(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, _idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let user_id = match payload::positive_int(&payload, "user_id") {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+    match state.port.resolve_user(user_id).await {
+        Ok(Some(u)) => respond(
+            200,
+            json!({
+                "ok": true,
+                "result": {
+                    "found": true,
+                    "user_id": u.user_id.to_string(),
+                    "name": u.name,
+                    "global_name": u.global_name,
+                    "display_name": u.display_name,
+                }
+            }),
+        ),
+        Ok(None) | Err(_) => respond(200, json!({ "ok": true, "result": { "found": false } })),
+    }
+}
+
 /// Live-Kennzahlen einer Gilde (`?guild_id=` optional). Loopback-only, ohne
 /// Token — für die öffentliche Server-Statistik des Dashboards.
 pub async fn guild_stats(

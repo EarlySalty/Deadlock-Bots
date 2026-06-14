@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use dl_broker::port::{
     DiscordPort, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo, PortError,
-    RichMessage, RoleInfo, RoleMembers, ViewSpec,
+    ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -520,6 +520,25 @@ impl DiscordPort for DiscordAdapter {
             }
         }
         Ok(out)
+    }
+
+    async fn resolve_user(&self, user_id: u64) -> Result<Option<ResolvedUser>, PortError> {
+        // Wie Pythons _resolve_user: REST-Lookup; nicht gefunden → Ok(None).
+        match self.http.get_user(UserId::new(user_id)).await {
+            Ok(user) => {
+                let name = user.name.to_string();
+                let global_name = user.global_name.as_ref().map(ToString::to_string);
+                // Discord-Präzedenz: global_name vor Username.
+                let display_name = Some(global_name.clone().unwrap_or_else(|| name.clone()));
+                Ok(Some(ResolvedUser {
+                    user_id,
+                    name,
+                    global_name,
+                    display_name,
+                }))
+            }
+            Err(_) => Ok(None),
+        }
     }
 
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError> {
