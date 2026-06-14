@@ -438,10 +438,16 @@ async fn main() -> anyhow::Result<()> {
                 move |channel_id| tempvoice.initial_owner_blocking(channel_id)
             }),
         );
+        // !rrang-Admin-Gruppe (toggle/anker/vcstatus/debug/aktualisieren/…):
+        // Prefix-Listener über denselben Manager (gemeinsamer Anker-State).
+        let rank_commands = dl_voice::rank::RankCommands::new(rank_manager.clone());
         dl_voice::rank::spawn(rank_manager, &dispatcher);
+        dl_voice::rank::spawn_command(rank_commands, &dispatcher, adapter.clone());
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
+        // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
+        dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
 
         // SecurityGuard (6): Message-Subscriber (Takeover/Burst/Keyword)
         if let Err(err) = security_guard.ensure_schema().await {

@@ -10,8 +10,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dl_db::Db;
-use dl_discord::{Dispatcher, VoiceEvent};
+use dl_discord::{ChannelSender, Dispatcher, VoiceEvent};
 use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 
 use crate::status::{select_best_presence, select_channel_cohort, CohortEntry, PresenceRow};
 
@@ -174,6 +175,16 @@ pub fn desired_channel_name(
     "Rang-Sprachkanal".to_string()
 }
 
+/// Rang-Name nach Tier-Wert (Port von `get_rank_name_from_value`):
+/// unbekannt → "Obscurus".
+pub fn rank_name_from_value(value: i64) -> String {
+    RANK_VALUES
+        .iter()
+        .find(|(_, v)| *v == value)
+        .map(|(name, _)| capitalize(name))
+        .unwrap_or_else(|| "Obscurus".to_string())
+}
+
 // ── Persistenz (voice_channel_anchors / voice_channel_settings) ────────────
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +300,28 @@ impl RankStore {
             .unwrap_or(true)
     }
 
+    /// Persistiert den Ein/Aus-Zustand des Rang-Systems je VC
+    /// (`voice_channel_settings`, Port von `_db_upsert_setting`).
+    pub async fn set_enabled(&self, channel_id: u64, guild_id: u64, enabled: bool) {
+        let result = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO voice_channel_settings(channel_id, guild_id, enabled, updated_at)
+                     VALUES(?1, ?2, ?3, CURRENT_TIMESTAMP)
+                     ON CONFLICT(channel_id) DO UPDATE SET
+                       enabled = excluded.enabled,
+                       updated_at = CURRENT_TIMESTAMP",
+                    rusqlite::params![channel_id, guild_id, i64::from(enabled)],
+                )
+                .map(|_| ())
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::warn!(%err, channel_id, "RankVoice: Setting-Persist fehlgeschlagen");
+        }
+    }
+
     /// Sub-Rang des primären Steam-Accounts (Fallback 3 = Mitte).
     pub async fn subrank_from_db(&self, user_id: u64) -> i64 {
         self.db
@@ -351,6 +384,27 @@ pub trait RankPort: Send + Sync {
     ) -> Result<(), String>;
     async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String>;
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
+
+    // ── Read-only-Helfer für die `!rrang`-Admin-Oberfläche ──────────────────
+
+    /// Voice-Kanal des Aufrufers (für `toggle`/`vcstatus`/`aktualisieren`);
+    /// `None`, wenn er in keinem ist.
+    async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+    /// Kanal-Anzeigename; `None`, wenn der Kanal nicht (mehr) existiert.
+    async fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<String>;
+    /// Kategorie-Anzeigename eines Kanals (für `vcstatus`).
+    async fn category_name(&self, guild_id: u64, channel_id: u64) -> Option<String>;
+    /// Anzahl Nicht-Bot-Mitglieder im Voice-Kanal.
+    async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> usize;
+    /// Anzeigename eines Gilden-Mitglieds; `None`, wenn nicht (mehr) auf dem
+    /// Server.
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
+    /// Rollen (id, name) eines Mitglieds (für `debug`); leer, wenn unbekannt.
+    async fn member_roles(&self, guild_id: u64, user_id: u64) -> Vec<(u64, String)>;
+    /// Mitgliederzahl je Rolle (für `rollen`); 0, wenn Rolle unbekannt.
+    async fn role_member_count(&self, guild_id: u64, role_id: u64) -> usize;
+    /// Voice-Kanäle einer Kategorie als (id, name) (für `kanäle`).
+    async fn category_voice_channels(&self, guild_id: u64, category_id: u64) -> Vec<(u64, String)>;
 }
 
 pub struct RankVoiceManager {
@@ -383,7 +437,7 @@ impl RankVoiceManager {
         *self.anchors.lock().await = anchors;
     }
 
-    async fn is_monitored(&self, guild_id: u64, channel_id: u64) -> bool {
+    pub async fn is_monitored(&self, guild_id: u64, channel_id: u64) -> bool {
         if EXCLUDED_CHANNEL_IDS.contains(&channel_id) {
             return false;
         }
@@ -553,6 +607,84 @@ impl RankVoiceManager {
         }
     }
 
+    // ── Admin-Operationen (`!rrang`) ────────────────────────────────────────
+
+    /// Momentaufnahme aller in-memory-Anker (für `!rrang anker`/`status`).
+    pub async fn anchor_snapshot(&self) -> Vec<(u64, Anchor)> {
+        self.anchors
+            .lock()
+            .await
+            .iter()
+            .map(|(channel_id, anchor)| (*channel_id, anchor.clone()))
+            .collect()
+    }
+
+    /// Aktueller Anker eines Kanals (für `!rrang vcstatus`).
+    pub async fn anchor_for(&self, channel_id: u64) -> Option<Anchor> {
+        self.anchors.lock().await.get(&channel_id).cloned()
+    }
+
+    /// `!rrang toggle ein`: Rang-System für den VC aktivieren (persistiert)
+    /// und sofort reconcilen (Port von `toggle_channel_system` ein-Zweig).
+    pub async fn enable_channel(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
+        self.store.set_enabled(channel_id, guild_id, true).await;
+        // Erneutes Initialisieren erzwingen: lokalen Rename-Cooldown lösen,
+        // damit reconcile Rechte + Namen frisch setzt.
+        self.last_rename.lock().await.remove(&channel_id);
+        self.reconcile_channel(guild_id, channel_id).await;
+    }
+
+    /// `!rrang toggle aus`: Rang-System deaktivieren (persistiert), Anker
+    /// entfernen und Rang-Rollen-Overwrites räumen (Port von
+    /// `toggle_channel_system` aus-Zweig: `remove_channel_anchor` +
+    /// `clear_role_permissions`).
+    pub async fn disable_channel(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
+        self.store.set_enabled(channel_id, guild_id, false).await;
+        self.anchors.lock().await.remove(&channel_id);
+        self.store.delete_anchor(channel_id).await;
+        self.clear_rank_overwrites(guild_id, channel_id).await;
+    }
+
+    /// `!rrang aktualisieren`: alten Anker verwerfen und frisch reconcilen
+    /// (Port von `force_update`: `remove_channel_anchor` + erneuter Aufbau).
+    pub async fn force_reconcile(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
+        self.anchors.lock().await.remove(&channel_id);
+        self.store.delete_anchor(channel_id).await;
+        self.last_rename.lock().await.remove(&channel_id);
+        self.reconcile_channel(guild_id, channel_id).await;
+    }
+
+    /// Entfernt alle Rang-Rollen-Overwrites (Haupt- + Sub-Rang) vom Kanal.
+    async fn clear_rank_overwrites(&self, guild_id: u64, channel_id: u64) {
+        let guild_roles = self.port.guild_roles(guild_id).await;
+        let majors: HashSet<u64> = major_rank_roles().keys().copied().collect();
+        let current: HashSet<u64> = self
+            .port
+            .current_role_overwrites(guild_id, channel_id)
+            .await
+            .into_iter()
+            .collect();
+        let removes: HashSet<u64> = current
+            .into_iter()
+            .filter(|role_id| {
+                majors.contains(role_id)
+                    || guild_roles
+                        .iter()
+                        .any(|(id, name)| id == role_id && parse_subrank_role(name).is_some())
+            })
+            .collect();
+        if removes.is_empty() {
+            return;
+        }
+        if let Err(err) = self
+            .port
+            .apply_overwrites(guild_id, channel_id, &HashSet::new(), &removes)
+            .await
+        {
+            tracing::warn!(%err, channel_id, "RankVoice: Overwrite-Räumung fehlgeschlagen");
+        }
+    }
+
     async fn rank_tuple(&self, user_id: u64, roles: &[(u64, String)]) -> (String, i64, i64) {
         let (name, value, sub) = user_rank_from_roles(roles);
         let sub = match sub {
@@ -643,6 +775,526 @@ pub fn spawn(
     })
 }
 
+
+// ── `!rrang`-Admin-Befehlsgruppe ────────────────────────────────────────────
+//
+// Port der `@commands.group("rrang", manage_guild)` aus
+// `cogs/rank_voice_manager.py`. Folgt dem `balance_cmd`-Muster: eigener
+// `MessageEvent`-Subscriber, admin-gated, Antwort über den `ChannelSender`.
+// Discord-Farben analog zum Original.
+
+/// Antwort eines `!rrang`-Subcommands (Text und/oder Embed).
+pub struct RankReply {
+    pub content: Option<String>,
+    pub embeds: Vec<Value>,
+}
+
+impl RankReply {
+    fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: Some(content.into()),
+            embeds: vec![],
+        }
+    }
+    fn embed(embed: Value) -> Self {
+        Self {
+            content: None,
+            embeds: vec![embed],
+        }
+    }
+}
+
+/// `!rrang`-Befehlsschicht über dem [`RankVoiceManager`].
+pub struct RankCommands {
+    pub manager: Arc<RankVoiceManager>,
+}
+
+impl RankCommands {
+    pub fn new(manager: Arc<RankVoiceManager>) -> Arc<Self> {
+        Arc::new(Self { manager })
+    }
+
+    /// Verarbeitet eine Nachricht; `None`, wenn es kein `!rrang`-Befehl ist.
+    pub async fn reply_for(&self, content: &str, guild_id: u64, user_id: u64) -> Option<RankReply> {
+        let mut parts = content.split_whitespace();
+        let root = parts.next()?.to_lowercase();
+        if root != "!rrang" {
+            return None;
+        }
+        let sub = parts.next().unwrap_or_default().to_lowercase();
+        let args: Vec<&str> = parts.collect();
+        let reply = match sub.as_str() {
+            "" => RankReply::embed(help_embed()),
+            "toggle" => self.toggle(guild_id, user_id, args.first().copied()).await,
+            "anker" => self.anchors_overview(guild_id).await,
+            "vcstatus" => self.vcstatus(guild_id, user_id).await,
+            "debug" => {
+                self.debug(guild_id, user_id, args.first().and_then(|a| parse_mention(a)))
+                    .await
+            }
+            "aktualisieren" => {
+                self.force_update(guild_id, user_id, args.first().and_then(|a| parse_channel(a)))
+                    .await
+            }
+            "rollen" => self.tracked_roles(guild_id).await,
+            "kanäle" | "kanaele" | "channels" => self.channel_config(guild_id).await,
+            "status" => self.system_status(guild_id, user_id).await,
+            "info" => {
+                self.rank_info(guild_id, user_id, args.first().and_then(|a| parse_mention(a)))
+                    .await
+            }
+            other => RankReply::text(format!("❌ Unbekannter Subcommand `{other}`.")),
+        };
+        Some(reply)
+    }
+
+    /// `toggle [ein/aus]` — schaltet das Rang-System für den aktuellen VC.
+    async fn toggle(&self, guild_id: u64, user_id: u64, action: Option<&str>) -> RankReply {
+        let Some(channel_id) = self.manager.port.caller_voice_channel(guild_id, user_id).await
+        else {
+            return RankReply::text("❌ Du musst in einem Voice Channel sein.");
+        };
+        let name = self
+            .manager
+            .port
+            .channel_name(guild_id, channel_id)
+            .await
+            .unwrap_or_else(|| channel_id.to_string());
+
+        if !self.manager.is_monitored(guild_id, channel_id).await {
+            return RankReply::text(format!("❌ **{name}** wird nicht überwacht."));
+        }
+
+        let current = self.manager.store.is_enabled(channel_id).await;
+        let Some(action) = action else {
+            return RankReply::text(format!(
+                "🔧 Rang-System für **{name}**: {}",
+                if current {
+                    "✅ Aktiviert"
+                } else {
+                    "❌ Deaktiviert"
+                }
+            ));
+        };
+
+        match action.to_lowercase().as_str() {
+            "ein" | "on" | "aktivieren" | "enable" => {
+                if current {
+                    return RankReply::text(format!("ℹ️ Bereits aktiviert für **{name}**."));
+                }
+                self.manager.enable_channel(guild_id, channel_id).await;
+                RankReply::text(format!("✅ Aktiviert: **{name}**"))
+            }
+            "aus" | "off" | "deaktivieren" | "disable" => {
+                if !current {
+                    return RankReply::text(format!("ℹ️ Bereits deaktiviert für **{name}**."));
+                }
+                self.manager.disable_channel(guild_id, channel_id).await;
+                RankReply::text(format!("❌ Deaktiviert: **{name}**"))
+            }
+            _ => RankReply::text("❌ Verwende: `ein`/`on` oder `aus`/`off`"),
+        }
+    }
+
+    /// `anker` — Übersicht aktiver Kanal-Anker (DB-persistiert).
+    async fn anchors_overview(&self, guild_id: u64) -> RankReply {
+        let anchors = self.manager.anchor_snapshot().await;
+        if anchors.is_empty() {
+            return RankReply::embed(json!({
+                "title": "🔗 Kanal-Anker Übersicht",
+                "description": "❌ Keine aktiven Kanal-Anker",
+                "color": 0x9B59B6,
+            }));
+        }
+        let mut lines: Vec<String> = Vec::new();
+        for (channel_id, anchor) in &anchors {
+            let ch_name = self.manager.port.channel_name(guild_id, *channel_id).await;
+            let user_name = self
+                .manager
+                .port
+                .member_display_name(guild_id, anchor.user_id)
+                .await;
+            let (Some(ch_name), Some(user_name)) = (ch_name, user_name) else {
+                lines.push(format!(
+                    "❓ Veralteter Eintrag (Kanal {channel_id}, User {})",
+                    anchor.user_id
+                ));
+                continue;
+            };
+            let min_rank = rank_name_from_value(anchor.allowed_min);
+            let max_rank = rank_name_from_value(anchor.allowed_max);
+            let count = self
+                .manager
+                .port
+                .channel_member_count(guild_id, *channel_id)
+                .await;
+            lines.push(format!(
+                "**{ch_name}**\n🔗 Anker: {user_name} ({} {})\n📊 Tiers: {min_rank}–{max_rank} | Score: {}–{}\n👥 Aktuelle User: {count}\n",
+                anchor.rank_name, anchor.subrank, anchor.score_min, anchor.score_max
+            ));
+        }
+        let shown: Vec<String> = lines.iter().take(10).cloned().collect();
+        let mut embed = json!({
+            "title": "🔗 Kanal-Anker Übersicht",
+            "description": shown.join("\n"),
+            "color": 0x9B59B6,
+        });
+        if lines.len() > 10 {
+            embed["footer"] = json!({ "text": format!("{} weitere …", lines.len() - 10) });
+        }
+        RankReply::embed(embed)
+    }
+
+    /// `vcstatus` — Status des aktuellen VC des Aufrufers.
+    async fn vcstatus(&self, guild_id: u64, user_id: u64) -> RankReply {
+        let Some(channel_id) = self.manager.port.caller_voice_channel(guild_id, user_id).await
+        else {
+            return RankReply::text("❌ Du musst in einem Voice Channel sein.");
+        };
+        let name = self
+            .manager
+            .port
+            .channel_name(guild_id, channel_id)
+            .await
+            .unwrap_or_else(|| channel_id.to_string());
+        let category = self
+            .manager
+            .port
+            .category_name(guild_id, channel_id)
+            .await
+            .unwrap_or_else(|| "–".to_string());
+        let count = self
+            .manager
+            .port
+            .channel_member_count(guild_id, channel_id)
+            .await;
+        let is_mon = self.manager.is_monitored(guild_id, channel_id).await;
+
+        let mut fields = vec![
+            json!({
+                "name": "📊 Kanal-Info",
+                "value": format!("ID: {channel_id}\nKategorie: {category}\nMitglieder: {count}"),
+                "inline": true,
+            }),
+            json!({
+                "name": "👁️ Überwachung",
+                "value": if is_mon { "✅ Überwacht" } else { "❌ Nicht überwacht" },
+                "inline": true,
+            }),
+        ];
+
+        if is_mon {
+            let sys_en = self.manager.store.is_enabled(channel_id).await;
+            fields.push(json!({
+                "name": "🔧 Rang-System",
+                "value": if sys_en { "✅ Aktiviert" } else { "❌ Deaktiviert" },
+                "inline": true,
+            }));
+            let anchor = self.manager.anchor_for(channel_id).await;
+            let anchor_value = match (anchor, sys_en) {
+                (Some(anchor), true) => {
+                    let user = self
+                        .manager
+                        .port
+                        .member_display_name(guild_id, anchor.user_id)
+                        .await
+                        .unwrap_or_else(|| anchor.user_id.to_string());
+                    let min_rank = rank_name_from_value(anchor.allowed_min);
+                    let max_rank = rank_name_from_value(anchor.allowed_max);
+                    format!(
+                        "{user} ({} {})\nTiers: {min_rank}–{max_rank}\nScore: {}–{}",
+                        anchor.rank_name, anchor.subrank, anchor.score_min, anchor.score_max
+                    )
+                }
+                (_, true) => "Kein Anker gesetzt".to_string(),
+                (_, false) => "System deaktiviert".to_string(),
+            };
+            fields.push(json!({ "name": "🔗 Anker", "value": anchor_value, "inline": false }));
+        }
+
+        RankReply::embed(json!({
+            "title": format!("🔊 Status: {name}"),
+            "color": 0x3498DB,
+            "fields": fields,
+        }))
+    }
+
+    /// `debug [@user]` — Rollen-Erkennung eines Users.
+    async fn debug(&self, guild_id: u64, caller_id: u64, target: Option<u64>) -> RankReply {
+        let user_id = target.unwrap_or(caller_id);
+        let Some(display_name) = self.manager.port.member_display_name(guild_id, user_id).await
+        else {
+            return RankReply::text("❌ Benutzer nicht gefunden.");
+        };
+        let roles = self.manager.port.member_roles(guild_id, user_id).await;
+        let majors = major_rank_roles();
+        let found: Vec<String> = roles
+            .iter()
+            .filter_map(|(rid, rname)| {
+                majors
+                    .get(rid)
+                    .map(|(name, value)| format!("**{rname}** (ID {rid}) -> {name} ({value})"))
+            })
+            .collect();
+        let (rn, rv, rs) = user_rank_from_roles(&roles);
+        let sub_txt = rs.map(|s| format!(" {s}")).unwrap_or_default();
+
+        let all_roles: Vec<String> = roles
+            .iter()
+            .take(10)
+            .map(|(rid, rname)| format!("{rid}: {rname}"))
+            .collect();
+        let mut all_roles_text = all_roles.join("\n");
+        if roles.len() > 10 {
+            all_roles_text.push_str(&format!("\n… und {} weitere", roles.len() - 10));
+        }
+
+        RankReply::embed(json!({
+            "title": format!("🔍 Debug: {display_name}"),
+            "color": 0xE67E22,
+            "fields": [
+                { "name": "👤 User-Info", "value": format!("ID: {user_id}\nRollen: {}", roles.len()), "inline": true },
+                { "name": "🎯 Erkannter Rang", "value": format!("**{rn}{sub_txt}** ({rv})"), "inline": true },
+                {
+                    "name": "🎭 Gefundene Rang-Rollen",
+                    "value": if found.is_empty() { "❌ Keine".to_string() } else { found.join("\n") },
+                    "inline": false,
+                },
+                {
+                    "name": "📋 Alle Rollen (erste 10)",
+                    "value": if all_roles_text.is_empty() { "—".to_string() } else { all_roles_text },
+                    "inline": false,
+                },
+            ],
+        }))
+    }
+
+    /// `aktualisieren [#vc]` — Forced Reconcile.
+    async fn force_update(
+        &self,
+        guild_id: u64,
+        caller_id: u64,
+        channel_arg: Option<u64>,
+    ) -> RankReply {
+        let channel_id = match channel_arg {
+            Some(id) => id,
+            None => match self.manager.port.caller_voice_channel(guild_id, caller_id).await {
+                Some(id) => id,
+                None => {
+                    return RankReply::text("❌ In einem Sprachkanal sein oder Kanal angeben.")
+                }
+            },
+        };
+        let name = self
+            .manager
+            .port
+            .channel_name(guild_id, channel_id)
+            .await
+            .unwrap_or_else(|| channel_id.to_string());
+        if !self.manager.is_monitored(guild_id, channel_id).await {
+            return RankReply::text("❌ Dieser Kanal wird nicht überwacht.");
+        }
+        self.manager.force_reconcile(guild_id, channel_id).await;
+        RankReply::text(format!("✅ Kanal **{name}** aktualisiert."))
+    }
+
+    /// `rollen` — konfigurierte Rang-Rollen + Mitgliederzahl.
+    async fn tracked_roles(&self, guild_id: u64) -> RankReply {
+        // Stabile Reihenfolge nach Tier-Wert (HashMap ist ungeordnet).
+        let mut majors: Vec<(u64, &'static str, i64)> = major_rank_roles()
+            .into_iter()
+            .map(|(id, (name, value))| (id, name, value))
+            .collect();
+        majors.sort_by_key(|(_, _, value)| *value);
+        let mut lines: Vec<String> = Vec::new();
+        for (role_id, name, value) in majors {
+            let count = self.manager.port.role_member_count(guild_id, role_id).await;
+            if count > 0 || self.role_exists(guild_id, role_id).await {
+                lines.push(format!("**{name}** ({value}): <@&{role_id}> – {count} Mitglieder"));
+            } else {
+                lines.push(format!("**{name}** ({value}): ❌ Rolle nicht gefunden (ID {role_id})"));
+            }
+        }
+        RankReply::embed(json!({
+            "title": "🎭 Überwachte Rang-Rollen",
+            "description": lines.join("\n"),
+            "color": 0xF1C40F,
+        }))
+    }
+
+    async fn role_exists(&self, guild_id: u64, role_id: u64) -> bool {
+        self.manager
+            .port
+            .guild_roles(guild_id)
+            .await
+            .iter()
+            .any(|(id, _)| *id == role_id)
+    }
+
+    /// `kanäle` — überwachte/ausgeschlossene Kanäle.
+    async fn channel_config(&self, guild_id: u64) -> RankReply {
+        let vcs = self
+            .manager
+            .port
+            .category_voice_channels(guild_id, MONITORED_CATEGORY_ID)
+            .await;
+        let mut fields: Vec<Value> = Vec::new();
+        if vcs.is_empty() {
+            fields.push(json!({
+                "name": format!("📁 Kategorie (ID {MONITORED_CATEGORY_ID})"),
+                "value": "❌ Kategorie nicht gefunden oder leer",
+                "inline": false,
+            }));
+        } else {
+            let monitored = vcs
+                .iter()
+                .filter(|(id, _)| !EXCLUDED_CHANNEL_IDS.contains(id))
+                .count();
+            fields.push(json!({
+                "name": "📁 Comp/Ranked (lane)",
+                "value": format!("Gesamt: {}\nÜberwacht: {monitored}", vcs.len()),
+                "inline": false,
+            }));
+        }
+        let mut ex_lines: Vec<String> = Vec::new();
+        for cid in EXCLUDED_CHANNEL_IDS {
+            match self.manager.port.channel_name(guild_id, cid).await {
+                Some(name) => ex_lines.push(format!("🔇 {name}")),
+                None => ex_lines.push(format!("❓ Unbekannt (ID {cid})")),
+            }
+        }
+        if !ex_lines.is_empty() {
+            fields.push(json!({
+                "name": "🚫 Ausgeschlossene Kanäle",
+                "value": ex_lines.join("\n"),
+                "inline": false,
+            }));
+        }
+        RankReply::embed(json!({
+            "title": "🔊 Kanal-Konfiguration",
+            "description": "Sprachkanal-Überwachung",
+            "color": 0x3498DB,
+            "fields": fields,
+        }))
+    }
+
+    /// `status` — Systemstatus (Anker-/Settings-Zähler + eigener Rang).
+    async fn system_status(&self, guild_id: u64, caller_id: u64) -> RankReply {
+        let anchors = self.manager.anchor_snapshot().await;
+        let roles = self.manager.port.member_roles(guild_id, caller_id).await;
+        let (rn, rv, rs) = user_rank_from_roles(&roles);
+        let sub_txt = rs.map(|s| format!(" {s}")).unwrap_or_default();
+        RankReply::embed(json!({
+            "title": "📊 System-Status",
+            "description": "Rollen-Berechtigungen Voice Manager",
+            "color": 0x2ECC71,
+            "fields": [
+                { "name": "🔧 Version", "value": "Sanftes Anker-System v4.0 (DB-persistiert)", "inline": false },
+                {
+                    "name": "📁 Überwachung",
+                    "value": format!("Kategorie: {MONITORED_CATEGORY_ID}\nAusgeschlossen: {}\nRollen: {}", EXCLUDED_CHANNEL_IDS.len(), major_rank_roles().len()),
+                    "inline": true,
+                },
+                { "name": "💾 State", "value": format!("Anker: {}", anchors.len()), "inline": true },
+                { "name": "🎯 Dein Rang", "value": format!("{rn}{sub_txt} ({rv})"), "inline": true },
+            ],
+        }))
+    }
+
+    /// `info [@user]` — höchster Rang aus den Rollen.
+    async fn rank_info(&self, guild_id: u64, caller_id: u64, target: Option<u64>) -> RankReply {
+        let user_id = target.unwrap_or(caller_id);
+        let Some(display_name) = self.manager.port.member_display_name(guild_id, user_id).await
+        else {
+            return RankReply::text("❌ Benutzer nicht gefunden.");
+        };
+        let roles = self.manager.port.member_roles(guild_id, user_id).await;
+        let (rn, rv, rs) = user_rank_from_roles(&roles);
+        let sub_txt = rs.map(|s| format!(" {s}")).unwrap_or_default();
+        RankReply::embed(json!({
+            "title": format!("🎭 Rang-Information: {display_name}"),
+            "color": 0x3498DB,
+            "fields": [
+                { "name": "Höchster Rang", "value": format!("{rn}{sub_txt}"), "inline": true },
+                { "name": "Rang-Wert", "value": rv.to_string(), "inline": true },
+            ],
+        }))
+    }
+}
+
+/// Parst eine einzelne User-Mention (`<@123>` / `<@!123>`).
+fn parse_mention(token: &str) -> Option<u64> {
+    let inner = token.strip_prefix("<@")?.strip_suffix('>')?;
+    inner.strip_prefix('!').unwrap_or(inner).parse::<u64>().ok()
+}
+
+/// Parst eine Kanal-Mention (`<#123>`) oder eine reine ID.
+fn parse_channel(token: &str) -> Option<u64> {
+    if let Some(inner) = token.strip_prefix("<#").and_then(|s| s.strip_suffix('>')) {
+        return inner.parse::<u64>().ok();
+    }
+    token.parse::<u64>().ok()
+}
+
+/// Root-Hilfe-Embed der `!rrang`-Gruppe (Port des Gruppen-Embeds).
+fn help_embed() -> Value {
+    json!({
+        "title": "🎭 Rollen-Berechtigungen Rang-System",
+        "description": "Verwaltet Sprachkanäle über Discord-Rollen-Berechtigungen (mit DB-Persistenz)",
+        "color": 0x0099FF,
+        "fields": [{
+            "name": "📋 Befehle",
+            "value": "`info` • Rang-Info eines Users\n\
+                      `debug` • Debug zu User-Rollen\n\
+                      `anker` • Zeigt Kanal-Anker\n\
+                      `toggle [ein/aus]` • System für aktuellen VC\n\
+                      `vcstatus` • Status des aktuellen VC\n\
+                      `status` • Systemstatus\n\
+                      `rollen` • Liste der Rang-Rollen\n\
+                      `kanäle` • Überwachte/ausgeschlossene Kanäle\n\
+                      `aktualisieren [#vc]` • Forced Update",
+            "inline": false,
+        }],
+    })
+}
+
+/// Message-Listener für `!rrang` (Python: `@commands.group("rrang")`,
+/// `manage_guild`). Folgt dem `balance_cmd::spawn`-Muster: eigener
+/// `MessageEvent`-Subscriber, admin-gated (Administrator, konsistent mit den
+/// anderen Admin-Command-Listenern), Antwort über den `ChannelSender`.
+pub fn spawn_command(
+    commands: Arc<RankCommands>,
+    dispatcher: &Dispatcher,
+    sender: Arc<dyn ChannelSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    let Some(guild_id) = event.guild_id else {
+                        continue;
+                    };
+                    if !event.author_is_admin {
+                        continue;
+                    }
+                    let content = event.content.trim();
+                    let Some(reply) = commands.reply_for(content, guild_id, event.author_id).await
+                    else {
+                        continue;
+                    };
+                    let _ = sender
+                        .send_to_channel(event.channel_id, reply.content.as_deref(), &reply.embeds)
+                        .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -718,5 +1370,235 @@ mod tests {
         );
         assert_eq!(desired_channel_name(None, Some(("Seeker", 2))), "Seeker 2");
         assert_eq!(desired_channel_name(None, None), "Rang-Sprachkanal");
+    }
+
+    #[test]
+    fn rang_name_aus_wert() {
+        assert_eq!(rank_name_from_value(0), "Obscurus");
+        assert_eq!(rank_name_from_value(9), "Phantom");
+        assert_eq!(rank_name_from_value(11), "Eternus");
+        assert_eq!(rank_name_from_value(99), "Obscurus");
+    }
+
+    #[test]
+    fn mention_und_kanal_parsen() {
+        assert_eq!(parse_mention("<@123>"), Some(123));
+        assert_eq!(parse_mention("<@!456>"), Some(456));
+        assert_eq!(parse_mention("abc"), None);
+        assert_eq!(parse_channel("<#789>"), Some(789));
+        assert_eq!(parse_channel("789"), Some(789));
+        assert_eq!(parse_channel("foo"), None);
+    }
+
+    // ── `!rrang`-Command-Tests (Mock-Port + Test-DB) ────────────────────────
+
+    use std::sync::Mutex as StdMutex;
+
+    /// Mock der RankPort-Discord-Seite. Nur die für die Admin-Commands
+    /// relevanten Felder; die reconcile-Pfade werden hier nicht getrieben.
+    struct MockRankPort {
+        caller_channel: Option<u64>,
+        category: Option<u64>,
+        channel_name: String,
+        members: usize,
+        target_roles: Vec<(u64, String)>,
+        target_name: Option<String>,
+        overwrites_cleared: StdMutex<bool>,
+    }
+
+    #[async_trait::async_trait]
+    impl RankPort for MockRankPort {
+        async fn channel_members_with_roles(
+            &self,
+            _g: u64,
+            _c: u64,
+        ) -> Vec<(u64, Vec<(u64, String)>)> {
+            Vec::new()
+        }
+        async fn guild_roles(&self, _g: u64) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+        async fn current_role_overwrites(&self, _g: u64, _c: u64) -> Vec<u64> {
+            // eine Haupt-Rang-Rolle, damit clear_rank_overwrites etwas räumt
+            vec![1331458016356208680]
+        }
+        async fn apply_overwrites(
+            &self,
+            _g: u64,
+            _c: u64,
+            _allowed: &HashSet<u64>,
+            _removes: &HashSet<u64>,
+        ) -> Result<(), String> {
+            *self.overwrites_cleared.lock().expect("lock") = true;
+            Ok(())
+        }
+        async fn rename(&self, _c: u64, _n: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
+            self.category
+        }
+        async fn caller_voice_channel(&self, _g: u64, _u: u64) -> Option<u64> {
+            self.caller_channel
+        }
+        async fn channel_name(&self, _g: u64, _c: u64) -> Option<String> {
+            Some(self.channel_name.clone())
+        }
+        async fn category_name(&self, _g: u64, _c: u64) -> Option<String> {
+            Some("Comp/Ranked".to_string())
+        }
+        async fn channel_member_count(&self, _g: u64, _c: u64) -> usize {
+            self.members
+        }
+        async fn member_display_name(&self, _g: u64, _u: u64) -> Option<String> {
+            self.target_name.clone()
+        }
+        async fn member_roles(&self, _g: u64, _u: u64) -> Vec<(u64, String)> {
+            self.target_roles.clone()
+        }
+        async fn role_member_count(&self, _g: u64, _r: u64) -> usize {
+            0
+        }
+        async fn category_voice_channels(&self, _g: u64, _cat: u64) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+    }
+
+    const RANK_DDLS: [&str; 2] = [
+        "CREATE TABLE voice_channel_settings(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT)",
+        "CREATE TABLE voice_channel_anchors(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank_name TEXT NOT NULL, rank_value INTEGER NOT NULL, allowed_min INTEGER NOT NULL, allowed_max INTEGER NOT NULL, anchor_subrank INTEGER DEFAULT 3, score_min INTEGER, score_max INTEGER, updated_at TEXT)",
+    ];
+
+    async fn rank_setup(
+        port: MockRankPort,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RankCommands>,
+        Arc<RankVoiceManager>,
+        Arc<MockRankPort>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
+        for ddl in RANK_DDLS {
+            db.write(move |c| c.execute(ddl, []).map(|_| ()))
+                .await
+                .expect("ddl");
+        }
+        let port = Arc::new(port);
+        let manager = RankVoiceManager::new(
+            db,
+            port.clone(),
+            Arc::new(|_channel_id| None), // kein Erstbesitzer
+        );
+        let commands = RankCommands::new(manager.clone());
+        (dir, commands, manager, port)
+    }
+
+    fn monitored_port() -> MockRankPort {
+        MockRankPort {
+            caller_channel: Some(500),
+            category: Some(MONITORED_CATEGORY_ID),
+            channel_name: "Phantom 3".to_string(),
+            members: 2,
+            target_roles: Vec::new(),
+            target_name: Some("Tester".to_string()),
+            overwrites_cleared: StdMutex::new(false),
+        }
+    }
+
+    #[tokio::test]
+    async fn kein_rrang_befehl_ist_none() {
+        let (_dir, cmds, _m, _p) = rank_setup(monitored_port()).await;
+        assert!(cmds.reply_for("hallo", 1, 9).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn rrang_root_zeigt_hilfe() {
+        let (_dir, cmds, _m, _p) = rank_setup(monitored_port()).await;
+        let reply = cmds.reply_for("!rrang", 1, 9).await.unwrap();
+        assert!(reply.embeds[0]["title"]
+            .as_str()
+            .unwrap()
+            .contains("Rang-System"));
+    }
+
+    #[tokio::test]
+    async fn toggle_ohne_voice_meldet_fehler() {
+        let mut port = monitored_port();
+        port.caller_channel = None;
+        let (_dir, cmds, _m, _p) = rank_setup(port).await;
+        let reply = cmds.reply_for("!rrang toggle ein", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("Voice Channel"));
+    }
+
+    #[tokio::test]
+    async fn toggle_nicht_ueberwacht() {
+        let mut port = monitored_port();
+        port.category = Some(999); // andere Kategorie → nicht überwacht
+        let (_dir, cmds, _m, _p) = rank_setup(port).await;
+        let reply = cmds.reply_for("!rrang toggle ein", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("nicht überwacht"));
+    }
+
+    #[tokio::test]
+    async fn toggle_aus_persistiert_und_raeumt() {
+        let (_dir, cmds, manager, port) = rank_setup(monitored_port()).await;
+        // Default ist enabled → aus schaltet ab + räumt Overwrites.
+        let reply = cmds.reply_for("!rrang toggle aus", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("Deaktiviert"));
+        assert!(!manager.store.is_enabled(500).await);
+        assert!(*port.overwrites_cleared.lock().expect("lock"));
+        // Erneut aus → "Bereits deaktiviert".
+        let reply = cmds.reply_for("!rrang toggle aus", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("Bereits deaktiviert"));
+    }
+
+    #[tokio::test]
+    async fn toggle_ein_persistiert() {
+        let (_dir, cmds, manager, _p) = rank_setup(monitored_port()).await;
+        // Erst aus, dann wieder ein.
+        manager.store.set_enabled(500, 1, false).await;
+        let reply = cmds.reply_for("!rrang toggle ein", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("Aktiviert"));
+        assert!(manager.store.is_enabled(500).await);
+    }
+
+    #[tokio::test]
+    async fn toggle_ohne_arg_zeigt_status() {
+        let (_dir, cmds, _m, _p) = rank_setup(monitored_port()).await;
+        let reply = cmds.reply_for("!rrang toggle", 1, 9).await.unwrap();
+        let text = reply.content.unwrap();
+        assert!(text.contains("Rang-System für"), "text: {text}");
+        assert!(text.contains("Aktiviert"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn debug_erkennt_rang_aus_rollen() {
+        let mut port = monitored_port();
+        port.target_roles = vec![(1331458016356208680, "Phantom".to_string())];
+        let (_dir, cmds, _m, _p) = rank_setup(port).await;
+        let reply = cmds.reply_for("!rrang debug", 1, 9).await.unwrap();
+        let fields = reply.embeds[0]["fields"].as_array().unwrap();
+        // "Erkannter Rang" zeigt Phantom (9).
+        assert!(fields[1]["value"].as_str().unwrap().contains("Phantom"));
+    }
+
+    #[tokio::test]
+    async fn aktualisieren_nicht_ueberwacht() {
+        let mut port = monitored_port();
+        port.category = Some(999);
+        let (_dir, cmds, _m, _p) = rank_setup(port).await;
+        let reply = cmds.reply_for("!rrang aktualisieren", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("nicht überwacht"));
+    }
+
+    #[tokio::test]
+    async fn anker_leer_meldet_keine() {
+        let (_dir, cmds, _m, _p) = rank_setup(monitored_port()).await;
+        let reply = cmds.reply_for("!rrang anker", 1, 9).await.unwrap();
+        assert!(reply.embeds[0]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Keine aktiven"));
     }
 }

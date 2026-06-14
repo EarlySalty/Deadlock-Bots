@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use dl_db::Db;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
+    BridgeInteraction, BridgeReply, ChannelSender, Dispatcher, InteractionHandler,
+    InteractionRouter, VoiceEvent,
 };
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
@@ -318,6 +319,95 @@ pub fn register(router: &mut InteractionRouter, nudge: Arc<VoiceNudge>) {
     router.on_custom_id(CLOSE_CUSTOM_ID, Arc::new(CloseHandler { nudge }));
 }
 
+impl VoiceNudge {
+    /// `!nudgesend [@user]` / `!t30` — Admin-Test der Steam-Nudge-DM (Port von
+    /// `nudgesend`/`_resolve_test_target`). Ziel = erwähnter User, sonst der
+    /// Aufrufer. Opt-out und ausgenommene Rolle werden — wie im Original —
+    /// vor dem Versand respektiert. Antwort als Text in denselben Kanal.
+    ///
+    /// `None`, wenn es kein `!nudgesend`/`!t30`-Befehl ist. Der Aufrufer muss
+    /// (am Listener) Admin sein.
+    pub async fn nudgesend_reply(
+        self: &Arc<Self>,
+        content: &str,
+        guild_id: u64,
+        author_id: u64,
+    ) -> Option<String> {
+        let mut parts = content.split_whitespace();
+        let root = parts.next()?.to_lowercase();
+        if !matches!(root.as_str(), "!nudgesend" | "!t30") {
+            return None;
+        }
+        // Ziel: erste Mention im Rest, sonst der Aufrufer selbst.
+        let target = parts.find_map(parse_mention).unwrap_or(author_id);
+
+        if self.is_opted_out(target).await {
+            return Some(
+                "⚠️ Nutzer hat ein Opt-out aktiviert; keine Nudge-DM gesendet.".to_string(),
+            );
+        }
+        let roles = self.port.member_role_ids(guild_id, target).await;
+        if roles.iter().any(|r| EXEMPT_ROLE_IDS.contains(r)) {
+            return Some("ℹ️ Test abgebrochen: Ziel hat eine ausgenommene Rolle.".to_string());
+        }
+
+        // force=True im Original: Steam-Link- und State-Check werden übersprungen,
+        // die DM geht direkt raus. `send_nudge` bildet genau das ab.
+        if self.send_nudge(target).await {
+            Some(format!("📨 Test-DM an <@{target}> gesendet."))
+        } else {
+            Some(
+                "⚠️ Test-DM konnte nicht gesendet werden (DMs aus? oder bereits benachrichtigt)."
+                    .to_string(),
+            )
+        }
+    }
+}
+
+/// Parst eine einzelne Discord-User-Mention (`<@123>` / `<@!123>`).
+fn parse_mention(token: &str) -> Option<u64> {
+    let inner = token.strip_prefix("<@")?.strip_suffix('>')?;
+    inner.strip_prefix('!').unwrap_or(inner).parse::<u64>().ok()
+}
+
+/// Message-Listener für `!nudgesend`/`!t30` (Python: `@commands.hybrid_command`,
+/// `administrator`). Folgt dem `balance_cmd::spawn`-Muster: eigener
+/// `MessageEvent`-Subscriber, admin-gated, Antwort über den `ChannelSender`.
+/// Nicht-Admins werden still ignoriert (kein „fehlende Berechtigung“-Reply).
+pub fn spawn_command(
+    nudge: Arc<VoiceNudge>,
+    dispatcher: &Dispatcher,
+    sender: Arc<dyn ChannelSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    let Some(guild_id) = event.guild_id else {
+                        continue;
+                    };
+                    if !event.author_is_admin {
+                        continue;
+                    }
+                    let content = event.content.trim();
+                    let Some(reply) = nudge
+                        .nudgesend_reply(content, guild_id, event.author_id)
+                        .await
+                    else {
+                        continue;
+                    };
+                    let _ = sender
+                        .send_to_channel(event.channel_id, Some(&reply), &[])
+                        .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 pub fn spawn(nudge: Arc<VoiceNudge>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
     tokio::spawn(async move {
@@ -341,6 +431,7 @@ mod tests {
         dms: StdMutex<Vec<u64>>,
         logs: StdMutex<Vec<String>>,
         url: Option<String>,
+        roles: StdMutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -349,7 +440,7 @@ mod tests {
             *self.in_voice.lock().expect("lock")
         }
         async fn member_role_ids(&self, _g: u64, _u: u64) -> Vec<u64> {
-            vec![]
+            self.roles.lock().expect("lock").clone()
         }
         async fn send_dm(
             &self,
@@ -389,6 +480,7 @@ mod tests {
             dms: StdMutex::new(Vec::new()),
             logs: StdMutex::new(Vec::new()),
             url: url.map(str::to_string),
+            roles: StdMutex::new(Vec::new()),
         });
         (dir, VoiceNudge::new(db, port.clone()), port)
     }
@@ -469,5 +561,73 @@ mod tests {
             .await;
         assert!(nudge.running.lock().await.is_empty());
         assert!(port.dms.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn mention_parsen() {
+        assert_eq!(parse_mention("<@123>"), Some(123));
+        assert_eq!(parse_mention("<@!456>"), Some(456));
+        assert_eq!(parse_mention("abc"), None);
+    }
+
+    #[tokio::test]
+    async fn nudgesend_an_mention_sendet() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        let reply = nudge
+            .nudgesend_reply("!nudgesend <@200>", 1, 9)
+            .await
+            .expect("reply");
+        assert!(reply.contains("Test-DM"), "reply: {reply}");
+        // DM ging an die Mention (200), nicht an den Aufrufer (9).
+        assert_eq!(port.dms.lock().expect("lock").clone(), vec![200]);
+    }
+
+    #[tokio::test]
+    async fn nudgesend_ohne_mention_nimmt_aufrufer() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        // Alias !t30 ohne Mention → Aufrufer (9).
+        let reply = nudge.nudgesend_reply("!t30", 1, 9).await.expect("reply");
+        assert!(reply.contains("Test-DM"), "reply: {reply}");
+        assert_eq!(port.dms.lock().expect("lock").clone(), vec![9]);
+    }
+
+    #[tokio::test]
+    async fn nudgesend_exempt_rolle_bricht_ab() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        *port.roles.lock().expect("lock") = vec![EXEMPT_ROLE_IDS[0]];
+        let reply = nudge
+            .nudgesend_reply("!nudgesend <@200>", 1, 9)
+            .await
+            .expect("reply");
+        assert!(reply.contains("ausgenommene Rolle"), "reply: {reply}");
+        assert!(port.dms.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn nudgesend_opt_out_bricht_ab() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        nudge
+            .db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO user_privacy(user_id, opted_out) VALUES(200, 1)",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("opt-out");
+        let reply = nudge
+            .nudgesend_reply("!nudgesend <@200>", 1, 9)
+            .await
+            .expect("reply");
+        assert!(reply.contains("Opt-out"), "reply: {reply}");
+        assert!(port.dms.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn kein_nudgesend_befehl_ist_none() {
+        let (_dir, nudge, _port) = setup(None).await;
+        assert!(nudge.nudgesend_reply("hallo welt", 1, 9).await.is_none());
     }
 }

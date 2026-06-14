@@ -758,6 +758,104 @@ impl crate::rank::RankPort for RankGlue {
             .parent_id
             .map(|p| p.get())
     }
+
+    async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .voice_states
+            .get(&UserId::new(user_id))?
+            .channel_id
+            .map(|c| c.get())
+    }
+
+    async fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))
+            .map(|c| c.name.to_string())
+    }
+
+    async fn category_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let parent = guild.channels.get(&ChannelId::new(channel_id))?.parent_id?;
+        guild.channels.get(&parent).map(|c| c.name.to_string())
+    }
+
+    async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> usize {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.voice_states
+                    .iter()
+                    .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
+                    .filter(|(uid, _)| {
+                        g.members.get(uid).map(|m| !m.user.bot).unwrap_or(true)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .members
+            .get(&UserId::new(user_id))
+            .map(|m| m.display_name().to_string())
+    }
+
+    async fn member_roles(&self, guild_id: u64, user_id: u64) -> Vec<(u64, String)> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members.get(&UserId::new(user_id)).map(|m| {
+                    m.roles
+                        .iter()
+                        .filter_map(|rid| {
+                            g.roles.get(rid).map(|r| (rid.get(), r.name.to_string()))
+                        })
+                        .collect()
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    async fn role_member_count(&self, guild_id: u64, role_id: u64) -> usize {
+        let role = RoleId::new(role_id);
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.members
+                    .iter()
+                    .filter(|(_, m)| m.roles.contains(&role))
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn category_voice_channels(&self, guild_id: u64, category_id: u64) -> Vec<(u64, String)> {
+        let parent = ChannelId::new(category_id);
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|g| {
+                g.channels
+                    .iter()
+                    .filter(|(_, c)| {
+                        c.kind == serenity::all::ChannelType::Voice && c.parent_id == Some(parent)
+                    })
+                    .map(|(id, c)| (id.get(), c.name.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Feedback-DM-Anbindung.
