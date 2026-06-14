@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dl_broker::port::{
-    DiscordPort, GuildRoles, InviteInfo, MemberAccess, MemberInfo, PortError, RichMessage,
-    RoleInfo, RoleMembers, ViewSpec,
+    DiscordPort, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo, PortError,
+    RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -520,6 +520,38 @@ impl DiscordPort for DiscordAdapter {
             }
         }
         Ok(out)
+    }
+
+    async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError> {
+        let gid = match guild_id {
+            Some(id) => GuildId::new(id),
+            None => self.first_guild().ok_or(PortError::GuildNotFound)?,
+        };
+        let Some(guild) = self.cache.guild(gid) else {
+            return Err(PortError::GuildNotFound);
+        };
+        // Online: Präsenzen ungleich Offline (nur falsch befüllt ohne
+        // GUILD_PRESENCES-Intent — dann 0, wie Pythons Fallback).
+        let online_count = guild
+            .presences
+            .values()
+            .filter(|p| p.status != serenity::all::OnlineStatus::Offline)
+            .count() as u64;
+        // Voice: Nutzer, die in irgendeinem Voice-Kanal sind.
+        let voice_count = guild
+            .voice_states
+            .values()
+            .filter(|vs| vs.channel_id.is_some())
+            .count() as u64;
+        Ok(GuildStats {
+            found: true,
+            guild_id: gid.get(),
+            name: Some(guild.name.clone()),
+            member_count: guild.member_count,
+            online_count,
+            voice_count,
+            vanity_url_code: guild.vanity_url_code.clone().filter(|c| !c.is_empty()),
+        })
     }
 }
 

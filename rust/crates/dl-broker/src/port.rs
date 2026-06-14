@@ -94,6 +94,20 @@ pub struct RoleMembers {
     pub members: Vec<MemberInfo>,
 }
 
+/// Live-Kennzahlen einer Gilde aus dem Gateway-Cache (für die öffentliche
+/// Server-Statistik). Ersetzt `guild.member_count` / `.voice_channels` /
+/// `.members[*].status` / `.vanity_url_code`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GuildStats {
+    pub found: bool,
+    pub guild_id: u64,
+    pub name: Option<String>,
+    pub member_count: u64,
+    pub online_count: u64,
+    pub voice_count: u64,
+    pub vanity_url_code: Option<String>,
+}
+
 /// Zugriffsstatus eines Mitglieds für die Dashboard-Auth: Admin-Permission
 /// und Rollen-IDs, aus dem Member-Cache abgeleitet (ersetzt Pythons
 /// `guild.get_member(...).guild_permissions` / `.roles`).
@@ -172,4 +186,7 @@ pub trait DiscordPort: Send + Sync {
     /// Analytics). Nur gefundene Mitglieder werden zurückgegeben; der Aufrufer
     /// füllt fehlende selbst auf (`User <id>`).
     async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError>;
+    /// Live-Kennzahlen einer Gilde (Mitglieder-/Online-/Voice-Zahl, Vanity).
+    /// guild_id None = erste Bot-Gilde.
+    async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError>;
 }

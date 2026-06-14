@@ -220,6 +220,40 @@ pub async fn resolve_names(
     }
 }
 
+/// Live-Kennzahlen einer Gilde (`?guild_id=` optional). Loopback-only, ohne
+/// Token — für die öffentliche Server-Statistik des Dashboards.
+pub async fn guild_stats(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    let guild_id = params
+        .get("guild_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    match state.port.guild_stats(guild_id).await {
+        Ok(s) => respond(
+            200,
+            json!({
+                "ok": true,
+                "found": s.found,
+                "guild_id": s.guild_id.to_string(),
+                "name": s.name,
+                "member_count": s.member_count,
+                "online_count": s.online_count,
+                "voice_count": s.voice_count,
+                "vanity_url_code": s.vanity_url_code,
+            }),
+        ),
+        Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+    }
+}
+
 // ── Aktionen (Token + Idempotenz) ──────────────────────────────────────────
 
 /// Gemeinsamer Einstieg: Auth + JSON-Objekt + Idempotency-Key.
