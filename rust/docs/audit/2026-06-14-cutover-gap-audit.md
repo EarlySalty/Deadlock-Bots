@@ -379,24 +379,30 @@ Slash-Wrapper) — bewusst je eigener Pass:
 - **bug_reporter → DROP** (siehe oben), Memory `project-bug-reporter-dropped`.
 
 - **`!balance` / Custom-Games-Team-Balancer (`deadlock_team_balancer.py`, live)
-  → Backend KOMPLETT portiert, nur die Admin-Befehlsschicht offen.** Verifiziert:
-  der Balancing-Algorithmus (`_balance_score`/`_best_split`) ist `balancer.rs`
-  (Tests mit CPython-Referenzwerten), der Store (`customgames_tournament_teams/
-  signups`, Perioden, Auth-Tokens) ist `store.rs`, der Turnier-USER-Flow
-  (`turnier.py`: Panel `turnier_panel_*`, Team-Signup, `/turnier`) ist
-  `discord_ui.rs`. OFFEN ist nur die `!balance`-Admin-Prefix-Gruppe:
-  - `auto`/`voice` — Voice-Member → Raenge → `best_split` → Vorschau-Embed
-    (read-only; **die natuerliche erste Scheibe**, braucht nur einen Port fuer
-    Voice-Member + Rang-aus-Rollen, kein Channel-Move).
-  - `start`/`manual` — erstellt 2 Match-Voice-Channels + moved Spieler.
-  - `status`/`matches`/`end`/`cleanup` — Match-Lifecycle-Verwaltung.
-  - `turnierpanel`/`turnierstatus`/`turnierliste`/`austragen` — groesstenteils
-    Admin-Aliase auf den schon portierten Turnier-Flow (Ueberschneidung pruefen).
-  Naechster Pass: `!balance auto` als read-only Erst-Scheibe.
+  → ERLEDIGT (`balance_cmd.rs`, 4 Scheiben).** Backend lag schon: Algorithmus
+  (`_balance_score`/`_best_split`) in `balancer.rs` (CPython-Referenztests),
+  Store in `store.rs`, Turnier-USER-Flow in `discord_ui.rs`. Portiert wurde die
+  `!balance`-Admin-Prefix-Gruppe:
+  - `auto`/`voice` — Voice-Member → Raenge → `best_split` → Vorschau-Embed.
+  - `start` — erstellt 2 Match-Voice-Channels + moved Spieler (NICHT gated, wie
+    Original; frueherer faelschlicher `manage_guild`-Gate entfernt).
+  - `manual @u1 …` — Mention-Parsing → explizite Spielerliste → gleicher Kern.
+  - `status [@user]` — Rang-Status (Rollen-Rang + DB-Fallback `user_ranks`).
+  - `matches`/`end`/`cleanup` — Match-Lifecycle (in-memory), Channel-Delete,
+    Debrief-Lane; `cleanup` `manage_channels`-gated.
+  - Rang-Aufloesung mit DB-Fallback (`get_user_rank` → `user_ranks`) jetzt in
+    `auto`/`start`/`manual`/`status`.
+  - **Abweichung (dokumentiert):** Pythons `start` zeigt bei >12 Spielern einen
+    interaktiven Auswahl-Dropdown (`SelectionView`). Rust laesst stattdessen
+    `best_split` die Ueberzaehligen automatisch auf die Bank setzen; `manual`
+    gibt die explizite Auswahl. Der Dropdown ist eine spaeter nachruestbare
+    Komfort-Funktion, kein Cutover-Blocker.
+  - `turnierpanel`/`turnierstatus`/`turnierliste`/`austragen` — Admin-Aliase auf
+    den schon portierten Turnier-Flow (separat, kein Teil dieser Gruppe).
 
 ### Konsolidierte Restliste (nach allen Verifikationen)
 
-1. `!balance`-Admin-Befehlsschicht (Backend fertig; Algorithmus/Store/Turnier-UI da).
+1. ~~`!balance`-Admin-Befehlsschicht~~ — ERLEDIGT (`balance_cmd.rs`, 4 Scheiben).
 2. `dm_assistant` Free-Text-AI-DM-Assistent — in Rust nicht vorhanden.
 3. Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]` (Infra).
 4. Kleinkram-Slash: `/faqclose`, `/faqpanel`, `/coaching-analysieren`,

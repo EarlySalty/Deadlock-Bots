@@ -23,6 +23,8 @@ const MATCH_CATEGORY_ID: u64 = 1289721245281292290;
 const CREATE_SLEEP: Duration = Duration::from_millis(400);
 /// Pause zwischen einzelnen Member-Moves (`MOVE_SLEEP`).
 const MOVE_SLEEP: Duration = Duration::from_millis(350);
+/// Obergrenze: 6er-Teams → max. 12 Spieler (`TEAM_SIZE_CAP * 2`).
+const MAX_PLAYERS: usize = crate::balancer::TEAM_SIZE_CAP * 2;
 
 /// Rang-Namen nach Wert (0..=11), wie `DEADLOCK_RANKS` im Original.
 const RANK_NAMES: [&str; 12] = [
@@ -99,8 +101,12 @@ pub trait BalancePort: Send + Sync {
     /// Nicht-Bot-Mitglieder im Voice-Channel des Aufrufers (leer, wenn er in
     /// keinem ist).
     async fn caller_voice_members(&self, guild_id: u64, user_id: u64) -> Vec<VoiceMember>;
-    /// Hat der Aufrufer `Server verwalten` (für `!balance start`)?
-    async fn is_admin(&self, guild_id: u64, user_id: u64) -> bool;
+    /// Löst ein beliebiges Gilden-Mitglied auf (für `!balance manual`/`status`);
+    /// `None`, wenn es nicht (mehr) auf dem Server ist.
+    async fn resolve_member(&self, guild_id: u64, user_id: u64) -> Option<VoiceMember>;
+    /// Gespeicherter Rang-String aus der zentralen DB (`user_ranks`); `None`,
+    /// wenn kein Eintrag vorhanden ist (DB-Fallback wie `_fetch_rank_from_db`).
+    async fn db_rank(&self, user_id: u64) -> Option<String>;
     /// Aktueller Voice-Channel des Aufrufers (für die Rück-Move-Referenz).
     async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     /// Erstellt einen Voice-Channel unter `category_id`; `None` bei Fehler oder
@@ -189,6 +195,8 @@ impl BalanceCommands {
             "" => BalanceReply::embed(help_embed()),
             "auto" | "voice" => self.auto_preview(guild_id, user_id).await,
             "start" => self.start(guild_id, user_id).await,
+            "manual" => self.manual(guild_id, user_id, &parse_mentions(&args)).await,
+            "status" => self.status(guild_id, user_id, parse_mentions(&args).first().copied()).await,
             "matches" => self.matches_list().await,
             "cleanup" => self.cleanup(guild_id, user_id, args.first().copied()).await,
             "end" => self.end(guild_id, args.first().copied(), args.get(1).copied()).await,
@@ -208,11 +216,12 @@ impl BalanceCommands {
                 members.len()
             ));
         }
-        // (user_id, name, rang_wert) — höchster Rang zuerst, wie das Original.
-        let mut players: Vec<(String, i64)> = members
-            .into_iter()
-            .map(|m| (m.display_name, rank_from_roles(&m.role_ids)))
-            .collect();
+        // (name, rang_wert) — höchster Rang zuerst, wie das Original.
+        let mut players: Vec<(String, i64)> = Vec::with_capacity(members.len());
+        for m in &members {
+            let (_, val) = self.resolve_rank(m.user_id, &m.role_ids).await;
+            players.push((m.display_name.clone(), val));
+        }
         players.sort_by_key(|p| std::cmp::Reverse(p.1));
 
         let values: Vec<i64> = players.iter().map(|(_, v)| *v).collect();
@@ -222,12 +231,25 @@ impl BalanceCommands {
         BalanceReply::embed(team_embed(&team_a, &team_b, "🎯 Vorschau – Team Balance (ohne Move)"))
     }
 
-    /// `start`: erstellt 2 Match-Voice-Channels, verschiebt die Teams und merkt
-    /// sich das Match (Port von `_run_balance_and_start`). `manage_guild`-gated.
-    async fn start(&self, guild_id: u64, user_id: u64) -> BalanceReply {
-        if !self.port.is_admin(guild_id, user_id).await {
-            return BalanceReply::text("❌ Dafür brauchst du die Berechtigung „Server verwalten“.");
+    /// Effektiver Rang eines Mitglieds: erst Discord-Rang-Rollen, sonst der in
+    /// `user_ranks` gespeicherte Rang (Port von `get_user_rank`).
+    async fn resolve_rank(&self, user_id: u64, role_ids: &[u64]) -> (String, i64) {
+        let role_val = rank_from_roles(role_ids);
+        if role_val > 0 {
+            return (rank_name(role_val).to_string(), role_val);
         }
+        if let Some(raw) = self.port.db_rank(user_id).await {
+            let val = rank_value_from_name(&raw);
+            if val > 0 {
+                return (rank_name(val).to_string(), val);
+            }
+        }
+        ("Obscurus".to_string(), 0)
+    }
+
+    /// `start`: balanciert die Voice-Member des Aufrufers und startet das Match.
+    /// Wie das Original NICHT permission-gated.
+    async fn start(&self, guild_id: u64, user_id: u64) -> BalanceReply {
         let members = self.port.caller_voice_members(guild_id, user_id).await;
         if members.len() < 4 {
             return BalanceReply::text(format!(
@@ -235,11 +257,53 @@ impl BalanceCommands {
                 members.len()
             ));
         }
-        let mut players: Vec<(u64, String, i64)> = members
-            .into_iter()
-            .map(|m| (m.user_id, m.display_name, rank_from_roles(&m.role_ids)))
-            .collect();
+        let players = self.resolve_players(&members).await;
+        self.run_and_start(guild_id, user_id, players).await
+    }
+
+    /// `manual @u1 …`: balanciert eine explizit genannte Spielerliste.
+    async fn manual(&self, guild_id: u64, user_id: u64, mentioned: &[u64]) -> BalanceReply {
+        let mut members: Vec<VoiceMember> = Vec::new();
+        for &uid in mentioned {
+            if let Some(m) = self.port.resolve_member(guild_id, uid).await {
+                members.push(m);
+            }
+        }
+        if members.len() < 4 {
+            return BalanceReply::text(format!(
+                "❌ Mindestens 4 Spieler benötigt (angegeben: {})",
+                members.len()
+            ));
+        }
+        if members.len() > MAX_PLAYERS {
+            return BalanceReply::text(format!(
+                "❌ Maximal {MAX_PLAYERS} Spieler unterstützt (angegeben: {})",
+                members.len()
+            ));
+        }
+        let players = self.resolve_players(&members).await;
+        self.run_and_start(guild_id, user_id, players).await
+    }
+
+    /// Löst Ränge für eine Mitgliederliste auf (höchster Rang zuerst).
+    async fn resolve_players(&self, members: &[VoiceMember]) -> Vec<(u64, String, i64)> {
+        let mut players: Vec<(u64, String, i64)> = Vec::with_capacity(members.len());
+        for m in members {
+            let (_, val) = self.resolve_rank(m.user_id, &m.role_ids).await;
+            players.push((m.user_id, m.display_name.clone(), val));
+        }
         players.sort_by_key(|p| std::cmp::Reverse(p.2));
+        players
+    }
+
+    /// Kern: erstellt 2 Match-Voice-Channels, verschiebt die Teams und merkt sich
+    /// das Match (Port von `_run_balance_and_start`).
+    async fn run_and_start(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        players: Vec<(u64, String, i64)>,
+    ) -> BalanceReply {
         let values: Vec<i64> = players.iter().map(|p| p.2).collect();
         let (idx_a, idx_b) = best_split(&values);
 
@@ -507,12 +571,65 @@ impl BalanceCommands {
             "fields": fields
         }))
     }
+
+    /// `status [@user]`: zeigt effektiven Rang, Rollen-Rang und DB-Fallback.
+    async fn status(&self, guild_id: u64, caller_id: u64, target: Option<u64>) -> BalanceReply {
+        let uid = target.unwrap_or(caller_id);
+        let Some(member) = self.port.resolve_member(guild_id, uid).await else {
+            return BalanceReply::text("❌ Mitglied nicht gefunden.");
+        };
+        let role_val = rank_from_roles(&member.role_ids);
+        let (cur_nm, cur_val) = self.resolve_rank(uid, &member.role_ids).await;
+        let db_raw = self.port.db_rank(uid).await;
+        let db_val = db_raw.as_deref().map(rank_value_from_name).unwrap_or(0);
+
+        let role_field = if role_val > 0 {
+            format!("{} ({role_val})", rank_name(role_val))
+        } else {
+            "Keine Rank-Rolle".to_string()
+        };
+        let db_field = if db_val > 0 {
+            format!("{} ({db_val})", rank_name(db_val))
+        } else {
+            "Nicht in DB".to_string()
+        };
+        BalanceReply::embed(json!({
+            "title": format!("📊 Rank-Status: {}", member.display_name),
+            "color": 0x3498DB,
+            "fields": [
+                { "name": "🎯 Aktueller Rank", "value": format!("**{cur_nm}** ({cur_val})"), "inline": true },
+                { "name": "🎭 Discord-Rollen", "value": role_field, "inline": true },
+                { "name": "🗃️ DB-Fallback", "value": db_field, "inline": true }
+            ]
+        }))
+    }
 }
 
 /// Laufzeit wie Pythons `timedelta.seconds`: Rest innerhalb eines Tages → min/sek.
 fn dur_min_sec(elapsed_secs: i64) -> (i64, i64) {
     let within_day = elapsed_secs.rem_euclid(86_400);
     (within_day / 60, within_day % 60)
+}
+
+/// Rang-Wert (0..=11) aus einem gespeicherten Rang-String (Port von
+/// `_normalize_rank_name` + `DEADLOCK_RANKS`): case-insensitiver Name → Index.
+fn rank_value_from_name(raw: &str) -> i64 {
+    let norm = raw.trim().to_lowercase();
+    RANK_NAMES
+        .iter()
+        .position(|n| n.to_lowercase() == norm)
+        .map(|i| i as i64)
+        .unwrap_or(0)
+}
+
+/// Parst Discord-User-Mentions (`<@123>` / `<@!123>`) aus den Befehls-Argumenten.
+fn parse_mentions(args: &[&str]) -> Vec<u64> {
+    args.iter()
+        .filter_map(|tok| {
+            let inner = tok.strip_prefix("<@")?.strip_suffix('>')?;
+            inner.strip_prefix('!').unwrap_or(inner).parse::<u64>().ok()
+        })
+        .collect()
 }
 
 /// Hilfe-Embed der `!balance`-Gruppe (Port des Root-Embeds).
@@ -527,11 +644,11 @@ fn help_embed() -> Value {
                 "value": "`!balance auto` – nur Anzeige (keine Channels)\n\
                           `!balance voice` – Alias von auto\n\
                           `!balance start` – Channels erstellen & Spieler moven\n\
+                          `!balance manual @u1 …` – manuelle Spielerauswahl\n\
+                          `!balance status [@user]` – Rank-Status\n\
                           `!balance matches` – aktive Matches\n\
                           `!balance end <id> [skip]` – Match beenden (+ Debrief)\n\
-                          `!balance cleanup <hours>` – alte Matches löschen\n\
-                          `!balance manual @u1 …` – manuelle Auswahl (folgt)\n\
-                          `!balance status [@user]` – Rank-Status (folgt)",
+                          `!balance cleanup <hours>` – alte Matches löschen",
                 "inline": false
             },
             {
@@ -650,14 +767,22 @@ mod tests {
     struct MockPort {
         members: Vec<(u64, i64)>,
         admin: bool,
+        db_ranks: Vec<(u64, String)>,
     }
 
     impl MockPort {
         fn new(members: Vec<(u64, i64)>) -> Arc<Self> {
-            Arc::new(Self { members, admin: false })
+            Arc::new(Self { members, admin: false, db_ranks: vec![] })
         }
         fn admin(members: Vec<(u64, i64)>) -> Arc<Self> {
-            Arc::new(Self { members, admin: true })
+            Arc::new(Self { members, admin: true, db_ranks: vec![] })
+        }
+        fn with_db_ranks(members: Vec<(u64, i64)>, db_ranks: Vec<(u64, &str)>) -> Arc<Self> {
+            Arc::new(Self {
+                members,
+                admin: false,
+                db_ranks: db_ranks.into_iter().map(|(id, r)| (id, r.to_string())).collect(),
+            })
         }
     }
 
@@ -678,8 +803,20 @@ mod tests {
                 })
                 .collect()
         }
-        async fn is_admin(&self, _g: u64, _u: u64) -> bool {
-            self.admin
+        async fn resolve_member(&self, _g: u64, user_id: u64) -> Option<VoiceMember> {
+            // Mitglied nur auflösen, wenn es in `members` bekannt ist.
+            self.members.iter().find(|&&(id, _)| id == user_id).map(|&(id, val)| VoiceMember {
+                user_id: id,
+                display_name: format!("U{id}"),
+                role_ids: DISCORD_RANK_ROLES
+                    .iter()
+                    .find(|(_, v)| *v == val)
+                    .map(|(rid, _)| vec![*rid])
+                    .unwrap_or_default(),
+            })
+        }
+        async fn db_rank(&self, user_id: u64) -> Option<String> {
+            self.db_ranks.iter().find(|&&(id, _)| id == user_id).map(|(_, r)| r.clone())
         }
         async fn caller_voice_channel(&self, _g: u64, _u: u64) -> Option<u64> {
             Some(999)
@@ -732,17 +869,66 @@ mod tests {
         assert!(reply.content.unwrap().contains("noch nicht verfügbar"));
     }
 
+    #[test]
+    fn mentions_parsen() {
+        assert_eq!(parse_mentions(&["<@123>", "<@!456>", "abc"]), vec![123, 456]);
+        assert!(parse_mentions(&["kein", "mention"]).is_empty());
+    }
+
+    #[test]
+    fn rang_wert_aus_db_string() {
+        assert_eq!(rank_value_from_name("eternus"), 11);
+        assert_eq!(rank_value_from_name("  Seeker "), 2);
+        assert_eq!(rank_value_from_name("quatsch"), 0);
+    }
+
     #[tokio::test]
-    async fn start_ohne_admin_blockt() {
+    async fn auto_nutzt_db_fallback_ohne_rolle() {
+        // Spieler 5 hat keine Rang-Rolle (val 0), aber DB-Rang „eternus“ (11).
+        let cmds = BalanceCommands::new(MockPort::with_db_ranks(
+            vec![(1, 5), (2, 5), (3, 5), (5, 0)],
+            vec![(5, "eternus")],
+        ));
+        let reply = cmds.reply_for("!balance auto", 1, 1).await.unwrap();
+        let embed = &reply.embeds[0];
+        // Irgendein Team-Feld muss den DB-aufgelösten Eternus (11) zeigen.
+        let text = embed.to_string();
+        assert!(text.contains("Eternus"), "embed: {text}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn manual_baut_match_aus_mentions() {
         let cmds = BalanceCommands::new(MockPort::new(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
-        let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
-        assert!(reply.content.unwrap().contains("Server verwalten"));
+        let reply = cmds
+            .reply_for("!balance manual <@1> <@2> <@3> <@4>", 1, 9)
+            .await
+            .unwrap();
+        assert!(reply.embeds[0]["title"].as_str().unwrap().contains("Match 001"));
+        assert_eq!(cmds.matches.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn manual_zu_wenige_mentions() {
+        let cmds = BalanceCommands::new(MockPort::new(vec![(1, 11), (2, 1)]));
+        let reply = cmds.reply_for("!balance manual <@1> <@2>", 1, 9).await.unwrap();
+        assert!(reply.content.unwrap().contains("angegeben: 2"));
+    }
+
+    #[tokio::test]
+    async fn status_zeigt_rollen_und_db() {
+        let cmds = BalanceCommands::new(MockPort::with_db_ranks(vec![(7, 0)], vec![(7, "archon")]));
+        let reply = cmds.reply_for("!balance status <@7>", 1, 9).await.unwrap();
+        let fields = reply.embeds[0]["fields"].as_array().unwrap();
+        // Keine Rolle → „Aktueller Rank“ kommt aus DB-Fallback (Archon = 7).
+        assert!(fields[0]["value"].as_str().unwrap().contains("Archon"));
+        assert!(fields[1]["value"].as_str().unwrap().contains("Keine Rank-Rolle"));
+        assert!(fields[2]["value"].as_str().unwrap().contains("Archon"));
     }
 
     // start_paused: die Rate-Limit-Sleeps laufen instant durch.
     #[tokio::test(start_paused = true)]
     async fn start_erstellt_match_und_bewegt() {
-        let cmds = BalanceCommands::new(MockPort::admin(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
+        let cmds = BalanceCommands::new(MockPort::new(vec![(1, 11), (2, 1), (3, 11), (4, 1)]));
         let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
         assert_eq!(reply.embeds.len(), 1);
         assert!(reply.embeds[0]["title"].as_str().unwrap().contains("Match 001"));

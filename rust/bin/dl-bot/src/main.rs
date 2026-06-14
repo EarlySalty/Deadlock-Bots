@@ -219,6 +219,7 @@ async fn main() -> anyhow::Result<()> {
     let balance_commands = Arc::new(dl_tournament::balance_cmd::BalanceCommands::new(Arc::new(
         modglue::BalanceGlue {
             adapter: adapter.clone(),
+            db: db.clone(),
         },
     )));
 

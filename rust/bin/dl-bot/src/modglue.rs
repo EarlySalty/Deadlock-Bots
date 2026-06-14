@@ -1146,6 +1146,7 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
 
 pub struct BalanceGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub db: dl_db::Db,
 }
 
 #[async_trait::async_trait]
@@ -1183,28 +1184,35 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
             .collect()
     }
 
-    async fn is_admin(&self, guild_id: u64, user_id: u64) -> bool {
-        // Python: @commands.has_permissions(manage_guild=True) → „Server verwalten“
-        // (oder Administrator, oder Server-Owner).
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
-            return false;
-        };
-        if guild.owner_id.get() == user_id {
-            return true;
-        }
-        guild
-            .members
-            .get(&UserId::new(user_id))
-            .map(|m| {
-                m.roles.iter().any(|rid| {
-                    guild
-                        .roles
-                        .get(rid)
-                        .map(|r| r.permissions.manage_guild() || r.permissions.administrator())
-                        .unwrap_or(false)
-                })
+    async fn resolve_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Option<dl_tournament::balance_cmd::VoiceMember> {
+        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let member = guild.members.get(&UserId::new(user_id))?;
+        Some(dl_tournament::balance_cmd::VoiceMember {
+            user_id,
+            display_name: member.display_name().to_string(),
+            role_ids: member.roles.iter().map(|r| r.get()).collect(),
+        })
+    }
+
+    async fn db_rank(&self, user_id: u64) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT rank FROM user_ranks WHERE user_id = ?1",
+                    [user_id],
+                    |row| row.get::<_, Option<String>>(0),
+                )
+                .optional()
             })
-            .unwrap_or(false)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
     }
 
     async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
