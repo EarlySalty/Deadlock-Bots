@@ -126,7 +126,26 @@ impl Db {
         .await??;
         Ok(result)
     }
+
+    /// Legt alle Tabellen/Indizes/Trigger des Schema-Vertrags
+    /// (`docs/db-schema.sql`) idempotent an — das Rust-Pendant zu Pythons
+    /// `init_schema`: ein einziger Owner, der beim Start das komplette Schema
+    /// sicherstellt. Bestehende Objekte bleiben unangetastet, weil jedes
+    /// `CREATE …` zu `CREATE … IF NOT EXISTS` umgeschrieben wird.
+    pub async fn bootstrap_schema(&self) -> Result<(), DbError> {
+        let script = SCHEMA_DUMP
+            .replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS ")
+            .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ")
+            .replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ")
+            .replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ");
+        self.write(move |conn| conn.execute_batch(&script)).await?;
+        Ok(())
+    }
 }
+
+/// Voller Produktions-Schema-Dump (Vertrag). Wird in [`Db::bootstrap_schema`]
+/// idempotent eingespielt.
+const SCHEMA_DUMP: &str = include_str!("../../../docs/db-schema.sql");
 
 #[cfg(test)]
 mod tests {
@@ -202,5 +221,42 @@ mod tests {
             .await
             .expect("pragma");
         assert_eq!(mode.to_lowercase(), "wal");
+    }
+
+    #[tokio::test]
+    async fn bootstrap_legt_kerntabellen_an_und_ist_idempotent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
+        // Frische DB: Schema einspielen — und ein zweites Mal (IF NOT EXISTS).
+        db.bootstrap_schema().await.expect("bootstrap");
+        db.bootstrap_schema().await.expect("idempotent");
+
+        // Stichprobe: Kerntabellen, die Runtime-Writer brauchen, existieren.
+        for table in [
+            "voice_stats",
+            "voice_session_log",
+            "message_activity",
+            "member_events",
+            "user_co_players",
+            "user_activity_patterns",
+            "steam_links",
+            "live_player_state",
+            "text_stats",
+            "text_conversation_log",
+            "kv_store",
+            "user_privacy",
+        ] {
+            let count: i64 = db
+                .read(move |c| {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                        [table],
+                        |row| row.get(0),
+                    )
+                })
+                .await
+                .expect("query");
+            assert_eq!(count, 1, "Tabelle {table} fehlt nach bootstrap_schema");
+        }
     }
 }

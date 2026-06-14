@@ -295,11 +295,18 @@ _5 Luecken (von 10 geprueft)._
 - **[BLOCKER]** `Master broker route POST /internal/master/v1/discord/resolve-user` <missing>  ✅ ERLEDIGT 475da89
   - Python broker serves POST /discord/resolve-user (resolve a Discord user by id). Rust dl-broker does NOT register it — it has the differently-named /discord/resolve-names (bulk, for the Rust dashboard) but not resolve-user. The LIVE Twitch-bot calls resolve-user: rust/crates/tb-transport-discord/src/
   - Py: `service/master_broker.py:255 (route) + 2433 (_handle_resolve_user)`
-- [degraded] `Master schema bootstrap (init_schema) — single idempotent owner` <partial>
-  - Python init_schema creates ALL ~60+ tables idempotently in one place on startup (executescript covering schema_version, kv_store, voice_stats, steam_links, live_player_state, message_activity, member_events, etc.). Rust has NO equivalent master bootstrap. dl-bot main.rs only calls a handful of per-m
+- `Master schema bootstrap (init_schema) — single idempotent owner` ✅ ERLEDIGT
+  - `dl_db::Db::bootstrap_schema()` spielt jetzt beim Start den kompletten
+    Schema-Vertrag (`rust/docs/db-schema.sql`, 114 Tabellen + 129 Indizes + 3
+    Trigger) idempotent ein — Rust-Pendant zu Pythons `init_schema`. Jedes
+    `CREATE …` wird zur Laufzeit zu `CREATE … IF NOT EXISTS` umgeschrieben und
+    per `execute_batch` eingespielt. Aufruf in `main.rs` direkt nach `Db::open`,
+    vor dem Smoke-Check. Test: `bootstrap_legt_kerntabellen_an_und_ist_idempotent`.
   - Py: `service/db.py:496 (init_schema), called at db.py:363`
-- [degraded] `Core tables created ONLY in #[cfg(test)] — voice_stats / voice_session_log / message_activity / user_co_players / user_activity_patterns / member_events / steam_links / live_player_state` <partial>
-  - Every Rust CREATE TABLE for these core tables is inside a `const DDLS`/test setup behind #[cfg(test)] (verified by reading tracker.rs:700 and analyzer.rs:575 #[cfg(test)] guard). The runtime writers (analyzer spawn_message_activity, spawn_member_events, voice tracker) INSERT/UPDATE assuming the tabl
+- `Core tables created ONLY in #[cfg(test)] — voice_stats / voice_session_log / message_activity / user_co_players / user_activity_patterns / member_events / steam_links / live_player_state` ✅ ERLEDIGT (durch bootstrap_schema mitabgedeckt)
+  - Die `#[cfg(test)]`-DDLs in tracker.rs/analyzer.rs/feedback.rs bleiben als
+    Test-Fixtures; zur Laufzeit legt `bootstrap_schema` diese Kerntabellen jetzt
+    selbst an, statt sich darauf zu verlassen, dass Python sie schon erzeugt hat.
   - Py: `service/db.py:620 (voice_stats), 628 (voice_session_log), 945 (user_co_players), 931 (user_activity_patterns), 957 (member_events), 671 (steam_links), 709 (live_player_state); message_activity at db.py:990`
 - [degraded] `text_stats + text_conversation_log writer (text gamification + conversation memory)` <missing>
   - Python user_activity_analyzer.on_message writes text_stats (per-user total_messages/total_points, fed to the public text leaderboard) and text_conversation_log (per-conversation session log). NO Rust code writes either: grep for INSERT/UPDATE text_stats / text_conversation_log across rust/crates+bin
@@ -404,7 +411,8 @@ Slash-Wrapper) — bewusst je eigener Pass:
 
 1. ~~`!balance`-Admin-Befehlsschicht~~ — ERLEDIGT (`balance_cmd.rs`, 4 Scheiben).
 2. `dm_assistant` Free-Text-AI-DM-Assistent — in Rust nicht vorhanden.
-3. Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]` (Infra).
+3. ~~Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]`~~ —
+   ERLEDIGT (`dl_db::Db::bootstrap_schema`, beim Start in `main.rs`).
 4. Kleinkram-Slash (verifiziert, teils erledigt/abgedeckt):
    - `/faqpanel` — ERLEDIGT (`faq.rs`). War der eigentliche Blocker: die Rust-FAQ
      hatte die Panel-Konstanten, postete das Panel aber NIE — d. h. der „Frage

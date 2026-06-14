@@ -29,6 +29,11 @@ async fn main() -> anyhow::Result<()> {
     let _web_cfg = WebConfig::from_env();
     let db = dl_db::Db::open(&cfg.db_path)
         .with_context(|| format!("gemeinsame DB öffnen: {}", cfg.db_path.display()))?;
+    // Komplettes Schema idempotent sicherstellen (Rust-Pendant zu init_schema):
+    // ein Owner, der beim Start alle Tabellen/Indizes anlegt, falls sie fehlen.
+    db.bootstrap_schema()
+        .await
+        .context("Schema-Bootstrap (db-schema.sql einspielen)")?;
     let tables: i64 = db
         .read(|c| {
             c.query_row(
