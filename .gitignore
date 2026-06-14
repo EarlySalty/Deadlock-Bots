@@ -31,6 +31,8 @@ install_windows_service.py
 !cogs/steam/steam_presence/package.json
 !cogs/steam/steam_presence/package-lock.json
 !cogs/steam/steam_presence/index.js
+# include_str!-Quelldatei: muss versioniert sein, sonst bricht der dl-community-Build
+!rust/crates/dl-community/src/onboarding_steps.json
 !cogs/steam/steam_presence/README.md
 !cogs/steam/steam_presence/deadlock_presence_logger.js
 !cogs/steam/steam_presence/statusanzeige.js

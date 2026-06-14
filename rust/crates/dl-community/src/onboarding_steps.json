@@ -1,0 +1,62 @@
+[
+ {
+  "title": "Hey, willkommen auf dem Server! 👋",
+  "description": "Schön dass du dabei bist – wir sind die **Deutsche Deadlock Community**.\n\nEgal ob du gerade erst anfängst oder schon ein paar hundert Stunden drinhast, hier findest du Leute zum Zocken, Tipps, Coaching und alles rund ums Game.\n\nKurz durchklicken lohnt sich – dann weißt du alles was du brauchst. Los geht's.",
+  "color": 5793266,
+  "id": ""
+ },
+ {
+  "title": "📋 Regeln & Verhalten",
+  "description": "Kurz & knapp – kein Roman:\n\n🚫 **Was gar nicht geht:**\n- Beleidigungen, Hassrede, Diskriminierung\n- Spam oder Werbung für andere Server\n- NSFW-Content irgendwo auf dem Server\n- Leute in Chill-Lanes wegen ihrem Skill anmachen\n\n✅ **Was wir erwarten:**\n- Respekt gegenüber allen – egal Rang, Erfahrung oder Spielstil\n- Im Voice **kommunizieren**: Lane-Gegner fehlen? Callt es. Ihr macht ne Box? Callt es. Ihr wechselt die Lane? Callt es. Niemand hat Bock auf 1v2 weil keiner redet.\n- Bei Problemen: kein Stress machen sondern ein Ticket öffnen -> #ticket-eroeffnen\n\n**Faustregel:** Behandel andere so wie du selbst behandelt werden willst.",
+  "color": 15548997,
+  "id": ""
+ },
+ {
+  "title": "🎮 Streamst du Deadlock?",
+  "description": "Wir haben einen **exklusiven Streamer-Bereich** mit automatisierten Tools, die dir als Partner das Leben leichter machen.\n\n**1️⃣ Auto-Raid Manager**\nSchluss mit manuellem Raid-Suchen am Ende eines langen Streams. Der Bot übernimmt das automatisch:\n• Sobald dein Stream **offline** geht, prüft der Bot, **welche Partner aktuell live** sind und raidet einen davon\n• **Fallback:** Wenn **kein Partner live** ist, sucht der Bot automatisch nach **deutschen Deadlock-Streamern**\n\n• **Manuelle Raids gehen nach wie vor, und der Bot ist nur aktiv wenn du Deadlock Streamst**.\n\n**2️⃣ Chat Guard – Schutz vor Müll im Chat**\nDamit dein Chat sauber bleibt, ohne dass du ständig moderieren musst:\n• **Spam-Mod:** Filtert Viewer-Bots z.B. Scam-Links.\n\n**3️⃣ Analytics Dashboard**\n• **Retention-Analyse:** Wann droppen Zuschauer? (z. B. nach 5, 10 oder 20 Minuten)\n• **Unique Chatters:** Wie viele **verschiedene** Menschen interagieren wirklich?\n• **Kategorie-Vergleich (DE):** Analyse der deutschen Deadlock-Kategorie & Vergleich zwischen Streamern\n→ Ziel: Du erkennst Muster und weißt, was du optimieren kannst.\n→ **Sneak Peak gefällig?** Klick unten auf **„📊 Demo ansehen“**!\n\n**4️⃣ Discord – Live-Stream Auto-Post**\n• Sobald du **Deadlock** streamst, wird dein Stream automatisch im Discord gepostet (#🎥twitch)\n→ Ergebnis: Mehr Sichtbarkeit in der Community, ohne dass du selbst posten musst.\n\nGib uns Feedback, wenn dir etwas auffällt oder du dir weitere Features wünschst.\n\n**Bereit, Partner zu werden?** Klicke unten auf **'Setup starten'**.",
+  "color": 9520895,
+  "id": "content_creator"
+ },
+ {
+  "title": "🎙️ Voice Lanes – was ist was?",
+  "description": "Es gibt verschiedene Lane-Typen und die unterscheiden sich wirklich:\n\n🏆 **Ranked / Competitive Lanes**\nNur für Leute in deinem Rang-Bereich (±2 Ränge). Max. 6 Spieler pro Lane. Willst du den Skill-Diff noch enger halten? In <#1371927143537315890> kannst du den Mindestrang für deine Lane anpassen.\n→ Hier kann der Ton mal direkter sein – aber respektvoll bleibt ihr trotzdem.\n\n🎮 **Chill / Spaß Lanes**\nKein Rang-Limit. Der Rang-Hinweis an der Lane ist nur eine grobe Orientierung – du kannst trotzdem joinen.\n→ **WICHTIG:** Hier nervt sich NIEMAND über Skill. Wer wegen schlechtem Gameplay flamet, kann das in Ranked Lanes machen. In Chill-Lanes ist das ein No-Go.\n\n🆕 **Neue Spieler Lane**\nPrimär für Leute die noch neu im Game sind. Jeder kann joinen, aber kein Flame, kein 'warum weißt du das nicht' - neue Spieler lernen noch das Game, nicht auch noch den Server.\n\n🥊 **Street Brawl Lanes**\nEigene Kategorie speziell für den Street Brawl Modus.",
+  "color": 16705372,
+  "id": ""
+ },
+ {
+  "title": "🚧 Lane öffnen & verwalten",
+  "description": "**Lane öffnen:** Geh in <#1371927143537315890> – dort ist ein Dropdown-Menü. Lane-Typ auswählen, fertig. Du bist automatisch der **Owner** der Lane.\n\n**Als Owner hast du folgende Tools:**\n\n👢 **Kick** – Jemand ist AFK oder nervt und Reden hilft nicht? Raus damit.\n🚫 **Ban** – Willst du jemanden dauerhaft aus deiner Lane ausschließen? Ban setzen. Die Person kann nicht mehr beitreten solange du Owner bist.\n↩️ **Unban** – Ban wieder aufheben.\n👥 **Duo / Trio** – Nur zu zweit oder dritt? Aktivieren, dann kommt niemand anderes rein.\n🔄 **Normale Lane** – Duo/Trio aufheben, alles zurück auf Standard.\n👁️ **Lurker-Rolle** – Du schaust nur zu und spielst nicht mit? Lurker-Rolle annehmen = du schaffst einen extra Platz für jemanden der mitspielen will.\n\n**Owner-Wechsel:** Wenn der Owner die Lane verlässt kannst du die Lane übernehmen und bist dann der neue Owner.",
+  "color": 5763719,
+  "id": ""
+ },
+ {
+  "title": "🎮 Mitspieler finden – so geht's richtig",
+  "description": "Das machen leider die meisten falsch, deswegen einmal klar erklärt:\n\n**Schritt 1 – Lanes checken (das Wichtigste!)**\nSchau im Seiten-Panel unter den Sprachkanälen was gerade offen ist. Gibt's eine Lane die halbwegs passt? → Einfach joinen und schauen. 90% der Zeit passt es.\n\n**Schritt 2 – Erst wenn wirklich nix passt:**\nEigene Lane in <#1371927143537315890> aufmachen und dann in <#1376335502919335936> schreiben was du suchst. Der Bot schaut dann automatisch wer von den aktiven Spielern vom Rang her passt und zeigt dir das an – mit Status (Lobby / Match) und ob noch Platz ist.\n\n**Bitte nicht:** Direkt in spieler-suche schreiben ohne vorher zu schauen ob schon was offen ist. Die Lanes sind sichtbar – einfach kurz hinschauen.\n\n💡 **Tipp:** Wenn du die **LFG Ping Rolle** hast (Discord Onboarding bei Rollen-Auswahl), wirst du gepingt wenn jemand Mitspieler sucht.",
+  "color": 5793266,
+  "id": ""
+ },
+ {
+  "title": "🛠️ Was der Server sonst noch so hat",
+  "description": "**📺 Clips & YouTube** – <#1425215762460835931>\nDeine besten Highlights dort einreichen. Wir bauen daraus YouTube Videos. Bester Clip der Woche wird von der Community gevotet – manchmal gibt's was zu gewinnen.\n\n**#🛠️ich-brauch-einen-coach\nDu willst besser werden oder brauchst Hilfe? Dort anfragen, dann gehts in die #🏆Coaching Lane🏆 im Voice.\n\n**🧩 Custom Games** – #📍Sammelpunkt\nWir machen regelmäßig Custom Games. Treffpunkt ist der **Sammelpunkt** Voice Channel, Koordination läuft über **#custom-games-chat**. Mit `/customgame` Befehlen kannst du Games erstellen. Wer die **Custom Games Ping Rolle** hat (Discord Onboarding → Rollen auswählen) wird gepingt wenn was läuft.\n\n**📝 Patchnotes** – #patchnotes\nAlle Patches auf Deutsch. Mit der **Patchnotes Ping Rolle** bekommst du sofort eine Benachrichtigung.\n\n**🎥 Streamer**\nStreamst du Deadlock? Mit `/streamer` beantragst du die Streamer-Partner-Rolle – läuft automatisch.\n\n**🗝️ Kein Deadlock-Zugang?** – <#1428745737323155679>\nDort einfach melden, wir helfen weiter.\n\n**Fast fertig – nur noch ein letzter Schritt! 🎮**",
+  "color": 5763719,
+  "id": ""
+ },
+ {
+  "title": "Voice-Ton",
+  "description": "Wähle optional, wie du meist im Voice unterwegs bist.\n\n**Banter-OK**\nDirektere Runden, in denen auch mal geflucht oder gestichelt wird.\n\n**Ragebaiter-Free**\nRunden ohne gezielte Provokationen, dafür mit strengerem Filter.\n\nWenn du nichts auswählst, kannst du das später jederzeit per `/meine-tags` setzen.",
+  "color": 5793266,
+  "id": ""
+ },
+ {
+  "title": "Alter (optional)",
+  "description": "Wähle optional eine Altersgruppe für Voice-Filter.\n\n**25+**\nFür Runden, die bewusst mit 25+-Filter erstellt werden.\n\n**U25**\nFür Runden ohne 25+-Markierung.\n\nWenn du diesen Schritt überspringst, kannst du den Tag später per `/meine-tags` setzen.",
+  "color": 16705372,
+  "id": ""
+ },
+ {
+  "title": "🔗 Account verknüpfen & Rang-System",
+  "description": "**Warum verknüpfen?**\nMit verknüpftem Steam-Account wird dein Rang korrekt angezeigt und immer aktuell gehalten. Der Live-Status in den Voice Lanes funktioniert zuverlässig und die Spielersuche kann dich sauber einstufen.\n\n**So geht's:**\nNutze einfach die **Buttons unten**, um deinen Steam-Account zu verknüpfen.\nOpen Source: <https://github.com/NaniDerEchte2/Deadlock-Bots>\nSobald der Bot dich verifiziert hat, ist dein Onboarding **abgeschlossen**.\n> Mehrere Accounts? Kein Problem – einfach mehrfach `/account_verknüpfen` ausführen.\n\n⚠️ **Wichtig:** Funktioniert nur korrekt wenn **alle im Call** ihren Account verknüpft haben – sonst sind die Angaben unvollständig.",
+  "color": 44783,
+  "id": "steam_link"
+ }
+]
