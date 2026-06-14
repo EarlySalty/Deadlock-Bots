@@ -433,8 +433,18 @@ impl AdaptiveLanes {
                 })
             })
             .collect();
-        for (lane_id, target) in plan_lane_reorder(&entries) {
-            let _ = self.port.set_channel_position(lane_id, target).await;
+        let plan = plan_lane_reorder(&entries);
+        if !plan.is_empty() {
+            tracing::info!(
+                rang_lanes = entries.len(),
+                reorders = plan.len(),
+                "RankSort: ordne Chill-Lanes nach Rang neu"
+            );
+        }
+        for (lane_id, target) in plan {
+            if let Err(err) = self.port.set_channel_position(lane_id, target).await {
+                tracing::warn!(%err, lane_id, target, "RankSort: Position setzen fehlgeschlagen");
+            }
         }
     }
 }

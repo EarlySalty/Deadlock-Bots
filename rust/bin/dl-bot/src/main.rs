@@ -202,7 +202,7 @@ async fn main() -> anyhow::Result<()> {
     impl dl_tournament::discord_ui::TurnierPort for TurnierRoleGlue {
         async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
             self.adapter
-                .cache
+                .cache()
                 .guild(serenity::all::GuildId::new(guild_id))
                 .and_then(|g| {
                     g.members
@@ -550,6 +550,10 @@ async fn main() -> anyhow::Result<()> {
         )
         .await
         .context("Gateway-Client bauen")?;
+        // KRITISCH: serenity legt beim Build einen EIGENEN Cache an. Ohne diese
+        // Kopplung läse die gesamte Glue aus einem leeren Adapter-Cache (alle
+        // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
+        adapter.link_cache(client.cache.clone());
         tracing::warn!(
             "Gateway AKTIV — sicherstellen, dass der Python-Bot die Events abgegeben hat"
         );

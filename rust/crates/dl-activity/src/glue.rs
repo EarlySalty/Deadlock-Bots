@@ -14,8 +14,8 @@ pub struct CacheVoiceGroups {
 impl VoiceGroups for CacheVoiceGroups {
     async fn channel_groups(&self) -> Vec<Vec<(u64, String)>> {
         let mut groups = Vec::new();
-        for guild_id in self.adapter.cache.guilds() {
-            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
                 continue;
             };
             let mut per_channel: std::collections::HashMap<u64, Vec<(u64, String)>> =

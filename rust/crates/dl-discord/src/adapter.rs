@@ -7,7 +7,7 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use dl_broker::port::{
     DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
@@ -19,8 +19,11 @@ use serenity::all::{Cache, ChannelId, ChannelType, GuildId, Http, MessageId, Rol
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
-    /// Gateway-Cache — erst nach Gateway-Start befüllt.
-    pub cache: Arc<Cache>,
+    /// Gateway-Cache. WICHTIG: serenity erlaubt keine Cache-Injektion und legt
+    /// beim Client-Build einen EIGENEN Cache an. Dieser hier wird nach dem Build
+    /// via [`Self::link_cache`] an genau diesen serenity-Cache gekoppelt — sonst
+    /// läse die gesamte Glue aus einem leeren Cache (alle Lookups None).
+    cache: OnceLock<Arc<Cache>>,
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
 }
@@ -29,8 +32,22 @@ impl DiscordAdapter {
     pub fn new(token: &str) -> Arc<Self> {
         Arc::new(Self {
             http: Arc::new(Http::new(token)),
-            cache: Arc::new(Cache::new()),
+            cache: OnceLock::new(),
             gateway_ready: Arc::new(AtomicBool::new(false)),
+        })
+    }
+
+    /// Koppelt den Adapter an serenitys vom Gateway befüllten Client-Cache.
+    /// Einmalig direkt nach dem Client-Build aufzurufen.
+    pub fn link_cache(&self, cache: Arc<Cache>) {
+        let _ = self.cache.set(cache);
+    }
+
+    /// Der Gateway-Cache. Vor dem Koppeln ein leerer Fallback (Lookups → None).
+    pub fn cache(&self) -> &Cache {
+        self.cache.get().map(Arc::as_ref).unwrap_or_else(|| {
+            static EMPTY: OnceLock<Cache> = OnceLock::new();
+            EMPTY.get_or_init(Cache::new)
         })
     }
 
@@ -40,7 +57,7 @@ impl DiscordAdapter {
 
     /// Erste Guild (Diagnose-Default wie Python `bot.guilds[0]`).
     fn first_guild(&self) -> Option<GuildId> {
-        self.cache.guilds().first().copied()
+        self.cache().guilds().first().copied()
     }
 
     /// view_spec → Discord-Komponenten (Action-Row mit einem Button).
@@ -346,8 +363,8 @@ impl DiscordPort for DiscordAdapter {
                 "gateway not connected (voice members need the cache)".to_string(),
             ));
         }
-        for guild_id in self.cache.guilds() {
-            let Some(guild) = self.cache.guild(guild_id) else {
+        for guild_id in self.cache().guilds() {
+            let Some(guild) = self.cache().guild(guild_id) else {
                 continue;
             };
             if !guild.channels.contains_key(&ChannelId::new(channel_id)) {
@@ -398,7 +415,7 @@ impl DiscordPort for DiscordAdapter {
             Some(id) => GuildId::new(id),
             None => self.first_guild().ok_or(PortError::GuildNotFound)?,
         };
-        let Some(guild) = self.cache.guild(guild_id) else {
+        let Some(guild) = self.cache().guild(guild_id) else {
             return Err(PortError::GuildNotFound);
         };
         // member_count pro Rolle aus dem Member-Cache (chunked vorausgesetzt)
@@ -434,7 +451,7 @@ impl DiscordPort for DiscordAdapter {
             Some(id) => GuildId::new(id),
             None => self.first_guild().ok_or(PortError::GuildNotFound)?,
         };
-        let Some(guild) = self.cache.guild(guild_id) else {
+        let Some(guild) = self.cache().guild(guild_id) else {
             return Err(PortError::GuildNotFound);
         };
         let role = guild
@@ -466,7 +483,7 @@ impl DiscordPort for DiscordAdapter {
         // Fallback auf bot.guilds, wenn keine konfiguriert sind).
         let guild_ids: Vec<GuildId> = match guild_id {
             Some(id) => vec![GuildId::new(id)],
-            None => self.cache.guilds(),
+            None => self.cache().guilds(),
         };
         let target = UserId::new(user_id);
 
@@ -475,7 +492,7 @@ impl DiscordPort for DiscordAdapter {
             ..Default::default()
         };
         for gid in guild_ids {
-            let Some(guild) = self.cache.guild(gid) else {
+            let Some(guild) = self.cache().guild(gid) else {
                 continue;
             };
             let Some(member) = guild.members.get(&target) else {
@@ -502,12 +519,12 @@ impl DiscordPort for DiscordAdapter {
     }
 
     async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError> {
-        let guild_ids = self.cache.guilds();
+        let guild_ids = self.cache().guilds();
         let mut out = Vec::new();
         for &user_id in user_ids {
             let target = UserId::new(user_id);
             for gid in &guild_ids {
-                let Some(guild) = self.cache.guild(*gid) else {
+                let Some(guild) = self.cache().guild(*gid) else {
                     continue;
                 };
                 if let Some(member) = guild.members.get(&target) {
@@ -549,10 +566,10 @@ impl DiscordPort for DiscordAdapter {
                 "gateway not connected (member list needs the cache)".to_string(),
             ));
         }
-        let Some(gid) = self.cache.guilds().first().copied() else {
+        let Some(gid) = self.cache().guilds().first().copied() else {
             return Err(PortError::GuildNotFound);
         };
-        let Some(guild) = self.cache.guild(gid) else {
+        let Some(guild) = self.cache().guild(gid) else {
             return Err(PortError::GuildNotFound);
         };
         let members = guild
@@ -574,7 +591,7 @@ impl DiscordPort for DiscordAdapter {
             Some(id) => GuildId::new(id),
             None => self.first_guild().ok_or(PortError::GuildNotFound)?,
         };
-        let Some(guild) = self.cache.guild(gid) else {
+        let Some(guild) = self.cache().guild(gid) else {
             return Err(PortError::GuildNotFound);
         };
         // Online: Präsenzen ungleich Offline (nur falsch befüllt ohne

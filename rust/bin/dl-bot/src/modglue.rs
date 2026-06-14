@@ -343,7 +343,7 @@ pub struct CoachingGlue {
 #[async_trait::async_trait]
 impl dl_community::coaching::CoachingPort for CoachingGlue {
     async fn coach_members(&self, role_id: u64) -> Vec<(u64, String, String, String)> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(self.guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(self.guild_id)) else {
             return Vec::new();
         };
         let role = serenity::all::RoleId::new(role_id);
@@ -469,7 +469,7 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
 
     async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .members
             .get(&UserId::new(user_id))
@@ -558,7 +558,7 @@ impl dl_community::clips::ClipPort for ClipGlue {
 
     async fn guild_name(&self, guild_id: u64) -> String {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .map(|g| g.name.to_string())
             .unwrap_or_else(|| guild_id.to_string())
@@ -579,7 +579,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
         user_id: u64,
         channel_name: &str,
     ) -> Result<u64, String> {
-        let bot_id = self.adapter.cache.current_user().id.get();
+        let bot_id = self.adapter.cache().current_user().id.get();
         // VIEW=1024, SEND=2048, HISTORY=65536, MANAGE_CHANNELS=16
         let body = json!({
             "name": channel_name,
@@ -619,7 +619,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
@@ -628,7 +628,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
 
     async fn user_name(&self, user_id: u64) -> String {
         self.adapter
-            .cache
+            .cache()
             .user(UserId::new(user_id))
             .map(|u| u.name.to_string())
             .unwrap_or_else(|| format!("user-{user_id}"))
@@ -794,7 +794,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
         co_player_ids: &[u64],
     ) -> Vec<dl_activity::lfg::LaneInfo> {
         use dl_activity::lfg::{LaneInfo, LaneLabel};
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         let co_set: std::collections::HashSet<u64> = co_player_ids.iter().copied().collect();
@@ -896,7 +896,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
     async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>) {
         let names: Vec<String> = self
             .adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members.get(&UserId::new(user_id)).map(|m| {
@@ -912,7 +912,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
 
     async fn member_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.voice_states
@@ -941,7 +941,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
     async fn coach_member_ids(&self, guild_id: u64) -> Vec<u64> {
         use dl_community::coaching_requests::{COACH_ROLE_ID, OWNER_EXCLUDE_ID};
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .map(|g| {
                 g.members
@@ -959,7 +959,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members
@@ -971,7 +971,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members
@@ -983,7 +983,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
 
     async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool {
         let guild_id = GuildId::new(guild_id);
-        let Some(guild) = self.adapter.cache.guild(guild_id) else {
+        let Some(guild) = self.adapter.cache().guild(guild_id) else {
             return false;
         };
         if guild.owner_id.get() == user_id {
@@ -1102,7 +1102,7 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
         user_id: u64,
         category_id: u64,
     ) -> Option<u64> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         let channel_id = guild.voice_states.get(&UserId::new(user_id))?.channel_id?;
         let parent = guild.channels.get(&channel_id)?.parent_id?;
         (parent.get() == category_id).then(|| channel_id.get())
@@ -1139,7 +1139,7 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
         guild_id: u64,
         user_id: u64,
     ) -> Option<dl_community::retention::RetentionMember> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         let member = guild.members.get(&UserId::new(user_id))?;
         Some(dl_community::retention::RetentionMember {
             display_name: member.display_name().to_string(),
@@ -1159,7 +1159,7 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
     }
 
     async fn guild_label(&self, guild_id: u64) -> (String, Option<String>) {
-        match self.adapter.cache.guild(GuildId::new(guild_id)) {
+        match self.adapter.cache().guild(GuildId::new(guild_id)) {
             Some(g) => (g.name.to_string(), g.icon_url()),
             // Python-Fallback, wenn die Gilde nicht im Cache ist.
             None => ("unserem Server".to_string(), None),
@@ -1208,7 +1208,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
         guild_id: u64,
         user_id: u64,
     ) -> Vec<dl_tournament::balance_cmd::VoiceMember> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         let Some(channel_id) = guild
@@ -1241,7 +1241,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
         guild_id: u64,
         user_id: u64,
     ) -> Option<dl_tournament::balance_cmd::VoiceMember> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         let member = guild.members.get(&UserId::new(user_id))?;
         Some(dl_tournament::balance_cmd::VoiceMember {
             user_id,
@@ -1268,7 +1268,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
     }
 
     async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         Some(guild.voice_states.get(&UserId::new(user_id))?.channel_id?.get())
     }
 
@@ -1301,7 +1301,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
         // sonst liefert Discord 40032 („Target user is not connected to voice“).
         let in_voice = self
             .adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| g.voice_states.get(&UserId::new(user_id)).and_then(|vs| vs.channel_id))
             .is_some();
@@ -1325,7 +1325,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
     }
 
     async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> Option<(String, usize)> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         let channel = ChannelId::new(channel_id);
         let name = guild.channels.get(&channel)?.name.to_string();
         // Nicht-Bot-Mitglieder im Voice-Channel zählen.
@@ -1348,7 +1348,7 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
 
     async fn can_manage_channels(&self, guild_id: u64, user_id: u64) -> bool {
         // Python: @commands.has_permissions(manage_channels=True) (+ Admin/Owner).
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return false;
         };
         if guild.owner_id.get() == user_id {

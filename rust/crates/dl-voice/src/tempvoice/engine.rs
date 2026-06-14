@@ -535,8 +535,15 @@ impl TempVoiceEngine {
         staging_id: u64,
         expected_channel_id: u64,
     ) -> Result<(), String> {
-        // User noch im erwarteten Kanal (Staging bzw. Router-VC)?
-        if self.port.member_voice_channel(guild_id, user_id).await != Some(expected_channel_id) {
+        // User noch im erwarteten Kanal (Staging bzw. Router-VC)? Der Gateway-
+        // Cache kann direkt beim Join-Event den neuen Voice-State noch nicht
+        // committed haben (Race) und liefert dann None — in dem Fall dem Event
+        // vertrauen und fortfahren. Nur abbrechen, wenn der User nachweislich in
+        // einem ANDEREN Kanal steht.
+        if matches!(
+            self.port.member_voice_channel(guild_id, user_id).await,
+            Some(c) if c != expected_channel_id
+        ) {
             return Ok(());
         }
         let rules = self.config.rules_for_staging(staging_id);
@@ -622,8 +629,13 @@ impl TempVoiceEngine {
             tracing::warn!(%err, lane_id, "TempVoice: Lane-Persist fehlgeschlagen");
         }
 
-        // Owner muss noch im erwarteten Kanal stehen, sonst Lane wieder abbauen
-        if self.port.member_voice_channel(guild_id, user_id).await != Some(expected_channel_id) {
+        // Owner noch im erwarteten Kanal? (None = Cache-Lag → Move trotzdem
+        // versuchen; der Move-API-Call scheitert sauber, falls er doch weg ist.
+        // Nur abbauen, wenn er nachweislich in einem ANDEREN Kanal steht.)
+        if matches!(
+            self.port.member_voice_channel(guild_id, user_id).await,
+            Some(c) if c != expected_channel_id
+        ) {
             self.cleanup_lane(lane_id, "TempVoice: Owner nicht mehr im Staging")
                 .await;
             return Ok(());

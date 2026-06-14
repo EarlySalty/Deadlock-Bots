@@ -16,7 +16,7 @@ pub struct AdapterGlue {
 #[async_trait::async_trait]
 impl GuildPort for AdapterGlue {
     async fn members(&self, guild_id: u64) -> Option<Vec<MemberLite>> {
-        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         Some(
             guild
                 .members
@@ -36,7 +36,7 @@ impl GuildPort for AdapterGlue {
         // Status-Texte sind Vertrag (identisch zu _grant_role im Original).
         let role_exists = self
             .adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .map(|g| g.roles.contains_key(&RoleId::new(role_id)))
             .unwrap_or(false);
@@ -45,7 +45,7 @@ impl GuildPort for AdapterGlue {
         }
         let already = self
             .adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members

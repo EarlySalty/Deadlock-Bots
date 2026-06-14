@@ -176,7 +176,7 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members
@@ -188,7 +188,7 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members

@@ -24,7 +24,7 @@ impl VoiceSnapshot for CacheSnapshot {
         channel_id: u64,
         grace_role_id: u64,
     ) -> Vec<VoiceMemberState> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         let channel = ChannelId::new(channel_id);
@@ -51,7 +51,7 @@ impl VoiceSnapshot for CacheSnapshot {
 
     async fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
@@ -244,7 +244,7 @@ impl LanePort for CacheSnapshot {
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .members
             .get(&UserId::new(user_id))
@@ -311,7 +311,7 @@ impl LanePort for CacheSnapshot {
 
     async fn member_nick(&self, guild_id: u64, user_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .members
             .get(&UserId::new(user_id))?
@@ -322,7 +322,7 @@ impl LanePort for CacheSnapshot {
 
     async fn channel_user_limit(&self, guild_id: u64, channel_id: u64) -> Option<i64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
@@ -331,7 +331,7 @@ impl LanePort for CacheSnapshot {
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .voice_states
             .get(&UserId::new(user_id))?
@@ -340,7 +340,7 @@ impl LanePort for CacheSnapshot {
     }
 
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         let Some(member) = guild.members.get(&UserId::new(user_id)) else {
@@ -354,7 +354,7 @@ impl LanePort for CacheSnapshot {
     }
 
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -367,7 +367,7 @@ impl LanePort for CacheSnapshot {
 
     async fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))
@@ -376,7 +376,7 @@ impl LanePort for CacheSnapshot {
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))?
@@ -385,7 +385,7 @@ impl LanePort for CacheSnapshot {
     }
 
     async fn category_voice_channel_names(&self, guild_id: u64, category_id: u64) -> Vec<String> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -405,7 +405,7 @@ impl LanePort for CacheSnapshot {
 
     async fn guild_role_names(&self, guild_id: u64) -> Vec<(u64, String)> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .map(|g| {
                 g.roles
@@ -446,7 +446,7 @@ pub struct NudgeGlue {
 impl crate::nudge::NudgePort for NudgeGlue {
     async fn is_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.voice_states
@@ -458,7 +458,7 @@ impl crate::nudge::NudgePort for NudgeGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members
@@ -525,8 +525,8 @@ pub struct StatusGlue {
 impl crate::status::StatusPort for StatusGlue {
     async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)> {
         let mut result = Vec::new();
-        for guild_id in self.adapter.cache.guilds() {
-            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
                 continue;
             };
             for (channel_id, channel) in &guild.channels {
@@ -568,8 +568,8 @@ impl crate::status::StatusPort for StatusGlue {
     }
 
     async fn channel_info(&self, channel_id: u64) -> Option<(u64, String, Vec<u64>)> {
-        for guild_id in self.adapter.cache.guilds() {
-            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
                 continue;
             };
             if let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) {
@@ -608,7 +608,7 @@ impl crate::rank::RankPort for RankGlue {
         guild_id: u64,
         channel_id: u64,
     ) -> Vec<(u64, Vec<(u64, String)>)> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -637,7 +637,7 @@ impl crate::rank::RankPort for RankGlue {
 
     async fn guild_roles(&self, guild_id: u64) -> Vec<(u64, String)> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .map(|g| {
                 g.roles
@@ -650,7 +650,7 @@ impl crate::rank::RankPort for RankGlue {
 
     async fn current_role_overwrites(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.channels.get(&ChannelId::new(channel_id)).map(|c| {
@@ -682,7 +682,7 @@ impl crate::rank::RankPort for RankGlue {
         // Bestehende Overwrites übernehmen, Rang-Batch einmischen (wie channel.edit)
         let mut overwrites: Vec<serde_json::Value> = Vec::new();
         let mut handled: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        if let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) {
+        if let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) {
             if let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) {
                 for ow in &channel.permission_overwrites {
                     let (kind, target_id) = match ow.kind {
@@ -751,7 +751,7 @@ impl crate::rank::RankPort for RankGlue {
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .channels
             .get(&ChannelId::new(channel_id))?
@@ -814,7 +814,7 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
 
     async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .members
             .get(&UserId::new(user_id))
@@ -830,7 +830,7 @@ pub struct RouterGlue {
 #[async_trait::async_trait]
 impl crate::router::RouterPort for RouterGlue {
     async fn category_lanes(&self, guild_id: u64, category_id: u64) -> Vec<(u64, Vec<u64>)> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -854,7 +854,7 @@ impl crate::router::RouterPort for RouterGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))
             .and_then(|g| {
                 g.members
@@ -866,7 +866,7 @@ impl crate::router::RouterPort for RouterGlue {
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         self.adapter
-            .cache
+            .cache()
             .guild(GuildId::new(guild_id))?
             .voice_states
             .get(&UserId::new(user_id))?
@@ -914,7 +914,7 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
         guild_id: u64,
         category_id: u64,
     ) -> Vec<(u64, String, usize, i64)> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -936,7 +936,7 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
     }
 
     async fn member_role_pairs(&self, guild_id: u64, user_id: u64) -> Vec<(u64, String)> {
-        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
         };
         guild
@@ -1043,8 +1043,8 @@ pub struct RenameExecGlue {
 impl crate::rename_queue::RenameExec for RenameExecGlue {
     async fn current_name(&self, channel_id: u64) -> Option<String> {
         let cid = ChannelId::new(channel_id);
-        for guild_id in self.adapter.cache.guilds() {
-            let Some(guild) = self.adapter.cache.guild(guild_id) else {
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
                 continue;
             };
             if let Some(channel) = guild.channels.get(&cid) {
