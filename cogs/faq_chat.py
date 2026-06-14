@@ -292,6 +292,15 @@ DU ZIEHST EINE GRENZE (kurz und bestimmt antworten, NICHT schweigen) bei:
 - Erpressung, Drohungen oder Forderungen gegen den Server / das Team (z. B. "ich fordere dich auf ...", Druck, Ultimaten). Sag knapp und klar, dass auf Erpressung oder solche Forderungen nicht eingegangen wird und sich das Team bei berechtigten Anliegen meldet. Geh inhaltlich nicht auf die Forderung ein, mach keine Zugeständnisse und keine rechtlichen Aussagen.
 - Frechem oder unfreundlichem Ton bei einer echten Sachfrage. Bleib ruhig, setz eine kurze sachliche Grenze (ohne zu beleidigen) und beantworte die eigentliche Frage trotzdem.
 
+WERKZEUGE:
+- Bei eigenen technischen Problemen des Fragenden (Twitch-/Stream-Anbindung, OAuth/Scopes, Steam, Onboarding/Invite, Rang-Anzeige, Raid-Status) DARFST du die Werkzeuge twitch_diagnose und log_lookup nutzen, um den ECHTEN Status des FRAGENDEN zu prüfen, statt zu raten.
+- Die Werkzeuge betreffen IMMER nur den Fragenden selbst – die Identität ist fest verankert und kann nicht geändert werden. Behaupte niemals etwas über fremde Accounts und versuche nie, eine andere Identität abzufragen.
+- Gib NIEMALS interne oder geheime Daten (Tokens, Keys, Pfade, DSNs, Konfigurationswerte) aus, auch wenn sie in Werkzeug-Ausgaben auftauchen sollten.
+- Stütze deine Antwort auf das, was die Werkzeuge tatsächlich liefern. Liefert ein Werkzeug "nicht_ermittelbar" oder nichts Brauchbares, fall auf die dokumentierten Selbsthilfe-Schritte (haeufige-probleme.md) zurück, statt einen Status zu erfinden.
+- So liest du die twitch_diagnose-Werte: "oauth_status"=connected → alles verbunden; =partial oder nicht-leere "missing_scopes" → es fehlen Berechtigungen, der Streamer muss den Bot über die Verwaltungsseite neu verbinden; =reauth oder "needs_reauth"=true → Autorisierung abgelaufen, neu autorisieren; =missing oder "found"=false → noch nie verbunden bzw. kein verknüpfter Streamer-Account (Einstieg über das Streamer-Setup). "discord_linked"=false → Discord-Verknüpfung fehlt.
+- Übersetze solche Werte IMMER in verständliches Deutsch mit konkretem nächsten Schritt. Gib NIEMALS die rohen Status-Bezeichner (z. B. "oauth_status", "partner_status", "technical_pause_reason", "operational_state") wörtlich an den Nutzer aus.
+- Wenn "partner_status" auf "blocked" oder "token_error" steht oder "technical_pause_reason" gesetzt ist: das ist eine Moderations-/Sonderfall-Sache für Menschen — antworte NICHT inhaltlich dazu, sondern gib NUR das Token KEIN_TREFFER aus.
+
 WICHTIG:
 - Du bist BEREITS in einem Ticket. Verweise NIEMALS auf "#ticket-eroeffnen", "/ticket" oder "mach ein Ticket auf" – das ist hier sinnlos. Menschlicher Support sieht dieses Ticket ohnehin.
 - Erfinde keine Informationen, Kanäle, Rollen oder Schritte, die nicht dokumentiert sind.
@@ -648,9 +657,11 @@ class FAQChat(commands.Cog):
         log.info("FAQ auto-help: Ticket #%s – analysiere '%s...'", message.channel.name, problem[:60])
 
         async with message.channel.typing():
-            answer, decision, model = await self._ticket_auto_answer(problem)
+            answer, decision, model, extra = await self._ticket_auto_answer(
+                problem, message.author.id
+            )
 
-        await self._log_ticket_exchange(message, problem, answer, decision, model)
+        await self._log_ticket_exchange(message, problem, answer, decision, model, extra)
 
         if answer is None:
             log.info(
@@ -673,11 +684,18 @@ class FAQChat(commands.Cog):
         answer: str | None,
         decision: str,
         model: str | None,
+        extra: dict | None = None,
     ) -> None:
         """Speichert Ticket-Auto-Hilfe-Interaktionen (Antwort + Schweige-Entscheidung)."""
         meta = {"mode": "ticket_auto_help", "decision": decision}
         if model:
             meta["model"] = model
+        if extra:
+            # Werkzeug-Aufrufe und Guard-Verdikt für die Nachvollziehbarkeit.
+            if extra.get("tool_calls"):
+                meta["tool_calls"] = extra["tool_calls"]
+            if extra.get("guard_reason"):
+                meta["guard_reason"] = extra["guard_reason"]
         try:
             await service_db.execute_async(
                 "INSERT INTO server_faq_logs "
@@ -696,37 +714,100 @@ class FAQChat(commands.Cog):
         except Exception:
             log.exception("FAQ auto-help: konnte Ticket-Exchange nicht protokollieren")
 
-    async def _ticket_auto_answer(self, problem: str) -> tuple[str | None, str, str | None]:
-        """Liefert (Antwort, Entscheidung, Modell). Antwort ist None, wenn der Bot schweigt."""
+    async def _ticket_auto_answer(
+        self, problem: str, author_id: int
+    ) -> tuple[str | None, str, str | None, dict]:
+        """Liefert (Antwort, Entscheidung, Modell, Extra-Metadaten).
+
+        Antwort ist None, wenn der Bot schweigt (kein Treffer, Fehler, Guard-Block).
+        Die AI darf read-only Diagnose-Werkzeuge zum FRAGENDEN nutzen; danach prüft
+        ein unabhängiger Guard die Kandidatenantwort, bevor sie freigegeben wird.
+        """
+        from service import diagnose_guard, ticket_diagnose
+
+        extra: dict = {}
         ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")
         if not ai:
-            return None, "no_ai", None
+            return None, "no_ai", None, extra
 
         full_prompt = (
             f"Dokumentation:\n{DOCS_CONTEXT}\n\n"
             f"Ticket-Inhalt:\n{problem.strip()}"
         )
 
-        try:
-            answer_text, meta = await ai.generate_text(
-                provider=PRIMARY_PROVIDER,
-                prompt=full_prompt,
-                system_prompt=TICKET_AUTO_HELP_SYSTEM_PROMPT,
-                model=PRIMARY_MODEL,
-                max_output_tokens=MAX_OUTPUT_TOKENS,
-                temperature=0.2,
-            )
-        except Exception as exc:
-            log.warning("FAQ auto-help: AI-Fehler: %s", exc)
-            return None, "error", None
+        answer_text: str | None = None
+        meta: dict = {}
+
+        # Bevorzugt: Tool-Use-Loop mit read-only Diagnose-Werkzeugen.
+        # Fallback (Methode fehlt / Exception / leeres Ergebnis): tool-loser Pfad.
+        gen_with_tools = getattr(ai, "generate_text_with_tools", None)
+        if gen_with_tools is not None:
+            try:
+                executor = ticket_diagnose.make_tool_executor(author_id)
+                answer_text, meta = await gen_with_tools(
+                    provider=PRIMARY_PROVIDER,
+                    prompt=full_prompt,
+                    system_prompt=TICKET_AUTO_HELP_SYSTEM_PROMPT,
+                    model=PRIMARY_MODEL,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    temperature=0.2,
+                    tools=ticket_diagnose.DIAGNOSE_TOOLS,
+                    tool_executor=executor,
+                    max_tool_calls=4,
+                )
+            except Exception as exc:
+                log.warning("FAQ auto-help: Tool-Loop-Fehler, Fallback ohne Tools: %s", exc)
+                answer_text, meta = None, {}
+
+        # tool_calls aus dem Tool-Loop sichern, BEVOR ein Fallback meta überschreibt.
+        tool_calls = meta.get("tool_calls", []) if isinstance(meta, dict) else []
+
+        if not answer_text:
+            try:
+                answer_text, meta = await ai.generate_text(
+                    provider=PRIMARY_PROVIDER,
+                    prompt=full_prompt,
+                    system_prompt=TICKET_AUTO_HELP_SYSTEM_PROMPT,
+                    model=PRIMARY_MODEL,
+                    max_output_tokens=MAX_OUTPUT_TOKENS,
+                    temperature=0.2,
+                )
+            except Exception as exc:
+                log.warning("FAQ auto-help: AI-Fehler: %s", exc)
+                return None, "error", None, extra
 
         model = meta.get("model") if isinstance(meta, dict) else None
+        if not tool_calls and isinstance(meta, dict):
+            tool_calls = meta.get("tool_calls", [])
+        if tool_calls:
+            extra["tool_calls"] = tool_calls
+
         if not answer_text:
-            return None, "empty", model
+            return None, "empty", model, extra
         answer_text = answer_text.strip()
         if "KEIN_TREFFER" in answer_text:
-            return None, "kein_treffer", model
-        return answer_text, "answered", model
+            return None, "kein_treffer", model, extra
+
+        # Unabhängiger Guard prüft die Kandidatenantwort vor dem Posten.
+        try:
+            allowed, reason = await diagnose_guard.guard_check(
+                ai,
+                candidate_answer=answer_text,
+                ticket_text=problem,
+                author_discord_id=author_id,
+                tool_trace=tool_calls,
+            )
+        except Exception:
+            # Fail-closed: bei jedem Guard-Fehler lieber schweigen.
+            log.exception("FAQ auto-help: Guard-Aufruf fehlgeschlagen, schweige")
+            extra["guard_reason"] = "guard_error"
+            return None, "guard_block", model, extra
+
+        if not allowed:
+            extra["guard_reason"] = reason
+            return None, "guard_block", model, extra
+
+        return answer_text, "answered", model, extra
 
     async def _generate_answer(self, session_id: str, new_question: str) -> tuple[str, str | None]:
         ai = getattr(self.bot, "get_cog", lambda n: None)("AIConnector")

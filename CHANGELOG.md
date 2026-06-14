@@ -1,3 +1,11 @@
+## #136 — Support-Bot prüft im Ticket den echten Twitch-Status statt zu raten
+
+**Ausgangslage:** Seit #132 hilft der Ticket-Bot gezielt bei Problemen. Aber bei „der Bot kommt nicht in meinen Stream" oder „ich habe autorisiert, aber es steht auf inaktiv" konnte er nur allgemeine Schritte nennen — den tatsächlichen Autorisierungs-Stand des Fragenden kannte er nicht und musste raten.
+
+**Was wurde geändert:** Der Ticket-Bot kann bei einem eigenen technischen Problem jetzt den echten Twitch-Status des Fragenden nachsehen (verbunden? fehlende Berechtigungen? Neu-Autorisierung nötig? aktiv?) und bei Bedarf redigierte Log-Zeilen zum Fragenden heranziehen. Das ist streng auf den Fragenden selbst beschränkt — auf seine vom Server ermittelte Identität, nie auf einen fremden Account — rein lesend, und es gibt niemals interne oder geheime Daten (Tokens, Pfade) aus. Vor dem Posten prüft eine zweite, unabhängige Sicherheitsstufe jede Antwort und blockiert im Zweifel.
+
+**Wie es funktioniert:** Erkennt der Bot ein eigenes Tech-Problem, fragt er über eine abgesicherte interne Schnittstelle den Status ab und übersetzt ihn in einen konkreten nächsten Schritt (z. B. „dir fehlen Berechtigungen — verbinde den Bot über die Verwaltungsseite neu" statt einer allgemeinen Anleitung). Lässt sich der Status nicht ermitteln, fällt er auf die dokumentierten Selbsthilfe-Schritte zurück, statt etwas zu erfinden. Bei zwischenmenschlichem Streit oder Moderationsfällen schweigt er weiterhin. Jede Antwort und jede bewusste Schweige-Entscheidung wird protokolliert, damit sich die Qualität nachvollziehen lässt.
+
 ## #135 — Rust-Neuaufbau: Twitch-Beitritts-Brücke + rückwirkende Neu-Einsortierung
 
 **Ausgangslage:** Mit #131 war die Quellen-Klassifikation der Server-Statistik in Rust nachgebaut und um die fehlende Twitch-Korrektur ergänzt — aber dem Twitch-Teil fehlten noch die *Daten*. Die Zuordnung Einladungscode→Streamer liegt in der Datenbank des Twitch-Bots; die Tabelle, aus der die Deadlock-Auswertung sie lesen würde, war in der gemeinsamen Datenbank leer und wurde nie befüllt. Folge: Beitritte über Streamer-Einladungen zählten weiter als „Bot-Einladung" oder „unbekannt" statt als „Twitch". Besonders unauffällig, weil diese Einladungen vom Bot selbst erzeugt werden — dadurch rutschten sie in den Topf „Bot-Einladung".

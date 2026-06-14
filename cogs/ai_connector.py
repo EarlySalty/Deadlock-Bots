@@ -1,7 +1,9 @@
 import asyncio
+import json
 import logging
 import os
 from typing import TYPE_CHECKING, Any
+from collections.abc import Callable
 
 from discord.ext import commands
 
@@ -270,6 +272,111 @@ class AIConnector(commands.Cog):
                     return choices[0].get("message", {}).get("content", "")
                 return None
 
+            def generate_with_tools(
+                self,
+                *,
+                prompt: str,
+                system_prompt: str | None,
+                model: str,
+                max_output_tokens: int,
+                temperature: float,
+                tools: list[dict[str, Any]],
+                tool_executor: "Callable[[str, dict[str, Any]], Any]",
+                max_tool_calls: int = 4,
+            ) -> tuple[str | None, list[str]]:
+                # Tool-Loop nur im token_plan-Modus (Anthropic-Messages-Format).
+                if not self.use_token_plan:
+                    return (None, [])
+
+                headers = {
+                    "x-api-key": self.api_key,
+                    "anthropic-version": "2023-06-01",
+                    "Content-Type": "application/json",
+                }
+                normalized_model = model if model != "MiniMax-Text-01" else "MiniMax-M3"
+                messages: list[dict[str, Any]] = [
+                    {"role": "user", "content": [{"type": "text", "text": prompt}]}
+                ]
+                used_tool_names: list[str] = []
+                tool_calls_made = 0
+
+                def _extract_text(content_blocks: list[dict[str, Any]]) -> str | None:
+                    fragments = [
+                        str(block.get("text", ""))
+                        for block in content_blocks or []
+                        if block.get("type") == "text" and block.get("text")
+                    ]
+                    joined = "".join(fragments).strip()
+                    return joined or None
+
+                try:
+                    while True:
+                        budget_left = tool_calls_made < max_tool_calls
+                        payload: dict[str, Any] = {
+                            "model": normalized_model,
+                            "system": system_prompt or "",
+                            "messages": messages,
+                            "max_tokens": max_output_tokens,
+                            "temperature": temperature,
+                        }
+                        # Solange Tool-Budget übrig ist, Tools anbieten.
+                        if budget_left:
+                            payload["tools"] = tools
+
+                        resp = self._http.post(
+                            f"{self.base_url}/messages",
+                            headers=headers,
+                            json=payload,
+                        )
+                        if resp.status_code != 200:
+                            log.warning(
+                                "MiniMax Tool-Loop API Fehler: %s - %s",
+                                resp.status_code,
+                                resp.text,
+                            )
+                            return (None, used_tool_names)
+
+                        data = resp.json()
+                        content_blocks = data.get("content", []) or []
+
+                        if data.get("stop_reason") == "tool_use" and budget_left:
+                            tool_result_blocks: list[dict[str, Any]] = []
+                            for block in content_blocks:
+                                if block.get("type") != "tool_use":
+                                    continue
+                                tool_name = block.get("name", "")
+                                tool_input = block.get("input") or {}
+                                try:
+                                    result = tool_executor(tool_name, tool_input)
+                                except Exception:
+                                    log.exception(
+                                        "MiniMax Tool-Executor fehlgeschlagen: %s", tool_name
+                                    )
+                                    result = {"error": "tool_execution_failed"}
+                                used_tool_names.append(tool_name)
+                                tool_result_blocks.append(
+                                    {
+                                        "type": "tool_result",
+                                        "tool_use_id": block.get("id"),
+                                        "content": json.dumps(result, ensure_ascii=False),
+                                    }
+                                )
+                            # Defekte Antwort: stop_reason=tool_use, aber kein tool_use-Block.
+                            # Keine leeren Turns anhängen, sondern vorhandenen Text zurückgeben.
+                            if not tool_result_blocks:
+                                return (_extract_text(content_blocks), used_tool_names)
+                            # Assistant-Turn (Original-Content) + User-Turn mit tool_results anhängen.
+                            messages.append({"role": "assistant", "content": content_blocks})
+                            messages.append({"role": "user", "content": tool_result_blocks})
+                            tool_calls_made += 1
+                            continue
+
+                        # Keine weiteren Tool-Calls (oder Budget erschöpft) -> Textantwort.
+                        return (_extract_text(content_blocks), used_tool_names)
+                except Exception:
+                    log.exception("MiniMax Tool-Loop fehlgeschlagen")
+                    return (None, used_tool_names)
+
         return (_MiniMaxClient(api_key, base_url, use_token_plan), base_url, api_key)
 
     # ---------- Public API ----------
@@ -337,6 +444,57 @@ class AIConnector(commands.Cog):
 
         meta["error"] = "unknown_provider"
         return None, meta
+
+    async def generate_text_with_tools(
+        self,
+        *,
+        provider: str,
+        prompt: str,
+        system_prompt: str | None = None,
+        model: str | None = None,
+        max_output_tokens: int | None = None,
+        temperature: float = 0.6,
+        tools: list[dict[str, Any]],
+        tool_executor: "Callable[[str, dict[str, Any]], Any]",
+        max_tool_calls: int = 4,
+    ) -> tuple[str, dict[str, Any]]:
+        """
+        Anthropic-kompatibler Tool-Use-Loop über MiniMax (nur token_plan-Modus).
+        tool_executor ist eine SYNC-Callable und läuft im Worker-Thread.
+        Returns (text, meta).
+        """
+        if provider.lower() != "minimax":
+            return ("", {"error": "unsupported_provider"})
+
+        client_data = self._get_minimax_client()
+        if not client_data:
+            return ("", {"error": "minimax_unavailable"})
+        client, _, _ = client_data
+
+        resolved_model = model or DEFAULT_MINIMAX_MODEL
+        mot = max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+
+        def _call_model() -> tuple[str | None, list[str]]:
+            return client.generate_with_tools(
+                prompt=prompt,
+                system_prompt=system_prompt,
+                model=resolved_model,
+                max_output_tokens=mot,
+                temperature=temperature,
+                tools=tools,
+                tool_executor=tool_executor,
+                max_tool_calls=max_tool_calls,
+            )
+
+        text, used_tool_names = await asyncio.to_thread(_call_model)
+        return (
+            text or "",
+            {
+                "provider": "minimax",
+                "model": resolved_model,
+                "tool_calls": used_tool_names,
+            },
+        )
 
     async def generate_multimodal(
         self,
