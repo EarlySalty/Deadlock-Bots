@@ -1,3 +1,11 @@
+## #133 — Coaching-Panel: Fragen kommen in den Channel statt in die DMs
+
+**Ausgangslage:** Im Coaching-Panel stand zwar schon die Regel „keine DMs/Freundschaftsanfragen an die Coaches", trotzdem landeten Follow-up-Fragen rund ums Coaching regelmäßig als DM. Die Antwort blieb dann bei einer Person hängen — andere mit demselben Anliegen hatten nichts davon, und Leute mit hilfreichem Input wurden gar nicht erst erreicht.
+
+**Was wurde geändert:** Das Coaching-Panel hat ein zusätzliches Feld bekommen, das für Fragen zum Coaching auf einen eigenen, öffentlichen Fragen-Channel verweist — statt auf DMs.
+
+**Wie es jetzt funktioniert:** Unter dem Ablauf zeigt das Panel jetzt einen anklickbaren Verweis auf den Fragen-Channel. Wer etwas wissen will, fragt dort öffentlich; so sehen alle die Antwort und andere mit demselben Thema lesen direkt mit. Technisch ist es nur ein neues Feld im bestehenden Panel-Embed — der Bot pflegt es beim Start automatisch in die schon gepostete Panel-Nachricht ein, es entsteht also kein zweiter Post.
+
 ## #132 — Support-Bot im Ticket: hilft bei Problemen, hält sich aus Streit raus
 
 **Ausgangslage:** Der Support-Bot beantwortet nicht nur im FAQ-Bereich Fragen, sondern macht in neu geöffneten Tickets einen automatischen Erstcheck. Dabei war er falsch eingestellt: Bei echten technischen Problemen („der Bot kommt nicht in meinen Stream", „ich habe autorisiert, aber es steht auf inaktiv") schwieg er oft, weil die passenden Hilfe-Themen in seiner Wissensbasis fehlten — und wenn er antwortete, verwies er gern darauf, „ein Ticket aufzumachen", obwohl der Nutzer längst in einem Ticket saß. Bei zwischenmenschlichem Streit dagegen mischte er sich eher ein, statt das den Menschen zu überlassen.

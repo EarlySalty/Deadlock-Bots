@@ -175,6 +175,15 @@ class CoachingPanelCog(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(
+            name="❓ Noch Fragen zum Coaching?",
+            value=(
+                "Stell sie öffentlich in <#1426220702054355077> statt per DM. "
+                "So sehen alle die Antwort – und andere mit dem gleichen Thema "
+                "lernen direkt mit."
+            ),
+            inline=False,
+        )
         return embed
 
     async def _get_panel_channel(self) -> discord.TextChannel | None:
