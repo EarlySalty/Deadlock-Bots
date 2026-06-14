@@ -304,3 +304,17 @@ _5 Luecken (von 10 geprueft)._
 - [degraded] `text_stats + text_conversation_log writer (text gamification + conversation memory)` <missing>
   - Python user_activity_analyzer.on_message writes text_stats (per-user total_messages/total_points, fed to the public text leaderboard) and text_conversation_log (per-conversation session log). NO Rust code writes either: grep for INSERT/UPDATE text_stats / text_conversation_log across rust/crates+bin
   - Py: `cogs/user_activity_analyzer.py:705 (INSERT text_stats), 685 (INSERT text_conversation_log), on_message listener at 1445; cog auto-loaded (bot_core/cog_loader.py discover, NOT in cog_blocklist.json)`
+## Korrekturen (Post-Audit-Verifikation)
+
+Nach dem Audit per Quellen-Check widerlegte Falsch-Positive — vor jedem Port
+gilt: erst pruefen, ob der Cog ueberhaupt geladen ist.
+
+- **`steam_verified_role` (background-loops, war [BLOCKER]) → KEIN Blocker,
+  intentional-drop.** Der Cog steht in `bot_core/cog_loader.py:222`
+  `default_excludes` und wird seit dem Steam-Cutover NICHT geladen; die
+  Verified-Rolle gehoert allein dem live Rust-steam-bot (`steam-flows/
+  friend_sync.rs`). Ein Port haette dl-bot dieselbe Rolle/DB schreiben lassen
+  wie der Steam-Bot → Rollen-Flapping (genau der Bug, den der Exclude-Kommentar
+  dokumentiert). Der widersprechende `on_ready`-Befund (intentionally-dropped)
+  war korrekt; der `periodic assigner`-Blocker-Befund hat den Lade-Ausschluss
+  uebersehen. NICHT portieren.
