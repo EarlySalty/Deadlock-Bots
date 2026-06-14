@@ -1,3 +1,13 @@
+## #149 — Verbund-Broker kann „ist dieser Nutzer noch auf dem Server?" beantworten
+
+**Problem:** Der Steam-Bot räumt die Steam-Verknüpfung eines Mitglieds auf, wenn es den Discord-Server verlässt (Freundschaft beenden, Verknüpfung archivieren). Verpasst er das Austritts-Ereignis (z. B. weil er gerade neu startet), gibt es einen stündlichen Nachlauf, der verwaiste Verknüpfungen aufspürt. Dafür muss er aber zuverlässig wissen, ob ein Nutzer **wirklich** weg ist — und genau diese Auskunft konnte der zentrale Master-Broker bisher nicht geben. Es ließ sich nur „aus dem Gedächtnis" (Cache) raten, ohne sicher zwischen „bestätigt weg", „noch da" und „weiß ich gerade nicht" zu unterscheiden.
+
+**Was wurde geändert:** Der Broker bekommt eine neue, nur lokal erreichbare Abfrage, die für eine Server-/Nutzer-Kombination einen klaren Status liefert: **anwesend**, **abwesend** oder **unbekannt**. Sie schaut erst ins schnelle Gedächtnis des Bots und fragt bei einem Treffer-Fehlschlag live bei Discord nach.
+
+**Wie es jetzt funktioniert:** Ist der Nutzer im Mitglieder-Gedächtnis, lautet die Antwort sofort „anwesend". Fehlt er dort, fragt der Bot live nach: antwortet Discord mit „gibt es nicht" (404), gilt der Nutzer als **abwesend**; bei jedem anderen Fehler (z. B. Rate-Limit) lautet die Antwort bewusst **unbekannt** statt „weg" — so kann eine vorübergehende Störung niemals fälschlich eine Aufräum-Aktion auslösen. Die Abfrage ist rein lesend, nur über die lokale Schleife erreichbar und ändert keine bestehende Funktion.
+
+**Betroffen:** Interne Infrastruktur (Grundlage für den korrekten Steam-Verknüpfungs-Nachlauf des Steam-Bots) — keine direkte Nutzeraktion.
+
 ## #148 — Coaching-Status erreicht die Website wieder
 
 **Problem:** Die Coaching-Plattform auf der Website zeigt den Stand der Coaching-Anfragen und -Sessions (offen, reserviert, übernommen, abgesagt, abgeschlossen). Nach der Umstellung der Bot-Anbindung wurde dieser Stand **nicht mehr an die Website gemeldet** — der Bot verarbeitete die Anfragen zwar weiter, spiegelte jeden Zustandswechsel aber nicht mehr an die Website-Schnittstelle. Ergebnis: die Website-Ansicht wäre nach dem Cutover stehengeblieben. Außerdem wurde eine Änderung der Coach-Rollen-Zugehörigkeit nur alle 10 Minuten zur Website synchronisiert, nicht zeitnah.
