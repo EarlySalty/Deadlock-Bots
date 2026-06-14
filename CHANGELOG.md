@@ -1,3 +1,13 @@
+## #140 — „Rang prüfen"-Button: genug Zeit für die Antwort
+
+**Problem:** Der „Rang prüfen"-Button im Steam-Panel lieferte kein Ergebnis. Neben der eigentlichen Abruf-Logik (im Steam-Dienst nachgezogen) gab es ein Timing-Problem auf Bot-Seite: Button-Klicks räumten dem Steam-Dienst nur wenige Sekunden für die Antwort ein. Ein echter Rang-Abruf (Profilkarte über den Spiel-Datendienst) dauert aber länger — der Bot hätte die Antwort also abgeschnitten, bevor sie fertig war.
+
+**Was wurde geändert:** Für genau diesen Button wartet der Bot jetzt deutlich länger auf die Antwort des Steam-Dienstes statt der kurzen Standard-Schranke. Wie bei langsamen Befehlen üblich wird die Interaktion nach kurzer Zeit auf „lädt…" gesetzt, damit der Klick nicht verfällt, während im Hintergrund der Rang geholt wird.
+
+**Wie es jetzt funktioniert:** Klick auf „Rang prüfen" → kurze Warteanzeige → das Ergebnis wird nachgereicht, sobald der Rang ermittelt ist. Andere Panel-Knöpfe (z. B. „Steam verknüpfen") behalten ihr schnelles Standard-Verhalten.
+
+**Betroffen:** Nutzer des „Rang prüfen"-Buttons im Steam-Panel.
+
 ## #139 — „Verified"-Rolle: Schluss mit dem Flackern (nur noch ein Verantwortlicher)
 
 **Problem:** Seit der Steam-Teil in einen eigenen Dienst ausgelagert wurde, verwalteten **zwei** Systeme gleichzeitig die „Verified"-Rolle: der alte bot-interne Abgleich (stündlich) und der neue Steam-Dienst. Beide lasen zwar denselben Datenstand, entschieden aber unabhängig voneinander über Vergeben und Entziehen. Trafen ihre Läufe ungünstig aufeinander, konnte die Rolle kurzzeitig flackern (vergeben → entzogen → wieder vergeben) oder uneinheitlich gesetzt sein.

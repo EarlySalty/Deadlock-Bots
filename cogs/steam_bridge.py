@@ -125,6 +125,17 @@ _FRIEND_CODE_MODAL_IDS: frozenset[str] = frozenset(
     ]
 )
 
+# Der Rang-Abruf beschäftigt den steam-core (Profilkarte vom Game-Coordinator)
+# mehrere Sekunden. Diese Buttons brauchen darum ein größeres Antwort-Budget als
+# den 10s-Default — sonst läuft der Forward ins Timeout, bevor der Rang da ist.
+_RANKCHECK_IDS: frozenset[str] = frozenset(
+    [
+        "steam_link_panel:rankcheck",
+        "linkpanel_rank_check",
+    ]
+)
+_RANKCHECK_FORWARD_TIMEOUT = 120.0
+
 # Wartezeit in Sekunden, nach der wir defer + followup statt direkter Response nutzen
 _DEFER_THRESHOLD_SECONDS = 2.0
 
@@ -537,9 +548,15 @@ async def _forward_interaction(
 
     # Wir starten den API-Call und warten maximal _DEFER_THRESHOLD_SECONDS.
     # Dauert er länger, defer wir die Interaction und senden dann ein Followup.
-    task = asyncio.create_task(
-        _post_event("interaction", event_data)
-    )
+    # Rang-Abrufe bekommen ein größeres Budget (Profilkarten-Lookup über steam-core).
+    if custom_id in _RANKCHECK_IDS:
+        task = asyncio.create_task(
+            _post_event("interaction", event_data, timeout=_RANKCHECK_FORWARD_TIMEOUT)
+        )
+    else:
+        task = asyncio.create_task(
+            _post_event("interaction", event_data)
+        )
     try:
         result = await asyncio.wait_for(asyncio.shield(task), timeout=_DEFER_THRESHOLD_SECONDS)
         await _render_response(interaction, result, already_deferred=False)
