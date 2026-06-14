@@ -142,6 +142,23 @@ pub struct MemberAccess {
     pub role_ids: Vec<u64>,
 }
 
+/// Live-Mitgliedschaftsstatus für den Leave-Reconcile des Steam-Bots.
+///
+/// Spiegelt Pythons `guild.get_member(...)` → `guild.fetch_member(...)`:
+/// - [`Present`](MemberPresence::Present): im Gateway-Cache **oder** per
+///   Live-Fetch bestätigt anwesend.
+/// - [`Absent`](MemberPresence::Absent): Cache-Miss **und** Live-Fetch 404
+///   (`discord.NotFound`) → bestätigt nicht mehr auf dem Server.
+/// - [`Unknown`](MemberPresence::Unknown): Cache-Miss **und** Live-Fetch-Fehler
+///   (Rate-Limit/5xx, `discord.HTTPException`) → Status unklar, NICHT als Leave
+///   werten (sonst löscht ein Rate-Limit fälschlich verifizierte User).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MemberPresence {
+    Present,
+    Absent,
+    Unknown,
+}
+
 #[async_trait::async_trait]
 pub trait DiscordPort: Send + Sync {
     async fn is_ready(&self) -> bool;
@@ -209,6 +226,14 @@ pub trait DiscordPort: Send + Sync {
         guild_id: Option<u64>,
         user_id: u64,
     ) -> Result<MemberAccess, PortError>;
+    /// Live-Mitgliedschaftsprüfung für den Leave-Reconcile: erst Gateway-Cache,
+    /// bei Miss ein Live-`get_member` (REST). Unterscheidet bestätigt-abwesend
+    /// (404) von temporären Fehlern. Spiegelt Pythons `get_member→fetch_member`.
+    async fn member_present(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<MemberPresence, PortError>;
     /// Anzeigenamen zu mehreren User-IDs aus dem Cache (für Dashboard-
     /// Analytics). Nur gefundene Mitglieder werden zurückgegeben; der Aufrufer
     /// füllt fehlende selbst auf (`User <id>`).

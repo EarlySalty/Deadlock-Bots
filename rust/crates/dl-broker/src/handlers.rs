@@ -10,7 +10,7 @@ use axum::response::Response;
 use serde_json::{json, Map, Value};
 
 use crate::payload::{self};
-use crate::port::{PortError, RichMessage};
+use crate::port::{MemberPresence, PortError, RichMessage};
 use crate::{
     authorize, error_body, payload_hash, request_id, require_loopback, respond, run_idempotent,
     success_body, SharedBroker, IDEMPOTENCY_HEADER,
@@ -185,6 +185,51 @@ pub async fn member_access(
         ),
         Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
     }
+}
+
+/// Live-Mitgliedschaftsprüfung (`?guild_id=&user_id=`) für den Steam-Bot
+/// Leave-Reconcile. Loopback-only, ohne Token — wie die übrigen Diagnose-Routen.
+/// Antwortet tri-state: `present` | `absent` | `unknown`.
+pub async fn member_present(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    let guild_id = params
+        .get("guild_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    let user_id = params
+        .get("user_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    if guild_id == 0 {
+        return bad_request(&rid, "guild_id must be a positive integer");
+    }
+    if user_id == 0 {
+        return bad_request(&rid, "user_id must be a positive integer");
+    }
+    // Tri-state nie als Fehler: selbst ein interner Port-Fehler wird zu
+    // "unknown", damit der Reconcile niemals fälschlich Cleanup auslöst.
+    let status = match state.port.member_present(guild_id, user_id).await {
+        Ok(MemberPresence::Present) => "present",
+        Ok(MemberPresence::Absent) => "absent",
+        Ok(MemberPresence::Unknown) | Err(_) => "unknown",
+    };
+    respond(
+        200,
+        json!({
+            "ok": true,
+            "status": status,
+            "guild_id": guild_id.to_string(),
+            "user_id": user_id.to_string(),
+        }),
+    )
 }
 
 /// Anzeigenamen zu mehreren User-IDs (`?user_ids=1,2,3`). Loopback-only,

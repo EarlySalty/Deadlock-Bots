@@ -11,7 +11,7 @@ use std::sync::{Arc, OnceLock};
 
 use dl_broker::port::{
     DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
-    PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
+    MemberPresence, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -201,6 +201,16 @@ impl DiscordAdapter {
             return resp.status_code.as_u16() == 404;
         }
         false
+    }
+
+    /// REST-404 (Unknown Member / Unknown User) = bestätigt abwesend.
+    /// Jeder andere Fehler (Rate-Limit/5xx/Transport) ist NICHT „abwesend".
+    fn is_http_404(err: &serenity::Error) -> bool {
+        matches!(
+            err,
+            serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+                if resp.status_code.as_u16() == 404
+        )
     }
 }
 
@@ -561,6 +571,30 @@ impl DiscordPort for DiscordAdapter {
             }
         }
         Ok(access)
+    }
+
+    async fn member_present(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Result<MemberPresence, PortError> {
+        let gid = GuildId::new(guild_id);
+        let uid = UserId::new(user_id);
+
+        // 1. Cache zuerst (Python: guild.get_member) — kostenlos, kein API-Call.
+        if let Some(guild) = self.cache().guild(gid) {
+            if guild.members.contains_key(&uid) {
+                return Ok(MemberPresence::Present);
+            }
+        }
+
+        // 2. Cache-Miss → Live-REST (Python: guild.fetch_member). 404 = bestätigt
+        //    abwesend, jeder andere Fehler = unbekannt (Rate-Limit/temporär).
+        match self.http.get_member(gid, uid).await {
+            Ok(_) => Ok(MemberPresence::Present),
+            Err(err) if Self::is_http_404(&err) => Ok(MemberPresence::Absent),
+            Err(_) => Ok(MemberPresence::Unknown),
+        }
     }
 
     async fn resolve_names(&self, user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError> {
