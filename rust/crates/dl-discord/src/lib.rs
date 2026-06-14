@@ -20,7 +20,7 @@ pub mod invite_tracker;
 pub use adapter::DiscordAdapter;
 pub use dispatcher::{Dispatcher, MemberEvent, MessageEvent, RoleEvent, VoiceEvent};
 pub use interactions::{
-    BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, InteractionHandler,
-    InteractionRouter, ModalField, ModalSpec,
+    BridgeAttachment, BridgeInteraction, BridgeReply, ChannelSender, CommandSpec,
+    InteractionHandler, InteractionRouter, ModalField, ModalSpec,
 };
 pub use invite_tracker::InviteTracker;

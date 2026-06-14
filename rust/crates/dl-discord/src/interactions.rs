@@ -71,6 +71,17 @@ pub struct BridgeReply {
     /// Antwort in den Kanal posten statt als Interaction-Reply
     /// (publish_steam_panel-Muster: Panel öffentlich, Bestätigung ephemeral).
     pub channel_message: Option<ChannelMessage>,
+    /// Datei-Anhänge (z. B. der DSGVO-Datenexport als JSON). Default leer —
+    /// bestehende Handler bleiben unverändert. Der Dispatch reicht sie als
+    /// `Vec<CreateAttachment>` an serenity durch (Multipart erledigt serenity).
+    pub attachments: Vec<BridgeAttachment>,
+}
+
+/// Ein Datei-Anhang für eine Interaction-Antwort (In-Memory-Bytes).
+#[derive(Debug, Clone)]
+pub struct BridgeAttachment {
+    pub filename: String,
+    pub data: Vec<u8>,
 }
 
 #[derive(Debug, Clone)]

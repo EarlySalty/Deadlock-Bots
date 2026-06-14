@@ -11,7 +11,7 @@ use std::time::Duration;
 use serde_json::{json, Map, Value};
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, CommandInteraction, ComponentInteraction,
-    ComponentInteractionDataKind, Http, Interaction, ModalInteraction,
+    ComponentInteractionDataKind, CreateAttachment, Http, Interaction, ModalInteraction,
 };
 
 use crate::adapter::DiscordAdapter;
@@ -226,7 +226,26 @@ fn message_data(reply: &BridgeReply) -> Value {
     if reply.ephemeral {
         data.insert("flags".into(), json!(EPHEMERAL_FLAG));
     }
+    if !reply.attachments.is_empty() {
+        // Discord ordnet die Multipart-Teile `files[i]` über diese id zu.
+        let meta: Vec<Value> = reply
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(i, a)| json!({ "id": i, "filename": a.filename }))
+            .collect();
+        data.insert("attachments".into(), json!(meta));
+    }
     Value::Object(data)
+}
+
+/// In-Memory-Anhänge → serenity-`CreateAttachment` (Multipart erledigt serenity).
+fn build_files(reply: &BridgeReply) -> Vec<CreateAttachment> {
+    reply
+        .attachments
+        .iter()
+        .map(|a| CreateAttachment::bytes(a.data.clone(), a.filename.clone()))
+        .collect()
 }
 
 fn modal_data(modal: &crate::interactions::ModalSpec) -> Value {
@@ -298,7 +317,7 @@ async fn respond(
         return;
     }
     if let Err(err) = http
-        .create_followup_message(token, &message_data(&reply), Vec::new())
+        .create_followup_message(token, &message_data(&reply), build_files(&reply))
         .await
     {
         tracing::warn!(%err, "Followup fehlgeschlagen");
@@ -339,7 +358,7 @@ async fn send_initial(
     }
     let response = json!({ "type": CB_MESSAGE, "data": message_data(&reply) });
     if let Err(err) = http
-        .create_interaction_response(interaction_id.into(), token, &response, Vec::new())
+        .create_interaction_response(interaction_id.into(), token, &response, build_files(&reply))
         .await
     {
         tracing::warn!(%err, "Interaction-Response fehlgeschlagen");

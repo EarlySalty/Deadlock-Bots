@@ -2,9 +2,9 @@
 //!
 //! v1: Slash `/datenschutz` (Ein-Klick-Bestätigung über einen Danger-Button
 //! statt des 2-Schritt-Edit-Flows) + `/datenschutz-optin`. Der Daten-Download
-//! („Daten herunterladen") braucht Datei-Anhänge in der Interaction-Antwort —
-//! das unterstützt `BridgeReply` noch nicht und folgt separat. Die **Löschung**
-//! (DSGVO-Löschrecht) und das Opt-in funktionieren. Das in-memory-State-Clearing
+//! („Daten herunterladen") liefert den Export als JSON-Datei-Anhang
+//! (`BridgeReply::attachments` → serenity-Multipart). Löschung (DSGVO-Löschrecht),
+//! Export (Auskunftsrecht) und Opt-in funktionieren. Das in-memory-State-Clearing
 //! (`_clear_runtime_state`) entfällt: der gesetzte Opt-out gated künftige
 //! Schreibzugriffe ohnehin (Tracker prüfen `is_opted_out`).
 
@@ -12,17 +12,19 @@ use std::sync::Arc;
 
 use dl_db::Db;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+    BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler,
+    InteractionRouter,
 };
 use serde_json::json;
 
-use crate::privacy::{delete_user_data, set_opt_in};
+use crate::privacy::{delete_user_data, export_user_data, set_opt_in};
 
 #[derive(Clone, Copy)]
 enum Action {
     Datenschutz,
     OptIn,
     Confirm,
+    Export,
 }
 
 struct PrivacyHandler {
@@ -46,12 +48,20 @@ impl InteractionHandler for PrivacyHandler {
                 ),
                 components: Some(json!([{
                     "type": 1,
-                    "components": [{
-                        "type": 2,
-                        "style": 4,
-                        "label": "Endgültig löschen",
-                        "custom_id": "privacy:confirm"
-                    }]
+                    "components": [
+                        {
+                            "type": 2,
+                            "style": 4,
+                            "label": "Endgültig löschen",
+                            "custom_id": "privacy:confirm"
+                        },
+                        {
+                            "type": 2,
+                            "style": 2,
+                            "label": "Daten herunterladen",
+                            "custom_id": "privacy:export"
+                        }
+                    ]
                 }])),
                 ephemeral: true,
                 ..Default::default()
@@ -79,6 +89,28 @@ impl InteractionHandler for PrivacyHandler {
                     ),
                 }
             }
+            Action::Export => match export_user_data(&self.db, uid, now).await {
+                Ok(value) => {
+                    let bytes = serde_json::to_vec_pretty(&value)
+                        .unwrap_or_else(|_| b"{}".to_vec());
+                    BridgeReply {
+                        content: Some(
+                            "📄 Hier sind deine gespeicherten Daten als JSON-Datei. \
+                             Personenbezogene Fremd-IDs sind dabei geschwärzt."
+                                .to_string(),
+                        ),
+                        ephemeral: true,
+                        attachments: vec![BridgeAttachment {
+                            filename: "deine-daten.json".to_string(),
+                            data: bytes,
+                        }],
+                        ..Default::default()
+                    }
+                }
+                Err(_) => BridgeReply::ephemeral_text(
+                    "⚠️ Konnte den Datenexport nicht erstellen. Bitte später erneut versuchen.",
+                ),
+            },
         }
     }
 }
@@ -120,8 +152,15 @@ pub fn register(router: &mut InteractionRouter, db: Db) {
     router.on_custom_id(
         "privacy:confirm",
         Arc::new(PrivacyHandler {
-            db,
+            db: db.clone(),
             action: Action::Confirm,
+        }),
+    );
+    router.on_custom_id(
+        "privacy:export",
+        Arc::new(PrivacyHandler {
+            db,
+            action: Action::Export,
         }),
     );
 }
