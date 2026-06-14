@@ -26,6 +26,7 @@ use serde_json::{json, Value};
 
 pub const COACH_ROLE_ID: u64 = 1494372744286965941;
 pub const COACHING_ACTIVE_ROLE_ID: u64 = 1371929762913587292;
+pub const COACHING_REWARD_ROLE_ID: u64 = 1500793970714873927;
 pub const REQUEST_CHANNEL_ID: u64 = 1461682293105229979;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
@@ -502,6 +503,107 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             self.open_request_to_all(request_id, "expired").await;
         }
     }
+
+    /// Abgelaufene Coaching-Rollen entfernen (Port `coaching_role_manager`):
+    /// aktive Rolle nach 48 h (`coaching_requests.role_expires_at`), Reward-
+    /// Rolle nach 5 Tagen (`coaching_sessions.reward_role_expires_at`).
+    pub async fn expire_roles(&self) {
+        let now = chrono::Utc::now().timestamp();
+        let guild_id = self.guild_id;
+
+        let active: Vec<(i64, u64)> = self
+            .db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, discord_user_id FROM coaching_requests
+                      WHERE role_removed_at IS NULL AND role_expires_at IS NOT NULL
+                        AND role_expires_at < ?1",
+                )?;
+                let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect()
+            })
+            .await
+            .unwrap_or_default();
+        for (req_id, user_id) in active {
+            self.port
+                .remove_role(
+                    guild_id,
+                    user_id,
+                    COACHING_ACTIVE_ROLE_ID,
+                    "Coaching-Rolle abgelaufen (48h)",
+                )
+                .await;
+            let _ = self
+                .db
+                .write(move |conn| {
+                    conn.execute(
+                        "UPDATE coaching_requests SET role_removed_at=?1, updated_at=?1 WHERE id=?2",
+                        rusqlite::params![now, req_id],
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            let thread: Option<u64> = self
+                .db
+                .read(move |conn| {
+                    conn.query_row(
+                        "SELECT discord_thread_id FROM coaching_sessions
+                          WHERE request_id=?1 AND status IN ('active','waiting_survey')
+                          ORDER BY created_at DESC LIMIT 1",
+                        [req_id],
+                        |r| r.get::<_, Option<u64>>(0),
+                    )
+                    .optional()
+                    .map(|o| o.flatten())
+                })
+                .await
+                .ok()
+                .flatten();
+            if let Some(tid) = thread {
+                self.port
+                    .send_channel_text(
+                        tid,
+                        "⏰ Die 48h Coaching-Phase ist abgelaufen. Falls ihr noch keine \
+                         Voice-Session hattet, müsst ihr eine neue Anfrage stellen.",
+                    )
+                    .await;
+            }
+        }
+
+        let reward: Vec<(i64, u64)> = self
+            .db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, discord_user_id FROM coaching_sessions
+                      WHERE reward_role_removed_at IS NULL AND reward_role_expires_at IS NOT NULL
+                        AND reward_role_expires_at < ?1",
+                )?;
+                let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
+                rows.collect()
+            })
+            .await
+            .unwrap_or_default();
+        for (sess_id, user_id) in reward {
+            self.port
+                .remove_role(
+                    guild_id,
+                    user_id,
+                    COACHING_REWARD_ROLE_ID,
+                    "Coaching Reward-Rolle abgelaufen (5 Tage)",
+                )
+                .await;
+            let _ = self
+                .db
+                .write(move |conn| {
+                    conn.execute(
+                        "UPDATE coaching_sessions SET reward_role_removed_at=?1 WHERE id=?2",
+                        rusqlite::params![now, sess_id],
+                    )
+                    .map(|_| ())
+                })
+                .await;
+        }
+    }
 }
 
 // ── Interaction-Handler ────────────────────────────────────────────────────
@@ -863,6 +965,7 @@ pub fn spawn(coaching: Arc<CoachingRequests>) -> Vec<tokio::task::JoinHandle<()>
     let expiry = tokio::spawn(async move {
         loop {
             coaching.expire_reservations().await;
+            coaching.expire_roles().await;
             tokio::time::sleep(Duration::from_secs(60)).await;
         }
     });
