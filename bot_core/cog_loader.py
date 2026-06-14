@@ -216,6 +216,10 @@ class CogLoaderMixin:
     def _should_exclude(self, module_path: str) -> bool:
         default_excludes = {
             "",
+            # Verified-Rolle wird seit dem Steam-Cutover allein vom Rust-steam-bot
+            # (friend_sync) verwaltet. Der alte Python-Reconciler lief parallel auf
+            # derselben Rolle/DB → Rollen-Flapping. Hier deaktiviert (Single-Owner).
+            "cogs.steam_verified_role",
         }
         runtime_role = self._effective_split_runtime_role()
         if runtime_role == "dashboard":

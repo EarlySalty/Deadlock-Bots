@@ -1,3 +1,13 @@
+## #139 — „Verified"-Rolle: Schluss mit dem Flackern (nur noch ein Verantwortlicher)
+
+**Problem:** Seit der Steam-Teil in einen eigenen Dienst ausgelagert wurde, verwalteten **zwei** Systeme gleichzeitig die „Verified"-Rolle: der alte bot-interne Abgleich (stündlich) und der neue Steam-Dienst. Beide lasen zwar denselben Datenstand, entschieden aber unabhängig voneinander über Vergeben und Entziehen. Trafen ihre Läufe ungünstig aufeinander, konnte die Rolle kurzzeitig flackern (vergeben → entzogen → wieder vergeben) oder uneinheitlich gesetzt sein.
+
+**Was wurde geändert:** Der alte bot-interne Verified-Abgleich wurde abgeschaltet. Zuständig für die „Verified"-Rolle ist jetzt ausschließlich der Steam-Dienst.
+
+**Wie es jetzt funktioniert:** Die Rolle kommt unmittelbar, sobald die Steam-Freundschaft mit dem Bot bestätigt ist, und wird danach von genau einer Stelle konsistent gepflegt — regelmäßiger Abgleich plus Entzug, wenn die Freundschaft wegfällt. Da kein zweites System mehr gegensteuert, gibt es kein Flackern und keine widersprüchlichen Zustände mehr.
+
+**Betroffen:** Alle mit „Verified"-Rolle, besonders wer das Kommen und Gehen der Rolle bemerkt hat.
+
 ## #138 — /checkrank & weitere Steam-Befehle antworten wieder
 
 **Problem:** `/checkrank` (und weitere Steam-Befehle, die nur Text oder ein Info-Embed ohne Knöpfe zurückgeben — etwa die Rang-Einzelabfrage oder die Verknüpfungs-Statusanzeige) brachen seit dem Umbau der Steam-Anbindung kommentarlos ab: Der Befehl lief intern auf einen Fehler und schickte deshalb gar keine Antwort. Für den Nutzer sah es so aus, als würde der Befehl einfach nichts tun.
