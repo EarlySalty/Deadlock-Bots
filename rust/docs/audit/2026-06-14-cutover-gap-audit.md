@@ -405,8 +405,20 @@ Slash-Wrapper) — bewusst je eigener Pass:
 1. ~~`!balance`-Admin-Befehlsschicht~~ — ERLEDIGT (`balance_cmd.rs`, 4 Scheiben).
 2. `dm_assistant` Free-Text-AI-DM-Assistent — in Rust nicht vorhanden.
 3. Master-Schema-Bootstrap + Core-Tabellen nur unter `#[cfg(test)]` (Infra).
-4. Kleinkram-Slash: `/faqclose`, `/faqpanel`, `/coaching-analysieren`,
-   Owner-only `/coaching-session-beenden` + `/coaching-survey-senden`.
+4. Kleinkram-Slash (verifiziert, teils erledigt/abgedeckt):
+   - `/faqpanel` — ERLEDIGT (`faq.rs`). War der eigentliche Blocker: die Rust-FAQ
+     hatte die Panel-Konstanten, postete das Panel aber NIE — d. h. der „Frage
+     stellen"-Button wäre nach dem Cutover nirgends erschienen, das FAQ-Feature
+     unerreichbar. Jetzt: Panel-Ensure beim Start (KV-idempotent, wie
+     `_ensure_panel` in cog_load) + `/faqpanel`-Admin-Command (Status/Repost).
+   - `/faqclose` — ABGEDECKT: Rust-`faq.rs` hat den Close-Button
+     `faq_chat:close:{session}` (gleiche Wirkung, andere UX). Gehört zudem zum
+     separaten `server_faq.py`; kein eigener Port nötig.
+   - `/coaching-analysieren`, `/coaching-survey-senden`,
+     `/coaching-session-beenden` — BEWUSST ZURÜCKGESTELLT (siehe `coaching.rs`
+     Kopf-Doku): Owner-only manuelle Overrides des Automatik-Flows; der
+     Auto-Flow (Analyse beim Claim, Survey-Scanner, Reward-Rollen) läuft in Rust.
+     Website-Spiegelung + Rollen-Ablauf-Manager bleiben vorerst Python.
 5. By-design deferred (KEIN Rust-Port): Web-Control-Routen (status/restart/
    cogs-reload/logs/standalone → Frontend-Panel-Hiding), Steam-Hero-Sync.
 6. Bewusste Drops: bug_reporter, steam_verified_role (anderer Owner),

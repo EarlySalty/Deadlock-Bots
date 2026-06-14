@@ -35,6 +35,8 @@ pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const MAX_OUTPUT_TOKENS: u32 = 1500;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
+/// KV-Schlüssel der gemerkten Panel-Message-ID (wie `_store_panel_msg_id`).
+pub const PANEL_KV_KEY: &str = "message_id";
 
 pub const SYSTEM_PROMPT: &str = r#"Du bist ein hilfreicher, aber strikt eingeschränkter FAQ-Assistent.
 
@@ -126,6 +128,28 @@ pub fn build_prompt(docs: &str, history: &[(String, String)], question: &str) ->
         parts.join("\n\n---\n\n"),
         question.trim()
     )
+}
+
+/// Embed + „Frage stellen"-Button des FAQ-Panels (Port von `_build_panel_embed`
+/// + `FAQPanelView`).
+fn panel_body() -> serde_json::Map<String, serde_json::Value> {
+    let embed = json!({
+        "title": "FAQ - Häufig gestellte Fragen",
+        "description": "Stell eine Frage zum Server, zu Kanälen, Rollen oder Deadlock.\n\
+                        Klicke auf den Button – **ein Bot** versucht deine Frage zu beantworten.\n\
+                        Deine Frage geht **nicht** an die Community.\n\n\
+                        ⏱️ Chats werden nach 24 Stunden automatisch geschlossen.",
+        "color": 0x5865F2, // blurple
+        "footer": { "text": "Deadlock Master Bot • FAQ Chat" }
+    });
+    let components = json!([{ "type": 1, "components": [{
+        "type": 2, "style": 1, "label": "Frage stellen",
+        "emoji": { "name": "💬" }, "custom_id": "faq_chat:start"
+    }]}]);
+    let mut body = serde_json::Map::new();
+    body.insert("embeds".into(), json!([embed]));
+    body.insert("components".into(), components);
+    body
 }
 
 // ── Store ──────────────────────────────────────────────────────────────────
@@ -314,6 +338,19 @@ pub trait FaqPort: Send + Sync {
     );
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
     async fn user_name(&self, user_id: u64) -> String;
+    /// Postet eine Rich-Nachricht (Embed + Components) → message_id (fürs Panel).
+    async fn post_rich(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String>;
+    /// Editiert eine zuvor gepostete Rich-Nachricht (Panel-Refresh).
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String>;
 }
 
 pub struct FaqChat {
@@ -338,6 +375,67 @@ impl FaqChat {
             docs,
             answered_tickets: tokio::sync::Mutex::new(HashSet::new()),
         })
+    }
+
+    /// Postet/editiert das FAQ-Panel im [`PANEL_CHANNEL_ID`] (Port von
+    /// `_ensure_panel`). Idempotent über den KV-Store: ist eine Panel-Nachricht
+    /// gemerkt, wird sie editiert; nur wenn das fehlschlägt (z. B. gelöscht),
+    /// wird eine neue gepostet. Wird beim Start aufgerufen.
+    pub async fn ensure_panel(&self) {
+        let body = panel_body();
+        let stored = self.panel_message_id().await;
+        if let Some(message_id) = stored {
+            if self
+                .port
+                .edit_rich(PANEL_CHANNEL_ID, message_id, body.clone())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+        }
+        match self.port.post_rich(PANEL_CHANNEL_ID, body).await {
+            Ok(message_id) => {
+                if let Err(err) = self
+                    .store
+                    .db
+                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
+                    .await
+                {
+                    tracing::warn!(%err, "FAQ-Panel-ID konnte nicht gespeichert werden");
+                }
+            }
+            Err(err) => tracing::warn!(%err, "FAQ-Panel konnte nicht gepostet werden"),
+        }
+    }
+
+    /// `/faqpanel` (Admin): meldet ein bestehendes Panel oder erstellt es neu.
+    pub async fn faqpanel_command(&self, guild_id: u64) -> BridgeReply {
+        if let Some(message_id) = self.panel_message_id().await {
+            return BridgeReply::ephemeral_text(format!(
+                "✅ FAQ Panel existiert bereits: https://discord.com/channels/{guild_id}/{PANEL_CHANNEL_ID}/{message_id}"
+            ));
+        }
+        self.ensure_panel().await;
+        match self.panel_message_id().await {
+            Some(message_id) => BridgeReply::ephemeral_text(format!(
+                "✅ FAQ Panel wurde erstellt: https://discord.com/channels/{guild_id}/{PANEL_CHANNEL_ID}/{message_id}"
+            )),
+            None => BridgeReply::ephemeral_text(format!(
+                "❌ Konnte Panel nicht erstellen. Channel {PANEL_CHANNEL_ID} prüfen."
+            )),
+        }
+    }
+
+    /// Gemerkte Panel-Message-ID aus dem KV-Store.
+    async fn panel_message_id(&self) -> Option<u64> {
+        self.store
+            .db
+            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok())
     }
 
     async fn generate_answer(&self, session_id: &str, question: &str) -> String {
@@ -461,6 +559,14 @@ struct FaqHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for FaqHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        // /faqpanel (Admin): Panel posten/melden.
+        if interaction.command == "faqpanel" {
+            if interaction.guild_id == 0 {
+                return BridgeReply::ephemeral_text("❌ Das funktioniert nur auf dem Server.");
+            }
+            return self.faq.faqpanel_command(interaction.guild_id).await;
+        }
+
         // Start über den Panel-Button ODER den /faq-Slash-Command.
         if interaction.custom_id == "faq_chat:start" || interaction.command == "faq" {
             if interaction.guild_id == 0 {
@@ -575,6 +681,19 @@ pub fn register(router: &mut InteractionRouter, faq: Arc<FaqChat>) {
         },
         handler.clone(),
     );
+    router.on_command(
+        "faqpanel",
+        CommandSpec {
+            definition: json!({
+                "name": "faqpanel",
+                "description": "Erstellt das FAQ Panel (Admin)",
+                "type": 1,
+                "dm_permission": false,
+                "default_member_permissions": "8", // Administrator
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("faq_chat:start", handler.clone());
     router.on_prefix("faq_chat:close", handler);
 }
@@ -591,6 +710,8 @@ pub fn spawn(
             if let Err(err) = faq.store.ensure_schema().await {
                 tracing::warn!(%err, "FAQ-Schema-Anlage fehlgeschlagen");
             }
+            // Panel beim Start posten/auffrischen (wie `_ensure_panel` in cog_load).
+            faq.ensure_panel().await;
             loop {
                 match messages.recv().await {
                     Ok(event) => {
@@ -690,5 +811,100 @@ mod tests {
         store.close_session("s1").await;
         assert!(store.active_session_of_user(42).await.is_none());
         assert!(store.expired_sessions().await.is_empty());
+    }
+
+    // Port-Mock, der Panel-Post/-Edit zählt.
+    struct MockPanelPort {
+        posts: std::sync::Mutex<u32>,
+        edits: std::sync::Mutex<u32>,
+    }
+
+    #[async_trait::async_trait]
+    impl FaqPort for MockPanelPort {
+        async fn create_faq_channel(&self, _g: u64, _u: u64, _n: &str) -> Result<u64, String> {
+            Ok(1)
+        }
+        async fn send_message(&self, _c: u64, _t: &str, _comp: Option<serde_json::Value>) {}
+        async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
+            None
+        }
+        async fn user_name(&self, _u: u64) -> String {
+            "U".to_string()
+        }
+        async fn post_rich(
+            &self,
+            _c: u64,
+            _b: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<u64, String> {
+            *self.posts.lock().unwrap() += 1;
+            Ok(55501)
+        }
+        async fn edit_rich(
+            &self,
+            _c: u64,
+            _m: u64,
+            _b: serde_json::Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            *self.edits.lock().unwrap() += 1;
+            Ok(())
+        }
+    }
+
+    async fn db_with_kv() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
+        db.write(|c| {
+            c.execute(
+                "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("kv_store");
+        (dir, db)
+    }
+
+    #[tokio::test]
+    async fn panel_postet_einmal_dann_editiert() {
+        let (_dir, db) = db_with_kv().await;
+        let port = Arc::new(MockPanelPort {
+            posts: std::sync::Mutex::new(0),
+            edits: std::sync::Mutex::new(0),
+        });
+        let faq = FaqChat::new(db, port.clone(), None, String::new());
+
+        // Erster ensure: ein Post, kein Edit; ID wird gemerkt.
+        faq.ensure_panel().await;
+        assert_eq!(*port.posts.lock().unwrap(), 1);
+        assert_eq!(*port.edits.lock().unwrap(), 0);
+        assert_eq!(faq.panel_message_id().await, Some(55501));
+
+        // Zweiter ensure: nur Edit, kein neuer Post (idempotent).
+        faq.ensure_panel().await;
+        assert_eq!(*port.posts.lock().unwrap(), 1);
+        assert_eq!(*port.edits.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn faqpanel_command_meldet_bestehend_und_erstellt() {
+        let (_dir, db) = db_with_kv().await;
+        let port = Arc::new(MockPanelPort {
+            posts: std::sync::Mutex::new(0),
+            edits: std::sync::Mutex::new(0),
+        });
+        let faq = FaqChat::new(db, port.clone(), None, String::new());
+
+        // Noch kein Panel → Command erstellt es und meldet „wurde erstellt".
+        let reply = faq.faqpanel_command(42).await;
+        let text = reply.content.unwrap();
+        assert!(text.contains("wurde erstellt"), "text: {text}");
+        assert!(text.contains("/42/1491953161747955853/55501"), "jump: {text}");
+        assert_eq!(*port.posts.lock().unwrap(), 1);
+
+        // Erneuter Command → meldet „existiert bereits", postet nicht erneut.
+        let reply = faq.faqpanel_command(42).await;
+        assert!(reply.content.unwrap().contains("existiert bereits"));
+        assert_eq!(*port.posts.lock().unwrap(), 1);
     }
 }
