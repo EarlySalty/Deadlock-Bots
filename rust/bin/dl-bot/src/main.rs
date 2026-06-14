@@ -100,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     if let Err(err) = streamer_intents.ensure_schema().await {
         tracing::warn!(%err, "streamer_link_intents-Schema konnte nicht angelegt werden");
     }
-    dl_bridges::streamer_intent::register(&mut router, streamer_intents);
+    dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
     // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
     let nudge = dl_voice::nudge::VoiceNudge::new(
@@ -354,6 +354,12 @@ async fn main() -> anyhow::Result<()> {
         if let Some(matcher) = &matcher {
             dl_bridges::matcher::spawn_scan_loop(matcher.clone());
             dl_bridges::matcher::spawn_command_listener(&dispatcher, matcher.clone());
+            // Streamer-Intent-Watcher: korreliert neu auftauchende Streamer mit
+            // offenen /streamer-Absichten (1-h-Fenster) und verknüpft sie.
+            dl_bridges::streamer_intent::spawn_watcher(
+                streamer_intents.clone(),
+                matcher.client.clone(),
+            );
         }
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren

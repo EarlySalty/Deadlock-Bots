@@ -7,14 +7,19 @@
 //! Discord-ID dann mit einem Streamer, der in genau diesem Fenster neu auf der
 //! Twitch-Bot-Seite auftaucht — die zeitliche Nähe ist das Korrelationssignal.
 
+use std::collections::HashSet;
 use std::sync::Arc;
+use std::time::Duration;
 
 use dl_db::{Db, DbError};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use rusqlite::params;
-use serde_json::json;
+use serde_json::{json, Value};
+
+use crate::matcher::{norm_key, similarity};
+use crate::twitch::TwitchApiClient;
 
 /// Website, auf der der Streamer seinen Twitch-Account verbindet.
 pub const STREAMER_ONBOARDING_URL: &str =
@@ -23,6 +28,14 @@ pub const STREAMER_ONBOARDING_URL: &str =
 /// Korrelationsfenster: so lange nach `/streamer` gilt ein neu auftauchender
 /// Streamer als „derselbe" und wird verknüpft (Wunsch: max 1 Stunde).
 pub const INTENT_TTL_SECS: i64 = 3600;
+
+/// Poll-Takt des Watchers — deutlich häufiger als der 6-h-Matcher, damit das
+/// 1-h-Fenster zuverlässig getroffen wird.
+const POLL_INTERVAL: Duration = Duration::from_secs(180);
+
+/// Namens-Ähnlichkeits-Schwelle für die Disambiguierung bei mehreren offenen
+/// Absichten (gleicher Boden wie der Matcher).
+const FUZZY_FLOOR: f64 = 0.62;
 
 /// Eine offene Verknüpfungs-Absicht.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -191,6 +204,112 @@ pub fn register(router: &mut InteractionRouter, intents: StreamerIntents) {
     );
 }
 
+/// Ordnet einem neu aufgetauchten Twitch-Login die passende offene Absicht zu.
+///
+/// Primär über Namens-Ähnlichkeit (entscheidet, wenn mehrere Leute warten); gibt
+/// es keinen Namens-Treffer über der Schwelle, greift die reine Zeit-Korrelation
+/// nur, wenn GENAU eine Absicht offen ist — bei mehreren wäre eine Zuordnung zu
+/// unsicher (→ `None`, der 6-h-Matcher übernimmt später per Namensabgleich).
+pub fn correlate(login: &str, pending: &[StreamerIntent], fuzzy_floor: f64) -> Option<u64> {
+    let login_key = norm_key(login);
+    let best = pending
+        .iter()
+        .map(|intent| {
+            (
+                intent.discord_id,
+                similarity(&login_key, &norm_key(&intent.discord_name)),
+            )
+        })
+        .filter(|(_, score)| *score >= fuzzy_floor)
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    if let Some((discord_id, _)) = best {
+        return Some(discord_id);
+    }
+    if pending.len() == 1 {
+        return Some(pending[0].discord_id);
+    }
+    None
+}
+
+/// Extrahiert die Twitch-Logins aus den `link_candidates`-Einträgen
+/// (Feld `twitch_login`, normalisiert wie der Matcher).
+fn candidate_logins(candidates: &[Value]) -> Vec<String> {
+    candidates
+        .iter()
+        .filter_map(|entry| entry.get("twitch_login").and_then(Value::as_str))
+        .map(|login| login.trim().to_lowercase())
+        .filter(|login| !login.is_empty())
+        .collect()
+}
+
+/// Watcher (Scheibe 2): pollt die Link-Candidates der Twitch-Bot-Seite, erkennt
+/// neu auftauchende Streamer und verknüpft sie mit einer offenen `/streamer`-
+/// Absicht im 1-h-Fenster. `link-candidates` liefert nur UNverknüpfte Streamer
+/// — sobald verknüpft, verschwindet ein Login aus der Liste, also kein Konflikt
+/// mit dem 6-h-Matcher.
+pub fn spawn_watcher(
+    intents: StreamerIntents,
+    client: Arc<TwitchApiClient>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        // Beim ersten Lauf alle bestehenden Candidates als „gesehen" markieren,
+        // damit ein Bot-Start keine Alt-Streamer fälschlich als „neu" verknüpft.
+        let mut seen: HashSet<String> = HashSet::new();
+        let mut baselined = false;
+        loop {
+            let now = chrono::Utc::now().timestamp();
+            intents.expire_old(now).await;
+
+            match client.link_candidates().await {
+                Ok(candidates) => {
+                    let logins = candidate_logins(&candidates);
+                    if !baselined {
+                        seen.extend(logins);
+                        baselined = true;
+                    } else {
+                        let mut pending = intents.pending_intents(now).await;
+                        for login in logins {
+                            if !seen.insert(login.clone()) {
+                                continue; // schon bekannt
+                            }
+                            if pending.is_empty() {
+                                continue;
+                            }
+                            let Some(discord_id) = correlate(&login, &pending, FUZZY_FLOOR) else {
+                                continue;
+                            };
+                            let name = pending
+                                .iter()
+                                .find(|i| i.discord_id == discord_id)
+                                .map(|i| i.discord_name.clone())
+                                .unwrap_or_default();
+                            match client.link_discord_profile(&login, discord_id, &name).await {
+                                Ok(_) => {
+                                    intents.mark_linked(discord_id, &login).await;
+                                    pending.retain(|i| i.discord_id != discord_id);
+                                    tracing::info!(
+                                        login = %login,
+                                        discord_id,
+                                        "Streamer-Absicht automatisch verknüpft"
+                                    );
+                                }
+                                Err(err) => tracing::warn!(
+                                    %err, login = %login,
+                                    "Streamer-Verknüpfung fehlgeschlagen"
+                                ),
+                            }
+                        }
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "link-candidates-Abruf fehlgeschlagen");
+                }
+            }
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -249,5 +368,51 @@ mod tests {
         let pending = store.pending_intents(check).await;
         assert_eq!(pending.len(), 1, "Fenster wurde durch den 2. Aufruf erneuert");
         assert_eq!(pending[0].created_at, again);
+    }
+
+    fn intent(id: u64, name: &str) -> StreamerIntent {
+        StreamerIntent {
+            discord_id: id,
+            discord_name: name.into(),
+            created_at: 0,
+        }
+    }
+
+    #[test]
+    fn correlate_einzelne_absicht_greift_per_zeit() {
+        // Kein Namens-Bezug, aber genau eine offene Absicht → Zeit-Korrelation.
+        let pending = vec![intent(1, "wwwwwwww")];
+        assert_eq!(correlate("dragskope", &pending, FUZZY_FLOOR), Some(1));
+    }
+
+    #[test]
+    fn correlate_mehrere_disambiguiert_per_name() {
+        let pending = vec![intent(1, "wwwwwwww"), intent(2, "dragskope")];
+        assert_eq!(correlate("dragskope", &pending, FUZZY_FLOOR), Some(2));
+    }
+
+    #[test]
+    fn correlate_mehrere_ohne_namenstreffer_ist_none() {
+        let pending = vec![intent(1, "wwwwwwww"), intent(2, "vvvvvvvv")];
+        assert_eq!(correlate("dragskope", &pending, FUZZY_FLOOR), None);
+    }
+
+    #[test]
+    fn correlate_ohne_absicht_ist_none() {
+        assert_eq!(correlate("dragskope", &[], FUZZY_FLOOR), None);
+    }
+
+    #[test]
+    fn candidate_logins_extrahiert_und_normalisiert() {
+        let candidates = vec![
+            json!({ "twitch_login": " DragSkope " }),
+            json!({ "twitch_login": "" }),
+            json!({ "foo": "bar" }),
+            json!({ "twitch_login": "Live_TTV" }),
+        ];
+        assert_eq!(
+            candidate_logins(&candidates),
+            vec!["dragskope".to_string(), "live_ttv".to_string()]
+        );
     }
 }
