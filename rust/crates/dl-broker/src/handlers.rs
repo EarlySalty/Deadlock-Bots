@@ -220,6 +220,34 @@ pub async fn resolve_names(
     }
 }
 
+/// Alle nicht-Bot-Mitglieder der Default-Gilde (`GET .../discord/members`).
+/// Loopback-only, ohne Token (wie `_handle_list_members`). Antwort
+/// `{ok, members:[{id,name,global_name,nick}]}`; wird vom Twitch-Bot-Relay
+/// (`list_members`) konsumiert.
+pub async fn members(State(state): State<SharedBroker>, peer: Peer, headers: HeaderMap) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    match state.port.list_members().await {
+        Ok(list) => {
+            let members: Vec<serde_json::Value> = list
+                .into_iter()
+                .map(|m| {
+                    json!({
+                        "id": m.user_id.to_string(),
+                        "name": m.name,
+                        "global_name": m.global_name,
+                        "nick": m.nick,
+                    })
+                })
+                .collect();
+            respond(200, json!({ "ok": true, "members": members }))
+        }
+        Err(_) => respond(404, error_body(&rid, None, "not_found", "guild not found")),
+    }
+}
+
 /// Einen einzelnen Discord-User auflösen (`POST .../discord/resolve-user`).
 /// Token-authentifiziert (Body `{user_id}`); antwortet immer 200 mit
 /// `{ok, result:{found,...}}` (nicht gefunden → `found:false`), wie

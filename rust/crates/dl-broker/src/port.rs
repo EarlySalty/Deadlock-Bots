@@ -75,6 +75,15 @@ pub struct ResolvedUser {
     pub display_name: Option<String>,
 }
 
+/// Ein Gilden-Mitglied für den Broker-Endpunkt `members` (Twitch-Bot-Relay).
+#[derive(Debug, Clone)]
+pub struct GuildMemberInfo {
+    pub user_id: u64,
+    pub name: String,
+    pub global_name: Option<String>,
+    pub nick: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct InviteInfo {
     pub invite_url: String,
@@ -199,6 +208,9 @@ pub trait DiscordPort: Send + Sync {
     /// Einen einzelnen Discord-User auflösen (Cache, sonst API). `Ok(None)` =
     /// nicht gefunden — kein Fehler; der Aufrufer behandelt das wie "unbekannt".
     async fn resolve_user(&self, user_id: u64) -> Result<Option<ResolvedUser>, PortError>;
+    /// Alle nicht-Bot-Mitglieder der Default-Gilde (Gateway-Cache). Für den
+    /// Broker-Endpunkt `members`, den der Twitch-Bot-Relay konsumiert.
+    async fn list_members(&self) -> Result<Vec<GuildMemberInfo>, PortError>;
     /// Live-Kennzahlen einer Gilde (Mitglieder-/Online-/Voice-Zahl, Vanity).
     /// guild_id None = erste Bot-Gilde.
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError>;

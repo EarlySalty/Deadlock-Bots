@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use dl_broker::port::{
-    DiscordPort, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo, PortError,
-    ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
+    DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
+    PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -539,6 +539,34 @@ impl DiscordPort for DiscordAdapter {
             }
             Err(_) => Ok(None),
         }
+    }
+
+    async fn list_members(&self) -> Result<Vec<GuildMemberInfo>, PortError> {
+        // Wie _handle_list_members: alle nicht-Bot-Mitglieder der Default-Gilde
+        // aus dem Gateway-Cache (gechunkt beim Bot-Start, wie resolve_names).
+        if !self.cache_ready() {
+            return Err(PortError::Discord(
+                "gateway not connected (member list needs the cache)".to_string(),
+            ));
+        }
+        let Some(gid) = self.cache.guilds().first().copied() else {
+            return Err(PortError::GuildNotFound);
+        };
+        let Some(guild) = self.cache.guild(gid) else {
+            return Err(PortError::GuildNotFound);
+        };
+        let members = guild
+            .members
+            .iter()
+            .filter(|(_, m)| !m.user.bot)
+            .map(|(uid, m)| GuildMemberInfo {
+                user_id: uid.get(),
+                name: m.user.name.to_string(),
+                global_name: m.user.global_name.as_ref().map(ToString::to_string),
+                nick: m.nick.as_ref().map(ToString::to_string),
+            })
+            .collect();
+        Ok(members)
     }
 
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError> {

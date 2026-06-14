@@ -137,6 +137,10 @@ pub fn router(state: SharedBroker) -> Router {
             post(handlers::resolve_user),
         )
         .route(
+            "/internal/master/v1/discord/members",
+            get(handlers::members),
+        )
+        .route(
             "/internal/master/v1/discord/guild-stats",
             get(handlers::guild_stats),
         )
