@@ -244,6 +244,7 @@ pub fn router(app: DashboardApp) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/admin", get(index))
+        .route("/turnier", get(turnier_page))
         .route("/api/auth/me", get(auth_me))
         .route("/auth/discord/login", get(login))
         .route("/auth/discord/callback", get(own_callback))
@@ -364,13 +365,30 @@ fn html_escape_attr(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
-/// Lädt `service/static/dashboard.html` (neben der DB: `repo/data/` → `repo/`).
-/// Kein Caching — wie das Original; fehlt die Datei, gibt der Handler 500.
-async fn load_dashboard_html(app: &DashboardApp) -> Option<String> {
+/// Lädt eine SPA-Datei aus `service/static/` (neben der DB: `repo/data/` →
+/// `repo/`). Kein Caching — wie das Original; fehlt die Datei, gibt der
+/// aufrufende Handler 500.
+async fn load_static_html(app: &DashboardApp, name: &str) -> Option<String> {
     let repo_root = app.db().path().parent()?.parent()?;
-    tokio::fs::read_to_string(repo_root.join("service/static/dashboard.html"))
+    tokio::fs::read_to_string(repo_root.join("service/static").join(name))
         .await
         .ok()
+}
+
+/// Setzt die drei Auth-Platzhalter in eine SPA-Datei ein (Nutzer-Label
+/// HTML-escaped; `next` steuert das Login-Ziel) und liefert die HTML-Antwort.
+fn render_spa(html: String, display_name: &str, login_next: &str) -> Response {
+    let login_url = format!("/auth/discord/login?next={login_next}");
+    let rendered = html
+        .replace("{{AUTH_USER_LABEL}}", &html_escape_attr(display_name))
+        .replace("{{DISCORD_LOGIN_URL}}", &login_url)
+        .replace("{{AUTH_LOGOUT_URL}}", "/auth/logout");
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+        rendered,
+    )
+        .into_response()
 }
 
 /// `/` und `/admin` — liefert die Dashboard-SPA mit eingesetzten Auth-Platzhaltern
@@ -390,19 +408,28 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
         .as_ref()
         .map(|s| s.display_name.clone())
         .unwrap_or_else(|| "Nicht angemeldet".to_string());
-    let Some(html) = load_dashboard_html(&app).await else {
+    let Some(html) = load_static_html(&app, "dashboard.html").await else {
         return err_text(500, "dashboard.html nicht ladbar");
     };
-    let rendered = html
-        .replace("{{AUTH_USER_LABEL}}", &html_escape_attr(&display_name))
-        .replace("{{DISCORD_LOGIN_URL}}", "/auth/discord/login?next=%2Fadmin")
-        .replace("{{AUTH_LOGOUT_URL}}", "/auth/logout");
-    (
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        rendered,
-    )
-        .into_response()
+    render_spa(html, &display_name, "%2Fadmin")
+}
+
+/// `/turnier` — Turnier-Verwaltungs-SPA (Port von `_handle_turnier_page`).
+/// Wie `index`, aber ohne `turnier_only`-Weiterleitung (Turnier-Mods dürfen
+/// hier rein) und mit Login-Ziel `/turnier`.
+async fn turnier_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    let session = app.session_from_headers(&headers);
+    if app.cfg().auth_enforced() && session.is_none() {
+        return redirect("/auth/discord/login?next=%2Fturnier", None);
+    }
+    let display_name = session
+        .as_ref()
+        .map(|s| s.display_name.clone())
+        .unwrap_or_else(|| "Nicht angemeldet".to_string());
+    let Some(html) = load_static_html(&app, "turnier.html").await else {
+        return err_text(500, "turnier.html nicht ladbar");
+    };
+    render_spa(html, &display_name, "%2Fturnier")
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
