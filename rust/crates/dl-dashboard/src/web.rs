@@ -289,6 +289,10 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/repo-activity",
             get(crate::repo_activity::repo_activity),
         )
+        .route(
+            "/api/repo-activity/refresh",
+            post(crate::repo_activity::repo_activity_refresh),
+        )
         .route("/api/leave-surveys", get(crate::analytics::leave_surveys))
         .route("/api/user-retention", get(crate::analytics::user_retention))
         .route("/api/voice-stats", get(crate::analytics::voice_stats))
