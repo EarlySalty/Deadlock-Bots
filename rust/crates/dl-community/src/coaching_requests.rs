@@ -620,6 +620,38 @@ impl InteractionHandler for CoachingHandler {
         let c = &self.coaching;
         let now_ts = chrono::Utc::now().timestamp();
 
+        // /coaching-status — Status der letzten Anfrage (reiner Read).
+        if interaction.command == "coaching-status" {
+            let user_id = interaction.user_id;
+            let status: Option<String> = c
+                .db
+                .read(move |conn| {
+                    conn.query_row(
+                        "SELECT status FROM coaching_requests
+                          WHERE discord_user_id = ?1 ORDER BY created_at DESC LIMIT 1",
+                        rusqlite::params![user_id],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .optional()
+                })
+                .await
+                .ok()
+                .flatten();
+            let msg = match status.as_deref() {
+                None => "Du hast keine Coaching-Anfrage gestellt.".to_string(),
+                Some("pending") => "⏳ Deine Anfrage wird gerade analysiert. Bitte warte.".to_string(),
+                Some("analyzed") => {
+                    "✅ Deine Anfrage wurde analysiert und wartet auf einen Coach.".to_string()
+                }
+                Some("matched") => "🎉 Ein Coach hat sich für dich gemeldet. Check deine DMs.".to_string(),
+                Some("active") => "🎮 Deine Coaching-Session läuft gerade.".to_string(),
+                Some("completed") => "✅ Deine letzte Session ist abgeschlossen.".to_string(),
+                Some("cancelled") => "❌ Deine Anfrage wurde abgebrochen.".to_string(),
+                Some(other) => format!("Status: {other}"),
+            };
+            return BridgeReply::ephemeral_text(msg);
+        }
+
         // Start über den Panel-Button ODER den /coaching-anfrage-Slash.
         if interaction.custom_id == "coaching_panel_start" || interaction.command == "coaching-anfrage"
         {
@@ -954,6 +986,17 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
             definition: json!({
                 "name": "coaching-anfrage",
                 "description": "Stelle eine Coaching-Anfrage",
+                "type": 1,
+            }),
+        },
+        handler.clone(),
+    );
+    router.on_command(
+        "coaching-status",
+        CommandSpec {
+            definition: json!({
+                "name": "coaching-status",
+                "description": "Pruefe den Status deiner Anfrage",
                 "type": 1,
             }),
         },
