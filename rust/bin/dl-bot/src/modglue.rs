@@ -660,6 +660,18 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .map(|_| ())
             .map_err(|e| e.to_string())
     }
+
+    async fn delete_panel(&self, channel_id: u64, message_id: u64) {
+        let _ = self
+            .adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("FAQ: Duplikat-Panel aufräumen"),
+            )
+            .await;
+    }
 }
 
 // ── DM-Assistent-Anbindung ─────────────────────────────────────────────────

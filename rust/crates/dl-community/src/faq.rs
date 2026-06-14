@@ -35,8 +35,10 @@ pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const MAX_OUTPUT_TOKENS: u32 = 1500;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
-/// KV-Schlüssel der gemerkten Panel-Message-ID (wie `_store_panel_msg_id`).
-pub const PANEL_KV_KEY: &str = "message_id";
+/// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
+/// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
+/// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
+pub const PANEL_KV_KEY: &str = "panel_msg_id";
 
 pub const SYSTEM_PROMPT: &str = r#"Du bist ein hilfreicher, aber strikt eingeschränkter FAQ-Assistent.
 
@@ -351,6 +353,8 @@ pub trait FaqPort: Send + Sync {
         message_id: u64,
         body: serde_json::Map<String, serde_json::Value>,
     ) -> Result<(), String>;
+    /// Löscht eine Nachricht (Aufräumen eines Duplikat-Panels).
+    async fn delete_panel(&self, channel_id: u64, message_id: u64);
 }
 
 pub struct FaqChat {
@@ -382,6 +386,13 @@ impl FaqChat {
     /// gemerkt, wird sie editiert; nur wenn das fehlschlägt (z. B. gelöscht),
     /// wird eine neue gepostet. Wird beim Start aufgerufen.
     pub async fn ensure_panel(&self) {
+        // Selbstheilung: eine frühere (fehlerhafte) Rust-Version merkte die
+        // Panel-ID unter dem falschen Key `message_id` und postete dadurch beim
+        // Cutover ein Duplikat. Ist dort eine ID gemerkt, die nicht dem
+        // kanonischen `panel_msg_id` entspricht, wird das Duplikat gelöscht und
+        // der Alt-Key entfernt.
+        self.heal_legacy_panel().await;
+
         let body = panel_body();
         let stored = self.panel_message_id().await;
         if let Some(message_id) = stored {
@@ -436,6 +447,28 @@ impl FaqChat {
             .ok()
             .flatten()
             .and_then(|s| s.parse::<u64>().ok())
+    }
+
+    /// Entfernt ein unter dem alten Key (`message_id`) gemerktes Duplikat-Panel.
+    async fn heal_legacy_panel(&self) {
+        const LEGACY_KEY: &str = "message_id";
+        let legacy = self
+            .store
+            .db
+            .kv_get(PANEL_KV_NS, LEGACY_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|s| s.parse::<u64>().ok());
+        let Some(legacy_id) = legacy else {
+            return;
+        };
+        // Nur löschen, wenn es NICHT das kanonische Panel ist.
+        if self.panel_message_id().await != Some(legacy_id) {
+            self.port.delete_panel(PANEL_CHANNEL_ID, legacy_id).await;
+            tracing::info!(legacy_id, "FAQ: Duplikat-Panel aus Cutover-Bug gelöscht");
+        }
+        let _ = self.store.db.kv_delete(PANEL_KV_NS, LEGACY_KEY).await;
     }
 
     async fn generate_answer(&self, session_id: &str, question: &str) -> String {
@@ -813,10 +846,11 @@ mod tests {
         assert!(store.expired_sessions().await.is_empty());
     }
 
-    // Port-Mock, der Panel-Post/-Edit zählt.
+    // Port-Mock, der Panel-Post/-Edit/-Delete zählt.
     struct MockPanelPort {
         posts: std::sync::Mutex<u32>,
         edits: std::sync::Mutex<u32>,
+        deleted: std::sync::Mutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -848,6 +882,17 @@ mod tests {
             *self.edits.lock().unwrap() += 1;
             Ok(())
         }
+        async fn delete_panel(&self, _c: u64, message_id: u64) {
+            self.deleted.lock().unwrap().push(message_id);
+        }
+    }
+
+    fn panel_port() -> Arc<MockPanelPort> {
+        Arc::new(MockPanelPort {
+            posts: std::sync::Mutex::new(0),
+            edits: std::sync::Mutex::new(0),
+            deleted: std::sync::Mutex::new(Vec::new()),
+        })
     }
 
     async fn db_with_kv() -> (tempfile::TempDir, Db) {
@@ -868,10 +913,7 @@ mod tests {
     #[tokio::test]
     async fn panel_postet_einmal_dann_editiert() {
         let (_dir, db) = db_with_kv().await;
-        let port = Arc::new(MockPanelPort {
-            posts: std::sync::Mutex::new(0),
-            edits: std::sync::Mutex::new(0),
-        });
+        let port = panel_port();
         let faq = FaqChat::new(db, port.clone(), None, String::new());
 
         // Erster ensure: ein Post, kein Edit; ID wird gemerkt.
@@ -889,10 +931,7 @@ mod tests {
     #[tokio::test]
     async fn faqpanel_command_meldet_bestehend_und_erstellt() {
         let (_dir, db) = db_with_kv().await;
-        let port = Arc::new(MockPanelPort {
-            posts: std::sync::Mutex::new(0),
-            edits: std::sync::Mutex::new(0),
-        });
+        let port = panel_port();
         let faq = FaqChat::new(db, port.clone(), None, String::new());
 
         // Noch kein Panel → Command erstellt es und meldet „wurde erstellt".
@@ -906,5 +945,24 @@ mod tests {
         let reply = faq.faqpanel_command(42).await;
         assert!(reply.content.unwrap().contains("existiert bereits"));
         assert_eq!(*port.posts.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn heilt_duplikat_aus_altem_key() {
+        let (_dir, db) = db_with_kv().await;
+        // Kanonisches Panel (Python-Key) = 100, Duplikat unter Alt-Key = 200.
+        db.kv_set(PANEL_KV_NS, PANEL_KV_KEY, "100").await.unwrap();
+        db.kv_set(PANEL_KV_NS, "message_id", "200").await.unwrap();
+        let port = panel_port();
+        let faq = FaqChat::new(db.clone(), port.clone(), None, String::new());
+
+        faq.ensure_panel().await;
+
+        // Das Duplikat (200) wurde gelöscht, das kanonische (100) nur editiert.
+        assert_eq!(*port.deleted.lock().unwrap(), vec![200]);
+        assert_eq!(*port.posts.lock().unwrap(), 0);
+        assert_eq!(*port.edits.lock().unwrap(), 1);
+        // Der Alt-Key ist entfernt.
+        assert_eq!(db.kv_get(PANEL_KV_NS, "message_id").await.unwrap(), None);
     }
 }
