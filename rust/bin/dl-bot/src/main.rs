@@ -174,6 +174,9 @@ async fn main() -> anyhow::Result<()> {
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
     dl_community::onboarding::register(&mut router, wizard);
 
+    // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
+    dl_community::privacy_ui::register(&mut router, db.clone());
+
     // Turnier-User-Flow (8): Panel-Buttons + Solo/Team-Anmeldung
     struct TurnierRoleGlue {
         adapter: Arc<dl_discord::DiscordAdapter>,
