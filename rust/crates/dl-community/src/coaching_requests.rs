@@ -20,7 +20,9 @@ use std::time::Duration;
 use dl_ai::{GenerateRequest, TextGenerator};
 use dl_db::Db;
 use dl_discord::interactions::{ModalField, ModalSpec};
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -618,7 +620,9 @@ impl InteractionHandler for CoachingHandler {
         let c = &self.coaching;
         let now_ts = chrono::Utc::now().timestamp();
 
-        if interaction.custom_id == "coaching_panel_start" {
+        // Start über den Panel-Button ODER den /coaching-anfrage-Slash.
+        if interaction.custom_id == "coaching_panel_start" || interaction.command == "coaching-anfrage"
+        {
             // Ban-Prüfung (coaching_bans, 7-Tage-Sperren)
             let user_id = interaction.user_id;
             let ban: Option<(i64, String)> =
@@ -944,6 +948,17 @@ impl InteractionHandler for CoachingHandler {
 
 pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>) {
     let handler = Arc::new(CoachingHandler { coaching });
+    router.on_command(
+        "coaching-anfrage",
+        CommandSpec {
+            definition: json!({
+                "name": "coaching-anfrage",
+                "description": "Stelle eine Coaching-Anfrage",
+                "type": 1,
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("coaching_panel_start", handler.clone());
     router.on_custom_id("coaching_request_modal", handler.clone());
     router.on_prefix("coach_claim_", handler.clone());
