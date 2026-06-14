@@ -1067,7 +1067,10 @@ impl TempVoiceEngine {
             return Err("Min-Rang gilt nur für Comp/Ranked-Lanes.".to_string());
         }
         let min_rank = min_rank.trim().to_lowercase();
-        if min_rank != "unknown" && logic::rank_index(&min_rank) == 0 {
+        // Gültigkeit über rank_score prüfen, nicht rank_index: so werden auch
+        // Sub-Rang-Labels wie "phantom 3" akzeptiert (rank_index kennt nur die
+        // 11 Haupt-Ränge und würde sie fälschlich als "unbekannt" abweisen).
+        if min_rank != "unknown" && logic::rank_score(&min_rank) == 0 {
             return Err(format!("Unbekannter Rang: {min_rank}"));
         }
 

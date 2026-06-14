@@ -22,6 +22,10 @@ const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
 
 struct PanelHandler {
     engine: Arc<TempVoiceEngine>,
+    /// Zwischenspeicher für den ① gewählten Haupt-Rang, bis ② der Sub-Rang
+    /// kommt (Port von Pythons modul-globalem `_pending_main_rank`). Per-Prozess-
+    /// RAM, geht — wie im Original — bei Neustart verloren.
+    pending_main_rank: tokio::sync::Mutex<std::collections::HashMap<u64, String>>,
 }
 
 impl PanelHandler {
@@ -507,16 +511,222 @@ impl InteractionHandler for PanelHandler {
                 }
             }
 
-            // ── Noch nicht portierte Panels ───────────────────────────
-            "tv_tag_filter"
-            | "tv_lurker"
-            | "tv_mode_switch_btn"
-            | "tv_mode_switch_select"
-            | "tv_minrank"
-            | "tv_subrank_perm"
-            | "tv_subrank" => BridgeReply::ephemeral_text(
-                "Diese Funktion ist im neuen System noch nicht freigeschaltet.",
-            ),
+            // ── Lurker ────────────────────────────────────────────────
+            // Wie LurkerButton: jedes Lane-Mitglied toggelt seinen EIGENEN
+            // Lurker-Status (kein Owner-Check — Original-Verhalten).
+            "tv_lurker" => {
+                let Some(lane) = self.lane_of(&interaction).await else {
+                    return BridgeReply::ephemeral_text("Du musst in einer Lane sein.");
+                };
+                let (_, msg) = engine
+                    .toggle_lurker(interaction.guild_id, lane, interaction.user_id)
+                    .await;
+                BridgeReply::ephemeral_text(msg)
+            }
+
+            // ── Modus wechseln ────────────────────────────────────────
+            "tv_mode_switch_btn" => {
+                if self.lane_of(&interaction).await.is_none() {
+                    return BridgeReply::ephemeral_text(NOT_IN_LANE);
+                }
+                BridgeReply {
+                    content: Some("Wähle den neuen Modus:".to_string()),
+                    components: Some(json!([{ "type": 1, "components": [{
+                        "type": 3, "custom_id": "tv_mode_switch_select",
+                        "placeholder": "Neuen Modus wählen…",
+                        "options": [
+                            { "label": "Casual", "value": "casual" },
+                            { "label": "Ranked", "value": "ranked" },
+                            { "label": "Street Brawl", "value": "street_brawl" },
+                            { "label": "Off Topic", "value": "off_topic" },
+                        ],
+                        "min_values": 1, "max_values": 1,
+                    }]}])),
+                    ephemeral: true,
+                    ..BridgeReply::default()
+                }
+            }
+            "tv_mode_switch_select" => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(mode) = interaction.values.first().cloned() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                match self
+                    .engine
+                    .switch_lane_mode(interaction.guild_id, lane, interaction.user_id, &mode)
+                    .await
+                {
+                    None => {
+                        let label = match mode.as_str() {
+                            "casual" => "Casual",
+                            "ranked" => "Ranked",
+                            "street_brawl" => "Street Brawl",
+                            "off_topic" => "Off Topic",
+                            other => other,
+                        };
+                        BridgeReply::ephemeral_text(format!("Lane auf **{label}** umgestellt."))
+                    }
+                    Some(err) => BridgeReply::ephemeral_text(err),
+                }
+            }
+
+            // ── Mindest-Rang (① Haupt-Rang → ② Sub-Rang) ──────────────
+            // Wie MinRankSelect/SubRankSelectPermanent: kein Owner-Check
+            // (jedes Lane-Mitglied), aber nur in Comp/Ranked-Kategorien und
+            // nicht über dem eigenen Rang. Der Haupt-Rang wird zwischen den
+            // beiden Selects in `pending_main_rank` gehalten (Port von Pythons
+            // modul-globalem `_pending_main_rank`).
+            "tv_minrank" => {
+                let Some(lane) = self.lane_of(&interaction).await else {
+                    return BridgeReply::ephemeral_text("Tritt zuerst deiner Lane bei.");
+                };
+                let in_minrank = match engine.lane_snapshot(lane).await {
+                    Some((_, category_id)) => {
+                        engine.config.minrank_categories.contains(&category_id)
+                    }
+                    None => false,
+                };
+                if !in_minrank {
+                    return BridgeReply::ephemeral_text("Mindest-Rang ist hier deaktiviert.");
+                }
+                let Some(choice) = interaction.values.first() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                let choice = choice.to_lowercase();
+                let roles = engine
+                    .port
+                    .member_role_names(interaction.guild_id, interaction.user_id)
+                    .await;
+                let member_idx = super::logic::member_rank_index(&roles);
+                if super::logic::rank_index(&choice) > member_idx {
+                    let own = super::logic::RANK_ORDER.get(member_idx).copied().unwrap_or("unknown");
+                    return BridgeReply::ephemeral_text(format!(
+                        "Du kannst keinen Mindest-Rang über deinem eigenen setzen. Dein Rang: {}.",
+                        super::logic::capitalize(own)
+                    ));
+                }
+                self.pending_main_rank.lock().await.insert(lane, choice.clone());
+                BridgeReply::ephemeral_text(format!(
+                    "Haupt-Rang **{}** gespeichert – jetzt **② Sub-Rang (1–6)** auswählen.",
+                    super::logic::capitalize(&choice)
+                ))
+            }
+            "tv_subrank_perm" | "tv_subrank" => {
+                let Some(lane) = self.lane_of(&interaction).await else {
+                    return BridgeReply::ephemeral_text("Tritt zuerst deiner Lane bei.");
+                };
+                let main_rank = self.pending_main_rank.lock().await.get(&lane).cloned();
+                let Some(main_rank) = main_rank else {
+                    return BridgeReply::ephemeral_text(
+                        "Bitte zuerst den **① Haupt-Rang** auswählen.",
+                    );
+                };
+                let Some(sub_raw) = interaction.values.first() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                let sub: i64 = sub_raw.trim().parse().unwrap_or(-1);
+                let rank_label = if sub == 0 {
+                    main_rank.clone()
+                } else if (1..=6).contains(&sub) {
+                    format!("{main_rank} {sub}")
+                } else {
+                    return BridgeReply::ephemeral_text("Ungültiger Sub-Rang.");
+                };
+                self.pending_main_rank.lock().await.remove(&lane);
+                match self
+                    .engine
+                    .set_min_rank(interaction.guild_id, lane, &rank_label)
+                    .await
+                {
+                    Ok(()) => BridgeReply::ephemeral_text(format!(
+                        "Mindest-Rang gesetzt auf: **{}**.",
+                        super::logic::capitalize(&rank_label)
+                    )),
+                    Err(err) => BridgeReply::ephemeral_text(err),
+                }
+            }
+
+            // ── Tag-Filter (Owner) ────────────────────────────────────
+            // Port von TagFilterConfigView. Da der Router zustandslos ist,
+            // persistiert JEDE Auswahl sofort (statt sammeln + Speichern-Knopf)
+            // — Endzustand identisch.
+            "tv_tag_filter" => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let f = engine.store.lane_tag_filter(lane).await;
+                BridgeReply {
+                    content: Some(
+                        "Tag-Filter konfigurieren — jede Auswahl wird sofort übernommen:"
+                            .to_string(),
+                    ),
+                    components: Some(json!([
+                        { "type": 1, "components": [{
+                            "type": 3, "custom_id": "tv_tagf_age", "placeholder": "Mindest-Alter",
+                            "options": [
+                                { "label": "Aus", "value": "off", "default": f.min_age_tag.is_none() },
+                                { "label": "25+", "value": "25+", "default": f.min_age_tag.as_deref() == Some("25+") },
+                            ],
+                            "min_values": 1, "max_values": 1,
+                        }]},
+                        { "type": 1, "components": [{
+                            "type": 3, "custom_id": "tv_tagf_tone", "placeholder": "Tonfall",
+                            "options": [
+                                { "label": "Aus", "value": "off", "default": f.required_tone_tag.is_none() },
+                                { "label": "Ragebaiter-Free", "value": "ragebaiter_free", "default": f.required_tone_tag.as_deref() == Some("ragebaiter_free") },
+                            ],
+                            "min_values": 1, "max_values": 1,
+                        }]},
+                        { "type": 1, "components": [{
+                            "type": 3, "custom_id": "tv_tagf_rb", "placeholder": "Ragebaiter blockieren",
+                            "options": [
+                                { "label": "Aus", "value": "off", "default": !f.deny_ragebaiter },
+                                { "label": "An", "value": "on", "default": f.deny_ragebaiter },
+                            ],
+                            "min_values": 1, "max_values": 1,
+                        }]},
+                    ])),
+                    ephemeral: true,
+                    ..BridgeReply::default()
+                }
+            }
+            "tv_tagf_age" | "tv_tagf_tone" | "tv_tagf_rb" => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(value) = interaction.values.first().cloned() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                let mut filter = engine.store.lane_tag_filter(lane).await;
+                let confirm = match interaction.custom_id.as_str() {
+                    "tv_tagf_age" => {
+                        filter.min_age_tag = (value != "off").then(|| value.clone());
+                        "Mindest-Alter aktualisiert."
+                    }
+                    "tv_tagf_tone" => {
+                        filter.required_tone_tag = (value != "off").then(|| value.clone());
+                        "Tonfall-Filter aktualisiert."
+                    }
+                    _ => {
+                        filter.deny_ragebaiter = value == "on";
+                        "Ragebaiter-Filter aktualisiert."
+                    }
+                };
+                match engine
+                    .save_tag_filter(interaction.guild_id, lane, filter)
+                    .await
+                {
+                    Ok(()) => BridgeReply::ephemeral_text(confirm),
+                    Err(err) => {
+                        BridgeReply::ephemeral_text(format!("Speichern fehlgeschlagen: {err}"))
+                    }
+                }
+            }
 
             other => {
                 tracing::warn!(custom_id = other, "TempVoice-Panel: unbekannte Komponente");
@@ -528,7 +738,10 @@ impl InteractionHandler for PanelHandler {
 
 /// Alle Panel-custom_ids am Router registrieren.
 pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
-    let handler = Arc::new(PanelHandler { engine });
+    let handler = Arc::new(PanelHandler {
+        engine,
+        pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+    });
     for custom_id in [
         "tv_region_de",
         "tv_region_e",
@@ -554,6 +767,7 @@ pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
         "tv_rename_modal",
         "tv_tag_filter",
         "tv_tagf_age",
+        "tv_tagf_tone",
         "tv_tagf_rb",
         "tv_lurker",
         "tv_mode_switch_btn",
