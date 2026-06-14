@@ -1,3 +1,13 @@
+## #145 — Turnier-Automatik & Moderations-Einspruch zurück (weitere Cutover-Lücken)
+
+**Problem:** Mehrere Funktionen, die es vor der Umstellung auf das neue System gab, fehlten danach. Turnier: (1) Der **Auto-Balance** — ein Hintergrund-Vorgang, der angemeldete Solo-Spieler regelmäßig nach Rang automatisch auf Teams verteilt und Teilteams auffüllt — lief gar nicht mehr. (2) Das **Anmelde-Panel** ließ sich nicht neu in einen Kanal posten (bestehende Panels funktionierten, ein verlorenes konnte aber nicht ersetzt werden). (3) `!balance start` mit mehr als 12 Leuten im Voice schnitt **stillschweigend die rangschwächsten ab**, statt das zu sagen. Moderation: (4) Wer automatisch gebannt/stummgeschaltet wurde, bekam **keine Einspruchsmöglichkeit** mehr; (5) die öffentliche „Scam erkannt"-Notiz erschien nur in *einem* der betroffenen Kanäle; (6) im Mod-Log fehlten Kontextdaten.
+
+**Was wurde geändert:** Der Auto-Balance läuft wieder als 5-Minuten-Vorgang, zeilengenau nach der alten Logik (volle Teams bleiben unangetastet, der Rest wird nach Rang-Score per Snake-Draft auf neue „Team A/B/…"-Teams verteilt). Ein neuer Admin-Befehl **`/turnierpanel`** postet das Anmelde-Panel mit den Solo-/Team-Knöpfen neu in den aktuellen Kanal. `!balance start` bricht bei >12 Spielern jetzt mit klarer Anweisung ab (Teilnehmer gezielt per `!balance manual @…` wählen) statt Leute zu verlieren. Die Auto-Moderations-DM an Betroffene trägt wieder einen **„Einspruch"-Knopf** → kurzes Begründungs-Formular → der Einspruch landet im Mod-Kanal. Die Scam-Notiz geht in **jeden** betroffenen Kanal (einmal pro Kanal), und das Mod-Log zeigt wieder Account-Alter, Zeit seit Beitritt, Aktivitätsfenster, Signale und die ausgeführten Aktionen — plus einen „Entbannen"-Knopf, wenn tatsächlich gebannt wurde.
+
+**Wie es jetzt funktioniert:** Anmeldungen werden im Hintergrund automatisch zu Teams; Admins posten das Panel bei Bedarf neu; große Voice-Runden bekommen eine klare Ansage statt stillem Datenverlust; gebannte Nutzer können direkt aus der DM Einspruch einlegen; und das Team sieht im Log alle Eckdaten eines Vorfalls auf einen Blick.
+
+**Betroffen:** Turnier-Teilnehmer und -Admins, das Mod-Team und alle von der Auto-Moderation Betroffenen.
+
 ## #144 — Master-Broker kann jetzt Discord-Rollen anlegen
 
 **Ausgangslage:** Andere Bots im Verbund (z. B. der Twitch-Bot) haben keinen eigenen Discord-Zugang — sie lassen alle Discord-Aktionen über den zentralen Master-Broker laufen. Der konnte Mitglieder zu bestehenden Rollen hinzufügen, aber keine neue Rolle erstellen. Für die automatische Anlage der Twitch-„ist live"-Ping-Rolle fehlte genau das.
