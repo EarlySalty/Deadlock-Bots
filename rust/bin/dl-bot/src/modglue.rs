@@ -1141,3 +1141,45 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
         }
     }
 }
+
+// ── Team-Balancer-Anbindung (!balance) ─────────────────────────────────────
+
+pub struct BalanceGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
+    async fn caller_voice_members(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Vec<dl_tournament::balance_cmd::VoiceMember> {
+        let Some(guild) = self.adapter.cache.guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        let Some(channel_id) = guild
+            .voice_states
+            .get(&UserId::new(user_id))
+            .and_then(|vs| vs.channel_id)
+        else {
+            return Vec::new();
+        };
+        guild
+            .voice_states
+            .iter()
+            .filter(|(_, vs)| vs.channel_id == Some(channel_id))
+            .filter_map(|(uid, _)| {
+                let member = guild.members.get(uid)?;
+                if member.user.bot {
+                    return None;
+                }
+                Some(dl_tournament::balance_cmd::VoiceMember {
+                    user_id: uid.get(),
+                    display_name: member.display_name().to_string(),
+                    role_ids: member.roles.iter().map(|r| r.get()).collect(),
+                })
+            })
+            .collect()
+    }
+}

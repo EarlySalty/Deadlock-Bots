@@ -215,6 +215,13 @@ async fn main() -> anyhow::Result<()> {
     });
     dl_tournament::discord_ui::register(&mut router, turnier_ui);
 
+    // Team-Balancer (!balance): Prefix-Listener, Spawn ist gateway-gated.
+    let balance_commands = Arc::new(dl_tournament::balance_cmd::BalanceCommands {
+        port: Arc::new(modglue::BalanceGlue {
+            adapter: adapter.clone(),
+        }),
+    });
+
     // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         db.clone(),
@@ -361,6 +368,8 @@ async fn main() -> anyhow::Result<()> {
                 matcher.client.clone(),
             );
         }
+        // Team-Balancer-Prefix-Listener (!balance auto/voice — read-only Vorschau)
+        dl_tournament::balance_cmd::spawn(balance_commands.clone(), &dispatcher, adapter.clone());
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
