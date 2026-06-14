@@ -423,6 +423,12 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
         dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
+        // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
+        // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung).
+        dl_community::retention::spawn(
+            dl_community::retention::RetentionTracker::new(db.clone()),
+            &dispatcher,
+        );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
