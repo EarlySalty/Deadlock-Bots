@@ -305,9 +305,17 @@ pub fn router(app: DashboardApp) -> Router {
             get(crate::deadlock::deadlock_heroes),
         )
         // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
+        // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
         .route(
             "/api/leave-survey/{token}",
-            get(crate::survey::leave_survey_get),
+            get(crate::survey::leave_survey_get)
+                .post(crate::survey::leave_survey_post)
+                .layer(axum::extract::DefaultBodyLimit::max(30 * 1024 * 1024)),
+        )
+        // Admin-geschützter Abruf hochgeladener Umfrage-Bilder.
+        .route(
+            "/api/leave-surveys/image/{token}/{filename}",
+            get(crate::survey::leave_survey_image),
         )
         // Turnier-Admin-Mutationen (Phase 9d) — Turnier-Mod/Voll + CSRF.
         .route(

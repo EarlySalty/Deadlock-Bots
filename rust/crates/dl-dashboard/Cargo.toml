@@ -14,7 +14,7 @@ dl-webcore.workspace = true
 dl-tournament.workspace = true
 dl-activity.workspace = true
 rusqlite.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 tower-http.workspace = true
 tower.workspace = true
 reqwest.workspace = true
