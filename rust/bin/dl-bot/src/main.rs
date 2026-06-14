@@ -235,6 +235,11 @@ async fn main() -> anyhow::Result<()> {
     )));
 
     // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
+    // Website-Client einmal bauen und teilen: CoachingRequests spiegelt damit
+    // jeden Anfrage-/Session-Zustand (Python `_mirror_to_website`), die
+    // Plattform-Brücke (CoachingSync) nutzt denselben Client für Roster-Sync
+    // und Termin-DMs. None = kein interner Token → Mirror/Sync inaktiv.
+    let coaching_website = dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         db.clone(),
         Arc::new(modglue::CoachingReqGlue {
@@ -243,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
         dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
             .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
         1289721245281292288,
+        coaching_website.clone(),
     );
     dl_community::coaching_requests::register(&mut router, coaching_requests.clone());
 
@@ -481,7 +487,9 @@ async fn main() -> anyhow::Result<()> {
         });
 
         // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Termin-DMs 60s
-        match dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok()) {
+        // + Roster-Resync bei Coach-Rollen-Änderung (Debounce). Teilt sich den
+        // oben gebauten Website-Client mit CoachingRequests.
+        match coaching_website.clone() {
             Some(client) => {
                 let sync = Arc::new(dl_community::coaching::CoachingSync {
                     client,
@@ -490,7 +498,7 @@ async fn main() -> anyhow::Result<()> {
                         guild_id: 1289721245281292288,
                     }),
                 });
-                dl_community::coaching::spawn(sync);
+                dl_community::coaching::spawn(sync, &dispatcher);
             }
             None => tracing::info!("Coaching-Sync inaktiv (kein interner Token)"),
         }

@@ -115,6 +115,37 @@ pub fn new_session_id() -> String {
     )
 }
 
+/// Parameter für `mirror_to_website` (entspricht den Keyword-Args von
+/// Python `_mirror_to_website`). Nur `request_id` ist Pflicht; die Rest-Felder
+/// kommen je nach Lebenszyklus-Punkt dazu (Claim/Cancel/Survey).
+#[derive(Default)]
+struct MirrorOpts {
+    request_id: i64,
+    assigned_coach_username: Option<String>,
+    coach_discord_id: Option<u64>,
+    coach_username: Option<String>,
+    session_status: Option<String>,
+    bot_session_id: Option<String>,
+}
+
+/// Roh-Zeile aus `coaching_requests` für die Website-Spiegelung.
+struct MirrorRow {
+    id: i64,
+    discord_user_id: i64,
+    discord_username: String,
+    rank: String,
+    subrank: String,
+    hero: Option<String>,
+    games_played: Option<String>,
+    hours_played: Option<String>,
+    availability: Option<String>,
+    current_problems: Option<String>,
+    ai_summary: String,
+    status: String,
+    assigned_coach_id: Option<String>,
+    reserved_until: Option<i64>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct RequestData {
     pub id: i64,
@@ -221,6 +252,10 @@ pub struct CoachingRequests {
     pub port: Arc<dyn CoachingPort>,
     pub ai: Option<Arc<dyn TextGenerator>>,
     pub guild_id: u64,
+    /// Website-Spiegelung der Anfrage-/Session-Zustände (Python
+    /// `_mirror_to_website`). `None` = inaktiv (kein interner Token), genau
+    /// wie wenn `website_client._token()` leer ist.
+    pub website: Option<Arc<crate::coaching::WebsiteClient>>,
 }
 
 impl CoachingRequests {
@@ -229,13 +264,105 @@ impl CoachingRequests {
         port: Arc<dyn CoachingPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         guild_id: u64,
+        website: Option<Arc<crate::coaching::WebsiteClient>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
             port,
             ai,
             guild_id,
+            website,
         })
+    }
+
+    /// Spiegelt den aktuellen Anfrage-/Session-Stand best-effort an die Website
+    /// (Port von `_mirror_to_website`). Liest die `coaching_requests`-Zeile,
+    /// füllt das EXAKTE Payload-Schema und feuert den POST in einem
+    /// `tokio::spawn`, damit der Discord-Flow nie blockiert. Fehler nur
+    /// `tracing`. Ohne Website-Client (kein Token) ein No-op.
+    fn mirror_to_website(&self, opts: MirrorOpts) {
+        let Some(client) = self.website.clone() else {
+            return;
+        };
+        let db = self.db.clone();
+        tokio::spawn(async move {
+            let request_id = opts.request_id;
+            // Volle Zeile lesen — wie `db.query_one("SELECT * ...")` in Python.
+            let row: Option<MirrorRow> = db
+                .read(move |conn| {
+                    conn.query_row(
+                        "SELECT id, discord_user_id, COALESCE(discord_username,''),
+                                rank, subrank, hero, games_played, hours_played,
+                                availability, current_problems, COALESCE(ai_summary,''),
+                                status, assigned_coach_id, reserved_until
+                           FROM coaching_requests WHERE id = ?1",
+                        [request_id],
+                        |r| {
+                            Ok(MirrorRow {
+                                id: r.get(0)?,
+                                discord_user_id: r.get(1)?,
+                                discord_username: r.get(2)?,
+                                rank: r.get(3)?,
+                                subrank: r.get(4)?,
+                                hero: r.get::<_, Option<String>>(5)?,
+                                games_played: r.get::<_, Option<String>>(6)?,
+                                hours_played: r.get::<_, Option<String>>(7)?,
+                                availability: r.get::<_, Option<String>>(8)?,
+                                current_problems: r.get::<_, Option<String>>(9)?,
+                                ai_summary: r.get(10)?,
+                                status: r.get(11)?,
+                                assigned_coach_id: r.get::<_, Option<String>>(12)?,
+                                reserved_until: r.get::<_, Option<i64>>(13)?,
+                            })
+                        },
+                    )
+                    .optional()
+                })
+                .await
+                .ok()
+                .flatten();
+            let Some(row) = row else {
+                tracing::debug!(request_id, "Coaching-Mirror: Zeile nicht gefunden (ignoriert)");
+                return;
+            };
+            // assigned_coach_id ist TEXT in der DB — wie Python int(assigned) → numerisch.
+            let assigned = row
+                .assigned_coach_id
+                .as_deref()
+                .and_then(|s| s.parse::<i64>().ok());
+            let mut payload = json!({
+                "bot_request_id": row.id,
+                "discord_user_id": row.discord_user_id,
+                "discord_username": row.discord_username,
+                "rank": row.rank,
+                "subrank": row.subrank,
+                "hero": row.hero,
+                "games_played": row.games_played,
+                "hours_played": row.hours_played,
+                "availability": row.availability,
+                "current_problems": row.current_problems,
+                "ai_summary": row.ai_summary,
+                "status": row.status,
+                "assigned_coach_discord_id": assigned,
+                "assigned_coach_username": opts.assigned_coach_username,
+                "reserved_until": row.reserved_until,
+            });
+            if let (Some(coach_id), Some(session_status)) =
+                (opts.coach_discord_id, opts.session_status.as_ref())
+            {
+                let map = payload.as_object_mut().expect("payload object");
+                map.insert("coach_discord_id".into(), json!(coach_id));
+                map.insert("coach_username".into(), json!(opts.coach_username));
+                map.insert("session_status".into(), json!(session_status));
+            }
+            if let Some(session_id) = opts.bot_session_id {
+                payload
+                    .as_object_mut()
+                    .expect("payload object")
+                    .insert("bot_session_id".into(), json!(session_id));
+            }
+            client.sync_coaching(&payload).await;
+        });
     }
 
     async fn load_request(
@@ -408,6 +535,18 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                         .map(|_| ())
                     })
                     .await;
+                // Website-Mirror (Python `_post_request_to_channel`:852) — mit
+                // dem Display-Namen des reservierten Coaches, falls einer
+                // zugewiesen wurde.
+                let assigned_coach_username = match assigned {
+                    Some(coach) => Some(self.port.member_display_name(self.guild_id, coach).await),
+                    None => None,
+                };
+                self.mirror_to_website(MirrorOpts {
+                    request_id: request.id,
+                    assigned_coach_username,
+                    ..MirrorOpts::default()
+                });
             }
             Err(err) => tracing::warn!(%err, "Coaching-Post fehlgeschlagen"),
         }
@@ -453,6 +592,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 claim_components(request.id, request.user_id),
             )
             .await;
+        // Website-Mirror (Python `_open_request_to_all`:742) — nur die Anfrage,
+        // ohne Coach-/Session-Felder; status ist inzwischen wieder 'analyzed'
+        // mit geleerter Reservierung.
+        self.mirror_to_website(MirrorOpts {
+            request_id,
+            ..MirrorOpts::default()
+        });
     }
 
     /// Analyse-Loop (wie _analyze_pending_requests, Claim via rowcount).
@@ -806,6 +952,16 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 .map(|_| ())
             })
             .await;
+        // Website-Mirror (Python `coaching_survey.py`:311): Session als
+        // 'completed' spiegeln, inkl. bot_session_id.
+        self.mirror_to_website(MirrorOpts {
+            request_id: rid,
+            coach_discord_id: session.coach_id,
+            coach_username: Some(coach_name),
+            session_status: Some("completed".to_string()),
+            bot_session_id: Some(session.id.clone()),
+            ..MirrorOpts::default()
+        });
     }
 }
 
@@ -1096,6 +1252,15 @@ impl InteractionHandler for CoachingHandler {
                     )
                     .await;
             }
+            // Website-Mirror (Python `CoachClaimButton.callback`:380):
+            // Session als 'active' mit dem claimenden Coach spiegeln.
+            c.mirror_to_website(MirrorOpts {
+                request_id,
+                coach_discord_id: Some(interaction.user_id),
+                coach_username: Some(coach_name.clone()),
+                session_status: Some("active".to_string()),
+                ..MirrorOpts::default()
+            });
             return BridgeReply::ephemeral_text(
                 "✅ Session gestartet — der Spieler wurde benachrichtigt.",
             );
@@ -1203,6 +1368,19 @@ impl InteractionHandler for CoachingHandler {
                     "Coaching abgebrochen - 7D Ban",
                 )
                 .await;
+            // Website-Mirror (Python `CoachCancelButton`:213): Session als
+            // 'cancelled' mit dem abbrechenden Coach spiegeln.
+            let coach_name = c
+                .port
+                .member_display_name(interaction.guild_id, interaction.user_id)
+                .await;
+            c.mirror_to_website(MirrorOpts {
+                request_id,
+                coach_discord_id: Some(interaction.user_id),
+                coach_username: Some(coach_name),
+                session_status: Some("cancelled".to_string()),
+                ..MirrorOpts::default()
+            });
             return BridgeReply::ephemeral_text(
                 "✅ Session abgebrochen — der Spieler ist 7 Tage fürs Coaching gesperrt.",
             );

@@ -137,6 +137,28 @@ impl WebsiteClient {
             .header("X-Bot-Token", &self.token)
     }
 
+    /// Einzelnen Anfrage-/Session-Snapshot spiegeln (wie `sync_coaching` in
+    /// website_client.py): POST `/coaching/platform/sync`. Best-effort, true
+    /// bei Erfolg.
+    pub async fn sync_coaching(&self, payload: &Value) -> bool {
+        match self
+            .request(reqwest::Method::POST, "/coaching/platform/sync")
+            .json(payload)
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::warn!(status = %response.status(), "Coaching-Sync fehlgeschlagen");
+                false
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Coaching-Sync Fehler");
+                false
+            }
+        }
+    }
+
     /// Coach-Roster übermitteln — true bei Erfolg (best-effort).
     pub async fn sync_coaches(&self, coaches: &[Value]) -> bool {
         match self
@@ -280,12 +302,55 @@ impl CoachingSync {
     }
 }
 
-pub fn spawn(sync: Arc<CoachingSync>) -> Vec<tokio::task::JoinHandle<()>> {
+/// Debounce-Fenster nach einer Coach-Rollen-Änderung (wie Python: ~5 s),
+/// bevor ein außerplanmäßiger Roster-Sync läuft.
+pub const ROLE_DEBOUNCE: Duration = Duration::from_secs(5);
+
+pub fn spawn(
+    sync: Arc<CoachingSync>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> Vec<tokio::task::JoinHandle<()>> {
     let role_sync = sync.clone();
     let role_task = tokio::spawn(async move {
         loop {
             role_sync.run_role_sync().await;
             tokio::time::sleep(ROLE_SYNC_INTERVAL).await;
+        }
+    });
+    // Coach-Roster-Resync bei Rollen-Änderung (Python `on_member_update`):
+    // Bekommt das Mitglied die Coach-Rolle, wird nach kurzer Debounce-Pause
+    // ein außerplanmäßiger Sync angestoßen — statt bis zum 600-s-Timer zu
+    // warten. Mehrere Änderungen kurz hintereinander werden zu einem Lauf
+    // zusammengefasst: jedes neue Event verschiebt das Fenster nach hinten.
+    let mut roles = dispatcher.subscribe_roles();
+    let resync = sync.clone();
+    let role_event_task = tokio::spawn(async move {
+        loop {
+            // Auf das erste Coach-Rollen-Event warten.
+            match roles.recv().await {
+                Ok(dl_discord::RoleEvent::Gained { role_ids, .. }) => {
+                    if !role_ids.contains(&COACH_ROLE_ID) {
+                        continue;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+            // Debounce: weitere Coach-Rollen-Events innerhalb des Fensters
+            // schlucken und das Fenster jeweils neu starten.
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(ROLE_DEBOUNCE) => break,
+                    event = roles.recv() => match event {
+                        Ok(dl_discord::RoleEvent::Gained { role_ids, .. })
+                            if role_ids.contains(&COACH_ROLE_ID) => continue,
+                        Ok(_) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+                    },
+                }
+            }
+            resync.run_role_sync().await;
         }
     });
     let notification_task = tokio::spawn(async move {
@@ -294,7 +359,7 @@ pub fn spawn(sync: Arc<CoachingSync>) -> Vec<tokio::task::JoinHandle<()>> {
             tokio::time::sleep(NOTIFICATION_INTERVAL).await;
         }
     });
-    vec![role_task, notification_task]
+    vec![role_task, role_event_task, notification_task]
 }
 
 #[cfg(test)]
