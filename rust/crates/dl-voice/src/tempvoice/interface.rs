@@ -176,8 +176,9 @@ impl InteractionHandler for PanelHandler {
                     Err(reply) => return reply,
                 };
                 let Some(requested) = interaction
-                    .values
-                    .first()
+                    .options
+                    .get("limit")
+                    .and_then(|v| v.as_str())
                     .and_then(|v| v.trim().parse().ok())
                 else {
                     return BridgeReply::ephemeral_text("Bitte eine Zahl eingeben.");
@@ -336,8 +337,9 @@ impl InteractionHandler for PanelHandler {
                     Err(reply) => return reply,
                 };
                 let Some(name) = interaction
-                    .values
-                    .first()
+                    .options
+                    .get("name")
+                    .and_then(|v| v.as_str())
                     .map(|v| v.trim().to_string())
                     .filter(|v| !v.is_empty())
                 else {
@@ -489,8 +491,9 @@ impl InteractionHandler for PanelHandler {
                     Err(reply) => return reply,
                 };
                 let Some(name) = interaction
-                    .values
-                    .first()
+                    .options
+                    .get("name")
+                    .and_then(|v| v.as_str())
                     .map(|v| v.trim().to_string())
                     .filter(|v| !v.is_empty())
                 else {
