@@ -34,26 +34,26 @@ pub fn reason_options(bucket: &str) -> &'static [(&'static str, &'static str)] {
                 "Verifizierung/Onboarding hat nicht geklappt",
                 "onboarding_failed",
             ),
-            ("Server war unuebersichtlich", "confusing"),
+            ("Server war unübersichtlich", "confusing"),
             ("Hab nicht gefunden wonach ich gesucht hab", "not_found"),
             ("War aus Versehen / falscher Server", "wrong_server"),
             ("Technisches Problem (Bot, Links, Channels)", "technical"),
             ("Anderer Grund", "other"),
         ],
         "B" => &[
-            ("Stimmung/Community hat sich veraendert", "mood_changed"),
-            ("Konflikt oder Aerger mit jemandem", "conflict"),
+            ("Stimmung/Community hat sich verändert", "mood_changed"),
+            ("Konflikt oder Ärger mit jemandem", "conflict"),
             ("Zu wenig los / keine Mitspieler mehr", "inactive_server"),
             ("Spiele Deadlock kaum/nicht mehr", "stopped_playing"),
             ("Moderation / Regeln", "moderation"),
-            ("Persoenliche Gruende / keine Zeit", "personal"),
+            ("Persönliche Gründe / keine Zeit", "personal"),
             ("Anderer Grund", "other"),
         ],
         _ => &[
             ("War nie richtig warm geworden", "never_warmed_up"),
-            ("Zu wenig Aktivitaet / Mitspieler", "low_activity"),
+            ("Zu wenig Aktivität / Mitspieler", "low_activity"),
             ("Spiele Deadlock nicht mehr", "stopped_playing"),
-            ("Keine Zeit / Discord aufgeraeumt", "no_time"),
+            ("Keine Zeit / Discord aufgeräumt", "no_time"),
             ("Hat mir nicht gefallen", "disliked"),
             ("Anderer Grund", "other"),
         ],
@@ -66,18 +66,18 @@ pub fn follow_up_question(reason_code: &str) -> &'static str {
         "confusing" => "Was hast du gesucht und nicht gefunden?",
         "technical" => "Welcher Bot/Link/Channel und was ist passiert?",
         "conflict" => "Magst du sagen was vorgefallen ist? Bleibt vertraulich.",
-        "mood_changed" => "Was hat sich veraendert und seit wann fuehlte es sich anders an?",
+        "mood_changed" => "Was hat sich verändert und seit wann fühlte es sich anders an?",
         "moderation" => "Welche Entscheidung oder Regel war das Problem?",
-        "stopped_playing" => "Was muesste passieren damit du wieder Deadlock spielst?",
-        "inactive_server" | "low_activity" => "Was haette mehr los gemacht fuer dich?",
+        "stopped_playing" => "Was müsste passieren damit du wieder Deadlock spielst?",
+        "inactive_server" | "low_activity" => "Was hätte mehr los gemacht für dich?",
         "personal" | "no_time" => {
             "Alles gut - magst du trotzdem kurz sagen ob etwas am Server lag?"
         }
-        "never_warmed_up" => "Was haette dir geholfen anzukommen?",
+        "never_warmed_up" => "Was hätte dir geholfen anzukommen?",
         "not_found" => "Wonach hast du gesucht?",
         "wrong_server" => "Kein Problem - alles gut.",
         "disliked" => "Was genau hat dir nicht gefallen?",
-        _ => "Erzaehl gern in eigenen Worten.",
+        _ => "Erzähl gern in eigenen Worten.",
     }
 }
 
@@ -237,8 +237,8 @@ impl LeaveSurvey {
         let embed = json!({
             "title": format!("Feedback zu {}", self.guild_name),
             "description": format!(
-                "{description}\n\nBitte waehle unten den passendsten Grund aus.\n\n\
-        Wenn du ausfuehrlicher Feedback geben magst (auch mit Bildern): {survey_url}"
+                "{description}\n\nBitte wähle unten den passendsten Grund aus.\n\n\
+        Wenn du ausführlicher Feedback geben magst (auch mit Bildern): {survey_url}"
             ),
             "color": 0x5865F2,
         });
@@ -248,7 +248,7 @@ impl LeaveSurvey {
             .collect();
         let components = json!([{ "type": 1, "components": [{
             "type": 3, "custom_id": format!("leave_survey:reason:{bucket}"),
-            "placeholder": "Grund auswaehlen …",
+            "placeholder": "Grund auswählen …",
             "options": options, "min_values": 1, "max_values": 1,
         }]}]);
 
@@ -413,7 +413,7 @@ impl InteractionHandler for SurveyHandler {
                         },
                         ModalField {
                             custom_id: "extra".to_string(),
-                            label: "Moechtest du noch etwas loswerden?".to_string(),
+                            label: "Möchtest du noch etwas loswerden?".to_string(),
                             placeholder: String::new(),
                             required: false,
                             min_length: 0,
@@ -472,7 +472,7 @@ impl InteractionHandler for SurveyHandler {
                 extra.unwrap_or_else(|| "—".to_string()),
             ))
             .await;
-        BridgeReply::ephemeral_text("Danke fuer dein ehrliches Feedback.")
+        BridgeReply::ephemeral_text("Danke für dein ehrliches Feedback.")
     }
 }
 
@@ -526,11 +526,11 @@ mod tests {
         assert!(!bucket_description("A", "Anna").contains("Anna"));
         assert_eq!(
             follow_up_question("inactive_server"),
-            "Was haette mehr los gemacht fuer dich?"
+            "Was hätte mehr los gemacht für dich?"
         );
         assert_eq!(
             follow_up_question("unbekannt"),
-            "Erzaehl gern in eigenen Worten."
+            "Erzähl gern in eigenen Worten."
         );
         assert_eq!(truncate_label("kurz", 45), "kurz");
         let long = "Dies ist eine sehr lange Beschriftung die gekuerzt werden muss";

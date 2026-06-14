@@ -32,9 +32,9 @@ pub fn build_message(display_name: &str, request_type: &str, co_player_names: &[
     }
     let mut lines: Vec<String> = if request_type == "second" {
         vec![
-            format!("Hey {display_name}, danke fuer deine Voice-Runden."),
-            "Kurzes Update: Was laeuft gut, was nervt, was sollen wir fixen?".to_string(),
-            "Button druecken und in 1-2 Saetzen Feedback dalassen.".to_string(),
+            format!("Hey {display_name}, danke für deine Voice-Runden."),
+            "Kurzes Update: Was läuft gut, was nervt, was sollen wir fixen?".to_string(),
+            "Button drücken und in 1-2 Sätzen Feedback dalassen.".to_string(),
         ]
     } else {
         vec![
@@ -389,7 +389,7 @@ mod tests {
         assert!(text.contains("Wie waren deine ersten Runden bei uns?"));
         assert!(text.contains("(+2 weitere)")); // 12 Namen → 10 + 2
         let text = build_message("Ben", "second", &[]);
-        assert!(text.contains("danke fuer deine Voice-Runden"));
+        assert!(text.contains("danke für deine Voice-Runden"));
         assert!(!text.contains("Mit im Call"));
     }
 
@@ -516,6 +516,6 @@ mod tests {
             .await;
         let dms = port.dms.lock().expect("lock");
         assert_eq!(dms.len(), 2);
-        assert!(dms[1].1.contains("danke fuer deine Voice-Runden"));
+        assert!(dms[1].1.contains("danke für deine Voice-Runden"));
     }
 }

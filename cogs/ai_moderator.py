@@ -301,7 +301,7 @@ class AcceptModerationButton(
         self.case_id = case_id or PERSISTENT_CASE_PLACEHOLDER
         super().__init__(
             discord.ui.Button(
-                label="Accept",
+                label="Annehmen",
                 style=discord.ButtonStyle.success,
                 custom_id=f"aimod:accept:{self.case_id}",
             )
@@ -363,7 +363,7 @@ class DenyModerationButton(
         self.case_id = case_id or PERSISTENT_CASE_PLACEHOLDER
         super().__init__(
             discord.ui.Button(
-                label="Deny",
+                label="Ablehnen",
                 style=discord.ButtonStyle.danger,
                 custom_id=f"aimod:deny:{self.case_id}",
             )

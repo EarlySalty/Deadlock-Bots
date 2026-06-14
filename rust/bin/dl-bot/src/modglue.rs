@@ -47,18 +47,18 @@ impl dl_moderation::ModPort for ModGlue {
         let embed = json!({
             "title": format!("🛡️ Moderationsvorschlag — {}", case.category),
             "description": format!(
-                "**User:** <@{}> (`{}`)\n**Kanal:** <#{}>\n**Confidence:** {:.0}%\n**Begründung:** {}\n\n**Nachricht:**\n{}",
+                "**User:** <@{}> (`{}`)\n**Kanal:** <#{}>\n**Sicherheit:** {:.0}%\n**Begründung:** {}\n\n**Nachricht:**\n{}",
                 case.user_id, case.user_tag, case.channel_id,
                 case.confidence * 100.0, case.reason, preview
             ),
             "color": 0xE67E22,
         });
         let components = json!([{ "type": 1, "components": [
-            { "type": 2, "style": 3, "label": "Accept (Delete + Timeout)",
+            { "type": 2, "style": 3, "label": "Annehmen (Löschen + Timeout)",
               "custom_id": format!("aimod:accept:{case_id}") },
             { "type": 2, "style": 4, "label": "Ban",
               "custom_id": format!("aimod:ban:{case_id}") },
-            { "type": 2, "style": 2, "label": "Deny",
+            { "type": 2, "style": 2, "label": "Ablehnen",
               "custom_id": format!("aimod:deny:{case_id}") },
         ]}]);
         let mut body = serde_json::Map::new();
@@ -232,7 +232,7 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
               "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) },
             { "type": 2, "style": 3, "label": "Timeout aufheben",
               "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) },
-            { "type": 2, "style": 2, "label": "Unban",
+            { "type": 2, "style": 2, "label": "Entbannen",
               "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) },
         ]}]);
         let mut body = serde_json::Map::new();
@@ -325,7 +325,7 @@ impl InteractionHandler for GuardReviewHandler {
                 BridgeReply::ephemeral_text(if ok {
                     "Entbannt."
                 } else {
-                    "Unban fehlgeschlagen."
+                    "Entbannen fehlgeschlagen."
                 })
             }
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),

@@ -63,7 +63,7 @@ ANALYTICS_DEMO_URL = "https://deutsche-deadlock-community.de/demo/twitch/demo/"
 # ------------------------------
 def _twitch_integration_unavailable_message() -> str:
     return (
-        "⚠️ Twitch-Onboarding ist derzeit nicht verfuegbar. "
+        "⚠️ Twitch-Onboarding ist derzeit nicht verfügbar. "
         "Die externe Deadlock-Twitch-Bot-Integration fehlt oder ist nicht korrekt konfiguriert. "
         "Bitte informiere einen Admin."
     )
@@ -708,7 +708,7 @@ class StreamerRequirementsView(StepView):
                         return
                     await btn_interaction.followup.send(
                         "⚠️ **Autorisierung noch nicht gefunden (OAuth fehlt)**\n\n"
-                        "Mögliche Gruende:\n"
+                        "Mögliche Gründe:\n"
                         "• Du hast den Bot noch nicht auf Twitch autorisiert\n"
                         "• Die Autorisierung wurde noch nicht synchronisiert (warte 10 Sek.)\n\n"
                         "Wichtig: Ohne Twitch-Bot-Autorisierung keine Freischaltung.\n"

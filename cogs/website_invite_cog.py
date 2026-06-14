@@ -368,7 +368,7 @@ class WebsiteInviteCog(commands.Cog):
         code = str(invite.code)
         _save_invite_for_subpage(slug, code, channel.id)
         await interaction.followup.send(
-            f"✅ Neuer Website-Invite fuer {label}: https://discord.gg/{code}",
+            f"✅ Neuer Website-Invite für {label}: https://discord.gg/{code}",
             ephemeral=True,
         )
 

@@ -102,7 +102,7 @@ STEPS: list[dict] = [
             "• **Unique Chatters:** Wie viele **verschiedene** Menschen interagieren wirklich?\n"
             "• **Kategorie-Vergleich (DE):** Analyse der deutschen Deadlock-Kategorie & Vergleich zwischen Streamern\n"
             "→ Ziel: Du erkennst Muster und weißt, was du optimieren kannst.\n"
-            "→ **Sneak Peak gefällig?** Klick unten auf **„📊 Demo ansehen“**!\n\n"
+            "→ **Sneak Peek gefällig?** Klick unten auf **„📊 Demo ansehen“**!\n\n"
             "**4️⃣ Discord – Live-Stream Auto-Post**\n"
             "• Sobald du **Deadlock** streamst, wird dein Stream automatisch im Discord gepostet (#🎥twitch)\n"
             "→ Ergebnis: Mehr Sichtbarkeit in der Community, ohne dass du selbst posten musst.\n\n"
@@ -379,7 +379,7 @@ class OnboardingTagStepView(discord.ui.View):
     ) -> None:
         if interaction.user.id != self.user_id:
             await interaction.response.send_message(
-                "Dieses Onboarding gehoert jemand anderem.", ephemeral=True
+                "Dieses Onboarding gehört jemand anderem.", ephemeral=True
             )
             return
 
@@ -674,7 +674,7 @@ class OnboardingAccountLinkView(discord.ui.View):
             view = DoneView(self.user_id)
             await interaction.response.send_message(
                 "Nice, jetzt weißt du alles! Falls doch mal Fragen sind: "
-                "einfach ein Ticket aufmachen oder einen Mod fragen. Have fun! 🎮",
+                "einfach ein Ticket aufmachen oder einen Mod fragen. Viel Spaß! 🎮",
                 ephemeral=True,
                 view=view,
             )
@@ -705,7 +705,7 @@ class DoneView(discord.ui.View):
 
         await interaction.response.send_message(
             "Nice, jetzt weißt du alles! Falls doch mal Fragen sind: "
-            "einfach ein Ticket aufmachen oder einen Mod fragen. Have fun! 🎮",
+            "einfach ein Ticket aufmachen oder einen Mod fragen. Viel Spaß! 🎮",
             ephemeral=True,
         )
         self.stop()
@@ -824,7 +824,7 @@ class StaticOnboarding(commands.Cog):
                         await channel.send(
                             content=f"<@{after.id}> ✅ **Verifizierung erfolgreich!**\n\n"
                             "Nice, jetzt weißt du alles! Falls doch mal Fragen sind: "
-                            "einfach ein Ticket aufmachen oder einen Mod fragen. Have fun! 🎮",
+                            "einfach ein Ticket aufmachen oder einen Mod fragen. Viel Spaß! 🎮",
                             view=DoneView(after.id),
                         )
                     except Exception:

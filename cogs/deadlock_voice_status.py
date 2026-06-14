@@ -1042,7 +1042,7 @@ class DeadlockVoiceStatus(commands.Cog):
 
         snapshot = self.last_observation.get(target_channel.id)
         if not snapshot:
-            await ctx.send("Keine Beobachtung fuer diesen Kanal vorhanden.")
+            await ctx.send("Keine Beobachtung für diesen Kanal vorhanden.")
             return
 
         decision = snapshot.get("decision", {}) or {}

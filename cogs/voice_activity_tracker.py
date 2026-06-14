@@ -508,19 +508,19 @@ class VoiceActivityTrackerCog(commands.Cog):
         if request_type == "second":
             lines = [
                 f"Hey {display_name}, danke dass du wieder im Voice warst.",
-                "Kurzes Update: Was laeuft gut, was nervt, was sollen wir direkt anpassen?",
-                "Klick auf den Button und schreib es in 1-2 Saetzen.",
+                "Kurzes Update: Was läuft gut, was nervt, was sollen wir direkt anpassen?",
+                "Klick auf den Button und schreib es in 1-2 Sätzen.",
             ]
         else:
             lines = [
-                f"Hey {display_name}, schoen dich im Voice zu sehen!",
+                f"Hey {display_name}, schön dich im Voice zu sehen!",
                 "Was hat dir gefallen, was sollen wir besser machen?",
-                "Button druecken und in 1-2 Saetzen dein Eindruck da lassen.",
+                "Button drücken und in 1-2 Sätzen dein Eindruck da lassen.",
             ]
         if co_player_names and co_player_names.strip() != "-":
             lines.append(f"Mit im Call: {co_player_names}")
         lines.append(f"Kanal: {channel_name} - Dauer: {duration_min} Min")
-        lines.append("Button druecken, kurz tippen, fertig. Danke dir!")
+        lines.append("Button drücken, kurz tippen, fertig. Danke dir!")
         message_text = "\n\n".join(lines)
 
         error_message = None
@@ -823,9 +823,9 @@ class VoiceActivityTrackerCog(commands.Cog):
         channel_name = session.get("channel_name") or "Voice"
         if request_type == "second":
             lines = [
-                f"Hey {display_name}, danke fuer deine Voice-Runden.",
-                "Kurzes Update: Was laeuft gut, was nervt, was sollen wir fixen?",
-                "Button druecken und in 1-2 Saetzen Feedback dalassen.",
+                f"Hey {display_name}, danke für deine Voice-Runden.",
+                "Kurzes Update: Was läuft gut, was nervt, was sollen wir fixen?",
+                "Button drücken und in 1-2 Sätzen Feedback dalassen.",
             ]
         else:
             lines = [
@@ -1549,9 +1549,9 @@ class VoiceActivityTrackerCog(commands.Cog):
         embed.add_field(name="🔴 Live Sessions", value=len(self.voice_sessions), inline=True)
 
         cfg = await self.cfg(ctx.guild.id)
-        embed.add_field(name="⏱️ Grace Duration", value=f"{cfg.grace_period_duration}s", inline=True)
+        embed.add_field(name="⏱️ Schonzeit", value=f"{cfg.grace_period_duration}s", inline=True)
         embed.add_field(name="🎖️ Special Role", value=f"<@&{cfg.special_role_id}>", inline=True)
-        embed.add_field(name="👥 Min Users", value=cfg.min_users_for_tracking, inline=True)
+        embed.add_field(name="👥 Min. User", value=cfg.min_users_for_tracking, inline=True)
 
         session_key = f"{ctx.author.id}:{ctx.guild.id}"
         if session_key in self.voice_sessions:
@@ -1647,31 +1647,31 @@ class VoiceActivityTrackerCog(commands.Cog):
     async def voice_status_command(self, ctx):
         try:
             cfg = await self.cfg(ctx.guild.id)
-            embed = discord.Embed(title="🔧 Voice System Admin Status (Central DB)", color=0x00FF99)
-            embed.add_field(name="🔴 Live Sessions", value=len(self.voice_sessions), inline=True)
-            embed.add_field(name="🛡️ Grace Periods", value=len(self.grace_period_users), inline=True)
+            embed = discord.Embed(title="🔧 Voice-System Admin-Status (zentrale DB)", color=0x00FF99)
+            embed.add_field(name="🔴 Live-Sessions", value=len(self.voice_sessions), inline=True)
+            embed.add_field(name="🛡️ Schonzeiten", value=len(self.grace_period_users), inline=True)
             try:
                 _ = central_db.query_one("SELECT 1")
-                db_state = "Connected"
+                db_state = "Verbunden"
             except Exception:
-                db_state = "Disconnected"
-            embed.add_field(name="🗄️ Database", value=db_state, inline=True)
+                db_state = "Getrennt"
+            embed.add_field(name="🗄️ Datenbank", value=db_state, inline=True)
 
-            embed.add_field(name="👥 Min Users", value=cfg.min_users_for_tracking, inline=True)
+            embed.add_field(name="👥 Min. User", value=cfg.min_users_for_tracking, inline=True)
             embed.add_field(
-                name="⏱️ Grace Duration",
+                name="⏱️ Schonzeit",
                 value=f"{cfg.grace_period_duration}s",
                 inline=True,
             )
-            embed.add_field(name="🎖️ Role ID", value=cfg.special_role_id, inline=True)
+            embed.add_field(name="🎖️ Rollen-ID", value=cfg.special_role_id, inline=True)
 
             uptime = datetime.utcnow() - self.session_stats["uptime_start"]
             embed.add_field(
-                name="🕐 Uptime",
+                name="🕐 Laufzeit",
                 value=f"{uptime.days}d {uptime.seconds // 3600}h",
                 inline=True,
             )
-            embed.add_field(name="📁 DB Path", value=f"...{central_db_path()[-40:]}", inline=True)
+            embed.add_field(name="📁 DB-Pfad", value=f"...{central_db_path()[-40:]}", inline=True)
             await ctx.send(embed=embed)
         except Exception as e:
             await ctx.send(f"❌ Fehler beim Abrufen des Status: {e}")
@@ -1681,18 +1681,18 @@ class VoiceActivityTrackerCog(commands.Cog):
     async def voice_config_command(self, ctx, setting=None, value=None):
         cfg = await self.cfg(ctx.guild.id)
         if not setting:
-            embed = discord.Embed(title="⚙️ Voice Tracker Config (Central DB)", color=0x0099FF)
-            embed.add_field(name="👥 Min Users", value=cfg.min_users_for_tracking, inline=True)
+            embed = discord.Embed(title="⚙️ Voice-Tracker-Konfiguration (zentrale DB)", color=0x0099FF)
+            embed.add_field(name="👥 Min. User", value=cfg.min_users_for_tracking, inline=True)
             embed.add_field(
-                name="⏱️ Grace Duration",
+                name="⏱️ Schonzeit",
                 value=f"{cfg.grace_period_duration}s",
                 inline=True,
             )
-            embed.add_field(name="🎖️ Special Role", value=cfg.special_role_id, inline=True)
-            embed.add_field(name="🔄 Session Timeout", value=f"{cfg.session_timeout}s", inline=True)
-            embed.add_field(name="📊 Max Sessions", value=cfg.max_sessions_per_user, inline=True)
+            embed.add_field(name="🎖️ Sonderrolle", value=cfg.special_role_id, inline=True)
+            embed.add_field(name="🔄 Session-Timeout", value=f"{cfg.session_timeout}s", inline=True)
+            embed.add_field(name="📊 Max. Sessions", value=cfg.max_sessions_per_user, inline=True)
             embed.add_field(
-                name="Available Settings",
+                name="Verfügbare Einstellungen",
                 value="```\n!voice_config grace_duration <seconds>\n!voice_config grace_role <role_id>\n!voice_config min_users <2-10>\n!voice_config session_timeout <seconds>\n!voice_config max_sessions <number>\n```",
                 inline=False,
             )
@@ -1706,41 +1706,41 @@ class VoiceActivityTrackerCog(commands.Cog):
                 if 60 <= duration <= 600:
                     await self.config_manager.set(ctx.guild.id, "grace_period_duration", duration)
                     await ctx.send(
-                        f"✅ Grace period duration set to {duration} seconds (zentral gespeichert)"
+                        f"✅ Schonzeit auf {duration} Sekunden gesetzt (zentral gespeichert)"
                     )
                 else:
-                    await ctx.send("❌ Grace duration must be between 60 and 600 seconds")
+                    await ctx.send("❌ Die Schonzeit muss zwischen 60 und 600 Sekunden liegen")
             elif s == "grace_role":
                 role_id = int(value)
                 await self.config_manager.set(ctx.guild.id, "special_role_id", role_id)
-                await ctx.send(f"✅ Grace period role set to <@&{role_id}> (zentral gespeichert)")
+                await ctx.send(f"✅ Schonzeit-Rolle auf <@&{role_id}> gesetzt (zentral gespeichert)")
             elif s == "min_users":
                 min_users = int(value)
                 if 2 <= min_users <= 10:
                     await self.config_manager.set(ctx.guild.id, "min_users_for_tracking", min_users)
-                    await ctx.send(f"✅ Minimum users set to {min_users} (zentral gespeichert)")
+                    await ctx.send(f"✅ Mindestzahl an Nutzern auf {min_users} gesetzt (zentral gespeichert)")
                 else:
-                    await ctx.send("❌ Minimum users must be between 2 and 10")
+                    await ctx.send("❌ Die Mindestzahl muss zwischen 2 und 10 liegen")
             elif s == "session_timeout":
                 to = int(value)
                 if 60 <= to <= 3600:
                     await self.config_manager.set(ctx.guild.id, "session_timeout", to)
-                    await ctx.send(f"✅ Session timeout set to {to}s (zentral gespeichert)")
+                    await ctx.send(f"✅ Session-Timeout auf {to}s gesetzt (zentral gespeichert)")
                 else:
-                    await ctx.send("❌ Session timeout must be between 60 and 3600 seconds")
+                    await ctx.send("❌ Der Session-Timeout muss zwischen 60 und 3600 Sekunden liegen")
             elif s == "max_sessions":
                 mx = int(value)
                 if 10 <= mx <= 10000:
                     await self.config_manager.set(ctx.guild.id, "max_sessions_per_user", mx)
-                    await ctx.send(f"✅ Max sessions set to {mx} (zentral gespeichert)")
+                    await ctx.send(f"✅ Max. Sessions auf {mx} gesetzt (zentral gespeichert)")
                 else:
-                    await ctx.send("❌ Max sessions must be between 10 and 10000")
+                    await ctx.send("❌ Max. Sessions muss zwischen 10 und 10000 liegen")
             else:
-                await ctx.send(f"❌ Unknown setting: {setting}")
+                await ctx.send(f"❌ Unbekannte Einstellung: {setting}")
         except ValueError:
-            await ctx.send("❌ Invalid value provided")
+            await ctx.send("❌ Ungültiger Wert")
         except Exception as e:
-            await ctx.send(f"❌ Error updating config: {e}")
+            await ctx.send(f"❌ Fehler beim Aktualisieren der Konfiguration: {e}")
 
 
 async def setup(bot):

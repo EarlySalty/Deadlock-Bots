@@ -656,7 +656,7 @@ class RegionEUButton(discord.ui.Button):
 class OwnerClaimButton(discord.ui.Button):
     def __init__(self, core):
         super().__init__(
-            label="👑 Owner Claim",
+            label="👑 Owner übernehmen",
             style=discord.ButtonStyle.success,
             row=0,
             custom_id="tv_owner_claim",

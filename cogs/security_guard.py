@@ -176,15 +176,15 @@ class AppealModal(discord.ui.Modal):
         min_chars: int,
         max_chars: int,
     ) -> None:
-        super().__init__(title="Appeal")
+        super().__init__(title="Einspruch")
         self.cog = cog
         self.case_id = case_id
         self.appeal_reason = discord.ui.TextInput(
-            label="Appeal reason",
+            label="Grund für den Einspruch",
             style=discord.TextStyle.paragraph,
             min_length=min_chars,
             max_length=max_chars,
-            placeholder="Explain why this ban should be reviewed.",
+            placeholder="Erkläre, warum dieser Bann überprüft werden sollte.",
         )
         self.add_item(self.appeal_reason)
 
@@ -202,7 +202,7 @@ class AppealView(discord.ui.View):
         self.cog = cog
         self.case_id = case_id
 
-    @discord.ui.button(label="Appeal", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="Einspruch", style=discord.ButtonStyle.primary)
     async def appeal_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -224,7 +224,7 @@ class UnbanView(discord.ui.View):
         self.user_id = user_id
         self.case_id = case_id
 
-    @discord.ui.button(label="Unban", style=discord.ButtonStyle.danger)
+    @discord.ui.button(label="Entbannen", style=discord.ButtonStyle.danger)
     async def unban_button(
         self, interaction: discord.Interaction, button: discord.ui.Button
     ) -> None:
@@ -1350,20 +1350,20 @@ class SecurityGuard(commands.Cog):
             return False
 
     async def _send_user_dm(self, member: discord.Member, reason: str, case_id: str) -> bool:
-        action_label = "banned" if self.punishment == "ban" else "timed out"
+        action_label = "gebannt" if self.punishment == "ban" else "stummgeschaltet"
         action_title = "Ban" if self.punishment == "ban" else "Timeout"
         embed = discord.Embed(
-            title=f"You were {action_label} by SecurityGuard",
+            title=f"Du wurdest von SecurityGuard {action_label}",
             color=0xE74C3C,
             timestamp=discord.utils.utcnow(),
         )
-        embed.add_field(name="Guild", value=member.guild.name, inline=False)
-        embed.add_field(name="Reason", value=reason or "auto-detected burst", inline=False)
-        embed.add_field(name="Case ID", value=case_id, inline=True)
+        embed.add_field(name="Server", value=member.guild.name, inline=False)
+        embed.add_field(name="Grund", value=reason or "automatisch erkannter Burst", inline=False)
+        embed.add_field(name="Fall-ID", value=case_id, inline=True)
         footer = (
-            "If you believe this is a mistake, use the Appeal button."
+            "Wenn du das für einen Fehler hältst, nutze den Einspruch-Button."
             if self.punishment == "ban"
-            else f"{action_title} duration: {self.timeout_minutes} minutes. Appeal is still available."
+            else f"{action_title}-Dauer: {self.timeout_minutes} Minuten. Ein Einspruch ist weiterhin möglich."
         )
         embed.set_footer(text=footer)
         try:
@@ -1551,19 +1551,19 @@ class SecurityGuard(commands.Cog):
         mod_channel = await self._resolve_mod_channel(guild) if guild else None
         safe_appeal = appeal_text.replace("`", "'").strip()
         if not safe_appeal:
-            safe_appeal = "(empty)"
+            safe_appeal = "(leer)"
 
         if mod_channel:
             embed = discord.Embed(
-                title="Appeal submitted",
+                title="Einspruch eingegangen",
                 color=0x3498DB,
                 timestamp=discord.utils.utcnow(),
             )
-            embed.add_field(name="Member", value=f"{user.mention} ({user.id})", inline=False)
-            embed.add_field(name="Case ID", value=case_id, inline=True)
+            embed.add_field(name="Mitglied", value=f"{user.mention} ({user.id})", inline=False)
+            embed.add_field(name="Fall-ID", value=case_id, inline=True)
             if case:
-                embed.add_field(name="Original reason", value=case.reason or "n/a", inline=False)
-            embed.add_field(name="Appeal reason", value=safe_appeal[:1000], inline=False)
+                embed.add_field(name="Ursprünglicher Grund", value=case.reason or "k. A.", inline=False)
+            embed.add_field(name="Begründung des Einspruchs", value=safe_appeal[:1000], inline=False)
             try:
                 await mod_channel.send(embed=embed)
             except discord.HTTPException as exc:
@@ -1573,7 +1573,7 @@ class SecurityGuard(commands.Cog):
             log.info("Appeal %s by %s: %s", case_id, user.id, _safe_log_value(safe_appeal))
 
         try:
-            await interaction.response.send_message("Your appeal was sent to the moderators.")
+            await interaction.response.send_message("Dein Einspruch wurde an das Mod-Team weitergeleitet.")
         except discord.HTTPException as exc:
             log.debug("Could not send appeal ack to user %s: %s", user.id, exc)
 
@@ -1589,7 +1589,7 @@ class SecurityGuard(commands.Cog):
         perms = getattr(interaction.user, "guild_permissions", None)
         if not perms or not (perms.ban_members or perms.administrator):
             await interaction.response.send_message(
-                "You do not have permission to unban.", ephemeral=True
+                "Keine Berechtigung zum Entbannen.", ephemeral=True
             )
             return
 
@@ -1602,7 +1602,7 @@ class SecurityGuard(commands.Cog):
                 try:
                     guild = await self.bot.fetch_guild(guild_id)
                 except discord.HTTPException:
-                    await interaction.followup.send("Guild not found.", ephemeral=True)
+                    await interaction.followup.send("Server nicht gefunden.", ephemeral=True)
                     return
 
         try:
@@ -1615,14 +1615,14 @@ class SecurityGuard(commands.Cog):
                 await interaction.message.edit(view=view)
             except discord.HTTPException as exc:
                 log.debug("Unable to update unban message view for case %s: %s", case_id, exc)
-            await interaction.followup.send("Unban completed.", ephemeral=True)
+            await interaction.followup.send("Entbannt.", ephemeral=True)
         except discord.NotFound:
-            await interaction.followup.send("User is not banned.", ephemeral=True)
+            await interaction.followup.send("Der Nutzer ist nicht gebannt.", ephemeral=True)
         except discord.Forbidden:
-            await interaction.followup.send("Bot lacks permission to unban.", ephemeral=True)
+            await interaction.followup.send("Dem Bot fehlt die Berechtigung zum Entbannen.", ephemeral=True)
         except discord.HTTPException as exc:
             log.warning("Unban failed for case %s: %s", case_id, exc)
-            await interaction.followup.send("Unban failed.", ephemeral=True)
+            await interaction.followup.send("Entbannen fehlgeschlagen.", ephemeral=True)
 
     async def _log_incident(
         self,
@@ -1666,7 +1666,7 @@ class SecurityGuard(commands.Cog):
             action_text = f"Timeout {self.timeout_minutes}m: {'yes' if action_ok else 'failed'}"
 
         embed = discord.Embed(
-            title=f"Auto-{action_label}: possible scam/spam burst",
+            title=f"Auto-{action_label}: möglicher Scam-/Spam-Burst",
             color=0xE74C3C,
             timestamp=now,
         )

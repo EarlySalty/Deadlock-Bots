@@ -309,7 +309,7 @@ impl InteractionHandler for OnboardingHandler {
                 }
             }
             "done" => BridgeReply::ephemeral_text(
-                "Nice, jetzt weißt du alles! Falls doch mal Fragen sind: einfach ein Ticket aufmachen oder einen Mod fragen. Have fun! 🎮",
+                "Nice, jetzt weißt du alles! Falls doch mal Fragen sind: einfach ein Ticket aufmachen oder einen Mod fragen. Viel Spaß! 🎮",
             ),
             _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
         }

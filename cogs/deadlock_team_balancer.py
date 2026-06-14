@@ -300,7 +300,7 @@ class RestrictedUserView(discord.ui.View):
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.owner_id:
             await interaction.response.send_message(
-                "Dieses Menue gehoert dir nicht. Bitte starte dein eigenes.",
+                "Dieses Menü gehört dir nicht. Bitte starte dein eigenes.",
                 ephemeral=True,
             )
             return False
@@ -318,7 +318,7 @@ class SoloRankSelect(discord.ui.Select):
             for label, value, _ in tstore.rank_choices()
         ]
         super().__init__(
-            placeholder="Waehle deinen aktuellen Rang...",
+            placeholder="Wähle deinen aktuellen Rang...",
             min_values=1,
             max_values=1,
             options=options,
@@ -341,7 +341,7 @@ class SoloSignupView(RestrictedUserView):
     async def submit_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not self.selected_rank:
             await interaction.response.send_message(
-                "Bitte waehle zuerst deinen Rang aus.",
+                "Bitte wähle zuerst deinen Rang aus.",
                 ephemeral=True,
             )
             return
@@ -387,7 +387,7 @@ class TeamNameModal(discord.ui.Modal, title="Team erstellen"):
         self.parent_view.selected_team_name = str(team["name"])
         state = "neu erstellt" if bool(team.get("created")) else "bereits vorhanden"
         await interaction.response.send_message(
-            f"✅ Team **{team['name']}** ist {state} und ausgewaehlt.",
+            f"✅ Team **{team['name']}** ist {state} und ausgewählt.",
             ephemeral=True,
         )
 
@@ -419,7 +419,7 @@ class TeamSelect(discord.ui.Select):
             )
         )
         super().__init__(
-            placeholder="Team waehlen oder neu erstellen...",
+            placeholder="Team wählen oder neu erstellen...",
             min_values=1,
             max_values=1,
             options=options,
@@ -434,7 +434,7 @@ class TeamSelect(discord.ui.Select):
         try:
             team_id = int(selected)
         except ValueError:
-            await interaction.response.send_message("❌ Ungueltige Team-Auswahl.", ephemeral=True)
+            await interaction.response.send_message("❌ Ungültige Team-Auswahl.", ephemeral=True)
             return
         view.selected_team_id = team_id
         view.selected_team_name = view.team_name_by_id.get(team_id)
@@ -452,7 +452,7 @@ class TeamRankSelect(discord.ui.Select):
             for label, value, _ in tstore.rank_choices()
         ]
         super().__init__(
-            placeholder="Rang fuer Turnier-Eintrag auswaehlen...",
+            placeholder="Rang für Turnier-Eintrag auswählen...",
             min_values=1,
             max_values=1,
             options=options,
@@ -483,13 +483,13 @@ class TeamSignupView(RestrictedUserView):
     async def submit_button(self, interaction: discord.Interaction, _: discord.ui.Button):
         if not self.selected_team_id:
             await interaction.response.send_message(
-                "Bitte waehle zuerst ein Team aus oder erstelle eines.",
+                "Bitte wähle zuerst ein Team aus oder erstelle eines.",
                 ephemeral=True,
             )
             return
         if not self.selected_rank:
             await interaction.response.send_message(
-                "Bitte waehle zuerst deinen Rang aus.",
+                "Bitte wähle zuerst deinen Rang aus.",
                 ephemeral=True,
             )
             return
@@ -527,7 +527,7 @@ class TournamentPanelView(discord.ui.View):
         cog = interaction.client.get_cog("DeadlockTeamBalancer")
         if not cog:
             await interaction.response.send_message(
-                "❌ Turnier-Cog nicht verfuegbar.", ephemeral=True
+                "❌ Turnier-Cog nicht verfügbar.", ephemeral=True
             )
             return
         await cog.open_tournament_team_entry(interaction)
@@ -542,7 +542,7 @@ class TournamentPanelView(discord.ui.View):
         cog = interaction.client.get_cog("DeadlockTeamBalancer")
         if not cog:
             await interaction.response.send_message(
-                "❌ Turnier-Cog nicht verfuegbar.", ephemeral=True
+                "❌ Turnier-Cog nicht verfügbar.", ephemeral=True
             )
             return
         await cog.open_tournament_solo_entry(interaction)
@@ -599,7 +599,7 @@ class DeadlockTeamBalancer(commands.Cog):
         view = SoloSignupView(interaction.user.id, interaction.guild.id)
         embed = discord.Embed(
             title="🎯 Solo-Turnieranmeldung",
-            description="Waehle deinen aktuellen Deadlock-Rang und bestaetige deinen Eintrag.",
+            description="Wähle deinen aktuellen Deadlock-Rang und bestätige deinen Eintrag.",
             color=discord.Color.blurple(),
         )
         await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
@@ -616,8 +616,8 @@ class DeadlockTeamBalancer(commands.Cog):
         embed = discord.Embed(
             title="🛡️ Team-Turnieranmeldung",
             description=(
-                "Waehle ein bestehendes Team oder erstelle ein neues Team.\n"
-                "Danach Rang auswaehlen und Eintrag absenden."
+                "Wähle ein bestehendes Team oder erstelle ein neues Team.\n"
+                "Danach Rang auswählen und Eintrag absenden."
             ),
             color=discord.Color.green(),
         )
@@ -741,15 +741,15 @@ class DeadlockTeamBalancer(commands.Cog):
         embed = discord.Embed(
             title="🏆 Deadlock Turnier-Anmeldung",
             description=(
-                "Trage dich hier fuer das Turnier ein:\n"
-                "• Als Team (Team waehlen oder neu erstellen)\n"
+                "Trage dich hier für das Turnier ein:\n"
+                "• Als Team (Team wählen oder neu erstellen)\n"
                 "• Oder alleine\n\n"
-                "Der aktuelle Rang wird ueber das Dropdown abgefragt."
+                "Der aktuelle Rang wird über das Dropdown abgefragt."
             ),
             color=discord.Color.gold(),
         )
         embed.set_footer(
-            text="Doppelte Eintraege und doppelte Team-Namen werden automatisch verhindert."
+            text="Doppelte Einträge und doppelte Team-Namen werden automatisch verhindert."
         )
         await ctx.send(embed=embed, view=TournamentPanelView())
 
@@ -832,7 +832,7 @@ class DeadlockTeamBalancer(commands.Cog):
             lines.append(f"• **{display}** | {mode} | {rank_lbl} | {team}")
         if len(signups) > 20:
             lines.append(f"... und {len(signups) - 20} weitere")
-        emb.add_field(name="Eintraege", value="\n".join(lines), inline=False)
+        emb.add_field(name="Einträge", value="\n".join(lines), inline=False)
         await ctx.send(embed=emb)
 
     @balance_root.command(name="austragen", aliases=["turnierexit", "unregister"])

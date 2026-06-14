@@ -45,26 +45,26 @@ class LeaveSurveyConfig:
 REASON_OPTIONS: dict[str, list[tuple[str, str]]] = {
     "A": [
         ("Verifizierung/Onboarding hat nicht geklappt", "onboarding_failed"),
-        ("Server war unuebersichtlich", "confusing"),
+        ("Server war unübersichtlich", "confusing"),
         ("Hab nicht gefunden wonach ich gesucht hab", "not_found"),
         ("War aus Versehen / falscher Server", "wrong_server"),
         ("Technisches Problem (Bot, Links, Channels)", "technical"),
         ("Anderer Grund", "other"),
     ],
     "B": [
-        ("Stimmung/Community hat sich veraendert", "mood_changed"),
-        ("Konflikt oder Aerger mit jemandem", "conflict"),
+        ("Stimmung/Community hat sich verändert", "mood_changed"),
+        ("Konflikt oder Ärger mit jemandem", "conflict"),
         ("Zu wenig los / keine Mitspieler mehr", "inactive_server"),
         ("Spiele Deadlock kaum/nicht mehr", "stopped_playing"),
         ("Moderation / Regeln", "moderation"),
-        ("Persoenliche Gruende / keine Zeit", "personal"),
+        ("Persönliche Gründe / keine Zeit", "personal"),
         ("Anderer Grund", "other"),
     ],
     "C": [
         ("War nie richtig warm geworden", "never_warmed_up"),
-        ("Zu wenig Aktivitaet / Mitspieler", "low_activity"),
+        ("Zu wenig Aktivität / Mitspieler", "low_activity"),
         ("Spiele Deadlock nicht mehr", "stopped_playing"),
-        ("Keine Zeit / Discord aufgeraeumt", "no_time"),
+        ("Keine Zeit / Discord aufgeräumt", "no_time"),
         ("Hat mir nicht gefallen", "disliked"),
         ("Anderer Grund", "other"),
     ],
@@ -75,18 +75,18 @@ FOLLOW_UP_QUESTIONS: dict[str, str] = {
     "confusing": "Was hast du gesucht und nicht gefunden?",
     "technical": "Welcher Bot/Link/Channel und was ist passiert?",
     "conflict": "Magst du sagen was vorgefallen ist? Bleibt vertraulich.",
-    "mood_changed": "Was hat sich veraendert und seit wann fuehlte es sich anders an?",
+    "mood_changed": "Was hat sich verändert und seit wann fühlte es sich anders an?",
     "moderation": "Welche Entscheidung oder Regel war das Problem?",
-    "stopped_playing": "Was muesste passieren damit du wieder Deadlock spielst?",
-    "inactive_server": "Was haette mehr los gemacht fuer dich?",
-    "low_activity": "Was haette mehr los gemacht fuer dich?",
+    "stopped_playing": "Was müsste passieren damit du wieder Deadlock spielst?",
+    "inactive_server": "Was hätte mehr los gemacht für dich?",
+    "low_activity": "Was hätte mehr los gemacht für dich?",
     "personal": "Alles gut - magst du trotzdem kurz sagen ob etwas am Server lag?",
     "no_time": "Alles gut - magst du trotzdem kurz sagen ob etwas am Server lag?",
-    "never_warmed_up": "Was haette dir geholfen anzukommen?",
+    "never_warmed_up": "Was hätte dir geholfen anzukommen?",
     "not_found": "Wonach hast du gesucht?",
     "wrong_server": "Kein Problem - alles gut.",
     "disliked": "Was genau hat dir nicht gefallen?",
-    "other": "Erzaehl gern in eigenen Worten.",
+    "other": "Erzähl gern in eigenen Worten.",
 }
 
 BUCKET_DESCRIPTIONS: dict[str, str] = {
@@ -127,7 +127,7 @@ class LeaveSurveyModal(discord.ui.Modal):
             max_length=1000,
         )
         self.extra_input = discord.ui.TextInput(
-            label="Moechtest du noch etwas loswerden?",
+            label="Möchtest du noch etwas loswerden?",
             style=discord.TextStyle.paragraph,
             required=False,
             max_length=1000,
@@ -161,7 +161,7 @@ class LeaveSurveyModal(discord.ui.Modal):
             )
 
             await interaction.response.send_message(
-                "Danke fuer dein ehrliches Feedback.",
+                "Danke für dein ehrliches Feedback.",
                 ephemeral=True,
             )
 
@@ -452,8 +452,8 @@ class LeaveSurveyCog(commands.Cog):
             title=f"Feedback zu {guild_name}",
             description=(
                 f"{description}\n\n"
-                f"Bitte waehle unten den passendsten Grund aus.\n\n"
-                f"Wenn du ausfuehrlicher Feedback geben magst (auch mit Bildern): {survey_url}"
+                f"Bitte wähle unten den passendsten Grund aus.\n\n"
+                f"Wenn du ausführlicher Feedback geben magst (auch mit Bildern): {survey_url}"
             ),
             color=discord.Color.blurple(),
         )
@@ -667,7 +667,7 @@ class LeaveSurveyCog(commands.Cog):
             dm_rate = (responded / sent_count * 100) if sent_count else 0.0
             web_rate = (web_submitted / sent_count * 100) if sent_count else 0.0
 
-            embed = discord.Embed(title="Leave Survey Status", color=discord.Color.blue())
+            embed = discord.Embed(title="Leave-Survey-Status", color=discord.Color.blue())
             embed.add_field(name="Surveys gesamt", value=str(total), inline=True)
             embed.add_field(name="DMs gesendet", value=str(sent_count), inline=True)
             embed.add_field(name="DM Response-Rate", value=f"{dm_rate:.1f}%", inline=True)
