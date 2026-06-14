@@ -230,6 +230,16 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_community::faq::register(&mut router, faq.clone());
 
+    // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
+    // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente
+    // custom_ids halten ein bereits gepostetes Panel über den Cutover hinweg.
+    let feedback_hub = Arc::new(dl_community::feedback_hub::FeedbackHub {
+        port: Arc::new(modglue::FeedbackGlue {
+            adapter: adapter.clone(),
+        }),
+    });
+    dl_community::feedback_hub::register(&mut router, feedback_hub);
+
     // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
     let clips = dl_community::clips::ClipSubmission::new(
         db.clone(),

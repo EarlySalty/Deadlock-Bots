@@ -8,6 +8,7 @@ pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
 pub mod faq;
+pub mod feedback_hub;
 pub mod invites;
 pub mod leave_survey;
 pub mod onboarding;

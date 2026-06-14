@@ -635,6 +635,32 @@ impl dl_community::faq::FaqPort for FaqGlue {
     }
 }
 
+// ── Anonymes-Feedback-Anbindung ────────────────────────────────────────────
+
+pub struct FeedbackGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::feedback_hub::FeedbackPort for FeedbackGlue {
+    async fn send_dm_text(&self, user_id: u64, text: String) -> Result<(), String> {
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(text));
+        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+            Ok(_) => Ok(()),
+            // 50007 = Cannot send messages to this user (DMs zu) → nicht actionbar
+            Err(err) if err.to_string().contains("50007") => Ok(()),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
 // ── LFG-Lobby-Finder-Anbindung ─────────────────────────────────────────────
 
 pub struct LfgGlue {
