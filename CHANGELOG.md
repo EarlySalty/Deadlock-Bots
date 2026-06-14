@@ -1,3 +1,11 @@
+## #129 — Rust-Neuaufbau: Turnier-Verwaltung (Admin-Aktionen)
+
+**Ausgangslage:** Im Admin-Dashboard lässt sich ein Turnier verwalten — Anmeldezeitraum anlegen und schließen, Teams anlegen und löschen, Spieler einem Team zuweisen, einzeln entfernen oder alle Anmeldungen leeren. Der Spieler-Anmelde-Flow lief schon in Rust (#114), die Verwaltungs-Aktionen aber noch über Python (das war die offen dokumentierte Lücke aus #114).
+
+**Was wurde geändert:** Diese sieben Verwaltungs-Aktionen sind jetzt in Rust nachgebaut. Sie laufen über denselben Turnier-Speicher wie der bereits portierte Anmelde-Flow (gleiche Tabellen, gleiche Regeln) und sind für Turnier-Moderatoren und volle Admins freigegeben. Jede schreibende Aktion ist durch denselben Anti-Fälschungs-Schutz (CSRF) abgesichert wie die übrigen Admin-Aktionen — ohne gültiges Token wird sie abgewiesen.
+
+**Wie es jetzt funktioniert:** Die Aktionen treffen dieselben Tabellen mit denselben Bedingungen wie zuvor: ein neuer Zeitraum deaktiviert automatisch den vorherigen; ein Team anzulegen ist unempfindlich gegen Groß-/Kleinschreibung (gleicher Name → gleiches Team statt Dublette); ein Team zu löschen hängt vorher seine Mitglieder ab; das Schließen ohne Angabe trifft den aktuell aktiven Zeitraum. Große Discord-IDs werden in der Antwort wie bisher als Text ausgegeben (sonst verlieren Browser bei sehr großen Zahlen Stellen). Geprüft gegen eine Kopie der echten Datenbank: ohne Schutz-Token abgewiesen, mit gültiger Sitzung Zeitraum angelegt (201), Team doppelt angelegt erkannt, aktiver Zeitraum geschlossen, alles geleert. Die reine Anzeige-Seite der Turnier-Übersicht (Teilnehmerliste mit Namen, Turnierbaum) braucht noch Daten aus dem laufenden Bot und folgt separat — bis dahin zeigt das Python-Dashboard sie.
+
 ## #128 — Rust-Neuaufbau: öffentliche Patchnotes-Schnittstelle
 
 **Ausgangslage:** Die Community-Website holt sich die übersetzten Deadlock-Patchnotes über eine öffentliche Schnittstelle des Dashboards (ohne Anmeldung). Diese lief bisher über Python.
