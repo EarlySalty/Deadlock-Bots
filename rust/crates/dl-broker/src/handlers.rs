@@ -752,7 +752,11 @@ pub async fn send_rich_message(
                 200,
                 success_body(&rid, Some(&idem), json!({
                     "channel_id": rich.channel_id,
-                    "message_id": message_id,
+                    // Discord-Snowflake als String (wie das alte Python-master_broker
+                    // via str(message_id) und wie die Discord-API selbst) — eine rohe
+                    // u64-Zahl sprengt JS-Zahlen und brach das String-Decoding der
+                    // Consumer (Twitch-Bot Live-Pings → Doppel-Postings).
+                    "message_id": message_id.to_string(),
                 })),
             ),
             Err(PortError::ChannelNotFound) => (

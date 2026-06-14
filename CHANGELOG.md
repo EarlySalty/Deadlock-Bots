@@ -1,3 +1,13 @@
+## #146 — Verbund-Broker liefert Discord-Nachrichten-IDs wieder als Text
+
+**Problem:** Über den zentralen Master-Broker posten andere Bots (u. a. der Twitch-Bot) ihre Discord-Nachrichten und bekommen danach eine Bestätigung mit der ID der erstellten Nachricht zurück. Beim Umbau des Brokers von Python auf das neue System wurde diese ID versehentlich als reine Zahl ausgeliefert statt — wie zuvor und wie es die Discord-API selbst tut — als Text. Discord-IDs sind so groß, dass viele Systeme sie als Zahl nicht mehr verlustfrei darstellen; aufrufende Bots erwarten deshalb Text. Der Twitch-Bot verwarf die Antwort dadurch als unlesbar, merkte sich die erstellte Nachricht nie und postete „ist live"-Pings mehrfach (siehe Twitch-Bot #221).
+
+**Was wurde geändert:** Der Broker liefert die Nachrichten-ID in der Post-Bestätigung wieder als Text — zurück zum ursprünglichen Vertrag.
+
+**Wie es jetzt funktioniert:** Nach erfolgreichem Posten wandelt der Broker die intern als Zahl geführte ID vor dem Versenden in Text um. Damit passt die Antwort wieder zu dem, was alle aufrufenden Bots erwarten, und große IDs gehen nicht verloren. Andere Felder der Antwort (z. B. die Kanal-ID) bleiben unverändert.
+
+**Betroffen:** Alle Bots, die Discord-Nachrichten über den Master-Broker posten — sichtbar wurde es zuerst an den doppelten Live-Pings des Twitch-Bots.
+
 ## #145 — Turnier-Automatik & Moderations-Einspruch zurück (weitere Cutover-Lücken)
 
 **Problem:** Mehrere Funktionen, die es vor der Umstellung auf das neue System gab, fehlten danach. Turnier: (1) Der **Auto-Balance** — ein Hintergrund-Vorgang, der angemeldete Solo-Spieler regelmäßig nach Rang automatisch auf Teams verteilt und Teilteams auffüllt — lief gar nicht mehr. (2) Das **Anmelde-Panel** ließ sich nicht neu in einen Kanal posten (bestehende Panels funktionierten, ein verlorenes konnte aber nicht ersetzt werden). (3) `!balance start` mit mehr als 12 Leuten im Voice schnitt **stillschweigend die rangschwächsten ab**, statt das zu sagen. Moderation: (4) Wer automatisch gebannt/stummgeschaltet wurde, bekam **keine Einspruchsmöglichkeit** mehr; (5) die öffentliche „Scam erkannt"-Notiz erschien nur in *einem* der betroffenen Kanäle; (6) im Mod-Log fehlten Kontextdaten.
