@@ -22,7 +22,9 @@ use std::time::Duration;
 
 use dl_ai::{GenerateRequest, TextGenerator};
 use dl_db::Db;
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+};
 use rusqlite::OptionalExtension;
 use serde_json::json;
 
@@ -459,7 +461,8 @@ struct FaqHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for FaqHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        if interaction.custom_id == "faq_chat:start" {
+        // Start über den Panel-Button ODER den /faq-Slash-Command.
+        if interaction.custom_id == "faq_chat:start" || interaction.command == "faq" {
             if interaction.guild_id == 0 {
                 return BridgeReply::ephemeral_text("❌ Das funktioniert nur auf dem Server.");
             }
@@ -560,6 +563,18 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
 
 pub fn register(router: &mut InteractionRouter, faq: Arc<FaqChat>) {
     let handler = Arc::new(FaqHandler { faq });
+    router.on_command(
+        "faq",
+        CommandSpec {
+            definition: json!({
+                "name": "faq",
+                "description": "Startet einen FAQ-Chat mit dem Server-Assistenten.",
+                "type": 1,
+                "dm_permission": false,
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("faq_chat:start", handler.clone());
     router.on_prefix("faq_chat:close", handler);
 }
