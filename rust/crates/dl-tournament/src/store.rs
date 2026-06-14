@@ -54,6 +54,25 @@ pub fn rank_value(rank_key: &str) -> i64 {
     RANK_KEYS.iter().position(|k| *k == key).unwrap_or(0) as i64 + 1
 }
 
+/// Balance-Score eines Anmelders (Port von `turnier.py::_rank_score`).
+///
+/// `tier` ist hier die gespeicherte `rank_value`-Spalte (1..=11), nicht der
+/// Steam-Tier — genau wie der Original-Aufruf in `_run_auto_balance`
+/// (`_rank_score(s.get("rank_value"), s.get("rank_subvalue"))`). `tier == 0` → 3
+/// (greift praktisch nie, weil `rank_value` mindestens 1 ist, aber 1:1
+/// übernommen).
+///
+/// Sub-Klemmung exakt wie Python `max(1, min(6, int(subrank or 3)))`: ein
+/// fehlender/0-Subrank (häufig bei Solo-Anmeldern) zählt als **3**, nicht 1 —
+/// sonst weicht die Score-Sortierung vom Original ab.
+pub fn rank_score(tier: i64, subrank: i64) -> i64 {
+    let sub = if subrank == 0 { 3 } else { subrank }.clamp(1, 6);
+    if tier == 0 {
+        return 3;
+    }
+    tier * 6 + sub
+}
+
 pub fn normalize_mode(raw: &str) -> Result<&'static str, String> {
     match raw.trim().to_lowercase().as_str() {
         "solo" => Ok("solo"),
@@ -533,6 +552,160 @@ impl TournamentStore {
             .map_err(|e| e.to_string())
     }
 
+    /// Auto-Balance (Port von `turnier.py::_run_auto_balance`, 1014-1141).
+    ///
+    /// Läuft nur bei aktiver Periode. Füllt zuerst nicht-volle Teams nach
+    /// Rang-Score auf (volle Teams werden NIE angefasst), dann verteilt es die
+    /// danach noch unzugewiesenen Solo-Anmelder per Snake-Draft auf neu
+    /// erzeugte „Team A/B/…"-Teams. Schreibt autonom in die DB.
+    ///
+    /// Gibt `(neue_teams, zugewiesene_spieler)` zurück (wie die Log-Zeile am
+    /// Python-Ende). `(0, 0)`, wenn nichts zu tun war.
+    pub async fn auto_balance(&self, guild_id: u64) -> (usize, usize) {
+        // Guard: nur innerhalb einer aktiven Periode (Python: get_active_period).
+        let Some((_, _, period_team_size)) = self.active_period(guild_id).await else {
+            return (0, 0);
+        };
+        let team_size = if period_team_size > 0 {
+            period_team_size
+        } else {
+            TEAM_MAX_SIZE
+        };
+
+        let teams = self.list_teams(guild_id).await;
+        let signups = self.list_signups(guild_id).await;
+        if signups.is_empty() {
+            return (0, 0);
+        }
+
+        // Volle Teams identifizieren (nie anfassen) + Mitgliederzählung.
+        let mut full_team_ids: std::collections::HashSet<i64> = std::collections::HashSet::new();
+        let mut team_member_counts: std::collections::HashMap<i64, i64> =
+            std::collections::HashMap::new();
+        for t in &teams {
+            team_member_counts.insert(t.id, t.member_count);
+            if t.member_count >= team_size {
+                full_team_ids.insert(t.id);
+            }
+        }
+
+        // Pool: unzugewiesen ODER in einem nicht-vollen Team.
+        let mut pool: Vec<Signup> = signups
+            .into_iter()
+            .filter(|s| match s.team_id {
+                None => true,
+                Some(tid) => !full_team_ids.contains(&tid),
+            })
+            .collect();
+        if pool.is_empty() {
+            return (0, 0);
+        }
+
+        // Nach Rang-Score absteigend sortieren (stabil, wie Pythons list.sort).
+        pool.sort_by_key(|s| std::cmp::Reverse(rank_score(s.rank_value, s.rank_subvalue)));
+
+        // 1) Nicht-volle Teams zuerst auffüllen.
+        let non_full_teams: Vec<&TeamRow> = teams
+            .iter()
+            .filter(|t| !full_team_ids.contains(&t.id))
+            .collect();
+        for team in non_full_teams {
+            let tid = team.id;
+            let current = team_member_counts.get(&tid).copied().unwrap_or(0);
+            let slots_available = team_size - current;
+            if slots_available <= 0 {
+                continue;
+            }
+            // Spieler aus dem Pool, die nicht bereits in DIESEM Team sind.
+            let to_add: Vec<u64> = pool
+                .iter()
+                .filter(|s| s.team_id != Some(tid))
+                .take(slots_available as usize)
+                .map(|s| s.user_id)
+                .collect();
+            for uid in to_add {
+                match self.assign_signup_team(guild_id, uid, Some(tid)).await {
+                    Ok(_) => {
+                        pool.retain(|s| s.user_id != uid);
+                        *team_member_counts.entry(tid).or_insert(0) += 1;
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, user = uid, team = tid, "assign_signup_team fehlgeschlagen");
+                    }
+                }
+            }
+        }
+
+        // Pool neu filtern: jetzt nur noch wirklich unzugewiesene Spieler.
+        pool.retain(|s| s.team_id.is_none());
+        if (pool.len() as i64) < team_size {
+            return (0, 0);
+        }
+
+        // 2) Snake-Draft in neue Teams.
+        // Nächste freien Auto-Namen ("Team A", "Team B", …) finden.
+        let existing_names: std::collections::HashSet<String> =
+            teams.iter().map(|t| t.name.to_lowercase()).collect();
+        let num_new_teams = pool.len() / team_size as usize;
+        let mut auto_names: Vec<String> = Vec::new();
+        let mut letter_idx: u32 = 0;
+        while auto_names.len() < num_new_teams {
+            let name = format!("Team {}", char::from(b'A' + (letter_idx as u8)));
+            if !existing_names.contains(&name.to_lowercase()) {
+                auto_names.push(name);
+            }
+            letter_idx += 1;
+            if letter_idx > 25 {
+                // Fallback auf nummerierte Namen.
+                let n = letter_idx - 25;
+                let name = format!("Team {n}");
+                if !existing_names.contains(&name.to_lowercase()) {
+                    auto_names.push(name);
+                }
+                letter_idx += 1;
+            }
+        }
+
+        let mut new_team_ids: Vec<i64> = Vec::new();
+        for name in &auto_names {
+            match self.get_or_create_team(guild_id, name, None).await {
+                Ok(team) => new_team_ids.push(team.id),
+                Err(err) => tracing::warn!(%err, name = %name, "get_or_create_team fehlgeschlagen"),
+            }
+        }
+        if new_team_ids.is_empty() {
+            return (0, 0);
+        }
+
+        // Snake-Draft-Zuweisung: Indizes 0,S-1,S,2S-1,2S,…
+        let n_teams = new_team_ids.len();
+        let assignable = (n_teams * team_size as usize).min(pool.len());
+        for (i, player) in pool.iter().take(n_teams * team_size as usize).enumerate() {
+            let cycle = i / n_teams;
+            let pos_in_cycle = i % n_teams;
+            let team_idx = if cycle % 2 == 0 {
+                pos_in_cycle
+            } else {
+                n_teams - 1 - pos_in_cycle
+            };
+            if team_idx >= new_team_ids.len() {
+                continue;
+            }
+            let tid = new_team_ids[team_idx];
+            if let Err(err) = self.assign_signup_team(guild_id, player.user_id, Some(tid)).await {
+                tracing::warn!(%err, user = player.user_id, team = tid, "Snake-draft assign fehlgeschlagen");
+            }
+        }
+
+        tracing::info!(
+            guild = guild_id,
+            neue_teams = new_team_ids.len(),
+            spieler = assignable,
+            "Auto-Balance abgeschlossen"
+        );
+        (new_team_ids.len(), assignable)
+    }
+
     /// Verifizierter Steam-Rang für die Web-Anmeldung.
     pub async fn verified_steam_rank(&self, user_id: u64) -> Option<(String, i64)> {
         self.db
@@ -967,6 +1140,112 @@ mod tests {
         // abgelaufener Token
         let expired = store.create_auth_token(200, "Ben", -1.0).await;
         assert_eq!(store.consume_auth_token(&expired).await, None);
+    }
+
+    #[test]
+    fn rank_score_wie_python() {
+        // sub 0/fehlend → 3 (Python: int(subrank or 3)), also 1*6+3 = 9.
+        assert_eq!(rank_score(1, 0), 9);
+        // rank_value 11, sub 6 → 11*6+6 = 72 (Eternus 6).
+        assert_eq!(rank_score(11, 6), 72);
+        // tier 0 → 3 (Obscurus-Sonderfall).
+        assert_eq!(rank_score(0, 4), 3);
+        // sub wird auf 1..=6 geklemmt (oberer Rand).
+        assert_eq!(rank_score(5, 9), 5 * 6 + 6);
+        // sub 1 bleibt 1 (untere Grenze, kein „or 3"-Default, da != 0).
+        assert_eq!(rank_score(5, 1), 5 * 6 + 1);
+    }
+
+    #[tokio::test]
+    async fn auto_balance_ohne_periode_macht_nichts() {
+        let (_dir, store) = store().await;
+        // Anmeldung ohne aktive Periode → kein Auto-Balance.
+        store
+            .upsert_signup(1, 100, "solo", "phantom", 0, None, false, None)
+            .await
+            .expect("signup");
+        assert_eq!(store.auto_balance(1).await, (0, 0));
+        // Spieler bleibt teamlos.
+        assert!(store.get_signup(1, 100).await.expect("sg").team_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_balance_snake_draft_in_neue_teams() {
+        let (_dir, store) = store().await;
+        store
+            .create_period(1, "Cup", "2026-06-01", "2026-12-31", 2, None)
+            .await
+            .expect("period");
+        // 4 Solo-Anmelder, absteigende Rang-Scores (eternus > phantom > seeker > initiate).
+        for (uid, rank) in [
+            (1u64, "eternus"),
+            (2, "phantom"),
+            (3, "seeker"),
+            (4, "initiate"),
+        ] {
+            store
+                .upsert_signup(1, uid, "solo", rank, 0, None, false, None)
+                .await
+                .expect("signup");
+        }
+        let (new_teams, assigned) = store.auto_balance(1).await;
+        assert_eq!(new_teams, 2);
+        assert_eq!(assigned, 4);
+        // Snake-Draft team_size=2: A=[idx0,idx3], B=[idx1,idx2]
+        // (pool nach Score absteigend: 1,2,3,4).
+        let teams = store.list_teams(1).await;
+        assert_eq!(teams.len(), 2);
+        // Jedes Team voll (2 Spieler).
+        for t in &teams {
+            assert_eq!(t.member_count, 2, "team {} count", t.name);
+        }
+        // Spieler 1 und 4 im selben Team, 2 und 3 im selben.
+        let t1 = store.get_signup(1, 1).await.expect("s1").team_id;
+        let t4 = store.get_signup(1, 4).await.expect("s4").team_id;
+        let t2 = store.get_signup(1, 2).await.expect("s2").team_id;
+        let t3 = store.get_signup(1, 3).await.expect("s3").team_id;
+        assert_eq!(t1, t4);
+        assert_eq!(t2, t3);
+        assert_ne!(t1, t2);
+    }
+
+    #[tokio::test]
+    async fn auto_balance_laesst_volle_teams_unberuehrt() {
+        let (_dir, store) = store().await;
+        store
+            .create_period(1, "Cup", "2026-06-01", "2026-12-31", 2, None)
+            .await
+            .expect("period");
+        // Volles Team (team_size=2): 2 Mitglieder.
+        let full = store.get_or_create_team(1, "Full", None).await.expect("t");
+        store
+            .upsert_signup(1, 10, "team", "phantom", 0, Some(full.id), false, None)
+            .await
+            .expect("s10");
+        store
+            .upsert_signup(1, 11, "team", "phantom", 0, Some(full.id), false, None)
+            .await
+            .expect("s11");
+        // 2 freie Solo-Anmelder.
+        store
+            .upsert_signup(1, 20, "solo", "seeker", 0, None, false, None)
+            .await
+            .expect("s20");
+        store
+            .upsert_signup(1, 21, "solo", "seeker", 0, None, false, None)
+            .await
+            .expect("s21");
+        let (new_teams, assigned) = store.auto_balance(1).await;
+        // Volles Team unangetastet, 1 neues Team für die 2 Solo-Spieler.
+        assert_eq!(new_teams, 1);
+        assert_eq!(assigned, 2);
+        // Die vollen Team-Mitglieder bleiben im selben Team.
+        assert_eq!(store.get_signup(1, 10).await.expect("s10").team_id, Some(full.id));
+        assert_eq!(store.get_signup(1, 11).await.expect("s11").team_id, Some(full.id));
+        // Die Solo-Spieler haben jetzt ein (neues, anderes) Team.
+        let t20 = store.get_signup(1, 20).await.expect("s20").team_id;
+        assert!(t20.is_some());
+        assert_ne!(t20, Some(full.id));
     }
 
     #[tokio::test]

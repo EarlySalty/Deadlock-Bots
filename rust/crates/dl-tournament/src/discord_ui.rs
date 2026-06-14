@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use dl_discord::interactions::{ModalField, ModalSpec};
+use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
@@ -86,6 +86,77 @@ fn period_status_str(period: Option<&Value>, now: chrono::NaiveDateTime) -> Stri
     }
 }
 
+/// Persistentes Anmelde-Panel (Port von `_build_panel_embed`, turnier.py:115-149).
+fn panel_embed(period: Option<&Value>, summary: Option<&Value>, now: chrono::NaiveDateTime) -> Value {
+    let active = period.filter(|p| p.get("is_active").and_then(Value::as_i64).unwrap_or(0) != 0);
+    let mut fields: Vec<Value> = Vec::new();
+    let mut description: Option<String> = None;
+
+    if let Some(p) = active {
+        fields.push(json!({
+            "name": "📅 Zeitraum",
+            "value": p.get("name").and_then(Value::as_str).unwrap_or("—"),
+            "inline": false,
+        }));
+        fields.push(json!({ "name": "Status", "value": period_status_str(period, now), "inline": true }));
+        fields.push(json!({
+            "name": "🕐 Start",
+            "value": fmt_dt(p.get("registration_start").and_then(Value::as_str)),
+            "inline": true,
+        }));
+        fields.push(json!({
+            "name": "🕐 Ende",
+            "value": fmt_dt(p.get("registration_end").and_then(Value::as_str)),
+            "inline": true,
+        }));
+    } else {
+        description = Some("Aktuell ist **kein Anmeldezeitraum** aktiv.".to_string());
+    }
+
+    if let Some(s) = summary {
+        let g = |k: &str| s.get(k).and_then(Value::as_i64).unwrap_or(0);
+        fields.push(json!({
+            "name": "👥 Anmeldungen",
+            "value": format!(
+                "Gesamt: **{}** | Solo: **{}** | Team: **{}**",
+                g("signups_total"), g("solo_count"), g("team_count")
+            ),
+            "inline": false,
+        }));
+    }
+
+    fields.push(json!({
+        "name": "ℹ️ Voraussetzungen",
+        "value": format!(
+            "• Du benötigst die <@&{TURNIER_ROLE_ID}> Rolle\n\
+             • Steam-Konto verknüpfen: `/account_verknüpfen`"
+        ),
+        "inline": false,
+    }));
+
+    let mut embed = json!({
+        "title": "🏆 Deadlock Turnier-Anmeldung",
+        "color": 0xF1C40F,
+        "fields": fields,
+    });
+    if let Some(desc) = description {
+        embed["description"] = json!(desc);
+    }
+    embed
+}
+
+/// Persistente Panel-Buttons (Original-custom_ids `turnier_panel_*`).
+fn panel_components() -> Value {
+    json!([{ "type": 1, "components": [
+        { "type": 2, "style": 3, "label": "Jetzt anmelden", "emoji": { "name": "✅" },
+          "custom_id": "turnier_panel_anmelden" },
+        { "type": 2, "style": 4, "label": "Abmelden", "emoji": { "name": "🚪" },
+          "custom_id": "turnier_panel_abmelden" },
+        { "type": 2, "style": 2, "label": "Mein Status", "emoji": { "name": "📊" },
+          "custom_id": "turnier_panel_status" },
+    ]}])
+}
+
 fn mode_components(user_id: u64, rank_name: &str, rank_sub: i64) -> Value {
     // Rang in die ID einbetten — das Menü ist zustandslos
     let rank = rank_name.to_lowercase();
@@ -147,6 +218,10 @@ impl InteractionHandler for TurnierHandler {
         // /turnier-Slash → Dashboard-Embed.
         if interaction.command == "turnier" {
             return self.dashboard(interaction).await;
+        }
+        // /turnierpanel-Slash → Panel öffentlich in den Kanal posten (Admin).
+        if interaction.command == "turnierpanel" {
+            return self.post_panel(interaction).await;
         }
         let ui = &self.ui;
         match interaction.custom_id.as_str() {
@@ -351,6 +426,28 @@ impl TurnierHandler {
         BridgeReply {
             embeds: vec![embed],
             components: Some(json!([{ "type": 1, "components": buttons }])),
+            ephemeral: true,
+            ..BridgeReply::default()
+        }
+    }
+
+    /// `/turnierpanel` (Port von `AdminDashboardView.post_panel_btn` /
+    /// `balance_tournament_panel`): postet das persistente Anmelde-Panel
+    /// (Embed + `turnier_panel_*`-Buttons) öffentlich in den aktuellen Kanal und
+    /// bestätigt ephemeral. Admin-gated über `default_member_permissions` (Manage
+    /// Guild) bei der Command-Registrierung — Discord blockt serverseitig.
+    async fn post_panel(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let ui = &self.ui;
+        let now = chrono::Local::now().naive_local();
+        let period = ui.store.active_period_json(interaction.guild_id).await;
+        let summary = ui.store.summary(interaction.guild_id).await.ok();
+        let embed = panel_embed(period.as_ref(), summary.as_ref(), now);
+        BridgeReply {
+            channel_message: Some(ChannelMessage {
+                embeds: vec![embed],
+                components: Some(panel_components()),
+                confirmation: "✅ Panel in diesem Channel gepostet.".to_string(),
+            }),
             ephemeral: true,
             ..BridgeReply::default()
         }
@@ -565,6 +662,20 @@ pub fn register(router: &mut InteractionRouter, ui: Arc<TurnierUi>) {
         },
         handler.clone(),
     );
+    // Admin: Anmelde-Panel in den Kanal posten (Manage Guild = 32).
+    router.on_command(
+        "turnierpanel",
+        CommandSpec {
+            definition: json!({
+                "name": "turnierpanel",
+                "description": "Postet das Turnier-Anmelde-Panel in diesen Kanal (Admin).",
+                "type": 1,
+                "dm_permission": false,
+                "default_member_permissions": "32",
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("turnier_panel_anmelden", handler.clone());
     router.on_custom_id("turnier_panel_abmelden", handler.clone());
     router.on_custom_id("turnier_panel_status", handler.clone());
@@ -616,5 +727,51 @@ mod tests {
         assert_eq!(embed["fields"][0]["value"], "Eingetragen");
         let embed = signup_success_embed("team", "updated", "Archon", 0, Some("Alpha"));
         assert_eq!(embed["fields"].as_array().expect("fields").len(), 4);
+    }
+
+    #[test]
+    fn panel_embed_und_buttons() {
+        let now = chrono::NaiveDate::from_ymd_opt(2026, 6, 10)
+            .expect("datum")
+            .and_hms_opt(12, 0, 0)
+            .expect("uhrzeit");
+        // Aktive Periode → Zeitraum-Felder + Anmeldungen + Voraussetzungen.
+        let period = json!({
+            "is_active": 1,
+            "name": "Cup #1",
+            "registration_start": "2026-06-09T00:00:00",
+            "registration_end": "2026-06-11T23:59:59",
+        });
+        let summary = json!({ "signups_total": 5, "solo_count": 2, "team_count": 3 });
+        let embed = panel_embed(Some(&period), Some(&summary), now);
+        assert_eq!(embed["title"], "🏆 Deadlock Turnier-Anmeldung");
+        let fields = embed["fields"].as_array().expect("fields");
+        // Zeitraum, Status, Start, Ende, Anmeldungen, Voraussetzungen = 6.
+        assert_eq!(fields.len(), 6);
+        assert!(embed.get("description").is_none());
+
+        // Ohne aktive Periode → Beschreibung statt Zeitraum-Feldern.
+        let embed = panel_embed(None, None, now);
+        assert_eq!(
+            embed["description"].as_str().expect("desc"),
+            "Aktuell ist **kein Anmeldezeitraum** aktiv."
+        );
+
+        // Buttons tragen die Original-custom_ids.
+        let comps = panel_components();
+        let ids: Vec<&str> = comps[0]["components"]
+            .as_array()
+            .expect("buttons")
+            .iter()
+            .map(|b| b["custom_id"].as_str().expect("id"))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "turnier_panel_anmelden",
+                "turnier_panel_abmelden",
+                "turnier_panel_status"
+            ]
+        );
     }
 }

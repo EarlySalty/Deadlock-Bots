@@ -382,6 +382,25 @@ async fn main() -> anyhow::Result<()> {
         }
         // Team-Balancer-Prefix-Listener (!balance auto/voice — read-only Vorschau)
         dl_tournament::balance_cmd::spawn(balance_commands.clone(), &dispatcher, adapter.clone());
+
+        // Turnier-Auto-Balance (Port von TurnierCog._auto_balance_loop): alle
+        // 300 s pro Gilde nicht-volle Teams nach Rang-Score auffüllen und
+        // unzugewiesene Solo-Anmelder per Snake-Draft auf neue Teams verteilen.
+        // Schreibt autonom in die DB; der Guard (nur bei aktiver Periode) sitzt
+        // in store::auto_balance. Cache-gebunden, daher gateway-gated.
+        {
+            let auto_balance_store =
+                Arc::new(dl_tournament::store::TournamentStore::new(db.clone()));
+            let adapter = adapter.clone();
+            tokio::spawn(async move {
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+                    for guild_id in adapter.cache().guilds() {
+                        auto_balance_store.auto_balance(guild_id.get()).await;
+                    }
+                }
+            });
+        }
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker

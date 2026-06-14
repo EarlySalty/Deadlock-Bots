@@ -249,11 +249,27 @@ impl BalanceCommands {
 
     /// `start`: balanciert die Voice-Member des Aufrufers und startet das Match.
     /// Wie das Original NICHT permission-gated.
+    ///
+    /// Bei >`MAX_PLAYERS` (12) öffnet das Python-Original einen interaktiven
+    /// Spieler-Picker (`SelectionView`). Dieser Prefix-Listener hat aber keinen
+    /// Komponenten-Rückkanal (`ChannelSender` kann nur Text+Embeds, kein
+    /// zustandsbehafteter Select über den Interaction-Router) — ein Picker ist
+    /// hier nicht sauber abbildbar. Deshalb brechen wir mit klarer Anweisung ab
+    /// statt — wie zuvor — die rangschwächsten Spieler still abzuschneiden
+    /// (Datenverlust). Der User reduziert die Auswahl selbst via `!balance manual`.
     async fn start(&self, guild_id: u64, user_id: u64) -> BalanceReply {
         let members = self.port.caller_voice_members(guild_id, user_id).await;
         if members.len() < 4 {
             return BalanceReply::text(format!(
                 "❌ Mindestens 4 Spieler benötigt (aktuell: {})",
+                members.len()
+            ));
+        }
+        if members.len() > MAX_PLAYERS {
+            return BalanceReply::text(format!(
+                "👥 Es sind **{}** Spieler im Channel — `!balance start` unterstützt maximal \
+                 **{MAX_PLAYERS}** (6v6).\nWähle die Teilnehmer gezielt aus: \
+                 `!balance manual @Spieler1 @Spieler2 …` (4–{MAX_PLAYERS} Spieler).",
                 members.len()
             ));
         }
@@ -938,6 +954,20 @@ mod tests {
         let fields = reply.embeds[0]["fields"].as_array().unwrap();
         let move_field = fields.iter().find(|f| f["name"] == "Move").unwrap();
         assert!(move_field["value"].as_str().unwrap().contains("2/2"));
+    }
+
+    #[tokio::test]
+    async fn start_ueber_max_bricht_ab_statt_abzuschneiden() {
+        // 13 Spieler (> MAX_PLAYERS) → klarer Abbruch, kein Match, kein still
+        // abgeschnittenes Team.
+        let members: Vec<(u64, i64)> = (1..=13).map(|i| (i as u64, 5)).collect();
+        let cmds = BalanceCommands::new(MockPort::new(members));
+        let reply = cmds.reply_for("!balance start", 1, 1).await.unwrap();
+        let text = reply.content.expect("text-abbruch");
+        assert!(text.contains("maximal"), "text: {text}");
+        assert!(text.contains("!balance manual"), "text: {text}");
+        // Kein Match angelegt (kein Datenverlust durch stilles Starten).
+        assert!(cmds.matches.lock().unwrap().is_empty());
     }
 
     #[tokio::test(start_paused = true)]
