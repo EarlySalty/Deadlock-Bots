@@ -115,6 +115,10 @@ impl DashboardApp {
         &self.inner.names
     }
 
+    pub(crate) fn tournament_default_guild(&self) -> u64 {
+        self.cfg().tournament_default_guild
+    }
+
     /// Auth-Gate für lesende `/api`-Routen: ohne erzwungene Auth offen, sonst
     /// gültige Session nötig (wie `_check_auth` ohne CSRF/Full-Access).
     pub(crate) fn guard_read(&self, headers: &HeaderMap) -> Result<(), Response> {
@@ -273,6 +277,23 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/leave-survey/{token}",
             get(crate::survey::leave_survey_get),
         )
+        // Turnier-Admin-Mutationen (Phase 9d) — Turnier-Mod/Voll + CSRF.
+        .route(
+            "/api/turnier/period",
+            post(crate::tournament::period_create),
+        )
+        .route(
+            "/api/turnier/period/close",
+            post(crate::tournament::period_close),
+        )
+        .route("/api/turnier/team", post(crate::tournament::team_create))
+        .route(
+            "/api/turnier/team/delete",
+            post(crate::tournament::team_delete),
+        )
+        .route("/api/turnier/assign", post(crate::tournament::assign))
+        .route("/api/turnier/remove", post(crate::tournament::remove))
+        .route("/api/turnier/clear", post(crate::tournament::clear))
         // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
         .route(
             "/api/public/patch-notes",
@@ -1064,6 +1085,14 @@ async fn lookup_role_strings(
 
 pub(crate) fn ok_json(value: Value) -> Response {
     (StatusCode::OK, Json(value)).into_response()
+}
+
+pub(crate) fn ok_json_status(status: u16, value: Value) -> Response {
+    (
+        StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
+        Json(value),
+    )
+        .into_response()
 }
 
 pub(crate) fn err_json(status: u16, code: &str) -> Response {

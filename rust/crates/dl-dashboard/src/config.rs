@@ -62,6 +62,8 @@ pub struct DashboardConfig {
     pub discord_api_base: String,
     /// Basis-URL des Master-Brokers (Member-Access-Lookup für den Login).
     pub broker_base: String,
+    /// Standard-Gilde für die Turnier-Admin-Routen (TURNIER_PUBLIC_GUILD_ID).
+    pub tournament_default_guild: u64,
     /// Tokens für die turnier-/allgemeinen internen Routen
     /// (initiate/consume/authorize-url/session).
     pub turnier_tokens: Vec<String>,
@@ -128,6 +130,9 @@ impl DashboardConfig {
                 .unwrap_or_else(|| DISCORD_API_BASE.to_string()),
             broker_base: get("MASTER_BROKER_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_BROKER_BASE.to_string()),
+            tournament_default_guild: get("TURNIER_PUBLIC_GUILD_ID")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0),
             turnier_tokens,
             twitch_tokens,
         }

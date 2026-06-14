@@ -33,6 +33,7 @@ pub mod public;
 pub mod session;
 pub mod survey;
 pub mod token;
+pub mod tournament;
 pub mod web;
 
 pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};

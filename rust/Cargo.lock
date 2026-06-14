@@ -446,6 +446,7 @@ dependencies = [
  "chrono",
  "dl-core",
  "dl-db",
+ "dl-tournament",
  "dl-webcore",
  "rand 0.8.6",
  "reqwest",
