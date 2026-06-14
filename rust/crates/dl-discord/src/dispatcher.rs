@@ -49,6 +49,9 @@ pub struct MessageEvent {
     /// Aus dem Gateway-Cache berechnet; ohne Cache false.
     pub author_is_admin: bool,
     pub content: String,
+    /// Ist die Nachricht eine Antwort (`message_reference` gesetzt)? Für den
+    /// einmaligen Reply-Bonus der Text-Gamification.
+    pub is_reply: bool,
     /// Anhänge gesamt / davon Bilder (für Spam-/Takeover-Detektion).
     pub attachment_count: u32,
     pub image_attachment_count: u32,
@@ -202,6 +205,7 @@ mod tests {
             author_display_name: "x".into(),
             author_is_admin: false,
             content: "hallo".into(),
+            is_reply: false,
             attachment_count: 0,
             image_attachment_count: 0,
             author_created_at: 0,

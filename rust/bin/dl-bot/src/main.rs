@@ -463,6 +463,13 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
         dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
+        // Text-Gamification (5): Konversations-Punkte → text_stats (speist das
+        // öffentliche Text-Leaderboard) + 60-s-Flush-Loop.
+        let text_sessions = Arc::new(dl_activity::text_stats::TextSessions::new(db.clone()));
+        if let Err(err) = text_sessions.ensure_schema().await {
+            tracing::warn!(%err, "text_stats-Schema konnte nicht angelegt werden");
+        }
+        dl_activity::text_stats::spawn_text_stats(text_sessions, &dispatcher);
         // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
         // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung)
         // + stündlicher Miss-You-Check (Embed-DM an inaktive Stamm-User).

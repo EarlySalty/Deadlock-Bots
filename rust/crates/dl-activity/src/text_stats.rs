@@ -12,7 +12,8 @@
 //! `MessageEvent`-Strom (inkl. Reply-Erkennung) + der 60-s-Flush-Loop folgen.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use dl_db::{Db, DbError};
 use rusqlite::params;
@@ -176,6 +177,25 @@ impl TextSessions {
         }
     }
 
+    /// Privacy-Opt-out wie der message_activity-Writer (fail-open bei Fehler).
+    async fn is_opted_out(&self, user_id: u64) -> bool {
+        self.db
+            .read(move |conn| {
+                use rusqlite::OptionalExtension;
+                Ok(conn
+                    .query_row(
+                        "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
+                        [user_id],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .optional()?
+                    .filter(|v| *v != 0)
+                    .is_some())
+            })
+            .await
+            .unwrap_or(false)
+    }
+
     async fn write_session(&self, user_id: u64, channel_id: u64, session: &Session) {
         if session.message_count <= 0 {
             return;
@@ -235,6 +255,53 @@ fn fmt_ts(ts: i64) -> String {
     chrono::DateTime::from_timestamp(ts, 0)
         .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
         .unwrap_or_default()
+}
+
+/// Subscriber auf den Nachrichten-Strom + 60-s-Flush-Loop (Python:
+/// `on_message` + `@tasks.loop(seconds=60) flush_text_sessions`).
+/// Opt-out-User werden übersprungen; der Flush-Loop schließt verwaiste Sessions.
+pub fn spawn_text_stats(
+    sessions: Arc<TextSessions>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    let mut messages = dispatcher.subscribe_messages();
+    let on_msg = {
+        let sessions = sessions.clone();
+        tokio::spawn(async move {
+            loop {
+                match messages.recv().await {
+                    Ok(event) => {
+                        let Some(guild_id) = event.guild_id else {
+                            continue;
+                        };
+                        if sessions.is_opted_out(event.author_id).await {
+                            continue;
+                        }
+                        let now = chrono::Utc::now().timestamp();
+                        sessions
+                            .on_message(
+                                event.author_id,
+                                event.channel_id,
+                                guild_id,
+                                event.is_reply,
+                                now,
+                            )
+                            .await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        })
+    };
+    let flush = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(60)).await;
+            let now = chrono::Utc::now().timestamp();
+            sessions.flush_expired(now).await;
+        }
+    });
+    vec![on_msg, flush]
 }
 
 #[cfg(test)]

@@ -87,6 +87,7 @@ impl EventHandler for Handler {
                 .unwrap_or_else(|| message.author.name.to_string()),
             author_is_admin,
             content: message.content.clone(),
+            is_reply: message.message_reference.is_some(),
             attachment_count: message.attachments.len() as u32,
             image_attachment_count,
             author_created_at: message.author.id.created_at().unix_timestamp(),
