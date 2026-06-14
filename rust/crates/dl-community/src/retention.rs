@@ -6,16 +6,66 @@
 //! Leave-Survey-Einstufung (Bucket A/B/C, [`crate::leave_survey`]) LIEST
 //! `avg_weekly_sessions` hier — ohne diesen Schreiber veraltet die Quelle.
 //!
-//! Die „Wir-vermissen-dich"-DM (`daily_retention_check`) ist user-facing
-//! (Embed + Feedback-Button) und folgt im gebündelten UI-Pass.
+//! Die „Wir-vermissen-dich"-DM (`daily_retention_check`) ist hier mit portiert:
+//! ein stündlicher Loop löst genau zur Check-Stunde (12 UTC, max. 1×/Tag) eine
+//! Suche nach inaktiven Stamm-Usern aus und schickt ihnen eine Embed-DM mit
+//! Link-Buttons + Feedback-Button. Der Feedback-Button öffnet ein Modal, dessen
+//! Antwort als `message_type='feedback'` in `user_retention_messages` landet.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use chrono::Timelike;
 use dl_db::{Db, DbError};
+use dl_discord::interactions::{ModalField, ModalSpec};
+use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use rusqlite::{params, OptionalExtension};
+use serde_json::{json, Value};
 
 const SYNC_INTERVAL: Duration = Duration::from_secs(30 * 60);
 const LOOKBACK_DAYS: i64 = 60;
+
+// ── Miss-You-Konfiguration (Python `RetentionConfig`) ──────────────────────
+const MIN_WEEKLY_SESSIONS: f64 = 0.5;
+const MIN_TOTAL_ACTIVE_DAYS: i64 = 3;
+const INACTIVITY_THRESHOLD_DAYS: i64 = 14;
+const MIN_DAYS_BETWEEN_MESSAGES: i64 = 30;
+const MAX_MISS_YOU_PER_USER: i64 = 1;
+const CHECK_HOUR: u32 = 12;
+const SERVER_LINK: &str = "https://discord.com/channels/1289721245281292288/1289721245281292291";
+const VOICE_LINK: &str = "https://discord.com/channels/1289721245281292288/1501089974093873232";
+const EXCLUDED_ROLE_IDS: [u64; 2] = [1304416311383818240, 1309741866098491479];
+
+/// Mitgliedsinfo für die Miss-You-Auswahl (Anzeigename + Rollen).
+pub struct RetentionMember {
+    pub display_name: String,
+    pub role_ids: Vec<u64>,
+}
+
+/// Zustellergebnis der Miss-You-DM (→ `delivery_status`).
+pub enum MissYouDelivery {
+    Sent,
+    Blocked,
+    Failed(String),
+}
+
+/// Discord-Anbindung der Miss-You-DM (vom Bot über den Cache/HTTP erfüllt).
+#[async_trait::async_trait]
+pub trait RetentionPort: Send + Sync {
+    /// Anzeigename + Rollen aus dem Guild-Cache; `None`, wenn kein Mitglied.
+    async fn member_info(&self, guild_id: u64, user_id: u64) -> Option<RetentionMember>;
+    /// Fallback-Name via `fetch_user` (`global_name` | `name`).
+    async fn fetch_user_name(&self, user_id: u64) -> Option<String>;
+    /// Guild-Name + optionales Icon (Thumbnail-URL).
+    async fn guild_label(&self, guild_id: u64) -> (String, Option<String>);
+    /// DM mit Embed + Components senden; meldet den Zustellstatus.
+    async fn send_miss_you_dm(
+        &self,
+        user_id: u64,
+        embed: Value,
+        components: Value,
+    ) -> MissYouDelivery;
+}
 
 #[derive(Clone)]
 pub struct RetentionTracker {
@@ -173,10 +223,286 @@ impl RetentionTracker {
             })
             .await
     }
+
+    /// Inaktive Stamm-User (Python `_find_inactive_regular_users`): regelmäßig
+    /// aktiv gewesen, jetzt über der Schwelle inaktiv, nicht opted-out,
+    /// Spam-Schutz greift. Liefert `(user_id, guild_id, days_inactive)`, max. 50.
+    async fn find_inactive_users(&self, now: i64) -> Vec<(u64, u64, i64)> {
+        let inactivity_threshold = now - INACTIVITY_THRESHOLD_DAYS * 86400;
+        let min_gap = now - MIN_DAYS_BETWEEN_MESSAGES * 86400;
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT user_id, guild_id, (?1 - last_active_at) / 86400 AS days_inactive
+                       FROM user_retention_tracking
+                      WHERE avg_weekly_sessions >= ?2
+                        AND total_active_days >= ?3
+                        AND last_active_at < ?4
+                        AND opted_out = 0
+                        AND miss_you_count < ?5
+                        AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at < ?6)
+                      ORDER BY days_inactive DESC
+                      LIMIT 50",
+                )?;
+                let rows = stmt.query_map(
+                    params![
+                        now,
+                        MIN_WEEKLY_SESSIONS,
+                        MIN_TOTAL_ACTIVE_DAYS,
+                        inactivity_threshold,
+                        MAX_MISS_YOU_PER_USER,
+                        min_gap
+                    ],
+                    |r| {
+                        Ok((
+                            r.get::<_, i64>(0)? as u64,
+                            r.get::<_, i64>(1)? as u64,
+                            r.get::<_, i64>(2)?,
+                        ))
+                    },
+                )?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    /// Stündlicher Miss-You-Check (Python `daily_retention_check`): nur zur
+    /// Check-Stunde (12 UTC) und max. 1×/Tag. Das Datum liegt im `kv_store`,
+    /// damit ein Neustart am Check-Tag nicht doppelt sendet.
+    pub async fn run_miss_you_check(&self, port: &Arc<dyn RetentionPort>) {
+        let now_dt = chrono::Utc::now();
+        if now_dt.hour() != CHECK_HOUR {
+            return;
+        }
+        let today = now_dt.format("%Y-%m-%d").to_string();
+        if self
+            .db
+            .kv_get("retention", "last_check_date")
+            .await
+            .ok()
+            .flatten()
+            .as_deref()
+            == Some(today.as_str())
+        {
+            return;
+        }
+        let _ = self.db.kv_set("retention", "last_check_date", today).await;
+
+        let now = now_dt.timestamp();
+        for (user_id, guild_id, days_inactive) in self.find_inactive_users(now).await {
+            self.send_miss_you(port, user_id, guild_id, days_inactive)
+                .await;
+        }
+    }
+
+    /// Eine Miss-You-DM aufbauen, senden und das Ergebnis protokollieren
+    /// (Python `_send_miss_you_message`).
+    async fn send_miss_you(
+        &self,
+        port: &Arc<dyn RetentionPort>,
+        user_id: u64,
+        guild_id: u64,
+        days_inactive: i64,
+    ) {
+        // Globaler Privacy-Opt-out hat Vorrang vor der Retention-Spalte.
+        if crate::privacy::is_opted_out(&self.db, user_id as i64).await {
+            return;
+        }
+        // Name + Excluded-Rollen aus dem Cache; ausgeschlossene Rollen → kein DM.
+        let member = port.member_info(guild_id, user_id).await;
+        if let Some(m) = &member {
+            if m.role_ids.iter().any(|r| EXCLUDED_ROLE_IDS.contains(r)) {
+                return;
+            }
+        }
+        let display_name = match member.map(|m| m.display_name) {
+            Some(name) => name,
+            None => port
+                .fetch_user_name(user_id)
+                .await
+                .unwrap_or_else(|| "Unbekannt".to_string()),
+        };
+        let (guild_name, icon) = port.guild_label(guild_id).await;
+
+        let embed = miss_you_embed(&display_name, days_inactive, &guild_name, icon.as_deref());
+        let delivery = port
+            .send_miss_you_dm(user_id, embed, miss_you_components(guild_id))
+            .await;
+        let now = chrono::Utc::now().timestamp();
+        match delivery {
+            MissYouDelivery::Sent => {
+                let _ = self
+                    .db
+                    .write(move |conn| {
+                        conn.execute(
+                            "UPDATE user_retention_tracking
+                                SET last_miss_you_sent_at=?1, miss_you_count=miss_you_count+1, updated_at=?1
+                              WHERE user_id=?2",
+                            params![now, user_id],
+                        )?;
+                        conn.execute(
+                            "INSERT INTO user_retention_messages
+                               (user_id, guild_id, message_type, sent_at, delivery_status)
+                             VALUES(?1, ?2, 'miss_you', ?3, 'sent')",
+                            params![user_id, guild_id, now],
+                        )?;
+                        Ok(())
+                    })
+                    .await;
+            }
+            MissYouDelivery::Blocked => {
+                let _ = self
+                    .db
+                    .write(move |conn| {
+                        conn.execute(
+                            "INSERT INTO user_retention_messages
+                               (user_id, guild_id, message_type, sent_at, delivery_status, error_message)
+                             VALUES(?1, ?2, 'miss_you', ?3, 'blocked', 'DMs disabled')",
+                            params![user_id, guild_id, now],
+                        )
+                        .map(|_| ())
+                    })
+                    .await;
+            }
+            MissYouDelivery::Failed(err) => {
+                let _ = self
+                    .db
+                    .write(move |conn| {
+                        conn.execute(
+                            "INSERT INTO user_retention_messages
+                               (user_id, guild_id, message_type, sent_at, delivery_status, error_message)
+                             VALUES(?1, ?2, 'miss_you', ?3, 'failed', ?4)",
+                            params![user_id, guild_id, now, err],
+                        )
+                        .map(|_| ())
+                    })
+                    .await;
+            }
+        }
+    }
 }
 
-/// Spawnt den Voice-Join-Subscriber + den 30-min-Sync-Loop.
-pub fn spawn(tracker: RetentionTracker, dispatcher: &dl_discord::Dispatcher) {
+/// Miss-You-Embed (Python `_send_miss_you_message`): blau, optional Guild-Icon.
+fn miss_you_embed(
+    display_name: &str,
+    days_inactive: i64,
+    guild_name: &str,
+    icon: Option<&str>,
+) -> Value {
+    let mut embed = json!({
+        "title": format!("Hey {display_name}, wir vermissen dich! :("),
+        "description": format!(
+            "Dir ist bestimmt aufgefallen, dass du schon **{days_inactive} Tage** \
+             nicht mehr aktiv in der **{guild_name}** warst.\n\n\
+             Wir würden uns freuen, dich mal wieder im Voice oder Chat zu sehen.\n\n\
+             Falls dich etwas stört oder du Feedback hast, lass es uns bitte wissen \
+             - wir wollen den Server für dich besser machen."
+        ),
+        // discord.Color.blue()
+        "color": 0x3498DB,
+    });
+    if let Some(url) = icon {
+        embed["thumbnail"] = json!({ "url": url });
+    }
+    embed
+}
+
+/// Action-Row der Miss-You-DM: Link-Buttons (Server/Voice) + Feedback-Button.
+/// Die `guild_id` reist in der `custom_id` mit, weil der Button in einer DM
+/// geklickt wird (dort gäbe es sonst keinen Guild-Kontext).
+fn miss_you_components(guild_id: u64) -> Value {
+    json!([{
+        "type": 1,
+        "components": [
+            { "type": 2, "style": 5, "label": "Zum Server", "emoji": { "name": "🏠" }, "url": SERVER_LINK },
+            { "type": 2, "style": 5, "label": "Zum Voice", "emoji": { "name": "🎧" }, "url": VOICE_LINK },
+            { "type": 2, "style": 1, "label": "Feedback geben", "emoji": { "name": "💬" }, "custom_id": format!("{FEEDBACK_BTN_PREFIX}{guild_id}") },
+        ],
+    }])
+}
+
+const FEEDBACK_BTN_PREFIX: &str = "retention_feedback:";
+const FEEDBACK_MODAL_PREFIX: &str = "retention_feedback_modal:";
+
+struct FeedbackHandler {
+    db: Db,
+    port: Arc<dyn RetentionPort>,
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for FeedbackHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        // Modal-Submit → Feedback in user_retention_messages ablegen.
+        if let Some(gid) = interaction.custom_id.strip_prefix(FEEDBACK_MODAL_PREFIX) {
+            let guild_id = gid.parse::<u64>().unwrap_or(0);
+            let text = interaction
+                .options
+                .get("feedback")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            let user_id = interaction.user_id;
+            let now = chrono::Utc::now().timestamp();
+            let _ = self
+                .db
+                .write(move |conn| {
+                    conn.execute(
+                        "INSERT INTO user_retention_messages
+                           (user_id, guild_id, message_type, sent_at, delivery_status, error_message)
+                         VALUES(?1, ?2, 'feedback', ?3, 'received', ?4)",
+                        params![user_id, guild_id, now, text],
+                    )
+                    .map(|_| ())
+                })
+                .await;
+            let (guild_name, _) = self.port.guild_label(guild_id).await;
+            return BridgeReply::ephemeral_text(format!(
+                "Danke für dein Feedback! Wir werden es uns anschauen und versuchen, \
+                 **{guild_name}** für dich zu verbessern."
+            ));
+        }
+
+        // Feedback-Button → Modal öffnen (guild_id wandert in die Modal-custom_id).
+        if let Some(gid) = interaction.custom_id.strip_prefix(FEEDBACK_BTN_PREFIX) {
+            return BridgeReply {
+                modal: Some(ModalSpec {
+                    custom_id: format!("{FEEDBACK_MODAL_PREFIX}{gid}"),
+                    title: "Feedback geben".to_string(),
+                    fields: vec![ModalField {
+                        custom_id: "feedback".to_string(),
+                        label: "Was können wir verbessern?".to_string(),
+                        placeholder:
+                            "Erzähl uns, was dich stört oder was wir besser machen können..."
+                                .to_string(),
+                        required: true,
+                        min_length: 0,
+                        max_length: 1000,
+                        paragraph: true,
+                    }],
+                }),
+                ..BridgeReply::default()
+            };
+        }
+
+        BridgeReply::ephemeral_text("Unbekannte Aktion.")
+    }
+}
+
+/// Registriert den Feedback-Button + das Feedback-Modal der Miss-You-DM.
+pub fn register(router: &mut InteractionRouter, db: Db, port: Arc<dyn RetentionPort>) {
+    let handler = Arc::new(FeedbackHandler { db, port });
+    router.on_prefix(FEEDBACK_BTN_PREFIX, handler.clone());
+    router.on_prefix(FEEDBACK_MODAL_PREFIX, handler);
+}
+
+/// Spawnt den Voice-Join-Subscriber, den 30-min-Sync-Loop und den stündlichen
+/// Miss-You-Check.
+pub fn spawn(
+    tracker: RetentionTracker,
+    port: Arc<dyn RetentionPort>,
+    dispatcher: &dl_discord::Dispatcher,
+) {
     {
         let tracker = tracker.clone();
         tokio::spawn(async move {
@@ -187,6 +513,17 @@ pub fn spawn(tracker: RetentionTracker, dispatcher: &dl_discord::Dispatcher) {
                     tracing::warn!(%e, "retention-sync fehlgeschlagen");
                 }
                 tokio::time::sleep(SYNC_INTERVAL).await;
+            }
+        });
+    }
+
+    // Miss-You-Loop: stündlich aufwachen, die Tagesschranke prüft die Methode.
+    {
+        let tracker = tracker.clone();
+        tokio::spawn(async move {
+            loop {
+                tracker.run_miss_you_check(&port).await;
+                tokio::time::sleep(Duration::from_secs(3600)).await;
             }
         });
     }
@@ -331,5 +668,40 @@ mod tests {
             .await
             .unwrap();
         assert!((avg - 2.0).abs() < 0.01, "avg_weekly = {avg}");
+    }
+
+    #[tokio::test]
+    async fn find_inactive_filtert_jede_bedingung() {
+        let (_d, t) = mk().await;
+        let now = 2_000_000_000_i64;
+        let inactive = now - 20 * 86400; // 20 Tage inaktiv (> 14)
+        let recent = now - 2 * 86400; // erst 2 Tage (noch aktiv)
+        let recent_msg = now - 5 * 86400; // vor 5 Tagen schon angeschrieben (< 30)
+        // user 1 erfüllt alle Kriterien; 2–7 fallen je an einer Bedingung raus.
+        t.db
+            .write(move |c| {
+                c.execute_batch(&format!(
+                    "INSERT INTO user_retention_tracking
+                       (user_id,guild_id,last_active_at,total_active_days,avg_weekly_sessions,opted_out,miss_you_count,last_miss_you_sent_at)
+                     VALUES
+                       (1,1,{inactive},5,1.0,0,0,NULL),        -- berechtigt
+                       (2,1,{inactive},5,1.0,1,0,NULL),        -- opted_out
+                       (3,1,{inactive},5,1.0,0,1,NULL),        -- schon 1 Nachricht
+                       (4,1,{recent},5,1.0,0,0,NULL),          -- noch aktiv
+                       (5,1,{inactive},1,1.0,0,0,NULL),        -- zu wenige aktive Tage
+                       (6,1,{inactive},5,0.1,0,0,NULL),        -- zu selten (avg < 0.5)
+                       (7,1,{inactive},5,1.0,0,0,{recent_msg}) -- Spam-Sperre (< 30 Tage)"
+                ))?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let found: Vec<u64> = t
+            .find_inactive_users(now)
+            .await
+            .into_iter()
+            .map(|(u, _, _)| u)
+            .collect();
+        assert_eq!(found, vec![1], "nur der berechtigte User darf übrig bleiben");
     }
 }

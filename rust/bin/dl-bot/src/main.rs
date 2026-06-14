@@ -260,6 +260,14 @@ async fn main() -> anyhow::Result<()> {
     );
     dl_community::leave_survey::register(&mut router, leave_survey.clone());
 
+    // Retention-Miss-You: Feedback-Button + -Modal der „Wir-vermissen-dich"-DM.
+    // Der Port versorgt sowohl die Buttons als auch den gateway-gated Loop.
+    let retention_port: Arc<dyn dl_community::retention::RetentionPort> =
+        Arc::new(modglue::RetentionGlue {
+            adapter: adapter.clone(),
+        });
+    dl_community::retention::register(&mut router, db.clone(), retention_port.clone());
+
     // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
     onboardglue::register(
         &mut router,
@@ -440,9 +448,11 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
         dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
         // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
-        // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung).
+        // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung)
+        // + stündlicher Miss-You-Check (Embed-DM an inaktive Stamm-User).
         dl_community::retention::spawn(
             dl_community::retention::RetentionTracker::new(db.clone()),
+            retention_port.clone(),
             &dispatcher,
         );
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);

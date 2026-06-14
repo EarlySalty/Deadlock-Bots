@@ -1073,3 +1073,71 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             .is_ok()
     }
 }
+
+// ── Retention-Miss-You-Anbindung ───────────────────────────────────────────
+
+pub struct RetentionGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::retention::RetentionPort for RetentionGlue {
+    async fn member_info(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+    ) -> Option<dl_community::retention::RetentionMember> {
+        let guild = self.adapter.cache.guild(GuildId::new(guild_id))?;
+        let member = guild.members.get(&UserId::new(user_id))?;
+        Some(dl_community::retention::RetentionMember {
+            display_name: member.display_name().to_string(),
+            role_ids: member.roles.iter().map(|r| r.get()).collect(),
+        })
+    }
+
+    async fn fetch_user_name(&self, user_id: u64) -> Option<String> {
+        let user = self.adapter.http.get_user(UserId::new(user_id)).await.ok()?;
+        // Discord-Präzedenz: global_name vor Username (wie resolve_user).
+        Some(
+            user.global_name
+                .as_ref()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| user.name.to_string()),
+        )
+    }
+
+    async fn guild_label(&self, guild_id: u64) -> (String, Option<String>) {
+        match self.adapter.cache.guild(GuildId::new(guild_id)) {
+            Some(g) => (g.name.to_string(), g.icon_url()),
+            // Python-Fallback, wenn die Gilde nicht im Cache ist.
+            None => ("unserem Server".to_string(), None),
+        }
+    }
+
+    async fn send_miss_you_dm(
+        &self,
+        user_id: u64,
+        embed: serde_json::Value,
+        components: serde_json::Value,
+    ) -> dl_community::retention::MissYouDelivery {
+        use dl_community::retention::MissYouDelivery;
+        let channel = match self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(err) => return MissYouDelivery::Failed(err.to_string()),
+        };
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        match self.adapter.send_raw_public(channel.id.get(), &body).await {
+            Ok(_) => MissYouDelivery::Sent,
+            // 50007 = Cannot send messages to this user (DMs deaktiviert).
+            Err(err) if err.contains("50007") => MissYouDelivery::Blocked,
+            Err(err) => MissYouDelivery::Failed(err),
+        }
+    }
+}
