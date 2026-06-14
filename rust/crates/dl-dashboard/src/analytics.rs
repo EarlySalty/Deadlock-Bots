@@ -1345,3 +1345,97 @@ pub async fn user_retention(State(app): State<DashboardApp>, headers: HeaderMap)
         "recent": candidates,
     }))
 }
+
+/// `GET /api/voice-stats?limit=N` — Voice-Bestenlisten + Summary (Port von
+/// `_handle_voice_stats`). Der Live-Sessions-Teil liest im Original den
+/// In-Memory-Zustand des Voice-Trackers (dl-bot-Prozess) — ohne Broker-Endpunkt
+/// hier eine bewusste v1-Lücke (leer).
+pub async fn voice_stats(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    if let Err(resp) = app.guard_read(&headers) {
+        return resp;
+    }
+    let limit = match parse_limit(&params, 10, 50) {
+        Ok(n) => n,
+        Err(resp) => return resp,
+    };
+
+    let data = app
+        .db()
+        .read(move |conn| {
+            let (tracked_users, total_seconds, total_points, last_update): (i64, i64, i64, Option<String>) =
+                conn.query_row(
+                    "SELECT COUNT(*), COALESCE(SUM(total_seconds),0), COALESCE(SUM(total_points),0), MAX(last_update)
+                       FROM voice_stats",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
+            let rows = |sql: &str| -> rusqlite::Result<Vec<Value>> {
+                let mut stmt = conn.prepare(sql)?;
+                stmt.query_map(params![limit], |r| {
+                    Ok(json!({
+                        "user_id": r.get::<_, i64>(0)?,
+                        "total_seconds": r.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                        "total_points": r.get::<_, Option<i64>>(2)?.unwrap_or(0),
+                        "last_update": r.get::<_, Option<String>>(3)?,
+                    }))
+                })?
+                .collect()
+            };
+            let top_time = rows(
+                "SELECT user_id, total_seconds, total_points, last_update FROM voice_stats
+                  ORDER BY total_seconds DESC, total_points DESC LIMIT ?1",
+            )?;
+            let top_points = rows(
+                "SELECT user_id, total_seconds, total_points, last_update FROM voice_stats
+                  ORDER BY total_points DESC, total_seconds DESC LIMIT ?1",
+            )?;
+            Ok((tracked_users, total_seconds, total_points, last_update, top_time, top_points))
+        })
+        .await;
+
+    let (tracked_users, total_seconds, total_points, last_update, mut top_time, mut top_points) =
+        match data {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::error!(%err, "voice_stats fehlgeschlagen");
+                return err_text(500, "Voice stats unavailable");
+            }
+        };
+
+    let ids: Vec<u64> = top_time
+        .iter()
+        .chain(top_points.iter())
+        .filter_map(|c| c["user_id"].as_i64().and_then(|i| u64::try_from(i).ok()))
+        .collect();
+    let names = app.names().resolve(&ids).await;
+    for c in top_time.iter_mut().chain(top_points.iter_mut()) {
+        let uid = c["user_id"]
+            .as_i64()
+            .and_then(|i| u64::try_from(i).ok())
+            .unwrap_or(0);
+        c["display_name"] = json!(display_name_or_default(&names, uid));
+    }
+
+    let avg = if tracked_users > 0 {
+        json!(total_seconds as f64 / tracked_users as f64)
+    } else {
+        json!(0)
+    };
+
+    ok_json(json!({
+        "summary": {
+            "tracked_users": tracked_users,
+            "total_seconds": total_seconds,
+            "total_points": total_points,
+            "last_update": last_update,
+            "avg_seconds_per_user": avg,
+        },
+        "top_by_time": top_time,
+        "top_by_points": top_points,
+        "live": { "summary": { "active_sessions": 0, "total_seconds": 0 }, "sessions": [] },
+    }))
+}
