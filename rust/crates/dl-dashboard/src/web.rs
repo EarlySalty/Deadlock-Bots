@@ -354,14 +354,53 @@ pub fn router(app: DashboardApp) -> Router {
 
 // ── Browser-Routen (Login/Callback/Logout) ──────────────────────────────────
 
-async fn index() -> Response {
-    // Die SPA (admin_dashboard/dist) wird beim Cutover über den Binär-Prozess
-    // statisch ausgeliefert; bis dahin ist dies ein Platzhalter. Der
-    // Auth-Provider funktioniert unabhängig davon (interne Endpunkte).
+/// Escaping wie Pythons `html.escape(quote=True)` — für in HTML eingesetzte
+/// Werte (hier das Nutzer-Label, das aus der Session stammt).
+fn html_escape_attr(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
+/// Lädt `service/static/dashboard.html` (neben der DB: `repo/data/` → `repo/`).
+/// Kein Caching — wie das Original; fehlt die Datei, gibt der Handler 500.
+async fn load_dashboard_html(app: &DashboardApp) -> Option<String> {
+    let repo_root = app.db().path().parent()?.parent()?;
+    tokio::fs::read_to_string(repo_root.join("service/static/dashboard.html"))
+        .await
+        .ok()
+}
+
+/// `/` und `/admin` — liefert die Dashboard-SPA mit eingesetzten Auth-Platzhaltern
+/// (Port von `_handle_index`). Bei erzwungener Auth ohne Session → Discord-Login;
+/// `turnier_only`-Sessions → Turnier-Seite.
+async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    let session = app.session_from_headers(&headers);
+    if app.cfg().auth_enforced() && session.is_none() {
+        return redirect("/auth/discord/login?next=%2Fadmin", None);
+    }
+    if let Some(s) = &session {
+        if s.access_level.as_str() == "turnier_only" {
+            return redirect("/turnier", None);
+        }
+    }
+    let display_name = session
+        .as_ref()
+        .map(|s| s.display_name.clone())
+        .unwrap_or_else(|| "Nicht angemeldet".to_string());
+    let Some(html) = load_dashboard_html(&app).await else {
+        return err_text(500, "dashboard.html nicht ladbar");
+    };
+    let rendered = html
+        .replace("{{AUTH_USER_LABEL}}", &html_escape_attr(&display_name))
+        .replace("{{DISCORD_LOGIN_URL}}", "/auth/discord/login?next=%2Fadmin")
+        .replace("{{AUTH_LOGOUT_URL}}", "/auth/logout");
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        "<!doctype html><title>Deadlock Dashboard</title><p>Dashboard (Rust). Auth-Provider aktiv.</p>",
+        rendered,
     )
         .into_response()
 }
@@ -1308,6 +1347,17 @@ mod tests {
             value.parse().expect("value"),
         );
         h
+    }
+
+    #[test]
+    fn html_escape_attr_neutralisiert_xss() {
+        assert_eq!(
+            html_escape_attr(r#"<script>"a"&'b'"#),
+            "&lt;script&gt;&quot;a&quot;&amp;&#x27;b&#x27;"
+        );
+        // Ampersand zuerst, damit Entities nicht doppelt escaped werden.
+        assert_eq!(html_escape_attr("a&b"), "a&amp;b");
+        assert_eq!(html_escape_attr("harmlos"), "harmlos");
     }
 
     #[test]
