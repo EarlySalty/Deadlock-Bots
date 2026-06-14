@@ -1,3 +1,13 @@
+## #138 — /checkrank & weitere Steam-Befehle antworten wieder
+
+**Problem:** `/checkrank` (und weitere Steam-Befehle, die nur Text oder ein Info-Embed ohne Knöpfe zurückgeben — etwa die Rang-Einzelabfrage oder die Verknüpfungs-Statusanzeige) brachen seit dem Umbau der Steam-Anbindung kommentarlos ab: Der Befehl lief intern auf einen Fehler und schickte deshalb gar keine Antwort. Für den Nutzer sah es so aus, als würde der Befehl einfach nichts tun.
+
+**Was wurde geändert:** Beim Zusammenbauen der Antwort wurde für den Fall „diese Antwort hat keine Knöpfe" der falsche Platzhalter verwendet. Die aktuelle Discord-Bibliotheksversion akzeptiert dafür keinen leeren Wert mehr, sondern verlangt einen eigenen „kein-Element"-Platzhalter — sonst wirft sie einen Fehler, bevor die Nachricht rausgeht. Genau dieser Platzhalter wird jetzt gesetzt.
+
+**Wie es jetzt funktioniert:** Antworten ohne Knöpfe (reiner Text / Embed) werden wieder korrekt verschickt. Befehle mit Knöpfen (z. B. das Verknüpfungs-Panel) waren nie betroffen, weil dort ohnehin ein echtes Bedienelement mitgeschickt wurde. `/checkrank` und Co. liefern damit wieder ihr Ergebnis.
+
+**Betroffen:** Alle, die `/checkrank`, die Rang-Einzelabfrage oder die Steam-Statusbefehle nutzen.
+
 ## #137 — Server-Statistik: „Vor Tracking" sauber von „Unbekannt" getrennt
 
 **Ausgangslage:** Im Mitgliederquellen-Donut stand „Unbekannt" bei ~30 % (621 von 2020 Beitritten) — auffällig hoch. Die Analyse zeigt: das sind fast ausschließlich Beitritte von *bevor* der Bot überhaupt erfassen konnte, woher jemand kam. Die Quellen-Erkennung (welche Einladung wurde benutzt) ging erst am 18.02.2026 live; alles davor wurde pauschal „unbekannt" gestempelt. Diese Quelle lässt sich rückwirkend nicht rekonstruieren — sie wurde damals nirgends festgehalten, und Discord verrät selbst im Nachhinein nicht, über welche Einladung jemand kam.

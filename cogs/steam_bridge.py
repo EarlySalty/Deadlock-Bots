@@ -458,18 +458,23 @@ async def _render_response(
                     style=btn_style,
                 ))
 
+    # discord.py erwartet MISSING (nicht None) als "kein View". view=None löst
+    # sonst einen TypeError aus und die Antwort geht nie raus — betraf alle
+    # Button-losen Antworten wie /checkrank, /steam_rank, whoami, Admin-Syncs.
+    view_arg = view if view is not None else discord.utils.MISSING
+
     if already_deferred:
         await interaction.followup.send(
             content=reply_text,
             embed=embed,
-            view=view,
+            view=view_arg,
             ephemeral=ephemeral,
         )
     else:
         await interaction.response.send_message(
             content=reply_text,
             embed=embed,
-            view=view,
+            view=view_arg,
             ephemeral=ephemeral,
         )
 
