@@ -1,3 +1,11 @@
+## #144 — Master-Broker kann jetzt Discord-Rollen anlegen
+
+**Ausgangslage:** Andere Bots im Verbund (z. B. der Twitch-Bot) haben keinen eigenen Discord-Zugang — sie lassen alle Discord-Aktionen über den zentralen Master-Broker laufen. Der konnte Mitglieder zu bestehenden Rollen hinzufügen, aber keine neue Rolle erstellen. Für die automatische Anlage der Twitch-„ist live"-Ping-Rolle fehlte genau das.
+
+**Was geändert wurde:** Der Broker hat einen neuen internen Endpunkt, der eine neue, erwähnbare Rolle in der Guild anlegt und ihre ID zurückgibt.
+
+**Wie es funktioniert:** Der aufrufende Bot schickt Guild, Rollenname und einen Audit-Grund. Der Broker sucht zuerst (best effort) eine gleichnamige Rolle, um Duplikate zu vermeiden, und legt nur sonst eine neue an. Der Endpunkt ist wie alle Broker-Aktionen nur lokal erreichbar (Loopback + interner Token) und gegen doppelte Aufrufe abgesichert. Voraussetzung ist, dass der Bot in der Guild die Berechtigung „Rollen verwalten" hat — fehlt sie, meldet Discord einen Fehler, der sauber durchgereicht wird.
+
 ## #143 — Moderation greift wieder durch + TempVoice-Eingabefenster reagieren
 
 **Problem:** Zwei Cutover-Regressionen. (1) Die Moderations-Review-Knöpfe (Annehmen / Bannen / Ablehnen), mit denen das Team einen automatisch erkannten Scam-/Spam-Fall bestätigt, **führten gar keine Aktion mehr aus** — sie setzten nur intern einen Status, löschten aber die Nachricht nicht, timeouteten/bannten den Account nicht und schrieben kein Aktions-Log. Ein bestätigter Fall blieb faktisch folgenlos. Zusätzlich behandelte der automatische Account-Takeover-Schutz (Account postet in Sekunden Bilder über mehrere Kanäle = typisches Hack-Muster) den Fall als **harten Ban** statt als reversible Maßnahme. (2) Im TempVoice-Panel reagierten die Eingabefenster **Limit setzen**, **Lane umbenennen** und **Preset speichern** nicht — egal was man eintippte, kam nur „Bitte … eingeben".
