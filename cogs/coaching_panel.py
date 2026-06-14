@@ -169,18 +169,17 @@ class CoachingPanelCog(commands.Cog):
             name="📋 Ablauf",
             value=(
                 "1. Formular ausfüllen\n"
-                "2. AI analysiert deine Anfrage\n"
-                "3. Du bekommst die Coaching-Rolle\n"
-                "4. Ein Coach meldet sich bei dir"
+                "2. Du bekommst die Coaching-Rolle\n"
+                "3. Ein Coach meldet sich bei dir"
             ),
             inline=False,
         )
         embed.add_field(
-            name="❓ Noch Fragen zum Coaching?",
+            name="❓ Fragen zum Coaching?",
             value=(
-                "Stell sie öffentlich in <#1426220702054355077> statt per DM. "
-                "So sehen alle die Antwort – und andere mit dem gleichen Thema "
-                "lernen direkt mit."
+                "Hau sie einfach in <#1426220702054355077> raus statt per DM. "
+                "Dann sehen alle die Antwort und andere mit dem gleichen Thema "
+                "lesen direkt mit."
             ),
             inline=False,
         )

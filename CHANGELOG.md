@@ -2,9 +2,9 @@
 
 **Ausgangslage:** Im Coaching-Panel stand zwar schon die Regel „keine DMs/Freundschaftsanfragen an die Coaches", trotzdem landeten Follow-up-Fragen rund ums Coaching regelmäßig als DM. Die Antwort blieb dann bei einer Person hängen — andere mit demselben Anliegen hatten nichts davon, und Leute mit hilfreichem Input wurden gar nicht erst erreicht.
 
-**Was wurde geändert:** Das Coaching-Panel hat ein zusätzliches Feld bekommen, das für Fragen zum Coaching auf einen eigenen, öffentlichen Fragen-Channel verweist — statt auf DMs.
+**Was wurde geändert:** Das Coaching-Panel hat ein zusätzliches Feld bekommen, das für Fragen zum Coaching auf einen eigenen, öffentlichen Fragen-Channel verweist — statt auf DMs. Außerdem ist die Ablauf-Übersicht entschlackt: der interne Zwischenschritt „KI sortiert die Anfrage vor" wird nicht mehr aufgeführt, sodass nur die für Nutzer relevanten Schritte übrig bleiben.
 
-**Wie es jetzt funktioniert:** Unter dem Ablauf zeigt das Panel jetzt einen anklickbaren Verweis auf den Fragen-Channel. Wer etwas wissen will, fragt dort öffentlich; so sehen alle die Antwort und andere mit demselben Thema lesen direkt mit. Technisch ist es nur ein neues Feld im bestehenden Panel-Embed — der Bot pflegt es beim Start automatisch in die schon gepostete Panel-Nachricht ein, es entsteht also kein zweiter Post.
+**Wie es jetzt funktioniert:** Unter dem Ablauf zeigt das Panel jetzt einen anklickbaren Verweis auf den Fragen-Channel. Wer etwas wissen will, fragt dort öffentlich; so sehen alle die Antwort und andere mit demselben Thema lesen direkt mit. Der Ablauf nennt nur noch die drei sichtbaren Schritte — Formular ausfüllen, Coaching-Rolle bekommen, Coach meldet sich. Technisch ist beides nur Text im bestehenden Panel-Embed — der Bot pflegt es beim Start automatisch in die schon gepostete Panel-Nachricht ein, es entsteht also kein zweiter Post.
 
 ## #132 — Support-Bot im Ticket: hilft bei Problemen, hält sich aus Streit raus
 
