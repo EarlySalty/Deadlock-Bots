@@ -658,6 +658,138 @@ impl TournamentStore {
             .flatten()
     }
 
+    /// Zusammenfassung der Anmeldungen/Teams (wie `summary_async`).
+    pub async fn summary(&self, guild_id: u64) -> Result<serde_json::Value, DbError> {
+        self.db
+            .read(move |conn| {
+                let (signups_total, solo, team, unassigned): (i64, i64, i64, i64) = conn
+                    .query_row(
+                        "SELECT COUNT(*),
+                                COALESCE(SUM(CASE WHEN registration_mode = 'solo' THEN 1 ELSE 0 END), 0),
+                                COALESCE(SUM(CASE WHEN registration_mode = 'team' THEN 1 ELSE 0 END), 0),
+                                COALESCE(SUM(CASE WHEN registration_mode = 'solo' AND team_id IS NULL THEN 1 ELSE 0 END), 0)
+                         FROM customgames_tournament_signups WHERE guild_id = ?1",
+                        [guild_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                    )?;
+                let teams_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM customgames_tournament_teams WHERE guild_id = ?1",
+                    [guild_id],
+                    |r| r.get(0),
+                )?;
+                Ok(serde_json::json!({
+                    "signups_total": signups_total,
+                    "solo_count": solo,
+                    "team_count": team,
+                    "unassigned_solo": unassigned,
+                    "teams_count": teams_count,
+                }))
+            })
+            .await
+    }
+
+    /// Alle Perioden einer Gilde, neueste zuerst (wie `list_periods_async`).
+    pub async fn list_periods(&self, guild_id: u64) -> Result<Vec<serde_json::Value>, DbError> {
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT id, guild_id, name, registration_start, registration_end,
+                            is_active, created_at
+                     FROM tournament_periods WHERE guild_id = ?1 ORDER BY id DESC",
+                )?;
+                let rows = stmt
+                    .query_map([guild_id], |row| {
+                        Ok(serde_json::json!({
+                            "id": row.get::<_, i64>(0)?,
+                            "guild_id": row.get::<_, i64>(1)?,
+                            "name": row.get::<_, String>(2)?,
+                            "registration_start": row.get::<_, String>(3)?,
+                            "registration_end": row.get::<_, String>(4)?,
+                            "is_active": row.get::<_, i64>(5)?,
+                            "created_at": row.get::<_, Option<String>>(6)?,
+                        }))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await
+    }
+
+    /// Deaktiviert eine Periode per ID (wie `close_period_async`). `false`, wenn
+    /// sie nicht existiert.
+    pub async fn close_period(&self, guild_id: u64, period_id: i64) -> Result<bool, DbError> {
+        self.db
+            .write(move |conn| {
+                let exists = conn
+                    .query_row(
+                        "SELECT 1 FROM tournament_periods WHERE guild_id = ?1 AND id = ?2",
+                        rusqlite::params![guild_id, period_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !exists {
+                    return Ok(false);
+                }
+                conn.execute(
+                    "UPDATE tournament_periods SET is_active = 0 WHERE guild_id = ?1 AND id = ?2",
+                    rusqlite::params![guild_id, period_id],
+                )?;
+                Ok(true)
+            })
+            .await
+    }
+
+    /// Löscht ein Team und hängt seine Anmeldungen ab (wie `delete_team_async`).
+    /// `false`, wenn das Team nicht existiert.
+    pub async fn delete_team(&self, guild_id: u64, team_id: i64) -> Result<bool, DbError> {
+        self.db
+            .write(move |conn| {
+                let exists = conn
+                    .query_row(
+                        "SELECT 1 FROM customgames_tournament_teams WHERE guild_id = ?1 AND id = ?2",
+                        rusqlite::params![guild_id, team_id],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+                if !exists {
+                    return Ok(false);
+                }
+                // Anmeldungen zuerst abhängen (SQLite-FK nicht garantiert).
+                conn.execute(
+                    "UPDATE customgames_tournament_signups SET team_id = NULL
+                     WHERE guild_id = ?1 AND team_id = ?2",
+                    rusqlite::params![guild_id, team_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM customgames_tournament_teams WHERE guild_id = ?1 AND id = ?2",
+                    rusqlite::params![guild_id, team_id],
+                )?;
+                Ok(true)
+            })
+            .await
+    }
+
+    /// Löscht alle Anmeldungen einer Gilde, liefert die Anzahl (wie
+    /// `clear_all_signups_async`).
+    pub async fn clear_all_signups(&self, guild_id: u64) -> Result<i64, DbError> {
+        self.db
+            .write(move |conn| {
+                let count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM customgames_tournament_signups WHERE guild_id = ?1",
+                    [guild_id],
+                    |r| r.get(0),
+                )?;
+                conn.execute(
+                    "DELETE FROM customgames_tournament_signups WHERE guild_id = ?1",
+                    [guild_id],
+                )?;
+                Ok(count)
+            })
+            .await
+    }
+
     /// Einmal-Token für die Turnier-Website (TTL Sekunden).
     pub async fn create_auth_token(
         &self,
@@ -835,5 +967,51 @@ mod tests {
         // abgelaufener Token
         let expired = store.create_auth_token(200, "Ben", -1.0).await;
         assert_eq!(store.consume_auth_token(&expired).await, None);
+    }
+
+    #[tokio::test]
+    async fn admin_methoden() {
+        let (_dir, store) = store().await;
+        // Perioden: anlegen, listen, schliessen.
+        let p1 = store
+            .create_period(1, "Cup #1", "2026-06-01", "2026-06-15", 6, None)
+            .await
+            .expect("p1");
+        store
+            .create_period(1, "Cup #2", "2026-07-01", "2026-07-15", 4, None)
+            .await
+            .expect("p2");
+        let periods = store.list_periods(1).await.expect("list");
+        assert_eq!(periods.len(), 2);
+        // neueste zuerst (Cup #2), nur sie ist aktiv
+        assert_eq!(periods[0]["name"], "Cup #2");
+        assert_eq!(periods[0]["is_active"], 1);
+        assert_eq!(periods[1]["is_active"], 0);
+        // schliessen: existierend → true, dann inaktiv; unbekannt → false
+        assert!(store.close_period(1, p1).await.expect("close"));
+        assert!(!store.close_period(1, 9999).await.expect("close"));
+
+        // Team anlegen + löschen (Anmeldung wird abgehängt).
+        let team = store
+            .get_or_create_team(1, "Alpha", None)
+            .await
+            .expect("team");
+        store
+            .upsert_signup(1, 100, "team", "phantom", 0, Some(team.id), false, None)
+            .await
+            .expect("signup");
+        assert!(store.delete_team(1, team.id).await.expect("delete"));
+        assert!(!store.delete_team(1, team.id).await.expect("delete")); // schon weg
+                                                                        // Signup existiert noch, aber ohne Team.
+        let sg = store.get_signup(1, 100).await.expect("signup da");
+        assert!(sg.team_id.is_none());
+
+        // summary + clear.
+        let summary = store.summary(1).await.expect("summary");
+        assert_eq!(summary["signups_total"], 1);
+        assert_eq!(summary["teams_count"], 0);
+        let cleared = store.clear_all_signups(1).await.expect("clear");
+        assert_eq!(cleared, 1);
+        assert_eq!(store.summary(1).await.expect("s")["signups_total"], 0);
     }
 }
