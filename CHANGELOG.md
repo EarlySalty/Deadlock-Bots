@@ -1,3 +1,15 @@
+## #153 — Zwei weitere Statistik-Befehle zurück: Member-Events & Ping-Check
+
+**Problem:** Beim Wiederherstellen der Statistik-Befehle (#152) standen noch zwei weitere Befehle aus den alten Cogs aus, die ebenfalls seit dem Rust-Umbau fehlten: die persönliche Event-Historie eines Mitglieds und der Ping-Eignungs-Check.
+
+**Was wurde geändert:** Zwei zusätzliche Prefix-Befehle sind zurück:
+- `!memberevents` / `!mevents [@User] [Anzahl]` — listet die letzten Server-Events eines Mitglieds (Beitritt, Verlassen, Bann, Entbannung).
+- `!checkping [@User]` — prüft, ob ein Mitglied gepingt werden dürfte, und nennt den Grund.
+
+**Wie es jetzt funktioniert:** `!memberevents` zeigt die neuesten Events zuerst (Standard 10, maximal 50), jeweils mit Symbol, Typ und Zeitpunkt; ohne Daten kommt ein kurzer Hinweis. `!checkping` wertet dieselben Kriterien wie früher aus (Aktivität der letzten zwei Wochen, typische Online-Zeiten ± zwei Stunden, passender Wochentag, Ping-Rate-Limit) und meldet „kann/kann nicht gepingt werden" samt Begründung. Beide stehen allen offen. Hinweis: Der Versand-Teil des Ping-Systems (aktives Anschreiben inaktiver Mitglieder) ist weiterhin nicht portiert — `!checkping` ist reine Anzeige; die Rate-Limit-Begründung greift daher praktisch nicht.
+
+**Betroffen:** Alle Mitglieder (beide Befehle wieder abrufbar).
+
 ## #152 — Statistik-Befehle sind zurück
 
 **Problem:** Seit dem Rust-Umbau fehlten sämtliche Statistik-Befehle. Voice- und Text-Aktivität wurde im Hintergrund weiter gesammelt, war für Mitglieder aber nirgends abrufbar — weder die persönlichen Werte noch die Bestenlisten. Die Annahme, ein Web-Dashboard ersetze das, trug nicht: Die zugehörige Web-Anzeige läuft derzeit nicht, die Statistik-Anzeige war damit faktisch tot.

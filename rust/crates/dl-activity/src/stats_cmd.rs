@@ -11,7 +11,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use chrono::NaiveDateTime;
+use chrono::{Datelike, NaiveDateTime, Timelike};
 use dl_db::Db;
 use dl_discord::{ChannelSender, Dispatcher};
 use rusqlite::OptionalExtension;
@@ -88,6 +88,27 @@ fn day_name(d: i64) -> Option<&'static str> {
     usize::try_from(d).ok().and_then(|i| DAY_NAMES.get(i).copied())
 }
 
+/// Python-`repr` einer Integer-Liste: `[20, 21, 19]`.
+fn py_list_ints(v: &[i64]) -> String {
+    let inner = v
+        .iter()
+        .map(|n| n.to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{inner}]")
+}
+
+/// Python-`repr` der Wochentag-Namensliste: `['Mo', 'Di']` (einfache Quotes).
+fn py_list_day_names(v: &[i64]) -> String {
+    let inner = v
+        .iter()
+        .filter_map(|d| day_name(*d))
+        .map(|n| format!("'{n}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{inner}]")
+}
+
 /// JSON-Array (`"[20, 21]"`) → `Vec<i64>` (leer bei NULL/Parsefehler).
 fn parse_json_ints(raw: &Option<String>) -> Vec<i64> {
     raw.as_deref()
@@ -135,6 +156,14 @@ struct PatternFull {
     last_active: Option<String>,
     ping_count: i64,
     last_pinged: Option<String>,
+}
+
+struct PingPatternRow {
+    hours: Option<String>,
+    days: Option<String>,
+    score: i64,
+    last_pinged: Option<String>,
+    ping_count: i64,
 }
 
 /// Handgeschriebene Reads gegen die geteilten SQLite-Tabellen — es gibt keine
@@ -340,6 +369,56 @@ impl ActivityStatsStore {
             .flatten()
     }
 
+    /// Letzte Events eines Users (neueste zuerst): `(event_type, timestamp)`.
+    /// `display_name` wird mitselektiert (Query-Form wie im Original), aber im
+    /// Output nicht genutzt. `limit` geht roh in `LIMIT` (SQLite: 0 = keine
+    /// Zeilen, negativ = kein Limit) — der Aufrufer klemmt vorher auf 50.
+    async fn member_events_recent(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        limit: i64,
+    ) -> Vec<(String, Option<String>)> {
+        self.db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT event_type, timestamp, display_name FROM member_events \
+                     WHERE user_id = ?1 AND guild_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
+                )?;
+                let rows = stmt.query_map(rusqlite::params![user_id, guild_id, limit], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+    }
+
+    async fn ping_pattern(&self, user_id: u64) -> Option<PingPatternRow> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT typical_hours, typical_days, activity_score_2w, \
+                     last_pinged_at, ping_count_30d \
+                     FROM user_activity_patterns WHERE user_id = ?1",
+                    [user_id],
+                    |r| {
+                        Ok(PingPatternRow {
+                            hours: r.get(0)?,
+                            days: r.get(1)?,
+                            score: r.get::<_, i64>(2)?,
+                            last_pinged: r.get(3)?,
+                            ping_count: r.get::<_, i64>(4)?,
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
     async fn server_event_counts(&self, guild_id: u64) -> Vec<(String, i64)> {
         self.db
             .read(move |conn| {
@@ -436,6 +515,10 @@ impl ActivityStatsCommands {
             "!messagestats" | "!msgstats" => {
                 Some(self.messagestats(content, guild_id, author_id).await)
             }
+            "!memberevents" | "!mevents" => {
+                Some(self.memberevents(content, guild_id, author_id).await)
+            }
+            "!checkping" => Some(self.checkping(content, author_id).await),
             // !serverstats braucht im Original Manage-Server; hier auf Admin
             // (das einzige im Event verfügbare Permission-Signal) gegated.
             // Nicht-Admins werden still ignoriert (kein Reply, wie bei rank/nudge).
@@ -724,6 +807,135 @@ impl ActivityStatsCommands {
         }))
     }
 
+    async fn memberevents(&self, content: &str, guild_id: u64, author_id: u64) -> StatsReply {
+        // Args: optionale Mention (Ziel) + optionaler Integer (limit, Default 10).
+        // Eine reine Zahl ist immer das Limit (nicht als User-ID gedeutet),
+        // damit `!memberevents 25` nicht fälschlich als Ziel-ID zählt.
+        let mut target: Option<u64> = None;
+        let mut limit: i64 = 10;
+        for tok in content.split_whitespace().skip(1) {
+            if tok.starts_with("<@") {
+                if let Some(uid) = parse_target(tok) {
+                    target = Some(uid);
+                }
+            } else if let Ok(n) = tok.parse::<i64>() {
+                limit = n;
+            }
+        }
+        let target = target.unwrap_or(author_id);
+        let name = self.resolve_one(target).await;
+
+        // Query klemmt auf 50; der Footer zeigt das ROHE limit (Original-Diskrepanz).
+        let events = self
+            .store
+            .member_events_recent(target, guild_id, limit.min(50))
+            .await;
+        if events.is_empty() {
+            return StatsReply::text(format!("❌ Keine Events für {name} gefunden."));
+        }
+        let mut description = String::new();
+        for (event_type, timestamp) in &events {
+            let icon = match event_type.as_str() {
+                "join" => "➕",
+                "leave" => "➖",
+                "ban" => "🔨",
+                "unban" => "✅",
+                _ => "•",
+            };
+            description.push_str(&format!(
+                "{icon} **{}** - {}\n",
+                event_type.to_uppercase(),
+                left_or_unknown(timestamp, 16)
+            ));
+        }
+        StatsReply::embed(json!({
+            "title": format!("📋 Member-Events - {name}"),
+            "color": 0x3498DB,
+            "description": description,
+            "footer": { "text": format!("Zeige {} von max {} Events", events.len(), limit) }
+        }))
+    }
+
+    /// Ping-Eligibility-Check (read-only, Port von `should_ping_user` +
+    /// `check_ping_command`). Nur Lesepfad; das Senden/Zählen (`record_ping`,
+    /// Smart-Ping) ist im Rust-Bot nicht portiert, daher greifen die
+    /// Rate-Limit-/„Zu früh"-Zweige in der Praxis nicht (ping_count=0/NULL).
+    async fn checkping(&self, content: &str, author_id: u64) -> StatsReply {
+        let target = first_target(content).unwrap_or(author_id);
+        let name = self.resolve_one(target).await;
+        let (can_ping, reason) = self.ping_eligibility(target).await;
+        StatsReply::embed(json!({
+            "title": format!("🔔 Ping-Check - {name}"),
+            "color": if can_ping { 0x2ECC71 } else { 0xE74C3C },
+            "fields": [
+                { "name": "Status", "value": if can_ping { "✅ Kann gepingt werden" } else { "❌ Kann nicht gepingt werden" }, "inline": false },
+                { "name": "Grund", "value": reason, "inline": false }
+            ]
+        }))
+    }
+
+    /// `(can_ping, reason)` — byte-genauer Port der Prüfreihenfolge aus
+    /// `should_ping_user` (max 3/30d, ≥24h seit letztem Ping, ≥5 Sessions/2W,
+    /// ±2h-Zeitfenster mit Wrap, optionaler Wochentag).
+    async fn ping_eligibility(&self, user_id: u64) -> (bool, String) {
+        let Some(p) = self.store.ping_pattern(user_id).await else {
+            return (false, "Keine Aktivitätsdaten vorhanden".to_string());
+        };
+        let max_pings_30d = 3;
+        if p.ping_count >= max_pings_30d {
+            return (
+                false,
+                format!("Rate-Limit erreicht ({}/{} in 30d)", p.ping_count, max_pings_30d),
+            );
+        }
+        if let Some(last) = p.last_pinged.as_deref().filter(|s| !s.is_empty()) {
+            if let Some(parsed) = parse_dt(last) {
+                let since = chrono::Utc::now()
+                    .naive_utc()
+                    .signed_duration_since(parsed)
+                    .num_seconds();
+                if since < 86400 {
+                    let hours_remaining = (86400 - since) as f64 / 3600.0;
+                    return (
+                        false,
+                        format!("Zu früh (noch {hours_remaining:.1}h bis nächster Ping)"),
+                    );
+                }
+            }
+        }
+        if p.score < 5 {
+            return (false, format!("User zu inaktiv (nur {} Sessions in 2W)", p.score));
+        }
+        let now = chrono::Utc::now().naive_utc();
+        let current_hour = now.hour() as i64;
+        let current_day = now.weekday().num_days_from_monday() as i64;
+        let typical_hours = parse_json_ints(&p.hours);
+        let typical_days = parse_json_ints(&p.days);
+        let hour_match = typical_hours.iter().any(|h| {
+            let diff = (current_hour - h).abs();
+            diff <= 2 || diff >= 22
+        });
+        if !hour_match {
+            return (
+                false,
+                format!(
+                    "Außerhalb typischer Online-Zeiten (typisch: {}h)",
+                    py_list_ints(&typical_hours)
+                ),
+            );
+        }
+        if !typical_days.is_empty() && !typical_days.contains(&current_day) {
+            return (
+                false,
+                format!(
+                    "Unpassender Wochentag (typisch: {})",
+                    py_list_day_names(&typical_days)
+                ),
+            );
+        }
+        (true, "OK - User kann gepingt werden".to_string())
+    }
+
     async fn serverstats(&self, guild_id: u64) -> StatsReply {
         let mut fields: Vec<Value> = Vec::new();
 
@@ -850,6 +1062,15 @@ mod tests {
         assert_eq!(day_name(6), Some("So"));
         assert_eq!(day_name(7), None);
         assert_eq!(day_name(-1), None);
+    }
+
+    #[test]
+    fn py_list_repr_byte_genau() {
+        assert_eq!(py_list_ints(&[20, 21, 19]), "[20, 21, 19]");
+        assert_eq!(py_list_ints(&[]), "[]");
+        assert_eq!(py_list_day_names(&[0, 1]), "['Mo', 'Di']");
+        assert_eq!(py_list_day_names(&[6]), "['So']");
+        assert_eq!(py_list_day_names(&[]), "[]");
     }
 
     #[test]
