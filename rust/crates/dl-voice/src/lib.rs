@@ -16,6 +16,7 @@ pub mod nudge;
 pub mod rank;
 pub mod rename_queue;
 pub mod router;
+pub mod stats;
 pub mod status;
 pub mod tempvoice;
 pub mod tracker;

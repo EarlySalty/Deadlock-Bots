@@ -1,3 +1,20 @@
+## #152 — Statistik-Befehle sind zurück
+
+**Problem:** Seit dem Rust-Umbau fehlten sämtliche Statistik-Befehle. Voice- und Text-Aktivität wurde im Hintergrund weiter gesammelt, war für Mitglieder aber nirgends abrufbar — weder die persönlichen Werte noch die Bestenlisten. Die Annahme, ein Web-Dashboard ersetze das, trug nicht: Die zugehörige Web-Anzeige läuft derzeit nicht, die Statistik-Anzeige war damit faktisch tot.
+
+**Was wurde geändert:** Sieben Befehle sind zurück und verhalten sich wie früher:
+- `!vstats [@User]` — persönliche Voice-Statistik (Gesamtzeit, Punkte, laufende Session, Grace-Rolle)
+- `!vleaderboard` / `!vlb` / `!voicetop` — Voice-Bestenliste (Top 10)
+- `!useranalysis` / `!ua` / `!analyze [@User]` — Aktivitäts-Analyse (Server-History, Voice, Nachrichten, Top-Mitspieler, Muster)
+- `!myactivity [@User]` — eigenes Aktivitätsmuster der letzten zwei Wochen
+- `!tleaderboard` / `!tlb` / `!texttop` — Text-Bestenliste (Top 10)
+- `!messagestats` / `!msgstats [@User]` — Nachrichten-Statistik
+- `!serverstats` — Server-Gesamtübersicht (nur Admins)
+
+**Wie es jetzt funktioniert:** Die Befehle stehen allen offen; nur die Server-Übersicht verlangt Admin-Rechte (Nicht-Berechtigte werden still ignoriert). Bestenlisten zeigen die Top 10 nach Punkten, mit Sekunden bzw. Nachrichten als Gleichstand-Kriterium, und im Fußzeilen-Text die eigene Platzierung. Die persönliche Voice-Statistik rechnet eine gerade laufende Voice-Session live dazu. Die Voice-Abfragen sind gegen Spam begrenzt (höchstens fünf Anfragen pro 30 Sekunden je Nutzer; danach ein kurzer Hinweis mit Restzeit). Namen, Rollen und Server-Name kommen aus dem Gateway-Cache; Zahlen sind wie im Original formatiert (Bestenlisten mit Punkt-Tausendertrennung, Nachrichten-/Server-Werte mit Komma).
+
+**Betroffen:** Alle Mitglieder (Statistiken und Bestenlisten wieder abrufbar) sowie Admins (Server-Übersicht).
+
 ## #151 — Regelwerk-Panel lässt sich wieder posten
 
 **Problem:** Seit dem Rust-Umbau fehlte der Admin-Befehl, mit dem das Regelwerk-Panel im Regel-Kanal gesetzt wird. Dieses Panel mit dem „Hier starten"-Button ist der Einstiegspunkt ins geführte Onboarding — ohne den Befehl ließ es sich nach Änderungen nicht neu posten.

@@ -1,10 +1,13 @@
 //! Gateway-Cache-Anbindung des Aktivitäts-Analyzers.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use dl_discord::DiscordAdapter;
+use serenity::all::{GuildId, UserId};
 
 use crate::analyzer::VoiceGroups;
+use crate::stats_cmd::NamePort;
 
 pub struct CacheVoiceGroups {
     pub adapter: Arc<DiscordAdapter>,
@@ -38,5 +41,38 @@ impl VoiceGroups for CacheVoiceGroups {
             groups.extend(per_channel.into_values().filter(|g| g.len() >= 2));
         }
         groups
+    }
+}
+
+/// Namens-/Guild-Auflösung für die Aktivitäts-/Text-Stats-Befehle.
+pub struct StatsNames {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl NamePort for StatsNames {
+    async fn resolve_names(&self, user_ids: &[u64]) -> HashMap<u64, String> {
+        let mut out = HashMap::new();
+        let guilds = self.adapter.cache().guilds();
+        for &user_id in user_ids {
+            let target = UserId::new(user_id);
+            for gid in &guilds {
+                let Some(guild) = self.adapter.cache().guild(*gid) else {
+                    continue;
+                };
+                if let Some(member) = guild.members.get(&target) {
+                    out.insert(user_id, member.display_name().to_string());
+                    break; // erste Fundstelle genügt
+                }
+            }
+        }
+        out
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> Option<String> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|g| g.name.clone())
     }
 }

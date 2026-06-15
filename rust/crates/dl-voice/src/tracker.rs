@@ -207,6 +207,25 @@ impl VoiceTracker {
         cfg
     }
 
+    /// Laufende (Live-)Session eines Users in einer Guild, falls vorhanden:
+    /// `(live_secs, peak_users)`. `live_secs` = Sekunden seit Session-Start
+    /// (>=0), `peak_users` analog zu Pythons `peak_users or 1` mindestens 1.
+    /// Basis für die Live-Felder von `!vstats`.
+    pub async fn live_session(&self, user_id: u64, guild_id: u64) -> Option<(i64, i64)> {
+        let state = self.state.lock().await;
+        let session = state.sessions.get(&(user_id, guild_id))?;
+        let live_secs = (Utc::now().naive_utc() - session.start_time)
+            .num_seconds()
+            .max(0);
+        Some((live_secs, session.peak_users.max(1)))
+    }
+
+    /// Konfigurierte Grace-/Spezialrolle der Guild (für die Grace-Anzeige in
+    /// `!vstats`). Geht über denselben Cache wie [`Self::config`].
+    pub async fn special_role_id(&self, guild_id: u64) -> u64 {
+        self.config(guild_id).await.special_role_id
+    }
+
     async fn is_opted_out(&self, user_id: u64) -> bool {
         self.db
             .read(move |conn| {

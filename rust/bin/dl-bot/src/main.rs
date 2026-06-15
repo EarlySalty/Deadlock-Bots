@@ -430,6 +430,15 @@ async fn main() -> anyhow::Result<()> {
         let voice_tracker =
             dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
+        // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
+        // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
+        // Rollen, Guild-Name). Bewusst ohne Admin-Gate (jeder darf abfragen).
+        let voice_stats = dl_voice::stats::VoiceStatsCommands::new(
+            db.clone(),
+            voice_tracker.clone(),
+            cache_snapshot.clone(),
+        );
+        dl_voice::stats::spawn_command(voice_stats, &dispatcher, adapter.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
@@ -531,6 +540,16 @@ async fn main() -> anyhow::Result<()> {
             tracing::warn!(%err, "text_stats-Schema konnte nicht angelegt werden");
         }
         dl_activity::text_stats::spawn_text_stats(text_sessions, &dispatcher);
+        // Aktivitäts-/Text-Statistik-Befehle als Prefix-Listener:
+        // !useranalysis/!ua/!analyze, !myactivity, !tleaderboard/!tlb/!texttop,
+        // !messagestats/!msgstats, !serverstats (nur Letzteres admin-gegated).
+        let activity_stats = dl_activity::stats_cmd::ActivityStatsCommands::new(
+            db.clone(),
+            Arc::new(dl_activity::glue::StatsNames {
+                adapter: adapter.clone(),
+            }),
+        );
+        dl_activity::stats_cmd::spawn_command(activity_stats, &dispatcher, adapter.clone());
         // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
         // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung)
         // + stündlicher Miss-You-Check (Embed-DM an inaktive Stamm-User).

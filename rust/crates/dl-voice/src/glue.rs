@@ -435,6 +435,47 @@ impl LanePort for CacheSnapshot {
     }
 }
 
+/// Cache-Anbindung für die Voice-Statistik-Befehle (`!vstats`/`!vleaderboard`).
+#[async_trait::async_trait]
+impl crate::stats::StatsPort for CacheSnapshot {
+    async fn resolve_names(&self, user_ids: &[u64]) -> std::collections::HashMap<u64, String> {
+        let mut out = std::collections::HashMap::new();
+        let guilds = self.adapter.cache().guilds();
+        for &user_id in user_ids {
+            let target = UserId::new(user_id);
+            for gid in &guilds {
+                let Some(guild) = self.adapter.cache().guild(*gid) else {
+                    continue;
+                };
+                if let Some(member) = guild.members.get(&target) {
+                    out.insert(user_id, member.display_name().to_string());
+                    break; // erste Fundstelle genügt (wie resolve_names)
+                }
+            }
+        }
+        out
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn guild_name(&self, guild_id: u64) -> Option<String> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|g| g.name.clone())
+    }
+}
+
 /// Nudge-Anbindung: Cache + REST + Steam-Bot-Client.
 pub struct NudgeGlue {
     pub adapter: Arc<DiscordAdapter>,
