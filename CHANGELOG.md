@@ -1,3 +1,13 @@
+## #151 — Regelwerk-Panel lässt sich wieder posten
+
+**Problem:** Seit dem Rust-Umbau fehlte der Admin-Befehl, mit dem das Regelwerk-Panel im Regel-Kanal gesetzt wird. Dieses Panel mit dem „Hier starten"-Button ist der Einstiegspunkt ins geführte Onboarding — ohne den Befehl ließ es sich nach Änderungen nicht neu posten.
+
+**Was wurde geändert:** Der Admin-Befehl ist zurück. Er postet das Regelwerk-Embed samt „Hier starten"-Button — Text, Farbe und Button wortgleich zur bisherigen Fassung.
+
+**Wie es jetzt funktioniert:** Ein Admin ruft den Befehl auf; das Panel landet im fest hinterlegten Regel-Kanal — genau wie im Original, das immer diesen Kanal bedient, unabhängig davon, wo der Befehl ausgelöst wird. Der „Hier starten"-Button öffnet weiterhin den privaten Onboarding-Thread. In einer DM (außerhalb eines Servers) lehnt der Befehl mit einem kurzen Hinweis ab.
+
+**Betroffen:** Admins (Panel wieder setzbar) und neue Mitglieder (Onboarding-Einstieg bleibt erreichbar).
+
 ## #150 — Bild-Moderation: reine Bild-Nachrichten werden wieder geprüft
 
 **Problem:** Die KI-Moderation bewertete bisher nur den Text einer Nachricht. Eine Nachricht ganz ohne Text — nur mit einem Bild-Anhang — wurde komplett übersprungen. Damit rutschte rein bildbasierter Scam (gefälschte Krypto-Auszahlungen, Casino-/Wett-Promos, Promo-Codes) und bildbasiertes NSFW durch die automatische Erkennung. Auch der Account-Takeover-Alarm (verdächtige Bild-Flut über mehrere Kanäle in Sekunden) lieferte den Mods keinerlei Bild-Einschätzung mehr, sondern nur den deterministischen Muster-Treffer.

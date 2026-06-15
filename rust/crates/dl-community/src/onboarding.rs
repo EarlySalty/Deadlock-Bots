@@ -19,7 +19,9 @@
 
 use std::sync::Arc;
 
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
+};
 use serde_json::{json, Value};
 
 pub const RULES_CHANNEL_ID: u64 = 1315684135175716975;
@@ -126,6 +128,38 @@ pub fn next_step_index(current: usize, is_streamer: bool) -> usize {
     next.min(steps().len() - 1)
 }
 
+/// Regelwerk-/Onboarding-Panel-Embed (Text byte-genau aus
+/// `cogs/rules_channel.py::publish_rules_panel`).
+pub fn build_panel_embed() -> Value {
+    json!({
+        "title": "📜 Regelwerk · Deutsche Deadlock Community",
+        "description":
+            "### Neu hier? Klick auf **Hier starten ➤**\n\
+             und wir erklären dir alles in 5 Minuten.\n\n\n\
+             **Verhalten**\n\
+             - Respekt gegenüber allen – keine Beleidigungen, Diskriminierung oder persönlichen Angriffe\n\
+             - Keine Hassrede, kein NSFW, kein Spam, keine Fremdwerbung\n\
+             - Privatsphäre respektieren – keine fremden Daten posten\n\
+             - Schädliche Inhalte (Viren, IP-Grabber etc.) = sofortiger permanenter Bann\n\n\
+             **Im Spielkontext erlaubt**\n\
+             Situatives Trash Talking, Sarkasmus, Wortspiele – solange es nicht persönlich wird. \
+             Ohne nonverbale Signale kann Ton schnell schiefgehen, also vorher abchecken ob alle damit fein sind.\n\n\
+             **Universalregel:** Sei kein Arschloch 😄\n\n\
+             **Moderation**\n\
+             Probleme? @Moderator oder @Owner pingen. \
+             Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban.",
+        "color": 0x00AEEF,
+    })
+}
+
+/// Action-Row mit dem persistenten „Hier starten"-Button (`rp:panel:start`).
+pub fn build_panel_components() -> Value {
+    json!([{ "type": 1, "components": [{
+        "type": 2, "style": 1, "label": "Hier starten ➜",
+        "custom_id": "rp:panel:start",
+    }]}])
+}
+
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -208,6 +242,16 @@ impl OnboardingWizard {
             .await;
     }
 
+    /// Postet das Regelwerk-Panel (Embed + „Hier starten"-Button) in einen
+    /// Kanal — Port von `publish_rules_panel`. Das Original editiert eine feste
+    /// Panel-Message in RULES_CHANNEL_ID; hier wird stattdessen frisch dorthin
+    /// gepostet (kein hartkodierter Message-ID-Edit nötig).
+    async fn publish_panel(&self, channel_id: u64) {
+        self.port
+            .send_step(channel_id, build_panel_embed(), build_panel_components())
+            .await;
+    }
+
     /// Reagiert auf einen Rollen-Zugewinn: kam die Verified-Rolle dazu und ist
     /// ein Onboarding-Channel gemerkt, kommt die Abschluss-Nachricht.
     pub async fn handle_role_gained(&self, user_id: u64, role_ids: &[u64]) {
@@ -253,6 +297,15 @@ struct OnboardingHandler {
 impl InteractionHandler for OnboardingHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let wizard = &self.wizard;
+        // /publish_rules_panel (Admin): Panel in den festen Regelwerk-Kanal posten
+        // (wie das Python-Original, das immer RULES_CHANNEL_ID bedient).
+        if interaction.command == "publish_rules_panel" {
+            if interaction.guild_id == 0 {
+                return BridgeReply::ephemeral_text("❌ Das funktioniert nur auf dem Server.");
+            }
+            wizard.publish_panel(RULES_CHANNEL_ID).await;
+            return BridgeReply::ephemeral_text("✅ Panel gepostet.");
+        }
         if interaction.custom_id == "rp:panel:start" {
             let name = format!(
                 "Onboarding – {}",
@@ -374,6 +427,19 @@ impl InteractionHandler for OnboardingHandler {
 
 pub fn register(router: &mut InteractionRouter, wizard: Arc<OnboardingWizard>) {
     let handler = Arc::new(OnboardingHandler { wizard });
+    router.on_command(
+        "publish_rules_panel",
+        CommandSpec {
+            definition: json!({
+                "name": "publish_rules_panel",
+                "description": "(Admin) Regelwerk-Panel posten",
+                "type": 1,
+                "dm_permission": false,
+                "default_member_permissions": "8", // Administrator
+            }),
+        },
+        handler.clone(),
+    );
     router.on_custom_id("rp:panel:start", handler.clone());
     router.on_prefix("ob:", handler);
 }
@@ -448,5 +514,24 @@ mod tests {
             .as_str()
             .expect("id")
             .starts_with("ob:steam"));
+    }
+
+    #[test]
+    fn panel_embed_und_button() {
+        let embed = build_panel_embed();
+        assert!(embed["title"]
+            .as_str()
+            .expect("title")
+            .contains("Regelwerk"));
+        assert!(embed["description"]
+            .as_str()
+            .expect("desc")
+            .contains("Hier starten"));
+        assert_eq!(embed["color"].as_u64().expect("color"), 0x00AEEF);
+        let row = build_panel_components();
+        let button = &row[0]["components"][0];
+        assert_eq!(button["custom_id"].as_str().expect("id"), "rp:panel:start");
+        assert_eq!(button["label"].as_str().expect("label"), "Hier starten ➜");
+        assert_eq!(button["style"].as_u64().expect("style"), 1);
     }
 }
