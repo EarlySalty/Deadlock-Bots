@@ -1,3 +1,11 @@
+## #154 — Discord-Bot zurück auf Python
+
+**Ausgangslage:** Der Rust-Bot (`dl-bot`) deckte rund 50 % der Python-Funktionalität ab; der Rest war nicht portiert und sollte vorerst nicht nachgezogen werden.
+
+**Was wurde geändert:** `deadlock-bot.service` startet jetzt wieder über `run_bot_with_infisical.sh` statt `run_dl_bot_service.sh` — der Python-Bot (`main_bot.py`) ist damit der aktive Gateway-Owner.
+
+**Wie es jetzt läuft:** Alle 44 Cogs werden geladen; der vollständige Python-Funktionsumfang ist wieder verfügbar. Der Rust-Bot (`deadlock-bot-rust.service`) bleibt installiert, aber inaktiv.
+
 ## #153 — Zwei weitere Statistik-Befehle zurück: Member-Events & Ping-Check
 
 **Problem:** Beim Wiederherstellen der Statistik-Befehle (#152) standen noch zwei weitere Befehle aus den alten Cogs aus, die ebenfalls seit dem Rust-Umbau fehlten: die persönliche Event-Historie eines Mitglieds und der Ping-Eignungs-Check.
