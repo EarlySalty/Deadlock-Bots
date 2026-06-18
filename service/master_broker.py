@@ -17,6 +17,8 @@ from urllib.parse import urlsplit
 import discord
 from aiohttp import web
 
+from service.scam_revoke import build_scam_revoke_view
+
 logger = logging.getLogger(__name__)
 
 
@@ -959,7 +961,7 @@ class MasterBroker:
             raise ValueError("view_spec must be a JSON object")
 
         view_type = str(raw_spec.get("type") or "").strip()
-        if view_type not in {"twitch_live_tracking", "link_button"}:
+        if view_type not in {"twitch_live_tracking", "link_button", "scam_revoke"}:
             raise ValueError("view_spec.type is invalid")
 
         parsed_spec = dict(raw_spec)
@@ -972,6 +974,19 @@ class MasterBroker:
                 raise ValueError("view_spec.label exceeds Discord limit (80)")
             parsed_spec["label"] = label
             parsed_spec["url"] = cls._validate_url(str(parsed_spec.get("url") or ""))
+        elif view_type == "scam_revoke":
+            try:
+                verdict_id = int(parsed_spec.get("verdict_id"))
+            except (TypeError, ValueError):
+                raise ValueError("view_spec.verdict_id must be a positive integer") from None
+            if verdict_id <= 0:
+                raise ValueError("view_spec.verdict_id must be a positive integer")
+            parsed_spec["verdict_id"] = verdict_id
+            for field in ("channel_login", "chatter_login", "action_taken"):
+                value = str(parsed_spec.get(field) or "").strip()
+                if not value:
+                    raise ValueError(f"view_spec.{field} is required")
+                parsed_spec[field] = value
 
         return parsed_spec
 
@@ -1062,6 +1077,10 @@ class MasterBroker:
                 )
             )
             return _ResolvedBrokerView(view=view, should_register=False)
+
+        if view_type == "scam_revoke":
+            view = build_scam_revoke_view(view_spec)
+            return _ResolvedBrokerView(view=view, should_register=True)
 
         resolver = getattr(self.bot, "resolve_master_broker_view_spec", None)
         if not callable(resolver):

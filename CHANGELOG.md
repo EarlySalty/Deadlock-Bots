@@ -1,3 +1,11 @@
+## #155 — Scam-Schutz: Fehlentscheidung per Discord-Button zurücknehmen
+
+**Ausgangslage:** Der Twitch-Scam-Schutz meldet seine Aktionen (automatischer Bann oder Moderationsvorschlag) nach Discord. Eine falsch getroffene Entscheidung ließ sich von dort aber nicht direkt korrigieren — die Rücknahme ging nur über einen Chat-Befehl im jeweiligen Twitch-Kanal.
+
+**Was wurde geändert:** Die Discord-Meldungen tragen jetzt einen „Rückgängig"-Knopf. Ein Klick nimmt die gemeldete Entscheidung zurück.
+
+**Wie es jetzt läuft:** Beim Klick ruft der Discord-Bot die interne Twitch-Schnittstelle auf; dort wird — sofern ein Bann gesetzt war — entbannt und die Entscheidung als Fehlalarm vermerkt. Dieser Fehlalarm fließt in den selbstlernenden Schutz ein, der daraus lernt und ähnliche Fälle künftig seltener falsch einstuft. Nach erfolgreicher Rücknahme wird der Knopf deaktiviert und als „Zurückgenommen" angezeigt; bei einem Fehlschlag bleibt er nutzbar und es kommt ein kurzer Hinweis. Der Knopf wirkt nur bis zum nächsten Neustart des Discord-Bots — die dauerhaften Rücknahme-Wege bleiben der Chat-Befehl und (künftig) das Dashboard.
+
 ## #154 — Discord-Bot zurück auf Python
 
 **Ausgangslage:** Der Rust-Bot (`dl-bot`) deckte rund 50 % der Python-Funktionalität ab; der Rest war nicht portiert und sollte vorerst nicht nachgezogen werden.

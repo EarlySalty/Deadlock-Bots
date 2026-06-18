@@ -11,6 +11,7 @@ from service.master_broker import (
     _INTERNAL_TOKEN_HEADER,
     MasterBroker,
 )
+from service.scam_revoke import ScamRevokeView
 
 
 class _FakeRequest:
@@ -342,6 +343,94 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsInstance(registered_view, _TrackingTestView)
         self.assertEqual(registered_view.bound_channel_id, 444)
         self.assertEqual(registered_view.bound_message_id, 9876)
+
+    def _scam_spec(self, **overrides: Any) -> dict[str, Any]:
+        spec: dict[str, Any] = {
+            "type": "scam_revoke",
+            "verdict_id": 99,
+            "channel_login": "earlysalty",
+            "chatter_login": "sophiaa_star",
+            "action_taken": "banned",
+        }
+        spec.update(overrides)
+        for key, value in list(spec.items()):
+            if value is None:
+                del spec[key]
+        return spec
+
+    async def _send_scam(self, **overrides: Any):
+        channel = _FakeChannel(666)
+        bot = _FakeBot(channel=channel)
+        broker = MasterBroker(bot, token="secret-token")
+        request = _FakeRequest(
+            {
+                "channel_id": 666,
+                "embed": {"title": "Scam erkannt"},
+                "view_spec": self._scam_spec(**overrides),
+            },
+            headers=self._headers("req-scam"),
+        )
+        response = await broker._handle_send_rich_message(request)
+        return response, channel, bot
+
+    async def test_send_rich_message_builds_scam_revoke_view_and_registers(self) -> None:
+        response, channel, bot = await self._send_scam()
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(len(channel.sent_calls), 1)
+        sent_view = channel.sent_calls[0]["view"]
+        self.assertIsInstance(sent_view, ScamRevokeView)
+        self.assertEqual(sent_view.verdict_id, 99)
+        self.assertEqual(sent_view.children[0].label, "Rückgängig")
+
+        self.assertEqual(len(bot.added_views), 1)
+        registered_view, registered_message_id = bot.added_views[0]
+        self.assertIs(registered_view, sent_view)
+        self.assertEqual(registered_message_id, 4321)
+        self.assertEqual(registered_view.channel_id, 666)
+        self.assertEqual(registered_view.message_id, 4321)
+
+    async def test_send_rich_message_rejects_scam_revoke_without_verdict_id(self) -> None:
+        response, channel, bot = await self._send_scam(verdict_id=None)
+
+        self.assertEqual(response.status, 400)
+        body = self._payload(response)
+        self.assertEqual(body["error"]["code"], "bad_request")
+        self.assertIn("view_spec.verdict_id", body["error"]["message"])
+        self.assertEqual(channel.sent_calls, [])
+        self.assertEqual(bot.added_views, [])
+
+    async def test_send_rich_message_rejects_scam_revoke_non_positive_verdict_id(self) -> None:
+        response, channel, _ = await self._send_scam(verdict_id=0)
+
+        self.assertEqual(response.status, 400)
+        body = self._payload(response)
+        self.assertIn("view_spec.verdict_id", body["error"]["message"])
+        self.assertEqual(channel.sent_calls, [])
+
+    async def test_send_rich_message_rejects_scam_revoke_missing_channel_login(self) -> None:
+        response, channel, _ = await self._send_scam(channel_login=None)
+
+        self.assertEqual(response.status, 400)
+        body = self._payload(response)
+        self.assertIn("view_spec.channel_login", body["error"]["message"])
+        self.assertEqual(channel.sent_calls, [])
+
+    async def test_send_rich_message_rejects_scam_revoke_missing_chatter_login(self) -> None:
+        response, channel, _ = await self._send_scam(chatter_login=None)
+
+        self.assertEqual(response.status, 400)
+        body = self._payload(response)
+        self.assertIn("view_spec.chatter_login", body["error"]["message"])
+        self.assertEqual(channel.sent_calls, [])
+
+    async def test_send_rich_message_rejects_scam_revoke_missing_action_taken(self) -> None:
+        response, channel, _ = await self._send_scam(action_taken=None)
+
+        self.assertEqual(response.status, 400)
+        body = self._payload(response)
+        self.assertIn("view_spec.action_taken", body["error"]["message"])
+        self.assertEqual(channel.sent_calls, [])
 
     async def test_send_rich_message_rejects_invalid_view_spec_type(self) -> None:
         channel = _FakeChannel(555)
