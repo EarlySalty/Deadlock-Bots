@@ -1,3 +1,11 @@
+## #157 — Admin-Login über Haupt- und Admin-Domain stabilisiert
+
+**Ausgangslage:** Der gemeinsame Discord-Rücksprung lief auf der Hauptdomain, während beide Admin-Oberflächen anschließend auf die Admin-Subdomain wechselten. Die neue Rust-Implementierung setzte das Login-Cookie jedoch nur für die Hauptdomain. Auf der Admin-Subdomain fehlte die Session deshalb sofort wieder und der Login begann erneut.
+
+**Was wurde geändert:** Die Rust-Implementierung übernimmt jetzt das bestehende Python-Verhalten vollständig: Das Session-Cookie wird für die gemeinsame Community-Domain ausgestellt und das Rücksprungziel wird aus der fest konfigurierten öffentlichen Admin-Adresse gebildet statt aus dem eingehenden Host-Header.
+
+**Wie es jetzt läuft:** Discord meldet weiterhin ausschließlich an den registrierten Rücksprung auf der Hauptdomain zurück. Danach bleibt dieselbe Session auf der Admin-Subdomain gültig, sodass Discord- und Twitch-Admin-Dashboard ohne Auth-Schleife auf der richtigen Domain öffnen.
+
 ## #156 — member-access-Endpunkt im Python-Master-Broker hinzugefügt
 
 **Ausgangslage:** Nach dem Rollback des Discord-Bots auf Python (#154) fehlte im Python-Master-Broker der Endpunkt `/internal/master/v1/discord/member-access`. Das Rust-Dashboard (`dl-web`) benötigt diesen jedoch beim Login zur Überprüfung der Admin-Rechte und Rollen, was zu einer Endlosschleife (Auth Loop) führte.

@@ -467,7 +467,6 @@ async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Respons
 async fn login(
     State(app): State<DashboardApp>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let now = now_unix_f64();
@@ -480,24 +479,10 @@ async fn login(
     if !app.cfg().auth_enforced() {
         return redirect("/admin", None);
     }
-    let next_path_relative = auth::safe_href(
+    let next_path = public_dashboard_redirect_url(
+        app.cfg(),
         params.get("next").map(String::as_str).unwrap_or(""),
-        "/admin",
     );
-    let host = headers
-        .get(axum::http::header::HOST)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let next_path = if !host.is_empty() {
-        let proto = if headers.get("X-Forwarded-Proto").and_then(|v| v.to_str().ok()) == Some("https") {
-            "https"
-        } else {
-            "http"
-        };
-        format!("{}://{}{}", proto, host, next_path_relative)
-    } else {
-        next_path_relative
-    };
     let redirect_uri = app.cfg().discord_redirect_uri.clone();
     let state = crate::token::session_token();
     {
@@ -714,6 +699,7 @@ async fn own_login_complete(
         &session_id,
         app.cfg().session_ttl_secs,
         request_is_secure(headers, app.cfg()),
+        session_cookie_domain(&app.cfg().discord_redirect_uri).as_deref(),
     );
     redirect(
         &auth::safe_href(&login_state.next_path, "/admin"),
@@ -732,7 +718,9 @@ async fn logout(State(app): State<DashboardApp>, headers: HeaderMap) -> Response
     };
     redirect(
         &auth::safe_href(target, "/admin"),
-        Some(clear_session_cookie()),
+        Some(clear_session_cookie(
+            session_cookie_domain(&app.cfg().discord_redirect_uri).as_deref(),
+        )),
     )
 }
 
@@ -1327,17 +1315,59 @@ fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn build_session_cookie(value: &str, max_age: i64, secure: bool) -> String {
+fn session_cookie_domain(redirect_uri: &str) -> Option<String> {
+    let url = url::Url::parse(redirect_uri.trim()).ok()?;
+    let host = url.host_str()?.trim().to_ascii_lowercase();
+    if host.is_empty() || matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1") {
+        return None;
+    }
+    Some(host)
+}
+
+fn public_dashboard_redirect_url(cfg: &DashboardConfig, candidate: &str) -> String {
+    let path = auth::safe_href(candidate, "/admin");
+    let path = if path.starts_with('/') && !path.starts_with("//") {
+        path
+    } else {
+        "/admin".to_string()
+    };
+    let base = cfg
+        .public_base_url
+        .as_deref()
+        .and_then(|value| url::Url::parse(value.trim()).ok())
+        .filter(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && url.host_str().is_some()
+                && url.username().is_empty()
+                && url.password().is_none()
+        })
+        .map(|url| url.as_str().trim_end_matches('/').to_string());
+    match base {
+        Some(base) => format!("{base}{path}"),
+        None => path,
+    }
+}
+
+fn build_session_cookie(value: &str, max_age: i64, secure: bool, domain: Option<&str>) -> String {
     let mut cookie =
         format!("{SESSION_COOKIE}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}");
+    if let Some(domain) = domain.filter(|value| !value.trim().is_empty()) {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
+    }
     if secure {
         cookie.push_str("; Secure");
     }
     cookie
 }
 
-fn clear_session_cookie() -> String {
-    format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0")
+fn clear_session_cookie(domain: Option<&str>) -> String {
+    let mut cookie = format!("{SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0");
+    if let Some(domain) = domain.filter(|value| !value.trim().is_empty()) {
+        cookie.push_str("; Domain=");
+        cookie.push_str(domain);
+    }
+    cookie
 }
 
 fn request_is_secure(headers: &HeaderMap, cfg: &DashboardConfig) -> bool {
@@ -1422,13 +1452,48 @@ mod tests {
 
     #[test]
     fn cookie_bauen_und_loeschen() {
-        let secure = build_session_cookie("v", 100, true);
+        let secure = build_session_cookie("v", 100, true, Some("deutsche-deadlock-community.de"));
         assert!(secure
             .starts_with("master_dash_session=v; Path=/; HttpOnly; SameSite=Lax; Max-Age=100"));
         assert!(secure.ends_with("; Secure"));
-        let insecure = build_session_cookie("v", 100, false);
+        assert!(secure.contains("; Domain=deutsche-deadlock-community.de"));
+        let insecure = build_session_cookie("v", 100, false, None);
         assert!(!insecure.contains("Secure"));
-        assert!(clear_session_cookie().contains("Max-Age=0"));
+        assert!(!insecure.contains("Domain="));
+        let cleared = clear_session_cookie(Some("deutsche-deadlock-community.de"));
+        assert!(cleared.contains("Max-Age=0"));
+        assert!(cleared.contains("; Domain=deutsche-deadlock-community.de"));
+    }
+
+    #[test]
+    fn session_cookie_domain_folgt_python_redirect_domain() {
+        assert_eq!(
+            session_cookie_domain("https://deutsche-deadlock-community.de/callback/discord"),
+            Some("deutsche-deadlock-community.de".to_string())
+        );
+        assert_eq!(
+            session_cookie_domain("http://localhost:8766/callback/discord"),
+            None
+        );
+        assert_eq!(session_cookie_domain("not-a-url"), None);
+    }
+
+    #[test]
+    fn public_dashboard_redirect_nutzt_konfigurierte_admin_domain() {
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "MASTER_DASHBOARD_PUBLIC_URL" => {
+                Some("https://admin.deutsche-deadlock-community.de".to_string())
+            }
+            _ => None,
+        });
+        assert_eq!(
+            public_dashboard_redirect_url(&cfg, "/admin"),
+            "https://admin.deutsche-deadlock-community.de/admin"
+        );
+        assert_eq!(
+            public_dashboard_redirect_url(&cfg, "https://evil.example/path"),
+            "https://admin.deutsche-deadlock-community.de/admin"
+        );
     }
 
     #[test]
@@ -1452,7 +1517,7 @@ mod tests {
             &headers_with("x-forwarded-proto", "https, http"),
             &cfg
         ));
-        assert!(!request_is_secure(&HeaderMap::new(), &cfg));
+        assert!(request_is_secure(&HeaderMap::new(), &cfg));
     }
 
     #[test]

@@ -18,6 +18,7 @@ const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
 const DEFAULT_OAUTH_STATE_TTL_SECONDS: i64 = 21_600; // 6 Stunden
 const DEFAULT_DISCORD_REDIRECT_URI: &str =
     "https://deutsche-deadlock-community.de/callback/discord";
+const DEFAULT_PUBLIC_BASE_URL: &str = "https://admin.deutsche-deadlock-community.de";
 const DEFAULT_LISTEN_BASE_URL: &str = "http://127.0.0.1:8766";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const DEFAULT_BROKER_BASE: &str = "http://127.0.0.1:8770";
@@ -123,7 +124,10 @@ impl DashboardConfig {
             allowed_origins: get("MASTER_DASHBOARD_ALLOWED_ORIGINS")
                 .map(|v| split_csv(&v))
                 .unwrap_or_default(),
-            public_base_url: get("MASTER_DASHBOARD_PUBLIC_URL"),
+            public_base_url: Some(
+                get("MASTER_DASHBOARD_PUBLIC_URL")
+                    .unwrap_or_else(|| DEFAULT_PUBLIC_BASE_URL.to_string()),
+            ),
             listen_base_url: get("MASTER_DASHBOARD_LISTEN_URL")
                 .unwrap_or_else(|| DEFAULT_LISTEN_BASE_URL.to_string()),
             discord_api_base: get("DISCORD_API_BASE")
@@ -204,6 +208,10 @@ mod tests {
         assert_eq!(cfg.oauth_state_ttl_secs, DEFAULT_OAUTH_STATE_TTL_SECONDS);
         assert!(!cfg.auth_enforced());
         assert_eq!(cfg.discord_redirect_uri, DEFAULT_DISCORD_REDIRECT_URI);
+        assert_eq!(
+            cfg.public_base_url.as_deref(),
+            Some(DEFAULT_PUBLIC_BASE_URL)
+        );
     }
 
     #[test]
