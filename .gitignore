@@ -79,3 +79,4 @@ master_bot.pid
 master_bot.bot.pid
 .runtime/master_bot_infisical.pid
 docs/superpowers/
+.claude/worktrees/*
