@@ -26,6 +26,40 @@ except Exception:  # pragma: no cover - optional dependency
 
 log = logging.getLogger(__name__)
 
+
+def _track_minimax_usage(data: dict, *, model: str, use_token_plan: bool, purpose: str, success: bool) -> None:
+    """Schreibt einen MiniMax-Call ins gemeinsame Usage-Ledger (best-effort, wirft nie).
+
+    Liest die Token-Zahlen aus dem `usage`-Objekt der API-Antwort. Im token_plan-Modus
+    (Anthropic-Format) heissen die Felder input_tokens/output_tokens, im Standard-Modus
+    (OpenAI-Format) prompt_tokens/completion_tokens. Fehlt usage, werden 0 genommen.
+    """
+    try:
+        import sys
+        _d = os.path.expanduser("~/Documents/.claude/minimax-usage")
+        if _d not in sys.path:
+            sys.path.insert(0, _d)
+        import minimax_usage as _mmu
+
+        usage = (data or {}).get("usage") or {}
+        if use_token_plan:
+            tokens_in = usage.get("input_tokens", 0)
+            tokens_out = usage.get("output_tokens", 0)
+        else:
+            tokens_in = usage.get("prompt_tokens", 0)
+            tokens_out = usage.get("completion_tokens", 0)
+        _mmu.record(
+            source="deadlock-bots",
+            tokens_in=tokens_in,
+            tokens_out=tokens_out,
+            model=model,
+            purpose=purpose,
+            success=success,
+        )
+    except Exception:
+        pass
+
+
 # --- MiniMax Defaults ---
 DEFAULT_MINIMAX_MODEL = os.getenv("MINIMAX_MODEL", "MiniMax-M3")
 DEFAULT_MINIMAX_BASE_URL = os.getenv("MINIMAX_BASE_URL", "https://api.minimax.chat/v1")
@@ -256,6 +290,14 @@ class AIConnector(commands.Cog):
                     log.warning("MiniMax API Fehler: %s - %s", resp.status_code, resp.text)
                     return None
                 data = resp.json()
+                # Usage ins gemeinsame Ledger (best-effort). Modell wie im Payload normalisiert.
+                _track_minimax_usage(
+                    data,
+                    model=(model if model != "MiniMax-Text-01" else "MiniMax-M3"),
+                    use_token_plan=self.use_token_plan,
+                    purpose="",
+                    success=True,
+                )
 
                 if self.use_token_plan:
                     fragments = []
@@ -337,6 +379,14 @@ class AIConnector(commands.Cog):
                             return (None, used_tool_names)
 
                         data = resp.json()
+                        # Jeder Tool-Loop-Call (token_plan/Anthropic-Format) einzeln ins Ledger.
+                        _track_minimax_usage(
+                            data,
+                            model=normalized_model,
+                            use_token_plan=True,
+                            purpose="tool-use",
+                            success=True,
+                        )
                         content_blocks = data.get("content", []) or []
 
                         if data.get("stop_reason") == "tool_use" and budget_left:

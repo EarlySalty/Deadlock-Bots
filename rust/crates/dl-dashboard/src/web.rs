@@ -467,6 +467,7 @@ async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Respons
 async fn login(
     State(app): State<DashboardApp>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
     let now = now_unix_f64();
@@ -479,10 +480,24 @@ async fn login(
     if !app.cfg().auth_enforced() {
         return redirect("/admin", None);
     }
-    let next_path = auth::safe_href(
+    let next_path_relative = auth::safe_href(
         params.get("next").map(String::as_str).unwrap_or(""),
         "/admin",
     );
+    let host = headers
+        .get(axum::http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let next_path = if !host.is_empty() {
+        let proto = if headers.get("X-Forwarded-Proto").and_then(|v| v.to_str().ok()) == Some("https") {
+            "https"
+        } else {
+            "http"
+        };
+        format!("{}://{}{}", proto, host, next_path_relative)
+    } else {
+        next_path_relative
+    };
     let redirect_uri = app.cfg().discord_redirect_uri.clone();
     let state = crate::token::session_token();
     {

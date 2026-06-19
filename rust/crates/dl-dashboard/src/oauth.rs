@@ -165,7 +165,9 @@ impl OAuthClient {
             }
         };
         if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "Discord-Token-Tausch fehlgeschlagen");
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            tracing::warn!(%status, %body, "Discord-Token-Tausch fehlgeschlagen");
             return None;
         }
         response.json::<TokenResponse>().await.ok()

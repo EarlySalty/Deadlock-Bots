@@ -213,6 +213,10 @@ class MasterBroker:
                         "/internal/master/v1/discord/members",
                         self._handle_list_members,
                     ),
+                    web.get(
+                        "/internal/master/v1/discord/member-access",
+                        self._handle_member_access,
+                    ),
                     web.post("/internal/master/v1/discord/send-message", self._handle_send_message),
                     web.post(
                         "/internal/master/v1/discord/create-channel",
@@ -1235,6 +1239,74 @@ class MasterBroker:
         ]
         return web.json_response(
             {"ok": True, "role_id": str(role.id), "name": role.name, "members": members}
+        )
+
+    async def _handle_member_access(self, request: web.Request) -> web.Response:
+        """Read-only: Zugriffsstatus eines Mitglieds (Admin + Rollen) für den Dashboard-Login.
+
+        Loopback-only, kein Token.
+        """
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            user_id = int(request.query.get("user_id") or 0)
+        except (TypeError, ValueError):
+            user_id = 0
+
+        if not user_id:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="user_id must be a positive integer",
+            )
+
+        try:
+            guild_id = int(request.query.get("guild_id") or 0)
+        except (TypeError, ValueError):
+            guild_id = 0
+
+        if guild_id:
+            guilds = [self.bot.get_guild(guild_id)]
+        else:
+            guilds = self.bot.guilds
+
+        found = False
+        display_name = None
+        is_administrator = False
+        role_ids = []
+
+        for guild in guilds:
+            if guild is None:
+                continue
+
+            if not guild.chunked:
+                try:
+                    await guild.chunk()
+                except Exception:
+                    pass
+
+            member = guild.get_member(user_id)
+            if member is not None:
+                if member.guild_permissions.administrator:
+                    is_administrator = True
+
+                if not found:
+                    found = True
+                    display_name = member.display_name
+                    role_ids = [str(r.id) for r in member.roles if r.id != guild.id]
+
+        return web.json_response(
+            {
+                "ok": True,
+                "found": found,
+                "user_id": str(user_id),
+                "display_name": display_name,
+                "is_administrator": is_administrator,
+                "role_ids": role_ids,
+            }
         )
 
     async def _handle_list_members(self, request: web.Request) -> web.Response:

@@ -1,3 +1,11 @@
+## #156 — member-access-Endpunkt im Python-Master-Broker hinzugefügt
+
+**Ausgangslage:** Nach dem Rollback des Discord-Bots auf Python (#154) fehlte im Python-Master-Broker der Endpunkt `/internal/master/v1/discord/member-access`. Das Rust-Dashboard (`dl-web`) benötigt diesen jedoch beim Login zur Überprüfung der Admin-Rechte und Rollen, was zu einer Endlosschleife (Auth Loop) führte.
+
+**Was wurde geändert:** Der Route-Eintrag für `/internal/master/v1/discord/member-access` und der zugehörige Handler `_handle_member_access` wurden in `service/master_broker.py` implementiert.
+
+**Wie es jetzt läuft:** Wenn das Rust-Dashboard die Mitgliedsrechte abfragt, liefert der Python-Broker die Daten aus dem Discord-Cache (Rollen, Administrator-Rechte und Anzeigename) analog zur früheren Rust-Broker-Implementierung aus. Die Authentifizierungsschleife ist dadurch behoben.
+
 ## #155 — Scam-Schutz: Fehlentscheidung per Discord-Button zurücknehmen
 
 **Ausgangslage:** Der Twitch-Scam-Schutz meldet seine Aktionen (automatischer Bann oder Moderationsvorschlag) nach Discord. Eine falsch getroffene Entscheidung ließ sich von dort aber nicht direkt korrigieren — die Rücknahme ging nur über einen Chat-Befehl im jeweiligen Twitch-Kanal.
