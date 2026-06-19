@@ -81,7 +81,8 @@ impl DashboardApp {
             cfg.discord_api_base.clone(),
         );
         let states = OAuthStateStore::new(db.clone(), cfg.oauth_state_ttl_secs);
-        let sessions = SessionStore::new(cfg.session_ttl_secs);
+        let sessions = SessionStore::persistent(db.path(), cfg.session_ttl_secs, now_unix_f64())
+            .expect("persistenter Admin-Session-Store muss verfügbar sein");
         Self {
             inner: Arc::new(Inner {
                 cfg,
@@ -233,8 +234,9 @@ impl DashboardApp {
         if !self.cfg().auth_enforced() {
             return None;
         }
-        let session_id = read_cookie(headers, SESSION_COOKIE)?;
-        self.inner.sessions.touch(&session_id, now_unix_f64())
+        read_cookies(headers, SESSION_COOKIE)
+            .into_iter()
+            .find_map(|session_id| self.inner.sessions.touch(&session_id, now_unix_f64()))
     }
 }
 
@@ -708,7 +710,7 @@ async fn own_login_complete(
 }
 
 async fn logout(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Some(session_id) = read_cookie(&headers, SESSION_COOKIE) {
+    for session_id in read_cookies(&headers, SESSION_COOKIE) {
         app.inner.sessions.remove(&session_id);
     }
     let target = if app.cfg().auth_enforced() {
@@ -1305,14 +1307,20 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn read_cookie(headers: &HeaderMap, name: &str) -> Option<String> {
-    let raw = headers.get(header::COOKIE)?.to_str().ok()?;
+fn read_cookies(headers: &HeaderMap, name: &str) -> Vec<String> {
+    let Some(raw) = headers
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return Vec::new();
+    };
     let prefix = format!("{name}=");
     raw.split(';')
         .map(str::trim)
-        .find_map(|part| part.strip_prefix(&prefix))
+        .filter_map(|part| part.strip_prefix(&prefix))
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn session_cookie_domain(redirect_uri: &str) -> Option<String> {
@@ -1443,11 +1451,19 @@ mod tests {
     #[test]
     fn cookie_lesen_findet_richtigen_namen() {
         let h = headers_with("cookie", "a=1; master_dash_session=tok123 ; b=2");
-        assert_eq!(read_cookie(&h, SESSION_COOKIE).as_deref(), Some("tok123"));
-        assert!(read_cookie(&h, "fehlt").is_none());
+        assert_eq!(read_cookies(&h, SESSION_COOKIE), vec!["tok123"]);
+        assert!(read_cookies(&h, "fehlt").is_empty());
         // Leerer Wert zählt als nicht vorhanden.
         let empty = headers_with("cookie", "master_dash_session=");
-        assert!(read_cookie(&empty, SESSION_COOKIE).is_none());
+        assert!(read_cookies(&empty, SESSION_COOKIE).is_empty());
+        let duplicate = headers_with(
+            "cookie",
+            "master_dash_session=alt; master_dash_session=gueltig",
+        );
+        assert_eq!(
+            read_cookies(&duplicate, SESSION_COOKIE),
+            vec!["alt".to_string(), "gueltig".to_string()]
+        );
     }
 
     #[test]

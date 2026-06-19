@@ -1,3 +1,11 @@
+## #158 — Gemeinsame Admin-Session neustartsicher gemacht
+
+**Ausgangslage:** Discord- und Twitch-Admin-Dashboard verwendeten zwar denselben Cookie-Namen, der zentrale Rust-Dienst hielt seine Sessions aber nur im Arbeitsspeicher. Nach einem Neustart war das Cookie wertlos. Zusätzlich konnte ein älteres Cookie mit demselben Namen das gültige Cookie überdecken und erneut eine Login-Schleife auslösen.
+
+**Was wurde geändert:** Zentrale Admin-Sessions werden mit ihrer 14-Tage-Laufzeit in der gemeinsamen Datenbank gespeichert und beim Start wieder geladen. Bei Anfragen mit mehreren gleichnamigen Alt-Cookies werden alle Kandidaten geprüft und der tatsächlich gültige Sessionwert verwendet.
+
+**Wie es jetzt läuft:** Ein Discord-Login stellt weiterhin genau ein gemeinsames Cookie aus. Dieses Cookie gilt für beide Admin-Dashboards, überlebt Neustarts und wird gleitend verlängert. Alte, ungültige Cookie-Dubletten blockieren eine gültige Session nicht mehr.
+
 ## #157 — Admin-Login über Haupt- und Admin-Domain stabilisiert
 
 **Ausgangslage:** Der gemeinsame Discord-Rücksprung lief auf der Hauptdomain, während beide Admin-Oberflächen anschließend auf die Admin-Subdomain wechselten. Die neue Rust-Implementierung setzte das Login-Cookie jedoch nur für die Hauptdomain. Auf der Admin-Subdomain fehlte die Session deshalb sofort wieder und der Login begann erneut.

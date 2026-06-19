@@ -1,17 +1,22 @@
-//! In-Memory-Store der Dashboard-Sessions (`master_dash_session`).
+//! Persistenter Store der Dashboard-Sessions (`master_dash_session`).
 //!
 //! Anders als die HMAC-signierten Stats-/Tierlist-Cookies (siehe
 //! `dl-webcore::SessionCodec`) ist eine Dashboard-Session ein **opakes
-//! Zufallstoken**, das serverseitig in einer Map nachgeschlagen wird — exakt
-//! wie `self._discord_sessions` im Python-Dashboard. Bei jedem Zugriff
-//! verlängert sich die Gültigkeit (gleitende TTL), und ein fehlendes
-//! CSRF-Token wird nachgezogen. Neustart leert den Store (wie im Original).
+//! Zufallstoken**. Ein kleiner In-Memory-Cache hält den Hot Path schnell;
+//! `kv_store` ist die verbindliche Quelle über Prozessneustarts hinweg.
+//! Bei jedem Zugriff verlängert sich die Gültigkeit (gleitende TTL).
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+
+use rusqlite::{params, Connection};
+use serde::{Deserialize, Serialize};
 
 use crate::config::AccessLevel;
 use crate::token;
+
+const SESSION_KV_NAMESPACE: &str = "dl_dashboard_admin_session";
 
 /// Grund, warum eine Session ausgestellt wurde (Diagnose/Audit, wie im
 /// Original z. B. `owner_override`, `guild_admin:<id>`, `moderator_role:<id>`).
@@ -49,6 +54,7 @@ pub struct NewSession {
 pub struct SessionStore {
     inner: Arc<Mutex<HashMap<String, Session>>>,
     ttl_secs: f64,
+    db_path: Option<PathBuf>,
 }
 
 impl SessionStore {
@@ -56,7 +62,18 @@ impl SessionStore {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             ttl_secs: ttl_secs.max(1) as f64,
+            db_path: None,
         }
+    }
+
+    pub fn persistent(db_path: &Path, ttl_secs: i64, now: f64) -> rusqlite::Result<Self> {
+        let db_path = db_path.to_path_buf();
+        let sessions = load_persisted_sessions(&db_path, now)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(sessions)),
+            ttl_secs: ttl_secs.max(1) as f64,
+            db_path: Some(db_path),
+        })
     }
 
     fn guard(&self) -> MutexGuard<'_, HashMap<String, Session>> {
@@ -83,7 +100,9 @@ impl SessionStore {
         };
         let mut map = self.guard();
         prune_expired(&mut map, now);
-        map.insert(session_id.clone(), session);
+        map.insert(session_id.clone(), session.clone());
+        drop(map);
+        self.persist(&session_id, &session);
         session_id
     }
 
@@ -103,20 +122,20 @@ impl SessionStore {
         }
         let mut map = self.guard();
         prune_expired(&mut map, now);
-        map.insert(
-            session_id.to_string(),
-            Session {
-                user_id: new.user_id,
-                username: new.username,
-                display_name: new.display_name,
-                reason: new.reason,
-                access_level: new.access_level,
-                csrf_token: token::token_urlsafe(32),
-                created_at: now,
-                last_seen_at: now,
-                expires_at: expires_at.unwrap_or(now + self.ttl_secs),
-            },
-        );
+        let session = Session {
+            user_id: new.user_id,
+            username: new.username,
+            display_name: new.display_name,
+            reason: new.reason,
+            access_level: new.access_level,
+            csrf_token: token::token_urlsafe(32),
+            created_at: now,
+            last_seen_at: now,
+            expires_at: expires_at.unwrap_or(now + self.ttl_secs),
+        };
+        map.insert(session_id.to_string(), session.clone());
+        drop(map);
+        self.persist(session_id, &session);
         true
     }
 
@@ -136,14 +155,38 @@ impl SessionStore {
         }
         session.expires_at = now + self.ttl_secs;
         session.last_seen_at = now;
-        Some(session.clone())
+        let result = session.clone();
+        drop(map);
+        self.persist(session_id, &result);
+        Some(result)
     }
 
     /// Entfernt eine Session (Logout).
     pub fn remove(&self, session_id: &str) {
         let session_id = session_id.trim();
         if !session_id.is_empty() {
-            self.guard().remove(session_id);
+            {
+                self.guard().remove(session_id);
+            }
+            self.delete_persisted(session_id);
+        }
+    }
+
+    fn persist(&self, session_id: &str, session: &Session) {
+        let Some(path) = self.db_path.as_deref() else {
+            return;
+        };
+        if let Err(error) = persist_session(path, session_id, session) {
+            tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
+        }
+    }
+
+    fn delete_persisted(&self, session_id: &str) {
+        let Some(path) = self.db_path.as_deref() else {
+            return;
+        };
+        if let Err(error) = delete_persisted_session(path, session_id) {
+            tracing::warn!(%error, "Persistierte Admin-Session konnte nicht gelöscht werden");
         }
     }
 
@@ -151,6 +194,103 @@ impl SessionStore {
     fn len(&self) -> usize {
         self.guard().len()
     }
+}
+
+#[derive(Serialize, Deserialize)]
+struct PersistedSession {
+    user_id: u64,
+    username: String,
+    display_name: String,
+    reason: String,
+    access_level: String,
+    csrf_token: String,
+    created_at: f64,
+    last_seen_at: f64,
+    expires_at: f64,
+}
+
+impl From<&Session> for PersistedSession {
+    fn from(session: &Session) -> Self {
+        Self {
+            user_id: session.user_id,
+            username: session.username.clone(),
+            display_name: session.display_name.clone(),
+            reason: session.reason.clone(),
+            access_level: session.access_level.as_str().to_string(),
+            csrf_token: session.csrf_token.clone(),
+            created_at: session.created_at,
+            last_seen_at: session.last_seen_at,
+            expires_at: session.expires_at,
+        }
+    }
+}
+
+impl PersistedSession {
+    fn into_session(self) -> Option<Session> {
+        let access_level = match self.access_level.as_str() {
+            "full" => AccessLevel::Full,
+            "turnier_only" => AccessLevel::TurnierOnly,
+            _ => return None,
+        };
+        Some(Session {
+            user_id: self.user_id,
+            username: self.username,
+            display_name: self.display_name,
+            reason: self.reason,
+            access_level,
+            csrf_token: self.csrf_token,
+            created_at: self.created_at,
+            last_seen_at: self.last_seen_at,
+            expires_at: self.expires_at,
+        })
+    }
+}
+
+fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
+    let connection = Connection::open(path)?;
+    connection.busy_timeout(std::time::Duration::from_secs(5))?;
+    Ok(connection)
+}
+
+fn persist_session(path: &Path, session_id: &str, session: &Session) -> rusqlite::Result<()> {
+    let payload = serde_json::to_string(&PersistedSession::from(session))
+        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+    open_connection(path)?.execute(
+        "INSERT INTO kv_store(ns, k, v) VALUES(?1, ?2, ?3)
+         ON CONFLICT(ns, k) DO UPDATE SET v = excluded.v",
+        params![SESSION_KV_NAMESPACE, session_id, payload],
+    )?;
+    Ok(())
+}
+
+fn delete_persisted_session(path: &Path, session_id: &str) -> rusqlite::Result<()> {
+    open_connection(path)?.execute(
+        "DELETE FROM kv_store WHERE ns = ?1 AND k = ?2",
+        params![SESSION_KV_NAMESPACE, session_id],
+    )?;
+    Ok(())
+}
+
+fn load_persisted_sessions(path: &Path, now: f64) -> rusqlite::Result<HashMap<String, Session>> {
+    let connection = open_connection(path)?;
+    let mut statement = connection.prepare("SELECT k, v FROM kv_store WHERE ns = ?1")?;
+    let rows = statement.query_map([SESSION_KV_NAMESPACE], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut sessions = HashMap::new();
+    for row in rows {
+        let (session_id, payload) = row?;
+        let Ok(persisted) = serde_json::from_str::<PersistedSession>(&payload) else {
+            continue;
+        };
+        let Some(session) = persisted.into_session() else {
+            continue;
+        };
+        if session.expires_at > now {
+            sessions.insert(session_id, session);
+        }
+    }
+    Ok(sessions)
 }
 
 fn prune_expired(map: &mut HashMap<String, Session>, now: f64) {
@@ -237,5 +377,33 @@ mod tests {
         let s = store.touch(&id, 1000.0).expect("gültig");
         assert!(!s.has_full_access());
         assert_eq!(s.access_level.as_str(), "turnier_only");
+    }
+
+    #[test]
+    fn persistente_session_ueberlebt_store_neustart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("sessions.sqlite3");
+        let connection = Connection::open(&path).expect("db");
+        connection
+            .execute(
+                "CREATE TABLE kv_store(
+                    ns TEXT NOT NULL,
+                    k TEXT NOT NULL,
+                    v TEXT NOT NULL,
+                    PRIMARY KEY(ns, k)
+                )",
+                [],
+            )
+            .expect("schema");
+        drop(connection);
+
+        let first = SessionStore::persistent(&path, 1209600, 1000.0).expect("store");
+        let id = first.create(login("owner_override", AccessLevel::Full), 1000.0);
+        drop(first);
+
+        let restarted = SessionStore::persistent(&path, 1209600, 1001.0).expect("restart");
+        let session = restarted.touch(&id, 1001.0).expect("persistiert");
+        assert_eq!(session.user_id, 42);
+        assert!(session.has_full_access());
     }
 }
