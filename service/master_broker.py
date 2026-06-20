@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 import discord
 from aiohttp import web
 
+from cogs.welcome_dm import base as welcome_base
 from service.scam_revoke import build_scam_revoke_view
 
 logger = logging.getLogger(__name__)
@@ -72,6 +73,68 @@ class _RichMessagePayload:
 class _ResolvedBrokerView:
     view: discord.ui.View | None
     should_register: bool = False
+
+
+def _build_ticket_overwrites(
+    guild: Any,
+    owner_id: int,
+) -> dict[Any, discord.PermissionOverwrite]:
+    owner = guild.get_member(int(owner_id)) if hasattr(guild, "get_member") else None
+    overwrites: dict[Any, discord.PermissionOverwrite] = {
+        guild.default_role: discord.PermissionOverwrite(view_channel=False),
+    }
+    if owner is not None:
+        overwrites[owner] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            attach_files=True,
+            embed_links=True,
+            add_reactions=True,
+        )
+
+    bot_member = getattr(guild, "me", None)
+    if bot_member is not None:
+        overwrites[bot_member] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_channels=True,
+            manage_messages=True,
+            attach_files=True,
+            embed_links=True,
+            add_reactions=True,
+        )
+
+    staff_role_ids = tuple(
+        int(role_id) for role_id in getattr(welcome_base, "WELCOME_DM_TEST_ROLE_IDS", ()) or ()
+    )
+    for role_id in staff_role_ids:
+        role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
+        if role is None:
+            continue
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_messages=True,
+        )
+
+    for role in getattr(guild, "roles", ()) or ():
+        if role.is_default():
+            continue
+        perms = role.permissions
+        if not (perms.administrator or perms.manage_guild or perms.manage_channels):
+            continue
+        overwrites[role] = discord.PermissionOverwrite(
+            view_channel=True,
+            send_messages=True,
+            read_message_history=True,
+            manage_messages=True,
+            manage_channels=True,
+        )
+
+    return overwrites
 
 
 class MasterBroker:
@@ -1501,6 +1564,11 @@ class MasterBroker:
                 raise ValueError("name exceeds Discord limit (100)")
             category_id = self._parse_positive_payload_int(payload, "category_id")
             topic = str(payload.get("topic") or "").strip() or None
+            ticket_owner_id = (
+                self._parse_positive_payload_int(payload, "ticket_owner_id")
+                if payload.get("ticket_owner_id") is not None
+                else None
+            )
         except ValueError as exc:
             return self._error_response(
                 request=request,
@@ -1516,9 +1584,14 @@ class MasterBroker:
                 message="invalid JSON payload",
             )
 
-        payload_hash = self._payload_hash(
-            {"name": name, "category_id": category_id, "topic": topic}
-        )
+        operation_payload: dict[str, Any] = {
+            "name": name,
+            "category_id": category_id,
+            "topic": topic,
+        }
+        if ticket_owner_id is not None:
+            operation_payload["ticket_owner_id"] = ticket_owner_id
+        payload_hash = self._payload_hash(operation_payload)
 
         async def _operation() -> web.Response:
             category = await self._resolve_channel(category_id)
@@ -1542,7 +1615,14 @@ class MasterBroker:
                 )
 
             try:
-                channel = await guild.create_text_channel(name=name, category=category, topic=topic)
+                create_kwargs: dict[str, Any] = {
+                    "name": name,
+                    "category": category,
+                    "topic": topic,
+                }
+                if ticket_owner_id is not None:
+                    create_kwargs["overwrites"] = _build_ticket_overwrites(guild, ticket_owner_id)
+                channel = await guild.create_text_channel(**create_kwargs)
             except Exception as exc:
                 logger.error(
                     "Master broker create_channel failed (category=%s name=%s): %s",

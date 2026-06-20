@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 import discord
 
+from service import master_broker as master_broker_module
 from service.master_broker import (
     _IDEMPOTENCY_HEADER,
     _INTERNAL_TOKEN_HEADER,
@@ -71,6 +73,40 @@ class _FakeDmUser:
         return self.dm_channel
 
 
+class _FakePermissions:
+    def __init__(
+        self,
+        *,
+        administrator: bool = False,
+        manage_guild: bool = False,
+        manage_channels: bool = False,
+    ) -> None:
+        self.administrator = administrator
+        self.manage_guild = manage_guild
+        self.manage_channels = manage_channels
+
+
+class _FakeRole:
+    def __init__(
+        self,
+        role_id: int,
+        *,
+        is_default: bool = False,
+        permissions: _FakePermissions | None = None,
+    ) -> None:
+        self.id = role_id
+        self._is_default = is_default
+        self.permissions = permissions or _FakePermissions()
+
+    def is_default(self) -> bool:
+        return self._is_default
+
+
+class _FakeMember:
+    def __init__(self, user_id: int) -> None:
+        self.id = user_id
+
+
 class _FakeCategory:
     def __init__(self, channel_id: int, guild: _FakeGuild) -> None:
         self.id = channel_id
@@ -78,12 +114,25 @@ class _FakeCategory:
 
 
 class _FakeGuild:
-    def __init__(self, guild_id: int = 1) -> None:
+    def __init__(
+        self,
+        guild_id: int = 1,
+        *,
+        default_role: _FakeRole | None = None,
+        roles: list[_FakeRole] | None = None,
+        members: list[_FakeMember] | None = None,
+        me: _FakeMember | None = None,
+    ) -> None:
         self.id = guild_id
         self.created_channels: list[dict[str, Any]] = []
+        self.default_role = default_role or _FakeRole(guild_id, is_default=True)
+        self.roles = roles or [self.default_role]
+        self._roles = {int(role.id): role for role in self.roles}
+        self._members = {int(member.id): member for member in members or []}
+        self.me = me
 
     async def create_text_channel(
-        self, *, name: str, category: _FakeCategory, topic: str | None = None
+        self, *, name: str, category: _FakeCategory, topic: str | None = None, **kwargs: Any
     ) -> _FakeChannel:
         channel = _FakeChannel(7000 + len(self.created_channels) + 1)
         self.created_channels.append(
@@ -91,10 +140,17 @@ class _FakeGuild:
                 "name": name,
                 "category": category,
                 "topic": topic,
+                "kwargs": dict(kwargs),
                 "channel": channel,
             }
         )
         return channel
+
+    def get_member(self, user_id: int) -> _FakeMember | None:
+        return self._members.get(int(user_id))
+
+    def get_role(self, role_id: int) -> _FakeRole | None:
+        return self._roles.get(int(role_id))
 
 
 class _TrackingTestView(discord.ui.View):
@@ -203,6 +259,7 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(create_body["result"]["channel_id"], created_channel.id)
         self.assertEqual(guild.created_channels[0]["name"], "match-alpha-vs-bravo")
         self.assertEqual(guild.created_channels[0]["topic"], "Test Topic")
+        self.assertNotIn("overwrites", guild.created_channels[0]["kwargs"])
 
         bot.add_channel(created_channel)
         delete_request = _FakeRequest(
@@ -217,6 +274,62 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         delete_body = self._payload(delete_response)
         self.assertEqual(delete_body["result"]["channel_id"], created_channel.id)
         self.assertTrue(created_channel.deleted)
+
+    async def test_create_ticket_channel_sets_private_overwrites(self) -> None:
+        everyone = _FakeRole(1, is_default=True)
+        staff_role = _FakeRole(22)
+        admin_role = _FakeRole(33, permissions=_FakePermissions(administrator=True))
+        normal_role = _FakeRole(44)
+        owner = _FakeMember(123)
+        bot_member = _FakeMember(999)
+        guild = _FakeGuild(
+            default_role=everyone,
+            roles=[everyone, staff_role, admin_role, normal_role],
+            members=[owner, bot_member],
+            me=bot_member,
+        )
+        category = _FakeCategory(555, guild)
+        bot = _FakeBot(channel=category)
+        broker = MasterBroker(bot, token="secret-token")
+        request = _FakeRequest(
+            {
+                "name": "beta-ticket-123",
+                "category_id": 555,
+                "ticket_owner_id": 123,
+            },
+            headers=self._headers("req-create-ticket"),
+        )
+
+        with patch.object(
+            master_broker_module.welcome_base,
+            "WELCOME_DM_TEST_ROLE_IDS",
+            (staff_role.id,),
+        ):
+            response = await broker._handle_create_channel(request)
+
+        self.assertEqual(response.status, 200)
+        overwrites = guild.created_channels[0]["kwargs"]["overwrites"]
+        self.assertIs(overwrites[everyone].view_channel, False)
+        self.assertIs(overwrites[owner].view_channel, True)
+        self.assertIs(overwrites[owner].send_messages, True)
+        self.assertIs(overwrites[owner].read_message_history, True)
+        self.assertIs(overwrites[owner].attach_files, True)
+        self.assertIs(overwrites[owner].embed_links, True)
+        self.assertIs(overwrites[owner].add_reactions, True)
+        self.assertIs(overwrites[bot_member].manage_channels, True)
+        self.assertIs(overwrites[bot_member].manage_messages, True)
+        self.assertIs(overwrites[staff_role].manage_messages, True)
+        self.assertIs(overwrites[admin_role].manage_channels, True)
+        self.assertNotIn(normal_role, overwrites)
+
+    def test_ticket_overwrites_skip_missing_owner_but_keep_channel_private(self) -> None:
+        everyone = _FakeRole(1, is_default=True)
+        guild = _FakeGuild(default_role=everyone)
+
+        overwrites = master_broker_module._build_ticket_overwrites(guild, 404)
+
+        self.assertIs(overwrites[everyone].view_channel, False)
+        self.assertEqual(len(overwrites), 1)
 
     async def test_send_rich_message_builds_link_button_and_allowed_mentions(self) -> None:
         channel = _FakeChannel(111)
