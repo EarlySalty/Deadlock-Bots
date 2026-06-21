@@ -142,10 +142,21 @@ impl DashboardConfig {
         }
     }
 
-    /// Auth wird erzwungen, sobald OAuth-Zugangsdaten konfiguriert sind —
-    /// ohne Client-Secret könnte das Dashboard niemanden anmelden.
-    pub fn auth_enforced(&self) -> bool {
+    /// Discord OAuth ist nur mit beiden Credentials benutzbar.
+    pub fn discord_oauth_configured(&self) -> bool {
         self.discord_client_id.is_some() && self.discord_client_secret.is_some()
+    }
+
+    /// Python setzt `_discord_auth_enabled = True`: fehlende Credentials sind
+    /// deshalb keine Deaktivierung, sondern eine Fehlkonfiguration.
+    pub fn auth_misconfigured(&self) -> bool {
+        !self.discord_oauth_configured()
+    }
+
+    /// Auth bleibt erzwungen, auch wenn OAuth falsch konfiguriert ist. Die
+    /// Handler liefern dann 503 statt das Dashboard offen auszuliefern.
+    pub fn auth_enforced(&self) -> bool {
+        true
     }
 
     /// Prüft ein Token gegen die turnier-/allgemeinen internen Routen.
@@ -206,7 +217,9 @@ mod tests {
         assert_eq!(cfg.turnier_mod_role_id, DEFAULT_TURNIER_MOD_ROLE_ID);
         assert_eq!(cfg.session_ttl_secs, DEFAULT_SESSION_TTL_SECONDS);
         assert_eq!(cfg.oauth_state_ttl_secs, DEFAULT_OAUTH_STATE_TTL_SECONDS);
-        assert!(!cfg.auth_enforced());
+        assert!(cfg.auth_enforced());
+        assert!(cfg.auth_misconfigured());
+        assert!(!cfg.discord_oauth_configured());
         assert_eq!(cfg.discord_redirect_uri, DEFAULT_DISCORD_REDIRECT_URI);
         assert_eq!(
             cfg.public_base_url.as_deref(),
@@ -222,6 +235,17 @@ mod tests {
         ]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
         assert!(cfg.auth_enforced());
+        assert!(!cfg.auth_misconfigured());
+        assert!(cfg.discord_oauth_configured());
+    }
+
+    #[test]
+    fn auth_fail_closed_bei_unvollstaendigen_creds() {
+        let map = HashMap::from([("DISCORD_OAUTH_CLIENT_ID", "123")]);
+        let cfg = DashboardConfig::from_lookup(lookup(&map));
+        assert!(cfg.auth_enforced());
+        assert!(cfg.auth_misconfigured());
+        assert!(!cfg.discord_oauth_configured());
     }
 
     #[test]

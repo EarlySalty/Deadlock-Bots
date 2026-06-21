@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::body::{Body, Bytes};
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -36,6 +36,8 @@ pub const SESSION_COOKIE: &str = "master_dash_session";
 const DEFAULT_SCOPE: &str = "identify guilds.members.read";
 const OWN_LOGIN_STATE_TTL: f64 = 21_600.0; // 6 h, wie der OAuth-State
 const ADMIN_LOGIN_URL: &str = "/auth/discord/login";
+const AUTH_MISCONFIGURED_MESSAGE: &str = "Dashboard Auth ist nicht korrekt konfiguriert. \
+Discord OAuth Client-ID/Secret fehlen im Windows-Tresor (DeadlockBot).";
 
 // ── App-Zustand ─────────────────────────────────────────────────────────────
 
@@ -152,6 +154,9 @@ impl DashboardApp {
     /// Auth-Gate für lesende `/api`-Routen: ohne erzwungene Auth offen, sonst
     /// gültige Session nötig (wie `_check_auth` ohne CSRF/Full-Access).
     pub(crate) fn guard_read(&self, headers: &HeaderMap) -> Result<(), Response> {
+        if self.cfg().auth_misconfigured() {
+            return Err(auth_misconfigured_response());
+        }
         if !self.cfg().auth_enforced() {
             return Ok(());
         }
@@ -165,6 +170,9 @@ impl DashboardApp {
     /// Gate für Routen mit `required=True, require_full_access=True`: immer
     /// erzwungen, gültige Session mit Voll-Zugriff nötig (401/403 wie Original).
     pub(crate) fn guard_full(&self, headers: &HeaderMap) -> Result<(), Response> {
+        if self.cfg().auth_misconfigured() {
+            return Err(auth_misconfigured_response());
+        }
         match self.session_from_headers(headers) {
             Some(session) if session.has_full_access() => Ok(()),
             Some(_) => Err(err_text(403, "Full dashboard access required")),
@@ -181,6 +189,9 @@ impl DashboardApp {
         headers: &HeaderMap,
         require_full: bool,
     ) -> Result<crate::session::Session, Response> {
+        if self.cfg().auth_misconfigured() {
+            return Err(auth_misconfigured_response());
+        }
         let Some(session) = self.session_from_headers(headers) else {
             return Err(err_text(401, "Authentication required"));
         };
@@ -231,7 +242,7 @@ impl DashboardApp {
 
     /// Liest die aktuelle Session aus dem Cookie und verlängert sie gleitend.
     fn session_from_headers(&self, headers: &HeaderMap) -> Option<crate::session::Session> {
-        if !self.cfg().auth_enforced() {
+        if self.cfg().auth_misconfigured() || !self.cfg().auth_enforced() {
             return None;
         }
         read_cookies(headers, SESSION_COOKIE)
@@ -360,7 +371,44 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/public/guild-stats",
             get(crate::public::guild_stats).options(crate::public::public_cors),
         )
+        .layer(axum::middleware::from_fn(security_headers))
         .with_state(app)
+}
+
+async fn security_headers(
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Response {
+    let mut response = next.run(request).await;
+    let headers = response.headers_mut();
+    if !headers.contains_key(header::X_FRAME_OPTIONS) {
+        headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
+    }
+    if !headers.contains_key(header::X_CONTENT_TYPE_OPTIONS) {
+        headers.insert(
+            header::X_CONTENT_TYPE_OPTIONS,
+            HeaderValue::from_static("nosniff"),
+        );
+    }
+    if !headers.contains_key("X-XSS-Protection") {
+        headers.insert(
+            "X-XSS-Protection",
+            HeaderValue::from_static("1; mode=block"),
+        );
+    }
+    if !headers.contains_key(header::REFERRER_POLICY) {
+        headers.insert(
+            header::REFERRER_POLICY,
+            HeaderValue::from_static("strict-origin-when-cross-origin"),
+        );
+    }
+    if !headers.contains_key("Permissions-Policy") {
+        headers.insert(
+            "Permissions-Policy",
+            HeaderValue::from_static("geolocation=(), microphone=(), camera=(), payment=()"),
+        );
+    }
+    response
 }
 
 // ── Browser-Routen (Login/Callback/Logout) ──────────────────────────────────
@@ -405,6 +453,9 @@ fn render_spa(html: String, display_name: &str, login_next: &str) -> Response {
 /// (Port von `_handle_index`). Bei erzwungener Auth ohne Session → Discord-Login;
 /// `turnier_only`-Sessions → Turnier-Seite.
 async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
+    }
     let session = app.session_from_headers(&headers);
     if app.cfg().auth_enforced() && session.is_none() {
         return redirect("/auth/discord/login?next=%2Fadmin", None);
@@ -428,6 +479,9 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
 /// Wie `index`, aber ohne `turnier_only`-Weiterleitung (Turnier-Mods dürfen
 /// hier rein) und mit Login-Ziel `/turnier`.
 async fn turnier_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
+    }
     let session = app.session_from_headers(&headers);
     if app.cfg().auth_enforced() && session.is_none() {
         return redirect("/auth/discord/login?next=%2Fturnier", None);
@@ -443,6 +497,9 @@ async fn turnier_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Re
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
+    }
     if !app.cfg().auth_enforced() {
         return ok_json(json!({
             "enabled": false,
@@ -477,6 +534,9 @@ async fn login(
             429,
             "Zu viele Login-Anfragen. Bitte in einer Minute erneut.",
         );
+    }
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
     }
     if !app.cfg().auth_enforced() {
         return redirect("/admin", None);
@@ -520,8 +580,8 @@ async fn callback(
             "Zu viele OAuth-Callback-Anfragen. Bitte in einer Minute erneut.",
         );
     }
-    if !app.cfg().auth_enforced() {
-        return err_text(503, "Discord OAuth ist nicht konfiguriert.");
+    if !app.cfg().discord_oauth_configured() {
+        return auth_misconfigured_response();
     }
     let state = params.get("state").map(|s| s.trim()).unwrap_or("");
     if state.is_empty() {
@@ -631,6 +691,9 @@ async fn own_login_complete(
     params: &HashMap<String, String>,
     headers: &HeaderMap,
 ) -> Response {
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
+    }
     if !app.cfg().auth_enforced() {
         return redirect("/admin", None);
     }
@@ -737,7 +800,7 @@ async fn initiate(
     if let Err(resp) = guard_any(&app, &peer, &headers) {
         return resp;
     }
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
     let payload = match parse_obj(&body) {
@@ -803,7 +866,7 @@ async fn consume_result(
     if let Err(resp) = guard_any(&app, &peer, &headers) {
         return resp;
     }
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
     let payload = match parse_obj(&body) {
@@ -915,7 +978,7 @@ async fn twitch_authorize_url(
 }
 
 fn authorize_url_impl(app: &DashboardApp, body: &Bytes) -> Response {
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
     let payload = match parse_obj(body) {
@@ -959,7 +1022,7 @@ async fn twitch_session(
 }
 
 async fn discord_session_impl(app: &DashboardApp, body: &Bytes) -> Response {
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
     let payload = match parse_obj(body) {
@@ -1000,7 +1063,7 @@ async fn steam_link_session(
     if let Err(resp) = guard_turnier(&app, &peer, &headers) {
         return resp;
     }
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return err_json(503, "discord_oauth_not_configured");
     }
     let payload = match parse_obj(&body) {
@@ -1051,7 +1114,7 @@ async fn validate_session(
     if session_id.is_empty() {
         return err_json(400, "missing_session_id");
     }
-    if !app.cfg().auth_enforced() {
+    if !app.cfg().discord_oauth_configured() {
         return ok_json(json!({ "valid": false }));
     }
     match app.inner.sessions.touch(&session_id, now_unix_f64()) {
@@ -1147,6 +1210,10 @@ fn guard_twitch(
 
 fn reject(rejection: InternalReject) -> Response {
     err_text(rejection.status(), rejection.message())
+}
+
+fn auth_misconfigured_response() -> Response {
+    err_text(503, AUTH_MISCONFIGURED_MESSAGE)
 }
 
 // ── OAuth-Ergebnis persistieren ─────────────────────────────────────────────
@@ -1427,6 +1494,46 @@ fn prune_login_states(states: &mut HashMap<String, LoginState>, now: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tower::ServiceExt;
+
+    const KV_DDL: &str = "CREATE TABLE kv_store(
+              ns TEXT NOT NULL,
+              k  TEXT NOT NULL,
+              v  TEXT NOT NULL,
+              PRIMARY KEY(ns, k)
+            )";
+
+    struct NoMemberLookup;
+
+    #[async_trait::async_trait]
+    impl MemberLookup for NoMemberLookup {
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Option<crate::authority::MemberAccessInfo> {
+            None
+        }
+    }
+
+    struct NoNameResolver;
+
+    #[async_trait::async_trait]
+    impl NameResolver for NoNameResolver {
+        async fn resolve(&self, _user_ids: &[u64]) -> HashMap<u64, String> {
+            HashMap::new()
+        }
+    }
+
+    async fn test_router(cfg: DashboardConfig) -> (tempfile::TempDir, Router) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dl_db::Db::open_creating(dir.path().join("dashboard.sqlite3")).expect("db");
+        db.write(|conn| conn.execute(KV_DDL, []).map(|_| ()))
+            .await
+            .expect("kv_store");
+        let app = DashboardApp::new(cfg, db, Arc::new(NoMemberLookup), Arc::new(NoNameResolver));
+        (dir, router(app))
+    }
 
     fn headers_with(name: &str, value: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
@@ -1446,6 +1553,77 @@ mod tests {
         // Ampersand zuerst, damit Entities nicht doppelt escaped werden.
         assert_eq!(html_escape_attr("a&b"), "a&amp;b");
         assert_eq!(html_escape_attr("harmlos"), "harmlos");
+    }
+
+    #[tokio::test]
+    async fn misconfigured_auth_liefert_503_statt_dashboard() {
+        let cfg = DashboardConfig::from_lookup(|_| None);
+        let (_dir, app) = test_router(cfg).await;
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/admin")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let body = axum::body::to_bytes(response.into_body(), 1024)
+            .await
+            .expect("body");
+        assert_eq!(&body[..], AUTH_MISCONFIGURED_MESSAGE.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn security_headers_stehen_auf_jeder_antwort() {
+        let cfg = DashboardConfig::from_lookup(|_| None);
+        let (_dir, app) = test_router(cfg).await;
+
+        let response = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/api/auth/me")
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+
+        let headers = response.headers();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            headers
+                .get(header::X_FRAME_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            headers
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers
+                .get("X-XSS-Protection")
+                .and_then(|v| v.to_str().ok()),
+            Some("1; mode=block")
+        );
+        assert_eq!(
+            headers
+                .get(header::REFERRER_POLICY)
+                .and_then(|v| v.to_str().ok()),
+            Some("strict-origin-when-cross-origin")
+        );
+        assert_eq!(
+            headers
+                .get("Permissions-Policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("geolocation=(), microphone=(), camera=(), payment=()")
+        );
     }
 
     #[test]
