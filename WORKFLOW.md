@@ -1,3 +1,20 @@
+# Wave1 SecurityGuard + AI-Moderator Parity (2026-06-21)
+
+## Ziel
+Rust-Port unter `rust/` an sieben Audit-Punkten mit Python-Live-Code abgleichen: SG-9 bis SG-12 und AM-6 bis AM-8. Python-Referenz (`cogs/`, `service/`) bleibt read-only; kein Commit/Push.
+
+## Fortschritt
+- `cogs/security_guard.py`, `cogs/ai_moderator.py`, `rust/crates/dl-moderation/src/guard.rs`, `store.rs`, `lib.rs` und `rust/crates/dl-discord/src/gateway.rs` vollständig gelesen.
+- Audit-Kontext fuer Security Guard und AI Moderator in `rust/docs/audit/2026-06-21-py-rust-discord-parity-audit.md` abgeglichen.
+- Bestehende Rust-Glue-Struktur (`rust/bin/dl-bot/src/modglue.rs`) und `MessageEvent`-Dispatcher geprueft.
+- SG-9 bis SG-12 umgesetzt: separater Staff-Skip, Bild-Multichannel-Scam-Pfad, Young-Burst-Bildbestaetigung und etablierter Scam-Pfad mit 24h-Timeout + Platzhalter-DM.
+- AM-6 bis AM-8 umgesetzt: AutoDelete timeoutet 24h, Kontext-Backfill mit 12 Zeilen, reiches Prompt-Payload inklusive `recent_context`, `>>>`-Prefix, Zeitstempel und Reply-Kontext.
+- Verifikation gruen: `cargo check --workspace`; `cargo test -p dl-moderation -p dl-discord`.
+
+## Erledigt (Claude)
+- Finale deutsche Texte an beiden `Platzhalter`-Stellen eingesetzt: etablierter-Scam Warn-DM (guard.rs) + Mod-Embed-Titel (modglue.rs), Wortlaut aus Python-Vorlage `_handle_scam_proposal`.
+- Kritischer Sub-Agent-Review: alle 7 Fixes paritätstreu. clippy sauber, cargo check/test grün (14+7).
+
 # FAQ-Doku W1 – Voice + Community (2026-05-23)
 
 ## Ziel

@@ -1,14 +1,17 @@
 //! SecurityGuard — Port des Kerns von `cogs/security_guard.py`.
 //!
-//! Drei Detektions-Pfade wie das Original:
+//! Vier Detektions-Pfade wie das Original:
 //! 1. **Account-Takeover** (alle Accounts, deterministisch, KEIN AI):
 //!    Bilder in ≥ 2 verschiedenen Channels innerhalb von 30 s → sofortige
 //!    Quarantäne (Ban/Timeout laut Konfiguration).
 //! 2. **Junge Accounts** (< 30 Tage): Mehrkanal-Burst (3 Kanäle/3
-//!    Nachrichten in 1 h, oder 2 Kanäle mit Keyword/Anhängen) → AI-Scam-
-//!    Check (MiniMax, ≥ 0,78) → bestätigt: Vollzug; unbestätigt:
-//!    60-min-Holding-Timeout als Mod-Vorschlag.
-//! 3. **Keyword-Einzeltreffer**: AI-Check; etablierte Accounts (≥ 30 Tage
+//!    Nachrichten in 1 h, oder 2 Kanäle mit Keyword/Anhängen) → Text- und
+//!    Bild-Scam-Check (stärkeres Signal entscheidet, MiniMax, ≥ 0,78) →
+//!    bestätigt: Vollzug; unbestätigt: 60-min-Holding-Timeout als Mod-Vorschlag.
+//! 3. **Bild-Multichannel** (alle Accounts): Bilder in ≥ 2 Channels →
+//!    MiniMax-Vision-Check (≥ 0,75); etabliert = 24h-Timeout-Vorschlag,
+//!    sonst Vollzug.
+//! 4. **Keyword-Einzeltreffer**: AI-Check; etablierte Accounts (≥ 30 Tage
 //!    Account + ≥ 24 h auf dem Server) bekommen einen Vorschlag, junge den
 //!    Vollzug.
 //!
@@ -17,12 +20,6 @@
 //! Label (`generate_multimodal`) und hängt es als Mod-Kontext an den Grund —
 //! KEIN Gate, die Quarantäne bleibt deterministisch.
 //!
-//! Bewusste Lücke (dokumentiert): Die KI-Bild-Scam-*Bestätigung* des
-//! Burst-Pfads (junge Accounts) lief im Original über die externe
-//! `mmx`-Vision-CLI und ist hier weiterhin text-only. Folge: Bursts, die NUR
-//! über Bilder bestätigt würden, landen als reversibler Holding-Vorschlag
-//! statt als Auto-Vollzug (konservativer als das Original, nie schärfer).
-
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
@@ -38,6 +35,8 @@ pub const ACCOUNT_MAX_AGE_HOURS: i64 = 720;
 pub const ESTABLISHED_ACCOUNT_MIN_AGE_HOURS: i64 = 720;
 pub const ESTABLISHED_MIN_JOIN_HOURS: i64 = 24;
 pub const AI_SCAM_CONFIDENCE: f64 = 0.78;
+pub const AI_IMAGE_CONFIDENCE: f64 = 0.75;
+pub const IMAGE_CHANNEL_THRESHOLD: usize = 2;
 pub const TAKEOVER_WINDOW_SECONDS: i64 = 30;
 pub const TAKEOVER_IMAGE_CHANNELS: usize = 2;
 pub const TIMEOUT_MINUTES: i64 = 1440;
@@ -186,6 +185,16 @@ pub fn should_trigger(msgs: &[RecentMsg]) -> Option<(String, [i64; 4])> {
     ))
 }
 
+/// Bilder in mindestens `IMAGE_CHANNEL_THRESHOLD` verschiedenen Channels.
+pub fn is_image_multi_channel(msgs: &[RecentMsg]) -> bool {
+    let channels_with_images: std::collections::HashSet<u64> = msgs
+        .iter()
+        .filter(|m| m.image_count > 0)
+        .map(|m| m.channel_id)
+        .collect();
+    channels_with_images.len() >= IMAGE_CHANNEL_THRESHOLD
+}
+
 /// `<think>`-Strip + greedy `\{.*\}` → (is_scam, confidence, reason).
 pub fn parse_scam_json(text: Option<&str>) -> (bool, f64, String) {
     let fallback = (false, 0.0, "parse_error".to_string());
@@ -261,6 +270,9 @@ pub enum GuardAction {
     Enforce,
     /// Reversibler 60-min-Holding-Timeout mit Mod-Review.
     Propose,
+    /// Etablierter Account mit bestätigtem Scam: Nachricht löschen,
+    /// 24h-Timeout, Warn-DM und Mod-Review.
+    EstablishedScam,
     /// Account-Takeover-Quarantäne: reversibler 24h-Timeout + eigene
     /// Takeover-DM (Original: `_handle_takeover`/`_send_takeover_dm`).
     Takeover,
@@ -360,8 +372,8 @@ impl SecurityGuard {
         let Some(guild_id) = event.guild_id else {
             return;
         };
-        if event.author_is_admin {
-            return; // Staff wird nicht überwacht (manage_messages-Näherung)
+        if event.author_is_staff {
+            return; // do not police staff: administrator || manage_messages || manage_guild
         }
         let now = chrono::Utc::now().timestamp();
 
@@ -437,7 +449,7 @@ impl SecurityGuard {
 
         let young = is_new_account(event.author_created_at, now);
 
-        // 2. Burst junger Accounts → AI-Text-Check
+        // 2. Burst junger Accounts → Text- und ggf. Bild-Scam-Check
         if young {
             if let Some((reason, meta)) = should_trigger(recent) {
                 let combined: String = recent
@@ -449,7 +461,19 @@ impl SecurityGuard {
                     .chars()
                     .take(2000)
                     .collect();
-                let (is_scam, confidence, ai_reason) = self.ai_check(&combined).await;
+                let (txt_scam, txt_conf, txt_reason) = self.ai_check(&combined).await;
+                let text_confirmed = txt_scam && txt_conf >= AI_SCAM_CONFIDENCE;
+                let (img_scam, img_conf, img_reason) =
+                    if !text_confirmed && recent.iter().any(|m| m.image_count > 0) {
+                        self.ai_check_image_scam(recent).await
+                    } else {
+                        (false, 0.0, "no_attachments".to_string())
+                    };
+                let (is_scam, confidence, ai_reason) = if img_scam && img_conf > txt_conf {
+                    (img_scam, img_conf, img_reason.clone())
+                } else {
+                    (txt_scam, txt_conf, txt_reason.clone())
+                };
                 let action = if is_scam && confidence >= AI_SCAM_CONFIDENCE {
                     GuardAction::Enforce
                 } else {
@@ -462,10 +486,15 @@ impl SecurityGuard {
                     GuardAction::Enforce => {
                         format!("{reason}; AI conf {:.0}%: {ai_reason}", confidence * 100.0)
                     }
-                    GuardAction::Propose | GuardAction::Takeover => format!(
-                        "{reason}; AI unbestätigt ({:.0}%: {ai_reason})",
-                        confidence * 100.0
-                    ),
+                    GuardAction::Propose | GuardAction::EstablishedScam | GuardAction::Takeover => {
+                        format!(
+                            "{reason}; AI unbestaetigt (Text {:.0}%: {}; Bild {:.0}%: {})",
+                            txt_conf * 100.0,
+                            txt_reason,
+                            img_conf * 100.0,
+                            img_reason
+                        )
+                    }
                 };
                 self.execute(guild_id, event, recent.to_vec(), full_reason, meta, action)
                     .await;
@@ -473,14 +502,76 @@ impl SecurityGuard {
             }
         }
 
-        // 3. Keyword-Einzeltreffer → AI; etabliert = Vorschlag, jung = Vollzug
+        // 3. Bilder in mehreren Channels → AI-Bild-Scam-Check (alle Accounts)
+        if is_image_multi_channel(recent) {
+            let (is_scam, confidence, ai_reason) = self.ai_check_image_scam(recent).await;
+            if is_scam && confidence >= AI_IMAGE_CONFIDENCE {
+                let established =
+                    is_established_account(event.author_created_at, event.author_joined_at, now);
+                if established {
+                    let latest = recent
+                        .iter()
+                        .rev()
+                        .find(|m| m.image_count > 0)
+                        .cloned()
+                        .unwrap_or_else(|| RecentMsg {
+                            channel_id: event.channel_id,
+                            message_id: event.message_id,
+                            created_at: now,
+                            content: event.content.clone(),
+                            attachment_count: event.attachment_count,
+                            image_count: event.image_attachment_count,
+                            image_urls: event.image_attachment_urls.clone(),
+                        });
+                    let reason = format!(
+                        "AI-Scam proposal (conf {:.0}%): {ai_reason}",
+                        confidence * 100.0
+                    );
+                    let meta = [1, 1, latest.attachment_count as i64, 1];
+                    self.execute(
+                        guild_id,
+                        event,
+                        vec![latest],
+                        reason,
+                        meta,
+                        GuardAction::EstablishedScam,
+                    )
+                    .await;
+                } else {
+                    let image_channels = recent
+                        .iter()
+                        .filter(|m| m.image_count > 0)
+                        .map(|m| m.channel_id)
+                        .collect::<std::collections::HashSet<_>>()
+                        .len() as i64;
+                    let image_count: i64 = recent.iter().map(|m| m.image_count as i64).sum();
+                    let reason = format!(
+                        "Bild-Scam in {image_channels} Channels (conf {:.0}%): {ai_reason}",
+                        confidence * 100.0
+                    );
+                    let meta = [image_channels, recent.len() as i64, image_count, 0];
+                    self.execute(
+                        guild_id,
+                        event,
+                        recent.to_vec(),
+                        reason,
+                        meta,
+                        GuardAction::Enforce,
+                    )
+                    .await;
+                }
+                return true;
+            }
+        }
+
+        // 4. Keyword-Einzeltreffer → AI; etabliert = 24h-Timeout+Warn-DM, jung = Vollzug
         if contains_suspicious_text(&event.content) {
             let (is_scam, confidence, ai_reason) = self.ai_check(&event.content).await;
             if is_scam && confidence >= AI_SCAM_CONFIDENCE {
                 let established =
                     is_established_account(event.author_created_at, event.author_joined_at, now);
                 let action = if established {
-                    GuardAction::Propose
+                    GuardAction::EstablishedScam
                 } else {
                     GuardAction::Enforce
                 };
@@ -522,6 +613,31 @@ impl SecurityGuard {
         parse_scam_json(raw.as_deref())
     }
 
+    async fn ai_check_image_scam(&self, msgs: &[RecentMsg]) -> (bool, f64, String) {
+        let Some(vision) = &self.vision else {
+            return (false, 0.0, "ai_unavailable".to_string());
+        };
+        let image_urls: Vec<String> = msgs
+            .iter()
+            .flat_map(|m| m.image_urls.iter().cloned())
+            .take(1)
+            .collect();
+        if image_urls.is_empty() {
+            return (false, 0.0, "no_images".to_string());
+        }
+        let raw = vision
+            .generate_multimodal(dl_ai::GenerateMultimodalRequest {
+                prompt: VISION_SCAM_PROMPT.to_string(),
+                image_urls,
+                system_prompt: None,
+                model: None,
+                max_output_tokens: Some(200),
+                temperature: 0.2,
+            })
+            .await;
+        parse_scam_json(raw.as_deref())
+    }
+
     /// Best-effort-Bild-Label für den Takeover-Alarm (Original:
     /// `_takeover_ai_label` → `_ai_check_image_scam`). KEIN Gate: ändert die
     /// Quarantäne nie, liefert den Mods nur Kontext, ob MiniMax die Bilder
@@ -556,10 +672,7 @@ impl SecurityGuard {
         }
         let verdict = if is_scam { "Scam" } else { "kein Scam" };
         let reason = if reason.is_empty() { "-" } else { &reason };
-        Some(format!(
-            "{verdict} ({:.0}%) — {reason}",
-            confidence * 100.0
-        ))
+        Some(format!("{verdict} ({:.0}%) — {reason}", confidence * 100.0))
     }
 
     /// Vollzug oder Vorschlag: DM → Aktion → Nachrichten löschen →
@@ -582,6 +695,7 @@ impl SecurityGuard {
             action: match action {
                 GuardAction::Enforce => "ban".to_string(),
                 GuardAction::Propose => "timeout-proposal".to_string(),
+                GuardAction::EstablishedScam => "timeout-proposal".to_string(),
                 GuardAction::Takeover => "takeover-quarantine".to_string(),
             },
             reason: reason.clone(),
@@ -604,6 +718,16 @@ impl SecurityGuard {
                     .send_dm(event.author_id, takeover_dm_text(&case_id))
                     .await
             }
+            GuardAction::EstablishedScam => {
+                self.port
+                    .send_dm(
+                        event.author_id,
+                        format!(
+                            "Du wurdest auf der Deutschen Deadlock Community vorübergehend stummgeschaltet (24 Stunden).\nGrund: Auf deinem Account wurde eine verdächtige Scam-Nachricht erkannt. Falls dein Account gehackt wurde, melde dich bitte beim Mod-Team, sobald du ihn zurück hast.\nCase: {case_id}\nWende dich an das Mod-Team, sobald dein Account wieder sicher ist."
+                        ),
+                    )
+                    .await
+            }
             _ => {
                 self.port
                     .send_dm_with_appeal(
@@ -622,6 +746,11 @@ impl SecurityGuard {
             GuardAction::Propose => {
                 self.port
                     .timeout(guild_id, event.author_id, PROPOSAL_TIMEOUT_MINUTES, &reason)
+                    .await
+            }
+            GuardAction::EstablishedScam => {
+                self.port
+                    .timeout(guild_id, event.author_id, TIMEOUT_MINUTES, &reason)
                     .await
             }
             // Reversibler 24h-Timeout statt Ban (Original: `_apply_timeout`,
@@ -789,6 +918,16 @@ mod tests {
         let msgs = vec![msg(1, 30, "", 1), msg(2, 10, "", 1)];
         let (reason, _) = should_trigger(&msgs).expect("attach");
         assert!(reason.contains("attachments across 2+ channels"));
+    }
+
+    #[test]
+    fn image_multi_channel_threshold_wie_python() {
+        let msgs = vec![msg(1, 30, "", 1), msg(2, 10, "", 1)];
+        assert!(is_image_multi_channel(&msgs));
+        let msgs = vec![msg(1, 30, "", 1), msg(1, 10, "", 2)];
+        assert!(!is_image_multi_channel(&msgs));
+        let msgs = vec![msg(1, 30, "telegram", 0), msg(2, 10, "", 0)];
+        assert!(!is_image_multi_channel(&msgs));
     }
 
     #[test]

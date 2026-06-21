@@ -20,10 +20,9 @@
 //! Temperatur 0.2): leerer Text wird nur dann übersprungen, wenn auch keine
 //! Bild-Anhänge vorliegen oder kein Vision-Generator verdrahtet ist.
 //!
-//! Bewusste Lücken (dokumentiert): Kontext-Backfill-Eskalation (12
-//! Nachrichten bei 0.55–0.78) und die übrigen Tone-Tag-Schwellen — folgen
-//! mit dem Tag-System; der Admin-Skip nähert manage_messages über das
-//! Administrator-Flag des Dispatchers an.
+//! Kontext-Backfill-Eskalation (12 Nachrichten bei `needs_context` oder
+//! 0.55–0.78) und der reichere Prompt-Payload sind portiert. Der Staff-Skip
+//! nutzt die Dispatcher-Rechte fuer Admins/`manage_messages`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -42,6 +41,9 @@ pub const RAGEBAIT_WINDOW_MINUTES: i64 = 120;
 pub const RAGEBAIT_ESCALATE_THRESHOLD: i64 = 4;
 pub const AUTO_DELETE_CONFIDENCE: f64 = 0.90;
 pub const PROPOSE_CONFIDENCE: f64 = 0.78;
+pub const CONTEXT_ESCALATE_LOWER: f64 = 0.55;
+pub const CONTEXT_ESCALATE_UPPER: f64 = 0.78;
+pub const CONTEXT_BACKFILL_MESSAGES: usize = 12;
 pub const PER_USER_COOLDOWN_SECONDS: f64 = 2.0;
 pub const MAX_PROMPT_CHARS: usize = 4000;
 /// Niederschwellige Confidence-Untergrenze für die Ragebaiter-Free-Warnung
@@ -229,6 +231,130 @@ pub fn decide_action(verdict: &AiVerdict, proposal_threshold: f64) -> ModAction 
     ModAction::Ignore
 }
 
+pub fn needs_context_escalation(verdict: &AiVerdict) -> bool {
+    verdict.verdict == "needs_context"
+        || (CONTEXT_ESCALATE_LOWER..CONTEXT_ESCALATE_UPPER).contains(&verdict.confidence)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplyContext {
+    pub author: String,
+    pub content: String,
+}
+
+fn normalize_text(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_discord_mention(candidate: &str) -> bool {
+    let Some(first) = candidate.chars().next() else {
+        return false;
+    };
+    if first != '@' && first != '#' {
+        return false;
+    }
+    let rest = &candidate[first.len_utf8()..];
+    let rest = rest
+        .strip_prefix('!')
+        .or_else(|| rest.strip_prefix('&'))
+        .unwrap_or(rest);
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn strip_mentions(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find('>') else {
+            out.push_str(&rest[open..]);
+            return normalize_text(&out);
+        };
+        let candidate = &after_open[..close];
+        if !is_discord_mention(candidate) {
+            out.push('<');
+            out.push_str(candidate);
+            out.push('>');
+        }
+        rest = &after_open[close + 1..];
+    }
+    out.push_str(rest);
+    normalize_text(&out)
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value.chars().take(limit).collect()
+}
+
+fn build_prompt_payload(
+    event: &dl_discord::MessageEvent,
+    context_lines: &[String],
+    attachment_count: usize,
+    include_full_context: bool,
+    replied_to: Option<&ReplyContext>,
+) -> String {
+    let mut focus_message = strip_mentions(&event.content);
+    if focus_message.is_empty() {
+        focus_message = "[kein Text]".to_string();
+    }
+    focus_message = truncate_chars(&focus_message, 1000);
+
+    let context_limit = if include_full_context { 110 } else { 200 };
+    let mut recent_context: Vec<String> = context_lines
+        .iter()
+        .map(|line| truncate_chars(line, context_limit))
+        .collect();
+
+    let mut payload = serde_json::json!({
+        "user_tag": truncate_chars(&event.author_display_name, 80),
+        "user_message": focus_message,
+        "attachment_count": attachment_count,
+        "recent_context": recent_context,
+        "context_note": "Lines starting with '>>>' are from the SAME user being evaluated. Timestamps show how long ago each message was sent.",
+    });
+    if let Some(reply) = replied_to {
+        payload["is_reply_to"] = serde_json::json!({
+            "author": truncate_chars(&reply.author, 60),
+            "content": truncate_chars(&reply.content, 300),
+        });
+        payload["reply_note"] = serde_json::json!(
+            "The evaluated message is a DIRECT REPLY to 'is_reply_to'. Read it as a response to that specific message, not in isolation."
+        );
+    }
+    if include_full_context {
+        payload["analysis_stage"] = serde_json::json!("context_escalation");
+        payload["focus_message_id"] = serde_json::json!(event.message_id.to_string());
+    }
+
+    let mut prompt = payload.to_string();
+    while prompt.len() > MAX_PROMPT_CHARS && !recent_context.is_empty() {
+        recent_context.remove(0);
+        payload["recent_context"] = serde_json::json!(recent_context);
+        prompt = payload.to_string();
+    }
+    if prompt.len() > MAX_PROMPT_CHARS {
+        let overflow = prompt.len().saturating_sub(MAX_PROMPT_CHARS);
+        let reduced_limit = 1000usize.saturating_sub(overflow).max(200);
+        payload["user_message"] = serde_json::json!(truncate_chars(
+            payload
+                .get("user_message")
+                .and_then(Value::as_str)
+                .unwrap_or_default(),
+            reduced_limit,
+        ));
+        prompt = payload.to_string();
+    }
+    prompt
+}
+
 // ── Engine ─────────────────────────────────────────────────────────────────
 
 /// Discord-Aktionen des Moderators (Tests mocken sie).
@@ -242,6 +368,26 @@ pub trait ModPort: Send + Sync {
     async fn post_log(&self, text: String);
     /// Reine Text-DM an einen User (Original: `_send_ragebaiter_free_hint`).
     async fn send_dm(&self, user_id: u64, text: String);
+    async fn fetch_context_lines(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+        _before_message_id: u64,
+        _author_id: u64,
+        _message_created_at: i64,
+        _limit: usize,
+    ) -> Vec<String> {
+        Vec::new()
+    }
+    async fn fetch_reply_context(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+        _reply_channel_id: Option<u64>,
+        _reply_message_id: Option<u64>,
+    ) -> Option<ReplyContext> {
+        None
+    }
 }
 
 /// Ergebnis einer Review-Aktion (Button-Reply-Text für den Mod).
@@ -303,7 +449,8 @@ impl AiModerator {
             .ok()
             .flatten()
             .flatten();
-        raw.map(|t| t.trim().to_lowercase()).filter(|t| !t.is_empty())
+        raw.map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
     }
 
     /// Niederschwellige Verwarn-DM im Ragebaiter-Free-Channel, mit Doppel-Schutz
@@ -368,8 +515,8 @@ impl AiModerator {
         if !SCAN_CHANNEL_IDS.contains(&event.channel_id) {
             return;
         }
-        if event.author_is_admin {
-            return; // Original skippt manage_messages — Annäherung
+        if event.author_is_admin || event.author_can_manage_messages {
+            return;
         }
         // Original (`ai_moderator.py`): überspringe nur, wenn WEDER Text NOCH
         // Bild-Anhänge vorliegen. Reine Bild-Nachrichten laufen über die
@@ -394,54 +541,16 @@ impl AiModerator {
             cooldown.insert(event.author_id, now);
         }
 
-        let verdict = if image_urls.is_empty() {
-            // Text-only — wie bisher reiner Text-Pfad.
-            let prompt: String = event.content.chars().take(MAX_PROMPT_CHARS).collect();
-            let raw = self
-                .generator
-                .generate_text(dl_ai::GenerateRequest {
-                    prompt,
-                    system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
-                    model: None,
-                    max_output_tokens: Some(300),
-                    temperature: 0.0,
-                })
-                .await;
-            parse_ai_verdict(raw.as_deref())
-        } else {
-            // Mit Bild-Anhängen → multimodaler Pfad. Prompt-Payload analog zum
-            // Original (`_build_prompt_payload`): user_message + attachment_count
-            // als kompaktes JSON. Vision-Generator ist hier garantiert gesetzt.
-            let Some(vision) = &self.vision else {
-                return;
-            };
-            let focus: String = if has_text {
-                event.content.chars().take(1000).collect()
-            } else {
-                "[kein Text]".to_string()
-            };
-            let prompt = serde_json::json!({
-                "user_tag": event.author_display_name.chars().take(80).collect::<String>(),
-                "user_message": focus,
-                "attachment_count": image_urls.len(),
-            })
-            .to_string();
-            let raw = vision
-                .generate_multimodal(dl_ai::GenerateMultimodalRequest {
-                    prompt,
-                    image_urls,
-                    system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
-                    model: None,
-                    max_output_tokens: Some(300),
-                    temperature: 0.2,
-                })
-                .await;
-            parse_ai_verdict(raw.as_deref())
-        };
+        let (verdict, _escalated_with_context) =
+            self.classify_message(guild_id, event, &image_urls).await;
 
         match decide_action(&verdict, PROPOSE_CONFIDENCE) {
             ModAction::Ignore => {}
             ModAction::AutoDelete => {
+                let case_id = self
+                    .store
+                    .insert_case(self.draft(guild_id, event, &verdict, "auto_delete"))
+                    .await;
                 let deleted = self
                     .port
                     .delete_message(
@@ -450,13 +559,19 @@ impl AiModerator {
                         "AI-Moderation: Auto-Delete",
                     )
                     .await;
-                let case_id = self
-                    .store
-                    .insert_case(self.draft(guild_id, event, &verdict, "auto_deleted"))
+                let timed_out = self
+                    .port
+                    .timeout_member(guild_id, event.author_id, TIMEOUT_MINUTES)
                     .await;
+                let action = if deleted && timed_out {
+                    "auto_delete"
+                } else {
+                    "auto_delete_failed"
+                };
+                self.store.update_case_action(&case_id, action).await;
                 self.port
                     .post_log(format!(
-                        "🤖 Auto-Delete ({}, {:.0}%): <@{}> in <#{}> — {} {}",
+                        "🤖 Auto-Delete ({}, {:.0}%): <@{}> in <#{}> — {} {}{}",
                         verdict.category,
                         verdict.confidence * 100.0,
                         event.author_id,
@@ -466,6 +581,11 @@ impl AiModerator {
                             ""
                         } else {
                             "(Delete fehlgeschlagen)"
+                        },
+                        if timed_out {
+                            ""
+                        } else {
+                            "(Timeout fehlgeschlagen)"
                         },
                     ))
                     .await;
@@ -517,6 +637,102 @@ impl AiModerator {
                     .await;
             }
         }
+    }
+
+    async fn classify_message(
+        &self,
+        guild_id: u64,
+        event: &dl_discord::MessageEvent,
+        image_urls: &[String],
+    ) -> (AiVerdict, bool) {
+        let minimal_context = self
+            .port
+            .fetch_context_lines(
+                guild_id,
+                event.channel_id,
+                event.message_id,
+                event.author_id,
+                event.message_created_at,
+                2,
+            )
+            .await;
+        let verdict = self
+            .run_moderation_call(guild_id, event, image_urls, &minimal_context, false)
+            .await;
+        if !needs_context_escalation(&verdict) {
+            return (verdict, false);
+        }
+
+        let full_context = self
+            .port
+            .fetch_context_lines(
+                guild_id,
+                event.channel_id,
+                event.message_id,
+                event.author_id,
+                event.message_created_at,
+                CONTEXT_BACKFILL_MESSAGES,
+            )
+            .await;
+        let escalated = self
+            .run_moderation_call(guild_id, event, image_urls, &full_context, true)
+            .await;
+        (escalated, true)
+    }
+
+    async fn run_moderation_call(
+        &self,
+        guild_id: u64,
+        event: &dl_discord::MessageEvent,
+        image_urls: &[String],
+        context_lines: &[String],
+        include_full_context: bool,
+    ) -> AiVerdict {
+        let replied_to = self
+            .port
+            .fetch_reply_context(
+                guild_id,
+                event.channel_id,
+                event.reply_channel_id,
+                event.reply_message_id,
+            )
+            .await;
+        let prompt = build_prompt_payload(
+            event,
+            context_lines,
+            image_urls.len(),
+            include_full_context,
+            replied_to.as_ref(),
+        );
+
+        if image_urls.is_empty() {
+            let raw = self
+                .generator
+                .generate_text(dl_ai::GenerateRequest {
+                    prompt,
+                    system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
+                    model: None,
+                    max_output_tokens: Some(300),
+                    temperature: 0.0,
+                })
+                .await;
+            return parse_ai_verdict(raw.as_deref());
+        }
+
+        let Some(vision) = &self.vision else {
+            return parse_error_verdict();
+        };
+        let raw = vision
+            .generate_multimodal(dl_ai::GenerateMultimodalRequest {
+                prompt,
+                image_urls: image_urls.to_vec(),
+                system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
+                model: None,
+                max_output_tokens: Some(300),
+                temperature: 0.2,
+            })
+            .await;
+        parse_ai_verdict(raw.as_deref())
     }
 
     fn draft(
@@ -580,10 +796,16 @@ impl AiModerator {
             .timeout_member(case.guild_id, case.user_id, TIMEOUT_MINUTES)
             .await;
         self.store.resolve_case(case_id, "accepted", mod_id).await;
-        self.post_action_log(&case, "accepted", mod_id, &[
-            (deleted, "Delete fehlgeschlagen"),
-            (timed_out, "Timeout fehlgeschlagen"),
-        ], None)
+        self.post_action_log(
+            &case,
+            "accepted",
+            mod_id,
+            &[
+                (deleted, "Delete fehlgeschlagen"),
+                (timed_out, "Timeout fehlgeschlagen"),
+            ],
+            None,
+        )
         .await;
         ReviewOutcome::Done("Moderationsvorschlag akzeptiert.".to_string())
     }
@@ -613,10 +835,16 @@ impl AiModerator {
             )
             .await;
         self.store.resolve_case(case_id, "banned", mod_id).await;
-        self.post_action_log(&case, "banned", mod_id, &[
-            (deleted, "Delete fehlgeschlagen"),
-            (banned, "Ban fehlgeschlagen"),
-        ], None)
+        self.post_action_log(
+            &case,
+            "banned",
+            mod_id,
+            &[
+                (deleted, "Delete fehlgeschlagen"),
+                (banned, "Ban fehlgeschlagen"),
+            ],
+            None,
+        )
         .await;
         ReviewOutcome::Done("User gebannt.".to_string())
     }
@@ -629,7 +857,9 @@ impl AiModerator {
         if matches!(case.action.as_str(), "accepted" | "denied") {
             return ReviewOutcome::AlreadyHandled;
         }
-        self.store.resolve_case_denied(case_id, mod_id, reason).await;
+        self.store
+            .resolve_case_denied(case_id, mod_id, reason)
+            .await;
         self.post_action_log(&case, "denied", mod_id, &[], Some(reason))
             .await;
         ReviewOutcome::Done("Moderationsvorschlag abgelehnt.".to_string())
@@ -760,5 +990,64 @@ mod tests {
             decide_action(&verdict("needs_context", "other", 0.99), PROPOSE_CONFIDENCE),
             ModAction::Ignore
         );
+    }
+
+    #[test]
+    fn context_escalation_thresholds_match_python() {
+        let verdict = |v: &str, conf: f64| AiVerdict {
+            verdict: v.into(),
+            category: "other".into(),
+            confidence: conf,
+            reason: String::new(),
+        };
+        assert!(needs_context_escalation(&verdict("needs_context", 0.1)));
+        assert!(!needs_context_escalation(&verdict("ok", 0.54)));
+        assert!(needs_context_escalation(&verdict("ok", 0.55)));
+        assert!(needs_context_escalation(&verdict("propose", 0.779)));
+        assert!(!needs_context_escalation(&verdict("propose", 0.78)));
+    }
+
+    #[test]
+    fn prompt_payload_contains_context_and_reply() {
+        let event = dl_discord::MessageEvent {
+            guild_id: Some(1),
+            channel_id: 2,
+            message_id: 3,
+            author_id: 4,
+            author_display_name: "Anna".into(),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_is_staff: false,
+            content: "hallo <@123> test".into(),
+            message_created_at: 1_000,
+            is_reply: true,
+            reply_message_id: Some(9),
+            reply_channel_id: Some(2),
+            attachment_count: 1,
+            image_attachment_count: 1,
+            image_attachment_urls: vec!["https://img".into()],
+            author_created_at: 0,
+            author_joined_at: None,
+        };
+        let prompt = build_prompt_payload(
+            &event,
+            &[
+                ">>> [2min ago] Anna: vorher".to_string(),
+                "    [1min ago] Ben: antwort".to_string(),
+            ],
+            1,
+            true,
+            Some(&ReplyContext {
+                author: "Ben".into(),
+                content: "provokation".into(),
+            }),
+        );
+        let payload: Value = serde_json::from_str(&prompt).expect("payload");
+        assert_eq!(payload["user_message"], "hallo test");
+        assert_eq!(payload["attachment_count"], 1);
+        assert_eq!(payload["recent_context"][0], ">>> [2min ago] Anna: vorher");
+        assert_eq!(payload["is_reply_to"]["author"], "Ben");
+        assert_eq!(payload["analysis_stage"], "context_escalation");
+        assert_eq!(payload["focus_message_id"], "3");
     }
 }

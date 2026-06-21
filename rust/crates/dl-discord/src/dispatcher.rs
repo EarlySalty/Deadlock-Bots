@@ -48,10 +48,20 @@ pub struct MessageEvent {
     pub author_display_name: String,
     /// Aus dem Gateway-Cache berechnet; ohne Cache false.
     pub author_is_admin: bool,
+    /// AI-Moderator-Staff-Skip wie Python: manage_messages.
+    pub author_can_manage_messages: bool,
+    /// Staff-Schutz fuer Moderationspfade: administrator || manage_messages || manage_guild.
+    pub author_is_staff: bool,
     pub content: String,
+    /// Nachrichtenerstellung (Unix-Sekunden, aus Discord-Timestamp/Snowflake).
+    pub message_created_at: i64,
     /// Ist die Nachricht eine Antwort (`message_reference` gesetzt)? Für den
     /// einmaligen Reply-Bonus der Text-Gamification.
     pub is_reply: bool,
+    /// Ziel der Reply, falls vorhanden. Wird von der AI-Moderation fuer
+    /// `is_reply_to`-Kontext aufgeloest.
+    pub reply_message_id: Option<u64>,
+    pub reply_channel_id: Option<u64>,
     /// Anhänge gesamt / davon Bilder (für Spam-/Takeover-Detektion).
     pub attachment_count: u32,
     pub image_attachment_count: u32,
@@ -207,8 +217,13 @@ mod tests {
             author_id: 3,
             author_display_name: "x".into(),
             author_is_admin: false,
+            author_can_manage_messages: false,
+            author_is_staff: false,
             content: "hallo".into(),
+            message_created_at: 0,
             is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
             attachment_count: 0,
             image_attachment_count: 0,
             image_attachment_urls: Vec::new(),

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use serenity::all::{
     Context, EventHandler, GatewayIntents, GuildId, GuildMemberUpdateEvent, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, Ready, User, VoiceState,
+    InviteDeleteEvent, Member, Message, Permissions, Ready, User, VoiceState,
 };
 use serenity::async_trait;
 
@@ -21,6 +21,10 @@ struct Handler {
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
     invite_tracker: Arc<InviteTracker>,
+}
+
+fn is_staff_permissions(perms: Permissions) -> bool {
+    perms.administrator() || perms.manage_messages() || perms.manage_guild()
 }
 
 #[async_trait]
@@ -47,15 +51,22 @@ impl EventHandler for Handler {
         if message.author.bot {
             return;
         }
-        // Admin-Flag aus dem Cache (für !steam_*-Admin-Kommandos u. ä.)
-        let author_is_admin = message
+        // Admin-Flag bleibt eng fuer Admin-Commands; Staff-Schutz fuer
+        // Moderation folgt Python: administrator || manage_messages || manage_guild.
+        let (author_is_admin, author_can_manage_messages, author_is_staff, author_joined_at) = message
             .guild_id
             .and_then(|guild_id| {
                 let guild = ctx.cache.guild(guild_id)?;
                 let member = guild.members.get(&message.author.id)?;
-                Some(guild.member_permissions(member).administrator())
+                let perms = guild.member_permissions(member);
+                Some((
+                    perms.administrator(),
+                    perms.manage_messages(),
+                    is_staff_permissions(perms),
+                    member.joined_at.map(|t| t.unix_timestamp()),
+                ))
             })
-            .unwrap_or(false);
+            .unwrap_or((false, false, false, None));
         let image_attachment_urls: Vec<String> = message
             .attachments
             .iter()
@@ -73,11 +84,15 @@ impl EventHandler for Handler {
             .map(|a| a.url.clone())
             .collect();
         let image_attachment_count = image_attachment_urls.len() as u32;
-        let author_joined_at = message.guild_id.and_then(|guild_id| {
-            let guild = ctx.cache.guild(guild_id)?;
-            let member = guild.members.get(&message.author.id)?;
-            member.joined_at.map(|t| t.unix_timestamp())
-        });
+        let reply_message_id = message
+            .message_reference
+            .as_ref()
+            .and_then(|reference| reference.message_id)
+            .map(|id| id.get());
+        let reply_channel_id = message
+            .message_reference
+            .as_ref()
+            .map(|reference| reference.channel_id.get());
         self.dispatcher.publish_message(MessageEvent {
             guild_id: message.guild_id.map(|g| g.get()),
             channel_id: message.channel_id.get(),
@@ -88,8 +103,13 @@ impl EventHandler for Handler {
                 .await
                 .unwrap_or_else(|| message.author.name.to_string()),
             author_is_admin,
+            author_can_manage_messages,
+            author_is_staff,
             content: message.content.clone(),
+            message_created_at: message.timestamp.unix_timestamp(),
             is_reply: message.message_reference.is_some(),
+            reply_message_id,
+            reply_channel_id,
             attachment_count: message.attachments.len() as u32,
             image_attachment_count,
             image_attachment_urls,
@@ -228,6 +248,19 @@ impl EventHandler for Handler {
             (None, None) => return,
         };
         self.dispatcher.publish_voice(event);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn staff_permissions_match_python_guard_skip() {
+        assert!(is_staff_permissions(Permissions::ADMINISTRATOR));
+        assert!(is_staff_permissions(Permissions::MANAGE_MESSAGES));
+        assert!(is_staff_permissions(Permissions::MANAGE_GUILD));
+        assert!(!is_staff_permissions(Permissions::SEND_MESSAGES));
     }
 }
 

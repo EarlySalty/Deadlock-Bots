@@ -131,6 +131,20 @@ impl ModerationStore {
             .await;
     }
 
+    pub async fn update_case_action(&self, case_id: &str, action: &str) {
+        let (case_id, action) = (case_id.to_string(), action.to_string());
+        let _ = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE ai_moderation_cases SET action = ?1 WHERE case_id = ?2",
+                    rusqlite::params![action, case_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+    }
+
     pub async fn resolve_case(&self, case_id: &str, action: &str, mod_id: u64) {
         let (case_id, action) = (case_id.to_string(), action.to_string());
         let _ = self
@@ -266,6 +280,9 @@ mod tests {
             })
             .await;
         store.set_review_message(&case_id, 999).await;
+        store
+            .update_case_action(&case_id, "auto_delete_failed")
+            .await;
         store.resolve_case(&case_id, "accepted", 777).await;
         let (action, mod_id, review): (String, u64, u64) = store
             .db
@@ -300,9 +317,14 @@ mod tests {
             .await;
         let case = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(case.action, "proposed");
-        assert_eq!((case.channel_id, case.message_id, case.user_id), (2, 3, 100));
+        assert_eq!(
+            (case.channel_id, case.message_id, case.user_id),
+            (2, 3, 100)
+        );
 
-        store.resolve_case_denied(&case_id, 777, "kein Verstoss").await;
+        store
+            .resolve_case_denied(&case_id, 777, "kein Verstoss")
+            .await;
         let denied = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(denied.action, "denied");
 

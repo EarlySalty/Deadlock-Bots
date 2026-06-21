@@ -4,7 +4,8 @@ use std::sync::Arc;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::json;
-use serenity::all::{ChannelId, GuildId, MessageId, UserId};
+use serenity::all::{ChannelId, GuildId, Message, MessageId, UserId};
+use serenity::builder::GetMessages;
 
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -104,6 +105,106 @@ impl dl_moderation::ModPort for ModGlue {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
         let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+    }
+
+    async fn fetch_context_lines(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        before_message_id: u64,
+        author_id: u64,
+        message_created_at: i64,
+        limit: usize,
+    ) -> Vec<String> {
+        let fetch_limit = limit.saturating_add(1).min(100) as u8;
+        let Ok(mut messages) = ChannelId::new(channel_id)
+            .messages(
+                &self.adapter.http,
+                GetMessages::new()
+                    .before(MessageId::new(before_message_id))
+                    .limit(fetch_limit),
+            )
+            .await
+        else {
+            return Vec::new();
+        };
+        messages.sort_by_key(|message| message.timestamp.unix_timestamp());
+
+        let mut lines = Vec::new();
+        for previous in messages {
+            let mut preview = strip_mentions(&previous.content);
+            if preview.is_empty() && !previous.attachments.is_empty() {
+                preview = "[Anhang]".to_string();
+            }
+            if preview.is_empty() {
+                continue;
+            }
+
+            let delta_s = message_created_at - previous.timestamp.unix_timestamp();
+            let mins = (delta_s.max(0)) / 60;
+            let time_tag = if mins < 60 {
+                format!("[{mins}min ago]")
+            } else {
+                format!("[{}h ago]", mins / 60)
+            };
+            let prefix = if previous.author.id.get() == author_id {
+                ">>>"
+            } else {
+                "   "
+            };
+            let display_name = self.display_name_for_message(guild_id, &previous);
+            lines.push(format!(
+                "{prefix} {time_tag} {display_name}: {}",
+                truncate_chars(&preview, 150)
+            ));
+        }
+        if lines.len() > limit {
+            lines.split_off(lines.len() - limit)
+        } else {
+            lines
+        }
+    }
+
+    async fn fetch_reply_context(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        reply_channel_id: Option<u64>,
+        reply_message_id: Option<u64>,
+    ) -> Option<dl_moderation::ReplyContext> {
+        let message_id = reply_message_id?;
+        let channel_id = reply_channel_id.unwrap_or(channel_id);
+        let message = ChannelId::new(channel_id)
+            .message(&self.adapter.http, MessageId::new(message_id))
+            .await
+            .ok()?;
+        let mut content = strip_mentions(&message.content);
+        if content.is_empty() {
+            content = if message.attachments.is_empty() {
+                "[kein Text]".to_string()
+            } else {
+                "[Anhang]".to_string()
+            };
+        }
+        Some(dl_moderation::ReplyContext {
+            author: truncate_chars(&self.display_name_for_message(guild_id, &message), 60),
+            content: truncate_chars(&content, 300),
+        })
+    }
+}
+
+impl ModGlue {
+    fn display_name_for_message(&self, guild_id: u64, message: &Message) -> String {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|guild| {
+                guild
+                    .members
+                    .get(&message.author.id)
+                    .map(|member| member.display_name().to_string())
+            })
+            .unwrap_or_else(|| message.author.name.to_string())
     }
 }
 
@@ -208,6 +309,58 @@ fn fmt_delta(now: i64, past: Option<i64>) -> String {
     }
 }
 
+fn normalize_text(value: &str) -> String {
+    value
+        .replace(['\r', '\n'], " ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn is_discord_mention(candidate: &str) -> bool {
+    let Some(first) = candidate.chars().next() else {
+        return false;
+    };
+    if first != '@' && first != '#' {
+        return false;
+    }
+    let rest = &candidate[first.len_utf8()..];
+    let rest = rest
+        .strip_prefix('!')
+        .or_else(|| rest.strip_prefix('&'))
+        .unwrap_or(rest);
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit())
+}
+
+fn strip_mentions(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(open) = rest.find('<') {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 1..];
+        let Some(close) = after_open.find('>') else {
+            out.push_str(&rest[open..]);
+            return normalize_text(&out);
+        };
+        let candidate = &after_open[..close];
+        if !is_discord_mention(candidate) {
+            out.push('<');
+            out.push_str(candidate);
+            out.push('>');
+        }
+        rest = &after_open[close + 1..];
+    }
+    out.push_str(rest);
+    normalize_text(&out)
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    if value.chars().count() <= limit {
+        return value.to_string();
+    }
+    value.chars().take(limit).collect()
+}
+
 pub struct GuardGlue {
     pub adapter: Arc<DiscordAdapter>,
 }
@@ -306,6 +459,9 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             dl_moderation::guard::GuardAction::Propose => {
                 ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
             }
+            dl_moderation::guard::GuardAction::EstablishedScam => {
+                ("🛡️ Scam erkannt: etablierter Account — Auto-Timeout (24h)", 0xE67E22)
+            }
             dl_moderation::guard::GuardAction::Takeover => {
                 ("⚠️ Account-Takeover erkannt — Quarantäne (24h-Timeout, reversibel)", 0xE74C3C)
             }
@@ -338,6 +494,9 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             let minutes = match action {
                 dl_moderation::guard::GuardAction::Propose => {
                     dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
+                }
+                dl_moderation::guard::GuardAction::EstablishedScam => {
+                    dl_moderation::guard::TIMEOUT_MINUTES
                 }
                 _ => dl_moderation::guard::TIMEOUT_MINUTES,
             };
