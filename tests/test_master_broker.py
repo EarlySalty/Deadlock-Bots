@@ -23,11 +23,13 @@ class _FakeRequest:
         *,
         headers: dict[str, str],
         remote: str = "127.0.0.1",
+        query: dict[str, str] | None = None,
     ) -> None:
         self._payload = payload
         self.headers = headers
         self.remote = remote
         self.transport = None
+        self.query = dict(query or {})
 
     async def json(self) -> dict[str, Any]:
         return dict(self._payload)
@@ -43,8 +45,19 @@ class _FakeMessage:
 
 
 class _FakeChannel:
-    def __init__(self, channel_id: int, *, message: _FakeMessage | None = None) -> None:
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        message: _FakeMessage | None = None,
+        name: str = "fake-channel",
+        category_id: int | None = None,
+        last_message_id: int | None = None,
+    ) -> None:
         self.id = channel_id
+        self.name = name
+        self.category_id = category_id
+        self.last_message_id = last_message_id
         self.sent_calls: list[dict[str, Any]] = []
         self._message = message or _FakeMessage(4321)
         self.fetch_calls: list[int] = []
@@ -129,7 +142,18 @@ class _FakeGuild:
         self.roles = roles or [self.default_role]
         self._roles = {int(role.id): role for role in self.roles}
         self._members = {int(member.id): member for member in members or []}
+        self._channels: dict[int, Any] = {}
         self.me = me
+        self.chunked = True
+
+    async def chunk(self) -> None:
+        self.chunked = True
+
+    def add_channel(self, channel: Any) -> None:
+        self._channels[int(channel.id)] = channel
+
+    def get_channel(self, channel_id: int) -> Any | None:
+        return self._channels.get(int(channel_id))
 
     async def create_text_channel(
         self, *, name: str, category: _FakeCategory, topic: str | None = None, **kwargs: Any
@@ -172,14 +196,27 @@ class _TrackingTestView(discord.ui.View):
 
 
 class _FakeBot:
-    def __init__(self, *, channel: Any | None = None, user: _FakeDmUser | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        channel: Any | None = None,
+        user: _FakeDmUser | None = None,
+        guilds: list[Any] | None = None,
+    ) -> None:
         self._channels: dict[int, Any] = {}
         if channel is not None:
             self._channels[int(channel.id)] = channel
         self._users: dict[int, _FakeDmUser] = {}
         if user is not None:
             self._users[int(user.id)] = user
+        self.guilds = list(guilds or [])
         self.added_views: list[tuple[discord.ui.View, int | None]] = []
+
+    def get_guild(self, guild_id: int) -> Any | None:
+        for guild in self.guilds:
+            if int(getattr(guild, "id", 0)) == int(guild_id):
+                return guild
+        return None
 
     def add_channel(self, channel: Any) -> None:
         self._channels[int(channel.id)] = channel
@@ -236,6 +273,69 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["result"]["user_id"], 123)
         self.assertEqual(body["result"]["channel_id"], user.dm_channel.id)
         self.assertEqual(user.dm_channel.sent_calls[0]["content"], "Direktnachricht")
+
+    async def test_channel_info_rejects_non_loopback(self) -> None:
+        guild = _FakeGuild()
+        channel = _FakeChannel(7777, name="ticket-123")
+        guild.add_channel(channel)
+        bot = _FakeBot(guilds=[guild])
+        broker = MasterBroker(bot, token="secret-token")
+        request = _FakeRequest(
+            {},
+            headers=self._headers("req-channel-info-reject"),
+            remote="10.0.0.5",
+            query={"channel_id": "7777"},
+        )
+
+        response = await broker._handle_channel_info(request)
+
+        self.assertEqual(response.status, 403)
+        body = self._payload(response)
+        self.assertEqual(body["error"]["code"], "forbidden")
+
+    async def test_channel_info_returns_metadata(self) -> None:
+        guild = _FakeGuild()
+        channel = _FakeChannel(
+            7777,
+            name="ticket-123",
+            category_id=555,
+            last_message_id=999888,
+        )
+        guild.add_channel(channel)
+        bot = _FakeBot(guilds=[guild])
+        broker = MasterBroker(bot, token="secret-token")
+        request = _FakeRequest(
+            {},
+            headers=self._headers("req-channel-info-ok"),
+            query={"channel_id": "7777"},
+        )
+
+        response = await broker._handle_channel_info(request)
+
+        self.assertEqual(response.status, 200)
+        body = self._payload(response)
+        self.assertEqual(body["ok"], True)
+        self.assertEqual(body["channel_id"], "7777")
+        self.assertEqual(body["name"], "ticket-123")
+        self.assertEqual(body["parent_id"], "555")
+        self.assertEqual(body["last_message_id"], "999888")
+
+    async def test_channel_info_unknown_channel_returns_404(self) -> None:
+        guild = _FakeGuild()
+        bot = _FakeBot(guilds=[guild])
+        broker = MasterBroker(bot, token="secret-token")
+        request = _FakeRequest(
+            {},
+            headers=self._headers("req-channel-info-404"),
+            query={"channel_id": "12345"},
+        )
+
+        response = await broker._handle_channel_info(request)
+
+        self.assertEqual(response.status, 404)
+        body = self._payload(response)
+        self.assertEqual(body["error"]["code"], "not_found")
+        self.assertIn("12345", body["error"]["message"])
 
     async def test_create_and_delete_channel_endpoints(self) -> None:
         guild = _FakeGuild()

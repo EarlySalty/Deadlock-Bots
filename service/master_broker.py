@@ -273,6 +273,10 @@ class MasterBroker:
                         self._handle_role_members,
                     ),
                     web.get(
+                        "/internal/master/v1/discord/channel-info",
+                        self._handle_channel_info,
+                    ),
+                    web.get(
                         "/internal/master/v1/discord/members",
                         self._handle_list_members,
                     ),
@@ -1302,6 +1306,44 @@ class MasterBroker:
         ]
         return web.json_response(
             {"ok": True, "role_id": str(role.id), "name": role.name, "members": members}
+        )
+
+    async def _handle_channel_info(self, request: web.Request) -> web.Response:
+        """Read-only: Metadaten eines Kanals (?channel_id=). Loopback-only, kein Token."""
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        try:
+            channel_id = int(request.query.get("channel_id") or 0)
+        except (TypeError, ValueError):
+            channel_id = 0
+        guild = await self._resolve_guild_for_diagnostics(request)
+        if guild is None:
+            return self._error_response(
+                request=request, status=404, code="not_found", message="guild not found"
+            )
+        channel = guild.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            channel = self.bot.get_channel(channel_id) if channel_id else None
+        if channel is None:
+            return self._error_response(
+                request=request,
+                status=404,
+                code="not_found",
+                message=f"channel {channel_id} not found",
+            )
+        return web.json_response(
+            {
+                "ok": True,
+                "channel_id": str(channel.id),
+                "name": channel.name,
+                "parent_id": str(channel.category_id) if channel.category_id else None,
+                "last_message_id": (
+                    str(channel.last_message_id)
+                    if getattr(channel, "last_message_id", None)
+                    else None
+                ),
+            }
         )
 
     async def _handle_member_access(self, request: web.Request) -> web.Response:
