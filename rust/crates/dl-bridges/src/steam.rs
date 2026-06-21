@@ -17,6 +17,7 @@ use serde_json::{json, Map, Value};
 
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
+const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
 pub const PANEL_CUSTOM_IDS: [&str; 5] = [
@@ -31,8 +32,17 @@ pub const BETAINVITE_PANEL_CUSTOM_ID: &str = "betainvite:panel:start";
 
 /// custom_ids, die lokal das Freundescode-Modal öffnen statt zu forwarden.
 const FRIEND_CODE_MODAL_IDS: [&str; 2] = ["steam_link_panel:friend_code", "linkpanel_friend_code"];
+const RANKCHECK_IDS: [&str; 2] = ["steam_link_panel:rankcheck", "linkpanel_rank_check"];
 const FRIEND_CODE_MODAL_CUSTOM_ID: &str = "steam_bridge:friend_code_modal";
 const FRIEND_CODE_SUBMIT_CUSTOM_ID: &str = "steam_link_panel:friend_code:submit";
+
+fn component_forward_timeout(custom_id: &str) -> Duration {
+    if RANKCHECK_IDS.contains(&custom_id) {
+        RANKCHECK_FORWARD_TIMEOUT
+    } else {
+        DEFAULT_TIMEOUT
+    }
+}
 
 const UNREACHABLE_MSG: &str =
     "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte versuche es in wenigen Sekunden erneut.";
@@ -288,9 +298,10 @@ impl InteractionHandler for ForwardComponent {
             };
         }
         let payload = SteamBotClient::interaction_payload(&interaction, &interaction.custom_id);
+        let timeout = component_forward_timeout(&interaction.custom_id);
         let result = self
             .client
-            .post_event("interaction", payload, DEFAULT_TIMEOUT)
+            .post_event("interaction", payload, timeout)
             .await;
         render(result)
     }
@@ -891,5 +902,21 @@ mod tests {
         }
         // 14 Routen, aber nur 11 Top-Level-Definitionen (steam-Gruppe dedupliziert)
         assert_eq!(router.command_definitions().len(), 11);
+    }
+
+    #[test]
+    fn rankcheck_buttons_nutzen_langzeit_timeout() {
+        assert_eq!(
+            component_forward_timeout("steam_link_panel:rankcheck"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            component_forward_timeout("linkpanel_rank_check"),
+            Duration::from_secs(120)
+        );
+        assert_eq!(
+            component_forward_timeout("steam_link_panel:open"),
+            DEFAULT_TIMEOUT
+        );
     }
 }

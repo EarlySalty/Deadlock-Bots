@@ -833,9 +833,7 @@ impl crate::rank::RankPort for RankGlue {
                 g.voice_states
                     .iter()
                     .filter(|(_, vs)| vs.channel_id == Some(ChannelId::new(channel_id)))
-                    .filter(|(uid, _)| {
-                        g.members.get(uid).map(|m| !m.user.bot).unwrap_or(true)
-                    })
+                    .filter(|(uid, _)| g.members.get(uid).map(|m| !m.user.bot).unwrap_or(true))
                     .count()
             })
             .unwrap_or(0)
@@ -858,13 +856,31 @@ impl crate::rank::RankPort for RankGlue {
                 g.members.get(&UserId::new(user_id)).map(|m| {
                     m.roles
                         .iter()
-                        .filter_map(|rid| {
-                            g.roles.get(rid).map(|r| (rid.get(), r.name.to_string()))
-                        })
+                        .filter_map(|rid| g.roles.get(rid).map(|r| (rid.get(), r.name.to_string())))
                         .collect()
                 })
             })
             .unwrap_or_default()
+    }
+
+    async fn guild_member_roles(&self, guild_id: u64, user_id: u64) -> Option<Vec<(u64, String)>> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let member = guild.members.get(&UserId::new(user_id))?;
+        if member.user.bot {
+            return None;
+        }
+        Some(
+            member
+                .roles
+                .iter()
+                .filter_map(|rid| {
+                    guild
+                        .roles
+                        .get(rid)
+                        .map(|r| (rid.get(), r.name.to_string()))
+                })
+                .collect(),
+        )
     }
 
     async fn role_member_count(&self, guild_id: u64, role_id: u64) -> usize {
@@ -1140,12 +1156,52 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
         &self,
         guild_id: u64,
         category_id: u64,
+        anchor_id: u64,
         name: &str,
     ) -> Result<u64, String> {
         let mut body = serde_json::Map::new();
         body.insert("name".into(), json!(name));
         body.insert("type".into(), json!(2));
         body.insert("parent_id".into(), json!(category_id.to_string()));
+        let (overwrites, user_limit, bitrate) = {
+            let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+                return Err("Guild nicht im Cache".to_string());
+            };
+            let Some(anchor) = guild.channels.get(&ChannelId::new(anchor_id)) else {
+                return Err("Adaptive-Lane-Anker nicht im Cache".to_string());
+            };
+            let overwrites: Vec<serde_json::Value> = anchor
+                .permission_overwrites
+                .iter()
+                .filter_map(|ow| {
+                    let (kind, target_id) = match ow.kind {
+                        serenity::all::PermissionOverwriteType::Role(role_id) => {
+                            (0u8, role_id.get())
+                        }
+                        serenity::all::PermissionOverwriteType::Member(user_id) => {
+                            (1u8, user_id.get())
+                        }
+                        _ => return None,
+                    };
+                    Some(json!({
+                        "id": target_id.to_string(),
+                        "type": kind,
+                        "allow": ow.allow.bits().to_string(),
+                        "deny": ow.deny.bits().to_string(),
+                    }))
+                })
+                .collect();
+            (
+                overwrites,
+                anchor.user_limit.map(|limit| limit as i64).unwrap_or(0),
+                anchor.bitrate,
+            )
+        };
+        body.insert("permission_overwrites".into(), json!(overwrites));
+        body.insert("user_limit".into(), json!(user_limit));
+        if let Some(bitrate) = bitrate {
+            body.insert("bitrate".into(), json!(bitrate));
+        }
         self.adapter
             .http
             .create_channel(

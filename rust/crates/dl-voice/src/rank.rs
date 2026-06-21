@@ -401,6 +401,9 @@ pub trait RankPort: Send + Sync {
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
     /// Rollen (id, name) eines Mitglieds (für `debug`); leer, wenn unbekannt.
     async fn member_roles(&self, guild_id: u64, user_id: u64) -> Vec<(u64, String)>;
+    /// Rollen eines Gilden-Mitglieds für Ankerlogik; None bei unbekanntem Member
+    /// oder Bot.
+    async fn guild_member_roles(&self, guild_id: u64, user_id: u64) -> Option<Vec<(u64, String)>>;
     /// Mitgliederzahl je Rolle (für `rollen`); 0, wenn Rolle unbekannt.
     async fn role_member_count(&self, guild_id: u64, role_id: u64) -> usize;
     /// Voice-Kanäle einer Kategorie als (id, name) (für `kanäle`).
@@ -484,9 +487,19 @@ impl RankVoiceManager {
         // Rang-relevante Member: größte zusammen spielende Gruppe (Presence-Kohorte)
         let relevant = self.rank_relevant_members(&members).await;
 
-        // Anker bestimmen: Erstbesitzer > bestehender Anker (wenn anwesend) > erstes rangiertes Mitglied
+        // Anker bestimmen: Erstbesitzer (gildenweit) > bestehender Anker
+        // (wenn anwesend) > erstes rangiertes Mitglied.
         let anchor_member = match (self.initial_owner)(channel_id) {
-            Some(owner_id) => members.iter().find(|(id, _)| *id == owner_id).cloned(),
+            Some(owner_id) => {
+                if let Some((_, roles)) = members.iter().find(|(id, _)| *id == owner_id) {
+                    Some((owner_id, roles.clone()))
+                } else {
+                    self.port
+                        .guild_member_roles(guild_id, owner_id)
+                        .await
+                        .map(|roles| (owner_id, roles))
+                }
+            }
             None => None,
         };
         let existing = self.anchors.lock().await.get(&channel_id).cloned();
@@ -775,7 +788,6 @@ pub fn spawn(
     })
 }
 
-
 // ── `!rrang`-Admin-Befehlsgruppe ────────────────────────────────────────────
 //
 // Port der `@commands.group("rrang", manage_guild)` aus
@@ -829,19 +841,31 @@ impl RankCommands {
             "anker" => self.anchors_overview(guild_id).await,
             "vcstatus" => self.vcstatus(guild_id, user_id).await,
             "debug" => {
-                self.debug(guild_id, user_id, args.first().and_then(|a| parse_mention(a)))
-                    .await
+                self.debug(
+                    guild_id,
+                    user_id,
+                    args.first().and_then(|a| parse_mention(a)),
+                )
+                .await
             }
             "aktualisieren" => {
-                self.force_update(guild_id, user_id, args.first().and_then(|a| parse_channel(a)))
-                    .await
+                self.force_update(
+                    guild_id,
+                    user_id,
+                    args.first().and_then(|a| parse_channel(a)),
+                )
+                .await
             }
             "rollen" => self.tracked_roles(guild_id).await,
             "kanäle" | "kanaele" | "channels" => self.channel_config(guild_id).await,
             "status" => self.system_status(guild_id, user_id).await,
             "info" => {
-                self.rank_info(guild_id, user_id, args.first().and_then(|a| parse_mention(a)))
-                    .await
+                self.rank_info(
+                    guild_id,
+                    user_id,
+                    args.first().and_then(|a| parse_mention(a)),
+                )
+                .await
             }
             other => RankReply::text(format!("❌ Unbekannter Subcommand `{other}`.")),
         };
@@ -850,7 +874,11 @@ impl RankCommands {
 
     /// `toggle [ein/aus]` — schaltet das Rang-System für den aktuellen VC.
     async fn toggle(&self, guild_id: u64, user_id: u64, action: Option<&str>) -> RankReply {
-        let Some(channel_id) = self.manager.port.caller_voice_channel(guild_id, user_id).await
+        let Some(channel_id) = self
+            .manager
+            .port
+            .caller_voice_channel(guild_id, user_id)
+            .await
         else {
             return RankReply::text("❌ Du musst in einem Voice Channel sein.");
         };
@@ -947,7 +975,11 @@ impl RankCommands {
 
     /// `vcstatus` — Status des aktuellen VC des Aufrufers.
     async fn vcstatus(&self, guild_id: u64, user_id: u64) -> RankReply {
-        let Some(channel_id) = self.manager.port.caller_voice_channel(guild_id, user_id).await
+        let Some(channel_id) = self
+            .manager
+            .port
+            .caller_voice_channel(guild_id, user_id)
+            .await
         else {
             return RankReply::text("❌ Du musst in einem Voice Channel sein.");
         };
@@ -1022,7 +1054,11 @@ impl RankCommands {
     /// `debug [@user]` — Rollen-Erkennung eines Users.
     async fn debug(&self, guild_id: u64, caller_id: u64, target: Option<u64>) -> RankReply {
         let user_id = target.unwrap_or(caller_id);
-        let Some(display_name) = self.manager.port.member_display_name(guild_id, user_id).await
+        let Some(display_name) = self
+            .manager
+            .port
+            .member_display_name(guild_id, user_id)
+            .await
         else {
             return RankReply::text("❌ Benutzer nicht gefunden.");
         };
@@ -1078,11 +1114,14 @@ impl RankCommands {
     ) -> RankReply {
         let channel_id = match channel_arg {
             Some(id) => id,
-            None => match self.manager.port.caller_voice_channel(guild_id, caller_id).await {
+            None => match self
+                .manager
+                .port
+                .caller_voice_channel(guild_id, caller_id)
+                .await
+            {
                 Some(id) => id,
-                None => {
-                    return RankReply::text("❌ In einem Sprachkanal sein oder Kanal angeben.")
-                }
+                None => return RankReply::text("❌ In einem Sprachkanal sein oder Kanal angeben."),
             },
         };
         let name = self
@@ -1110,9 +1149,13 @@ impl RankCommands {
         for (role_id, name, value) in majors {
             let count = self.manager.port.role_member_count(guild_id, role_id).await;
             if count > 0 || self.role_exists(guild_id, role_id).await {
-                lines.push(format!("**{name}** ({value}): <@&{role_id}> – {count} Mitglieder"));
+                lines.push(format!(
+                    "**{name}** ({value}): <@&{role_id}> – {count} Mitglieder"
+                ));
             } else {
-                lines.push(format!("**{name}** ({value}): ❌ Rolle nicht gefunden (ID {role_id})"));
+                lines.push(format!(
+                    "**{name}** ({value}): ❌ Rolle nicht gefunden (ID {role_id})"
+                ));
             }
         }
         RankReply::embed(json!({
@@ -1204,7 +1247,11 @@ impl RankCommands {
     /// `info [@user]` — höchster Rang aus den Rollen.
     async fn rank_info(&self, guild_id: u64, caller_id: u64, target: Option<u64>) -> RankReply {
         let user_id = target.unwrap_or(caller_id);
-        let Some(display_name) = self.manager.port.member_display_name(guild_id, user_id).await
+        let Some(display_name) = self
+            .manager
+            .port
+            .member_display_name(guild_id, user_id)
+            .await
         else {
             return RankReply::text("❌ Benutzer nicht gefunden.");
         };
@@ -1293,7 +1340,6 @@ pub fn spawn_command(
         }
     })
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -1392,10 +1438,18 @@ mod tests {
 
     // ── `!rrang`-Command-Tests (Mock-Port + Test-DB) ────────────────────────
 
-    use std::sync::Mutex as StdMutex;
+    use std::{collections::HashMap as StdHashMap, sync::Mutex as StdMutex};
 
     /// Mock der RankPort-Discord-Seite. Nur die für die Admin-Commands
     /// relevanten Felder; die reconcile-Pfade werden hier nicht getrieben.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ApplyCall {
+        guild_id: u64,
+        channel_id: u64,
+        allowed: HashSet<u64>,
+        removes: HashSet<u64>,
+    }
+
     struct MockRankPort {
         caller_channel: Option<u64>,
         category: Option<u64>,
@@ -1403,6 +1457,13 @@ mod tests {
         members: usize,
         target_roles: Vec<(u64, String)>,
         target_name: Option<String>,
+        channel_members: Vec<(u64, Vec<(u64, String)>)>,
+        guild_roles: Vec<(u64, String)>,
+        current_overwrites: Vec<u64>,
+        guild_member_roles: StdHashMap<u64, Option<Vec<(u64, String)>>>,
+        guild_member_role_calls: StdMutex<Vec<u64>>,
+        apply_calls: StdMutex<Vec<ApplyCall>>,
+        rename_calls: StdMutex<Vec<(u64, String)>>,
         overwrites_cleared: StdMutex<bool>,
     }
 
@@ -1413,26 +1474,36 @@ mod tests {
             _g: u64,
             _c: u64,
         ) -> Vec<(u64, Vec<(u64, String)>)> {
-            Vec::new()
+            self.channel_members.clone()
         }
         async fn guild_roles(&self, _g: u64) -> Vec<(u64, String)> {
-            Vec::new()
+            self.guild_roles.clone()
         }
         async fn current_role_overwrites(&self, _g: u64, _c: u64) -> Vec<u64> {
             // eine Haupt-Rang-Rolle, damit clear_rank_overwrites etwas räumt
-            vec![1331458016356208680]
+            self.current_overwrites.clone()
         }
         async fn apply_overwrites(
             &self,
-            _g: u64,
-            _c: u64,
-            _allowed: &HashSet<u64>,
-            _removes: &HashSet<u64>,
+            guild_id: u64,
+            channel_id: u64,
+            allowed: &HashSet<u64>,
+            removes: &HashSet<u64>,
         ) -> Result<(), String> {
             *self.overwrites_cleared.lock().expect("lock") = true;
+            self.apply_calls.lock().expect("lock").push(ApplyCall {
+                guild_id,
+                channel_id,
+                allowed: allowed.clone(),
+                removes: removes.clone(),
+            });
             Ok(())
         }
-        async fn rename(&self, _c: u64, _n: &str) -> Result<(), String> {
+        async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
+            self.rename_calls
+                .lock()
+                .expect("lock")
+                .push((channel_id, name.to_string()));
             Ok(())
         }
         async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
@@ -1456,6 +1527,16 @@ mod tests {
         async fn member_roles(&self, _g: u64, _u: u64) -> Vec<(u64, String)> {
             self.target_roles.clone()
         }
+        async fn guild_member_roles(&self, _g: u64, user_id: u64) -> Option<Vec<(u64, String)>> {
+            self.guild_member_role_calls
+                .lock()
+                .expect("lock")
+                .push(user_id);
+            self.guild_member_roles
+                .get(&user_id)
+                .cloned()
+                .unwrap_or(None)
+        }
         async fn role_member_count(&self, _g: u64, _r: u64) -> usize {
             0
         }
@@ -1469,8 +1550,9 @@ mod tests {
         "CREATE TABLE voice_channel_anchors(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank_name TEXT NOT NULL, rank_value INTEGER NOT NULL, allowed_min INTEGER NOT NULL, allowed_max INTEGER NOT NULL, anchor_subrank INTEGER DEFAULT 3, score_min INTEGER, score_max INTEGER, updated_at TEXT)",
     ];
 
-    async fn rank_setup(
+    async fn rank_setup_with_owner(
         port: MockRankPort,
+        initial_owner: Arc<dyn Fn(u64) -> Option<u64> + Send + Sync>,
     ) -> (
         tempfile::TempDir,
         Arc<RankCommands>,
@@ -1485,13 +1567,20 @@ mod tests {
                 .expect("ddl");
         }
         let port = Arc::new(port);
-        let manager = RankVoiceManager::new(
-            db,
-            port.clone(),
-            Arc::new(|_channel_id| None), // kein Erstbesitzer
-        );
+        let manager = RankVoiceManager::new(db, port.clone(), initial_owner);
         let commands = RankCommands::new(manager.clone());
         (dir, commands, manager, port)
+    }
+
+    async fn rank_setup(
+        port: MockRankPort,
+    ) -> (
+        tempfile::TempDir,
+        Arc<RankCommands>,
+        Arc<RankVoiceManager>,
+        Arc<MockRankPort>,
+    ) {
+        rank_setup_with_owner(port, Arc::new(|_channel_id| None)).await
     }
 
     fn monitored_port() -> MockRankPort {
@@ -1502,8 +1591,23 @@ mod tests {
             members: 2,
             target_roles: Vec::new(),
             target_name: Some("Tester".to_string()),
+            channel_members: Vec::new(),
+            guild_roles: Vec::new(),
+            current_overwrites: vec![1331458016356208680],
+            guild_member_roles: StdHashMap::new(),
+            guild_member_role_calls: StdMutex::new(Vec::new()),
+            apply_calls: StdMutex::new(Vec::new()),
+            rename_calls: StdMutex::new(Vec::new()),
             overwrites_cleared: StdMutex::new(false),
         }
+    }
+
+    fn role(role_id: u64, name: &str) -> (u64, String) {
+        (role_id, name.to_string())
+    }
+
+    fn owner_for(channel_id: u64, owner_id: u64) -> Arc<dyn Fn(u64) -> Option<u64> + Send + Sync> {
+        Arc::new(move |candidate| (candidate == channel_id).then_some(owner_id))
     }
 
     #[tokio::test]
@@ -1600,5 +1704,89 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Keine aktiven"));
+    }
+
+    #[tokio::test]
+    async fn reconcile_channel_loest_erstbesitzer_gildenweit_auf() {
+        let mut port = monitored_port();
+        port.channel_members = vec![(7, vec![role(1331458016356208680, "Phantom")])];
+        port.guild_member_roles.insert(
+            42,
+            Some(vec![role(1331457949654319114, "Archon")]),
+        );
+        let (_dir, _cmds, manager, port) =
+            rank_setup_with_owner(port, owner_for(500, 42)).await;
+
+        manager.reconcile_channel(1, 500).await;
+
+        let anchor = manager.anchor_for(500).await.expect("anchor");
+        assert_eq!(anchor.user_id, 42);
+        assert_eq!(anchor.rank_name, "Archon");
+        assert_eq!(anchor.rank_value, 7);
+        assert_eq!(*port.guild_member_role_calls.lock().expect("lock"), vec![42]);
+    }
+
+    #[tokio::test]
+    async fn reconcile_channel_priorisiert_owner_vor_fallback() {
+        let mut port = monitored_port();
+        port.channel_members = vec![
+            (42, vec![role(1331457652877955072, "Seeker")]),
+            (7, vec![role(1331458087349129296, "Eternus")]),
+        ];
+        port.guild_member_roles.insert(
+            42,
+            Some(vec![role(1331458087349129296, "Eternus")]),
+        );
+        let (_dir, _cmds, manager, port) =
+            rank_setup_with_owner(port, owner_for(500, 42)).await;
+
+        manager.reconcile_channel(1, 500).await;
+
+        let anchor = manager.anchor_for(500).await.expect("anchor");
+        assert_eq!(anchor.user_id, 42);
+        assert_eq!(anchor.rank_name, "Seeker");
+        assert!(port.guild_member_role_calls.lock().expect("lock").is_empty());
+
+        let mut port = monitored_port();
+        port.channel_members = vec![
+            (8, vec![role(999, "Moderator")]),
+            (9, vec![role(1331458016356208680, "Phantom")]),
+        ];
+        let (_dir, _cmds, manager, _port) = rank_setup(port).await;
+
+        manager.reconcile_channel(1, 500).await;
+
+        let anchor = manager.anchor_for(500).await.expect("anchor");
+        assert_eq!(anchor.user_id, 9);
+        assert_eq!(anchor.rank_name, "Phantom");
+    }
+
+    #[tokio::test]
+    async fn reconcile_channel_ignoriert_bot_und_ungerankten_owner() {
+        let mut port = monitored_port();
+        port.channel_members = vec![(7, vec![role(1331458016356208680, "Phantom")])];
+        port.guild_member_roles.insert(42, None);
+        let (_dir, _cmds, manager, port) =
+            rank_setup_with_owner(port, owner_for(500, 42)).await;
+
+        manager.reconcile_channel(1, 500).await;
+
+        let anchor = manager.anchor_for(500).await.expect("anchor");
+        assert_eq!(anchor.user_id, 7);
+        assert_eq!(anchor.rank_name, "Phantom");
+        assert_eq!(*port.guild_member_role_calls.lock().expect("lock"), vec![42]);
+
+        let mut port = monitored_port();
+        port.channel_members = vec![(8, vec![role(1331457949654319114, "Archon")])];
+        port.guild_member_roles
+            .insert(43, Some(vec![role(999, "Moderator")]));
+        let (_dir, _cmds, manager, _port) =
+            rank_setup_with_owner(port, owner_for(500, 43)).await;
+
+        manager.reconcile_channel(1, 500).await;
+
+        let anchor = manager.anchor_for(500).await.expect("anchor");
+        assert_eq!(anchor.user_id, 8);
+        assert_eq!(anchor.rank_name, "Archon");
     }
 }

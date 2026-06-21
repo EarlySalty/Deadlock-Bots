@@ -259,7 +259,8 @@ async fn main() -> anyhow::Result<()> {
     // jeden Anfrage-/Session-Zustand (Python `_mirror_to_website`), die
     // Plattform-Brücke (CoachingSync) nutzt denselben Client für Roster-Sync
     // und Termin-DMs. None = kein interner Token → Mirror/Sync inaktiv.
-    let coaching_website = dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
+    let coaching_website =
+        dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
         db.clone(),
         Arc::new(modglue::CoachingReqGlue {
@@ -486,6 +487,12 @@ async fn main() -> anyhow::Result<()> {
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
         // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
         dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());
+        // Voice-Feedback: Freitext-Antworten auf Feedback-DMs.
+        dl_voice::feedback::spawn_dm_responses(
+            voice_feedback.clone(),
+            &dispatcher,
+            adapter.clone(),
+        );
 
         // SecurityGuard (6): Message-Subscriber (Takeover/Burst/Keyword)
         if let Err(err) = security_guard.ensure_schema().await {

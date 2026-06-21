@@ -23,7 +23,7 @@ use serde_json::{json, Value};
 use crate::store::{self, TournamentStore};
 
 pub const TURNIER_ROLE_ID: u64 = 1474210107255554331;
-pub const TEAM_MAX_SIZE: i64 = 5;
+pub const TEAM_MAX_SIZE: i64 = store::TEAM_MAX_SIZE;
 
 pub fn rank_display(rank_name: &str, subrank: i64) -> String {
     if rank_name.is_empty() {
@@ -71,11 +71,18 @@ fn period_status_str(period: Option<&Value>, now: chrono::NaiveDateTime) -> Stri
     if p.get("is_active").and_then(Value::as_i64).unwrap_or(0) == 0 {
         return "⛔ Geschlossen".to_string();
     }
-    let parse = |k: &str| p.get(k).and_then(Value::as_str).and_then(crate::web::parse_period_dt);
+    let parse = |k: &str| {
+        p.get(k)
+            .and_then(Value::as_str)
+            .and_then(crate::web::parse_period_dt)
+    };
     match (parse("registration_start"), parse("registration_end")) {
         (Some(start), Some(end)) => {
             if now < start {
-                format!("⏳ Startet {}", fmt_dt(p.get("registration_start").and_then(Value::as_str)))
+                format!(
+                    "⏳ Startet {}",
+                    fmt_dt(p.get("registration_start").and_then(Value::as_str))
+                )
             } else if now > end {
                 "⛔ Abgelaufen".to_string()
             } else {
@@ -87,7 +94,11 @@ fn period_status_str(period: Option<&Value>, now: chrono::NaiveDateTime) -> Stri
 }
 
 /// Persistentes Anmelde-Panel (Port von `_build_panel_embed`, turnier.py:115-149).
-fn panel_embed(period: Option<&Value>, summary: Option<&Value>, now: chrono::NaiveDateTime) -> Value {
+fn panel_embed(
+    period: Option<&Value>,
+    summary: Option<&Value>,
+    now: chrono::NaiveDateTime,
+) -> Value {
     let active = period.filter(|p| p.get("is_active").and_then(Value::as_i64).unwrap_or(0) != 0);
     let mut fields: Vec<Value> = Vec::new();
     let mut description: Option<String> = None;
@@ -98,7 +109,9 @@ fn panel_embed(period: Option<&Value>, summary: Option<&Value>, now: chrono::Nai
             "value": p.get("name").and_then(Value::as_str).unwrap_or("—"),
             "inline": false,
         }));
-        fields.push(json!({ "name": "Status", "value": period_status_str(period, now), "inline": true }));
+        fields.push(
+            json!({ "name": "Status", "value": period_status_str(period, now), "inline": true }),
+        );
         fields.push(json!({
             "name": "🕐 Start",
             "value": fmt_dt(p.get("registration_start").and_then(Value::as_str)),
@@ -157,14 +170,22 @@ fn panel_components() -> Value {
     ]}])
 }
 
-fn mode_components(user_id: u64, rank_name: &str, rank_sub: i64) -> Value {
+fn period_team_size(period: Option<&Value>) -> i64 {
+    period
+        .and_then(|p| p.get("team_size"))
+        .and_then(Value::as_i64)
+        .filter(|size| *size > 0)
+        .unwrap_or(TEAM_MAX_SIZE)
+}
+
+fn mode_components(user_id: u64, rank_name: &str, rank_sub: i64, team_size: i64) -> Value {
     // Rang in die ID einbetten — das Menü ist zustandslos
     let rank = rank_name.to_lowercase();
     json!([{ "type": 1, "components": [
         { "type": 2, "style": 1, "label": "Solo anmelden", "emoji": { "name": "🎯" },
-          "custom_id": format!("tn:solo:{rank}:{rank_sub}:{user_id}") },
+          "custom_id": format!("tn:solo:{rank}:{rank_sub}:{team_size}:{user_id}") },
         { "type": 2, "style": 2, "label": "Mit Team anmelden", "emoji": { "name": "🛡️" },
-          "custom_id": format!("tn:team:{rank}:{rank_sub}:{user_id}") },
+          "custom_id": format!("tn:team:{rank}:{rank_sub}:{team_size}:{user_id}") },
     ]}])
 }
 
@@ -249,11 +270,7 @@ impl InteractionHandler for TurnierHandler {
 Nutze `/account_verknüpfen` auf dem Server, um dein Konto zu verbinden.",
                     );
                 };
-                let team_size = period
-                    .as_ref()
-                    .and_then(|p| p.get("team_size"))
-                    .and_then(Value::as_i64)
-                    .unwrap_or(TEAM_MAX_SIZE);
+                let team_size = period_team_size(period.as_ref());
                 BridgeReply {
                     embeds: vec![json!({
                         "title": "🏆 Turnier-Anmeldung",
@@ -264,7 +281,12 @@ Nutze `/account_verknüpfen` auf dem Server, um dein Konto zu verbinden.",
                         ),
                         "color": 0xF1C40F,
                     })],
-                    components: Some(mode_components(interaction.user_id, &rank_name, rank_sub)),
+                    components: Some(mode_components(
+                        interaction.user_id,
+                        &rank_name,
+                        rank_sub,
+                        team_size,
+                    )),
                     ephemeral: true,
                     ..BridgeReply::default()
                 }
@@ -330,9 +352,9 @@ impl TurnierHandler {
             .await;
         let period_open = is_period_open(period.as_ref(), now);
         // Aktive Periode (is_active != 0) — None deckt „kein/inaktiv" ab.
-        let active_period = period.as_ref().filter(|p| {
-            p.get("is_active").and_then(Value::as_i64).unwrap_or(0) != 0
-        });
+        let active_period = period
+            .as_ref()
+            .filter(|p| p.get("is_active").and_then(Value::as_i64).unwrap_or(0) != 0);
 
         let mut fields: Vec<Value> = Vec::new();
         let mut description = String::new();
@@ -408,7 +430,8 @@ impl TurnierHandler {
             }
         }
 
-        let mut embed = json!({ "title": "🏆 Deadlock Turnier", "color": 0xF1C40F, "fields": fields });
+        let mut embed =
+            json!({ "title": "🏆 Deadlock Turnier", "color": 0xF1C40F, "fields": fields });
         if !description.is_empty() {
             embed["description"] = json!(description);
         }
@@ -467,6 +490,19 @@ impl TurnierHandler {
         let action = parts.get(1).copied().unwrap_or_default();
         let rank = parts.get(2).copied().unwrap_or("initiate").to_string();
         let rank_sub: i64 = parts.get(3).and_then(|r| r.parse().ok()).unwrap_or(0);
+        let team_size = if parts.len() >= 6 {
+            parts
+                .get(4)
+                .and_then(|raw| raw.parse::<i64>().ok())
+                .filter(|size| *size > 0)
+                .unwrap_or(TEAM_MAX_SIZE)
+        } else {
+            ui.store
+                .active_period(interaction.guild_id)
+                .await
+                .map(|(_, _, size)| if size > 0 { size } else { TEAM_MAX_SIZE })
+                .unwrap_or(TEAM_MAX_SIZE)
+        };
         let rank_name = store::rank_label(&rank);
 
         match action {
@@ -503,7 +539,12 @@ impl TurnierHandler {
                 let teams = ui.store.list_teams(interaction.guild_id).await;
                 if teams.is_empty() {
                     return BridgeReply {
-                        modal: Some(team_create_modal(&rank, rank_sub, interaction.user_id)),
+                        modal: Some(team_create_modal(
+                            &rank,
+                            rank_sub,
+                            team_size,
+                            interaction.user_id,
+                        )),
                         ..BridgeReply::default()
                     };
                 }
@@ -511,10 +552,10 @@ impl TurnierHandler {
                     .iter()
                     .take(24)
                     .map(|team| {
-                        let full_tag = if team.member_count >= TEAM_MAX_SIZE {
+                        let full_tag = if team.member_count >= team_size {
                             " ✗ voll".to_string()
                         } else {
-                            format!(" ({}/{TEAM_MAX_SIZE})", team.member_count)
+                            format!(" ({}/{team_size})", team.member_count)
                         };
                         json!({
                             "label": team.name.chars().take(100).collect::<String>(),
@@ -537,7 +578,7 @@ impl TurnierHandler {
                     })],
                     components: Some(json!([{ "type": 1, "components": [{
                         "type": 3,
-                        "custom_id": format!("tn:pick:{rank}:{rank_sub}:{}", interaction.user_id),
+                        "custom_id": format!("tn:pick:{rank}:{rank_sub}:{team_size}:{}", interaction.user_id),
                         "placeholder": "Team auswählen…",
                         "options": options,
                         "min_values": 1, "max_values": 1,
@@ -552,15 +593,20 @@ impl TurnierHandler {
                 };
                 if value == "__create__" {
                     return BridgeReply {
-                        modal: Some(team_create_modal(&rank, rank_sub, interaction.user_id)),
+                        modal: Some(team_create_modal(
+                            &rank,
+                            rank_sub,
+                            team_size,
+                            interaction.user_id,
+                        )),
                         ..BridgeReply::default()
                     };
                 }
                 let team_id: i64 = value.parse().unwrap_or(0);
                 if let Some(team) = ui.store.get_team(interaction.guild_id, team_id).await {
-                    if team.member_count >= TEAM_MAX_SIZE {
+                    if team.member_count >= team_size {
                         return BridgeReply::ephemeral_text(format!(
-                            "❌ Dieses Team ist bereits voll ({TEAM_MAX_SIZE}/{TEAM_MAX_SIZE})."
+                            "❌ Dieses Team ist bereits voll ({team_size}/{team_size})."
                         ));
                     }
                 }
@@ -582,9 +628,9 @@ impl TurnierHandler {
                     Ok(team) => team,
                     Err(err) => return BridgeReply::ephemeral_text(format!("❌ {err}")),
                 };
-                if !team.created && team.member_count >= TEAM_MAX_SIZE {
+                if !team.created && team.member_count >= team_size {
                     return BridgeReply::ephemeral_text(format!(
-                        "❌ Team **{}** ist bereits voll ({}/{TEAM_MAX_SIZE}).",
+                        "❌ Team **{}** ist bereits voll ({}/{team_size}).",
                         team.name, team.member_count
                     ));
                 }
@@ -632,9 +678,9 @@ impl TurnierHandler {
     }
 }
 
-fn team_create_modal(rank: &str, rank_sub: i64, user_id: u64) -> ModalSpec {
+fn team_create_modal(rank: &str, rank_sub: i64, team_size: i64, user_id: u64) -> ModalSpec {
     ModalSpec {
-        custom_id: format!("tn:create:{rank}:{rank_sub}:{user_id}"),
+        custom_id: format!("tn:create:{rank}:{rank_sub}:{team_size}:{user_id}"),
         title: "Neues Team erstellen".to_string(),
         fields: vec![ModalField {
             custom_id: "team_name".to_string(),
@@ -686,6 +732,27 @@ pub fn register(router: &mut InteractionRouter, ui: Arc<TurnierUi>) {
 mod tests {
     use super::*;
 
+    struct MockTurnierPort;
+
+    #[async_trait::async_trait]
+    impl TurnierPort for MockTurnierPort {
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            vec![TURNIER_ROLE_ID]
+        }
+    }
+
+    async fn test_handler() -> (tempfile::TempDir, TurnierHandler) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dl_db::Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
+        let store = TournamentStore::new(db);
+        store.ensure_schema().await.expect("schema");
+        let ui = Arc::new(TurnierUi {
+            store: Arc::new(store),
+            port: Arc::new(MockTurnierPort),
+        });
+        (dir, TurnierHandler { ui })
+    }
+
     #[test]
     fn periode_offen() {
         let now = chrono::NaiveDate::from_ymd_opt(2026, 6, 10)
@@ -715,18 +782,43 @@ mod tests {
 
     #[test]
     fn anzeige_und_ids() {
+        assert_eq!(TEAM_MAX_SIZE, 6);
         assert_eq!(rank_display("Archon", 3), "Archon 3");
         assert_eq!(rank_display("Archon", 0), "Archon");
         assert_eq!(rank_display("", 2), "Unbekannt");
-        let components = mode_components(42, "Phantom", 2);
+        let components = mode_components(42, "Phantom", 2, 4);
         assert_eq!(
             components[0]["components"][0]["custom_id"],
-            "tn:solo:phantom:2:42"
+            "tn:solo:phantom:2:4:42"
         );
+        assert_eq!(
+            components[0]["components"][1]["custom_id"],
+            "tn:team:phantom:2:4:42"
+        );
+        let modal = team_create_modal("phantom", 2, 4, 42);
+        assert_eq!(modal.custom_id, "tn:create:phantom:2:4:42");
         let embed = signup_success_embed("solo", "inserted", "Phantom", 2, None);
         assert_eq!(embed["fields"][0]["value"], "Eingetragen");
         let embed = signup_success_embed("team", "updated", "Archon", 0, Some("Alpha"));
         assert_eq!(embed["fields"].as_array().expect("fields").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn legacy_fuenfteilige_tn_id_nutzt_owner_und_team_size_fallback() {
+        let (_dir, handler) = test_handler().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tn:team:phantom:2:42".to_string(),
+                user_id: 42,
+                guild_id: 1,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let modal = reply.modal.expect("modal");
+        assert_eq!(modal.custom_id, "tn:create:phantom:2:6:42");
+        assert!(reply.content.is_none());
     }
 
     #[test]

@@ -218,6 +218,10 @@ pub trait Notifier: Send + Sync {
 /// AI-Bewertung — bis dl-ai (Phase 6) liefert der Default None → Heuristik.
 #[async_trait::async_trait]
 pub trait AiScorer: Send + Sync {
+    fn is_available(&self) -> bool {
+        true
+    }
+
     async fn score(&self, login: &str, member: &MemberLite, ratio: f64) -> (Option<i64>, String);
 }
 
@@ -225,6 +229,10 @@ pub struct NoAi;
 
 #[async_trait::async_trait]
 impl AiScorer for NoAi {
+    fn is_available(&self) -> bool {
+        false
+    }
+
     async fn score(
         &self,
         _login: &str,
@@ -314,6 +322,7 @@ pub struct MatcherConfig {
     pub auto_threshold: i64,
     pub review_threshold: i64,
     pub fuzzy_floor: f64,
+    pub max_ai_per_scan: u64,
     pub scan_interval_hours: u64,
     pub state_path: PathBuf,
 }
@@ -349,6 +358,7 @@ impl MatcherConfig {
             fuzzy_floor: get("STREAMER_LINK_FUZZY_FLOOR")
                 .and_then(|v| v.parse::<f64>().ok())
                 .unwrap_or(0.62),
+            max_ai_per_scan: int("STREAMER_LINK_MAX_AI_PER_SCAN", 40).max(0) as u64,
             scan_interval_hours: int("STREAMER_LINK_SCAN_INTERVAL_HOURS", 6).max(0) as u64,
             state_path: PathBuf::from(
                 get("STREAMER_LINK_STATE_PATH")
@@ -368,6 +378,7 @@ pub struct ScanStats {
     pub review: u64,
     pub skipped: u64,
     pub errors: u64,
+    pub ai_calls: u64,
     /// Alle in diesem Lauf erstmals geprüften Logins (für das Summary-Embed).
     pub new_logins: Vec<String>,
 }
@@ -482,6 +493,7 @@ impl Matcher {
 
         let (exact, bucket) = Self::build_index(&members);
         let mut used_member_ids: std::collections::HashSet<u64> = std::collections::HashSet::new();
+        let ai_available = self.scorer.is_available();
 
         for entry in &candidates {
             let login = entry
@@ -536,7 +548,19 @@ impl Matcher {
                 continue;
             }
 
-            let (ai_score, ai_reason) = self.scorer.score(&login, member, ratio).await;
+            if ai_available && stats.ai_calls >= self.config.max_ai_per_scan {
+                stats.checked = stats.checked.saturating_sub(1);
+                break;
+            }
+
+            let (ai_score, ai_reason) = if ai_available {
+                self.scorer.score(&login, member, ratio).await
+            } else {
+                (None, String::new())
+            };
+            if ai_score.is_some() {
+                stats.ai_calls += 1;
+            }
             let (score, reason) = match ai_score {
                 Some(score) => (score, ai_reason),
                 None => (
@@ -959,8 +983,14 @@ fn summary_embed(stats: &ScanStats, trigger: &str) -> Value {
     json!({
         "title": "📊 Streamer-Abgleich gelaufen",
         "description": format!(
-            "**Auslöser:** {trigger}\n**Geprüft:** {}\n**Auto-verknüpft:** {}\n**Vorschläge:** {}\n**Ohne Treffer:** {}\n**Fehler:** {}{}",
-            stats.checked, stats.auto, stats.review, stats.skipped, stats.errors, logins_text
+            "**Auslöser:** {trigger}\n**Geprüft:** {}\n**Auto-verknüpft:** {}\n**Vorschläge:** {}\n**Ohne Treffer:** {}\n**AI-Aufrufe:** {}\n**Fehler:** {}{}",
+            stats.checked,
+            stats.auto,
+            stats.review,
+            stats.skipped,
+            stats.ai_calls,
+            stats.errors,
+            logins_text
         ),
         "color": 0x3498DB,
     })
@@ -1145,6 +1175,8 @@ pub fn spawn_command_listener(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::net::SocketAddr;
+    use std::sync::{Arc, Mutex};
 
     // Referenzwerte aus CPython (cogs/twitch/streamer_link_matcher.py)
     #[test]
@@ -1195,6 +1227,169 @@ mod tests {
             (None, "y".to_string())
         );
         assert_eq!(parse_ai_score(None), (None, String::new()));
+    }
+
+    #[test]
+    fn config_und_summary_ai_budget_wie_python() {
+        let cfg = MatcherConfig::from_env(|key| match key {
+            "STREAMER_LINK_MAX_AI_PER_SCAN" => Some("7".to_string()),
+            _ => None,
+        });
+        assert_eq!(cfg.max_ai_per_scan, 7);
+        let stats = ScanStats {
+            checked: 3,
+            ai_calls: 2,
+            errors: 1,
+            ..ScanStats::default()
+        };
+        let embed = summary_embed(&stats, "Test");
+        let desc = embed["description"].as_str().expect("description");
+        assert!(desc.contains("**AI-Aufrufe:** 2"));
+        assert!(desc.contains("**Fehler:** 1"));
+    }
+
+    struct MockGuild {
+        members: Vec<MemberLite>,
+    }
+
+    #[async_trait::async_trait]
+    impl GuildPort for MockGuild {
+        async fn members(&self, _guild_id: u64) -> Option<Vec<MemberLite>> {
+            Some(self.members.clone())
+        }
+
+        async fn grant_role(&self, _guild_id: u64, _user_id: u64, _role_id: u64) -> String {
+            "Rolle gesetzt".to_string()
+        }
+    }
+
+    struct MockNotifier {
+        embeds: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Notifier for MockNotifier {
+        async fn notify(&self, embed: Value, _components: Option<Value>) -> Option<(u64, u64)> {
+            self.embeds.lock().expect("lock").push(embed);
+            Some((10, 20))
+        }
+
+        async fn finalize_review(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _status: String,
+            _color: u32,
+        ) {
+        }
+
+        async fn send_text(&self, _channel_id: u64, _text: String) {}
+    }
+
+    struct CountingAi {
+        calls: Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl AiScorer for CountingAi {
+        async fn score(
+            &self,
+            login: &str,
+            _member: &MemberLite,
+            _ratio: f64,
+        ) -> (Option<i64>, String) {
+            self.calls.lock().expect("lock").push(login.to_string());
+            (Some(50), "AI".to_string())
+        }
+    }
+
+    async fn mock_link_candidates(entries: Value) -> (String, tokio::task::JoinHandle<()>) {
+        let app = axum::Router::new().route(
+            "/internal/twitch/v1/streamers/link-candidates",
+            axum::routing::get(move || {
+                let entries = entries.clone();
+                async move { axum::Json(json!({ "entries": entries })) }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn ai_budget_cap_bricht_scan_mit_checked_korrektur_ab() {
+        let entries = json!([
+            { "twitch_login": "alice" },
+            { "twitch_login": "bob" },
+            { "twitch_login": "carol" }
+        ]);
+        let (url, server) = mock_link_candidates(entries).await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let config = MatcherConfig {
+            enabled: true,
+            notify_channel_id: DEFAULT_NOTIFY_CHANNEL_ID,
+            role_id: DEFAULT_STREAMER_ROLE_ID,
+            guild_id: DEFAULT_GUILD_ID,
+            auto_threshold: 90,
+            review_threshold: 70,
+            fuzzy_floor: 0.62,
+            max_ai_per_scan: 2,
+            scan_interval_hours: 6,
+            state_path: dir.path().join("state.json"),
+        };
+        let guild = Arc::new(MockGuild {
+            members: vec![
+                MemberLite {
+                    user_id: 1,
+                    name: "alice".to_string(),
+                    ..MemberLite::default()
+                },
+                MemberLite {
+                    user_id: 2,
+                    name: "bob".to_string(),
+                    ..MemberLite::default()
+                },
+                MemberLite {
+                    user_id: 3,
+                    name: "carol".to_string(),
+                    ..MemberLite::default()
+                },
+            ],
+        });
+        let notifier = Arc::new(MockNotifier {
+            embeds: Mutex::new(Vec::new()),
+        });
+        let scorer = Arc::new(CountingAi {
+            calls: Mutex::new(Vec::new()),
+        });
+        let matcher = Matcher::new(
+            config,
+            TwitchApiClient::new(url, "tok", std::time::Duration::from_secs(2)),
+            guild,
+            notifier.clone(),
+            scorer.clone(),
+        );
+
+        let stats = matcher.run_scan("Test").await;
+        assert_eq!(stats.checked, 2);
+        assert_eq!(stats.ai_calls, 2);
+        assert_eq!(stats.skipped, 2);
+        assert_eq!(
+            scorer.calls.lock().expect("lock").clone(),
+            vec!["alice".to_string(), "bob".to_string()]
+        );
+        let embeds = notifier.embeds.lock().expect("lock");
+        let summary = embeds.last().expect("summary");
+        assert!(summary["description"]
+            .as_str()
+            .expect("description")
+            .contains("**AI-Aufrufe:** 2"));
+        server.abort();
     }
 
     #[test]

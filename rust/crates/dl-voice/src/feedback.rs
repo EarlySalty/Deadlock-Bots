@@ -10,8 +10,10 @@
 use std::sync::Arc;
 
 use dl_db::Db;
-use dl_discord::interactions::{ModalField, ModalSpec};
-use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use dl_discord::interactions::{ChannelSender, ModalField, ModalSpec};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, MessageEvent,
+};
 use rusqlite::OptionalExtension;
 
 pub const MIN_SECONDS: i64 = 300;
@@ -20,6 +22,20 @@ pub const SECOND_MIN_DAYS: i64 = 4;
 pub const FORWARD_USER_ID: u64 = 662995601738170389;
 pub const START_CUSTOM_ID: &str = "voice_feedback:start";
 pub const MODAL_CUSTOM_ID: &str = "voice_feedback:modal";
+pub const RESPONSE_WINDOW_SECONDS: i64 = 72 * 3600;
+pub const ACK_TEXT: &str = "Danke für dein Feedback! 🙌\n\n\
+Wenn sonst irgendwas sein sollte, kannst du dich jederzeit an unser Team wenden – hier beißt keiner und jeder hilft gerne! :) \
+Falls es doch mal ein Problem geben sollte, wende dich bitte direkt an einen Community Moderator (bei kleineren Dingen), einen Moderator oder an den Owner. ❤️";
+
+struct FeedbackRequestResponse {
+    id: i64,
+    sent_at_ts: i64,
+    status: String,
+    request_type: String,
+    co_player_names: String,
+    channel_name: String,
+    duration_seconds: i64,
+}
 
 /// DM-Text wie das Original (first/second).
 pub fn build_message(display_name: &str, request_type: &str, co_player_names: &[String]) -> String {
@@ -268,6 +284,106 @@ impl VoiceFeedback {
             })
             .await;
     }
+
+    /// Freitext-Antworten auf die Feedback-DM (Python `on_message` in DMs).
+    /// Gibt den Dankestext zurück, wenn der User noch keine Antwort bestätigt
+    /// bekommen hat.
+    pub async fn handle_dm_message(self: &Arc<Self>, event: MessageEvent) -> Option<&'static str> {
+        if event.guild_id.is_some() {
+            return None;
+        }
+        let content = event.content.trim().to_string();
+        if content.is_empty()
+            || dl_community::privacy::is_opted_out(&self.db, event.author_id as i64).await
+        {
+            return None;
+        }
+
+        let user_id = event.author_id;
+        let row: Option<FeedbackRequestResponse> = self
+            .db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT id, sent_at_ts, status, request_type, co_player_names, channel_name, duration_seconds
+                       FROM voice_feedback_requests
+                      WHERE user_id = ?1
+                      ORDER BY sent_at_ts DESC
+                      LIMIT 1",
+                    [user_id],
+                    |row| {
+                        Ok(FeedbackRequestResponse {
+                            id: row.get(0)?,
+                            sent_at_ts: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                            status: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            request_type: row
+                                .get::<_, Option<String>>(3)?
+                                .unwrap_or_else(|| "first".to_string()),
+                            co_player_names: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                            channel_name: row
+                                .get::<_, Option<String>>(5)?
+                                .unwrap_or_else(|| "Voice".to_string()),
+                            duration_seconds: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten();
+        let row = row?;
+
+        let now = chrono::Utc::now().timestamp();
+        if row.sent_at_ts > 0 && now.saturating_sub(row.sent_at_ts) > RESPONSE_WINDOW_SECONDS {
+            return None;
+        }
+
+        let should_ack = row.status != "responded";
+        let request_id = row.id;
+        let message_id = event.message_id;
+        let content_for_db = content.clone();
+        let stored = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO voice_feedback_responses(request_id, user_id, message_id, content)
+                     VALUES(?1, ?2, ?3, ?4)",
+                    rusqlite::params![request_id, user_id, message_id, content_for_db],
+                )?;
+                conn.execute(
+                    "UPDATE voice_feedback_requests SET status='responded' WHERE id = ?1",
+                    [request_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+        if let Err(err) = stored {
+            tracing::warn!(%err, request_id, user_id, "VoiceFeedback: Freitext-Antwort speichern fehlgeschlagen");
+            return None;
+        }
+
+        let duration_min = if row.duration_seconds > 0 {
+            std::cmp::max(1, row.duration_seconds / 60).to_string()
+        } else {
+            "?".to_string()
+        };
+        let co_players = if row.co_player_names.trim().is_empty() {
+            "—".to_string()
+        } else {
+            row.co_player_names
+        };
+        self.port
+            .forward_to_owner(
+                FORWARD_USER_ID,
+                format!(
+                    "📩 Neues Voice-Feedback (Req #{}, Typ: {})\nVon: {} ({})\nKanal: {}\nDauer: {duration_min} Min\nMit im Call: {co_players}\n\nAntwort:\n{content}",
+                    row.id, row.request_type, event.author_display_name, event.author_id, row.channel_name
+                ),
+            )
+            .await;
+
+        should_ack.then_some(ACK_TEXT)
+    }
 }
 
 /// Button + Modal-Submit (custom_ids: voice_feedback:start / :modal:{id}).
@@ -362,11 +478,7 @@ impl InteractionHandler for FeedbackHandler {
             )
             .await;
 
-        BridgeReply::ephemeral_text(
-            "Danke für dein Feedback! 🙌\n\n\
-Wenn sonst irgendwas sein sollte, kannst du dich jederzeit an unser Team wenden – hier beißt keiner und jeder hilft gerne! :) \
-Falls es doch mal ein Problem geben sollte, wende dich bitte direkt an einen Community Moderator (bei kleineren Dingen), einen Moderator oder an den Owner. ❤️",
-        )
+        BridgeReply::ephemeral_text(ACK_TEXT)
     }
 }
 
@@ -374,6 +486,29 @@ pub fn register(router: &mut InteractionRouter, feedback: Arc<VoiceFeedback>) {
     let handler = Arc::new(FeedbackHandler { feedback });
     router.on_custom_id(START_CUSTOM_ID, handler.clone());
     router.on_prefix(format!("{MODAL_CUSTOM_ID}:"), handler);
+}
+
+pub fn spawn_dm_responses(
+    feedback: Arc<VoiceFeedback>,
+    dispatcher: &Dispatcher,
+    sender: Arc<dyn ChannelSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    let channel_id = event.channel_id;
+                    let Some(ack) = feedback.handle_dm_message(event).await else {
+                        continue;
+                    };
+                    let _ = sender.send_to_channel(channel_id, Some(ack), &[]).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 #[cfg(test)]
@@ -441,6 +576,29 @@ mod tests {
             forwards: StdMutex::new(Vec::new()),
         });
         (dir, VoiceFeedback::new(db, port.clone()), port)
+    }
+
+    fn dm_event(user_id: u64, message_id: u64, content: &str) -> MessageEvent {
+        MessageEvent {
+            guild_id: None,
+            channel_id: 900,
+            message_id,
+            author_id: user_id,
+            author_display_name: "FeedbackUser".to_string(),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_is_staff: false,
+            content: content.to_string(),
+            message_created_at: chrono::Utc::now().timestamp(),
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            author_created_at: 0,
+            author_joined_at: None,
+        }
     }
 
     #[tokio::test]
@@ -517,5 +675,57 @@ mod tests {
         let dms = port.dms.lock().expect("lock");
         assert_eq!(dms.len(), 2);
         assert!(dms[1].1.contains("danke für deine Voice-Runden"));
+    }
+
+    #[tokio::test]
+    async fn dm_freitext_antwort_wie_python() {
+        let (_dir, feedback, port) = setup().await;
+        let now = chrono::Utc::now().timestamp();
+        feedback
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO voice_feedback_requests(
+                       user_id, guild_id, channel_id, channel_name, co_player_names,
+                       duration_seconds, request_type, status, sent_at_ts
+                     ) VALUES(100, 1, 10, 'Lane 1', 'Alice, Bob', 601, 'first', 'sent', ?1)",
+                    [now],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("seed");
+
+        let ack = feedback
+            .handle_dm_message(dm_event(100, 700, "War gut, aber bitte mehr Moderation."))
+            .await;
+        assert_eq!(ack, Some(ACK_TEXT));
+        let (status, message_id, content): (String, i64, String) = feedback
+            .db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT r.status, a.message_id, a.content
+                       FROM voice_feedback_requests r
+                       JOIN voice_feedback_responses a ON a.request_id = r.id
+                      WHERE r.user_id = 100",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .await
+            .expect("response");
+        assert_eq!(status, "responded");
+        assert_eq!(message_id, 700);
+        assert_eq!(content, "War gut, aber bitte mehr Moderation.");
+        let forwards = port.forwards.lock().expect("lock");
+        assert_eq!(forwards.len(), 1);
+        assert!(forwards[0].contains("📩 Neues Voice-Feedback (Req #"));
+        assert!(forwards[0].contains("Mit im Call: Alice, Bob"));
+
+        drop(forwards);
+        let ack = feedback
+            .handle_dm_message(dm_event(100, 701, "Nachtrag"))
+            .await;
+        assert_eq!(ack, None);
     }
 }

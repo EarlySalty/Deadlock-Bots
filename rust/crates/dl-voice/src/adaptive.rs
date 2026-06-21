@@ -237,6 +237,7 @@ pub trait AdaptivePort: Send + Sync {
         &self,
         guild_id: u64,
         category_id: u64,
+        anchor_id: u64,
         name: &str,
     ) -> Result<u64, String>;
     async fn set_channel_position(&self, channel_id: u64, position: i64) -> Result<(), String>;
@@ -400,12 +401,31 @@ impl AdaptiveLanes {
             if current.as_deref() != Some(desired.as_str()) {
                 let _ = self.port.rename_channel(*channel_id, &desired).await;
             }
+            let desired_position = anchor.3 + *index as i64 - 1;
+            let current_position = channels
+                .iter()
+                .find(|(id, _, _, _)| id == channel_id)
+                .map(|(_, _, _, position)| *position);
+            if current_position != Some(desired_position) {
+                let _ = self
+                    .port
+                    .set_channel_position(*channel_id, desired_position)
+                    .await;
+            }
         }
         for index in &plan.create_indices {
             let name = lane_name_for_index(base_name, *index);
+            let Ok(channel_id) = self
+                .port
+                .create_voice_channel(guild_id, category_id, anchor_id, &name)
+                .await
+            else {
+                continue;
+            };
+            let desired_position = anchor.3 + *index as i64 - 1;
             let _ = self
                 .port
-                .create_voice_channel(guild_id, category_id, &name)
+                .set_channel_position(channel_id, desired_position)
                 .await;
         }
     }
@@ -498,6 +518,131 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Debug, Clone, Default, PartialEq, Eq)]
+    struct AnchorAttrs {
+        overwrites: Vec<String>,
+        user_limit: i64,
+        bitrate: Option<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct CreateCall {
+        guild_id: u64,
+        category_id: u64,
+        anchor_id: u64,
+        name: String,
+        copied_anchor: AnchorAttrs,
+    }
+
+    struct MockAdaptivePort {
+        channels: StdMutex<Vec<(u64, String, usize, i64)>>,
+        anchor_attrs: HashMap<u64, AnchorAttrs>,
+        create_results: StdMutex<Vec<Result<u64, String>>>,
+        create_calls: StdMutex<Vec<CreateCall>>,
+        position_calls: StdMutex<Vec<(u64, i64)>>,
+        rename_calls: StdMutex<Vec<(u64, String)>>,
+        delete_calls: StdMutex<Vec<u64>>,
+    }
+
+    impl MockAdaptivePort {
+        fn new(channels: Vec<(u64, String, usize, i64)>) -> Self {
+            Self {
+                channels: StdMutex::new(channels),
+                anchor_attrs: HashMap::new(),
+                create_results: StdMutex::new(Vec::new()),
+                create_calls: StdMutex::new(Vec::new()),
+                position_calls: StdMutex::new(Vec::new()),
+                rename_calls: StdMutex::new(Vec::new()),
+                delete_calls: StdMutex::new(Vec::new()),
+            }
+        }
+
+        fn with_anchor_attrs(mut self, anchor_id: u64, attrs: AnchorAttrs) -> Self {
+            self.anchor_attrs.insert(anchor_id, attrs);
+            self
+        }
+
+        fn with_create_results(self, results: Vec<Result<u64, String>>) -> Self {
+            *self.create_results.lock().expect("lock") = results;
+            self
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AdaptivePort for MockAdaptivePort {
+        async fn category_channels(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+        ) -> Vec<(u64, String, usize, i64)> {
+            self.channels.lock().expect("lock").clone()
+        }
+
+        async fn member_role_pairs(&self, _guild_id: u64, _user_id: u64) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn rename_channel(&self, channel_id: u64, name: &str) -> Result<(), String> {
+            self.rename_calls
+                .lock()
+                .expect("lock")
+                .push((channel_id, name.to_string()));
+            Ok(())
+        }
+
+        async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+            self.delete_calls.lock().expect("lock").push(channel_id);
+            Ok(())
+        }
+
+        async fn create_voice_channel(
+            &self,
+            guild_id: u64,
+            category_id: u64,
+            anchor_id: u64,
+            name: &str,
+        ) -> Result<u64, String> {
+            let copied_anchor = self
+                .anchor_attrs
+                .get(&anchor_id)
+                .cloned()
+                .unwrap_or_default();
+            self.create_calls.lock().expect("lock").push(CreateCall {
+                guild_id,
+                category_id,
+                anchor_id,
+                name: name.to_string(),
+                copied_anchor,
+            });
+            self.create_results
+                .lock()
+                .expect("lock")
+                .remove(0)
+        }
+
+        async fn set_channel_position(
+            &self,
+            channel_id: u64,
+            position: i64,
+        ) -> Result<(), String> {
+            self.position_calls
+                .lock()
+                .expect("lock")
+                .push((channel_id, position));
+            Ok(())
+        }
+    }
 
     fn snap(channel_id: u64, index: usize, members: usize) -> LaneSnapshot {
         LaneSnapshot {
@@ -634,5 +779,78 @@ mod tests {
         // Sortiert: seeker(2) < phantom1 < phantom3 → Lane 2 auf 10, 3 auf 11, 1 auf 12
         assert_eq!(plan_lane_reorder(&entries), vec![(2, 10), (3, 11), (1, 12)]);
         assert!(plan_lane_reorder(&entries[..1]).is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_managed_positioniert_neue_lane_und_reicht_anchor_durch() {
+        let copied_anchor = AnchorAttrs {
+            overwrites: vec!["role:7 allow:1048576 deny:0".to_string()],
+            user_limit: 6,
+            bitrate: Some(96_000),
+        };
+        let port = Arc::new(
+            MockAdaptivePort::new(vec![(100, "Lane".to_string(), 6, 10)])
+                .with_anchor_attrs(100, copied_anchor.clone())
+                .with_create_results(vec![Ok(200)]),
+        );
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sync_managed(1, 2, 100, "Lane", 6, None).await;
+
+        let creates = port.create_calls.lock().expect("lock").clone();
+        assert_eq!(
+            creates,
+            vec![CreateCall {
+                guild_id: 1,
+                category_id: 2,
+                anchor_id: 100,
+                name: "Lane 2".to_string(),
+                copied_anchor,
+            }]
+        );
+        assert_eq!(
+            *port.position_calls.lock().expect("lock"),
+            vec![(200, 11)]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_managed_setzt_reassignment_position_nur_bei_abweichung() {
+        let port = Arc::new(MockAdaptivePort::new(vec![
+            (100, "Lane".to_string(), 1, 10),
+            (201, "Lane 2".to_string(), 1, 11),
+        ]));
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sync_managed(1, 2, 100, "Lane", 6, None).await;
+
+        assert!(port.position_calls.lock().expect("lock").is_empty());
+
+        let port = Arc::new(MockAdaptivePort::new(vec![
+            (100, "Lane".to_string(), 1, 10),
+            (201, "Lane 2".to_string(), 1, 99),
+        ]));
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sync_managed(1, 2, 100, "Lane", 6, None).await;
+
+        assert_eq!(
+            *port.position_calls.lock().expect("lock"),
+            vec![(201, 11)]
+        );
+    }
+
+    #[tokio::test]
+    async fn sync_managed_ueberspringt_create_fehler_ohne_panic() {
+        let port = Arc::new(
+            MockAdaptivePort::new(vec![(100, "Lane".to_string(), 6, 10)])
+                .with_create_results(vec![Err("create failed".to_string())]),
+        );
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sync_managed(1, 2, 100, "Lane", 6, None).await;
+
+        assert_eq!(port.create_calls.lock().expect("lock").len(), 1);
+        assert!(port.position_calls.lock().expect("lock").is_empty());
     }
 }

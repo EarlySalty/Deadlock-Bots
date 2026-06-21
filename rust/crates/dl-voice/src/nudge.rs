@@ -271,10 +271,6 @@ impl VoiceNudge {
             }
             Err(err) => {
                 tracing::info!(%err, user_id, "Nudge: DM fehlgeschlagen (DMs zu?)");
-                let _ = self
-                    .db
-                    .kv_set(DONE_NS, user_id.to_string(), "dm_failed".to_string())
-                    .await;
                 false
             }
         }
@@ -432,6 +428,7 @@ mod tests {
         logs: StdMutex<Vec<String>>,
         url: Option<String>,
         roles: StdMutex<Vec<u64>>,
+        fail_dm: StdMutex<bool>,
     }
 
     #[async_trait::async_trait]
@@ -448,6 +445,9 @@ mod tests {
             _embeds: &[Value],
             _components: &Value,
         ) -> Result<(u64, u64), String> {
+            if *self.fail_dm.lock().expect("lock") {
+                return Err("forbidden".to_string());
+            }
             self.dms.lock().expect("lock").push(user_id);
             Ok((900, 901))
         }
@@ -481,6 +481,7 @@ mod tests {
             logs: StdMutex::new(Vec::new()),
             url: url.map(str::to_string),
             roles: StdMutex::new(Vec::new()),
+            fail_dm: StdMutex::new(false),
         });
         (dir, VoiceNudge::new(db, port.clone()), port)
     }
@@ -531,6 +532,15 @@ mod tests {
         assert_eq!(nudge.kv(DONE_NS, 100).await.as_deref(), Some("sent"));
         assert!(nudge.has_active_nudge(100).await);
         assert!(!port.logs.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn dm_fehlschlag_markiert_nicht_done() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        *port.fail_dm.lock().expect("lock") = true;
+        assert!(!nudge.send_nudge(100).await);
+        assert_eq!(nudge.kv(DONE_NS, 100).await, None);
+        assert!(!nudge.has_active_nudge(100).await);
     }
 
     #[tokio::test]

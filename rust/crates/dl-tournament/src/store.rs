@@ -199,20 +199,24 @@ impl TournamentStore {
         let (name_clone, key_clone) = (name.clone(), key.clone());
         self.db
             .write(move |conn| {
-                let existing: Option<(i64, String)> = conn
+                let existing: Option<(i64, String, i64)> = conn
                     .query_row(
-                        "SELECT id, name FROM customgames_tournament_teams
-                          WHERE guild_id = ?1 AND name_key = ?2",
+                        "SELECT t.id, t.name, COALESCE(COUNT(s.user_id), 0)
+                           FROM customgames_tournament_teams t
+                           LEFT JOIN customgames_tournament_signups s
+                             ON s.guild_id = t.guild_id AND s.team_id = t.id
+                          WHERE t.guild_id = ?1 AND t.name_key = ?2
+                          GROUP BY t.id, t.name",
                         rusqlite::params![guild_id, key_clone],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
                     )
                     .optional()?;
-                if let Some((id, name)) = existing {
+                if let Some((id, name, member_count)) = existing {
                     return Ok(Team {
                         id,
                         name,
                         created: false,
-                        member_count: 0,
+                        member_count,
                     });
                 }
                 conn.execute(
@@ -476,15 +480,19 @@ impl TournamentStore {
         self.db
             .read(move |conn| {
                 conn.query_row(
-                    "SELECT id, name, created_by FROM customgames_tournament_teams
-                      WHERE guild_id = ?1 AND id = ?2",
+                    "SELECT t.id, t.name, t.created_by, COALESCE(COUNT(s.user_id), 0)
+                       FROM customgames_tournament_teams t
+                       LEFT JOIN customgames_tournament_signups s
+                         ON s.guild_id = t.guild_id AND s.team_id = t.id
+                      WHERE t.guild_id = ?1 AND t.id = ?2
+                      GROUP BY t.id, t.name, t.created_by",
                     rusqlite::params![guild_id, team_id],
                     |row| {
                         Ok(TeamRow {
                             id: row.get(0)?,
                             name: row.get(1)?,
                             created_by: row.get(2)?,
-                            member_count: 0,
+                            member_count: row.get(3)?,
                         })
                     },
                 )
@@ -692,7 +700,10 @@ impl TournamentStore {
                 continue;
             }
             let tid = new_team_ids[team_idx];
-            if let Err(err) = self.assign_signup_team(guild_id, player.user_id, Some(tid)).await {
+            if let Err(err) = self
+                .assign_signup_team(guild_id, player.user_id, Some(tid))
+                .await
+            {
                 tracing::warn!(%err, user = player.user_id, team = tid, "Snake-draft assign fehlgeschlagen");
             }
         }
@@ -1108,6 +1119,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn team_member_count_in_get_team_und_get_or_create_team() {
+        let (_dir, store) = store().await;
+        let team = store
+            .get_or_create_team(1, "Alpha", Some(100))
+            .await
+            .expect("team");
+        assert!(team.created);
+        assert_eq!(team.member_count, 0);
+
+        store
+            .upsert_signup(1, 10, "team", "phantom", 3, Some(team.id), false, None)
+            .await
+            .expect("signup 10");
+        store
+            .upsert_signup(1, 11, "team", "seeker", 2, Some(team.id), false, None)
+            .await
+            .expect("signup 11");
+
+        let row = store.get_team(1, team.id).await.expect("team row");
+        assert_eq!(row.member_count, 2);
+        let again = store
+            .get_or_create_team(1, "alpha", None)
+            .await
+            .expect("team again");
+        assert!(!again.created);
+        assert_eq!(again.member_count, 2);
+
+        store
+            .upsert_signup(1, 11, "solo", "seeker", 2, None, false, None)
+            .await
+            .expect("solo update");
+
+        let row = store.get_team(1, team.id).await.expect("team row");
+        assert_eq!(row.member_count, 1);
+        let again = store
+            .get_or_create_team(1, "Alpha", None)
+            .await
+            .expect("team again");
+        assert_eq!(again.member_count, 1);
+    }
+
+    #[tokio::test]
     async fn perioden_wechseln_aktiv() {
         let (_dir, store) = store().await;
         let first = store
@@ -1166,7 +1219,12 @@ mod tests {
             .expect("signup");
         assert_eq!(store.auto_balance(1).await, (0, 0));
         // Spieler bleibt teamlos.
-        assert!(store.get_signup(1, 100).await.expect("sg").team_id.is_none());
+        assert!(store
+            .get_signup(1, 100)
+            .await
+            .expect("sg")
+            .team_id
+            .is_none());
     }
 
     #[tokio::test]
@@ -1240,8 +1298,14 @@ mod tests {
         assert_eq!(new_teams, 1);
         assert_eq!(assigned, 2);
         // Die vollen Team-Mitglieder bleiben im selben Team.
-        assert_eq!(store.get_signup(1, 10).await.expect("s10").team_id, Some(full.id));
-        assert_eq!(store.get_signup(1, 11).await.expect("s11").team_id, Some(full.id));
+        assert_eq!(
+            store.get_signup(1, 10).await.expect("s10").team_id,
+            Some(full.id)
+        );
+        assert_eq!(
+            store.get_signup(1, 11).await.expect("s11").team_id,
+            Some(full.id)
+        );
         // Die Solo-Spieler haben jetzt ein (neues, anderes) Team.
         let t20 = store.get_signup(1, 20).await.expect("s20").team_id;
         assert!(t20.is_some());
