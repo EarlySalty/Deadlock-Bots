@@ -14,6 +14,7 @@ dl-ai.workspace = true
 dl-db.workspace = true
 dl-discord.workspace = true
 rusqlite.workspace = true
+regex.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
 tracing.workspace = true

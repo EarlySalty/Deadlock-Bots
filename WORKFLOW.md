@@ -1,3 +1,18 @@
+# Invite/New-Account SecurityGuard (2026-06-21)
+
+## Ziel
+Rust-SecurityGuard nach `rust/docs/specs/2026-06-21-invite-newaccount-moderation-design.md` erweitern: Fremd-Discord-Invites erkennen, neue Account-Klassifikation (<30d Account und <7d Join), Soft-Warn vs. Hijack nach Channel-Streuung, DM-vor-Ban.
+
+## Fortschritt
+- Spec vollständig gelesen; relevante Rust-Dateien `guard.rs`, `lib.rs`, `store.rs`, Glue `modglue.rs` und Python-Referenz `cogs/security_guard.py` gesichtet.
+- Bestehende Welle-1-Pfade identifiziert: `GuardAction::{Enforce, Propose, EstablishedScam, Takeover}`, History-Fenster, DM/Aktion/Delete-Reihenfolge, Serenity-REST fuer Invites/Vanity.
+- Implementiert: pure Invite-Code-Extraktion, neue Account-Klassifikation, Streuungsrouting, `SoftWarn`/`Hijack`-Konsolidierung, Ban-DM vor Ban, selbstloeschende Soft-Warn-Notiz.
+- Glue implementiert: `OUR_GUILD_ID`, `INVITE_ALLOWLIST_FALLBACK`, `ESCALATION_CONTACT_HANDLE`, Auto-Allowlist eigener Invites + Vanity und TTL-Cache fuer Invite-Aufloesung.
+- Verifikation gruen: `cargo test -p dl-moderation` (19 Tests) und `cargo check --workspace`.
+
+## Offen
+- Claude-Review; kein Commit/Push durch diesen Worker.
+
 # Wave1 SecurityGuard + AI-Moderator Parity (2026-06-21)
 
 ## Ziel

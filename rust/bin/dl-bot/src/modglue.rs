@@ -1,11 +1,15 @@
 //! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::json;
-use serenity::all::{ChannelId, GuildId, Message, MessageId, UserId};
+use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, UserId};
 use serenity::builder::GetMessages;
+use tokio::sync::{Mutex, RwLock};
+
+const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -243,7 +247,10 @@ impl InteractionHandler for ReviewHandler {
         };
         match action {
             "accept" => {
-                let outcome = self.moderator.accept_case(case_id, interaction.user_id).await;
+                let outcome = self
+                    .moderator
+                    .accept_case(case_id, interaction.user_id)
+                    .await;
                 Self::outcome_reply(outcome)
             }
             "ban" => {
@@ -361,8 +368,151 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+#[derive(Debug, Clone)]
+struct InviteCacheEntry {
+    guild_id: Option<u64>,
+    expires_at: i64,
+}
+
+struct GuardInviteResolver {
+    our_guild_id: u64,
+    fallback_codes: HashSet<String>,
+    allowlist: RwLock<HashSet<String>>,
+    cache: Mutex<HashMap<String, InviteCacheEntry>>,
+}
+
+impl GuardInviteResolver {
+    fn new(our_guild_id: u64, fallback_codes: Vec<String>) -> Self {
+        let fallback_codes: HashSet<String> = fallback_codes.into_iter().collect();
+        Self {
+            our_guild_id,
+            allowlist: RwLock::new(fallback_codes.clone()),
+            fallback_codes,
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn refresh_allowlist(&self, http: &Http) {
+        let mut next = self.fallback_codes.clone();
+        match http
+            .get_guild_invites(GuildId::new(self.our_guild_id))
+            .await
+        {
+            Ok(invites) => {
+                for invite in invites {
+                    next.insert(invite.code);
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, guild_id = self.our_guild_id, "SecurityGuard: eigene Invites nicht abrufbar");
+            }
+        }
+        match http
+            .get_guild_vanity_url(GuildId::new(self.our_guild_id))
+            .await
+        {
+            Ok(code) if !code.trim().is_empty() => {
+                next.insert(code.trim().to_string());
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(%err, guild_id = self.our_guild_id, "SecurityGuard: Vanity-Invite nicht abrufbar");
+            }
+        }
+        *self.allowlist.write().await = next;
+    }
+
+    async fn resolve(&self, http: &Http, code: &str) -> Option<u64> {
+        let code = code.trim();
+        if code.is_empty() {
+            return None;
+        }
+        if self.allowlist.read().await.contains(code) {
+            return Some(self.our_guild_id);
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        if let Some(entry) = self.cache.lock().await.get(code).cloned() {
+            if entry.expires_at > now {
+                return entry.guild_id;
+            }
+        }
+
+        let guild_id = match http.get_invite(code, false, false, None).await {
+            Ok(invite) => invite.guild.map(|guild| guild.id.get()),
+            Err(err) => {
+                tracing::debug!(%err, %code, "SecurityGuard: Invite nicht auflösbar");
+                None
+            }
+        };
+        if guild_id == Some(self.our_guild_id) {
+            self.allowlist.write().await.insert(code.to_string());
+        }
+        self.cache.lock().await.insert(
+            code.to_string(),
+            InviteCacheEntry {
+                guild_id,
+                expires_at: now + INVITE_CACHE_TTL_SECONDS,
+            },
+        );
+        guild_id
+    }
+}
+
+fn looks_like_invite_code(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 64
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-')
+}
+
+pub fn parse_invite_allowlist_fallback(raw: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for token in raw.split([',', ';', '\n', '\r', '\t', ' ']) {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let extracted = dl_moderation::guard::extract_invite_codes(token);
+        if extracted.is_empty() && looks_like_invite_code(token) {
+            if seen.insert(token.to_string()) {
+                out.push(token.to_string());
+            }
+            continue;
+        }
+        for code in extracted {
+            if seen.insert(code.clone()) {
+                out.push(code);
+            }
+        }
+    }
+    out
+}
+
 pub struct GuardGlue {
     pub adapter: Arc<DiscordAdapter>,
+    invite_resolver: Arc<GuardInviteResolver>,
+}
+
+impl GuardGlue {
+    pub fn new(
+        adapter: Arc<DiscordAdapter>,
+        our_guild_id: u64,
+        fallback_codes: Vec<String>,
+    ) -> Self {
+        Self {
+            adapter,
+            invite_resolver: Arc::new(GuardInviteResolver::new(our_guild_id, fallback_codes)),
+        }
+    }
+
+    pub async fn refresh_invite_allowlist(&self) {
+        self.invite_resolver
+            .refresh_allowlist(&self.adapter.http)
+            .await;
+    }
 }
 
 #[async_trait::async_trait]
@@ -459,12 +609,11 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             dl_moderation::guard::GuardAction::Propose => {
                 ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
             }
-            dl_moderation::guard::GuardAction::EstablishedScam => {
-                ("🛡️ Scam erkannt: etablierter Account — Auto-Timeout (24h)", 0xE67E22)
-            }
-            dl_moderation::guard::GuardAction::Takeover => {
-                ("⚠️ Account-Takeover erkannt — Quarantäne (24h-Timeout, reversibel)", 0xE74C3C)
-            }
+            dl_moderation::guard::GuardAction::SoftWarn => ("🛡️ Soft-Warn", 0x95A5A6),
+            dl_moderation::guard::GuardAction::Hijack => (
+                "⚠️ Account-Hijack/Takeover — Quarantäne (24h-Timeout, reversibel)",
+                0xE74C3C,
+            ),
         };
         let preview: String = case
             .messages
@@ -495,12 +644,15 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
                 dl_moderation::guard::GuardAction::Propose => {
                     dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
                 }
-                dl_moderation::guard::GuardAction::EstablishedScam => {
-                    dl_moderation::guard::TIMEOUT_MINUTES
-                }
+                dl_moderation::guard::GuardAction::Hijack => dl_moderation::guard::TIMEOUT_MINUTES,
+                dl_moderation::guard::GuardAction::SoftWarn => 0,
                 _ => dl_moderation::guard::TIMEOUT_MINUTES,
             };
-            format!("Timeout {minutes}m: {action_ok_text}")
+            if matches!(action, dl_moderation::guard::GuardAction::SoftWarn) {
+                format!("Soft-Warn: {action_ok_text}")
+            } else {
+                format!("Timeout {minutes}m: {action_ok_text}")
+            }
         };
         let reason_value: String = if case.reason.is_empty() {
             "auto-detected burst".to_string()
@@ -513,6 +665,7 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             json!({ "name": "Case ID", "value": case.case_id, "inline": true }),
             json!({ "name": "Account age", "value": fmt_delta(now, Some(case.account_created_at)), "inline": true }),
             json!({ "name": "Time since join", "value": fmt_delta(now, case.joined_at), "inline": true }),
+            json!({ "name": "Auslöser", "value": case.trigger.as_str(), "inline": true }),
             json!({ "name": "Activity window", "value": format!(
                 "{} msgs / {} channels in {}s",
                 case.meta[1], case.meta[0], dl_moderation::guard::WINDOW_SECONDS
@@ -557,10 +710,33 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             .await;
     }
 
-    async fn post_public_notice(&self, channel_id: u64, text: String) {
+    async fn post_self_deleting_notice(
+        &self,
+        channel_id: u64,
+        text: String,
+        delete_after_secs: u64,
+    ) {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
-        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+        let Ok(message_id) = self.adapter.send_raw_public(channel_id, &body).await else {
+            return;
+        };
+        let adapter = self.adapter.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(delete_after_secs)).await;
+            let _ = adapter
+                .http
+                .delete_message(
+                    ChannelId::new(channel_id),
+                    MessageId::new(message_id),
+                    Some("SecurityGuard: selbstlöschende Notiz"),
+                )
+                .await;
+        });
+    }
+
+    async fn resolve_invite_guild(&self, code: &str) -> Option<u64> {
+        self.invite_resolver.resolve(&self.adapter.http, code).await
     }
 }
 
@@ -1529,7 +1705,12 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
     }
 
     async fn fetch_user_name(&self, user_id: u64) -> Option<String> {
-        let user = self.adapter.http.get_user(UserId::new(user_id)).await.ok()?;
+        let user = self
+            .adapter
+            .http
+            .get_user(UserId::new(user_id))
+            .await
+            .ok()?;
         // Discord-Präzedenz: global_name vor Username (wie resolve_user).
         Some(
             user.global_name
@@ -1650,7 +1831,13 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
 
     async fn caller_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
         let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
-        Some(guild.voice_states.get(&UserId::new(user_id))?.channel_id?.get())
+        Some(
+            guild
+                .voice_states
+                .get(&UserId::new(user_id))?
+                .channel_id?
+                .get(),
+        )
     }
 
     async fn create_match_channel(
@@ -1665,7 +1852,11 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
         body.insert("parent_id".into(), json!(category_id.to_string()));
         self.adapter
             .http
-            .create_channel(GuildId::new(guild_id), &body, Some("Team-Balancer: Match-Channel"))
+            .create_channel(
+                GuildId::new(guild_id),
+                &body,
+                Some("Team-Balancer: Match-Channel"),
+            )
             .await
             .ok()
             .map(|c| c.id.get())
@@ -1684,7 +1875,11 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
             .adapter
             .cache()
             .guild(GuildId::new(guild_id))
-            .and_then(|g| g.voice_states.get(&UserId::new(user_id)).and_then(|vs| vs.channel_id))
+            .and_then(|g| {
+                g.voice_states
+                    .get(&UserId::new(user_id))
+                    .and_then(|vs| vs.channel_id)
+            })
             .is_some();
         if !in_voice {
             return MoveOutcome::NotInVoice;
@@ -1705,7 +1900,11 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
         }
     }
 
-    async fn channel_member_count(&self, guild_id: u64, channel_id: u64) -> Option<(String, usize)> {
+    async fn channel_member_count(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Option<(String, usize)> {
         let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
         let channel = ChannelId::new(channel_id);
         let name = guild.channels.get(&channel)?.name.to_string();
@@ -1722,7 +1921,10 @@ impl dl_tournament::balance_cmd::BalancePort for BalanceGlue {
     async fn delete_channel(&self, channel_id: u64) -> bool {
         self.adapter
             .http
-            .delete_channel(ChannelId::new(channel_id), Some("Team-Balancer: Match beendet"))
+            .delete_channel(
+                ChannelId::new(channel_id),
+                Some("Team-Balancer: Match beendet"),
+            )
             .await
             .is_ok()
     }

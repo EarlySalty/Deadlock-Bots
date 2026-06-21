@@ -1,29 +1,30 @@
 //! SecurityGuard — Port des Kerns von `cogs/security_guard.py`.
 //!
-//! Vier Detektions-Pfade wie das Original:
-//! 1. **Account-Takeover** (alle Accounts, deterministisch, KEIN AI):
-//!    Bilder in ≥ 2 verschiedenen Channels innerhalb von 30 s → sofortige
-//!    Quarantäne (Ban/Timeout laut Konfiguration).
-//! 2. **Junge Accounts** (< 30 Tage): Mehrkanal-Burst (3 Kanäle/3
-//!    Nachrichten in 1 h, oder 2 Kanäle mit Keyword/Anhängen) → Text- und
-//!    Bild-Scam-Check (stärkeres Signal entscheidet, MiniMax, ≥ 0,78) →
-//!    bestätigt: Vollzug; unbestätigt: 60-min-Holding-Timeout als Mod-Vorschlag.
-//! 3. **Bild-Multichannel** (alle Accounts): Bilder in ≥ 2 Channels →
-//!    MiniMax-Vision-Check (≥ 0,75); etabliert = 24h-Timeout-Vorschlag,
-//!    sonst Vollzug.
-//! 4. **Keyword-Einzeltreffer**: AI-Check; etablierte Accounts (≥ 30 Tage
-//!    Account + ≥ 24 h auf dem Server) bekommen einen Vorschlag, junge den
-//!    Vollzug.
+//! Detektions-Pfade:
+//! 1. **Account-Takeover**: Bilder in ≥ 2 verschiedenen Channels innerhalb
+//!    von 30 s → Treffer.
+//! 2. **Fremd-Invite**: echte Discord-Invite-Links werden per Port auf die
+//!    Ziel-Guild aufgelöst; fremd oder nicht auflösbar → Treffer.
+//! 3. **Junge Accounts**: Mehrkanal-Burst → Text-/Bild-Scam-Check; bestätigt
+//!    = Treffer, unbestätigt = 60-min-Holding-Timeout als Mod-Vorschlag.
+//! 4. **Bild-Multichannel** und **Keyword-Einzeltreffer**: AI-bestätigte Scam-
+//!    Signale → Treffer.
+//!
+//! Treffer laufen durch das vereinheitlichte Modell: ban-fähig neu (<30 d
+//! Account und <7 d Server) → Ban; etablierter Einzelchannel → Soft-Warn;
+//! etablierte Streuung oder Takeover → Hijack-Timeout.
 //!
 //! Takeover-Bild-Label (Original: `_finalize_takeover_ai_label`): Bei einem
 //! Takeover mit Bild-Anhängen holt der Guard best-effort ein MiniMax-Vision-
 //! Label (`generate_multimodal`) und hängt es als Mod-Kontext an den Grund —
 //! KEIN Gate, die Quarantäne bleibt deterministisch.
 //!
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::sync::OnceLock;
 
 use dl_db::Db;
+use regex::Regex;
 use serde_json::Value;
 
 pub const REVIEW_CHANNEL_ID: u64 = 1374364800817303632;
@@ -31,9 +32,11 @@ pub const MOD_CHANNEL_ID: u64 = 1315684135175716978;
 pub const WINDOW_SECONDS: i64 = 3600;
 pub const CHANNEL_THRESHOLD: usize = 3;
 pub const MESSAGE_THRESHOLD: usize = 3;
-pub const ACCOUNT_MAX_AGE_HOURS: i64 = 720;
-pub const ESTABLISHED_ACCOUNT_MIN_AGE_HOURS: i64 = 720;
-pub const ESTABLISHED_MIN_JOIN_HOURS: i64 = 24;
+pub const NEW_ACCOUNT_MAX_AGE_HOURS: i64 = 720;
+pub const NEW_MEMBER_MAX_JOIN_HOURS: i64 = 168;
+pub const ACCOUNT_MAX_AGE_HOURS: i64 = NEW_ACCOUNT_MAX_AGE_HOURS;
+pub const ESTABLISHED_ACCOUNT_MIN_AGE_HOURS: i64 = NEW_ACCOUNT_MAX_AGE_HOURS;
+pub const ESTABLISHED_MIN_JOIN_HOURS: i64 = NEW_MEMBER_MAX_JOIN_HOURS;
 pub const AI_SCAM_CONFIDENCE: f64 = 0.78;
 pub const AI_IMAGE_CONFIDENCE: f64 = 0.75;
 pub const IMAGE_CHANNEL_THRESHOLD: usize = 2;
@@ -45,6 +48,8 @@ pub const HISTORY_MAX: usize = 20;
 /// Einspruch-Modal-Grenzen (Original: APPEAL_MIN_CHARS / APPEAL_MAX_CHARS).
 pub const APPEAL_MIN_CHARS: u16 = 4;
 pub const APPEAL_MAX_CHARS: u16 = 800;
+pub const DEFAULT_ESCALATION_CONTACT_HANDLE: &str = "@earlysalty";
+pub const SOFT_WARN_DELETE_AFTER_SECONDS: u64 = 12;
 
 pub const KEYWORDS: [&str; 15] = [
     "telegram",
@@ -98,6 +103,44 @@ pub struct RecentMsg {
 pub fn contains_suspicious_text(text: &str) -> bool {
     let lower = text.to_lowercase();
     KEYWORDS.iter().any(|kw| lower.contains(kw))
+}
+
+/// Extrahiert Discord-Invite-Codes aus echten Invite-URLs.
+///
+/// Erkannt werden `discord.gg/<code>`, `discord.com/invite/<code>`,
+/// `discordapp.com/invite/<code>` sowie `ptb.`/`canary.`-Hosts. Andere
+/// Discord-Links wie `/channels/...` werden bewusst ignoriert.
+pub fn extract_invite_codes(text: &str) -> Vec<String> {
+    static INVITE_RE: OnceLock<Regex> = OnceLock::new();
+    let re = INVITE_RE.get_or_init(|| {
+        match Regex::new(
+            r"(?ix)
+            (?:^|[^A-Z0-9_.-])
+            (?:https?://)?
+            (?:(?:ptb|canary)\.)?
+            (?:
+                discord\.gg/
+                |
+                discord(?:app)?\.com/invite/
+            )
+            ([A-Z0-9-]+)
+            ",
+        ) {
+            Ok(re) => re,
+            Err(err) => panic!("invalid invite regex: {err}"),
+        }
+    });
+    let mut seen = HashSet::new();
+    let mut codes = Vec::new();
+    for caps in re.captures_iter(text) {
+        let Some(code) = caps.get(1).map(|m| m.as_str().to_string()) else {
+            continue;
+        };
+        if seen.insert(code.clone()) {
+            codes.push(code);
+        }
+    }
+    codes
 }
 
 /// Takeover-Fingerabdruck: Bilder über ≥ 2 Channels in ≤ 30 s.
@@ -226,40 +269,59 @@ pub fn parse_scam_json(text: Option<&str>) -> (bool, f64, String) {
     (is_scam, confidence, reason)
 }
 
-/// Takeover-DM-Text (Original: `_send_takeover_dm`). Dauer aus `TIMEOUT_MINUTES`
-/// abgeleitet (1440 → „24 Stunden"). Als Plain-Text, wie die übrige Guard-DM.
-pub fn takeover_dm_text(case_id: &str) -> String {
-    let hours = TIMEOUT_MINUTES / 60;
-    let dauer = if TIMEOUT_MINUTES % 60 == 0 && hours > 0 {
-        if hours == 1 {
-            "1 Stunde".to_string()
-        } else {
-            format!("{hours} Stunden")
-        }
-    } else {
-        format!("{TIMEOUT_MINUTES} Minuten")
-    };
+pub fn ban_dm_text(contact_handle: &str) -> String {
     format!(
-        "Du wurdest vorübergehend stummgeschaltet.\n\
-         Grund: Dein Account hat in Sekunden Bilder in mehreren Kanälen gepostet — ein typisches \
-         Muster für einen gekaperten Account. Falls du gehackt wurdest: Passwort ändern, \
-         2FA aktivieren und beim Mod-Team melden, sobald du den Account zurück hast.\n\
-         Dauer: {dauer}\n\
-         Case: {case_id}\n\
-         Falls das ein Irrtum war, wende dich ans Mod-Team — der Timeout wird aufgehoben."
+        "Du wurdest auf der Deutschen Deadlock Community gebannt, weil dein Account ein Scam-/Fremdlink-Muster ausgelöst hat. Wenn du denkst, das ist ein Fehler: Schick {contact_handle} eine Freundschaftsanfrage **und** eine kurze Nachricht — dann schauen wir uns das an."
     )
 }
 
-pub fn is_new_account(created_at: i64, now: i64) -> bool {
-    now - created_at < ACCOUNT_MAX_AGE_HOURS * 3600
+/// Einheitliche Hijack-DM für Takeover-Muster und etablierte gestreute Treffer.
+pub fn hijack_dm_text(case_id: &str) -> String {
+    format!(
+        "Du wurdest auf der Deutschen Deadlock Community vorübergehend stummgeschaltet (24 Stunden).\nGrund: Auf deinem Account wurde eine verdächtige Scam-Nachricht erkannt. Falls dein Account gehackt wurde, melde dich bitte beim Mod-Team, sobald du ihn zurück hast.\nCase: {case_id}\nWende dich an das Mod-Team, sobald dein Account wieder sicher ist."
+    )
+}
+
+pub fn soft_warn_notice(user_id: u64) -> String {
+    format!(
+        "<@{user_id}> — fremder Discord-Invite entfernt. Bitte keine fremden Server-Einladungen posten."
+    )
+}
+
+pub fn is_new_account(created_at: i64, joined_at: Option<i64>, now: i64) -> bool {
+    let account_new = now - created_at < NEW_ACCOUNT_MAX_AGE_HOURS * 3600;
+    let joined_new = joined_at
+        .map(|joined| now - joined < NEW_MEMBER_MAX_JOIN_HOURS * 3600)
+        .unwrap_or(false);
+    account_new && joined_new
 }
 
 pub fn is_established_account(created_at: i64, joined_at: Option<i64>, now: i64) -> bool {
-    let account_old = now - created_at >= ESTABLISHED_ACCOUNT_MIN_AGE_HOURS * 3600;
-    let joined_long = joined_at
-        .map(|joined| now - joined >= ESTABLISHED_MIN_JOIN_HOURS * 3600)
-        .unwrap_or(false);
-    account_old && joined_long
+    !is_new_account(created_at, joined_at, now)
+}
+
+pub fn distinct_channel_count(msgs: &[RecentMsg]) -> usize {
+    msgs.iter()
+        .map(|m| m.channel_id)
+        .collect::<HashSet<_>>()
+        .len()
+}
+
+pub fn decide_hit_action(
+    created_at: i64,
+    joined_at: Option<i64>,
+    now: i64,
+    window_msgs: &[RecentMsg],
+    takeover_pattern: bool,
+) -> GuardAction {
+    if is_new_account(created_at, joined_at, now) {
+        return GuardAction::Enforce;
+    }
+    if takeover_pattern || distinct_channel_count(window_msgs) >= 2 {
+        GuardAction::Hijack
+    } else {
+        GuardAction::SoftWarn
+    }
 }
 
 // ── Engine ─────────────────────────────────────────────────────────────────
@@ -270,12 +332,11 @@ pub enum GuardAction {
     Enforce,
     /// Reversibler 60-min-Holding-Timeout mit Mod-Review.
     Propose,
-    /// Etablierter Account mit bestätigtem Scam: Nachricht löschen,
-    /// 24h-Timeout, Warn-DM und Mod-Review.
-    EstablishedScam,
-    /// Account-Takeover-Quarantäne: reversibler 24h-Timeout + eigene
-    /// Takeover-DM (Original: `_handle_takeover`/`_send_takeover_dm`).
-    Takeover,
+    /// Etablierter Einzelchannel-Treffer: löschen + selbstlöschende Notiz.
+    SoftWarn,
+    /// Etablierter gestreuter Treffer oder Takeover-Muster: 24h-Timeout +
+    /// einheitliche Hijack-DM.
+    Hijack,
 }
 
 /// Discord-Seite (Tests mocken sie).
@@ -285,13 +346,20 @@ pub trait GuardPort: Send + Sync {
     async fn timeout(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str) -> bool;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool;
     async fn send_dm(&self, user_id: u64, text: String) -> bool;
-    /// User-DM mit „Einspruch"-Button (`sg:appeal:{case_id}`). Original:
-    /// `_send_user_dm` mit AppealView — Enforce/Propose, nicht Takeover.
+    /// User-DM mit „Einspruch"-Button (`sg:appeal:{case_id}`) für den
+    /// verbliebenen Holding-Proposal-Pfad.
     async fn send_dm_with_appeal(&self, user_id: u64, text: String, case_id: &str) -> bool;
     /// Mod-Alarm mit sg:*-Buttons in den Mod-Kanal.
     async fn post_mod_alert(&self, case: &Incident, action: &GuardAction);
-    /// Kurze öffentliche Notiz in den betroffenen Kanal.
-    async fn post_public_notice(&self, channel_id: u64, text: String);
+    /// Kurze öffentliche Notiz in den betroffenen Kanal, danach Best-Effort-Löschung.
+    async fn post_self_deleting_notice(
+        &self,
+        channel_id: u64,
+        text: String,
+        delete_after_secs: u64,
+    );
+    /// Invite-Code auf die Ziel-Guild auflösen. `None` ist konservativ fremd.
+    async fn resolve_invite_guild(&self, code: &str) -> Option<u64>;
 }
 
 #[derive(Debug, Clone)]
@@ -314,6 +382,21 @@ pub struct Incident {
     pub action_ok: bool,
     /// Wie viele Nachrichten gelöscht? (Log-Feld „Deleted").
     pub deleted_count: i64,
+    /// Auslöser für Mod-Embed/Diagnose: Scam, Fremd-Invite oder Takeover.
+    pub trigger: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct SecurityGuardConfig {
+    pub escalation_contact_handle: String,
+}
+
+impl Default for SecurityGuardConfig {
+    fn default() -> Self {
+        Self {
+            escalation_contact_handle: DEFAULT_ESCALATION_CONTACT_HANDLE.to_string(),
+        }
+    }
 }
 
 pub struct SecurityGuard {
@@ -324,6 +407,7 @@ pub struct SecurityGuard {
     /// kein Gate: ändert die Quarantäne nie, liefert nur Mod-Kontext.
     pub vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
     pub port: Arc<dyn GuardPort>,
+    pub config: SecurityGuardConfig,
     history: tokio::sync::Mutex<HashMap<u64, VecDeque<RecentMsg>>>,
     active: tokio::sync::Mutex<std::collections::HashSet<u64>>,
 }
@@ -335,11 +419,22 @@ impl SecurityGuard {
         vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn GuardPort>,
     ) -> Arc<Self> {
+        Self::new_with_config(db, generator, vision, port, SecurityGuardConfig::default())
+    }
+
+    pub fn new_with_config(
+        db: Db,
+        generator: Option<Arc<dyn dl_ai::TextGenerator>>,
+        vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
+        port: Arc<dyn GuardPort>,
+        config: SecurityGuardConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             db,
             generator,
             vision,
             port,
+            config,
             history: tokio::sync::Mutex::new(HashMap::new()),
             active: tokio::sync::Mutex::new(std::collections::HashSet::new()),
         })
@@ -416,6 +511,16 @@ impl SecurityGuard {
         self.active.lock().await.remove(&user_id);
     }
 
+    async fn foreign_invite_code(&self, guild_id: u64, content: &str) -> Option<String> {
+        for code in extract_invite_codes(content) {
+            match self.port.resolve_invite_guild(&code).await {
+                Some(invite_guild_id) if invite_guild_id == guild_id => {}
+                _ => return Some(code),
+            }
+        }
+        None
+    }
+
     /// → true wenn ein Case ausgelöst wurde (History wird dann geleert).
     async fn run_detection(
         self: &Arc<Self>,
@@ -442,12 +547,55 @@ impl SecurityGuard {
                 Some(label) => format!("{reason}\nMiniMax-Einschaetzung: {label}"),
                 None => reason,
             };
-            self.execute(guild_id, event, burst, reason, meta, GuardAction::Takeover)
+            let action = decide_hit_action(
+                event.author_created_at,
+                event.author_joined_at,
+                now,
+                &burst,
+                true,
+            );
+            self.execute(guild_id, event, burst, reason, meta, action, "Takeover")
                 .await;
             return true;
         }
 
-        let young = is_new_account(event.author_created_at, now);
+        if let Some(code) = self.foreign_invite_code(guild_id, &event.content).await {
+            let single = vec![RecentMsg {
+                channel_id: event.channel_id,
+                message_id: event.message_id,
+                created_at: now,
+                content: event.content.clone(),
+                attachment_count: event.attachment_count,
+                image_count: event.image_attachment_count,
+                image_urls: event.image_attachment_urls.clone(),
+            }];
+            let action = decide_hit_action(
+                event.author_created_at,
+                event.author_joined_at,
+                now,
+                recent,
+                false,
+            );
+            let meta = [
+                distinct_channel_count(recent) as i64,
+                recent.len() as i64,
+                event.attachment_count as i64,
+                0,
+            ];
+            self.execute(
+                guild_id,
+                event,
+                single,
+                format!("Fremder Discord-Invite: {code}"),
+                meta,
+                action,
+                "Fremd-Invite",
+            )
+            .await;
+            return true;
+        }
+
+        let young = is_new_account(event.author_created_at, event.author_joined_at, now);
 
         // 2. Burst junger Accounts → Text- und ggf. Bild-Scam-Check
         if young {
@@ -475,18 +623,21 @@ impl SecurityGuard {
                     (txt_scam, txt_conf, txt_reason.clone())
                 };
                 let action = if is_scam && confidence >= AI_SCAM_CONFIDENCE {
-                    GuardAction::Enforce
+                    decide_hit_action(
+                        event.author_created_at,
+                        event.author_joined_at,
+                        now,
+                        recent,
+                        false,
+                    )
                 } else {
                     GuardAction::Propose
                 };
-                // `action` ist hier ausschließlich Enforce oder Propose
-                // (zwei Zeilen darüber gesetzt); der Takeover-Pfad läuft
-                // separat über `run_detection` und kommt hier nie an.
                 let full_reason = match action {
                     GuardAction::Enforce => {
                         format!("{reason}; AI conf {:.0}%: {ai_reason}", confidence * 100.0)
                     }
-                    GuardAction::Propose | GuardAction::EstablishedScam | GuardAction::Takeover => {
+                    GuardAction::Propose | GuardAction::SoftWarn | GuardAction::Hijack => {
                         format!(
                             "{reason}; AI unbestaetigt (Text {:.0}%: {}; Bild {:.0}%: {})",
                             txt_conf * 100.0,
@@ -496,8 +647,16 @@ impl SecurityGuard {
                         )
                     }
                 };
-                self.execute(guild_id, event, recent.to_vec(), full_reason, meta, action)
-                    .await;
+                self.execute(
+                    guild_id,
+                    event,
+                    recent.to_vec(),
+                    full_reason,
+                    meta,
+                    action,
+                    "Scam",
+                )
+                .await;
                 return true;
             }
         }
@@ -506,60 +665,35 @@ impl SecurityGuard {
         if is_image_multi_channel(recent) {
             let (is_scam, confidence, ai_reason) = self.ai_check_image_scam(recent).await;
             if is_scam && confidence >= AI_IMAGE_CONFIDENCE {
-                let established =
-                    is_established_account(event.author_created_at, event.author_joined_at, now);
-                if established {
-                    let latest = recent
-                        .iter()
-                        .rev()
-                        .find(|m| m.image_count > 0)
-                        .cloned()
-                        .unwrap_or_else(|| RecentMsg {
-                            channel_id: event.channel_id,
-                            message_id: event.message_id,
-                            created_at: now,
-                            content: event.content.clone(),
-                            attachment_count: event.attachment_count,
-                            image_count: event.image_attachment_count,
-                            image_urls: event.image_attachment_urls.clone(),
-                        });
-                    let reason = format!(
-                        "AI-Scam proposal (conf {:.0}%): {ai_reason}",
-                        confidence * 100.0
-                    );
-                    let meta = [1, 1, latest.attachment_count as i64, 1];
-                    self.execute(
-                        guild_id,
-                        event,
-                        vec![latest],
-                        reason,
-                        meta,
-                        GuardAction::EstablishedScam,
-                    )
-                    .await;
-                } else {
-                    let image_channels = recent
-                        .iter()
-                        .filter(|m| m.image_count > 0)
-                        .map(|m| m.channel_id)
-                        .collect::<std::collections::HashSet<_>>()
-                        .len() as i64;
-                    let image_count: i64 = recent.iter().map(|m| m.image_count as i64).sum();
-                    let reason = format!(
-                        "Bild-Scam in {image_channels} Channels (conf {:.0}%): {ai_reason}",
-                        confidence * 100.0
-                    );
-                    let meta = [image_channels, recent.len() as i64, image_count, 0];
-                    self.execute(
-                        guild_id,
-                        event,
-                        recent.to_vec(),
-                        reason,
-                        meta,
-                        GuardAction::Enforce,
-                    )
-                    .await;
-                }
+                let image_channels = recent
+                    .iter()
+                    .filter(|m| m.image_count > 0)
+                    .map(|m| m.channel_id)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len() as i64;
+                let image_count: i64 = recent.iter().map(|m| m.image_count as i64).sum();
+                let reason = format!(
+                    "Bild-Scam in {image_channels} Channels (conf {:.0}%): {ai_reason}",
+                    confidence * 100.0
+                );
+                let meta = [image_channels, recent.len() as i64, image_count, 0];
+                let action = decide_hit_action(
+                    event.author_created_at,
+                    event.author_joined_at,
+                    now,
+                    recent,
+                    false,
+                );
+                self.execute(
+                    guild_id,
+                    event,
+                    recent.to_vec(),
+                    reason,
+                    meta,
+                    action,
+                    "Scam",
+                )
+                .await;
                 return true;
             }
         }
@@ -568,13 +702,13 @@ impl SecurityGuard {
         if contains_suspicious_text(&event.content) {
             let (is_scam, confidence, ai_reason) = self.ai_check(&event.content).await;
             if is_scam && confidence >= AI_SCAM_CONFIDENCE {
-                let established =
-                    is_established_account(event.author_created_at, event.author_joined_at, now);
-                let action = if established {
-                    GuardAction::EstablishedScam
-                } else {
-                    GuardAction::Enforce
-                };
+                let action = decide_hit_action(
+                    event.author_created_at,
+                    event.author_joined_at,
+                    now,
+                    recent,
+                    false,
+                );
                 let reason = format!("AI-Scam (conf {:.0}%): {ai_reason}", confidence * 100.0);
                 let single = vec![RecentMsg {
                     channel_id: event.channel_id,
@@ -585,8 +719,13 @@ impl SecurityGuard {
                     image_count: event.image_attachment_count,
                     image_urls: event.image_attachment_urls.clone(),
                 }];
-                let meta = [1, 1, event.attachment_count as i64, 1];
-                self.execute(guild_id, event, single, reason, meta, action)
+                let meta = [
+                    distinct_channel_count(recent) as i64,
+                    recent.len() as i64,
+                    event.attachment_count as i64,
+                    1,
+                ];
+                self.execute(guild_id, event, single, reason, meta, action, "Scam")
                     .await;
                 return true;
             }
@@ -675,8 +814,9 @@ impl SecurityGuard {
         Some(format!("{verdict} ({:.0}%) — {reason}", confidence * 100.0))
     }
 
-    /// Vollzug oder Vorschlag: DM → Aktion → Nachrichten löschen →
-    /// öffentliche Notiz → Mod-Alarm → Persistenz (Reihenfolge wie Original).
+    /// DM vor Ban/Timeout, dann Aktion, Löschung, optional Soft-Warn-Notiz
+    /// und Mod-Alarm. DM-Fehler blockieren die Aktion nicht.
+    #[allow(clippy::too_many_arguments)]
     async fn execute(
         &self,
         guild_id: u64,
@@ -685,6 +825,7 @@ impl SecurityGuard {
         reason: String,
         meta: [i64; 4],
         action: GuardAction,
+        trigger: &str,
     ) {
         let case_id = format!("sg-{}-{}", event.author_id, chrono::Utc::now().timestamp());
         let mut incident = Incident {
@@ -695,8 +836,8 @@ impl SecurityGuard {
             action: match action {
                 GuardAction::Enforce => "ban".to_string(),
                 GuardAction::Propose => "timeout-proposal".to_string(),
-                GuardAction::EstablishedScam => "timeout-proposal".to_string(),
-                GuardAction::Takeover => "takeover-quarantine".to_string(),
+                GuardAction::SoftWarn => "soft-warn".to_string(),
+                GuardAction::Hijack => "hijack-timeout".to_string(),
             },
             reason: reason.clone(),
             meta,
@@ -706,29 +847,25 @@ impl SecurityGuard {
             dm_sent: false,
             action_ok: false,
             deleted_count: 0,
+            trigger: trigger.to_string(),
         };
         self.persist(&incident).await;
 
-        // Takeover hat eine eigene DM (Hinweis auf möglichen Hack, reversibel),
-        // alle anderen Pfade die generische Sicherheits-Muster-DM mit
-        // Einspruch-Button (Original: `_send_user_dm` mit AppealView).
         let dm_sent = match action {
-            GuardAction::Takeover => {
-                self.port
-                    .send_dm(event.author_id, takeover_dm_text(&case_id))
-                    .await
-            }
-            GuardAction::EstablishedScam => {
+            GuardAction::Enforce => {
                 self.port
                     .send_dm(
                         event.author_id,
-                        format!(
-                            "Du wurdest auf der Deutschen Deadlock Community vorübergehend stummgeschaltet (24 Stunden).\nGrund: Auf deinem Account wurde eine verdächtige Scam-Nachricht erkannt. Falls dein Account gehackt wurde, melde dich bitte beim Mod-Team, sobald du ihn zurück hast.\nCase: {case_id}\nWende dich an das Mod-Team, sobald dein Account wieder sicher ist."
-                        ),
+                        ban_dm_text(&self.config.escalation_contact_handle),
                     )
                     .await
             }
-            _ => {
+            GuardAction::Hijack => {
+                self.port
+                    .send_dm(event.author_id, hijack_dm_text(&case_id))
+                    .await
+            }
+            GuardAction::Propose => {
                 self.port
                     .send_dm_with_appeal(
                         event.author_id,
@@ -739,6 +876,7 @@ impl SecurityGuard {
                     )
                     .await
             }
+            GuardAction::SoftWarn => false,
         };
 
         let acted = match action {
@@ -748,18 +886,12 @@ impl SecurityGuard {
                     .timeout(guild_id, event.author_id, PROPOSAL_TIMEOUT_MINUTES, &reason)
                     .await
             }
-            GuardAction::EstablishedScam => {
+            GuardAction::Hijack => {
                 self.port
                     .timeout(guild_id, event.author_id, TIMEOUT_MINUTES, &reason)
                     .await
             }
-            // Reversibler 24h-Timeout statt Ban (Original: `_apply_timeout`,
-            // timeout_minutes=1440). Mod kann eskalieren oder aufheben.
-            GuardAction::Takeover => {
-                self.port
-                    .timeout(guild_id, event.author_id, TIMEOUT_MINUTES, &reason)
-                    .await
-            }
+            GuardAction::SoftWarn => true,
         };
         if !acted {
             tracing::warn!(case_id, "SecurityGuard: Aktion fehlgeschlagen");
@@ -775,20 +907,13 @@ impl SecurityGuard {
                 deleted += 1;
             }
         }
-        // Öffentliche Scam-Notice in JEDEN betroffenen Kanal, dedupliziert über
-        // alle Burst-Channels (Original: `_post_public_scam_notice`).
-        let action_text = if matches!(action, GuardAction::Enforce) {
-            "gebannt"
-        } else {
-            "vorübergehend gesperrt"
-        };
-        let mut seen_channels: std::collections::HashSet<u64> = std::collections::HashSet::new();
-        for msg in &messages {
-            if seen_channels.insert(msg.channel_id) {
+        if matches!(action, GuardAction::SoftWarn) {
+            if let Some(channel_id) = messages.first().map(|m| m.channel_id) {
                 self.port
-                    .post_public_notice(
-                        msg.channel_id,
-                        format!("🔒 Scam erkannt — Account wurde automatisch {action_text}."),
+                    .post_self_deleting_notice(
+                        channel_id,
+                        soft_warn_notice(event.author_id),
+                        SOFT_WARN_DELETE_AFTER_SECONDS,
                     )
                     .await;
             }
@@ -796,7 +921,9 @@ impl SecurityGuard {
         incident.dm_sent = dm_sent;
         incident.action_ok = acted;
         incident.deleted_count = deleted;
-        self.port.post_mod_alert(&incident, &action).await;
+        if !matches!(action, GuardAction::SoftWarn) {
+            self.port.post_mod_alert(&incident, &action).await;
+        }
     }
 
     async fn persist(&self, incident: &Incident) {
@@ -867,6 +994,10 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use dl_db::Db;
 
     fn msg(channel: u64, secs_ago: i64, content: &str, images: u32) -> RecentMsg {
         RecentMsg {
@@ -878,6 +1009,141 @@ mod tests {
             image_count: images,
             image_urls: (0..images).map(|i| format!("https://img/{i}")).collect(),
         }
+    }
+
+    fn event(
+        user_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+        created_at: i64,
+        joined_at: Option<i64>,
+    ) -> dl_discord::MessageEvent {
+        dl_discord::MessageEvent {
+            guild_id: Some(1),
+            channel_id,
+            message_id,
+            author_id: user_id,
+            author_display_name: format!("user-{user_id}"),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_is_staff: false,
+            content: content.to_string(),
+            message_created_at: chrono::Utc::now().timestamp(),
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            author_created_at: created_at,
+            author_joined_at: joined_at,
+        }
+    }
+
+    #[derive(Default)]
+    struct FakePort {
+        resolves: HashMap<String, Option<u64>>,
+        calls: tokio::sync::Mutex<Vec<String>>,
+    }
+
+    impl FakePort {
+        fn with_resolves(entries: &[(&str, Option<u64>)]) -> Arc<Self> {
+            Arc::new(Self {
+                resolves: entries
+                    .iter()
+                    .map(|(code, guild_id)| ((*code).to_string(), *guild_id))
+                    .collect(),
+                calls: tokio::sync::Mutex::new(Vec::new()),
+            })
+        }
+
+        async fn record(&self, call: impl Into<String>) {
+            self.calls.lock().await.push(call.into());
+        }
+
+        async fn calls(&self) -> Vec<String> {
+            self.calls.lock().await.clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl GuardPort for FakePort {
+        async fn ban(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
+            self.record("ban").await;
+            true
+        }
+
+        async fn timeout(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            minutes: i64,
+            _reason: &str,
+        ) -> bool {
+            self.record(format!("timeout:{minutes}")).await;
+            true
+        }
+
+        async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool {
+            self.record(format!("delete:{channel_id}:{message_id}"))
+                .await;
+            true
+        }
+
+        async fn send_dm(&self, _user_id: u64, _text: String) -> bool {
+            self.record("dm").await;
+            true
+        }
+
+        async fn send_dm_with_appeal(&self, _user_id: u64, _text: String, _case_id: &str) -> bool {
+            self.record("dm_appeal").await;
+            true
+        }
+
+        async fn post_mod_alert(&self, _case: &Incident, action: &GuardAction) {
+            self.record(format!("mod:{action:?}")).await;
+        }
+
+        async fn post_self_deleting_notice(
+            &self,
+            channel_id: u64,
+            _text: String,
+            delete_after_secs: u64,
+        ) {
+            self.record(format!("notice:{channel_id}:{delete_after_secs}"))
+                .await;
+        }
+
+        async fn resolve_invite_guild(&self, code: &str) -> Option<u64> {
+            self.record(format!("resolve:{code}")).await;
+            self.resolves.get(code).copied().flatten()
+        }
+    }
+
+    async fn test_guard(port: Arc<dyn GuardPort>) -> (tempfile::TempDir, Arc<SecurityGuard>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("sg.sqlite3")).expect("db");
+        let guard = SecurityGuard::new(db, None, None, port);
+        guard.ensure_schema().await.expect("schema");
+        (dir, guard)
+    }
+
+    #[test]
+    fn invite_extraktion_erkennt_invites_und_ignoriert_andere_discord_links() {
+        let text = "\
+            discord.gg/Vanity-Code \
+            https://discord.com/invite/AbC123?utm=1 \
+            http://discordapp.com/invite/oldCode. \
+            https://ptb.discord.com/invite/PTB \
+            https://canary.discord.com/invite/CANARY \
+            https://discord.com/channels/1/2/3 \
+            https://discord.com/users/42";
+        assert_eq!(
+            extract_invite_codes(text),
+            vec!["Vanity-Code", "AbC123", "oldCode", "PTB", "CANARY"]
+        );
+        assert!(extract_invite_codes("https://discord.com/channels/1/2/3").is_empty());
     }
 
     #[test]
@@ -946,29 +1212,192 @@ mod tests {
     fn account_alter() {
         let now = 1_000_000_000;
         let hour = 3600;
-        assert!(is_new_account(now - 100 * hour, now)); // 100h alt < 720h
-        assert!(!is_new_account(now - 800 * hour, now));
+        assert!(is_new_account(now - 100 * hour, Some(now - 10 * hour), now));
+        assert!(!is_new_account(
+            now - 100 * hour,
+            Some(now - 200 * hour),
+            now
+        ));
+        assert!(!is_new_account(now - 100 * hour, None, now));
+        assert!(!is_new_account(now - 800 * hour, Some(now - hour), now));
+        assert!(is_established_account(now - 100 * hour, None, now));
         assert!(is_established_account(
-            now - 800 * hour,
-            Some(now - 30 * hour),
+            now - 100 * hour,
+            Some(now - 200 * hour),
             now
         ));
-        // Account alt genug, aber erst 1h auf dem Server → nicht etabliert
-        assert!(!is_established_account(
-            now - 800 * hour,
-            Some(now - hour),
-            now
-        ));
-        assert!(!is_established_account(now - 800 * hour, None, now));
     }
 
     #[test]
-    fn takeover_dm_24h() {
-        let text = takeover_dm_text("sg-1-2");
-        // 1440 min → "24 Stunden", Case-ID enthalten, Hack-Hinweis vorhanden.
+    fn dm_texte() {
+        let text = hijack_dm_text("sg-1-2");
         assert!(text.contains("24 Stunden"));
         assert!(text.contains("sg-1-2"));
-        assert!(text.contains("gekaperten Account"));
+        assert!(text.contains("gehackt"));
+        assert_eq!(
+            ban_dm_text(DEFAULT_ESCALATION_CONTACT_HANDLE),
+            "Du wurdest auf der Deutschen Deadlock Community gebannt, weil dein Account ein Scam-/Fremdlink-Muster ausgelöst hat. Wenn du denkst, das ist ein Fehler: Schick @earlysalty eine Freundschaftsanfrage **und** eine kurze Nachricht — dann schauen wir uns das an."
+        );
+        assert_eq!(
+            soft_warn_notice(42),
+            "<@42> — fremder Discord-Invite entfernt. Bitte keine fremden Server-Einladungen posten."
+        );
+    }
+
+    #[test]
+    fn streuung_und_aktionsrouting() {
+        let now = 1_000_000;
+        let hour = 3600;
+        let one_channel = vec![msg(1, 5, "hit", 0), msg(1, 1, "hit2", 0)];
+        let two_channels = vec![msg(1, 5, "hit", 0), msg(2, 1, "hit2", 0)];
+        assert_eq!(distinct_channel_count(&one_channel), 1);
+        assert_eq!(distinct_channel_count(&two_channels), 2);
+        assert_eq!(
+            decide_hit_action(
+                now - 100 * hour,
+                Some(now - 10 * hour),
+                now,
+                &one_channel,
+                false
+            ),
+            GuardAction::Enforce
+        );
+        assert_eq!(
+            decide_hit_action(now - 800 * hour, Some(now - hour), now, &one_channel, false),
+            GuardAction::SoftWarn
+        );
+        assert_eq!(
+            decide_hit_action(
+                now - 800 * hour,
+                Some(now - hour),
+                now,
+                &two_channels,
+                false
+            ),
+            GuardAction::Hijack
+        );
+        assert_eq!(
+            decide_hit_action(now - 800 * hour, Some(now - hour), now, &one_channel, true),
+            GuardAction::Hijack
+        );
+    }
+
+    #[test]
+    fn takeover_und_etabliert_zwei_channels_konsolidieren_auf_hijack() {
+        let now = 1_000_000;
+        let hour = 3600;
+        let two_channels = vec![msg(1, 5, "", 1), msg(2, 1, "", 1)];
+        assert_eq!(
+            decide_hit_action(now - 800 * hour, Some(now - hour), now, &two_channels, true),
+            decide_hit_action(
+                now - 800 * hour,
+                Some(now - hour),
+                now,
+                &two_channels,
+                false
+            )
+        );
+        assert_eq!(
+            decide_hit_action(now - 800 * hour, Some(now - hour), now, &two_channels, true),
+            GuardAction::Hijack
+        );
+    }
+
+    #[tokio::test]
+    async fn fremd_invite_routing_own_foreign_unresolved_und_dm_vor_ban() {
+        let now = chrono::Utc::now().timestamp();
+        let hour = 3600;
+
+        let own_port = FakePort::with_resolves(&[("own", Some(1))]);
+        let (_dir, guard) = test_guard(own_port.clone()).await;
+        guard
+            .handle_message(&event(
+                10,
+                11,
+                111,
+                "https://discord.gg/own",
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        assert_eq!(own_port.calls().await, vec!["resolve:own"]);
+
+        let foreign_port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) = test_guard(foreign_port.clone()).await;
+        guard
+            .handle_message(&event(
+                20,
+                21,
+                211,
+                "https://discord.gg/foreign",
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        let calls = foreign_port.calls().await;
+        let dm_pos = calls.iter().position(|c| c == "dm").expect("dm");
+        let ban_pos = calls.iter().position(|c| c == "ban").expect("ban");
+        assert!(dm_pos < ban_pos);
+        assert!(calls.contains(&"delete:21:211".to_string()));
+
+        let unresolved_port = FakePort::with_resolves(&[("expired", None)]);
+        let (_dir, guard) = test_guard(unresolved_port.clone()).await;
+        guard
+            .handle_message(&event(
+                30,
+                31,
+                311,
+                "https://discord.gg/expired",
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        let calls = unresolved_port.calls().await;
+        assert!(calls.contains(&"resolve:expired".to_string()));
+        assert!(calls.contains(&"ban".to_string()));
+    }
+
+    #[tokio::test]
+    async fn etablierter_fremd_invite_softwarn_vs_hijack_nach_streuung() {
+        let now = chrono::Utc::now().timestamp();
+        let hour = 3600;
+
+        let soft_port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) = test_guard(soft_port.clone()).await;
+        guard
+            .handle_message(&event(
+                40,
+                41,
+                411,
+                "https://discord.gg/foreign",
+                now - 800 * hour,
+                None,
+            ))
+            .await;
+        let calls = soft_port.calls().await;
+        assert!(calls.contains(&"delete:41:411".to_string()));
+        assert!(calls.contains(&format!("notice:41:{}", SOFT_WARN_DELETE_AFTER_SECONDS)));
+        assert!(!calls.iter().any(|c| c == "dm" || c.starts_with("timeout")));
+
+        let hijack_port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) = test_guard(hijack_port.clone()).await;
+        guard
+            .handle_message(&event(50, 51, 511, "nur history", now - 800 * hour, None))
+            .await;
+        guard
+            .handle_message(&event(
+                50,
+                52,
+                512,
+                "https://discord.gg/foreign",
+                now - 800 * hour,
+                None,
+            ))
+            .await;
+        let calls = hijack_port.calls().await;
+        assert!(calls.contains(&"dm".to_string()));
+        assert!(calls.contains(&format!("timeout:{TIMEOUT_MINUTES}")));
+        assert!(calls.iter().any(|c| c == "mod:Hijack"));
     }
 
     #[test]

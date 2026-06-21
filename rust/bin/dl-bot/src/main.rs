@@ -177,16 +177,32 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
     let guard_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
-    let security_guard = dl_moderation::guard::SecurityGuard::new(
+    let our_guild_id = env("OUR_GUILD_ID")
+        .or_else(|| env("MAIN_GUILD_ID"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(onboardglue::MAIN_GUILD_ID);
+    let fallback_invites = env("INVITE_ALLOWLIST_FALLBACK")
+        .map(|raw| modglue::parse_invite_allowlist_fallback(&raw))
+        .unwrap_or_default();
+    let guard_glue = Arc::new(modglue::GuardGlue::new(
+        adapter.clone(),
+        our_guild_id,
+        fallback_invites,
+    ));
+    guard_glue.refresh_invite_allowlist().await;
+    let escalation_contact_handle = env("ESCALATION_CONTACT_HANDLE")
+        .unwrap_or_else(|| dl_moderation::guard::DEFAULT_ESCALATION_CONTACT_HANDLE.to_string());
+    let security_guard = dl_moderation::guard::SecurityGuard::new_with_config(
         db.clone(),
         guard_client
             .clone()
             .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
         // Derselbe Client liefert das best-effort Takeover-Bild-Label.
         guard_client.map(|c| c as Arc<dyn dl_ai::VisionGenerator>),
-        Arc::new(modglue::GuardGlue {
-            adapter: adapter.clone(),
-        }),
+        guard_glue,
+        dl_moderation::guard::SecurityGuardConfig {
+            escalation_contact_handle,
+        },
     );
 
     // Onboarding-Wizard (7): rp:panel:start + Thread-Schritte
