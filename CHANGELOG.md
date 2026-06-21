@@ -1,3 +1,11 @@
+## #159 — Ticket-Kanäle für Beta-Einladungen wieder privat
+
+**Ausgangslage:** Bei Beta-Einladungen erstellte Ticket-Kanäle waren zeitweise für mehr Personen sichtbar als vorgesehen, weil die Zugriffsrechte beim Anlegen nicht mehr eindeutig auf den jeweiligen Empfänger eingeschränkt wurden.
+
+**Was wurde geändert:** Neu erstellte Ticket-Kanäle erhalten beim Anlegen wieder ausdrückliche Sichtbarkeits-Beschränkungen, sodass nur der zugehörige Empfänger und das Team Zugriff haben. Fehlt ausnahmsweise die Empfänger-Zuordnung, bleibt der Kanal trotzdem geschlossen statt offen.
+
+**Wie es jetzt läuft:** Jeder Beta-Ticket-Kanal ist von Beginn an privat. Ohne gültige Zuordnung wird der Kanal sicherheitshalber nicht geöffnet, sondern bleibt verschlossen.
+
 ## #158 — Gemeinsame Admin-Session neustartsicher gemacht
 
 **Ausgangslage:** Discord- und Twitch-Admin-Dashboard verwendeten zwar denselben Cookie-Namen, der zentrale Rust-Dienst hielt seine Sessions aber nur im Arbeitsspeicher. Nach einem Neustart war das Cookie wertlos. Zusätzlich konnte ein älteres Cookie mit demselben Namen das gültige Cookie überdecken und erneut eine Login-Schleife auslösen.
