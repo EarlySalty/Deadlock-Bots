@@ -52,6 +52,9 @@ pub struct MessageEvent {
     pub author_can_manage_messages: bool,
     /// Staff-Schutz fuer Moderationspfade: administrator || manage_messages || manage_guild.
     pub author_is_staff: bool,
+    /// `true`, wenn der Gateway-Cache den Member enthielt und Staff-Rechte
+    /// berechnet werden konnten. SecurityGuard nutzt `false` fail-closed.
+    pub author_staff_status_known: bool,
     pub content: String,
     /// Nachrichtenerstellung (Unix-Sekunden, aus Discord-Timestamp/Snowflake).
     pub message_created_at: i64,
@@ -219,6 +222,7 @@ mod tests {
             author_is_admin: false,
             author_can_manage_messages: false,
             author_is_staff: false,
+            author_staff_status_known: true,
             content: "hallo".into(),
             message_created_at: 0,
             is_reply: false,

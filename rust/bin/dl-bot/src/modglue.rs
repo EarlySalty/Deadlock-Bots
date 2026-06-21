@@ -370,7 +370,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 
 #[derive(Debug, Clone)]
 struct InviteCacheEntry {
-    guild_id: Option<u64>,
+    guild_id: u64,
     expires_at: i64,
 }
 
@@ -422,6 +422,28 @@ impl GuardInviteResolver {
         *self.allowlist.write().await = next;
     }
 
+    async fn cached_guild_id(&self, code: &str, now: i64) -> Option<u64> {
+        self.cache
+            .lock()
+            .await
+            .get(code)
+            .filter(|entry| entry.expires_at > now)
+            .map(|entry| entry.guild_id)
+    }
+
+    async fn remember_resolve_result(&self, code: &str, guild_id: Option<u64>, now: i64) {
+        let Some(guild_id) = guild_id else {
+            return;
+        };
+        self.cache.lock().await.insert(
+            code.to_string(),
+            InviteCacheEntry {
+                guild_id,
+                expires_at: now + INVITE_CACHE_TTL_SECONDS,
+            },
+        );
+    }
+
     async fn resolve(&self, http: &Http, code: &str) -> Option<u64> {
         let code = code.trim();
         if code.is_empty() {
@@ -432,10 +454,8 @@ impl GuardInviteResolver {
         }
 
         let now = chrono::Utc::now().timestamp();
-        if let Some(entry) = self.cache.lock().await.get(code).cloned() {
-            if entry.expires_at > now {
-                return entry.guild_id;
-            }
+        if let Some(guild_id) = self.cached_guild_id(code, now).await {
+            return Some(guild_id);
         }
 
         let guild_id = match http.get_invite(code, false, false, None).await {
@@ -448,13 +468,7 @@ impl GuardInviteResolver {
         if guild_id == Some(self.our_guild_id) {
             self.allowlist.write().await.insert(code.to_string());
         }
-        self.cache.lock().await.insert(
-            code.to_string(),
-            InviteCacheEntry {
-                guild_id,
-                expires_at: now + INVITE_CACHE_TTL_SECONDS,
-            },
-        );
+        self.remember_resolve_result(code, guild_id, now).await;
         guild_id
     }
 }
@@ -489,6 +503,26 @@ pub fn parse_invite_allowlist_fallback(raw: &str) -> Vec<String> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invite_resolver_cacht_nur_definitive_guild_ids() {
+        let resolver = GuardInviteResolver::new(1, Vec::new());
+        let now = 1_000_000;
+
+        resolver.remember_resolve_result("expired", None, now).await;
+        assert!(resolver.cache.lock().await.is_empty());
+        assert_eq!(resolver.cached_guild_id("expired", now).await, None);
+
+        resolver
+            .remember_resolve_result("foreign", Some(2), now)
+            .await;
+        assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
+    }
 }
 
 pub struct GuardGlue {

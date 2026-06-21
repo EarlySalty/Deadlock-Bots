@@ -53,7 +53,13 @@ impl EventHandler for Handler {
         }
         // Admin-Flag bleibt eng fuer Admin-Commands; Staff-Schutz fuer
         // Moderation folgt Python: administrator || manage_messages || manage_guild.
-        let (author_is_admin, author_can_manage_messages, author_is_staff, author_joined_at) = message
+        let (
+            author_is_admin,
+            author_can_manage_messages,
+            author_is_staff,
+            author_joined_at,
+            author_staff_status_known,
+        ) = message
             .guild_id
             .and_then(|guild_id| {
                 let guild = ctx.cache.guild(guild_id)?;
@@ -64,9 +70,10 @@ impl EventHandler for Handler {
                     perms.manage_messages(),
                     is_staff_permissions(perms),
                     member.joined_at.map(|t| t.unix_timestamp()),
+                    true,
                 ))
             })
-            .unwrap_or((false, false, false, None));
+            .unwrap_or((false, false, false, None, false));
         let image_attachment_urls: Vec<String> = message
             .attachments
             .iter()
@@ -105,6 +112,7 @@ impl EventHandler for Handler {
             author_is_admin,
             author_can_manage_messages,
             author_is_staff,
+            author_staff_status_known,
             content: message.content.clone(),
             message_created_at: message.timestamp.unix_timestamp(),
             is_reply: message.message_reference.is_some(),

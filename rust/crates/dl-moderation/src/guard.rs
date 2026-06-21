@@ -4,7 +4,7 @@
 //! 1. **Account-Takeover**: Bilder in ≥ 2 verschiedenen Channels innerhalb
 //!    von 30 s → Treffer.
 //! 2. **Fremd-Invite**: echte Discord-Invite-Links werden per Port auf die
-//!    Ziel-Guild aufgelöst; fremd oder nicht auflösbar → Treffer.
+//!    Ziel-Guild aufgelöst; nur eindeutig fremde Guilds → Treffer.
 //! 3. **Junge Accounts**: Mehrkanal-Burst → Text-/Bild-Scam-Check; bestätigt
 //!    = Treffer, unbestätigt = 60-min-Holding-Timeout als Mod-Vorschlag.
 //! 4. **Bild-Multichannel** und **Keyword-Einzeltreffer**: AI-bestätigte Scam-
@@ -358,7 +358,8 @@ pub trait GuardPort: Send + Sync {
         text: String,
         delete_after_secs: u64,
     );
-    /// Invite-Code auf die Ziel-Guild auflösen. `None` ist konservativ fremd.
+    /// Invite-Code auf die Ziel-Guild auflösen. `None` bedeutet unauflösbar
+    /// und darf nicht als fremd gewertet werden.
     async fn resolve_invite_guild(&self, code: &str) -> Option<u64>;
 }
 
@@ -389,12 +390,16 @@ pub struct Incident {
 #[derive(Debug, Clone)]
 pub struct SecurityGuardConfig {
     pub escalation_contact_handle: String,
+    /// `false` = Shadow/Log-only: Erkennung und Mod-Sichtbarkeit laufen,
+    /// strafende Seiteneffekte werden nicht ausgeführt.
+    pub enforce: bool,
 }
 
 impl Default for SecurityGuardConfig {
     fn default() -> Self {
         Self {
             escalation_contact_handle: DEFAULT_ESCALATION_CONTACT_HANDLE.to_string(),
+            enforce: false,
         }
     }
 }
@@ -467,6 +472,14 @@ impl SecurityGuard {
         let Some(guild_id) = event.guild_id else {
             return;
         };
+        if !event.author_staff_status_known {
+            tracing::warn!(
+                guild_id,
+                user_id = event.author_id,
+                "SecurityGuard: Staff-Status nicht im Cache, fail-closed skip"
+            );
+            return;
+        }
         if event.author_is_staff {
             return; // do not police staff: administrator || manage_messages || manage_guild
         }
@@ -515,7 +528,14 @@ impl SecurityGuard {
         for code in extract_invite_codes(content) {
             match self.port.resolve_invite_guild(&code).await {
                 Some(invite_guild_id) if invite_guild_id == guild_id => {}
-                _ => return Some(code),
+                Some(_) => return Some(code),
+                None => {
+                    tracing::debug!(
+                        guild_id,
+                        %code,
+                        "SecurityGuard: Invite unauflösbar, nicht als fremd gewertet"
+                    );
+                }
             }
         }
         None
@@ -851,6 +871,23 @@ impl SecurityGuard {
         };
         self.persist(&incident).await;
 
+        if !self.config.enforce {
+            tracing::warn!(
+                case_id = %case_id,
+                guild_id,
+                user_id = event.author_id,
+                action = ?action,
+                trigger,
+                reason = %reason,
+                "SHADOW: würde {:?} gegen User {} — Grund {}, nicht durchgesetzt",
+                action,
+                event.author_id,
+                reason
+            );
+            self.port.post_mod_alert(&incident, &action).await;
+            return;
+        }
+
         let dm_sent = match action {
             GuardAction::Enforce => {
                 self.port
@@ -995,6 +1032,7 @@ pub fn spawn(
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::io;
     use std::sync::Arc;
 
     use dl_db::Db;
@@ -1028,6 +1066,7 @@ mod tests {
             author_is_admin: false,
             author_can_manage_messages: false,
             author_is_staff: false,
+            author_staff_status_known: true,
             content: content.to_string(),
             message_created_at: chrono::Utc::now().timestamp(),
             is_reply: false,
@@ -1064,6 +1103,46 @@ mod tests {
 
         async fn calls(&self) -> Vec<String> {
             self.calls.lock().await.clone()
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct LogCapture {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.bytes.lock().expect("log capture").clone();
+            String::from_utf8_lossy(&bytes).to_string()
+        }
+    }
+
+    struct LogCaptureWriter {
+        bytes: Arc<std::sync::Mutex<Vec<u8>>>,
+    }
+
+    impl io::Write for LogCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("log capture")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogCaptureWriter {
+                bytes: self.bytes.clone(),
+            }
         }
     }
 
@@ -1121,12 +1200,26 @@ mod tests {
         }
     }
 
-    async fn test_guard(port: Arc<dyn GuardPort>) -> (tempfile::TempDir, Arc<SecurityGuard>) {
+    fn enforcing_config() -> SecurityGuardConfig {
+        SecurityGuardConfig {
+            enforce: true,
+            ..SecurityGuardConfig::default()
+        }
+    }
+
+    async fn test_guard_with_config(
+        port: Arc<dyn GuardPort>,
+        config: SecurityGuardConfig,
+    ) -> (tempfile::TempDir, Arc<SecurityGuard>) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = Db::open_creating(dir.path().join("sg.sqlite3")).expect("db");
-        let guard = SecurityGuard::new(db, None, None, port);
+        let guard = SecurityGuard::new_with_config(db, None, None, port, config);
         guard.ensure_schema().await.expect("schema");
         (dir, guard)
+    }
+
+    async fn test_guard(port: Arc<dyn GuardPort>) -> (tempfile::TempDir, Arc<SecurityGuard>) {
+        test_guard_with_config(port, enforcing_config()).await
     }
 
     #[test]
@@ -1353,8 +1446,85 @@ mod tests {
             ))
             .await;
         let calls = unresolved_port.calls().await;
-        assert!(calls.contains(&"resolve:expired".to_string()));
+        assert_eq!(calls, vec!["resolve:expired"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shadow_mode_fuehrt_strafende_side_effects_nicht_aus_enforce_true_schon() {
+        let now = chrono::Utc::now().timestamp();
+        let hour = 3600;
+        let log_capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log_capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+
+        let shadow_port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) =
+            test_guard_with_config(shadow_port.clone(), SecurityGuardConfig::default()).await;
+        let _guard = tracing::subscriber::set_default(subscriber);
+        guard
+            .handle_message(&event(
+                60,
+                61,
+                611,
+                "https://discord.gg/foreign",
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        drop(_guard);
+        let calls = shadow_port.calls().await;
+        let logs = log_capture.text();
+        assert!(logs.contains("SHADOW: würde Enforce gegen User 60"));
+        assert!(logs.contains("nicht durchgesetzt"));
+        assert!(calls.contains(&"resolve:foreign".to_string()));
+        assert!(calls.contains(&"mod:Enforce".to_string()));
+        assert!(!calls.iter().any(|c| {
+            c == "dm"
+                || c == "dm_appeal"
+                || c == "ban"
+                || c.starts_with("timeout:")
+                || c.starts_with("delete:")
+                || c.starts_with("notice:")
+        }));
+
+        let enforce_port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) = test_guard(enforce_port.clone()).await;
+        guard
+            .handle_message(&event(
+                61,
+                62,
+                612,
+                "https://discord.gg/foreign",
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        let calls = enforce_port.calls().await;
+        assert!(calls.contains(&"dm".to_string()));
         assert!(calls.contains(&"ban".to_string()));
+        assert!(calls.contains(&"delete:62:612".to_string()));
+    }
+
+    #[tokio::test]
+    async fn staff_cache_miss_fail_closed_ohne_resolve_oder_aktion() {
+        let now = chrono::Utc::now().timestamp();
+        let hour = 3600;
+        let port = FakePort::with_resolves(&[("foreign", Some(2))]);
+        let (_dir, guard) = test_guard(port.clone()).await;
+        let mut event = event(
+            70,
+            71,
+            711,
+            "https://discord.gg/foreign",
+            now - 100 * hour,
+            Some(now - 10 * hour),
+        );
+        event.author_staff_status_known = false;
+        guard.handle_message(&event).await;
+        assert!(port.calls().await.is_empty());
     }
 
     #[tokio::test]

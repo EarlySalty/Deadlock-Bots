@@ -21,6 +21,17 @@ fn env(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
+fn env_bool(name: &str) -> bool {
+    env(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dl_core::observability::init_tracing("info");
@@ -192,6 +203,11 @@ async fn main() -> anyhow::Result<()> {
     guard_glue.refresh_invite_allowlist().await;
     let escalation_contact_handle = env("ESCALATION_CONTACT_HANDLE")
         .unwrap_or_else(|| dl_moderation::guard::DEFAULT_ESCALATION_CONTACT_HANDLE.to_string());
+    let security_guard_enforce = env_bool("SECURITY_GUARD_ENFORCE");
+    tracing::info!(
+        enforce = security_guard_enforce,
+        "SecurityGuard Enforcement-Modus gelesen (SECURITY_GUARD_ENFORCE)"
+    );
     let security_guard = dl_moderation::guard::SecurityGuard::new_with_config(
         db.clone(),
         guard_client
@@ -202,6 +218,7 @@ async fn main() -> anyhow::Result<()> {
         guard_glue,
         dl_moderation::guard::SecurityGuardConfig {
             escalation_contact_handle,
+            enforce: security_guard_enforce,
         },
     );
 

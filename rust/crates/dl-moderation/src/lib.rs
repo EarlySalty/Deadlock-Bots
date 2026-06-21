@@ -1018,6 +1018,7 @@ mod tests {
             author_is_admin: false,
             author_can_manage_messages: false,
             author_is_staff: false,
+            author_staff_status_known: true,
             content: "hallo <@123> test".into(),
             message_created_at: 1_000,
             is_reply: true,
