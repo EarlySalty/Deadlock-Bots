@@ -46,6 +46,12 @@ pub enum ViewSpec {
         tracking_token: String,
         button_label: String,
     },
+    ScamRevoke {
+        verdict_id: u64,
+        channel_login: String,
+        chatter_login: String,
+        action_taken: String,
+    },
 }
 
 #[derive(Debug, Clone)]

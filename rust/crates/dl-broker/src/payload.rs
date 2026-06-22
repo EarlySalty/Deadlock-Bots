@@ -105,7 +105,70 @@ pub fn id_list(payload: &Map<String, Value>, key: &str) -> ParseResult<Vec<u64>>
     Ok(out)
 }
 
-/// `_parse_view_spec`: type ∈ {twitch_live_tracking, link_button}.
+fn parse_scam_revoke_verdict_id(raw: &Map<String, Value>) -> ParseResult<u64> {
+    let err = "view_spec.verdict_id must be a positive integer".to_string();
+    let Some(value) = raw.get("verdict_id") else {
+        return Err(err);
+    };
+
+    let parsed = match value {
+        Value::Bool(value) => Some(u64::from(*value)),
+        Value::Number(number) => {
+            if let Some(value) = number.as_u64() {
+                Some(value)
+            } else if let Some(value) = number.as_i64() {
+                u64::try_from(value).ok()
+            } else {
+                number.as_f64().and_then(|value| {
+                    let truncated = value.trunc();
+                    if value.is_finite() && truncated >= 0.0 && truncated <= u64::MAX as f64 {
+                        Some(truncated as u64)
+                    } else {
+                        None
+                    }
+                })
+            }
+        }
+        Value::String(value) => value.trim().parse::<i128>().ok().and_then(|value| {
+            if value > 0 {
+                u64::try_from(value).ok()
+            } else {
+                None
+            }
+        }),
+        _ => None,
+    };
+
+    parsed.filter(|value| *value > 0).ok_or(err)
+}
+
+fn required_scam_revoke_field(raw: &Map<String, Value>, field: &str) -> ParseResult<String> {
+    let value = match raw.get(field) {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => String::new(),
+        Some(Value::String(value)) => value.trim().to_string(),
+        Some(Value::Bool(true)) => "True".to_string(),
+        Some(Value::Number(number)) => {
+            if number.as_i64() == Some(0)
+                || number.as_u64() == Some(0)
+                || number.as_f64() == Some(0.0)
+            {
+                String::new()
+            } else {
+                number.to_string()
+            }
+        }
+        Some(Value::Array(items)) if items.is_empty() => String::new(),
+        Some(Value::Object(items)) if items.is_empty() => String::new(),
+        Some(value) => value.to_string().trim().to_string(),
+    };
+    if value.is_empty() {
+        Err(format!("view_spec.{field} is required"))
+    } else {
+        Ok(value)
+    }
+}
+
+/// `_parse_view_spec`: type ∈ {twitch_live_tracking, link_button, scam_revoke}.
 pub fn view_spec(payload: &Map<String, Value>) -> ParseResult<Option<ViewSpec>> {
     let raw = match payload.get("view_spec") {
         None | Some(Value::Null) => return Ok(None),
@@ -152,6 +215,12 @@ pub fn view_spec(payload: &Map<String, Value>) -> ParseResult<Option<ViewSpec>> 
             referral_url: get("referral_url"),
             tracking_token: get("tracking_token"),
             button_label: get("button_label"),
+        })),
+        "scam_revoke" => Ok(Some(ViewSpec::ScamRevoke {
+            verdict_id: parse_scam_revoke_verdict_id(raw)?,
+            channel_login: required_scam_revoke_field(raw, "channel_login")?,
+            chatter_login: required_scam_revoke_field(raw, "chatter_login")?,
+            action_taken: required_scam_revoke_field(raw, "action_taken")?,
         })),
         _ => Err("view_spec.type is invalid".to_string()),
     }
@@ -230,6 +299,79 @@ mod tests {
         }})))
         .is_err());
         assert_eq!(view_spec(&obj(json!({}))).expect("ok"), None);
+    }
+
+    #[test]
+    fn view_spec_akzeptiert_scam_revoke() {
+        let spec = view_spec(&obj(json!({"view_spec": {
+            "type": "scam_revoke",
+            "verdict_id": "42",
+            "channel_login": " earlysalty ",
+            "chatter_login": " sophiaa_star ",
+            "action_taken": " banned "
+        }})))
+        .expect("ok")
+        .expect("some");
+
+        assert_eq!(
+            spec,
+            ViewSpec::ScamRevoke {
+                verdict_id: 42,
+                channel_login: "earlysalty".to_string(),
+                chatter_login: "sophiaa_star".to_string(),
+                action_taken: "banned".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn view_spec_lehnt_scam_revoke_ohne_pflichtfelder_ab() {
+        assert_eq!(
+            view_spec(&obj(json!({"view_spec": {
+                "type": "scam_revoke",
+                "channel_login": "earlysalty",
+                "chatter_login": "sophiaa_star",
+                "action_taken": "banned"
+            }}))),
+            Err("view_spec.verdict_id must be a positive integer".to_string())
+        );
+        assert_eq!(
+            view_spec(&obj(json!({"view_spec": {
+                "type": "scam_revoke",
+                "verdict_id": 0,
+                "channel_login": "earlysalty",
+                "chatter_login": "sophiaa_star",
+                "action_taken": "banned"
+            }}))),
+            Err("view_spec.verdict_id must be a positive integer".to_string())
+        );
+        assert_eq!(
+            view_spec(&obj(json!({"view_spec": {
+                "type": "scam_revoke",
+                "verdict_id": 42,
+                "chatter_login": "sophiaa_star",
+                "action_taken": "banned"
+            }}))),
+            Err("view_spec.channel_login is required".to_string())
+        );
+        assert_eq!(
+            view_spec(&obj(json!({"view_spec": {
+                "type": "scam_revoke",
+                "verdict_id": 42,
+                "channel_login": "earlysalty",
+                "action_taken": "banned"
+            }}))),
+            Err("view_spec.chatter_login is required".to_string())
+        );
+        assert_eq!(
+            view_spec(&obj(json!({"view_spec": {
+                "type": "scam_revoke",
+                "verdict_id": 42,
+                "channel_login": "earlysalty",
+                "chatter_login": "sophiaa_star"
+            }}))),
+            Err("view_spec.action_taken is required".to_string())
+        );
     }
 
     #[test]

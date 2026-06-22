@@ -770,6 +770,18 @@ fn parse_rich(
                 "tracking_token": tracking_token,
                 "button_label": button_label,
             }),
+            Some(crate::port::ViewSpec::ScamRevoke {
+                verdict_id,
+                channel_login,
+                chatter_login,
+                action_taken,
+            }) => json!({
+                "type": "scam_revoke",
+                "verdict_id": verdict_id,
+                "channel_login": channel_login,
+                "chatter_login": chatter_login,
+                "action_taken": action_taken,
+            }),
         },
     );
     Ok((rich, op))

@@ -131,6 +131,15 @@ impl DiscordAdapter {
                     }],
                 }])
             }
+            ViewSpec::ScamRevoke { verdict_id, .. } => json!([{
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 4,
+                    "label": "Rückgängig",
+                    "custom_id": format!("scam-revoke:{verdict_id}"),
+                }],
+            }]),
         }
     }
 
@@ -211,6 +220,34 @@ impl DiscordAdapter {
             serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
                 if resp.status_code.as_u16() == 404
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_components_rendern_scam_revoke_button_wie_python() {
+        let spec = ViewSpec::ScamRevoke {
+            verdict_id: 42,
+            channel_login: "earlysalty".to_string(),
+            chatter_login: "sophiaa_star".to_string(),
+            action_taken: "banned".to_string(),
+        };
+
+        assert_eq!(
+            DiscordAdapter::view_components(&spec),
+            json!([{
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 4,
+                    "label": "Rückgängig",
+                    "custom_id": "scam-revoke:42",
+                }],
+            }])
+        );
     }
 }
 
