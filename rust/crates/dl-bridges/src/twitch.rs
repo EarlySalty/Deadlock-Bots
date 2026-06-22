@@ -250,6 +250,16 @@ impl TwitchApiClient {
         Ok(entries)
     }
 
+    /// Read-only Diagnose für Ticket-Auto-Hilfe:
+    /// `GET /internal/twitch/v1/diagnose?discord_id=<id>`.
+    pub async fn diagnose_discord_user(
+        &self,
+        discord_user_id: u64,
+    ) -> Result<Value, TwitchBridgeError> {
+        let path = format!("/diagnose?discord_id={discord_user_id}");
+        self.request(reqwest::Method::GET, &path, None, None).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn record_link_click(
         &self,

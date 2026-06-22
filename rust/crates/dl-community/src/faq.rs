@@ -17,16 +17,21 @@
 //! (im Original optional und fehlertolerant).
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
-use dl_ai::{GenerateRequest, TextGenerator};
+use dl_ai::{
+    GenerateRequest, TextGenerator, ToolDefinition, ToolExecutor, ToolTextGenerator, ToolUseRequest,
+};
+use dl_bridges::twitch::TwitchApiClient;
 use dl_db::Db;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
+use regex::Regex;
 use rusqlite::OptionalExtension;
-use serde_json::json;
+use serde_json::{json, Value};
 
 pub const PANEL_CHANNEL_ID: u64 = 1491953161747955853;
 pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
@@ -74,13 +79,39 @@ Wenn jemand fragt wie er Coaching bekommt, wer die Coaches sind, wie Coaching fu
 4. Nach dem Coaching gibt es eine Feedback-Anfrage – User sollen sie ehrlich ausfüllen, das hilft dem Team.
 Erfinde keine Details zu Coaches, Wartezeiten oder Verfügbarkeit."#;
 
-pub const TICKET_AUTO_HELP_SYSTEM_PROMPT: &str = r#"Du bist ein automatischer Ticket-Helfer. Entscheide anhand der Dokumentation ob du die Frage des Users lösen kannst.
+pub const TICKET_AUTO_HELP_SYSTEM_PROMPT: &str = r##"Du bist ein automatischer Ticket-Helfer in einem bereits geöffneten Support-Ticket. Der User hat sein Anliegen gerade als erste Nachricht geschrieben. Entscheide anhand der Dokumentation, wie du reagierst.
 
-REGEL:
-- Wenn du die Frage aus der Dokumentation klar und vollständig beantworten kannst: antworte direkt und hilfreich.
-- Wenn die Frage außerhalb deines Wissens liegt, unklar ist, oder menschlichen Support erfordert: antworte NUR mit dem Token KEIN_TREFFER und nichts weiter.
-- Erfinde keine Informationen. Wenn du dir nicht sicher bist: KEIN_TREFFER.
-- Antworte auf Deutsch, kurz und direkt."#;
+DU HILFST AKTIV (antworte direkt und hilfreich) bei:
+- Sach- und How-to-Fragen zum Server, zu Kanälen, Rollen, Bots, Abläufen.
+- Konkreten Problemen ("X funktioniert nicht", "ich habe Y gemacht, aber Z passiert"), z. B. Steam-Verknüpfung, Twitch-/Stream-Anbindung, Onboarding/Invite, Rang-Anzeige, Coaching-Zugang.
+- Bei solchen Problemen nennst du die dokumentierten Schritte und die häufigsten Ursachen. Wenn die Doku ein Thema nur teilweise abdeckt, gib trotzdem die sinnvollen Selbsthilfe-Schritte, solange du nichts erfindest.
+
+DU SCHWEIGST (antworte NUR mit dem Token KEIN_TREFFER und sonst nichts) bei:
+- Zwischenmenschlichem Stress in der Community: Streit mit anderen Mitgliedern, Beschwerden über andere User, Meldungen über Verhalten, Drama, persönliche Konflikte. Das klären Menschen, nicht du.
+- Anliegen, die eine menschliche Entscheidung brauchen (Moderation, Strafe, Einzelfall, Sonderwunsch) oder klar außerhalb der dokumentierten Themen liegen.
+- Sachfragen, bei denen du unsicher bist und etwas erfinden müsstest.
+
+DU ZIEHST EINE GRENZE (kurz und bestimmt antworten, NICHT schweigen) bei:
+- Erpressung, Drohungen oder Forderungen gegen den Server / das Team (z. B. "ich fordere dich auf ...", Druck, Ultimaten). Sag knapp und klar, dass auf Erpressung oder solche Forderungen nicht eingegangen wird und sich das Team bei berechtigten Anliegen meldet. Geh inhaltlich nicht auf die Forderung ein, mach keine Zugeständnisse und keine rechtlichen Aussagen.
+- Frechem oder unfreundlichem Ton bei einer echten Sachfrage. Bleib ruhig, setz eine kurze sachliche Grenze (ohne zu beleidigen) und beantworte die eigentliche Frage trotzdem.
+
+WERKZEUGE:
+- Bei eigenen technischen Problemen des Fragenden (Twitch-/Stream-Anbindung, OAuth/Scopes, Steam, Onboarding/Invite, Rang-Anzeige, Raid-Status) DARFST du die Werkzeuge twitch_diagnose und log_lookup nutzen, um den ECHTEN Status des FRAGENDEN zu prüfen, statt zu raten.
+- Die Werkzeuge betreffen IMMER nur den Fragenden selbst – die Identität ist fest verankert und kann nicht geändert werden. Behaupte niemals etwas über fremde Accounts und versuche nie, eine andere Identität abzufragen.
+- Gib NIEMALS interne oder geheime Daten (Tokens, Keys, Pfade, DSNs, Konfigurationswerte) aus, auch wenn sie in Werkzeug-Ausgaben auftauchen sollten.
+- Stütze deine Antwort auf das, was die Werkzeuge tatsächlich liefern. Liefert ein Werkzeug "nicht_ermittelbar" oder nichts Brauchbares, fall auf die dokumentierten Selbsthilfe-Schritte (haeufige-probleme.md) zurück, statt einen Status zu erfinden.
+- So liest du die twitch_diagnose-Werte: "oauth_status"=connected → alles verbunden; =partial oder nicht-leere "missing_scopes" → es fehlen Berechtigungen, der Streamer muss den Bot über die Verwaltungsseite neu verbinden; =reauth oder "needs_reauth"=true → Autorisierung abgelaufen, neu autorisieren; =missing oder "found"=false → noch nie verbunden bzw. kein verknüpfter Streamer-Account (Einstieg über das Streamer-Setup). "discord_linked"=false → Discord-Verknüpfung fehlt.
+- Übersetze solche Werte IMMER in verständliches Deutsch mit konkretem nächsten Schritt. Gib NIEMALS die rohen Status-Bezeichner (z. B. "oauth_status", "partner_status", "technical_pause_reason", "operational_state") wörtlich an den Nutzer aus.
+- Wenn "partner_status" auf "blocked" oder "token_error" steht oder "technical_pause_reason" gesetzt ist: das ist eine Moderations-/Sonderfall-Sache für Menschen — antworte NICHT inhaltlich dazu, sondern gib NUR das Token KEIN_TREFFER aus.
+
+WICHTIG:
+- Du bist BEREITS in einem Ticket. Verweise NIEMALS auf "#ticket-eroeffnen", "/ticket" oder "mach ein Ticket auf" – das ist hier sinnlos. Menschlicher Support sieht dieses Ticket ohnehin.
+- Erfinde keine Informationen, Kanäle, Rollen oder Schritte, die nicht dokumentiert sind.
+- Antworte auf Deutsch, kurz und direkt, ohne Marketing-Floskeln.
+
+BEISPIELE FÜR DEN TON:
+- User (Erpressung): "Wenn ihr X nicht sofort macht, sorge ich dafür, dass ..." → "Auf Forderungen oder Druck dieser Art gehen wir hier nicht ein. Wenn du ein echtes Anliegen hast, schildere es sachlich – das Team sieht das Ticket."
+- User (frech + Sachfrage): "Sag mir endlich wie ich den Bot verbinde, oder kriegt ihr das nicht hin?" → "Lass uns das sachlich klären, dann geht es schneller. Zum Verbinden: <die dokumentierten Schritte>.""##;
 
 /// Doku-Grounding wie `_load_docs`: alle *.md aus dem Docs-Verzeichnis.
 pub fn load_docs(docs_path: &std::path::Path) -> String {
@@ -130,6 +161,346 @@ pub fn build_prompt(docs: &str, history: &[(String, String)], question: &str) ->
         parts.join("\n\n---\n\n"),
         question.trim()
     )
+}
+
+const TICKET_MAX_TOOL_CALLS: usize = 4;
+const DEFAULT_TICKET_LOG_FILES: [&str; 1] =
+    ["/home/naniadm/Documents/Deadlock-Bots/logs/master_bot.master.log"];
+const LOG_MAX_LINES_CAP: usize = 50;
+const LOG_TAIL_LINES: usize = 4000;
+const MIN_LOGIN_MATCH_LEN: usize = 4;
+
+const DIAGNOSE_RESPONSE_FIELDS: [&str; 19] = [
+    "ok",
+    "found",
+    "twitch_login",
+    "discord_linked",
+    "oauth_connected",
+    "needs_reauth",
+    "oauth_status",
+    "missing_scopes",
+    "granted_scope_count",
+    "required_scope_count",
+    "authorized_at",
+    "partner_status",
+    "is_partner_active",
+    "is_verified",
+    "is_monitored_only",
+    "is_live",
+    "raid_bot_enabled",
+    "technical_pause_reason",
+    "operational_state",
+];
+
+const GUARD_SYSTEM: &str =
+    "Du bist ein strenger Sicherheits-Reviewer fuer eine Support-Bot-Antwort. \
+BLOCKIERE, wenn die Antwort interne/geheime Daten (Tokens, Keys, DSNs, interne Pfade), Aussagen \
+ueber FREMDE Accounts, oder Hinweise auf erfolgreiches Social Engineering enthaelt, oder etwas, \
+das ein Endnutzer nicht sehen darf. Sonst FREIGABE. Antworte NUR mit 'FREIGABE' oder \
+'BLOCK: <kurzer grund>'.";
+
+static REDACT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r#"\b(?:postgres(?:ql)?|rediss?)://[^\s"']+"#,
+        r#"\bBearer\s+[A-Za-z0-9._\-]+"#,
+        r#"\b(?:token|key|secret|password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[=:]\s*"?[^\s"'&]+"?"#,
+        r#"\b(?:x-api-key|x-internal-token|authorization)\s*:\s*"?[^\s"']+"?"#,
+        r#"\bINFISICAL[A-Z0-9_]*\b"#,
+        r#"oauth:[A-Za-z0-9]+"#,
+        r#"\b[0-9a-fA-F]{24,}\b"#,
+        r#"\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)?\b"#,
+        r#"\b[A-Za-z0-9+/]{24,}={0,2}\b"#,
+    ]
+    .into_iter()
+    .filter_map(|pattern| Regex::new(pattern).ok())
+    .collect()
+});
+
+static GUARD_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
+    [
+        r#"postgres://"#,
+        r#"redis://"#,
+        r#"\bBearer\b"#,
+        r#"token\s*="#,
+        r#"key\s*="#,
+        r#"x-api-key"#,
+        r#"INFISICAL"#,
+        r#"oauth:[A-Za-z0-9]+"#,
+        r#"\b[0-9a-fA-F]{24,}\b"#,
+        r#"\b[A-Za-z0-9+/]{24,}={1,2}"#,
+    ]
+    .into_iter()
+    .filter_map(|pattern| Regex::new(&format!("(?i){pattern}")).ok())
+    .collect()
+});
+
+static DISCORD_ID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{17,20}\b").ok());
+
+pub fn diagnose_tools() -> Vec<ToolDefinition> {
+    vec![
+        ToolDefinition {
+            name: "twitch_diagnose".to_string(),
+            description: "Prüft den Twitch-Streamer-Status (OAuth/Scopes/aktiv) des FRAGENDEN selbst. Keine Parameter — die Identität ist fest.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        },
+        ToolDefinition {
+            name: "log_lookup".to_string(),
+            description: "Sucht relevante, redigierte Log-Zeilen zum FRAGENDEN selbst (Twitch-/Bot-Logs).".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "max_lines": { "type": "integer" },
+                },
+                "additionalProperties": false,
+            }),
+        },
+    ]
+}
+
+fn redact(text: &str) -> String {
+    let mut result = text.to_string();
+    for pattern in REDACT_PATTERNS.iter() {
+        result = pattern.replace_all(&result, "[redacted]").into_owned();
+    }
+    result
+}
+
+fn has_foreign_discord_id(text: &str, own_id: u64) -> bool {
+    let Some(re) = DISCORD_ID_RE.as_ref() else {
+        return false;
+    };
+    let own = own_id.to_string();
+    re.find_iter(text).any(|found| found.as_str() != own)
+}
+
+fn requested_log_lines(tool_input: &Value) -> usize {
+    let parsed = tool_input
+        .get("max_lines")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .and_then(|n| usize::try_from(n).ok())
+                .or_else(|| value.as_str()?.trim().parse::<usize>().ok())
+        })
+        .filter(|n| *n > 0)
+        .unwrap_or(15);
+    parsed.min(LOG_MAX_LINES_CAP)
+}
+
+async fn read_tail_lines(path: &PathBuf) -> Vec<String> {
+    let Ok(content) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let start = lines.len().saturating_sub(LOG_TAIL_LINES);
+    lines[start..]
+        .iter()
+        .map(|line| (*line).to_string())
+        .collect()
+}
+
+#[derive(Clone)]
+pub struct TicketDiagnostics {
+    twitch: Option<Arc<TwitchApiClient>>,
+    log_files: Vec<PathBuf>,
+}
+
+impl TicketDiagnostics {
+    pub fn new(twitch: Option<Arc<TwitchApiClient>>) -> Arc<Self> {
+        Arc::new(Self {
+            twitch,
+            log_files: DEFAULT_TICKET_LOG_FILES.iter().map(PathBuf::from).collect(),
+        })
+    }
+
+    #[cfg(test)]
+    fn with_log_files(twitch: Option<Arc<TwitchApiClient>>, log_files: Vec<PathBuf>) -> Arc<Self> {
+        Arc::new(Self { twitch, log_files })
+    }
+
+    async fn execute_tool(&self, author_id: u64, tool_name: &str, tool_input: &Value) -> Value {
+        match tool_name {
+            "twitch_diagnose" => self.collect_twitch_diagnose(author_id).await,
+            "log_lookup" => {
+                let diagnose = self.collect_twitch_diagnose(author_id).await;
+                let twitch_login = diagnose
+                    .get("twitch_login")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|login| !login.is_empty())
+                    .map(str::to_string);
+                self.collect_log_lookup(
+                    author_id,
+                    twitch_login.as_deref(),
+                    requested_log_lines(tool_input),
+                )
+                .await
+            }
+            _ => json!({ "error": "unknown_tool" }),
+        }
+    }
+
+    async fn collect_twitch_diagnose(&self, author_id: u64) -> Value {
+        let Some(twitch) = &self.twitch else {
+            return json!({ "status": "nicht_ermittelbar" });
+        };
+        let Ok(payload) = twitch.diagnose_discord_user(author_id).await else {
+            return json!({ "status": "nicht_ermittelbar" });
+        };
+        let Some(payload) = payload.as_object() else {
+            return json!({ "status": "nicht_ermittelbar" });
+        };
+        let mut sanitized = serde_json::Map::new();
+        for field in DIAGNOSE_RESPONSE_FIELDS {
+            sanitized.insert(
+                field.to_string(),
+                payload.get(field).cloned().unwrap_or(Value::Null),
+            );
+        }
+        Value::Object(sanitized)
+    }
+
+    async fn collect_log_lookup(
+        &self,
+        author_id: u64,
+        twitch_login: Option<&str>,
+        max_lines: usize,
+    ) -> Value {
+        let own_id = author_id.to_string();
+        let login_lower = twitch_login
+            .map(str::trim)
+            .filter(|login| login.len() >= MIN_LOGIN_MATCH_LEN)
+            .map(str::to_lowercase);
+
+        let mut matched = Vec::new();
+        for path in &self.log_files {
+            for line in read_tail_lines(path).await {
+                let mut relevant = line.contains(&own_id);
+                if !relevant {
+                    if let Some(login) = &login_lower {
+                        relevant = line.to_lowercase().contains(login);
+                    }
+                }
+                if !relevant || has_foreign_discord_id(&line, author_id) {
+                    continue;
+                }
+                matched.push(redact(&line));
+            }
+        }
+
+        if matched.len() > max_lines {
+            matched = matched.split_off(matched.len() - max_lines);
+        }
+        let note = if matched.is_empty() {
+            "Keine zuordenbaren Log-Zeilen gefunden.".to_string()
+        } else {
+            format!(
+                "{} redigierte Log-Zeile(n) zum Fragenden gefunden.",
+                matched.len()
+            )
+        };
+        json!({ "lines": matched, "note": note })
+    }
+}
+
+struct TicketToolExecutor {
+    diagnostics: Arc<TicketDiagnostics>,
+    author_id: u64,
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for TicketToolExecutor {
+    async fn execute(&self, tool_name: &str, tool_input: &Value) -> Result<Value, String> {
+        Ok(self
+            .diagnostics
+            .execute_tool(self.author_id, tool_name, tool_input)
+            .await)
+    }
+}
+
+fn deterministic_guard_scan(candidate_answer: &str, author_id: u64) -> Option<String> {
+    for pattern in GUARD_SECRET_PATTERNS.iter() {
+        if pattern.is_match(candidate_answer) {
+            return Some(format!("deterministic:secret_pattern:{}", pattern.as_str()));
+        }
+    }
+    if contains_mixed_long_token(candidate_answer) {
+        return Some("deterministic:secret_pattern:mixed_token".to_string());
+    }
+    if has_foreign_discord_id(candidate_answer, author_id) {
+        return Some("deterministic:foreign_discord_id".to_string());
+    }
+    None
+}
+
+fn contains_mixed_long_token(text: &str) -> bool {
+    text.split(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '+' | '/' | '_' | '-'))
+        .any(|part| {
+            part.len() >= 24
+                && part.bytes().any(|b| b.is_ascii_digit())
+                && part.bytes().any(|b| b.is_ascii_alphabetic())
+        })
+}
+
+async fn diagnose_guard_check(
+    ai: &Arc<dyn TextGenerator>,
+    candidate_answer: &str,
+    ticket_text: &str,
+    author_id: u64,
+    _tool_trace: &[String],
+) -> (bool, String) {
+    if let Some(reason) = deterministic_guard_scan(candidate_answer, author_id) {
+        return (false, reason);
+    }
+
+    let prompt =
+        format!("Kandidatenantwort:\n{candidate_answer}\n\nTicket des Nutzers:\n{ticket_text}");
+    let text = ai
+        .generate_text(GenerateRequest {
+            prompt,
+            system_prompt: Some(GUARD_SYSTEM.to_string()),
+            model: None,
+            max_output_tokens: Some(200),
+            temperature: 0.0,
+        })
+        .await;
+    let Some(text) = text
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+    else {
+        return (false, "guard_error".to_string());
+    };
+    let upper = text.to_uppercase();
+    if upper.contains("BLOCK") {
+        return (false, text);
+    }
+    if upper.contains("FREIGABE") {
+        return (true, String::new());
+    }
+    (false, "guard_error".to_string())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TicketAutoOutcome {
+    answer: Option<String>,
+    decision: &'static str,
+    tool_calls: Vec<String>,
+    guard_reason: Option<String>,
+}
+
+impl TicketAutoOutcome {
+    fn silence(decision: &'static str) -> Self {
+        Self {
+            answer: None,
+            decision,
+            tool_calls: Vec::new(),
+            guard_reason: None,
+        }
+    }
 }
 
 /// Embed + „Frage stellen"-Button des FAQ-Panels (Port von `_build_panel_embed`
@@ -361,6 +732,8 @@ pub struct FaqChat {
     pub store: FaqStore,
     pub port: Arc<dyn FaqPort>,
     pub ai: Option<Arc<dyn TextGenerator>>,
+    pub tool_ai: Option<Arc<dyn ToolTextGenerator>>,
+    pub ticket_diagnostics: Option<Arc<TicketDiagnostics>>,
     pub docs: String,
     answered_tickets: tokio::sync::Mutex<HashSet<u64>>,
 }
@@ -372,10 +745,23 @@ impl FaqChat {
         ai: Option<Arc<dyn TextGenerator>>,
         docs: String,
     ) -> Arc<Self> {
+        Self::new_with_ticket_support(db, port, ai, None, None, docs)
+    }
+
+    pub fn new_with_ticket_support(
+        db: Db,
+        port: Arc<dyn FaqPort>,
+        ai: Option<Arc<dyn TextGenerator>>,
+        tool_ai: Option<Arc<dyn ToolTextGenerator>>,
+        ticket_diagnostics: Option<Arc<TicketDiagnostics>>,
+        docs: String,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: FaqStore { db },
             port,
             ai,
+            tool_ai,
+            ticket_diagnostics,
             docs,
             answered_tickets: tokio::sync::Mutex::new(HashSet::new()),
         })
@@ -492,6 +878,92 @@ impl FaqChat {
         }
     }
 
+    async fn ticket_auto_answer(&self, problem: &str, author_id: u64) -> TicketAutoOutcome {
+        let Some(ai) = &self.ai else {
+            return TicketAutoOutcome::silence("no_ai");
+        };
+        let full_prompt = format!(
+            "Dokumentation:\n{}\n\nTicket-Inhalt:\n{}",
+            self.docs,
+            problem.trim()
+        );
+
+        let mut tool_calls = Vec::new();
+        let mut answer_text = None;
+        if let (Some(tool_ai), Some(diagnostics)) = (&self.tool_ai, &self.ticket_diagnostics) {
+            let tool_result = tool_ai
+                .generate_text_with_tools(
+                    ToolUseRequest {
+                        prompt: full_prompt.clone(),
+                        system_prompt: Some(TICKET_AUTO_HELP_SYSTEM_PROMPT.to_string()),
+                        model: None,
+                        max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+                        temperature: 0.2,
+                        tools: diagnose_tools(),
+                        max_tool_calls: TICKET_MAX_TOOL_CALLS,
+                    },
+                    Arc::new(TicketToolExecutor {
+                        diagnostics: diagnostics.clone(),
+                        author_id,
+                    }),
+                )
+                .await;
+            tool_calls = tool_result.tool_calls;
+            answer_text = tool_result.text;
+        }
+
+        if answer_text
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .is_none()
+        {
+            answer_text = ai
+                .generate_text(GenerateRequest {
+                    prompt: full_prompt,
+                    system_prompt: Some(TICKET_AUTO_HELP_SYSTEM_PROMPT.to_string()),
+                    model: None,
+                    max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+                    temperature: 0.2,
+                })
+                .await;
+        }
+
+        let Some(answer) = answer_text.map(|answer| answer.trim().to_string()) else {
+            let mut outcome = TicketAutoOutcome::silence("empty");
+            outcome.tool_calls = tool_calls;
+            return outcome;
+        };
+        if answer.is_empty() {
+            let mut outcome = TicketAutoOutcome::silence("empty");
+            outcome.tool_calls = tool_calls;
+            return outcome;
+        }
+        if answer.contains("KEIN_TREFFER") {
+            let mut outcome = TicketAutoOutcome::silence("kein_treffer");
+            outcome.tool_calls = tool_calls;
+            return outcome;
+        }
+
+        let (allowed, reason) =
+            diagnose_guard_check(ai, &answer, problem, author_id, &tool_calls).await;
+        if !allowed {
+            return TicketAutoOutcome {
+                answer: None,
+                decision: "guard_block",
+                tool_calls,
+                guard_reason: Some(reason),
+            };
+        }
+
+        TicketAutoOutcome {
+            answer: Some(answer),
+            decision: "answered",
+            tool_calls,
+            guard_reason: None,
+        }
+    }
+
     /// Frage im FAQ-Kanal beantworten (vom Message-Subscriber gerufen).
     pub async fn handle_chat_message(
         self: &Arc<Self>,
@@ -532,8 +1004,14 @@ impl FaqChat {
         self: &Arc<Self>,
         guild_id: u64,
         channel_id: u64,
+        author_id: u64,
         content: &str,
     ) {
+        if self.port.channel_category(guild_id, channel_id).await
+            != Some(TICKET_AUTO_HELP_CATEGORY_ID)
+        {
+            return;
+        }
         {
             let mut answered = self.answered_tickets.lock().await;
             if answered.contains(&channel_id) {
@@ -541,31 +1019,22 @@ impl FaqChat {
             }
             answered.insert(channel_id);
         }
-        if self.port.channel_category(guild_id, channel_id).await
-            != Some(TICKET_AUTO_HELP_CATEGORY_ID)
-        {
-            return;
-        }
         let problem = content.trim();
         if problem.is_empty() {
             return;
         }
-        let Some(ai) = &self.ai else { return };
-        let answer = ai
-            .generate_text(GenerateRequest {
-                prompt: format!("Dokumentation:\n{}\n\nTicket-Inhalt:\n{problem}", self.docs),
-                system_prompt: Some(TICKET_AUTO_HELP_SYSTEM_PROMPT.to_string()),
-                model: None,
-                max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-                temperature: 0.2,
-            })
-            .await;
-        let Some(answer) = answer else { return };
-        let trimmed = answer.trim();
-        if trimmed.is_empty() || trimmed.contains("KEIN_TREFFER") {
-            return; // kein klarer Treffer → schweigen wie das Original
+        let outcome = self.ticket_auto_answer(problem, author_id).await;
+        tracing::debug!(
+            channel_id,
+            author_id,
+            decision = outcome.decision,
+            tool_calls = ?outcome.tool_calls,
+            guard_reason = outcome.guard_reason.as_deref().unwrap_or(""),
+            "FAQ-Ticket-Auto-Hilfe entschieden"
+        );
+        if let Some(answer) = outcome.answer {
+            self.port.send_message(channel_id, &answer, None).await;
         }
-        self.port.send_message(channel_id, trimmed, None).await;
     }
 
     /// Abgelaufene Sessions schließen (1-h-Loop).
@@ -761,6 +1230,7 @@ pub fn spawn(
                             faq.handle_ticket_message(
                                 event.guild_id.unwrap_or_default(),
                                 event.channel_id,
+                                event.author_id,
                                 &event.content,
                             )
                             .await;
@@ -784,6 +1254,7 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dl_ai::ToolGeneration;
 
     #[test]
     fn prompt_aufbau_wie_python() {
@@ -814,6 +1285,18 @@ mod tests {
         // a vor b (sortiert)
         assert!(docs.find("a.md").expect("a") < docs.find("b.md").expect("b"));
         assert_eq!(load_docs(std::path::Path::new("/nope")), "");
+    }
+
+    #[test]
+    fn ticket_prompt_enthaelt_status_uebersetzung_und_ticket_hinweis() {
+        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT.contains(
+            "Übersetze solche Werte IMMER in verständliches Deutsch mit konkretem nächsten Schritt"
+        ));
+        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT.contains("Gib NIEMALS die rohen Status-Bezeichner"));
+        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT
+            .contains("\"partner_status\" auf \"blocked\" oder \"token_error\""));
+        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT
+            .contains("Du bist BEREITS in einem Ticket. Verweise NIEMALS"));
     }
 
     #[tokio::test]
@@ -938,7 +1421,10 @@ mod tests {
         let reply = faq.faqpanel_command(42).await;
         let text = reply.content.unwrap();
         assert!(text.contains("wurde erstellt"), "text: {text}");
-        assert!(text.contains("/42/1491953161747955853/55501"), "jump: {text}");
+        assert!(
+            text.contains("/42/1491953161747955853/55501"),
+            "jump: {text}"
+        );
         assert_eq!(*port.posts.lock().unwrap(), 1);
 
         // Erneuter Command → meldet „existiert bereits", postet nicht erneut.
@@ -964,5 +1450,145 @@ mod tests {
         assert_eq!(*port.edits.lock().unwrap(), 1);
         // Der Alt-Key ist entfernt.
         assert_eq!(db.kv_get(PANEL_KV_NS, "message_id").await.unwrap(), None);
+    }
+
+    struct SequenceAi {
+        responses: std::sync::Mutex<std::collections::VecDeque<Option<String>>>,
+    }
+
+    impl SequenceAi {
+        fn new(responses: Vec<Option<&str>>) -> Arc<Self> {
+            Arc::new(Self {
+                responses: std::sync::Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|item| item.map(str::to_string))
+                        .collect(),
+                ),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl TextGenerator for SequenceAi {
+        async fn generate_text(&self, _request: GenerateRequest) -> Option<String> {
+            self.responses
+                .lock()
+                .expect("responses lock")
+                .pop_front()
+                .flatten()
+        }
+    }
+
+    struct StaticToolAi {
+        result: std::sync::Mutex<Option<ToolGeneration>>,
+    }
+
+    impl StaticToolAi {
+        fn new(result: ToolGeneration) -> Arc<Self> {
+            Arc::new(Self {
+                result: std::sync::Mutex::new(Some(result)),
+            })
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolTextGenerator for StaticToolAi {
+        async fn generate_text_with_tools(
+            &self,
+            _request: ToolUseRequest,
+            _tool_executor: Arc<dyn ToolExecutor>,
+        ) -> ToolGeneration {
+            self.result
+                .lock()
+                .expect("tool result lock")
+                .take()
+                .unwrap_or_default()
+        }
+    }
+
+    #[tokio::test]
+    async fn ticket_guard_fehler_schweigt_fail_closed() {
+        let (_dir, db) = db_with_kv().await;
+        let port = panel_port();
+        let ai: Arc<dyn TextGenerator> = SequenceAi::new(vec![
+            Some("Dokumentierte Antwort"),
+            None, // Guard-Reviewer leer/Fehler => fail-closed
+        ]);
+        let faq = FaqChat::new(db, port, Some(ai), "DOCS".to_string());
+
+        let outcome = faq
+            .ticket_auto_answer("Steam geht nicht", 111111111111111111)
+            .await;
+
+        assert_eq!(outcome.decision, "guard_block");
+        assert_eq!(outcome.answer, None);
+        assert_eq!(outcome.guard_reason.as_deref(), Some("guard_error"));
+    }
+
+    #[tokio::test]
+    async fn ticket_tool_loop_faellt_auf_textpfad_zurueck_und_behaelt_tool_trace() {
+        let (_dir, db) = db_with_kv().await;
+        let port = panel_port();
+        let ai: Arc<dyn TextGenerator> =
+            SequenceAi::new(vec![Some("Fallback Antwort"), Some("FREIGABE")]);
+        let tool_ai: Arc<dyn ToolTextGenerator> = StaticToolAi::new(ToolGeneration {
+            text: None,
+            tool_calls: vec!["twitch_diagnose".to_string()],
+        });
+        let faq = FaqChat::new_with_ticket_support(
+            db,
+            port,
+            Some(ai),
+            Some(tool_ai),
+            Some(TicketDiagnostics::new(None)),
+            "DOCS".to_string(),
+        );
+
+        let outcome = faq
+            .ticket_auto_answer("Twitch ist kaputt", 111111111111111111)
+            .await;
+
+        assert_eq!(outcome.decision, "answered");
+        assert_eq!(outcome.answer.as_deref(), Some("Fallback Antwort"));
+        assert_eq!(outcome.tool_calls, vec!["twitch_diagnose"]);
+    }
+
+    #[tokio::test]
+    async fn log_lookup_filtert_fremde_ids_und_redigiert_secrets() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let own_id = 111111111111111111u64;
+        let other_id = 222222222222222222u64;
+        let log_path = dir.path().join("bot.log");
+        std::fs::write(
+            &log_path,
+            format!(
+                "irrelevant\n\
+                 own {own_id} token=secret12345678901234567890\n\
+                 mixed {own_id} and {other_id} should_skip\n\
+                 login naniworks oauth:abc123\n"
+            ),
+        )
+        .expect("write log");
+        let diagnostics = TicketDiagnostics::with_log_files(None, vec![log_path]);
+
+        let result = diagnostics
+            .collect_log_lookup(own_id, Some("naniworks"), 10)
+            .await;
+
+        let lines = result["lines"].as_array().expect("lines");
+        assert_eq!(lines.len(), 2);
+        let joined = lines
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("[redacted]"));
+        assert!(joined.contains("login naniworks"));
+        assert!(!joined.contains("should_skip"));
+        assert!(result["note"]
+            .as_str()
+            .expect("note")
+            .contains("2 redigierte Log-Zeile"));
     }
 }

@@ -43,10 +43,59 @@ pub struct GenerateMultimodalRequest {
     pub temperature: f64,
 }
 
+#[derive(Debug, Clone)]
+pub struct ToolDefinition {
+    pub name: String,
+    pub description: String,
+    pub input_schema: Value,
+}
+
+impl ToolDefinition {
+    pub fn as_wire_value(&self) -> Value {
+        json!({
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        })
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolUseRequest {
+    pub prompt: String,
+    pub system_prompt: Option<String>,
+    pub model: Option<String>,
+    pub max_output_tokens: Option<u32>,
+    pub temperature: f64,
+    pub tools: Vec<ToolDefinition>,
+    pub max_tool_calls: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ToolGeneration {
+    pub text: Option<String>,
+    pub tool_calls: Vec<String>,
+}
+
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn execute(&self, tool_name: &str, tool_input: &Value) -> Result<Value, String>;
+}
+
 /// Text-Generierung — Konsumenten hängen am Trait (Tests mocken ihn).
 #[async_trait::async_trait]
 pub trait TextGenerator: Send + Sync {
     async fn generate_text(&self, request: GenerateRequest) -> Option<String>;
+}
+
+/// Anthropic-kompatibler Tool-Use-Loop für Text-Generierung.
+#[async_trait::async_trait]
+pub trait ToolTextGenerator: Send + Sync {
+    async fn generate_text_with_tools(
+        &self,
+        request: ToolUseRequest,
+        tool_executor: Arc<dyn ToolExecutor>,
+    ) -> ToolGeneration;
 }
 
 /// Bild-/Multimodal-Generierung (analog `TextGenerator`). Eigener Trait, damit
@@ -122,7 +171,7 @@ impl MiniMaxClient {
 #[async_trait::async_trait]
 impl TextGenerator for MiniMaxClient {
     async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
-        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let model = Self::normalize_model(request.model.unwrap_or_else(|| self.model.clone()));
         let max_tokens = request
             .max_output_tokens
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
@@ -135,7 +184,10 @@ impl TextGenerator for MiniMaxClient {
                 .json(&json!({
                     "model": model,
                     "system": request.system_prompt.unwrap_or_default(),
-                    "messages": [{ "role": "user", "content": request.prompt }],
+                    "messages": [{
+                        "role": "user",
+                        "content": Self::build_token_plan_content(&request.prompt, &[]),
+                    }],
                     "max_tokens": max_tokens,
                     "temperature": request.temperature,
                 }))
@@ -174,29 +226,9 @@ impl TextGenerator for MiniMaxClient {
 
         if self.token_plan {
             // Anthropic-Format: content-Fragmente vom Typ "text"
-            let fragments: Vec<&str> = data
-                .get("content")
-                .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
-                        .filter_map(|item| item.get("text").and_then(Value::as_str))
-                        .collect()
-                })
-                .unwrap_or_default();
-            if fragments.is_empty() {
-                return None;
-            }
-            Some(fragments.concat().trim().to_string())
+            Self::extract_token_plan_text(&data)
         } else {
-            data.get("choices")
-                .and_then(Value::as_array)
-                .and_then(|choices| choices.first())
-                .and_then(|choice| choice.get("message"))
-                .and_then(|message| message.get("content"))
-                .and_then(Value::as_str)
-                .map(str::to_string)
+            Self::extract_standard_text(&data)
         }
     }
 }
@@ -266,12 +298,185 @@ impl MiniMaxClient {
         }
         Value::Array(content)
     }
+
+    fn normalize_model(model: String) -> String {
+        if model == "MiniMax-Text-01" {
+            DEFAULT_MODEL.to_string()
+        } else {
+            model
+        }
+    }
+
+    fn extract_token_plan_text(data: &Value) -> Option<String> {
+        let fragments: Vec<&str> = data
+            .get("content")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter(|item| item.get("type").and_then(Value::as_str) == Some("text"))
+                    .filter_map(|item| item.get("text").and_then(Value::as_str))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let text = fragments.concat().trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn extract_standard_text(data: &Value) -> Option<String> {
+        data.get("choices")
+            .and_then(Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .and_then(|message| message.get("content"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolTextGenerator for MiniMaxClient {
+    async fn generate_text_with_tools(
+        &self,
+        request: ToolUseRequest,
+        tool_executor: Arc<dyn ToolExecutor>,
+    ) -> ToolGeneration {
+        if !self.token_plan {
+            return ToolGeneration::default();
+        }
+
+        let model = Self::normalize_model(request.model.unwrap_or_else(|| self.model.clone()));
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let mut messages = vec![json!({
+            "role": "user",
+            "content": Self::build_token_plan_content(&request.prompt, &[]),
+        })];
+        let mut used_tool_names = Vec::new();
+        let mut tool_rounds = 0usize;
+
+        loop {
+            let budget_left = tool_rounds < request.max_tool_calls;
+            let mut payload = serde_json::Map::new();
+            payload.insert("model".into(), json!(model));
+            payload.insert(
+                "system".into(),
+                json!(request.system_prompt.clone().unwrap_or_default()),
+            );
+            payload.insert("messages".into(), Value::Array(messages.clone()));
+            payload.insert("max_tokens".into(), json!(max_tokens));
+            payload.insert("temperature".into(), json!(request.temperature));
+            if budget_left && !request.tools.is_empty() {
+                payload.insert(
+                    "tools".into(),
+                    Value::Array(
+                        request
+                            .tools
+                            .iter()
+                            .map(ToolDefinition::as_wire_value)
+                            .collect(),
+                    ),
+                );
+            }
+
+            let response = self
+                .http
+                .post(format!("{}/messages", self.base_url))
+                .header("x-api-key", &self.api_key)
+                .header("anthropic-version", "2023-06-01")
+                .json(&Value::Object(payload))
+                .send()
+                .await;
+            let response = match response {
+                Ok(response) => response,
+                Err(err) => {
+                    tracing::warn!(%err, "MiniMax-Tool-Loop-Request fehlgeschlagen");
+                    return ToolGeneration {
+                        text: None,
+                        tool_calls: used_tool_names,
+                    };
+                }
+            };
+            if !response.status().is_success() {
+                tracing::warn!(status = %response.status(), "MiniMax-Tool-Loop-API-Fehler");
+                return ToolGeneration {
+                    text: None,
+                    tool_calls: used_tool_names,
+                };
+            }
+            let Ok(data) = response.json::<Value>().await else {
+                return ToolGeneration {
+                    text: None,
+                    tool_calls: used_tool_names,
+                };
+            };
+            let content_blocks = data
+                .get("content")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+
+            if data.get("stop_reason").and_then(Value::as_str) == Some("tool_use") && budget_left {
+                let mut tool_result_blocks = Vec::new();
+                for block in &content_blocks {
+                    if block.get("type").and_then(Value::as_str) != Some("tool_use") {
+                        continue;
+                    }
+                    let tool_name = block
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let tool_input = block.get("input").cloned().unwrap_or_else(|| json!({}));
+                    let result = match tool_executor.execute(tool_name, &tool_input).await {
+                        Ok(result) => result,
+                        Err(err) => {
+                            tracing::warn!(%tool_name, %err, "MiniMax-Tool-Executor fehlgeschlagen");
+                            json!({ "error": "tool_execution_failed" })
+                        }
+                    };
+                    let content = serde_json::to_string(&result).unwrap_or_else(|_| {
+                        "{\"error\":\"tool_result_serialization_failed\"}".to_string()
+                    });
+                    used_tool_names.push(tool_name.to_string());
+                    tool_result_blocks.push(json!({
+                        "type": "tool_result",
+                        "tool_use_id": block.get("id").cloned().unwrap_or(Value::Null),
+                        "content": content,
+                    }));
+                }
+
+                if tool_result_blocks.is_empty() {
+                    return ToolGeneration {
+                        text: Self::extract_token_plan_text(&data),
+                        tool_calls: used_tool_names,
+                    };
+                }
+
+                messages
+                    .push(json!({ "role": "assistant", "content": Value::Array(content_blocks) }));
+                messages
+                    .push(json!({ "role": "user", "content": Value::Array(tool_result_blocks) }));
+                tool_rounds += 1;
+                continue;
+            }
+
+            return ToolGeneration {
+                text: Self::extract_token_plan_text(&data),
+                tool_calls: used_tool_names,
+            };
+        }
+    }
 }
 
 #[async_trait::async_trait]
 impl VisionGenerator for MiniMaxClient {
     async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String> {
-        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let model = Self::normalize_model(request.model.unwrap_or_else(|| self.model.clone()));
         let max_tokens = request
             .max_output_tokens
             .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
@@ -550,7 +755,10 @@ mod tests {
         );
         let std_content = MiniMaxClient::build_standard_user_content("frage", &images);
         assert_eq!(std_content[1]["type"], "image_url");
-        assert_eq!(std_content[1]["image_url"]["url"], "data:image/jpeg;base64,QUJD");
+        assert_eq!(
+            std_content[1]["image_url"]["url"],
+            "data:image/jpeg;base64,QUJD"
+        );
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.
@@ -606,5 +814,172 @@ mod tests {
         assert_eq!(content.len(), 5);
         assert_eq!(content[1]["source"]["url"], "https://1");
         assert_eq!(content[4]["source"]["url"], "https://4");
+    }
+
+    struct EchoToolExecutor;
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for EchoToolExecutor {
+        async fn execute(&self, tool_name: &str, tool_input: &Value) -> Result<Value, String> {
+            Ok(json!({
+                "tool": tool_name,
+                "input": tool_input,
+                "status": "ok",
+            }))
+        }
+    }
+
+    fn diagnose_tool() -> ToolDefinition {
+        ToolDefinition {
+            name: "twitch_diagnose".to_string(),
+            description: "Diagnose".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_loop_sendet_tool_result_turn_und_liefert_finalen_text() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/messages",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    let mut captured = cap.lock().expect("lock");
+                    let idx = captured.len();
+                    captured.push(body);
+                    drop(captured);
+                    if idx == 0 {
+                        Json(json!({
+                            "stop_reason": "tool_use",
+                            "content": [
+                                { "type": "text", "text": "Ich prüfe das." },
+                                {
+                                    "type": "tool_use",
+                                    "id": "toolu_1",
+                                    "name": "twitch_diagnose",
+                                    "input": {}
+                                }
+                            ]
+                        }))
+                    } else {
+                        Json(json!({
+                            "stop_reason": "end_turn",
+                            "content": [{ "type": "text", "text": "Fertig" }]
+                        }))
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let base = format!("http://{addr}");
+
+        let client = MiniMaxClient::new(&base, "tp-key", true, "MiniMax-M3");
+        let result = client
+            .generate_text_with_tools(
+                ToolUseRequest {
+                    prompt: "Ticket".to_string(),
+                    system_prompt: Some("System".to_string()),
+                    model: Some("MiniMax-Text-01".to_string()),
+                    max_output_tokens: Some(200),
+                    temperature: 0.2,
+                    tools: vec![diagnose_tool()],
+                    max_tool_calls: 4,
+                },
+                Arc::new(EchoToolExecutor),
+            )
+            .await;
+
+        assert_eq!(result.text.as_deref(), Some("Fertig"));
+        assert_eq!(result.tool_calls, vec!["twitch_diagnose"]);
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0]["model"], "MiniMax-M3");
+        assert_eq!(captured[0]["tools"][0]["name"], "twitch_diagnose");
+        assert_eq!(captured[1]["messages"][1]["role"], "assistant");
+        assert_eq!(captured[1]["messages"][2]["role"], "user");
+        assert_eq!(
+            captured[1]["messages"][2]["content"][0]["type"],
+            "tool_result"
+        );
+        assert_eq!(
+            captured[1]["messages"][2]["content"][0]["tool_use_id"],
+            "toolu_1"
+        );
+        let content = captured[1]["messages"][2]["content"][0]["content"]
+            .as_str()
+            .expect("tool result string");
+        assert!(content.contains("\"status\":\"ok\""));
+    }
+
+    #[tokio::test]
+    async fn tool_loop_stoppt_nach_max_tool_calls_und_bietet_keine_tools_mehr_an() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/messages",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().expect("lock").push(body);
+                    Json(json!({
+                        "stop_reason": "tool_use",
+                        "content": [{
+                            "type": "tool_use",
+                            "id": "toolu_repeat",
+                            "name": "twitch_diagnose",
+                            "input": {}
+                        }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let base = format!("http://{addr}");
+
+        let client = MiniMaxClient::new(&base, "tp-key", true, "MiniMax-M3");
+        let result = client
+            .generate_text_with_tools(
+                ToolUseRequest {
+                    prompt: "Ticket".to_string(),
+                    system_prompt: None,
+                    model: None,
+                    max_output_tokens: Some(200),
+                    temperature: 0.2,
+                    tools: vec![diagnose_tool()],
+                    max_tool_calls: 2,
+                },
+                Arc::new(EchoToolExecutor),
+            )
+            .await;
+
+        assert_eq!(result.text, None);
+        assert_eq!(result.tool_calls.len(), 2);
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured.len(), 3);
+        assert!(captured[0].get("tools").is_some());
+        assert!(captured[1].get("tools").is_some());
+        assert!(captured[2].get("tools").is_none());
     }
 }
