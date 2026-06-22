@@ -588,6 +588,7 @@ mod tests {
             author_is_admin: false,
             author_can_manage_messages: false,
             author_is_staff: false,
+            author_staff_status_known: true,
             content: content.to_string(),
             message_created_at: chrono::Utc::now().timestamp(),
             is_reply: false,
