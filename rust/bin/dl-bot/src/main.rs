@@ -6,6 +6,7 @@
 //! bis zum koordinierten Cutover hält der Python-Bot die Discord-Session,
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
+mod build_publisher;
 mod modglue;
 mod onboardglue;
 
@@ -599,6 +600,10 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         dl_activity::stats_cmd::spawn_command(activity_stats, &dispatcher, adapter.clone());
+        // Build-Publisher (#23): DB-only Queue-Steuerlogik fuer BUILD_PUBLISH.
+        // Gateway-gated, damit dormant Rust-Starts nicht parallel zum Python-Cog
+        // dieselbe steam_tasks-Queue befuellen.
+        let _build_publisher_tasks = build_publisher::spawn(db.clone());
         // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
         // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung)
         // + stündlicher Miss-You-Check (Embed-DM an inaktive Stamm-User).
