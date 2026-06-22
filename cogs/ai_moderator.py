@@ -32,6 +32,9 @@ AI_MODERATOR_CONFIG = {
     "CONTEXT_ESCALATE_BETWEEN": (0.55, 0.78),
     "CONTEXT_BACKFILL_MESSAGES": 12,
     "AUTO_DELETE_CATEGORIES": ["nsfw_explicit", "csam", "raping", "epstein_child", "scam"],
+    # Kategorien, fuer die KEINE Vorschlaege/Aktionen erzeugt werden (zu viele False Positives).
+    # Klassifikation laeuft weiter, das Ergebnis wird im Entscheidungspfad verworfen.
+    "DISABLED_CATEGORIES": ["racism"],
     "IGNORE_BOTS": True,
     "PER_USER_COOLDOWN_SECONDS": 2,
     "MAX_IMAGES_PER_CHECK": 4,
@@ -412,6 +415,7 @@ class AIModeratorCog(commands.Cog):
         self.context_escalate_upper = float(upper)
         self.context_backfill_messages = int(cfg["CONTEXT_BACKFILL_MESSAGES"])
         self.auto_delete_categories = {str(item) for item in cfg["AUTO_DELETE_CATEGORIES"]}
+        self.disabled_categories = {str(item).lower() for item in cfg.get("DISABLED_CATEGORIES", [])}
         self.ignore_bots = bool(cfg["IGNORE_BOTS"])
         self.per_user_cooldown_seconds = float(cfg["PER_USER_COOLDOWN_SECONDS"])
         self.max_images_per_check = int(cfg["MAX_IMAGES_PER_CHECK"])
@@ -498,6 +502,8 @@ class AIModeratorCog(commands.Cog):
         )
         proposal_threshold = self._get_proposal_threshold(required_tone_tag)
         verdict, escalated = await self._classify_message(message, image_attachments)
+        if verdict.category in self.disabled_categories:
+            return
         if verdict.verdict == "needs_context":
             return
 

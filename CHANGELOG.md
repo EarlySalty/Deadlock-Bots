@@ -1,3 +1,11 @@
+## #160 — AI-Moderation: Kategorie „Racism" abgeschaltet
+
+**Ausgangslage:** Die automatische Inhaltsprüfung schlug für die Kategorie Rassismus auch bei harmlosen oder grenzwertigen Kurznachrichten an und erzeugte dadurch übermäßig viele Fehlmeldungen, die den Moderations-Review unnötig fluteten.
+
+**Was wurde geändert:** Es gibt jetzt eine konfigurierbare Liste abgeschalteter Kategorien; „Racism" steht darin. Die Klassifizierung läuft technisch weiter, das Ergebnis abgeschalteter Kategorien wird aber verworfen, bevor daraus ein Moderationsvorschlag oder eine Aktion entsteht.
+
+**Wie es jetzt läuft:** Für als Rassismus eingestufte Nachrichten werden keine Vorschläge mehr erzeugt — unabhängig von der Confidence. Alle übrigen Kategorien (z. B. Scam, NSFW, Hassrede) arbeiten unverändert weiter. Die Abschaltung lässt sich jederzeit zurücknehmen, indem die Kategorie wieder aus der Liste entfernt wird.
+
 ## #159 — Ticket-Kanäle für Beta-Einladungen wieder privat
 
 **Ausgangslage:** Bei Beta-Einladungen erstellte Ticket-Kanäle waren zeitweise für mehr Personen sichtbar als vorgesehen, weil die Zugriffsrechte beim Anlegen nicht mehr eindeutig auf den jeweiligen Empfänger eingeschränkt wurden.
