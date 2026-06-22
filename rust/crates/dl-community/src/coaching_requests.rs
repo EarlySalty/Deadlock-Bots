@@ -1,14 +1,9 @@
-//! Coaching-Anfragen — Port von `cogs/coaching_panel.py` +
-//! `cogs/coaching_request.py`.
+//! Coaching-Anfragen — Website-getriebener Einstieg mit Resten aus dem
+//! früheren `cogs/coaching_panel.py`/`cogs/coaching_request.py`-Port.
 //!
-//! Panel-Button → 5-Felder-Formular → Anfrage landet in
-//! `coaching_requests` → AI-Analyse (MiniMax, INVALID_REQUEST-Protokoll
-//! gegen Unsinn-Anfragen) → Post in den Coaching-Kanal mit fairer
-//! Coach-Rotation (24-h-Reservierung, danach offen für alle) →
-//! Claim legt eine Session an, vergibt die Coaching-Rolle und
-//! benachrichtigt den Spieler; Abbruch durch den Coach sperrt den
-//! Spieler 7 Tage. custom_ids unverändert (`coaching_panel_start`,
-//! `coaching_request_modal`, `coach_claim_/release_/cancel_*`).
+//! Das Panel verweist inzwischen per Link-Button auf die Coaching-Website.
+//! Der Discord-interne Anfrage-/Analyse-/Rollen-Flow wird für neue Anfragen
+//! bewusst nicht mehr gestartet.
 //!
 //! Die Feedback-Umfrage (`coaching_survey`) ist hier mit portiert: ein
 //! 60-s-Poll plus ein Voice-Event-Listener erkennen das Ende einer Session
@@ -22,17 +17,16 @@
 //! Overrides des Automatik-Flows und bleiben vorerst aus.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use dl_ai::{GenerateRequest, TextGenerator};
 use dl_db::Db;
-use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use rusqlite::OptionalExtension;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
+pub const COACHING_PANEL_CHANNEL_ID: u64 = 1494373349944459355;
 pub const COACH_ROLE_ID: u64 = 1494372744286965941;
 pub const COACHING_ACTIVE_ROLE_ID: u64 = 1371929762913587292;
 pub const COACHING_REWARD_ROLE_ID: u64 = 1500793970714873927;
@@ -46,6 +40,12 @@ pub const REWARD_ROLE_DURATION_SECS: i64 = 5 * 24 * 60 * 60;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
 pub const ROLE_EXPIRY_HOURS: i64 = 48;
+pub const COACHING_WEBSITE_URL: &str = "https://deutsche-deadlock-community.de/coaching";
+pub const COACHING_WEBSITE_CTA_TEXT: &str =
+    "👉 **Bereit loszulegen?** Stell deine Coaching-Anfrage direkt über den Button unten auf unserer Website — dort füllst du in einer Minute alles aus, der Rest läuft von selbst.";
+pub const COACHING_WEBSITE_BUTTON_LABEL: &str = "Coaching-Anfrage starten";
+const PANEL_KV_NS: &str = "coaching";
+const PANEL_KV_KEY: &str = "panel_message_id";
 
 pub const COACHING_ANALYSIS_SYSTEM: &str = r#"Du bist ein Deadlock Coaching Koordinator.
 
@@ -207,10 +207,69 @@ pub fn cancel_components(session_id: &str, author_id: u64) -> Value {
     }]}])
 }
 
+pub fn build_panel_embed() -> Value {
+    json!({
+        "title": "🎮  Deadlock Coaching",
+        "description": format!(
+            "Du willst besser werden? Unsere Coaches helfen dir, dein Spiel gezielt zu verbessern.\n\n\
+             **⚠️ Wichtige Regeln:**\n\
+             • Die Kommunikation findet **ausschließlich** im Coaching-Chat statt.\n\
+             • Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches.\n\
+             • Sei bereit zu antworten, wenn sich ein Coach meldet.\n\n\
+             {COACHING_WEBSITE_CTA_TEXT}"
+        ),
+        "color": 0x3498DB,
+        "fields": [
+            {
+                "name": "📋 Ablauf",
+                "value": "1. Formular ausfüllen\n2. Du bekommst die Coaching-Rolle\n3. Ein Coach meldet sich bei dir",
+                "inline": false,
+            },
+            {
+                "name": "❓ Fragen nach dem Coaching?",
+                "value": "Hau sie einfach in <#1426220702054355077> raus statt per DM an deinen Coach. Dann sehen alle die Antwort und andere mit dem gleichen Thema lesen direkt mit.",
+                "inline": false,
+            },
+        ],
+    })
+}
+
+pub fn panel_components() -> Value {
+    json!([{ "type": 1, "components": [{
+        "type": 2,
+        "style": 5,
+        "label": COACHING_WEBSITE_BUTTON_LABEL,
+        "url": COACHING_WEBSITE_URL,
+    }]}])
+}
+
+fn panel_body() -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("embeds".into(), json!([build_panel_embed()]));
+    body.insert("components".into(), panel_components());
+    body
+}
+
+fn website_cta_reply() -> BridgeReply {
+    BridgeReply {
+        content: Some(COACHING_WEBSITE_CTA_TEXT.to_string()),
+        components: Some(panel_components()),
+        ephemeral: true,
+        ..BridgeReply::default()
+    }
+}
+
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
 pub trait CoachingPort: Send + Sync {
+    async fn post_panel(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
+    async fn edit_panel(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String>;
     /// Coach-Kandidaten: Mitglieder der Coach-Rolle (ohne Bots/Owner).
     async fn coach_member_ids(&self, guild_id: u64) -> Vec<u64>;
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
@@ -275,6 +334,49 @@ impl CoachingRequests {
         })
     }
 
+    /// Postet/editiert das persistente Coaching-Panel im Panel-Channel.
+    /// Idempotent über denselben KV-Vertrag wie Python:
+    /// `kv_store(ns='coaching', k='panel_message_id')`.
+    pub async fn ensure_panel(&self) {
+        let body = panel_body();
+        if let Some(message_id) = self.panel_message_id().await {
+            match self
+                .port
+                .edit_panel(COACHING_PANEL_CHANNEL_ID, message_id, body.clone())
+                .await
+            {
+                Ok(()) => return,
+                Err(err) => tracing::info!(
+                    %err,
+                    message_id,
+                    "Coaching-Panel konnte nicht editiert werden, poste neu"
+                ),
+            }
+        }
+
+        match self.port.post_panel(COACHING_PANEL_CHANNEL_ID, body).await {
+            Ok(message_id) => {
+                if let Err(err) = self
+                    .db
+                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
+                    .await
+                {
+                    tracing::warn!(%err, "Coaching-Panel-ID konnte nicht gespeichert werden");
+                }
+            }
+            Err(err) => tracing::warn!(%err, "Coaching-Panel konnte nicht gepostet werden"),
+        }
+    }
+
+    async fn panel_message_id(&self) -> Option<u64> {
+        self.db
+            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+
     /// Spiegelt den aktuellen Anfrage-/Session-Stand best-effort an die Website
     /// (Port von `_mirror_to_website`). Liest die `coaching_requests`-Zeile,
     /// füllt das EXAKTE Payload-Schema und feuert den POST in einem
@@ -322,7 +424,10 @@ impl CoachingRequests {
                 .ok()
                 .flatten();
             let Some(row) = row else {
-                tracing::debug!(request_id, "Coaching-Mirror: Zeile nicht gefunden (ignoriert)");
+                tracing::debug!(
+                    request_id,
+                    "Coaching-Mirror: Zeile nicht gefunden (ignoriert)"
+                );
                 return;
             };
             // assigned_coach_id ist TEXT in der DB — wie Python int(assigned) → numerisch.
@@ -350,16 +455,16 @@ impl CoachingRequests {
             if let (Some(coach_id), Some(session_status)) =
                 (opts.coach_discord_id, opts.session_status.as_ref())
             {
-                let map = payload.as_object_mut().expect("payload object");
-                map.insert("coach_discord_id".into(), json!(coach_id));
-                map.insert("coach_username".into(), json!(opts.coach_username));
-                map.insert("session_status".into(), json!(session_status));
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("coach_discord_id".into(), json!(coach_id));
+                    map.insert("coach_username".into(), json!(opts.coach_username));
+                    map.insert("session_status".into(), json!(session_status));
+                }
             }
             if let Some(session_id) = opts.bot_session_id {
-                payload
-                    .as_object_mut()
-                    .expect("payload object")
-                    .insert("bot_session_id".into(), json!(session_id));
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("bot_session_id".into(), json!(session_id));
+                }
             }
             client.sync_coaching(&payload).await;
         });
@@ -1013,9 +1118,8 @@ impl InteractionHandler for CoachingHandler {
         // /coaching-status — Status der letzten Anfrage (reiner Read).
         if interaction.command == "coaching-status" {
             let user_id = interaction.user_id;
-            let status: Option<String> = c
-                .db
-                .read(move |conn| {
+            let status: Option<String> =
+                c.db.read(move |conn| {
                     conn.query_row(
                         "SELECT status FROM coaching_requests
                           WHERE discord_user_id = ?1 ORDER BY created_at DESC LIMIT 1",
@@ -1029,11 +1133,15 @@ impl InteractionHandler for CoachingHandler {
                 .flatten();
             let msg = match status.as_deref() {
                 None => "Du hast keine Coaching-Anfrage gestellt.".to_string(),
-                Some("pending") => "⏳ Deine Anfrage wird gerade analysiert. Bitte warte.".to_string(),
+                Some("pending") => {
+                    "⏳ Deine Anfrage wird gerade analysiert. Bitte warte.".to_string()
+                }
                 Some("analyzed") => {
                     "✅ Deine Anfrage wurde analysiert und wartet auf einen Coach.".to_string()
                 }
-                Some("matched") => "🎉 Ein Coach hat sich für dich gemeldet. Check deine DMs.".to_string(),
+                Some("matched") => {
+                    "🎉 Ein Coach hat sich für dich gemeldet. Check deine DMs.".to_string()
+                }
                 Some("active") => "🎮 Deine Coaching-Session läuft gerade.".to_string(),
                 Some("completed") => "✅ Deine letzte Session ist abgeschlossen.".to_string(),
                 Some("cancelled") => "❌ Deine Anfrage wurde abgebrochen.".to_string(),
@@ -1042,59 +1150,19 @@ impl InteractionHandler for CoachingHandler {
             return BridgeReply::ephemeral_text(msg);
         }
 
-        // Start über den Panel-Button ODER den /coaching-anfrage-Slash.
-        if interaction.custom_id == "coaching_panel_start" || interaction.command == "coaching-anfrage"
+        // Website-driven intake: Legacy-Button und Slash-Command verweisen nur
+        // noch auf die Website; der Discord-Modal-/Analyse-Flow bleibt aus.
+        if interaction.custom_id == "coaching_panel_start"
+            || interaction.command == "coaching-anfrage"
         {
-            // Ban-Prüfung (coaching_bans, 7-Tage-Sperren)
-            let user_id = interaction.user_id;
-            let ban: Option<(i64, String)> =
-                c.db.read(move |conn| {
-                    conn.query_row(
-                        "SELECT expires_at, COALESCE(reason,'Unbekannt') FROM coaching_bans
-                          WHERE discord_user_id = ?1 AND expires_at > ?2",
-                        rusqlite::params![user_id, chrono::Utc::now().timestamp()],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()
-                })
-                .await
-                .ok()
-                .flatten();
-            if let Some((expires_at, reason)) = ban {
-                let when = chrono::DateTime::from_timestamp(expires_at, 0)
-                    .map(|dt| dt.format("%d.%m.%Y %H:%M").to_string())
-                    .unwrap_or_default();
-                return BridgeReply::ephemeral_text(format!(
-                    "❌ Du bist aktuell vom Coaching-System gesperrt.\nGrund: {reason}\nSperre endet am: {when}"
-                ));
-            }
-            let field =
-                |id: &str, label: &str, placeholder: &str, max: u16, paragraph: bool| ModalField {
-                    custom_id: id.to_string(),
-                    label: label.to_string(),
-                    placeholder: placeholder.to_string(),
-                    required: !paragraph || id == "problems",
-                    min_length: 0,
-                    max_length: max,
-                    paragraph,
-                };
-            return BridgeReply {
-                modal: Some(ModalSpec {
-                    custom_id: "coaching_request_modal".to_string(),
-                    title: "Coaching-Anfrage".to_string(),
-                    fields: vec![
-                        field("rank", "Rang + Subrank", "z.B. Archon 3, Ascendant VI, Emissary II", 60, false),
-                        field("hero", "Main-Hero", "z.B. Haze, Seven, Vindicta", 50, false),
-                        field("availability", "Wann hast du Zeit? (Datum + Uhrzeit)", "z.B. Montag 18:00, Heute Abend ab 20 Uhr...", 120, false),
-                        field("games_hours", "Games / Stunden", "z.B. 300 Games / 150 Stunden", 120, false),
-                        field("problems", "Probleme / Ziele", "Wobei brauchst du Hilfe? (Keine DMs/FAs an Coaches! Kommunikation nur im Chat!)", 1000, true),
-                    ],
-                }),
-                ..BridgeReply::default()
-            };
+            return website_cta_reply();
         }
 
         if interaction.custom_id == "coaching_request_modal" {
+            return website_cta_reply();
+        }
+
+        if interaction.custom_id == "__disabled_coaching_request_modal" {
             let get = |key: &str| {
                 interaction
                     .options
@@ -1415,59 +1483,20 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
         handler.clone(),
     );
     router.on_custom_id("coaching_panel_start", handler.clone());
-    router.on_custom_id("coaching_request_modal", handler.clone());
-    router.on_prefix("coach_claim_", handler.clone());
-    router.on_prefix("coach_release_", handler.clone());
-    router.on_prefix("coach_cancel_", handler);
+    // Website-driven intake: Der neue Panel-Button ist ein Link-Button ohne
+    // Interaction. Der Legacy-custom_id bleibt nur als Redirect-Fallback.
+    // #17/#18 entfallen bewusst; Rollen-/Analyse-/Stale-Flows übernimmt die Website.
 }
 
-/// Loops: Analyse (30 s) + Reservierungs-Ablauf (60 s wie Original).
+/// Discord-seitige Intake-/Analyse-/Rollen-Loops sind im Website-Redesign aus.
 pub fn spawn(
-    coaching: Arc<CoachingRequests>,
-    dispatcher: &dl_discord::Dispatcher,
+    _coaching: Arc<CoachingRequests>,
+    _dispatcher: &dl_discord::Dispatcher,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let analyze = {
-        let coaching = coaching.clone();
-        tokio::spawn(async move {
-            loop {
-                coaching.analyze_pending().await;
-                tokio::time::sleep(Duration::from_secs(30)).await;
-            }
-        })
-    };
-    let expiry = {
-        let coaching = coaching.clone();
-        tokio::spawn(async move {
-            loop {
-                coaching.expire_reservations().await;
-                coaching.expire_roles().await;
-                // Survey-Poll wie Python `_run_survey_checks` (60-s-Takt).
-                coaching.scan_survey_sessions().await;
-                tokio::time::sleep(Duration::from_secs(60)).await;
-            }
-        })
-    };
-    // Voice-Listener (Python `on_voice_state_update`): reagiert sofort, wenn
-    // User oder Coach den Coaching-VC verlässt, statt bis zu 60 s zu warten.
-    let mut voice = dispatcher.subscribe_voice();
-    let survey_voice = tokio::spawn(async move {
-        loop {
-            match voice.recv().await {
-                Ok(event) => {
-                    let user_id = match event {
-                        dl_discord::VoiceEvent::Join { user_id, .. }
-                        | dl_discord::VoiceEvent::Leave { user_id, .. }
-                        | dl_discord::VoiceEvent::Move { user_id, .. }
-                        | dl_discord::VoiceEvent::Update { user_id, .. } => user_id,
-                    };
-                    coaching.survey_sessions_for_member(user_id).await;
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
-            }
-        }
-    });
-    vec![analyze, expiry, survey_voice]
+    tracing::info!(
+        "Coaching: Discord-Intake-Loops deaktiviert (Website-driven intake, #17/#18 dropped)"
+    );
+    Vec::new()
 }
 
 #[cfg(test)]
@@ -1529,5 +1558,34 @@ mod tests {
             cancel[0]["components"][0]["custom_id"],
             "coach_cancel_abc-def_42"
         );
+    }
+
+    #[test]
+    fn panel_verweist_auf_website() {
+        let embed = build_panel_embed();
+        assert_eq!(embed["title"], "🎮  Deadlock Coaching");
+        let description = embed["description"].as_str().unwrap_or_default();
+        assert!(description
+            .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt."));
+        assert!(description.contains(
+            "Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches."
+        ));
+        assert!(description.ends_with(COACHING_WEBSITE_CTA_TEXT));
+        assert_eq!(embed["fields"][0]["name"], "📋 Ablauf");
+        assert_eq!(
+            embed["fields"][0]["value"],
+            "1. Formular ausfüllen\n2. Du bekommst die Coaching-Rolle\n3. Ein Coach meldet sich bei dir"
+        );
+        assert_eq!(embed["fields"][1]["name"], "❓ Fragen nach dem Coaching?");
+        assert_eq!(
+            embed["fields"][1]["value"],
+            "Hau sie einfach in <#1426220702054355077> raus statt per DM an deinen Coach. Dann sehen alle die Antwort und andere mit dem gleichen Thema lesen direkt mit."
+        );
+
+        let components = panel_components();
+        let button = &components[0]["components"][0];
+        assert_eq!(button["style"], 5);
+        assert_eq!(button["label"], COACHING_WEBSITE_BUTTON_LABEL);
+        assert_eq!(button["url"], COACHING_WEBSITE_URL);
     }
 }

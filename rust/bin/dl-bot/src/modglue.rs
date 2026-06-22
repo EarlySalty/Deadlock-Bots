@@ -1529,6 +1529,33 @@ pub struct CoachingReqGlue {
 
 #[async_trait::async_trait]
 impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
+    async fn post_panel(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_panel(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
     async fn coach_member_ids(&self, guild_id: u64) -> Vec<u64> {
         use dl_community::coaching_requests::{COACH_ROLE_ID, OWNER_EXCLUDE_ID};
         self.adapter

@@ -271,11 +271,11 @@ async fn main() -> anyhow::Result<()> {
         },
     )));
 
-    // Coaching-Anfragen (7): Panel/Claim/Release/Cancel + AI-Analyse-Loops
-    // Website-Client einmal bauen und teilen: CoachingRequests spiegelt damit
-    // jeden Anfrage-/Session-Zustand (Python `_mirror_to_website`), die
-    // Plattform-Brücke (CoachingSync) nutzt denselben Client für Roster-Sync
-    // und Termin-DMs. None = kein interner Token → Mirror/Sync inaktiv.
+    // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere
+    // Discord-Anfrageaufnahme samt KI-Analyse/Rollen-/Stale-Recovery bleibt im
+    // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
+    // Der Website-Client wird weiter für CoachingSync (Roster/Termin-DMs)
+    // geteilt. None = kein interner Token → Sync inaktiv.
     let coaching_website =
         dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
@@ -289,6 +289,7 @@ async fn main() -> anyhow::Result<()> {
         coaching_website.clone(),
     );
     dl_community::coaching_requests::register(&mut router, coaching_requests.clone());
+    coaching_requests.ensure_panel().await;
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
     let faq_docs_path = std::env::var("FAQ_DOCS_PATH").unwrap_or_else(|_| "docs".to_string());
@@ -618,7 +619,8 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        dl_community::coaching_requests::spawn(coaching_requests.clone(), &dispatcher);
+        // Kein Start von dl_community::coaching_requests::spawn(): Website-driven
+        // intake ersetzt Discord-seitige Analyse-/Rollen-/Stale-Flows (#17/#18).
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
