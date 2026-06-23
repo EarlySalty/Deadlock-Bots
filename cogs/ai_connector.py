@@ -563,15 +563,11 @@ class AIConnector(commands.Cog):
             "model": model,
         }
 
-        if provider != "minimax":
-            meta["error"] = "multimodal_not_supported"
-            return None, meta
-
         valid_prefixes = ("http://", "https://", "data:image/")
         valid_images = [image for image in images if image.startswith(valid_prefixes)]
         invalid_count = len(images) - len(valid_images)
         if invalid_count:
-            log.debug("MiniMax multimodal: %s ungueltige Bild-URLs uebersprungen.", invalid_count)
+            log.debug("%s multimodal: %s ungueltige Bild-URLs uebersprungen.", provider, invalid_count)
 
         dropped_images = valid_images[4:]
         if dropped_images:
@@ -579,6 +575,28 @@ class AIConnector(commands.Cog):
         selected_images = valid_images[:4]
 
         mot = max_output_tokens or DEFAULT_MAX_OUTPUT_TOKENS
+
+        if provider == "openai":
+            resolved_model = model or DEFAULT_OPENAI_MODEL
+            text, usage = await self._generate_openai_multimodal(
+                prompt=prompt,
+                images=selected_images,
+                system_prompt=system_prompt,
+                model=resolved_model,
+                max_output_tokens=mot,
+                temperature=temperature,
+            )
+            meta["model"] = resolved_model
+            if usage:
+                meta["usage"] = usage
+            if text is None:
+                meta["error"] = "openai_unavailable"
+            return text, meta
+
+        if provider != "minimax":
+            meta["error"] = "multimodal_not_supported"
+            return None, meta
+
         resolved_model = model or DEFAULT_MINIMAX_MODEL
         text = await self._generate_minimax_multimodal(
             prompt=prompt,
@@ -667,50 +685,165 @@ class AIConnector(commands.Cog):
         if response is None:
             return None, None
 
-        # Extract text
-        text = ""
+        text = self._extract_openai_text(response)
+        usage = self._extract_openai_usage(response)
+        return text or None, usage
+
+    async def _generate_openai_multimodal(
+        self,
+        *,
+        prompt: str,
+        images: list[str],
+        system_prompt: str | None,
+        model: str,
+        max_output_tokens: int,
+        temperature: float,
+    ) -> tuple[str | None, dict[str, Any] | None]:
+        client = self._get_openai_client()
+        if not client:
+            return None, None
+
+        response_content: list[dict[str, Any]] = [{"type": "input_text", "text": prompt}]
+        response_content.extend(
+            {"type": "input_image", "image_url": image}
+            for image in images
+        )
+
+        def _call_responses():
+            try:
+                return client.responses.create(
+                    model=model,
+                    input=[{"role": "user", "content": response_content}],
+                    instructions=system_prompt,
+                    max_output_tokens=max_output_tokens,
+                    temperature=temperature,
+                )
+            except TypeError as exc:
+                try:
+                    return client.responses.create(
+                        model=model,
+                        input=[{"role": "user", "content": response_content}],
+                        instructions=system_prompt,
+                        max_tokens=max_output_tokens,
+                        temperature=temperature,
+                    )
+                except Exception as fallback_exc:
+                    log.debug(
+                        "OpenAI Multimodal Responses Fallback fehlgeschlagen: %s / %s",
+                        exc,
+                        fallback_exc,
+                    )
+                    return None
+            except Exception as exc:
+                log.debug("OpenAI Multimodal Responses Request fehlgeschlagen: %s", exc)
+                return None
+
+        response = await asyncio.to_thread(_call_responses)
+
+        if response is None and hasattr(client, "chat"):
+            chat_content: list[dict[str, Any]] = [{"type": "text", "text": prompt}]
+            chat_content.extend(
+                {"type": "image_url", "image_url": {"url": image}}
+                for image in images
+            )
+            messages: list[dict[str, Any]] = []
+            if system_prompt:
+                messages.append({"role": "system", "content": system_prompt})
+            messages.append({"role": "user", "content": chat_content})
+
+            def _call_chat():
+                try:
+                    return client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        max_tokens=max_output_tokens,
+                        temperature=temperature,
+                    )
+                except TypeError as exc:
+                    try:
+                        return client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            max_completion_tokens=max_output_tokens,
+                            temperature=temperature,
+                        )
+                    except Exception as fallback_exc:
+                        log.debug(
+                            "OpenAI Multimodal Chat Fallback fehlgeschlagen: %s / %s",
+                            exc,
+                            fallback_exc,
+                        )
+                        return None
+                except Exception as exc:
+                    log.debug("OpenAI Multimodal Chat Request fehlgeschlagen: %s", exc)
+                    return None
+
+            response = await asyncio.to_thread(_call_chat)
+
+        if response is None:
+            return None, None
+
+        text = self._extract_openai_text(response)
+        usage = self._extract_openai_usage(response)
+        return text or None, usage
+
+    @staticmethod
+    def _openai_field(obj: Any, name: str, default: Any = None) -> Any:
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @classmethod
+    def _extract_openai_text(cls, response: Any) -> str:
         try:
-            output_text = getattr(response, "output_text", None)
-            if not output_text and isinstance(response, dict):
-                output_text = response.get("output_text")
+            output_text = cls._openai_field(response, "output_text")
             if output_text:
-                text = str(output_text).strip()
-            else:
-                out = getattr(response, "output", None) or getattr(response, "outputs", None)
-                if out is None and isinstance(response, dict):
-                    out = response.get("output") or response.get("outputs")
-                fragments = []
-                for item in out or []:
-                    item_type = getattr(item, "type", None)
-                    if item_type is None and isinstance(item, dict):
-                        item_type = item.get("type")
-                    if item_type != "message":
-                        continue
-                    item_content = getattr(item, "content", None)
-                    if item_content is None and isinstance(item, dict):
-                        item_content = item.get("content")
-                    for part in item_content or []:
-                        txt = getattr(part, "text", None)
-                        if txt is None and isinstance(part, dict):
-                            txt = part.get("text")
+                return str(output_text).strip()
+
+            fragments: list[str] = []
+            out = cls._openai_field(response, "output") or cls._openai_field(response, "outputs")
+            for item in out or []:
+                item_type = cls._openai_field(item, "type")
+                if item_type != "message":
+                    continue
+                for part in cls._openai_field(item, "content") or []:
+                    txt = cls._openai_field(part, "text")
+                    if txt:
+                        fragments.append(str(txt))
+
+            choices = cls._openai_field(response, "choices")
+            for choice in choices or []:
+                message = cls._openai_field(choice, "message")
+                content = cls._openai_field(message, "content")
+                if isinstance(content, str):
+                    fragments.append(content)
+                else:
+                    for part in content or []:
+                        txt = cls._openai_field(part, "text")
                         if txt:
                             fragments.append(str(txt))
-                text = "".join(fragments).strip()
+
+            return "".join(fragments).strip()
         except Exception:
             log.exception("Antwort-Parsing fehlgeschlagen")
-            text = ""
+            return ""
 
-        usage_raw = getattr(response, "usage", None)
-        if usage_raw is None and isinstance(response, dict):
-            usage_raw = response.get("usage")
-        usage = None
-        if usage_raw:
-            usage = {
-                "input_tokens": getattr(usage_raw, "input_tokens", None),
-                "output_tokens": getattr(usage_raw, "output_tokens", None),
-                "total_tokens": getattr(usage_raw, "total_tokens", None),
-            }
-        return text or None, usage
+    @classmethod
+    def _extract_openai_usage(cls, response: Any) -> dict[str, Any] | None:
+        usage_raw = cls._openai_field(response, "usage")
+        if not usage_raw:
+            return None
+        return {
+            "input_tokens": (
+                cls._openai_field(usage_raw, "input_tokens")
+                or cls._openai_field(usage_raw, "prompt_tokens")
+            ),
+            "output_tokens": (
+                cls._openai_field(usage_raw, "output_tokens")
+                or cls._openai_field(usage_raw, "completion_tokens")
+            ),
+            "total_tokens": cls._openai_field(usage_raw, "total_tokens"),
+        }
 
     async def _generate_minimax(
         self,

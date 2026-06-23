@@ -1,3 +1,11 @@
+## #161 — Bild-Scam-Erkennung: treffsicheres Modell, ehrliche Mod-Meldung
+
+**Ausgangslage:** Die automatische Bild-Scam-Erkennung stufte normale Spielinhalte — Rang-Verläufe, Match-Statistiken, Server-Logos — fälschlich als Casino-/Glücksspiel-Betrug ein und verhängte dadurch unberechtigte Timeouts gegen langjährige Mitglieder. Zusätzlich zeigte die Meldung an das Mod-Team weder das beanstandete Bild noch verlässlich an, ob die Nachricht wirklich gelöscht wurde — der Hinweis „gelöscht" stand fest im Text, auch wenn das Löschen fehlschlug.
+
+**Was wurde geändert:** Die Bildprüfung läuft jetzt über ein deutlich treffsichereres KI-Modell, das an realen Server-Bildern gegengeprüft wurde. Der Auslöser für den Mehrkanal-Verdacht reagiert nur noch auf Bilder, die in kurzem Abstand (wenige Minuten) über mehrere Kanäle auftauchen, statt auf alles innerhalb einer Stunde. Die Mod-Meldung hängt das beanstandete Bild als Beweis an und nennt den tatsächlichen Stand von Löschung und Timeout.
+
+**Wie es jetzt läuft:** Normale Gaming-Screenshots lösen keinen Fehlalarm mehr aus; das schnelle Streuen identischer Scam-Bilder über mehrere Kanäle wird weiterhin erkannt. Das Mod-Team sieht das Beweisbild und eine ehrliche Statusangabe und kann die Strafe gezielt prüfen. Die Strafzumessung bleibt unverändert (Timeout für etablierte, Bann für neue Accounts).
+
 ## #160 — AI-Moderation: Kategorie „Racism" abgeschaltet
 
 **Ausgangslage:** Die automatische Inhaltsprüfung schlug für die Kategorie Rassismus auch bei harmlosen oder grenzwertigen Kurznachrichten an und erzeugte dadurch übermäßig viele Fehlmeldungen, die den Moderations-Review unnötig fluteten.

@@ -1,10 +1,8 @@
 import asyncio
-import contextlib
+import base64
 import json
 import logging
-import os
 import re
-import tempfile
 from collections import defaultdict, deque
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -27,14 +25,22 @@ SCAM_DETECTION_SYSTEM_PROMPT = (
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
 )
 
-# Prompt fuer den MiniMax-Vision-Check via mmx-CLI (`mmx vision describe`).
-# Einzelner Prompt (kein separater System-Prompt im CLI), liefert dasselbe JSON-Schema.
+# Prompt fuer den Bild-Vision-Check. Der Wortlaut ist validiert; nicht aendern.
 VISION_SCAM_PROMPT = (
     "You are a scam detector for a Discord gaming server. Look at the image. "
     "Decide if it shows financial/crypto/casino/gambling/giveaway scam content "
     "(fake withdrawals, betting bonuses, promo codes, fake celebrity crypto promos, "
     "trading/earnings proof). Reply ONLY with valid JSON, no other text: "
     '{"is_scam": true|false, "confidence": 0.0-1.0, "reason": "max one sentence"}'
+)
+TAKEOVER_AI_FIELD_NAME = "KI-Einschätzung"
+BURST_IMAGE_CHECK_FIELD_NAME = "Bild-Check (KI)"
+SCAM_PROPOSAL_FOOTER_DELETE_OK = (
+    "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben."
+)
+SCAM_PROPOSAL_FOOTER_DELETE_FAILED = (
+    "⚠️ Nachricht konnte NICHT gelöscht werden — bitte manuell entfernen. "
+    "Account möglicherweise gehackt — Timeout-Status siehe Feld oben."
 )
 
 _SCAM_JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -83,14 +89,16 @@ SECURITY_CONFIG: dict[str, object] = {
     "ESTABLISHED_ACCOUNT_MIN_AGE_HOURS": 720,  # 30 Tage
     "ESTABLISHED_MIN_JOIN_HOURS": 24,
     # AI-Scam-Erkennung fuer Einzelnachrichten mit Keyword-Treffer.
-    # Alle AI-Checks laufen ueber MiniMax (OpenAI ist auf diesem Bot nicht konfiguriert).
     "AI_SCAM_PROVIDER": "minimax",
     "AI_SCAM_CONFIDENCE": 0.78,
-    # AI-Bild-Scam-Erkennung (Multimodal, nur MiniMax unterstuetzt).
-    "AI_IMAGE_PROVIDER": "minimax",
+    # AI-Bild-Scam-Erkennung (Multimodal).
+    "AI_IMAGE_PROVIDER": "openai",
+    "AI_IMAGE_MODEL": "gpt-5.4-nano",
     "AI_IMAGE_CONFIDENCE": 0.75,
     # Mindestanzahl Channels mit Bildern um Bild-Scam-Check auszuloesen.
     "IMAGE_CHANNEL_THRESHOLD": 2,
+    # Kurzes Zeitfenster fuer Bild-Mehrkanal-Gate; legitime Einzelposts ueber 1h zaehlen nicht.
+    "IMAGE_MULTICHANNEL_WINDOW_SECONDS": 300,
     # --- Account-Takeover-Schnellpfad (deterministisch, OHNE AI) ---
     # Gekaperter Account streut in Sekunden Bilder ueber mehrere Channels.
     # Dieser Pfad greift fuer ALLE Accounts (auch etablierte) und braucht kein AI-Urteil.
@@ -99,14 +107,11 @@ SECURITY_CONFIG: dict[str, object] = {
     "TAKEOVER_WINDOW_SECONDS": 30,
     # Mindestanzahl VERSCHIEDENER Channels mit Bild im Fenster (>=2 Bilder in >=2 Channels).
     "TAKEOVER_IMAGE_CHANNELS": 2,
-    # MiniMax als VERSTAERKER: schickt die Bilder zusaetzlich durch die Bild-Scam-Pruefung
+    # AI als VERSTAERKER: schickt die Bilder zusaetzlich durch die Bild-Scam-Pruefung
     # und haengt das Urteil an den Mod-Alarm. Reines Label — die Quarantaene laeuft auch
     # ohne/gegen das AI-Urteil. Timeout kappt einen haengenden Call.
     "TAKEOVER_AI_LABEL": True,
     "TAKEOVER_AI_TIMEOUT_SECONDS": 45,
-    # Pfad zur MiniMax-CLI fuer den Vision-Check (`mmx vision describe`).
-    # Bild-Verstehen laeuft in diesem Pfad NUR ueber diese CLI (einmal `mmx auth login`).
-    "VISION_CLI_BIN": "/home/naniadm/.local/bin/mmx",
     # Kurze oeffentliche Meldung in den betroffenen Channels nach Scam-Action.
     "POST_PUBLIC_NOTICE": True,
     # Dauer des Timeouts in Minuten (Default: 24h).
@@ -335,11 +340,15 @@ class SecurityGuard(commands.Cog):
         self.ai_scam_confidence = max(
             0.5, min(1.0, float(cfg.get("AI_SCAM_CONFIDENCE", 0.78) or 0.78))
         )
-        self.ai_image_provider = str(cfg.get("AI_IMAGE_PROVIDER", "minimax") or "minimax").lower()
+        self.ai_image_provider = str(cfg.get("AI_IMAGE_PROVIDER", "openai") or "openai").lower()
+        self.ai_image_model = str(cfg.get("AI_IMAGE_MODEL", "gpt-5.4-nano") or "gpt-5.4-nano")
         self.ai_image_confidence = max(
             0.5, min(1.0, float(cfg.get("AI_IMAGE_CONFIDENCE", 0.75) or 0.75))
         )
         self.image_channel_threshold = max(2, int(cfg.get("IMAGE_CHANNEL_THRESHOLD", 2) or 2))
+        self.image_multichannel_window_seconds = max(
+            1, int(cfg.get("IMAGE_MULTICHANNEL_WINDOW_SECONDS", 300) or 300)
+        )
         self.takeover_enabled = bool(cfg.get("TAKEOVER_ENABLED", True))
         self.takeover_window_seconds = max(5, int(cfg.get("TAKEOVER_WINDOW_SECONDS", 30) or 30))
         self.takeover_image_channels = max(2, int(cfg.get("TAKEOVER_IMAGE_CHANNELS", 2) or 2))
@@ -347,7 +356,6 @@ class SecurityGuard(commands.Cog):
         self.takeover_ai_timeout = max(
             2, int(cfg.get("TAKEOVER_AI_TIMEOUT_SECONDS", 8) or 8)
         )
-        self.vision_bin = str(cfg.get("VISION_CLI_BIN", "/home/naniadm/.local/bin/mmx"))
         self.timeout_minutes = max(5, int(cfg.get("TIMEOUT_MINUTES", 1440) or 1440))
         self.proposal_timeout_minutes = max(
             5, int(cfg.get("PROPOSAL_TIMEOUT_MINUTES", 60) or 60)
@@ -537,7 +545,7 @@ class SecurityGuard(commands.Cog):
 
         # Pfad 2: Bilder in mehreren Channels → AI-Bild-Scam-Check (alle Accounts)
         if (
-            self._is_image_multi_channel(recent_msgs)
+            self._is_image_multi_channel(recent_msgs, now)
             and member.id not in self._active_cases
         ):
             self._active_cases.add(member.id)
@@ -640,18 +648,24 @@ class SecurityGuard(commands.Cog):
         reason = str(data.get("reason", ""))[:300]
         return is_scam, confidence, reason
 
-    def _is_image_multi_channel(self, msgs: list[RecentMessage]) -> bool:
-        channels_with_images = {m.channel_id for m in msgs if m.attachments}
+    def _is_image_multi_channel(
+        self,
+        msgs: list[RecentMessage],
+        now: datetime | None = None,
+    ) -> bool:
+        image_msgs = [m for m in msgs if m.attachments]
+        if not image_msgs:
+            return False
+        anchor = now or max(m.created_at for m in image_msgs)
+        cutoff = anchor - timedelta(seconds=self.image_multichannel_window_seconds)
+        channels_with_images = {
+            m.channel_id for m in image_msgs
+            if m.created_at >= cutoff
+        }
         return len(channels_with_images) >= self.image_channel_threshold
 
     async def _ai_check_image_scam(self, msgs: list[RecentMessage]) -> tuple[bool, float, str]:
-        """Bild-Scam-Pruefung ueber die MiniMax-CLI (`mmx vision describe`).
-
-        M2.7 ist text-only und kann Bilder NICHT verarbeiten — der fruehere
-        Multimodal-Chat-Call lieferte deshalb immer "No images provided". Vision
-        laeuft jetzt ueber das echte MiniMax-VLM via CLI. Geprueft wird ein
-        repraesentatives Bild aus dem Burst (reicht fuer das Scam-Urteil).
-        """
+        """Bild-Scam-Pruefung ueber AIConnector/OpenAI-Vision."""
         target: discord.Attachment | None = None
         for msg in msgs:
             for att in msg.attachments:
@@ -669,83 +683,61 @@ class SecurityGuard(commands.Cog):
             log.warning("Bild-Download fuer Vision-Check fehlgeschlagen: %s", exc)
             return False, 0.0, "download_error"
 
-        return await self._mmx_vision_scam(data_bytes, target.filename or "image.jpg")
+        return await self._openai_vision_scam(
+            data_bytes,
+            target.filename or "image.jpg",
+            target.content_type,
+        )
 
-    async def _mmx_vision_scam(self, image_bytes: bytes, filename: str) -> tuple[bool, float, str]:
-        """Schreibt das Bild in eine Temp-Datei und laesst es von `mmx vision describe`
-        bewerten. mmx ist persistent eingeloggt (`mmx auth login`) — kein Key im Bot.
-        Antwort-Envelope: {"content": "```json {...}```", "base_resp": {"status_code": 0}}.
-        """
-        suffix = os.path.splitext(filename)[1].lower()
-        if suffix not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
-            suffix = ".jpg"
+    @staticmethod
+    def _image_media_type(filename: str, content_type: str | None = None) -> str:
+        if content_type and content_type.lower().startswith("image/"):
+            return content_type.lower().split(";", 1)[0]
+        lower = (filename or "").lower()
+        if lower.endswith(".png"):
+            return "image/png"
+        if lower.endswith(".gif"):
+            return "image/gif"
+        if lower.endswith(".webp"):
+            return "image/webp"
+        return "image/jpeg"
 
-        tmp_path: str | None = None
-        proc: asyncio.subprocess.Process | None = None
-        out = b""
-        err = b""
+    async def _openai_vision_scam(
+        self,
+        image_bytes: bytes,
+        filename: str,
+        content_type: str | None = None,
+    ) -> tuple[bool, float, str]:
+        ai = self.bot.get_cog("AIConnector")
+        if ai is None or not hasattr(ai, "generate_multimodal"):
+            return False, 0.0, "ai_unavailable"
+
+        media_type = self._image_media_type(filename, content_type)
+        image_data = base64.b64encode(image_bytes).decode("ascii")
+        image_uri = f"data:{media_type};base64,{image_data}"
         try:
-            fd, tmp_path = tempfile.mkstemp(prefix="sg_vision_", suffix=suffix)
-            with os.fdopen(fd, "wb") as fh:
-                fh.write(image_bytes)
-
-            cmd = [
-                self.vision_bin, "vision", "describe",
-                "--image", tmp_path,
-                "--prompt", VISION_SCAM_PROMPT,
-                "--output", "json",
-                "--quiet", "--non-interactive",
-                "--timeout", str(self.takeover_ai_timeout),
-            ]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *cmd,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-            except FileNotFoundError:
-                log.warning("mmx-CLI nicht gefunden unter %s", self.vision_bin)
-                return False, 0.0, "mmx_missing"
-
-            try:
-                out, err = await asyncio.wait_for(
-                    proc.communicate(), timeout=self.takeover_ai_timeout + 5
-                )
-            except TimeoutError:
-                with contextlib.suppress(ProcessLookupError):
-                    proc.kill()
-                return False, 0.0, "timeout"
-        finally:
-            if tmp_path and os.path.exists(tmp_path):
-                with contextlib.suppress(OSError):
-                    os.remove(tmp_path)
-
-        if proc.returncode != 0:
-            log.warning(
-                "mmx vision rc=%s: %s",
-                proc.returncode,
-                err.decode("utf-8", "replace")[:200],
+            text, _ = await ai.generate_multimodal(
+                provider=self.ai_image_provider,
+                model=self.ai_image_model,
+                prompt=VISION_SCAM_PROMPT,
+                images=[image_uri],
+                max_output_tokens=400,
+                temperature=0,
             )
-            return False, 0.0, "mmx_error"
+        except Exception as exc:
+            log.warning("OpenAI Vision-Check fehlgeschlagen: %s", exc)
+            return False, 0.0, "ai_error"
 
-        try:
-            envelope = json.loads(out.decode("utf-8", "replace"))
-        except json.JSONDecodeError:
-            return False, 0.0, "parse_error"
-
-        content = ""
-        if isinstance(envelope, dict):
-            base = envelope.get("base_resp") or {}
-            if base.get("status_code") not in (0, None):
-                log.warning("mmx vision API-Fehler: %s", base.get("status_msg"))
-                return False, 0.0, "api_error"
-            content = str(envelope.get("content") or "")
-
-        data = _parse_scam_json(content)
+        if not text:
+            return False, 0.0, "no_response"
+        data = _parse_scam_json(text)
         if data is None:
             return False, 0.0, "parse_error"
         is_scam = bool(data.get("is_scam", False))
-        confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+        try:
+            confidence = max(0.0, min(1.0, float(data.get("confidence", 0.0))))
+        except (TypeError, ValueError):
+            return False, 0.0, "parse_error"
         reason = str(data.get("reason", ""))[:300]
         return is_scam, confidence, reason
 
@@ -884,7 +876,7 @@ class SecurityGuard(commands.Cog):
 
         # 1. Beweise laden, SOLANGE die Nachrichten existieren (CDN-URLs sterben nach dem Delete).
         forwarded_files = await self._collect_attachments(burst_msgs)
-        # 2. Alert sofort posten — MiniMax-Label kommt asynchron nach (Embed-Edit).
+        # 2. Alert sofort posten — AI-Label kommt asynchron nach (Embed-Edit).
         alert_msg = await self._post_takeover_alert(
             member, burst_msgs, meta, case_id, forwarded_files, ai_label="⏳ wird ermittelt…"
         )
@@ -951,7 +943,7 @@ class SecurityGuard(commands.Cog):
             inline=False,
         )
         if ai_label:
-            embed.add_field(name="MiniMax-Einschätzung", value=ai_label[:300], inline=False)
+            embed.add_field(name=TAKEOVER_AI_FIELD_NAME, value=ai_label[:300], inline=False)
         embed.add_field(name="Nachrichten", value="\n".join(snippets[:8]) or "(keine)", inline=False)
         embed.set_footer(
             text="Bilder als Anhang gesichert. Prüfen: Ban (gehackter Account dauerhaft raus) "
@@ -995,22 +987,21 @@ class SecurityGuard(commands.Cog):
             return False
 
     async def _takeover_ai_label(self, burst_msgs: list[RecentMessage]) -> str:
-        """MiniMax-Bild-Scan als reines Label (kein Gate). Timeout-gekappt.
+        """Bild-Scan als reines AI-Label (kein Gate). Timeout-gekappt.
 
         Das Urteil aendert die Quarantaene NICHT — es liefert den Mods nur Kontext,
-        ob MiniMax die Bilder ebenfalls als Scam einschaetzt.
+        ob die AI die Bilder ebenfalls als Scam einschaetzt.
         """
         if not self.takeover_ai_label:
             return ""
         try:
             is_scam, conf, reason = await self._ai_check_image_scam(burst_msgs)
         except Exception as exc:  # noqa: BLE001 — Label ist best-effort, darf nie den Pfad brechen.
-            log.debug("Takeover MiniMax-Label fehlgeschlagen: %s", exc)
+            log.debug("Takeover AI-Label fehlgeschlagen: %s", exc)
             return "nicht verfügbar"
         # Interne Fehler-Codes des Vision-Checks lesbar machen (kein echtes Urteil).
         error_codes = {
-            "download_error", "mmx_missing", "mmx_error",
-            "parse_error", "api_error", "ai_unavailable",
+            "download_error", "parse_error", "ai_unavailable", "ai_error", "no_response",
         }
         if reason == "no_images":
             return ""
@@ -1028,7 +1019,7 @@ class SecurityGuard(commands.Cog):
     ) -> None:
         """AI-Label nachtraeglich ins Takeover-Embed eintragen (laeuft als Background-Task).
 
-        Fetcht die Nachricht frisch, sucht das Feld 'MiniMax-Einschaetzung' und ersetzt
+        Fetcht die Nachricht frisch, sucht das AI-Label-Feld und ersetzt
         den Platzhalter. Schlaegt der Edit fehl (Nachricht geloescht, kein Zugriff),
         wird das still ignoriert.
         """
@@ -1043,7 +1034,7 @@ class SecurityGuard(commands.Cog):
                 return
             embed = msg.embeds[0].copy()
             for i, field in enumerate(embed.fields):
-                if field.name == "MiniMax-Einschätzung":
+                if field.name == TAKEOVER_AI_FIELD_NAME:
                     embed.set_field_at(i, name=field.name, value=label[:300], inline=False)
                     await msg.edit(embed=embed)
                     return
@@ -1125,10 +1116,15 @@ class SecurityGuard(commands.Cog):
             [single_msg],
         )
 
+        # Beweise sichern, BEVOR geloescht wird (CDN-URLs werden sonst ungueltig).
+        forwarded_files = await self._collect_attachments([single_msg])
+
         # Nachricht löschen — Message.delete() kennt in discord.py 2.7 kein
         # reason-Argument; der Case-Kontext steht bereits im Moderations-Log.
+        delete_ok = False
         try:
             await message.delete()
+            delete_ok = True
         except discord.HTTPException:
             pass  # Message delete failure is non-critical once moderation handling continues.
 
@@ -1202,14 +1198,16 @@ class SecurityGuard(commands.Cog):
             value=f"```{snippet}```" if snippet else "(leer)",
             inline=False,
         )
-        embed.set_footer(
-            text="Nachricht gelöscht + 24h Timeout gesetzt. "
-                 "Account möglicherweise gehackt — User wurde per DM informiert."
+        footer_text = (
+            SCAM_PROPOSAL_FOOTER_DELETE_OK
+            if delete_ok
+            else SCAM_PROPOSAL_FOOTER_DELETE_FAILED
         )
+        embed.set_footer(text=footer_text)
 
         view = ScamBanView(self, member.guild.id, member.id, case_id)
         try:
-            await mod_channel.send(embed=embed, view=view)
+            await mod_channel.send(embed=embed, view=view, files=forwarded_files or None)
         except discord.HTTPException as exc:
             log.warning("Konnte Scam-Info nicht posten fuer Case %s: %s", case_id, exc)
 
@@ -1302,7 +1300,9 @@ class SecurityGuard(commands.Cog):
             name="Text-Check (MiniMax)", value=f"{txt_conf:.0%} — {txt_reason or '—'}", inline=False
         )
         embed.add_field(
-            name="Bild-Check (MiniMax)", value=f"{img_conf:.0%} — {img_reason or '—'}", inline=False
+            name=BURST_IMAGE_CHECK_FIELD_NAME,
+            value=f"{img_conf:.0%} — {img_reason or '—'}",
+            inline=False,
         )
         embed.add_field(
             name="Nachrichten",
