@@ -31,7 +31,7 @@ requests==2.34.2
 openai==2.43.0
 
 # HTML parsing
-beautifulsoup4==4.14.3
+beautifulsoup4==4.15.0
 
 # Crypto / auth
 cryptography==48.0.0
