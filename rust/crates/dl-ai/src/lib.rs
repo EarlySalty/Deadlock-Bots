@@ -7,19 +7,23 @@
 //! - **Standard** (`MINIMAX_API_KEY`/`MINMAX`): Bearer +
 //!   `POST /text/chatcompletion_v2` (choices/message/content).
 //!
-//! Bewusst NICHT portiert: die OpenAI-/Gemini-Pfade — auf diesem System ist
-//! nur MiniMax konfiguriert; alle Konsumenten (Matcher, LFG, Moderation)
-//! nutzen Provider `minimax`.
+//! OpenAI ist für den SecurityGuard-Bildpfad als separater Vision-Client
+//! verdrahtet; Text bleibt MiniMax.
 
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::{engine::general_purpose, Engine as _};
+use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
+pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 800;
 const DEFAULT_BASE_URL: &str = "https://api.minimax.chat/v1";
 const DEFAULT_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
 pub struct GenerateRequest {
@@ -165,6 +169,275 @@ impl MiniMaxClient {
             token_plan,
             model: model.into(),
         })
+    }
+}
+
+pub struct OpenAiClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl OpenAiClient {
+    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let api_key = get("OPENAI_API_KEY")?;
+        let base_url = get("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+        let model = get("AI_IMAGE_MODEL")
+            .or_else(|| get("OPENAI_MODEL"))
+            .or_else(|| get("AI_OPENAI_MODEL"))
+            .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
+        tracing::info!(%base_url, %model, "OpenAI-Vision-Client initialisiert");
+        Some(Self::new(base_url, api_key, model))
+    }
+
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+        })
+    }
+
+    async fn image_data_uri(&self, image_url: &str) -> Option<String> {
+        if image_url.starts_with("data:image/") {
+            return Some(image_url.to_string());
+        }
+        if !(image_url.starts_with("http://") || image_url.starts_with("https://")) {
+            return None;
+        }
+        let response = match self.http.get(image_url).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "OpenAI-Vision: Bilddownload fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "OpenAI-Vision: Bilddownload-HTTP-Fehler");
+            return None;
+        }
+        if response
+            .content_length()
+            .map(|len| len > MAX_OPENAI_IMAGE_BYTES)
+            .unwrap_or(false)
+        {
+            tracing::warn!("OpenAI-Vision: Bild zu gross, uebersprungen");
+            return None;
+        }
+        let media_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(Self::clean_image_media_type)
+            .unwrap_or_else(|| Self::infer_image_media_type(image_url));
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(%err, "OpenAI-Vision: Bildbytes nicht lesbar");
+                return None;
+            }
+        };
+        if bytes.len() as u64 > MAX_OPENAI_IMAGE_BYTES {
+            tracing::warn!("OpenAI-Vision: Bild zu gross, uebersprungen");
+            return None;
+        }
+        let encoded = general_purpose::STANDARD.encode(bytes);
+        Some(format!("data:{media_type};base64,{encoded}"))
+    }
+
+    fn clean_image_media_type(raw: &str) -> Option<String> {
+        let media_type = raw.split(';').next()?.trim().to_lowercase();
+        if media_type.starts_with("image/") {
+            Some(media_type)
+        } else {
+            None
+        }
+    }
+
+    fn infer_image_media_type(image_url: &str) -> String {
+        let lower = image_url
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(image_url)
+            .to_lowercase();
+        if lower.ends_with(".png") {
+            "image/png".to_string()
+        } else if lower.ends_with(".gif") {
+            "image/gif".to_string()
+        } else if lower.ends_with(".webp") {
+            "image/webp".to_string()
+        } else {
+            "image/jpeg".to_string()
+        }
+    }
+
+    fn extract_openai_text(data: &Value) -> Option<String> {
+        if let Some(text) = data.get("output_text").and_then(Value::as_str) {
+            let text = text.trim();
+            if !text.is_empty() {
+                return Some(text.to_string());
+            }
+        }
+
+        let mut fragments = Vec::new();
+        if let Some(items) = data
+            .get("output")
+            .or_else(|| data.get("outputs"))
+            .and_then(Value::as_array)
+        {
+            for item in items {
+                if item.get("type").and_then(Value::as_str) != Some("message") {
+                    continue;
+                }
+                if let Some(parts) = item.get("content").and_then(Value::as_array) {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            fragments.push(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some(choices) = data.get("choices").and_then(Value::as_array) {
+            for choice in choices {
+                let Some(content) = choice.get("message").and_then(|m| m.get("content")) else {
+                    continue;
+                };
+                if let Some(text) = content.as_str() {
+                    fragments.push(text);
+                    continue;
+                }
+                if let Some(parts) = content.as_array() {
+                    for part in parts {
+                        if let Some(text) = part.get("text").and_then(Value::as_str) {
+                            fragments.push(text);
+                        }
+                    }
+                }
+            }
+        }
+
+        let text = fragments.concat().trim().to_string();
+        if text.is_empty() {
+            None
+        } else {
+            Some(text)
+        }
+    }
+
+    fn normalize_scam_json(text: &str) -> Option<String> {
+        let cleaned = strip_think(text);
+        let (Some(open), Some(close)) = (cleaned.find('{'), cleaned.rfind('}')) else {
+            return None;
+        };
+        if close <= open {
+            return None;
+        }
+        let Ok(payload) = serde_json::from_str::<Value>(&cleaned[open..=close]) else {
+            return None;
+        };
+        if !payload.is_object() {
+            return None;
+        }
+        let is_scam = payload
+            .get("is_scam")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let confidence = payload
+            .get("confidence")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0)
+            .clamp(0.0, 1.0);
+        let reason = payload
+            .get("reason")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .chars()
+            .take(300)
+            .collect::<String>();
+        Some(json!({
+            "is_scam": is_scam,
+            "confidence": confidence,
+            "reason": reason,
+        })
+        .to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl VisionGenerator for OpenAiClient {
+    async fn generate_multimodal(&self, request: GenerateMultimodalRequest) -> Option<String> {
+        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let images: Vec<String> = request
+            .image_urls
+            .iter()
+            .filter(|url| VALID_IMAGE_PREFIXES.iter().any(|p| url.starts_with(p)))
+            .take(MAX_MULTIMODAL_IMAGES)
+            .cloned()
+            .collect();
+
+        let mut content = vec![json!({ "type": "text", "text": request.prompt })];
+        for image_url in images {
+            if let Some(data_uri) = self.image_data_uri(&image_url).await {
+                content.push(json!({
+                    "type": "image_url",
+                    "image_url": { "url": data_uri },
+                }));
+            }
+        }
+        if content.len() == 1 {
+            return None;
+        }
+
+        let mut messages = Vec::new();
+        if let Some(system) = request.system_prompt {
+            messages.push(json!({ "role": "system", "content": system }));
+        }
+        messages.push(json!({ "role": "user", "content": content }));
+
+        let response = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&json!({
+                "model": model,
+                "messages": messages,
+                "max_completion_tokens": max_tokens,
+            }))
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "OpenAI-Vision-Request fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "OpenAI-Vision-API-Fehler");
+            return None;
+        }
+        let data: Value = response.json().await.ok()?;
+        let text = Self::extract_openai_text(&data)?;
+        Some(Self::normalize_scam_json(&text).unwrap_or(text))
     }
 }
 
@@ -571,15 +844,26 @@ impl VisionGenerator for MiniMaxClient {
 
 /// `<think>…</think>`-Blöcke entfernen (MiniMax-M3-Eigenheit).
 pub fn strip_think(text: &str) -> String {
-    let lower = text.to_lowercase();
-    match (lower.find("<think>"), lower.find("</think>")) {
-        (Some(start), Some(end)) if end > start => {
-            format!("{}{}", &text[..start], &text[end + "</think>".len()..])
-                .trim()
-                .to_string()
-        }
-        _ => text.trim().to_string(),
+    fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
+        haystack
+            .as_bytes()
+            .windows(needle.len())
+            .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
     }
+
+    let mut rest = text;
+    let mut out = String::with_capacity(text.len());
+    while let Some(start) = find_ascii_case_insensitive(rest, "<think>") {
+        out.push_str(&rest[..start]);
+        let after_open = start + "<think>".len();
+        let Some(end_rel) = find_ascii_case_insensitive(&rest[after_open..], "</think>") else {
+            rest = "";
+            break;
+        };
+        rest = &rest[after_open + end_rel + "</think>".len()..];
+    }
+    out.push_str(rest);
+    out.trim().to_string()
 }
 
 // ── Matcher-Scoring (schließt die Phase-3c-Lücke) ──────────────────────────

@@ -189,6 +189,7 @@ async fn main() -> anyhow::Result<()> {
         }),
     );
     let guard_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
+    let openai_vision_client = dl_ai::OpenAiClient::from_env(|k| std::env::var(k).ok());
     let our_guild_id = env("OUR_GUILD_ID")
         .or_else(|| env("MAIN_GUILD_ID"))
         .and_then(|v| v.parse::<u64>().ok())
@@ -214,8 +215,9 @@ async fn main() -> anyhow::Result<()> {
         guard_client
             .clone()
             .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
-        // Derselbe Client liefert das best-effort Takeover-Bild-Label.
-        guard_client.map(|c| c as Arc<dyn dl_ai::VisionGenerator>),
+        openai_vision_client
+            .clone()
+            .map(|c| c as Arc<dyn dl_ai::VisionGenerator>),
         guard_glue,
         dl_moderation::guard::SecurityGuardConfig {
             escalation_contact_handle,
@@ -360,12 +362,13 @@ async fn main() -> anyhow::Result<()> {
 
     // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
     let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|client| {
-        // Derselbe Client bedient Text- und Vision-Pfad (Bild-only-Moderation).
-        let vision: Arc<dyn dl_ai::VisionGenerator> = client.clone();
+        let vision = openai_vision_client
+            .clone()
+            .map(|c| c as Arc<dyn dl_ai::VisionGenerator>);
         let moderator = dl_moderation::AiModerator::new(
             db.clone(),
             client as Arc<dyn dl_ai::TextGenerator>,
-            Some(vision),
+            vision,
             Arc::new(modglue::ModGlue {
                 adapter: adapter.clone(),
             }),

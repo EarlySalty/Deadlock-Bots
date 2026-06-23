@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::json;
@@ -10,6 +11,11 @@ use serenity::builder::GetMessages;
 use tokio::sync::{Mutex, RwLock};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
+const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
+    "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
+const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
+    "⚠️ Nachricht konnte NICHT gelöscht werden — bitte manuell entfernen. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
@@ -368,6 +374,30 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
+fn evidence_filename(url: &str) -> String {
+    let raw = url
+        .rsplit('/')
+        .next()
+        .and_then(|part| part.split(['?', '#']).next())
+        .filter(|part| !part.trim().is_empty())
+        .unwrap_or("evidence-image.jpg");
+    let sanitized: String = raw
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if sanitized.is_empty() {
+        "evidence-image.jpg".to_string()
+    } else {
+        sanitized
+    }
+}
+
 #[derive(Debug, Clone)]
 struct InviteCacheEntry {
     guild_id: u64,
@@ -528,6 +558,7 @@ mod tests {
 pub struct GuardGlue {
     pub adapter: Arc<DiscordAdapter>,
     invite_resolver: Arc<GuardInviteResolver>,
+    evidence_http: reqwest::Client,
 }
 
 impl GuardGlue {
@@ -539,6 +570,10 @@ impl GuardGlue {
         Self {
             adapter,
             invite_resolver: Arc::new(GuardInviteResolver::new(our_guild_id, fallback_codes)),
+            evidence_http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
@@ -717,11 +752,32 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         if !preview.is_empty() {
             fields.push(json!({ "name": "Nachrichten", "value": preview, "inline": false }));
         }
-        let embed = json!({
-            "title": title,
-            "color": color,
-            "fields": fields,
-        });
+        let footer = if matches!(action, dl_moderation::guard::GuardAction::Hijack)
+            && case.delete_attempted
+        {
+            let delete_ok = case.deleted_count >= case.messages.len() as i64;
+            Some(if delete_ok {
+                SCAM_PROPOSAL_FOOTER_DELETE_OK
+            } else {
+                SCAM_PROPOSAL_FOOTER_DELETE_FAILED
+            })
+        } else {
+            None
+        };
+        let embed = if let Some(footer) = footer {
+            json!({
+                "title": title,
+                "color": color,
+                "fields": fields,
+                "footer": { "text": footer },
+            })
+        } else {
+            json!({
+                "title": title,
+                "color": color,
+                "fields": fields,
+            })
+        };
         // Ban/Timeout-aufheben immer (Mod-Aktionen); „Entbannen" wie das
         // Original (`UnbanView`) nur, wenn tatsächlich gebannt wurde.
         let mut buttons = vec![
@@ -738,10 +794,25 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
-        let _ = self
+        let files = case
+            .evidence_images
+            .iter()
+            .map(|image| {
+                serenity::all::CreateAttachment::bytes(image.data.clone(), image.filename.clone())
+            })
+            .collect::<Vec<_>>();
+        if let Err(err) = self
             .adapter
-            .send_raw_public(dl_moderation::guard::MOD_CHANNEL_ID, &body)
-            .await;
+            .http
+            .send_message(
+                ChannelId::new(dl_moderation::guard::MOD_CHANNEL_ID),
+                files,
+                &body,
+            )
+            .await
+        {
+            tracing::warn!(%err, case_id = %case.case_id, "SecurityGuard: Mod-Alert konnte nicht gepostet werden");
+        }
     }
 
     async fn post_self_deleting_notice(
@@ -771,6 +842,43 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
 
     async fn resolve_invite_guild(&self, code: &str) -> Option<u64> {
         self.invite_resolver.resolve(&self.adapter.http, code).await
+    }
+
+    async fn fetch_evidence_image(&self, url: &str) -> Option<dl_moderation::guard::EvidenceImage> {
+        let response = match self.evidence_http.get(url).send().await {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "SecurityGuard: Beweisbild-Download fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "SecurityGuard: Beweisbild-HTTP-Fehler");
+            return None;
+        }
+        if response
+            .content_length()
+            .map(|len| len > MAX_EVIDENCE_IMAGE_BYTES)
+            .unwrap_or(false)
+        {
+            tracing::warn!("SecurityGuard: Beweisbild zu gross, uebersprungen");
+            return None;
+        }
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::warn!(%err, "SecurityGuard: Beweisbild nicht lesbar");
+                return None;
+            }
+        };
+        if bytes.len() as u64 > MAX_EVIDENCE_IMAGE_BYTES {
+            tracing::warn!("SecurityGuard: Beweisbild zu gross, uebersprungen");
+            return None;
+        }
+        Some(dl_moderation::guard::EvidenceImage {
+            filename: evidence_filename(url),
+            data: bytes.to_vec(),
+        })
     }
 }
 

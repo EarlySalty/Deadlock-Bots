@@ -1,3 +1,11 @@
+## #162 — Rust-Portierung zieht die Bild-Scam-Verbesserung nach
+
+**Ausgangslage:** Die in #161 ausgelieferte Verbesserung der Bild-Scam-Erkennung lag bislang nur in der aktiven Python-Fassung vor; die parallel gepflegte, noch nicht produktive Rust-Portierung kannte weiterhin nur den alten Bildprüf-Weg und das alte Verhalten.
+
+**Was wurde geändert:** Die Rust-Portierung erhielt einen eigenständigen OpenAI-Bildprüf-Client, das auf wenige Minuten verkürzte Zeitfenster für den Mehrkanal-Verdacht, das Anhängen des Beweisbilds an die Mod-Meldung und die ehrliche Status-Angabe zu Löschung und Timeout — verhaltensgleich zur Python-Fassung.
+
+**Wie es jetzt läuft:** Beide Codestände verhalten sich bei der Bild-Scam-Erkennung identisch. Für Nutzer ändert sich durch diesen Schritt nichts unmittelbar, da die Rust-Fassung nicht im Live-Betrieb ist; er hält die Portierung für eine spätere Umstellung deckungsgleich.
+
 ## #161 — Bild-Scam-Erkennung: treffsicheres Modell, ehrliche Mod-Meldung
 
 **Ausgangslage:** Die automatische Bild-Scam-Erkennung stufte normale Spielinhalte — Rang-Verläufe, Match-Statistiken, Server-Logos — fälschlich als Casino-/Glücksspiel-Betrug ein und verhängte dadurch unberechtigte Timeouts gegen langjährige Mitglieder. Zusätzlich zeigte die Meldung an das Mod-Team weder das beanstandete Bild noch verlässlich an, ob die Nachricht wirklich gelöscht wurde — der Hinweis „gelöscht" stand fest im Text, auch wenn das Löschen fehlschlug.

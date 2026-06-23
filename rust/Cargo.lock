@@ -321,6 +321,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "dl-bridges",
  "reqwest",
  "serde_json",
@@ -350,6 +351,7 @@ dependencies = [
  "dl-tournament",
  "dl-voice",
  "dl-webcore",
+ "reqwest",
  "rusqlite",
  "serde_json",
  "serenity",

@@ -12,6 +12,7 @@ serenity.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
+reqwest.workspace = true
 dl-core.workspace = true
 dl-community.workspace = true
 dl-db.workspace = true

@@ -40,11 +40,13 @@ pub const ESTABLISHED_MIN_JOIN_HOURS: i64 = NEW_MEMBER_MAX_JOIN_HOURS;
 pub const AI_SCAM_CONFIDENCE: f64 = 0.78;
 pub const AI_IMAGE_CONFIDENCE: f64 = 0.75;
 pub const IMAGE_CHANNEL_THRESHOLD: usize = 2;
+pub const IMAGE_MULTICHANNEL_WINDOW_SECONDS: i64 = 300;
 pub const TAKEOVER_WINDOW_SECONDS: i64 = 30;
 pub const TAKEOVER_IMAGE_CHANNELS: usize = 2;
 pub const TIMEOUT_MINUTES: i64 = 1440;
 pub const PROPOSAL_TIMEOUT_MINUTES: i64 = 60;
 pub const HISTORY_MAX: usize = 20;
+pub const EVIDENCE_IMAGE_LIMIT: usize = 4;
 /// Einspruch-Modal-Grenzen (Original: APPEAL_MIN_CHARS / APPEAL_MAX_CHARS).
 pub const APPEAL_MIN_CHARS: u16 = 4;
 pub const APPEAL_MAX_CHARS: u16 = 800;
@@ -98,6 +100,12 @@ pub struct RecentMsg {
     pub image_count: u32,
     /// URLs der Bild-Anhänge — für das Takeover-Vision-Label.
     pub image_urls: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct EvidenceImage {
+    pub filename: String,
+    pub data: Vec<u8>,
 }
 
 pub fn contains_suspicious_text(text: &str) -> bool {
@@ -228,11 +236,13 @@ pub fn should_trigger(msgs: &[RecentMsg]) -> Option<(String, [i64; 4])> {
     ))
 }
 
-/// Bilder in mindestens `IMAGE_CHANNEL_THRESHOLD` verschiedenen Channels.
-pub fn is_image_multi_channel(msgs: &[RecentMsg]) -> bool {
+/// Bilder in mindestens `IMAGE_CHANNEL_THRESHOLD` verschiedenen Channels im
+/// 5-Minuten-Fenster.
+pub fn is_image_multi_channel(msgs: &[RecentMsg], now: i64) -> bool {
+    let cutoff = now - IMAGE_MULTICHANNEL_WINDOW_SECONDS;
     let channels_with_images: std::collections::HashSet<u64> = msgs
         .iter()
-        .filter(|m| m.image_count > 0)
+        .filter(|m| m.image_count > 0 && m.created_at >= cutoff)
         .map(|m| m.channel_id)
         .collect();
     channels_with_images.len() >= IMAGE_CHANNEL_THRESHOLD
@@ -358,6 +368,9 @@ pub trait GuardPort: Send + Sync {
         text: String,
         delete_after_secs: u64,
     );
+    async fn fetch_evidence_image(&self, _url: &str) -> Option<EvidenceImage> {
+        None
+    }
     /// Invite-Code auf die Ziel-Guild auflösen. `None` bedeutet unauflösbar
     /// und darf nicht als fremd gewertet werden.
     async fn resolve_invite_guild(&self, code: &str) -> Option<u64>;
@@ -383,6 +396,8 @@ pub struct Incident {
     pub action_ok: bool,
     /// Wie viele Nachrichten gelöscht? (Log-Feld „Deleted").
     pub deleted_count: i64,
+    pub delete_attempted: bool,
+    pub evidence_images: Vec<EvidenceImage>,
     /// Auslöser für Mod-Embed/Diagnose: Scam, Fremd-Invite oder Takeover.
     pub trigger: String,
 }
@@ -562,9 +577,9 @@ impl SecurityGuard {
                 0,
             ];
             // Best-effort-KI-Bild-Label (kein Gate) als Mod-Kontext an den
-            // Grund anhängen — wie das Original-Feld „MiniMax-Einschätzung".
+            // Grund anhängen — wie das Original-Feld „KI-Einschätzung".
             let reason = match self.takeover_ai_label(&burst).await {
-                Some(label) => format!("{reason}\nMiniMax-Einschaetzung: {label}"),
+                Some(label) => format!("{reason}\nKI-Einschätzung: {label}"),
                 None => reason,
             };
             let action = decide_hit_action(
@@ -682,7 +697,7 @@ impl SecurityGuard {
         }
 
         // 3. Bilder in mehreren Channels → AI-Bild-Scam-Check (alle Accounts)
-        if is_image_multi_channel(recent) {
+        if is_image_multi_channel(recent, now) {
             let (is_scam, confidence, ai_reason) = self.ai_check_image_scam(recent).await;
             if is_scam && confidence >= AI_IMAGE_CONFIDENCE {
                 let image_channels = recent
@@ -790,8 +805,8 @@ impl SecurityGuard {
                 image_urls,
                 system_prompt: None,
                 model: None,
-                max_output_tokens: Some(200),
-                temperature: 0.2,
+                max_output_tokens: Some(400),
+                temperature: 0.0,
             })
             .await;
         parse_scam_json(raw.as_deref())
@@ -799,7 +814,7 @@ impl SecurityGuard {
 
     /// Best-effort-Bild-Label für den Takeover-Alarm (Original:
     /// `_takeover_ai_label` → `_ai_check_image_scam`). KEIN Gate: ändert die
-    /// Quarantäne nie, liefert den Mods nur Kontext, ob MiniMax die Bilder
+    /// Quarantäne nie, liefert den Mods nur Kontext, ob die KI die Bilder
     /// ebenfalls als Scam einschätzt. Gibt None zurück, wenn kein Vision-
     /// Generator verdrahtet ist oder keine Bilder vorliegen.
     async fn takeover_ai_label(&self, burst: &[RecentMsg]) -> Option<String> {
@@ -818,8 +833,8 @@ impl SecurityGuard {
                 image_urls,
                 system_prompt: None,
                 model: None,
-                max_output_tokens: Some(200),
-                temperature: 0.2,
+                max_output_tokens: Some(400),
+                temperature: 0.0,
             })
             .await;
         if raw.is_none() {
@@ -867,9 +882,12 @@ impl SecurityGuard {
             dm_sent: false,
             action_ok: false,
             deleted_count: 0,
+            delete_attempted: false,
+            evidence_images: Vec::new(),
             trigger: trigger.to_string(),
         };
         self.persist(&incident).await;
+        incident.evidence_images = self.collect_evidence_images(&messages).await;
 
         if !self.config.enforce {
             tracing::warn!(
@@ -958,9 +976,27 @@ impl SecurityGuard {
         incident.dm_sent = dm_sent;
         incident.action_ok = acted;
         incident.deleted_count = deleted;
+        incident.delete_attempted = true;
         if !matches!(action, GuardAction::SoftWarn) {
             self.port.post_mod_alert(&incident, &action).await;
         }
+    }
+
+    async fn collect_evidence_images(&self, messages: &[RecentMsg]) -> Vec<EvidenceImage> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for url in messages.iter().flat_map(|m| m.image_urls.iter()) {
+            if out.len() >= EVIDENCE_IMAGE_LIMIT {
+                break;
+            }
+            if !seen.insert(url.clone()) {
+                continue;
+            }
+            if let Some(image) = self.port.fetch_evidence_image(url).await {
+                out.push(image);
+            }
+        }
+        out
     }
 
     async fn persist(&self, incident: &Incident) {
@@ -1281,12 +1317,15 @@ mod tests {
 
     #[test]
     fn image_multi_channel_threshold_wie_python() {
+        let now = 1_000_000;
         let msgs = vec![msg(1, 30, "", 1), msg(2, 10, "", 1)];
-        assert!(is_image_multi_channel(&msgs));
+        assert!(is_image_multi_channel(&msgs, now));
         let msgs = vec![msg(1, 30, "", 1), msg(1, 10, "", 2)];
-        assert!(!is_image_multi_channel(&msgs));
+        assert!(!is_image_multi_channel(&msgs, now));
         let msgs = vec![msg(1, 30, "telegram", 0), msg(2, 10, "", 0)];
-        assert!(!is_image_multi_channel(&msgs));
+        assert!(!is_image_multi_channel(&msgs, now));
+        let msgs = vec![msg(1, 301, "", 1), msg(2, 10, "", 1)];
+        assert!(!is_image_multi_channel(&msgs, now));
     }
 
     #[test]
