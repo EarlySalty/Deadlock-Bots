@@ -104,12 +104,18 @@ class _FakeRole:
         self,
         role_id: int,
         *,
+        name: str | None = None,
         is_default: bool = False,
+        mentionable: bool = False,
         permissions: _FakePermissions | None = None,
     ) -> None:
         self.id = role_id
+        self.name = name or f"role-{role_id}"
         self._is_default = is_default
+        self.mentionable = mentionable
         self.permissions = permissions or _FakePermissions()
+        self.position = 0
+        self.members: list[Any] = []
 
     def is_default(self) -> bool:
         return self._is_default
@@ -138,6 +144,7 @@ class _FakeGuild:
     ) -> None:
         self.id = guild_id
         self.created_channels: list[dict[str, Any]] = []
+        self.created_roles: list[dict[str, Any]] = []
         self.default_role = default_role or _FakeRole(guild_id, is_default=True)
         self.roles = roles or [self.default_role]
         self._roles = {int(role.id): role for role in self.roles}
@@ -169,6 +176,22 @@ class _FakeGuild:
             }
         )
         return channel
+
+    async def create_role(
+        self, *, name: str, mentionable: bool = False, reason: str | None = None
+    ) -> _FakeRole:
+        role = _FakeRole(8000 + len(self.created_roles) + 1, name=name, mentionable=mentionable)
+        self.roles.append(role)
+        self._roles[int(role.id)] = role
+        self.created_roles.append(
+            {
+                "name": name,
+                "mentionable": mentionable,
+                "reason": reason,
+                "role": role,
+            }
+        )
+        return role
 
     def get_member(self, user_id: int) -> _FakeMember | None:
         return self._members.get(int(user_id))
@@ -431,6 +454,41 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(overwrites[everyone].view_channel, False)
         self.assertEqual(len(overwrites), 1)
 
+    async def test_create_role_returns_string_role_id_and_replays_idempotently(self) -> None:
+        guild = _FakeGuild(guild_id=123)
+        bot = _FakeBot(guilds=[guild])
+        broker = MasterBroker(bot, token="secret-token")
+        payload = {
+            "guild_id": "123",
+            "name": "foo ist live",
+            "mentionable": True,
+            "reason": "Auto-created Twitch live ping role for foo",
+        }
+        request = _FakeRequest(payload, headers=self._headers("req-create-role"))
+
+        response = await broker._handle_create_role(request)
+
+        self.assertEqual(response.status, 200)
+        body = self._payload(response)
+        self.assertTrue(body["ok"])
+        self.assertEqual(body["result"], {"role_id": "8001"})
+        self.assertEqual(len(guild.created_roles), 1)
+        self.assertEqual(guild.created_roles[0]["name"], "foo ist live")
+        self.assertIs(guild.created_roles[0]["mentionable"], True)
+        self.assertEqual(
+            guild.created_roles[0]["reason"],
+            "Auto-created Twitch live ping role for foo",
+        )
+
+        replay = _FakeRequest(payload, headers=self._headers("req-create-role"))
+        replay_response = await broker._handle_create_role(replay)
+
+        self.assertEqual(replay_response.status, 200)
+        replay_body = self._payload(replay_response)
+        self.assertTrue(replay_body["cached"])
+        self.assertEqual(replay_body["result"], {"role_id": "8001"})
+        self.assertEqual(len(guild.created_roles), 1)
+
     async def test_send_rich_message_builds_link_button_and_allowed_mentions(self) -> None:
         channel = _FakeChannel(111)
         bot = _FakeBot(channel=channel)
@@ -455,7 +513,7 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, 200)
         body = self._payload(response)
         self.assertTrue(body["ok"])
-        self.assertEqual(body["result"]["message_id"], 4321)
+        self.assertEqual(body["result"]["message_id"], "4321")
         self.assertEqual(len(channel.sent_calls), 1)
         sent = channel.sent_calls[0]
         self.assertEqual(sent["content"], "<@&55> Stream ist live")

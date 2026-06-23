@@ -290,6 +290,10 @@ class MasterBroker:
                         self._handle_create_channel,
                     ),
                     web.post(
+                        "/internal/master/v1/discord/role/create",
+                        self._handle_create_role,
+                    ),
+                    web.post(
                         "/internal/master/v1/discord/delete-channel",
                         self._handle_delete_channel,
                     ),
@@ -1694,6 +1698,163 @@ class MasterBroker:
         return await self._run_idempotent_action(
             request=request,
             action="discord.create_channel",
+            idempotency_key=idempotency_key,
+            payload_hash=payload_hash,
+            operation=_operation,
+        )
+
+    async def _handle_create_role(self, request: web.Request) -> web.Response:
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            payload = await self._read_json_object(request)
+            idempotency_key = self._extract_idempotency_key(request, payload)
+            guild_id = self._parse_positive_payload_int(payload, "guild_id")
+
+            raw_name = payload.get("name")
+            if not isinstance(raw_name, str):
+                raise ValueError("name must be a string")
+            name = raw_name.strip()
+            if not name:
+                raise ValueError("name is required")
+            if len(name) > 100:
+                raise ValueError("name exceeds Discord limit (100)")
+
+            mentionable = payload.get("mentionable")
+            if not isinstance(mentionable, bool):
+                raise ValueError("mentionable must be a boolean")
+
+            raw_reason = payload.get("reason")
+            if not isinstance(raw_reason, str):
+                raise ValueError("reason must be a string")
+            reason = raw_reason.strip()
+            if not reason:
+                raise ValueError("reason is required")
+            if len(reason) > 512:
+                raise ValueError("reason exceeds Discord limit (512)")
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+        except Exception:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message="invalid JSON payload",
+            )
+
+        guild_allowlist_rejected = self._allowlist_check(
+            request=request,
+            idempotency_key=idempotency_key,
+            scope="guild",
+            value=guild_id,
+            enabled=self._guild_allowlist_enabled,
+            allowed_ids=self._allowed_guild_ids,
+        )
+        if guild_allowlist_rejected is not None:
+            return guild_allowlist_rejected
+
+        payload_hash = self._payload_hash(
+            {
+                "guild_id": guild_id,
+                "name": name,
+                "mentionable": mentionable,
+                "reason": reason,
+            }
+        )
+
+        async def _operation() -> web.Response:
+            guild = None
+            try:
+                guild = self.bot.get_guild(guild_id)
+            except Exception:
+                guild = None
+
+            if guild is None:
+                fetch_guild = getattr(self.bot, "fetch_guild", None)
+                if callable(fetch_guild):
+                    try:
+                        guild = await fetch_guild(guild_id)
+                    except Exception:
+                        guild = None
+
+            if guild is None:
+                return self._error_response(
+                    request=request,
+                    status=404,
+                    code="not_found",
+                    message=f"guild {guild_id} not found",
+                    idempotency_key=idempotency_key,
+                )
+
+            if not hasattr(guild, "create_role"):
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="guild unavailable for role creation",
+                    idempotency_key=idempotency_key,
+                )
+
+            try:
+                role = await guild.create_role(
+                    name=name,
+                    mentionable=mentionable,
+                    reason=reason,
+                )
+            except discord.Forbidden:
+                logger.warning(
+                    "Master broker create_role forbidden (guild=%s name=%s)",
+                    guild_id,
+                    _safe_log_value(name),
+                )
+                return self._error_response(
+                    request=request,
+                    status=403,
+                    code="forbidden",
+                    message="missing permission to create role",
+                    idempotency_key=idempotency_key,
+                )
+            except Exception as exc:
+                logger.error(
+                    "Master broker create_role failed (guild=%s name=%s): %s",
+                    guild_id,
+                    _safe_log_value(name),
+                    exc,
+                )
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="failed to create role",
+                    idempotency_key=idempotency_key,
+                )
+
+            role_id = int(getattr(role, "id", 0) or 0)
+            if role_id <= 0:
+                return self._error_response(
+                    request=request,
+                    status=502,
+                    code="discord_error",
+                    message="created role has no id",
+                    idempotency_key=idempotency_key,
+                )
+
+            return self._success_response(
+                request=request,
+                idempotency_key=idempotency_key,
+                result={"role_id": str(role_id)},
+            )
+
+        return await self._run_idempotent_action(
+            request=request,
+            action="discord.create_role",
             idempotency_key=idempotency_key,
             payload_hash=payload_hash,
             operation=_operation,
