@@ -1,3 +1,11 @@
+## #163 — Server-Statistik der Website wieder live, stabilere Discord-Aktionen
+
+**Ausgangslage:** Die öffentliche Server-Statistik auf der Website (Mitglieder, online, im Voice) war kaputt und meldete „keine Daten"; auf dem Dashboard erschienen statt Namen teils nur rohe IDs. Ursache war eine Lücke zwischen dem neuen Website-Backend und dem Bot: Das Backend fragte den Bot minütlich nach den Live-Kennzahlen und nach der Auflösung mehrerer Namen auf einmal, doch der Bot kannte diese beiden Abfragen nicht und antwortete mit „nicht gefunden". Zusätzlich brach gelegentlich eine ausgehende Aktion des Bots (etwa eine Abschieds-Umfrage als Direktnachricht) mit einem internen Fehler ab, weil bestimmte komprimierte Antworten von Discord nicht entschlüsselt werden konnten.
+
+**Was wurde geändert:** Der Bot beantwortet jetzt beide Abfragen des Website-Backends — die aggregierten Live-Kennzahlen der Gilde (inklusive Vanity-Link) und die gebündelte Auflösung mehrerer Nutzer-IDs zu Anzeigenamen. Beide Abfragen laufen ausschließlich lokal und nur lesend. Für die Kompressions-Aushandlung mit Discord wird das fehleranfällige Verfahren nicht mehr angeboten, sodass alle Antworten zuverlässig verarbeitet werden.
+
+**Wie es jetzt läuft:** Die Server-Statistik auf der Website zeigt wieder aktuelle Zahlen, und auf dem Dashboard erscheinen Namen statt roher IDs. Ausgehende Aktionen des Bots — darunter Direktnachrichten — laufen ohne die sporadischen Entschlüsselungs-Abbrüche durch.
+
 ## #162 — Rust-Portierung zieht die Bild-Scam-Verbesserung nach
 
 **Ausgangslage:** Die in #161 ausgelieferte Verbesserung der Bild-Scam-Erkennung lag bislang nur in der aktiven Python-Fassung vor; die parallel gepflegte, noch nicht produktive Rust-Portierung kannte weiterhin nur den alten Bildprüf-Weg und das alte Verhalten.

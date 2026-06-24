@@ -333,6 +333,14 @@ class MasterBroker:
                         "/internal/master/v1/discord/resolve-user",
                         self._handle_resolve_user,
                     ),
+                    web.get(
+                        "/internal/master/v1/discord/guild-stats",
+                        self._handle_guild_stats,
+                    ),
+                    web.get(
+                        "/internal/master/v1/discord/resolve-names",
+                        self._handle_resolve_names,
+                    ),
                 ]
             )
 
@@ -1444,6 +1452,78 @@ class MasterBroker:
             if not m.bot
         ]
         return web.json_response({"ok": True, "members": members})
+
+    async def _handle_guild_stats(self, request: web.Request) -> web.Response:
+        """Read-only: Live-Kennzahlen der Guild (member/online/voice + vanity).
+
+        Loopback-only, kein Token — Quelle der öffentlichen Server-Statistik
+        des Rust-Dashboards (dl-web ruft diese Route, da es keinen Gateway hat).
+        ?guild_id= optional, sonst erste Guild des Bots.
+        """
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        guild = await self._resolve_guild_for_diagnostics(request)
+        if guild is None:
+            return web.json_response({"ok": True, "found": False})
+        import discord as _discord
+        voice_count = sum(len(vc.members) for vc in guild.voice_channels if vc.members)
+        try:
+            online_count = guild.approximate_presence_count or sum(
+                1 for m in guild.members if m.status != _discord.Status.offline
+            )
+        except Exception:
+            online_count = guild.approximate_presence_count or 0
+        member_count = guild.member_count or len(guild.members)
+        return web.json_response(
+            {
+                "ok": True,
+                "found": True,
+                "guild_id": str(guild.id),
+                "name": guild.name,
+                "member_count": member_count,
+                "online_count": online_count,
+                "voice_count": voice_count,
+                "vanity_url_code": guild.vanity_url_code,
+            }
+        )
+
+    async def _handle_resolve_names(self, request: web.Request) -> web.Response:
+        """Read-only: Bulk-Namensauflösung User-ID -> Anzeigename (?user_ids=1,2,3).
+
+        Loopback-only, kein Token. Pendant zum Rust dl-broker resolve-names;
+        speist die Analytics-Namensauflösung des Dashboards.
+        """
+        rejected = self._reject_non_loopback(request)
+        if rejected is not None:
+            return rejected
+        raw = request.query.get("user_ids") or ""
+        user_ids: list[int] = []
+        for part in raw.split(","):
+            part = part.strip()
+            if not part:
+                continue
+            try:
+                value = int(part)
+            except ValueError:
+                continue
+            if value > 0:
+                user_ids.append(value)
+        names: dict[str, str] = {}
+        try:
+            guild = await self._resolve_guild_for_diagnostics(request)
+            for uid in user_ids:
+                member = guild.get_member(uid) if guild is not None else None
+                if member is not None:
+                    names[str(uid)] = member.display_name
+                    continue
+                user = self.bot.get_user(uid)
+                if user is not None:
+                    names[str(uid)] = getattr(user, "display_name", None) or getattr(user, "global_name", None) or getattr(user, "name", str(uid))
+        except Exception:
+            logger.exception("resolve-names fehlgeschlagen")
+            return web.json_response({"ok": True, "names": {}})
+        return web.json_response({"ok": True, "names": names})
 
     async def _handle_health(self, request: web.Request) -> web.Response:
         rejected = self._authorize(request)

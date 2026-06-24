@@ -14,6 +14,7 @@ from pathlib import Path
 
 from bot_core.bootstrap import _load_env_robust, bootstrap_runtime
 from bot_core.runtime_mode import ensure_gateway_start_allowed, resolve_runtime_mode
+from bot_core import aiohttp_brotli_compat  # noqa: F401  # patcht aiohttp Accept-Encoding (kein Brotli), muss vor dem ersten HTTP-Request laufen
 
 # Frühe Initialisierung, damit .env/Logging bereitstehen bevor Settings geladen werden.
 bootstrap_runtime()
