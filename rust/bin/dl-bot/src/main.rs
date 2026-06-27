@@ -666,8 +666,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }),
         );
         dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        // Kein Start von dl_community::coaching_requests::spawn(): Website-driven
-        // intake ersetzt Discord-seitige Analyse-/Rollen-/Stale-Flows (#17/#18).
+        // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
+        // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
+        // Python Reward-Rolle + Feedback-DM bekommen.
+        let _coaching_request_tasks =
+            dl_community::coaching_requests::spawn(coaching_requests.clone(), &dispatcher);
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
