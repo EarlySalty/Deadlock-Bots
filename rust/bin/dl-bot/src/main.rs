@@ -7,6 +7,7 @@
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
 mod build_publisher;
+mod master;
 mod modglue;
 mod onboardglue;
 
@@ -34,8 +35,10 @@ fn env_bool(name: &str) -> bool {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
+    let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
+    let startup_text = master::startup_text_now();
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let _web_cfg = WebConfig::from_env();
@@ -383,6 +386,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let router = Arc::new(router);
+    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(env);
+    let command_sync = Arc::new(master::DiscordCommandSync::new(
+        adapter.clone(),
+        router.clone(),
+        command_sync_config.guild_id,
+    ));
+    let owner_id = master::owner_id_from_lookup(env);
+    if owner_id.is_none() {
+        tracing::warn!("OWNER_ID fehlt — !master/!m Owner-Commands bleiben gesperrt");
+    }
+    let (master_action_tx, mut master_action_rx) =
+        tokio::sync::mpsc::unbounded_channel::<master::MasterAction>();
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
     let _member_listener =
@@ -442,6 +457,18 @@ async fn main() -> anyhow::Result<()> {
         }
         // Team-Balancer-Prefix-Listener (!balance auto/voice — read-only Vorschau)
         dl_tournament::balance_cmd::spawn(balance_commands.clone(), &dispatcher, adapter.clone());
+        master::spawn_control(
+            &dispatcher,
+            adapter.clone(),
+            command_sync.clone(),
+            Arc::new(master::DiscordStatusPort::new(
+                adapter.clone(),
+                router.clone(),
+                startup_text.clone(),
+            )),
+            owner_id,
+            master_action_tx.clone(),
+        );
 
         // Turnier-Auto-Balance (Port von TurnierCog._auto_balance_loop): alle
         // 300 s pro Gilde nicht-volle Teams nach Rang-Score auffüllen und
@@ -657,19 +684,39 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         dl_voice::status::spawn(status_worker);
-        // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
-        if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
-            let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());
-            match dl_discord::dispatch::sync_commands(&adapter.http, &router, guild_id).await {
-                Ok(count) => tracing::info!(count, ?guild_id, "Slash-Commands synchronisiert"),
-                Err(err) => tracing::error!(%err, "Slash-Command-Sync fehlgeschlagen"),
+        // Slash-Commands syncen: Python-Default ist on + guild-scope.
+        if command_sync_config.enabled {
+            let summary = command_sync.sync_scope(command_sync_config.scope).await;
+            match summary.status.as_str() {
+                "synced" => tracing::info!(
+                    scope = summary.scope.as_str(),
+                    global = summary.global_count,
+                    guilds = summary.guild_counts.len(),
+                    "Slash-Commands synchronisiert"
+                ),
+                "partial" => tracing::warn!(
+                    scope = summary.scope.as_str(),
+                    global = summary.global_count,
+                    guilds = summary.guild_counts.len(),
+                    errors = summary.errors.len(),
+                    "Slash-Command-Sync teilweise fehlgeschlagen"
+                ),
+                _ => tracing::error!(
+                    scope = summary.scope.as_str(),
+                    errors = summary.errors.len(),
+                    "Slash-Command-Sync fehlgeschlagen"
+                ),
             }
+        } else {
+            tracing::info!("Startup app-command sync disabled via DL_BOT_COMMAND_SYNC.");
         }
         let mut client = dl_discord::gateway::build_client(
             &discord_token,
             adapter.clone(),
             dispatcher.clone(),
             router.clone(),
+            master::FEATURE_MODULES.len(),
+            env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
         )
         .await
         .context("Gateway-Client bauen")?;
@@ -687,13 +734,30 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing::info!("dl-bot läuft — beenden mit Ctrl+C");
+    let mut restart_requested = false;
     tokio::select! {
         result = broker_server => result.context("Broker-Server")?,
         result = changelog_server => result.context("Changelog-Server")?,
+        action = master_action_rx.recv() => {
+            match action {
+                Some(master::MasterAction::Restart) => {
+                    restart_requested = true;
+                    tracing::info!("Restart angefordert — Prozess beendet sich fuer systemd");
+                }
+                None => {
+                    tracing::debug!("Master-Control-Kanal geschlossen");
+                }
+            }
+        },
         _ = tokio::signal::ctrl_c() => tracing::info!("dl-bot beendet"),
     }
     if let Some(task) = gateway_task {
         task.abort();
     }
-    Ok(())
+    if restart_requested {
+        // Kein process::exit: normaler Return laesst PidLock::drop laufen,
+        // der Non-Zero-Code triggert systemd Restart=on-failure.
+        return Ok(master::restart_exit_code());
+    }
+    Ok(std::process::ExitCode::SUCCESS)
 }

@@ -10,6 +10,7 @@ use serenity::all::{
     InviteDeleteEvent, Member, Message, Permissions, Ready, User, VoiceState,
 };
 use serenity::async_trait;
+use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
 use crate::dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
@@ -21,16 +22,24 @@ struct Handler {
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
     invite_tracker: Arc<InviteTracker>,
+    feature_module_count: usize,
+    command_prefix: String,
 }
 
 fn is_staff_permissions(perms: Permissions) -> bool {
     perms.administrator() || perms.manage_messages() || perms.manage_guild()
 }
 
+pub fn presence_activity_name(feature_module_count: usize, command_prefix: &str) -> String {
+    format!("{feature_module_count} Cogs | {command_prefix}help")
+}
+
 #[async_trait]
 impl EventHandler for Handler {
-    async fn ready(&self, _ctx: Context, ready: Ready) {
+    async fn ready(&self, ctx: Context, ready: Ready) {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
+        let activity_name = presence_activity_name(self.feature_module_count, &self.command_prefix);
+        ctx.set_activity(Some(ActivityData::watching(activity_name)));
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
     }
 
@@ -264,6 +273,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ready_presence_name_matches_python_style() {
+        assert_eq!(presence_activity_name(47, "!"), "47 Cogs | !help");
+    }
+
+    #[test]
     fn staff_permissions_match_python_guard_skip() {
         assert!(is_staff_permissions(Permissions::ADMINISTRATOR));
         assert!(is_staff_permissions(Permissions::MANAGE_MESSAGES));
@@ -279,6 +293,8 @@ pub async fn build_client(
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
+    feature_module_count: usize,
+    command_prefix: String,
 ) -> serenity::Result<serenity::Client> {
     let intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
@@ -293,6 +309,8 @@ pub async fn build_client(
             dispatcher,
             router,
             invite_tracker: Arc::new(InviteTracker::new()),
+            feature_module_count,
+            command_prefix,
         })
         .await
 }
