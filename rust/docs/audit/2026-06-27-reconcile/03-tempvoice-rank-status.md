@@ -1,0 +1,68 @@
+# Reconcile Audit: TempVoice + Rank + Voice-Status
+
+Datum: 2026-06-27  
+Scope: `cogs/tempvoice/*`, `cogs/rank_voice_manager.py`, `cogs/deadlock_voice_status.py` gegen `rust/crates/dl-voice/src/*`.
+
+## Kurzsummary
+
+Aktueller Stand: **2 high / 22 medium / 5 low GAPs**.
+
+Mehrere Alt-Befunde sind inzwischen erledigt: Adaptive Neue-Spieler-/Duo-Lanes kopieren im Rust-Code Anchor-Overwrites/User-Limit/Bitrate und setzen die Zielposition (`glue.rs:1155-1204`, `adaptive.rs:416-429`), und der Rank-Manager löst den TempVoice-Erstbesitzer inzwischen gildenweit auf, falls er nicht mehr im Kanal sitzt (`rank.rs:490-501`). Nicht als GAP gewertet: die dokumentierte Auslagerung der Rang-Permission-Kopplung aus TempVoice in den Rank-Port (`engine.rs:6-8`).
+
+## GAPs
+
+| Severity | Typ | Python-Ref | Rust-Ref | User-sichtbare/Korrektheits-Auswirkung | Aufwand |
+|---|---|---|---|---|---|
+| high | missing-feature | `cogs/tempvoice/interface.py:124-139`, `:207-209`, `:376-509` | `rust/crates/dl-voice/src/tempvoice/interface.rs:742-785`; `ABSENT tempvoice_interface/tvpanel/rehydrate` | TempVoice-Control-Panels werden in Rust nicht erstellt, gespeichert oder nach Restart rehydriert. Alte Buttons funktionieren nur, wenn bereits eine Python-Message existiert; neue/fehlende Panels koennen Admins nicht per `!tvpanel` erzeugen und lane-gebundene Embeds werden nicht aktualisiert. | M |
+| high | missing-feature | `cogs/tempvoice/router_interface.py:137-147`, `:151-257` | `rust/crates/dl-voice/src/router.rs:243-307`; `ABSENT RouterInterface post/update` | Der Router registriert nur Button-Handler, postet aber keine Anleitung und kein Spielmodus-Panel in `TEMPVOICE_ROUTER_TEXT`. Ohne vorhandene Alt-Message bleibt der Router-Einstieg fuer User unsichtbar. | S |
+| medium | missing-feature | `cogs/tempvoice/core.py:808-817`, `:930-978` | `rust/crates/dl-voice/src/tempvoice/engine.rs:270-297`, `:1310-1318` | Python raeumt leere Lanes dauerhaft alle 180s und sweept auch DB-fremde gemanagte Leichen. Rust purged nur einmal 30s nach Start und nur bekannte State-Lanes; verpasste Leave-Events koennen leere Channels dauerhaft stehen lassen. | S |
+| medium | divergent-logic | `cogs/tempvoice/core.py:2545-2589` | `rust/crates/dl-voice/src/tempvoice/engine.rs:420-425` | Lurker-/Tag-Filter-Leave-Cleanup liegt in Rust hinter `is_managed_lane`. Wenn ein Kanal nicht mehr als managed erkannt wird, bleiben Lurker-Rolle/Nick/Limit oder Member-Overwrites haengen, waehrend Python diese Cleanup-Pfade vor dem Managed-Guard ausfuehrt. | S |
+| medium | divergent-logic | `cogs/tempvoice/core.py:2665-2728` | `rust/crates/dl-voice/src/tempvoice/engine.rs:374-415` | Owner-Backfill nach Restart setzt in Rust `prefix_from_rank=false`, `source_staging_id=None` und wendet nur Owner-Bans an. Python leitet Regeln aus dem Basisnamen ab, persistiert `source_staging_id` und ruft Owner-Settings inkl. Region an; Chill-/DE-Regeln koennen in Rust verloren gehen. | M |
+| medium | missing-feature | `cogs/tempvoice/core.py:1724-1784`, `:2469-2482` | `ABSENT channel-update subscriber in dl-voice tempvoice` | Manuelles Verschieben einer TempVoice-Lane in eine andere Kategorie zieht in Python Regeln, Limit, DB-Kategorie und Sortier-Events nach. Rust behandelt nur den eigenen `switch_lane_mode`-Pfad; externe Kategorie-Aenderungen bleiben inkonsistent. | M |
+| medium | behavioral-diff | `cogs/tempvoice/router.py:121-126` | `rust/crates/dl-voice/src/router.rs:193-199` | User mit gespeicherter Praeferenz und Auto-Join aus bekommen in Python beim Betreten des Router-VC sofort eine eigene Lane. Rust returned einfach; der User bleibt im Router-VC sitzen. | S |
+| medium | behavioral-diff | `cogs/tempvoice/core.py:2346-2407` | `rust/crates/dl-voice/src/router.rs:236-239`, `rust/crates/dl-voice/src/tempvoice/engine.rs:549-598` | Router-erstellte Lanes nutzen in Python eigene Namen/Limits (`Chill Lane`, Casual-Limit 6, Street-Brawl 4). Rust routed ueber normale Staging-Regeln; Casual kann als Rang-Prefix-Lane mit Default-Cap 8 entstehen. | M |
+| low | behavioral-diff | `cogs/tempvoice/router_interface.py:86-96`, `:61-67`, `:109-114` | `rust/crates/dl-voice/src/router.rs:251-265`, `:294-300` | Auto-Join-Toggle ohne Modus wird in Python abgelehnt, Rust legt implizit `casual` an. Zusaetzlich fehlen die 3s-gruenen Button-Feedbacks und die Antworttexte weichen ab. | S |
+| low | behavioral-diff | `cogs/tempvoice/core.py:2169-2182` | `rust/crates/dl-voice/src/glue.rs:64-80` | Normale TempVoice-Lanes werden in Python mit Server-Bitrate und Kategorie-Overwrites erstellt. Rust setzt nur Name/Typ/Parent/User-Limit; Bitrate ist sicher abweichend, Overwrite-Vererbung ist Discord-seitig nicht explizit identisch _(unverifiziert)_. | S |
+| medium | behavioral-diff | `cogs/tempvoice/interface.py:636-653`, `:688-701`, `:756-774`, `:1013-1028`, `:1351-1439` | `rust/crates/dl-voice/src/tempvoice/interface.rs:47-54`, `:114-195`, `:199-252`, `:293-367` | Viele Panel-Aktionen erlauben in Python Owner oder Mods/Admins (`manage_channels`/`administrator`); Rusts `owned_lane_of` akzeptiert nur den Owner. Mods/Admins koennen Region, Limit, Kick, Templates und Presets nicht stellvertretend bedienen. | M |
+| medium | behavioral-diff | `cogs/tempvoice/interface.py:749-774`, `:972-1000` | `rust/crates/dl-voice/src/tempvoice/interface.rs:293-309` | Duo/Trio/Reset-Templates setzen in Python Basisnamen plus Limit. Rust setzt nur das Limit; sichtbarer Lane-Name und gespeicherter `base_name` bleiben unveraendert. | S |
+| medium | port-bug | `cogs/tempvoice/core.py:1524-1609`, `cogs/tempvoice/interface.py:1100-1164` | `rust/crates/dl-voice/src/tempvoice/interface.rs:348-367`, `:420-433` | Presets speichern/laden in Rust nicht paritaetisch: Save schreibt `limit=6` und `min_rank=unknown`, Load ignoriert `base_name` und `min_rank` und setzt nur Limit/Region. Python bewahrt Name, Limit, Mindest-Rang und Region. | M |
+| medium | divergent-logic | `cogs/tempvoice/interface.py:1196-1210` | `rust/crates/dl-voice/src/tempvoice/interface.rs:585-619`, `rust/crates/dl-voice/src/tempvoice/engine.rs:1057-1099` | MinRank-Select prueft in Rust weder `verified_role_id` noch `core.is_min_rank_blocked(lane)`. Unverifizierte bzw. eigentlich blockierte Konstellationen koennen Mindest-Rang setzen, solange Rollen/Category passen. | S |
+| medium | behavioral-diff | `cogs/tempvoice/interface.py:1631-1710` | `rust/crates/dl-voice/src/tempvoice/interface.rs:436-455` | RankPref bietet in Python `Nicht angegeben` und markiert den aktuellen Rang als Default. Rust listet nur echte Ranks ohne `unknown`/Default; User koennen eine Praeferenz nicht sauber zuruecksetzen. | S |
+| medium | missing-feature | `cogs/tempvoice/lane_sorting.py:23-26`, `:290-317` | `rust/crates/dl-voice/src/adaptive.rs:433-469` | Lane-Sortierung deckt in Rust nur Chill ab. Python sortiert Chill und Comp/Ranked; Comp-Anker aus `RolePermissionVoiceManager` werden in Rust gar nicht fuer Sortierung genutzt. | M |
+| medium | divergent-logic | `cogs/tempvoice/lane_sorting.py:319-379` | `rust/crates/dl-voice/src/adaptive.rs:441-455` | Chill-Sortierung bestimmt den Rang in Python ueber Owner-Rang-Pref, Owner-Rollen, Durchschnittsrang und erst zuletzt Label. Rust parsed ausschliesslich den sichtbaren Channelnamen; falsch benannte Lanes werden nicht korrekt einsortiert. | M |
+| medium | divergent-logic | `cogs/tempvoice/lane_sorting.py:153-196`, `:237-276`, `:423-444` | `rust/crates/dl-voice/src/adaptive.rs:433-469`, `:475-516` | Python reserviert den Slot unter dem Casual-Staging fuer die permanente Chill-Lane, pinnt `1505618194017161267` ans Ende und reagiert auf Channel-Rename/Kategorie-Update. Rust sortiert nur vorhandene Rang-Slots bei Voice-Events; Reserved/Pinned/ChannelUpdate fehlen. | M |
+| medium | divergent-logic | `cogs/tempvoice/new_player_lanes.py:244-254`, `:299-301`, `:517-522` | `rust/crates/dl-voice/src/adaptive.rs:270-277`, `:314-325` | Python merkt einmal geroutete New-Player dauerhaft in `_routed_users`; Rueckkehr ins Staging fuehrt danach zum normalen Flow. Rust loescht den Eintrag nach 4 Minuten rein zeitbasiert und kann denselben User spaeter erneut automatisch routen. | S |
+| medium | missing-feature | `cogs/tempvoice/new_player_lanes.py:193-194`, `:312-318`; `cogs/tempvoice/duo_lanes.py:88-105`; `cogs/tempvoice/lane_sorting.py:92-104` | `rust/bin/dl-bot/src/main.rs:647-650`, `rust/crates/dl-voice/src/adaptive.rs:475-516` | Adaptive Lanes und Sortierung haben in Python Startup-Syncs. Rust startet nur den Voice-Event-Subscriber; nach Restart werden fehlende/ueberzaehlige New-Player-/Duo-Lanes und Sortierungen erst beim naechsten Voice-Event repariert. | S |
+| medium | missing-feature | `cogs/rank_voice_manager.py:1136-1170` | `rust/crates/dl-voice/src/rank.rs:437-440`, `:774-788` | Rank Voice Manager macht in Python bei `on_ready` einen Reconcile ueber alle Live-Voice-Channels. Rust rehydriert nur DB-Anker und wartet auf Join/Leave/Move; bereits besetzte Comp-Lanes bleiben nach Bot-Restart mit alten Rechten/Namen bis zum naechsten Voice-Event. | M |
+| medium | permission-diff | `cogs/rank_voice_manager.py:1253-1255` | `rust/crates/dl-voice/src/rank.rs:1310-1327`, `rust/crates/dl-discord/src/gateway.rs:68-72` | Python erlaubt `!rrang` fuer `manage_guild`. Rust prueft `event.author_is_admin`, und dieses Feld wird nur aus `perms.administrator()` gesetzt; Mods mit Server-verwalten ohne Administrator verlieren die Rank-Admin-Gruppe. | S |
+| low | behavioral-diff | `cogs/rank_voice_manager.py:1498-1512` | `rust/crates/dl-voice/src/rank.rs:1247-1268` | `!rrang info` zeigt in Python zusaetzlich die Balancing-Regel (`-1 bis +1 Ränge`). Rust zeigt nur Hoechster Rang und Rang-Wert. | S |
+| medium | wrong-constant | `cogs/deadlock_voice_status.py:46`, `:715-718` | `rust/crates/dl-voice/src/status.rs:696-698` | Rust addiert den Python-Offset `MATCH_MINUTE_DISPLAY_OFFSET` nicht. Match-Minuten werden standardmaessig um 3 Minuten zu niedrig angezeigt. | S |
+| medium | missing-feature | `cogs/deadlock_voice_status.py:60-62`, `:665-673`, `:767-784`, `:688-692` | `rust/crates/dl-voice/src/status.rs:677-684`, `:696-698` | Die `(X/Y)`-Slot-Anzeige aus `deadlock_localized` inkl. 1h-Cache fehlt. Rust nutzt `max(Discord-Voice-Member, player_count)` und zeigt in der Lobby nie `in der Lobby (X/Y)`; Party-Auslastung und Match-Nenner koennen falsch sein. | M |
+| medium | divergent-logic | `cogs/deadlock_voice_status.py:236-260`, `:535-536` | `rust/crates/dl-voice/src/status.rs:638` | Python fragt fuer dynamische TempVoice-Lanes den aktuellen Basisnamen aus TempVoice-Regeln ab. Rust splittet nur den bestehenden Channelnamen; bei rangpraefigierten Chill-Lanes kann der Status-Suffix auf einem veralteten Basisnamen aufbauen. | M |
+| medium | missing-feature | `cogs/deadlock_voice_status.py:64-78`, `:92-153`, `:984-1070` | `ABSENT dlvs/trace/snapshot in rust/crates/dl-voice/src/status.rs` | Admin-Diagnose fehlt: `dlvs`, `dlvs trace` und `dlvs snapshot` inklusive Trace-Log/last_observation sind nicht portiert. Bei Live-Status-Problemen fehlt der usernahe Diagnosepfad. | M |
+| low | port-bug | `service/deadlock_voice_cohort.py:8-10` | `rust/crates/dl-voice/src/status.rs:48-75` | Der Rust-Minutenparser akzeptiert keinen Whitespace zwischen `min`/`min.` und `)`, Python schon. Seltene `deadlock_localized`-Varianten wie `(23 min )` fallen in Rust auf 0/None zurueck. | S |
+| low | divergent-logic | `cogs/tempvoice/core.py:1786-1833`, `:2030-2051` | `rust/crates/dl-voice/src/tempvoice/engine.rs:1249-1264`, `rust/crates/dl-voice/src/glue.rs:124-163` | Python merged bestehende Member-Overwrites vor Owner-Ban/Tag-Filter-Deny; Rust setzt/loescht das komplette Member-Overwrite nur fuer `connect`. Andere per-User-Rechte koennen ueberschrieben bzw. beim Clear geloescht werden _(unverifiziert fuer konkrete Live-Overwrite-Kombinationen)_. | M |
+
+## Parity / Nicht mehr als GAP
+
+| Status | Bereich | Verifikation |
+|---|---|---|
+| parity | Adaptive-Lane-Clone | Python nutzt `anchor.clone(...)` und setzt Position (`new_player_lanes.py:473-493`, `duo_lanes.py:254-274`). Rust kopiert Anchor-Overwrites/User-Limit/Bitrate (`glue.rs:1155-1204`) und setzt Position direkt nach Create (`adaptive.rs:416-429`). |
+| parity | Rank-Erstbesitzer-Anker | Python loest den Initial Owner gildenweit (`rank_voice_manager.py:1031-1051`). Rust faellt bei Abwesenheit im VC auf `guild_member_roles` zurueck (`rank.rs:490-501`). |
+| parity | Rank-Command-Funktionalitaet | `!rrang`-Subcommands sind in Rust vorhanden (`rank.rs:830-870`). Offen bleibt nur das Permission-Gating aus der GAP-Tabelle. |
+
+## DELIBERATE / Nicht als GAP gewertet
+
+| Bereich | Quelle | Bewertung |
+|---|---|---|
+| Rang-Permission-Kopplung im TempVoice-Engine-Pfad | `rust/crates/dl-voice/src/tempvoice/engine.rs:6-8` | Dokumentiert als bewusste Auslagerung in den Rank-Port; nicht als TempVoice-Engine-GAP gewertet. |
+| Router-New-Player-Hook im Router-VC | `rust/crates/dl-voice/src/router.rs:11-14` | Im Rust-Kommentar als bewusste Luecke dokumentiert; hier nur als DELIBERATE notiert, nicht als GAP. |
+| Tag-Filter-Speichern-Knopf | `rust/crates/dl-voice/src/tempvoice/interface.rs:655-658` | Rust persistiert jede Auswahl sofort statt Sammeln+Speichern; Kommentar sagt Endzustand identisch. Nicht als GAP gewertet. |
+
+## Top-5 nach Risiko
+
+1. TempVoice-Control-Panels fehlen als Lifecycle/Command/DB-Flow.
+2. Router-Panel wird nicht gepostet/aktualisiert.
+3. Rank-Startup-Reconcile fehlt fuer bereits besetzte Comp-Lanes.
+4. Voice-Status zeigt Match-Minuten und Party-Slots falsch an.
+5. Router-Join mit Auto-Join aus erstellt keine eigene Lane.
