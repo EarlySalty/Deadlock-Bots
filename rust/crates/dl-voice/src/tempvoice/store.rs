@@ -41,6 +41,15 @@ pub struct PresetRecord {
     pub region: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InterfaceRecord {
+    pub guild_id: u64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub category_id: Option<u64>,
+    pub lane_id: Option<u64>,
+}
+
 pub struct TempVoiceStore {
     pub db: Db,
 }
@@ -423,6 +432,209 @@ impl TempVoiceStore {
             })
             .await
     }
+
+    // ── Persistente Interface-Messages (tempvoice_interface) ───────────────
+
+    pub async fn ensure_interface_schema(&self) -> Result<(), DbError> {
+        self.db
+            .write(|conn| {
+                let rows = {
+                    let mut stmt = conn.prepare("PRAGMA table_info(tempvoice_interface)")?;
+                    let rows = stmt.query_map([], |row| {
+                        Ok((row.get::<_, String>(1)?, row.get::<_, i64>(5)?))
+                    })?;
+                    rows.collect::<Result<Vec<_>, _>>()?
+                };
+
+                if rows.is_empty() {
+                    conn.execute_batch(INTERFACE_DDL)?;
+                    return Ok(());
+                }
+
+                let col_names: std::collections::HashSet<&str> =
+                    rows.iter().map(|(name, _)| name.as_str()).collect();
+                let pk_cols: Vec<&str> = rows
+                    .iter()
+                    .filter(|(_, pk)| *pk > 0)
+                    .map(|(name, _)| name.as_str())
+                    .collect();
+                let required = [
+                    "guild_id",
+                    "channel_id",
+                    "message_id",
+                    "category_id",
+                    "lane_id",
+                    "created_at",
+                    "updated_at",
+                ];
+                if required.iter().all(|name| col_names.contains(name))
+                    && pk_cols == ["guild_id", "message_id"]
+                {
+                    return Ok(());
+                }
+
+                let expr = |name: &str, fallback: &str| {
+                    if col_names.contains(name) {
+                        name.to_string()
+                    } else {
+                        fallback.to_string()
+                    }
+                };
+                let select = format!(
+                    "INSERT OR IGNORE INTO tempvoice_interface(
+                       guild_id, channel_id, message_id, category_id, lane_id, created_at, updated_at
+                     )
+                     SELECT {}, {}, {}, {}, {}, {}, {}
+                       FROM tempvoice_interface_old",
+                    expr("guild_id", "0"),
+                    expr("channel_id", "0"),
+                    expr("message_id", "0"),
+                    expr("category_id", "NULL"),
+                    expr("lane_id", "NULL"),
+                    expr("created_at", "CURRENT_TIMESTAMP"),
+                    expr("updated_at", "CURRENT_TIMESTAMP"),
+                );
+                let tx = conn.transaction()?;
+                tx.execute_batch(
+                    "ALTER TABLE tempvoice_interface RENAME TO tempvoice_interface_old;",
+                )?;
+                tx.execute_batch(INTERFACE_DDL)?;
+                tx.execute(&select, [])?;
+                tx.execute_batch("DROP TABLE tempvoice_interface_old;")?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await
+    }
+
+    pub async fn record_interface_message(&self, record: InterfaceRecord) -> Result<(), DbError> {
+        self.ensure_interface_schema().await?;
+        self.db
+            .write(move |conn| {
+                if let Some(lane_id) = record.lane_id {
+                    conn.execute(
+                        "INSERT INTO tempvoice_interface(
+                           guild_id, channel_id, message_id, category_id, lane_id, updated_at
+                         ) VALUES(?1, ?2, ?3, ?4, ?5, CURRENT_TIMESTAMP)
+                         ON CONFLICT(lane_id) DO UPDATE SET
+                           channel_id = excluded.channel_id,
+                           message_id = excluded.message_id,
+                           category_id = excluded.category_id,
+                           updated_at = CURRENT_TIMESTAMP",
+                        rusqlite::params![
+                            record.guild_id,
+                            record.channel_id,
+                            record.message_id,
+                            record.category_id,
+                            lane_id,
+                        ],
+                    )
+                } else {
+                    conn.execute(
+                        "INSERT INTO tempvoice_interface(
+                           guild_id, channel_id, message_id, category_id, lane_id, updated_at
+                         ) VALUES(?1, ?2, ?3, ?4, NULL, CURRENT_TIMESTAMP)
+                         ON CONFLICT(guild_id, message_id) DO UPDATE SET
+                           channel_id = excluded.channel_id,
+                           category_id = excluded.category_id,
+                           updated_at = CURRENT_TIMESTAMP",
+                        rusqlite::params![
+                            record.guild_id,
+                            record.channel_id,
+                            record.message_id,
+                            record.category_id,
+                        ],
+                    )
+                }
+                .map(|_| ())
+            })
+            .await
+    }
+
+    pub async fn global_interface_messages(&self) -> Result<Vec<InterfaceRecord>, DbError> {
+        self.ensure_interface_schema().await?;
+        self.db
+            .read(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT guild_id, channel_id, message_id, category_id, lane_id
+                       FROM tempvoice_interface
+                      WHERE lane_id IS NULL
+                      ORDER BY guild_id, message_id",
+                )?;
+                let rows = stmt.query_map([], interface_record_from_row)?;
+                rows.collect()
+            })
+            .await
+    }
+
+    pub async fn lane_interface_messages(&self) -> Result<Vec<InterfaceRecord>, DbError> {
+        self.ensure_interface_schema().await?;
+        self.db
+            .read(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT guild_id, channel_id, message_id, category_id, lane_id
+                       FROM tempvoice_interface
+                      WHERE lane_id IS NOT NULL
+                      ORDER BY lane_id",
+                )?;
+                let rows = stmt.query_map([], interface_record_from_row)?;
+                rows.collect()
+            })
+            .await
+    }
+
+    pub async fn remove_lane_interface_record(&self, lane_id: u64) -> Result<(), DbError> {
+        self.ensure_interface_schema().await?;
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM tempvoice_interface WHERE lane_id = ?1",
+                    [lane_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
+    pub async fn remove_interface_record(
+        &self,
+        guild_id: u64,
+        message_id: u64,
+    ) -> Result<(), DbError> {
+        self.ensure_interface_schema().await?;
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM tempvoice_interface WHERE guild_id = ?1 AND message_id = ?2",
+                    rusqlite::params![guild_id, message_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+}
+
+const INTERFACE_DDL: &str = "
+CREATE TABLE IF NOT EXISTS tempvoice_interface (
+    guild_id    INTEGER NOT NULL,
+    channel_id  INTEGER NOT NULL,
+    message_id  INTEGER NOT NULL,
+    category_id INTEGER,
+    lane_id     INTEGER,
+    created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (guild_id, message_id),
+    UNIQUE(lane_id)
+);";
+
+fn interface_record_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InterfaceRecord> {
+    Ok(InterfaceRecord {
+        guild_id: row.get(0)?,
+        channel_id: row.get(1)?,
+        message_id: row.get(2)?,
+        category_id: row.get(3)?,
+        lane_id: row.get(4)?,
+    })
 }
 
 #[cfg(test)]
@@ -553,5 +765,83 @@ mod tests {
             .await
             .expect("none")
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn interface_messages_persistieren_global_und_lane_gebunden() {
+        let (_dir, store) = store().await;
+        store.ensure_interface_schema().await.expect("schema");
+
+        store
+            .record_interface_message(InterfaceRecord {
+                guild_id: 9,
+                channel_id: 20,
+                message_id: 300,
+                category_id: Some(40),
+                lane_id: None,
+            })
+            .await
+            .expect("global insert");
+        store
+            .record_interface_message(InterfaceRecord {
+                guild_id: 9,
+                channel_id: 21,
+                message_id: 301,
+                category_id: Some(41),
+                lane_id: Some(9001),
+            })
+            .await
+            .expect("lane insert");
+
+        let global = store.global_interface_messages().await.expect("global");
+        assert_eq!(global.len(), 1);
+        assert_eq!(global[0].channel_id, 20);
+        assert_eq!(global[0].message_id, 300);
+        assert_eq!(global[0].category_id, Some(40));
+        assert_eq!(global[0].lane_id, None);
+
+        let lane = store.lane_interface_messages().await.expect("lane");
+        assert_eq!(lane.len(), 1);
+        assert_eq!(lane[0].channel_id, 21);
+        assert_eq!(lane[0].message_id, 301);
+        assert_eq!(lane[0].category_id, Some(41));
+        assert_eq!(lane[0].lane_id, Some(9001));
+
+        store
+            .record_interface_message(InterfaceRecord {
+                guild_id: 9,
+                channel_id: 22,
+                message_id: 302,
+                category_id: Some(42),
+                lane_id: Some(9001),
+            })
+            .await
+            .expect("lane upsert");
+
+        let lane = store.lane_interface_messages().await.expect("lane update");
+        assert_eq!(lane.len(), 1);
+        assert_eq!(lane[0].channel_id, 22);
+        assert_eq!(lane[0].message_id, 302);
+        assert_eq!(lane[0].category_id, Some(42));
+
+        store
+            .remove_lane_interface_record(9001)
+            .await
+            .expect("lane delete");
+        assert!(store
+            .lane_interface_messages()
+            .await
+            .expect("lane empty")
+            .is_empty());
+
+        store
+            .remove_interface_record(9, 300)
+            .await
+            .expect("global delete");
+        assert!(store
+            .global_interface_messages()
+            .await
+            .expect("global empty")
+            .is_empty());
     }
 }

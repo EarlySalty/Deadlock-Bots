@@ -150,6 +150,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         cache_snapshot.clone(),
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
+    let tempvoice_interface = dl_voice::tempvoice::interface::TempVoiceInterface::new(
+        tempvoice.clone(),
+        cache_snapshot.clone(),
+    );
 
     // Aktivitäts-Analyzer (5) — auch Co-Spieler-Quelle für den Router
     let activity = dl_activity::analyzer::ActivityAnalyzer::new(
@@ -160,15 +164,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Lane-Router (4c-Rest) — Panel-Buttons brauchen den Interaction-Router
+    let router_glue = Arc::new(dl_voice::glue::RouterGlue {
+        adapter: adapter.clone(),
+    });
     let lane_router = dl_voice::router::LaneRouter::new(
         db.clone(),
-        Arc::new(dl_voice::glue::RouterGlue {
-            adapter: adapter.clone(),
-        }),
+        router_glue.clone(),
         tempvoice.clone(),
         Some(activity.clone()),
     );
     dl_voice::router::register(&mut router, lane_router.clone());
+    let router_interface = dl_voice::router::RouterInterface::new(db.clone(), router_glue);
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
@@ -516,6 +522,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
+        tempvoice_interface.refresh_all_interfaces().await;
+        dl_voice::tempvoice::interface::spawn_command(
+            tempvoice_interface.clone(),
+            &dispatcher,
+            adapter.clone(),
+        );
         dl_voice::tempvoice::engine::spawn(tempvoice.clone(), &dispatcher);
         // Tag-Filter: Dienst anbinden + Ragebaiter-Sofort-Durchsetzung
         tag_service.rehydrate().await;
@@ -669,6 +681,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
+        router_interface.ensure_panel().await;
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
         // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung

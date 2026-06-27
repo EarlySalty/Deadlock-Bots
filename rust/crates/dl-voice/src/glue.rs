@@ -3,8 +3,9 @@
 use std::sync::Arc;
 
 use dl_discord::DiscordAdapter;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use serenity::all::{ChannelId, GuildId, RoleId, UserId};
+use serenity::builder::GetMessages;
 
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
@@ -432,6 +433,79 @@ impl LanePort for CacheSnapshot {
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::tempvoice::interface::TempVoiceInterfacePort for CacheSnapshot {
+    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn recent_bot_messages(
+        &self,
+        channel_id: u64,
+        limit: u8,
+    ) -> Result<Vec<crate::tempvoice::interface::TempVoicePanelMessage>, String> {
+        let bot_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id;
+        let mut messages = ChannelId::new(channel_id)
+            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
+            .await
+            .map_err(|err| err.to_string())?;
+        messages.sort_by_key(|message| message.id.get());
+        Ok(messages
+            .into_iter()
+            .filter(|message| message.author.id == bot_id)
+            .map(
+                |message| crate::tempvoice::interface::TempVoicePanelMessage {
+                    message_id: message.id.get(),
+                    has_embeds: !message.embeds.is_empty(),
+                    has_components: !message.components.is_empty(),
+                    embed_titles: message
+                        .embeds
+                        .into_iter()
+                        .filter_map(|embed| embed.title)
+                        .collect(),
+                },
+            )
+            .collect())
+    }
+
+    async fn member_can_manage_guild(&self, guild_id: u64, user_id: u64) -> bool {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|guild| {
+                let member = guild.members.get(&UserId::new(user_id))?;
+                Some(guild.member_permissions(member))
+            })
+            .map(|perms| perms.manage_guild() || perms.administrator())
+            .unwrap_or(false)
     }
 }
 
@@ -1059,6 +1133,60 @@ impl crate::router::RouterPort for RouterGlue {
             body.insert("content".into(), json!(text));
             let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
         }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::router::RouterInterfacePort for RouterGlue {
+    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn recent_bot_messages(
+        &self,
+        channel_id: u64,
+        limit: u8,
+    ) -> Result<Vec<crate::router::RouterPanelMessage>, String> {
+        let bot_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id;
+        let mut messages = ChannelId::new(channel_id)
+            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
+            .await
+            .map_err(|err| err.to_string())?;
+        messages.sort_by_key(|message| message.id.get());
+        Ok(messages
+            .into_iter()
+            .filter(|message| message.author.id == bot_id)
+            .map(|message| crate::router::RouterPanelMessage {
+                message_id: message.id.get(),
+                has_embeds: !message.embeds.is_empty(),
+                has_components: !message.components.is_empty(),
+            })
+            .collect())
     }
 }
 
