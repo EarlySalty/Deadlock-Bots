@@ -34,6 +34,19 @@ Detail je Subsystem in `0N-<subsystem>.md`. Severity-Verteilung: core 1H/4M/2L �
 
 **Zusatz-High aus bridges-Report (broker):** `/internal/master/v1/discord/channel-info` (loopback read) fehlt im Rust-Broker (`dl-broker/lib.rs`) → interne Clients bekommen 404 nach Cutover. Commit `3c52050` fügte den Endpoint nur dem **Python**-Broker zu. → Cluster **C5** (mit build-publisher, beide bridges/dl-bot-nah).
 
+## Umsetzungs-Status (2026-06-27, Branch `rust/parity-reconcile-2026-06-27`)
+
+| Cluster | High-Lücken | Status | Commit |
+|---|---|---|---|
+| C1 Core/Owner-Admin | H1 + Presence/Sync/PID | ✅ DONE (verifiziert, gepusht) | `7f3918c` |
+| C2 TempVoice-Panels | H2, H3 | ✅ DONE | `c4772ba` |
+| C3 Coaching | H4, H5 | ✅ DONE | `93e5508` |
+| C5 Build-Publisher + Broker | H8, H9, channel-info | ✅ DONE | `d90596b` |
+| C4 Turnier-Admin-Dialog | H7 | ⏳ OFFEN (Codex usage-limit) | — |
+| C3b AI-Onboarding | H6 | ⏳ OFFEN | — |
+
+Jeder DONE-Cluster: Codex-Impl (TDD) → frischer Codex-Kritiker (fand insgesamt ~13 echte Bugs, u.a. Restart-Exit-Code, TempVoice-Cutover-Duplikate, Coaching-Survey-False-Positive, Build-Pipeline-Race) → Claude-Verifikation (cargo build/clippy -D warnings/test grün) → Commit. **Offen nach C4/C3b:** Merge nach `main` + konsolidiertes CHANGELOG + Discord-Post. Medium/Low-Backlog (66M/55L) = Welle 2+.
+
 ## Implementierungs-Wellenplan (sequenziell, ein Feature-Branch)
 
 Worker laufen **sequenziell** im selben Working-Tree (Codex-Worker teilen sich das Arbeitsverzeichnis → paralleles Schreiben würde den Index zerstören). `main.rs` ist der gemeinsame Engpass (C1/C3/C5 verdrahten dort). Reihenfolge nach Wert + Risiko:
