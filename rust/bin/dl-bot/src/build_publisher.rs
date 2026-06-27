@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_db::{Db, DbError};
-use rusqlite::params;
-use serde_json::json;
+use rusqlite::{OptionalExtension, params};
+use serde_json::{Value, json};
 
 const STATUS_INFO_CANCELLED_EXCESS: &str =
     "Cancelled: Excluded by 3-build-per-hero rule based on priority/recency.";
@@ -55,10 +55,82 @@ struct PendingClone {
     attempts: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SteamReadiness {
+    Ready,
+    MissingState,
+    InvalidState,
+    NotLoggedOn,
+    GcNotReady,
+}
+
+#[derive(Debug)]
+struct CompletedPublishTask {
+    origin_hero_build_id: i64,
+    target_language: i64,
+    task_status: String,
+    result: Option<String>,
+    error: Option<String>,
+    task_id: i64,
+}
+
 #[derive(Debug)]
 struct BuildPublisher {
     db: Db,
     config: BuildPublisherConfig,
+}
+
+fn json_i64(value: Option<&Value>) -> Option<i64> {
+    match value? {
+        Value::Number(number) => number
+            .as_i64()
+            .or_else(|| number.as_u64().and_then(|value| i64::try_from(value).ok())),
+        Value::String(value) => value.trim().parse::<i64>().ok(),
+        _ => None,
+    }
+}
+
+fn option_label(value: Option<i64>) -> String {
+    value
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "None".to_string())
+}
+
+fn truncate_chars(value: &str, limit: usize) -> String {
+    value.chars().take(limit).collect()
+}
+
+fn steam_readiness(conn: &rusqlite::Connection) -> rusqlite::Result<SteamReadiness> {
+    let payload = conn
+        .query_row(
+            "SELECT payload FROM standalone_bot_state WHERE bot='steam' LIMIT 1",
+            [],
+            |row| row.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten();
+    let Some(payload) = payload.filter(|value| !value.trim().is_empty()) else {
+        return Ok(SteamReadiness::MissingState);
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&payload) else {
+        return Ok(SteamReadiness::InvalidState);
+    };
+    let runtime = value.get("runtime").and_then(Value::as_object);
+    let logged_on = runtime
+        .and_then(|runtime| runtime.get("logged_on"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !logged_on {
+        return Ok(SteamReadiness::NotLoggedOn);
+    }
+    let gc_ready = runtime
+        .and_then(|runtime| runtime.get("deadlock_gc_ready"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if !gc_ready {
+        return Ok(SteamReadiness::GcNotReady);
+    }
+    Ok(SteamReadiness::Ready)
 }
 
 impl BuildPublisher {
@@ -81,6 +153,34 @@ impl BuildPublisher {
             .db
             .write(move |conn| {
                 let mut stats = QueueStats::default();
+                match steam_readiness(conn)? {
+                    SteamReadiness::Ready => {}
+                    SteamReadiness::MissingState => {
+                        stats.skipped = 1;
+                        tracing::warn!(
+                            "Build publisher skipped: Steam state missing in standalone_bot_state"
+                        );
+                        return Ok(stats);
+                    }
+                    SteamReadiness::InvalidState => {
+                        stats.skipped = 1;
+                        tracing::warn!(
+                            "Build publisher skipped: Steam state payload is invalid JSON"
+                        );
+                        return Ok(stats);
+                    }
+                    SteamReadiness::NotLoggedOn => {
+                        stats.skipped = 1;
+                        tracing::warn!("Build publisher skipped: Steam not logged in");
+                        return Ok(stats);
+                    }
+                    SteamReadiness::GcNotReady => {
+                        stats.skipped = 1;
+                        tracing::warn!("Build publisher skipped: Deadlock GC not ready");
+                        return Ok(stats);
+                    }
+                }
+
                 let mut statement = conn.prepare(
                     r#"
                     WITH RankedClones AS (
@@ -248,8 +348,122 @@ impl BuildPublisher {
     async fn monitor_tasks_at(&self, now_ts: i64) -> Result<MonitorStats, DbError> {
         self.db
             .write(move |conn| {
+                let mut statement = conn.prepare(
+                    r#"
+                    SELECT c.origin_hero_build_id, c.target_language,
+                           t.status as task_status, t.result, t.error, t.id as task_id
+                    FROM hero_build_clones c
+                    INNER JOIN steam_tasks t ON (
+                        t.type = 'BUILD_PUBLISH'
+                        AND json_extract(t.payload, '$.origin_hero_build_id') = c.origin_hero_build_id
+                    )
+                    WHERE c.status = 'processing'
+                      AND t.status IN ('DONE', 'FAILED')
+                    ORDER BY t.finished_at DESC
+                    "#,
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok(CompletedPublishTask {
+                            origin_hero_build_id: row.get("origin_hero_build_id")?,
+                            target_language: row.get("target_language")?,
+                            task_status: row.get("task_status")?,
+                            result: row.get("result")?,
+                            error: row.get("error")?,
+                            task_id: row.get("task_id")?,
+                        })
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+
+                let mut stats = MonitorStats {
+                    checked: rows.len(),
+                    ..MonitorStats::default()
+                };
+                for row in rows {
+                    match row.task_status.as_str() {
+                        "DONE" => {
+                            let result = row
+                                .result
+                                .as_deref()
+                                .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+                                .unwrap_or(Value::Null);
+                            let response = result.get("response");
+                            let uploaded_id =
+                                json_i64(response.and_then(|value| value.get("hero_build_id")));
+                            let version = json_i64(response.and_then(|value| value.get("version")));
+                            let changed = conn.execute(
+                                r#"
+                                UPDATE hero_build_clones
+                                SET status = 'uploaded',
+                                    uploaded_build_id = ?1,
+                                    uploaded_version = ?2,
+                                    status_info = ?3,
+                                    updated_at = ?4
+                                WHERE origin_hero_build_id = ?5
+                                  AND target_language = ?6
+                                  AND status = 'processing'
+                                "#,
+                                params![
+                                    uploaded_id,
+                                    version,
+                                    format!(
+                                        "Published as build #{} v{}",
+                                        option_label(uploaded_id),
+                                        option_label(version)
+                                    ),
+                                    now_ts,
+                                    row.origin_hero_build_id,
+                                    row.target_language,
+                                ],
+                            )?;
+                            if changed > 0 {
+                                stats.completed += 1;
+                                tracing::info!(
+                                    origin_hero_build_id = row.origin_hero_build_id,
+                                    uploaded_build_id = uploaded_id,
+                                    "Build published successfully"
+                                );
+                            }
+                        }
+                        "FAILED" => {
+                            let error = row.error.unwrap_or_else(|| "Unknown error".to_string());
+                            let changed = conn.execute(
+                                r#"
+                                UPDATE hero_build_clones
+                                SET status = 'failed',
+                                    status_info = ?1,
+                                    updated_at = ?2
+                                WHERE origin_hero_build_id = ?3
+                                  AND target_language = ?4
+                                  AND status = 'processing'
+                                "#,
+                                params![
+                                    format!(
+                                        "Task #{} failed: {}",
+                                        row.task_id,
+                                        truncate_chars(&error, 500)
+                                    ),
+                                    now_ts,
+                                    row.origin_hero_build_id,
+                                    row.target_language,
+                                ],
+                            )?;
+                            if changed > 0 {
+                                stats.failed += 1;
+                                tracing::warn!(
+                                    origin_hero_build_id = row.origin_hero_build_id,
+                                    task_id = row.task_id,
+                                    error = %truncate_chars(&error, 100),
+                                    "Build publishing failed"
+                                );
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
                 let stale_threshold = now_ts - (30 * 60);
-                let reset_stale = conn.execute(
+                stats.reset_stale = conn.execute(
                     r#"
                     UPDATE hero_build_clones
                     SET status = 'pending',
@@ -258,14 +472,18 @@ impl BuildPublisher {
                     WHERE status = 'processing'
                       AND last_attempt_at < ?2
                       AND last_attempt_at IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1
+                          FROM steam_tasks t
+                          WHERE t.type = 'BUILD_PUBLISH'
+                            AND json_extract(t.payload, '$.origin_hero_build_id') = hero_build_clones.origin_hero_build_id
+                            AND t.status IN ('DONE', 'FAILED')
+                      )
                     "#,
                     params![STATUS_INFO_RESET_STALE, stale_threshold],
                 )?;
 
-                Ok(MonitorStats {
-                    reset_stale,
-                    ..MonitorStats::default()
-                })
+                Ok(stats)
             })
             .await
     }
@@ -318,6 +536,14 @@ pub fn spawn(db: Db) -> Vec<tokio::task::JoinHandle<()>> {
                                 "Reset stale builds stuck in processing state"
                             );
                         }
+                        if stats.completed > 0 || stats.failed > 0 {
+                            tracing::info!(
+                                completed = stats.completed,
+                                failed = stats.failed,
+                                checked = stats.checked,
+                                "Build publisher monitor completed"
+                            );
+                        }
                     }
                     Err(error) => tracing::error!(%error, "Build monitor run failed"),
                 }
@@ -356,7 +582,10 @@ mod tests {
             target_description TEXT,
             status TEXT NOT NULL DEFAULT 'pending',
             status_info TEXT,
+            uploaded_build_id INTEGER,
+            uploaded_version INTEGER,
             created_at INTEGER NOT NULL,
+            updated_at INTEGER,
             last_attempt_at INTEGER,
             attempts INTEGER NOT NULL DEFAULT 0,
             UNIQUE(origin_hero_build_id, target_language)
@@ -378,7 +607,16 @@ mod tests {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             type TEXT NOT NULL,
             payload TEXT,
-            status TEXT NOT NULL DEFAULT 'PENDING'
+            status TEXT NOT NULL DEFAULT 'PENDING',
+            result TEXT,
+            error TEXT,
+            finished_at INTEGER
+        );
+        CREATE TABLE standalone_bot_state(
+            bot TEXT PRIMARY KEY,
+            heartbeat INTEGER NOT NULL,
+            payload TEXT,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
     "#;
 
@@ -399,6 +637,28 @@ mod tests {
                 batch_size: 5,
             },
         )
+    }
+
+    async fn set_steam_state(db: &Db, logged_on: bool, gc_ready: bool) -> Result<(), DbError> {
+        db.write(move |conn| {
+            let payload = json!({
+                "runtime": {
+                    "logged_on": logged_on,
+                    "deadlock_gc_ready": gc_ready,
+                }
+            })
+            .to_string();
+            conn.execute(
+                r#"
+                INSERT INTO standalone_bot_state(bot, heartbeat, payload)
+                VALUES('steam', 1, ?1)
+                ON CONFLICT(bot) DO UPDATE SET payload = excluded.payload
+                "#,
+                params![payload],
+            )?;
+            Ok(())
+        })
+        .await
     }
 
     async fn insert_clone(
@@ -454,6 +714,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_uses_ranked_top_three_then_processes_oldest_valid_tasks() -> TestResult {
         let (_dir, db) = test_db().await?;
+        set_steam_state(&db, true, true).await?;
         insert_clone(&db, 100, 1, 10, Some(0), 100, 50, 0).await?;
         insert_clone(&db, 101, 1, 11, Some(0), 200, 40, 0).await?;
         insert_clone(&db, 102, 1, 12, Some(1), 300, 10, 0).await?;
@@ -494,6 +755,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_obeys_attempt_limits_batch_size_and_minimal_mode() -> TestResult {
         let (_dir, db) = test_db().await?;
+        set_steam_state(&db, true, true).await?;
         insert_clone(&db, 200, 1, 20, Some(0), 200, 10, 0).await?;
         insert_clone(&db, 201, 1, 21, Some(0), 190, 20, 1).await?;
         insert_clone(&db, 202, 1, 22, Some(0), 180, 30, 2).await?;
@@ -562,6 +824,7 @@ mod tests {
     #[tokio::test]
     async fn process_queue_cancels_pending_overflow_per_hero() -> TestResult {
         let (_dir, db) = test_db().await?;
+        set_steam_state(&db, true, true).await?;
         for idx in 0..5 {
             insert_clone(&db, 300 + idx, 7, 30 + idx, Some(0), 500 - idx, 10 + idx, 0).await?;
         }
@@ -597,6 +860,40 @@ mod tests {
                 (304, STATUS_INFO_CANCELLED_EXCESS.to_string()),
             ]
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn process_queue_skips_when_steam_login_or_gc_ready_is_missing() -> TestResult {
+        for (logged_on, gc_ready) in [(false, true), (true, false)] {
+            let (_dir, db) = test_db().await?;
+            set_steam_state(&db, logged_on, gc_ready).await?;
+            insert_clone(&db, 350, 1, 35, Some(0), 100, 10, 0).await?;
+
+            let stats = publisher(db.clone())
+                .process_queue_at(4_000, "test")
+                .await?;
+            assert_eq!(stats.skipped, 1);
+            assert_eq!(stats.checked, 0);
+            assert_eq!(stats.queued, 0);
+            assert_eq!(stats.cancelled_excess, 0);
+
+            let (task_count, status) = db
+                .read(|conn| {
+                    let task_count: i64 =
+                        conn.query_row("SELECT COUNT(*) FROM steam_tasks", [], |row| row.get(0))?;
+                    let status: String = conn.query_row(
+                        "SELECT status FROM hero_build_clones WHERE origin_hero_build_id = 350",
+                        [],
+                        |row| row.get(0),
+                    )?;
+                    Ok((task_count, status))
+                })
+                .await?;
+            assert_eq!(task_count, 0);
+            assert_eq!(status, "pending");
+        }
+
         Ok(())
     }
 
@@ -667,6 +964,244 @@ mod tests {
                     0
                 ),
             ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_applies_completed_and_failed_build_publish_tasks() -> TestResult {
+        let (_dir, db) = test_db().await?;
+        db.write(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO hero_build_clones(
+                    origin_hero_build_id, hero_id, target_language, status,
+                    created_at, updated_at, last_attempt_at, attempts
+                ) VALUES
+                    (500, 1, 2, 'processing', 1, 1, 9500, 1),
+                    (501, 1, 2, 'processing', 1, 1, 9500, 1)
+                "#,
+                [],
+            )?;
+            conn.execute(
+                r#"
+                INSERT INTO steam_tasks(id, type, payload, status, result, finished_at)
+                VALUES(900, 'BUILD_PUBLISH', ?1, 'DONE', ?2, 9_900)
+                "#,
+                params![
+                    json!({"origin_hero_build_id": 500}).to_string(),
+                    json!({"response": {"hero_build_id": 7000, "version": 12}}).to_string(),
+                ],
+            )?;
+            conn.execute(
+                r#"
+                INSERT INTO steam_tasks(id, type, payload, status, error, finished_at)
+                VALUES(901, 'BUILD_PUBLISH', ?1, 'FAILED', 'upload failed hard', 9_901)
+                "#,
+                params![json!({"origin_hero_build_id": 501}).to_string()],
+            )?;
+            Ok(())
+        })
+        .await?;
+
+        let stats = publisher(db.clone()).monitor_tasks_at(10_000).await?;
+        assert_eq!(stats.checked, 2);
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.reset_stale, 0);
+
+        let rows = db
+            .read(|conn| {
+                let mut statement = conn.prepare(
+                    r#"
+                    SELECT origin_hero_build_id, status, uploaded_build_id,
+                           uploaded_version, status_info, updated_at
+                    FROM hero_build_clones
+                    ORDER BY origin_hero_build_id
+                    "#,
+                )?;
+                let rows = statement
+                    .query_map([], |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                            row.get::<_, Option<i64>>(5)?,
+                        ))
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                Ok(rows)
+            })
+            .await?;
+
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    500,
+                    "uploaded".to_string(),
+                    Some(7000),
+                    Some(12),
+                    Some("Published as build #7000 v12".to_string()),
+                    Some(10_000),
+                ),
+                (
+                    501,
+                    "failed".to_string(),
+                    None,
+                    None,
+                    Some("Task #901 failed: upload failed hard".to_string()),
+                    Some(10_000),
+                ),
+            ]
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_consumes_finished_stale_task_before_resetting_processing_clone() -> TestResult
+    {
+        let (_dir, db) = test_db().await?;
+        db.write(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO hero_build_clones(
+                    origin_hero_build_id, hero_id, target_language, status,
+                    created_at, updated_at, last_attempt_at, attempts
+                ) VALUES(600, 1, 2, 'processing', 1, 1, 1_000, 2)
+                "#,
+                [],
+            )?;
+            conn.execute(
+                r#"
+                INSERT INTO steam_tasks(id, type, payload, status, result, finished_at)
+                VALUES(910, 'BUILD_PUBLISH', ?1, 'DONE', ?2, 2_500)
+                "#,
+                params![
+                    json!({"origin_hero_build_id": 600}).to_string(),
+                    json!({"response": {"hero_build_id": 7600, "version": 3}}).to_string(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+
+        let stats = publisher(db.clone()).monitor_tasks_at(3_000).await?;
+        assert_eq!(stats.checked, 1);
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.reset_stale, 0);
+
+        let row = db
+            .read(|conn| {
+                conn.query_row(
+                    r#"
+                    SELECT status, attempts, uploaded_build_id, uploaded_version, status_info
+                    FROM hero_build_clones
+                    WHERE origin_hero_build_id = 600
+                    "#,
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<i64>>(3)?,
+                            row.get::<_, Option<String>>(4)?,
+                        ))
+                    },
+                )
+            })
+            .await?;
+        assert_eq!(
+            row,
+            (
+                "uploaded".to_string(),
+                2,
+                Some(7600),
+                Some(3),
+                Some("Published as build #7600 v3".to_string()),
+            )
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn monitor_applies_only_latest_completed_task_for_a_processing_clone() -> TestResult {
+        let (_dir, db) = test_db().await?;
+        db.write(|conn| {
+            conn.execute(
+                r#"
+                INSERT INTO hero_build_clones(
+                    origin_hero_build_id, hero_id, target_language, status,
+                    created_at, updated_at, last_attempt_at, attempts
+                ) VALUES(610, 1, 2, 'processing', 1, 1, 2_500, 1)
+                "#,
+                [],
+            )?;
+            conn.execute(
+                r#"
+                INSERT INTO steam_tasks(id, type, payload, status, result, finished_at)
+                VALUES(920, 'BUILD_PUBLISH', ?1, 'DONE', ?2, 2_900)
+                "#,
+                params![
+                    json!({"origin_hero_build_id": 610}).to_string(),
+                    json!({"response": {"hero_build_id": 7610, "version": 1}}).to_string(),
+                ],
+            )?;
+            conn.execute(
+                r#"
+                INSERT INTO steam_tasks(id, type, payload, status, result, finished_at)
+                VALUES(921, 'BUILD_PUBLISH', ?1, 'DONE', ?2, 2_950)
+                "#,
+                params![
+                    json!({"origin_hero_build_id": 610}).to_string(),
+                    json!({"response": {"hero_build_id": 7611, "version": 2}}).to_string(),
+                ],
+            )?;
+            Ok(())
+        })
+        .await?;
+
+        let stats = publisher(db.clone()).monitor_tasks_at(3_000).await?;
+        assert_eq!(stats.checked, 2);
+        assert_eq!(stats.completed, 1);
+        assert_eq!(stats.failed, 0);
+        assert_eq!(stats.reset_stale, 0);
+
+        let row = db
+            .read(|conn| {
+                conn.query_row(
+                    r#"
+                    SELECT status, uploaded_build_id, uploaded_version, status_info
+                    FROM hero_build_clones
+                    WHERE origin_hero_build_id = 610
+                    "#,
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, Option<i64>>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                            row.get::<_, Option<String>>(3)?,
+                        ))
+                    },
+                )
+            })
+            .await?;
+        assert_eq!(
+            row,
+            (
+                "uploaded".to_string(),
+                Some(7611),
+                Some(2),
+                Some("Published as build #7611 v2".to_string()),
+            )
         );
 
         Ok(())

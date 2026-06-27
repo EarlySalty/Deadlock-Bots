@@ -34,6 +34,64 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+struct BrokerChannelInfoGlue {
+    adapter: Arc<dl_discord::DiscordAdapter>,
+}
+
+fn cached_channel_info(channel: &serenity::all::GuildChannel) -> dl_broker::port::ChannelInfo {
+    dl_broker::port::ChannelInfo {
+        channel_id: channel.id.get(),
+        name: channel.name.clone(),
+        parent_id: channel.parent_id.map(|id| id.get()),
+        last_message_id: channel.last_message_id.map(|id| id.get()),
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_broker::ChannelInfoPort for BrokerChannelInfoGlue {
+    async fn channel_info(
+        &self,
+        guild_id: Option<u64>,
+        channel_id: u64,
+    ) -> Result<dl_broker::port::ChannelInfo, dl_broker::PortError> {
+        if channel_id == 0 {
+            return Err(dl_broker::PortError::ChannelNotFound);
+        }
+        let cache = self.adapter.cache();
+        let preferred_guild_id = match guild_id {
+            Some(id) => serenity::all::GuildId::new(id),
+            None => cache
+                .guilds()
+                .first()
+                .copied()
+                .ok_or(dl_broker::PortError::GuildNotFound)?,
+        };
+        {
+            let Some(guild) = cache.guild(preferred_guild_id) else {
+                return Err(dl_broker::PortError::GuildNotFound);
+            };
+            if let Some(channel) = guild
+                .channels
+                .get(&serenity::all::ChannelId::new(channel_id))
+            {
+                return Ok(cached_channel_info(channel));
+            }
+        }
+        for candidate_guild_id in cache.guilds() {
+            let Some(guild) = cache.guild(candidate_guild_id) else {
+                continue;
+            };
+            if let Some(channel) = guild
+                .channels
+                .get(&serenity::all::ChannelId::new(channel_id))
+            {
+                return Ok(cached_channel_info(channel));
+            }
+        }
+        Err(dl_broker::PortError::ChannelNotFound)
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
@@ -416,9 +474,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
         .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
-    let broker =
-        dl_broker::BrokerState::new(adapter.clone(), broker_token, |key| std::env::var(key).ok())
-            .map_err(|e| anyhow::anyhow!(e))?;
+    let broker = dl_broker::BrokerState::new_with_channel_info(
+        adapter.clone(),
+        Arc::new(BrokerChannelInfoGlue {
+            adapter: adapter.clone(),
+        }),
+        broker_token,
+        |key| std::env::var(key).ok(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let broker_host = env("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let broker_addr = format!("{broker_host}:{}", cfg.ports.master_broker);
     let broker_listener = tokio::net::TcpListener::bind(&broker_addr)

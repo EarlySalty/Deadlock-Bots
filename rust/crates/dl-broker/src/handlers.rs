@@ -7,13 +7,13 @@ use std::net::SocketAddr;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::payload::{self};
 use crate::port::{MemberPresence, PortError, RichMessage};
 use crate::{
-    authorize, error_body, payload_hash, request_id, require_loopback, respond, run_idempotent,
-    success_body, SharedBroker, IDEMPOTENCY_HEADER,
+    IDEMPOTENCY_HEADER, SharedBroker, authorize, error_body, payload_hash, request_id,
+    require_loopback, respond, run_idempotent, success_body,
 };
 
 type Peer = ConnectInfo<SocketAddr>;
@@ -148,6 +148,57 @@ pub async fn role_members(
     }
 }
 
+pub async fn channel_info(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = require_loopback(&peer, &rid) {
+        return resp;
+    }
+    let guild_id = params
+        .get("guild_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|v| *v > 0);
+    let channel_id = params
+        .get("channel_id")
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(0);
+    match state.channel_info.channel_info(guild_id, channel_id).await {
+        Ok(info) => respond(
+            200,
+            json!({
+                "ok": true,
+                "channel_id": info.channel_id.to_string(),
+                "name": info.name,
+                "parent_id": info.parent_id.map(|value| value.to_string()),
+                "last_message_id": info.last_message_id.map(|value| value.to_string()),
+            }),
+        ),
+        Err(PortError::GuildNotFound) => {
+            respond(404, error_body(&rid, None, "not_found", "guild not found"))
+        }
+        Err(PortError::ChannelNotFound) => respond(
+            404,
+            error_body(
+                &rid,
+                None,
+                "not_found",
+                &format!("channel {channel_id} not found"),
+            ),
+        ),
+        Err(err) => {
+            tracing::error!(%err, channel_id, "channel_info fehlgeschlagen");
+            respond(
+                502,
+                error_body(&rid, None, "discord_error", "failed to read channel info"),
+            )
+        }
+    }
+}
+
 /// Zugriffsstatus eines Mitglieds (Admin + Rollen) für den Dashboard-Login.
 /// Loopback-only, ohne Token — wie die übrigen Diagnose-Routen.
 pub async fn member_access(
@@ -269,7 +320,11 @@ pub async fn resolve_names(
 /// Loopback-only, ohne Token (wie `_handle_list_members`). Antwort
 /// `{ok, members:[{id,name,global_name,nick}]}`; wird vom Twitch-Bot-Relay
 /// (`list_members`) konsumiert.
-pub async fn members(State(state): State<SharedBroker>, peer: Peer, headers: HeaderMap) -> Response {
+pub async fn members(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+) -> Response {
     let rid = request_id(&headers);
     if let Err(resp) = require_loopback(&peer, &rid) {
         return resp;
@@ -495,7 +550,17 @@ pub async fn send_message(
                     }
                 }
             } else {
-                let user_id = user_id.expect("user_id gesetzt wenn channel_id fehlt");
+                let Some(user_id) = user_id else {
+                    return (
+                        400,
+                        error_body(
+                            &rid,
+                            Some(&idem),
+                            "bad_request",
+                            "channel_id or user_id is required",
+                        ),
+                    );
+                };
                 match state.port.send_dm(user_id, &content).await {
                     Ok((dm_channel_id, message_id)) => (
                         200,
@@ -1097,42 +1162,49 @@ pub async fn create_role(
     op.insert("reason".into(), json!(reason));
     let hash = payload_hash(&op);
 
-    run_idempotent(&state, &rid, "discord.create_role", &idem, &hash, || async {
-        match state
-            .port
-            .create_role(guild_id, &name, mentionable, &reason)
-            .await
-        {
-            Ok(role_id) => (
-                200,
-                success_body(
-                    &rid,
-                    Some(&idem),
-                    json!({
-                        "guild_id": guild_id.to_string(),
-                        "role_id": role_id,
-                        "name": name,
-                    }),
+    run_idempotent(
+        &state,
+        &rid,
+        "discord.create_role",
+        &idem,
+        &hash,
+        || async {
+            match state
+                .port
+                .create_role(guild_id, &name, mentionable, &reason)
+                .await
+            {
+                Ok(role_id) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        json!({
+                            "guild_id": guild_id.to_string(),
+                            "role_id": role_id,
+                            "name": name,
+                        }),
+                    ),
                 ),
-            ),
-            Err(PortError::GuildNotFound) => (
-                404,
-                error_body(
-                    &rid,
-                    Some(&idem),
-                    "not_found",
-                    &format!("guild {guild_id} not found"),
+                Err(PortError::GuildNotFound) => (
+                    404,
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "not_found",
+                        &format!("guild {guild_id} not found"),
+                    ),
                 ),
-            ),
-            Err(err) => {
-                tracing::error!(%err, guild_id, "create_role fehlgeschlagen");
-                (
-                    502,
-                    error_body(&rid, Some(&idem), "discord_error", &err.to_string()),
-                )
+                Err(err) => {
+                    tracing::error!(%err, guild_id, "create_role fehlgeschlagen");
+                    (
+                        502,
+                        error_body(&rid, Some(&idem), "discord_error", &err.to_string()),
+                    )
+                }
             }
-        }
-    })
+        },
+    )
     .await
 }
 
@@ -1457,4 +1529,282 @@ pub async fn send_dm(
         }
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    use crate::port::{
+        ChannelInfo, ChannelInfoPort, DiscordPort, GuildMemberInfo, GuildRoles, GuildStats,
+        InviteInfo, MemberAccess, MemberInfo, MemberPresence, ResolvedUser, RichMessage,
+        RoleMembers,
+    };
+
+    struct UnusedDiscordPort;
+
+    #[async_trait::async_trait]
+    impl DiscordPort for UnusedDiscordPort {
+        async fn is_ready(&self) -> bool {
+            true
+        }
+
+        async fn send_channel_message(
+            &self,
+            _channel_id: u64,
+            _content: &str,
+        ) -> Result<u64, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn send_dm(
+            &self,
+            _user_id: u64,
+            _content: &str,
+        ) -> Result<(Option<u64>, u64), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn create_text_channel(
+            &self,
+            _category_id: u64,
+            _name: &str,
+            _topic: Option<&str>,
+        ) -> Result<u64, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn delete_channel(&self, _channel_id: u64) -> Result<(), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn send_rich_message(&self, _message: &RichMessage) -> Result<u64, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn edit_rich_message(
+            &self,
+            _message_id: u64,
+            _message: &RichMessage,
+        ) -> Result<(), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn add_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn create_role(
+            &self,
+            _guild_id: u64,
+            _name: &str,
+            _mentionable: bool,
+            _reason: &str,
+        ) -> Result<u64, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn remove_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn move_voice(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: Option<u64>,
+        ) -> Result<(), PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn voice_members(&self, _channel_id: u64) -> Result<Vec<MemberInfo>, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn create_invite(
+            &self,
+            _channel_id: u64,
+            _reason: &str,
+        ) -> Result<InviteInfo, PortError> {
+            Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn list_roles(&self, _guild_id: Option<u64>) -> Result<GuildRoles, PortError> {
+            Err(PortError::GuildNotFound)
+        }
+
+        async fn role_members(
+            &self,
+            _guild_id: Option<u64>,
+            _role_id: u64,
+        ) -> Result<RoleMembers, PortError> {
+            Err(PortError::GuildNotFound)
+        }
+
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Result<MemberAccess, PortError> {
+            Err(PortError::GuildNotFound)
+        }
+
+        async fn member_present(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+        ) -> Result<MemberPresence, PortError> {
+            Err(PortError::GuildNotFound)
+        }
+
+        async fn resolve_names(&self, _user_ids: &[u64]) -> Result<Vec<MemberInfo>, PortError> {
+            Ok(Vec::new())
+        }
+
+        async fn resolve_user(&self, _user_id: u64) -> Result<Option<ResolvedUser>, PortError> {
+            Ok(None)
+        }
+
+        async fn list_members(&self) -> Result<Vec<GuildMemberInfo>, PortError> {
+            Ok(Vec::new())
+        }
+
+        async fn guild_stats(&self, _guild_id: Option<u64>) -> Result<GuildStats, PortError> {
+            Err(PortError::GuildNotFound)
+        }
+    }
+
+    struct MockChannelInfoPort;
+
+    #[async_trait::async_trait]
+    impl ChannelInfoPort for MockChannelInfoPort {
+        async fn channel_info(
+            &self,
+            guild_id: Option<u64>,
+            channel_id: u64,
+        ) -> Result<ChannelInfo, PortError> {
+            if guild_id == Some(99) {
+                return Err(PortError::GuildNotFound);
+            }
+            if channel_id != 42 {
+                return Err(PortError::ChannelNotFound);
+            }
+            Ok(ChannelInfo {
+                channel_id,
+                name: "builds".to_string(),
+                parent_id: Some(7),
+                last_message_id: Some(700),
+            })
+        }
+    }
+
+    fn test_state() -> Result<SharedBroker, String> {
+        crate::BrokerState::new_with_channel_info(
+            Arc::new(UnusedDiscordPort),
+            Arc::new(MockChannelInfoPort),
+            "secret".to_string(),
+            |_| None,
+        )
+    }
+
+    fn peer(addr: &str) -> Result<Peer, std::net::AddrParseError> {
+        Ok(ConnectInfo(addr.parse()?))
+    }
+
+    async fn response_json(response: Response) -> Result<(u16, Value), Box<dyn std::error::Error>> {
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let value = serde_json::from_slice(&bytes)?;
+        Ok((status, value))
+    }
+
+    #[tokio::test]
+    async fn channel_info_returns_loopback_metadata_without_token()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut params = HashMap::new();
+        params.insert("channel_id".to_string(), "42".to_string());
+        let response = channel_info(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            HeaderMap::new(),
+            Query(params),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body,
+            json!({
+                "ok": true,
+                "channel_id": "42",
+                "name": "builds",
+                "parent_id": "7",
+                "last_message_id": "700",
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_info_keeps_python_not_found_errors() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let mut channel_params = HashMap::new();
+        channel_params.insert("channel_id".to_string(), "404".to_string());
+        let channel_response = channel_info(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            HeaderMap::new(),
+            Query(channel_params),
+        )
+        .await;
+        let (channel_status, channel_body) = response_json(channel_response).await?;
+        assert_eq!(channel_status, 404);
+        assert_eq!(channel_body["error"]["message"], "channel 404 not found");
+
+        let mut guild_params = HashMap::new();
+        guild_params.insert("guild_id".to_string(), "99".to_string());
+        guild_params.insert("channel_id".to_string(), "42".to_string());
+        let guild_response = channel_info(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            HeaderMap::new(),
+            Query(guild_params),
+        )
+        .await;
+        let (guild_status, guild_body) = response_json(guild_response).await?;
+        assert_eq!(guild_status, 404);
+        assert_eq!(guild_body["error"]["message"], "guild not found");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn channel_info_rejects_non_loopback_without_token_check()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let response = channel_info(
+            State(test_state()?),
+            peer("10.0.0.5:3456")?,
+            HeaderMap::new(),
+            Query(HashMap::new()),
+        )
+        .await;
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 403);
+        assert_eq!(body["error"]["code"], "forbidden");
+        Ok(())
+    }
 }

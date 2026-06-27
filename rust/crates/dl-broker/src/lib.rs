@@ -22,10 +22,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub use idempotency::{IdempotencyConfig, IdempotencyStore};
-pub use port::{DiscordPort, PortError};
+pub use port::{ChannelInfoPort, DiscordPort, PortError};
 
 pub const TOKEN_HEADER: &str = "X-Internal-Token";
 pub const IDEMPOTENCY_HEADER: &str = "X-Idempotency-Key";
@@ -61,6 +61,7 @@ impl Allowlist {
 
 pub struct BrokerState {
     pub port: Arc<dyn DiscordPort>,
+    pub channel_info: Arc<dyn ChannelInfoPort>,
     pub token: String,
     pub store: IdempotencyStore,
     pub channel_allowlist: Allowlist,
@@ -70,10 +71,33 @@ pub struct BrokerState {
 
 pub type SharedBroker = Arc<BrokerState>;
 
+struct MissingChannelInfoPort;
+
+#[async_trait::async_trait]
+impl ChannelInfoPort for MissingChannelInfoPort {
+    async fn channel_info(
+        &self,
+        _guild_id: Option<u64>,
+        _channel_id: u64,
+    ) -> Result<port::ChannelInfo, PortError> {
+        Err(PortError::ChannelNotFound)
+    }
+}
+
 impl BrokerState {
     /// `token` ist Pflicht (wie im Original: leerer Token = Konstruktionsfehler).
     pub fn new(
         port: Arc<dyn DiscordPort>,
+        token: String,
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<SharedBroker, String> {
+        Self::new_with_channel_info(port, Arc::new(MissingChannelInfoPort), token, lookup)
+    }
+
+    /// Wie [`Self::new`], aber mit separatem Read-Port fuer Channel-Metadaten.
+    pub fn new_with_channel_info(
+        port: Arc<dyn DiscordPort>,
+        channel_info: Arc<dyn ChannelInfoPort>,
         token: String,
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<SharedBroker, String> {
@@ -83,6 +107,7 @@ impl BrokerState {
         }
         Ok(Arc::new(Self {
             port,
+            channel_info,
             token,
             store: IdempotencyStore::new(IdempotencyConfig::from_env(&lookup)),
             channel_allowlist: Allowlist::from_env(
@@ -123,6 +148,10 @@ pub fn router(state: SharedBroker) -> Router {
         .route(
             "/internal/master/v1/discord/role-members",
             get(handlers::role_members),
+        )
+        .route(
+            "/internal/master/v1/discord/channel-info",
+            get(handlers::channel_info),
         )
         .route(
             "/internal/master/v1/discord/member-access",
@@ -348,7 +377,7 @@ where
             return respond(
                 409,
                 error_body(rid, Some(idem_key), "idempotency_conflict", &message),
-            )
+            );
         }
     };
 
