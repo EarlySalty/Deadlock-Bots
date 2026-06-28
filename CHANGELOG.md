@@ -1,3 +1,11 @@
+## #166 — Frag das Brain: neuer `!brain`-Befehl
+
+**Ausgangslage:** Wir sammeln seit Monaten in einer eigenen Wissensbasis — dem „Brain" — geprüftes Deadlock-Wissen: offizielle Spielwerte, die Patch-Historie und aus Creator-Videos extrahierte Aussagen, die wir gegen die echten Spieldaten gegengeprüft haben. Bisher lag das alles nur intern; im Discord kam man nicht dran. Wer eine Deadlock-Frage hatte, musste raten, lange suchen oder ein allgemeines KI-Tool fragen, das Deadlock kaum kennt und gern veraltetes Zeug erzählt.
+
+**Was wurde geändert:** Es gibt jetzt den Befehl `!brain <Frage>`. Dahinter steckt nicht einfach „frag irgendeine KI", sondern der echte Brain-Weg: Die Frage geht zuerst ins Brain, das die passenden Fakten heraussucht und nach Vertrauensgrad sortiert — gesicherte Spieldaten schlagen geprüfte Creator-Aussagen, die wiederum Ungeprüftes schlagen. Erst aus diesem Faktenbündel formuliert die KI die Antwort. Fragen, die nichts mit Deadlock zu tun haben, fängt der Befehl freundlich ab, bevor überhaupt eine KI-Antwort erzeugt wird. Ein kurzer Cooldown pro Person bremst Spam, lange Antworten werden sauber aufgeteilt, und der Bot pingt dabei niemanden — selbst wenn in einer Antwort mal ein `@everyone` auftauchen würde, löst es nichts aus.
+
+**Wie es jetzt läuft:** Jeder im Discord kann etwas wie `!brain wie spiel ich Vindicta?` oder `!brain ist Lash grad stark?` fragen und bekommt eine Antwort, die auf unserem geprüften Deadlock-Wissen fußt statt auf Halbwissen. Findet das Brain zu einer Frage nichts Belastbares, sagt der Bot das ehrlich, statt zu raten.
+
 ## #165 — Altes In-Bot-Turnier entfernt
 
 **Ausgangslage:** Im Bot steckte noch ein altes, nie richtig fertig gewordenes Turnier-System: eine Anmelde- und Admin-Seite für Turniere sowie ein Befehl, der per Sprachkanal zwei einigermaßen faire Teams zusammenlosen sollte. Das echte, weitergepflegte Turniersystem läuft inzwischen komplett woanders — als eigenständiges Projekt mit eigener Website. Der alte Kram im Bot war damit toter Ballast, der nur noch Pflegeaufwand und Verwechslungsgefahr brachte.

@@ -34,6 +34,37 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn env_bool_default(name: &str, default: bool) -> bool {
+    env(name)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn env_u64_default(name: &str, default: u64) -> u64 {
+    env(name)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_usize_default(name: &str, default: usize) -> usize {
+    env(name)
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(default)
+}
+
+fn default_brain_bin() -> String {
+    "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
+}
+
+fn default_brain_db() -> String {
+    "/home/naniadm/Documents/Deadlock-Brain/data/deadlock_brain.sqlite3".to_string()
+}
+
 struct BrokerChannelInfoGlue {
     adapter: Arc<dl_discord::DiscordAdapter>,
 }
@@ -338,6 +369,59 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     dl_community::privacy_ui::register(&mut router, db.clone());
 
+    // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
+    // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
+    let brain_handler = {
+        let brain_bin = env("BRAIN_BIN").unwrap_or_else(default_brain_bin);
+        let brain_bin_path = std::path::PathBuf::from(&brain_bin);
+        let enabled = env_bool_default("BRAIN_CMD_ENABLED", brain_bin_path.is_file());
+        if !enabled {
+            tracing::info!("Brain-Command deaktiviert (BRAIN_CMD_ENABLED)");
+            None
+        } else if !brain_bin_path.is_file() {
+            tracing::warn!(
+                bin = %brain_bin_path.display(),
+                "Brain-Command nicht registriert: BRAIN_BIN existiert nicht"
+            );
+            None
+        } else {
+            let client = dl_ai::MiniMaxClient::from_env(env);
+            if client.is_none() {
+                tracing::warn!(
+                    "Brain-Command registriert ohne MiniMax-Client; Antworten liefern Backend-Fehler"
+                );
+            }
+            let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
+            let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
+            let brain_db = env("BRAIN_DB").unwrap_or_else(default_brain_db);
+            let brain_db_path = std::path::PathBuf::from(&brain_db);
+            let channel_allowlist = env("BRAIN_CHANNEL_ALLOWLIST")
+                .and_then(|raw| modglue::parse_brain_channel_allowlist(&raw));
+            tracing::info!(
+                bin = %brain_bin_path.display(),
+                db = %brain_db_path.display(),
+                cooldown_secs,
+                max_question_len,
+                channel_allowlist = channel_allowlist.as_ref().map(|ids| ids.len()).unwrap_or(0),
+                "Brain-Command registriert"
+            );
+            Some(Arc::new(modglue::BrainHandler {
+                adapter: adapter.clone(),
+                config: dl_brain::BrainConfig {
+                    max_question_len,
+                    cooldown_secs,
+                },
+                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                retriever: Arc::new(modglue::BrainRetrieverGlue {
+                    bin: brain_bin_path,
+                    db_path: Some(brain_db_path),
+                }),
+                answerer: Arc::new(modglue::BrainAiGlue { client }),
+                channel_allowlist,
+            }))
+        }
+    };
+
     // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere
     // Discord-Anfrageaufnahme samt KI-Analyse/Rollen-/Stale-Recovery bleibt im
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
@@ -534,6 +618,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             owner_id,
             master_action_tx.clone(),
         );
+        if let Some(brain_handler) = &brain_handler {
+            modglue::spawn_brain_command(brain_handler.clone(), &dispatcher);
+        }
 
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren

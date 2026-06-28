@@ -26,6 +26,9 @@ pub struct BridgeInteraction {
     /// Slash-Command-Optionen bzw. Modal-/Select-Werte.
     pub options: HashMap<String, Value>,
     pub values: Vec<String>,
+    /// Rohtext einer Gateway-Nachricht, wenn ein Message-Subscriber den
+    /// Handler wiederverwendet. Leer bei echten Discord-Interactions.
+    pub content: String,
     pub interaction_id: u64,
     pub user_id: u64,
     /// Discord-Username (str(user)-Äquivalent, für Tracking-Zwecke).
