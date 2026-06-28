@@ -367,8 +367,8 @@ fn parse_mention(token: &str) -> Option<u64> {
 }
 
 /// Message-Listener für `!nudgesend`/`!t30` (Python: `@commands.hybrid_command`,
-/// `administrator`). Folgt dem `balance_cmd::spawn`-Muster: eigener
-/// `MessageEvent`-Subscriber, admin-gated, Antwort über den `ChannelSender`.
+/// `administrator`). Folgt dem Muster eines eigenständigen Spawn-/Listener-Tasks:
+/// eigener `MessageEvent`-Subscriber, admin-gated, Antwort über den `ChannelSender`.
 /// Nicht-Admins werden still ignoriert (kein „fehlende Berechtigung“-Reply).
 pub fn spawn_command(
     nudge: Arc<VoiceNudge>,

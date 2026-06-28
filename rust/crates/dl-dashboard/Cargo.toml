@@ -1,6 +1,6 @@
 [package]
 name = "dl-dashboard"
-description = "Master-Dashboard (:8766) — OAuth-Auth-Provider, Analytics-Reads, Turnier-Admin, Steuerung (systemd statt Cogs). Port von service/dashboard.py."
+description = "Master-Dashboard (:8766) — OAuth-Auth-Provider, Analytics-Reads, Steuerung (systemd statt Cogs). Port von service/dashboard.py."
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

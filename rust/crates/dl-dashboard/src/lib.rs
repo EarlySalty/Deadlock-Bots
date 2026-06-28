@@ -1,7 +1,7 @@
 //! Master-Dashboard (:8766) — Port von `service/dashboard.py`.
 //!
 //! Das Dashboard ist während der Migration der **OAuth-Besitzer**: Stats
-//! (:8768), Tierlist (:8771) und Turnier-Web (:8767) delegieren ihre
+//! (:8768) und Tierlist (:8771) delegieren ihre
 //! Anmeldung hierher (siehe `dl-webcore::DashboardClient`). Darum wird es als
 //! Erstes der Phase 9 portiert — ohne kompatiblen Auth-Provider kann der
 //! Cutover der bereits portierten Webs nicht erfolgen.
