@@ -21,8 +21,8 @@ Diese README fasst alle Features zusammen, die auf dem Server für Community-Mit
 - `!vleaderboard` (Aliases `!vlb`, `!voicetop`) listet die Top-Spieler nach Voice-Punkten, während `!vtest` einen Health-Check für das Voice-System liefert (u. a. aktive Sessions, Grace-Settings und persönlichen Voice-Status).【F:cogs/voice_activity_tracker.py†L533-L623】
 
 ## Deadlock Team Balancer
-- Das Command-Set `!balance` hilft beim Aufsetzen fairer Matches: `auto`/`voice` erstellt eine Vorschau, `start` legt automatisch zwei Team-Voice-Channels an und moved alle Teilnehmer, `manual` erlaubt eine Auswahl per Mentions.【F:cogs/deadlock_team_balancer.py†L305-L396】
-- Weitere Unterbefehle zeigen Ränge (`status`), laufende Matches (`matches`), bereinigen alte Matches (`cleanup`) oder schließen ein Spiel inklusive optionalem Debrief-Channel (`end`).【F:cogs/deadlock_team_balancer.py†L397-L520】
+- Historisch gab es ein `!balance`-Command-Set zum Aufsetzen fairer Matches; diese alte Bot-Funktion wurde entfernt.
+- Die damaligen Unterbefehle für Rangstatus, laufende Matches, Cleanup und Abschluss sind nur noch Archivkontext.
 
 ## Clip-Einreichung
 - Im Clip-Channel findest du einen persistierenden Button **„Clip einsenden“**. Nach der Rechtebestätigung öffnet sich ein Modal für Link, Credit und Zusatzinfos (inklusive Cooldown gegen Spam).【F:cogs/clip_submission.py†L201-L338】
@@ -39,4 +39,3 @@ Diese README fasst alle Features zusammen, die auf dem Server für Community-Mit
 - Die eigentliche Streamer-/Twitch-Integration lebt außerhalb dieses Repos. Betriebs- und Setup-Hinweise dazu stehen in [docs/TWITCH_EXTERNAL_REPO.md](./TWITCH_EXTERNAL_REPO.md).
 
 Viel Spaß beim Nutzen der Bots und Features – und danke fürs Mitgestalten der Deutschen Deadlock Community!
-
