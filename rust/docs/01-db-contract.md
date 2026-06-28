@@ -39,12 +39,12 @@ python3 rust/scripts/dump_schema.py   # read-only, schreibt rust/docs/db-schema.
 | TempVoice | tempvoice_*, router_user_prefs | dl-voice |
 | Steam-Link | steam_links(+archive), steam_nudge_state, steam_friend_*, steam_launch_tokens | dl-bridges |
 | Beta-Invite | steam_beta_invites, beta_invite_* | dl-bridges |
-| Builds/Heroes | deadlock_heroes, deadlock_hero_builds, hero_build_* | dl-tournament / dl-web |
+| Builds/Heroes | deadlock_heroes, deadlock_hero_builds, hero_build_* | dl-web (Tierlist/Builds) |
 | Tierlist | tierlist_* | dl-web |
 | Aktivität | user_activity_patterns, user_co_players, member_events, message_activity, text_* | dl-activity |
 | Retention | user_retention_*, dm_response_tracking | dl-activity |
 | Coaching | coaching_*, coaches, coach_applications | dl-coaching |
-| Turnier | customgames_*, tournament_periods, turnier_auth_tokens | dl-tournament |
+| Turnier (Legacy) | customgames_*, tournament_periods, turnier_auth_tokens | — Code 2026-06-28 entfernt; Tabellen verwaist, DB-Drop separat später |
 | Moderation | ai_moderation_*, security_guard_incidents, user_mod_tags | dl-moderation |
 | Community | clip_*, faq_chat_*, server_faq_logs, rename_*, member_leave_surveys, issue_reports | dl-community |
 | Changelogs | changelog_entries, changelog_posts, deadlock_changelogs | dl-bot |

@@ -11,8 +11,6 @@
 pub const DEFAULT_OWNER_USER_ID: u64 = 662995601738170389;
 /// Moderator-Rolle → Voll-Zugriff (DEFAULT_DASHBOARD_MODERATOR_ROLE_ID).
 pub const DEFAULT_MODERATOR_ROLE_ID: u64 = 1337518124647579661;
-/// Community-Moderator → ausschließlich Turnier-Bereich (TURNIER_MOD_ROLE_ID).
-pub const DEFAULT_TURNIER_MOD_ROLE_ID: u64 = 1401891955931222110;
 
 const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
 const DEFAULT_OAUTH_STATE_TTL_SECONDS: i64 = 21_600; // 6 Stunden
@@ -28,15 +26,12 @@ const DEFAULT_BROKER_BASE: &str = "http://127.0.0.1:8770";
 pub enum AccessLevel {
     /// Voller Zugriff (Owner, Admin, Moderator-Rolle).
     Full,
-    /// Nur der Turnier-Bereich (Community-Moderator).
-    TurnierOnly,
 }
 
 impl AccessLevel {
     pub fn as_str(self) -> &'static str {
         match self {
             AccessLevel::Full => "full",
-            AccessLevel::TurnierOnly => "turnier_only",
         }
     }
 }
@@ -48,7 +43,6 @@ pub struct DashboardConfig {
     pub discord_redirect_uri: String,
     pub owner_user_id: u64,
     pub moderator_role_id: u64,
-    pub turnier_mod_role_id: u64,
     /// Gilden, in denen Admin-/Rollen-Status geprüft wird. Leer = alle
     /// Bot-Gilden (Broker entscheidet).
     pub auth_guild_ids: Vec<u64>,
@@ -63,8 +57,6 @@ pub struct DashboardConfig {
     pub discord_api_base: String,
     /// Basis-URL des Master-Brokers (Member-Access-Lookup für den Login).
     pub broker_base: String,
-    /// Standard-Gilde für die Turnier-Admin-Routen (TURNIER_PUBLIC_GUILD_ID).
-    pub tournament_default_guild: u64,
     /// Tokens für die turnier-/allgemeinen internen Routen
     /// (initiate/consume/authorize-url/session).
     pub turnier_tokens: Vec<String>,
@@ -106,9 +98,6 @@ impl DashboardConfig {
             moderator_role_id: get("MASTER_DASHBOARD_MODERATOR_ROLE_ID")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MODERATOR_ROLE_ID),
-            turnier_mod_role_id: get("MASTER_DASHBOARD_TURNIER_MOD_ROLE_ID")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(DEFAULT_TURNIER_MOD_ROLE_ID),
             auth_guild_ids: get("MASTER_DASHBOARD_AUTH_GUILD_IDS")
                 .map(|v| parse_id_list(&v))
                 .unwrap_or_default(),
@@ -134,9 +123,6 @@ impl DashboardConfig {
                 .unwrap_or_else(|| DISCORD_API_BASE.to_string()),
             broker_base: get("MASTER_BROKER_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_BROKER_BASE.to_string()),
-            tournament_default_guild: get("TURNIER_PUBLIC_GUILD_ID")
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0),
             turnier_tokens,
             twitch_tokens,
         }
@@ -214,7 +200,6 @@ mod tests {
         let cfg = DashboardConfig::from_lookup(|_| None);
         assert_eq!(cfg.owner_user_id, DEFAULT_OWNER_USER_ID);
         assert_eq!(cfg.moderator_role_id, DEFAULT_MODERATOR_ROLE_ID);
-        assert_eq!(cfg.turnier_mod_role_id, DEFAULT_TURNIER_MOD_ROLE_ID);
         assert_eq!(cfg.session_ttl_secs, DEFAULT_SESSION_TTL_SECONDS);
         assert_eq!(cfg.oauth_state_ttl_secs, DEFAULT_OAUTH_STATE_TTL_SECONDS);
         assert!(cfg.auth_enforced());

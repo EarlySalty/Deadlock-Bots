@@ -2,6 +2,12 @@
 
 Stand: 2026-06-10 · Status: vom Betreiber freigegeben (Scope, Cutover-Strategie, Architektur)
 
+> **Update 2026-06-28:** Die Turnier-Domäne (Phase 8 / `dl-tournament`, altes `/turnier`-Admin,
+> Public-Turnier-Web `:8767`, `!balance`-Team-Balancer) wurde aus Bot **und** Rust-Port **entfernt** —
+> das echte Turniersystem lebt im separaten Repo **Deadlock-Turniere**. Erwähnungen von
+> `dl-tournament`/`:8767`/Turnier-Admin weiter unten sind historischer Plan-Stand und **kein aktives
+> Migrationsziel** mehr. Die OAuth-/Broker-/Tierlist-Bridge zu Deadlock-Turniere bleibt aktiv.
+
 ## Auftrag
 
 Das komplette Repo wird phasenweise nach Rust portiert — nicht als blinde 1:1-Übersetzung,
@@ -40,7 +46,7 @@ alles Neue entsteht ausschließlich unter `/rust`.
 /rust (Cargo-Workspace)
 ├─ bin/dl-bot       Discord-Gateway (serenity/poise) + Master-Broker :8770
 │                   + Changelog-Empfänger :8899 + interne Control-API
-├─ bin/dl-web       Public-Stats :8768 + Tierlist :8771 + Turnier :8767 + Dashboard :8766
+├─ bin/dl-web       Public-Stats :8768 + Tierlist :8771 + Dashboard :8766
 └─ crates/
    ├─ dl-core       Config (typisiert, EINMAL geladen), Fehler-Basis, Observability
    ├─ dl-db         SQLite-Schicht (rusqlite, 1 Writer + Read-only-Reader), kv_store-Repo
@@ -53,7 +59,7 @@ alles Neue entsteht ausschließlich unter `/rust`.
    ├─ dl-community  tags, faq_chat, server_faq, feedback_hub, clips, rename, leave_survey, rules, bug_reporter
    ├─ dl-onboarding welcome_dm-Flow + onboarding + ai_onboarding
    ├─ dl-coaching   die 5 Coaching-Cogs als EIN Modul mit Session-Lifecycle
-   ├─ dl-tournament customgames + team_balancer + Turnier-Web-Logik
+   │  (dl-tournament: customgames + team_balancer + Turnier-Web — ENTFERNT 2026-06-28)
    ├─ dl-bridges    steam_bridge (→ Steam-Bot :8783), twitch (→ Twitch-Bot :8776)
    └─ dl-webcore    Session/Auth/CSRF/OAuth-Relay — EINMAL statt 4× kopiert
 ```
@@ -96,7 +102,7 @@ Crates entstehen erst in der Phase, die sie braucht — keine leeren Hüllen auf
 | 5 | dl-activity: Analyzer, LFG durchgängig, player_finder (Flag aus), Website-Invites, member_events/message_activity-Writer | ✅ komplett — Rest: Text-Sessions, Invite-Attribution, Retention |
 | 6 | dl-ai, dl-moderation (AI-Mod + Guard), Tags, FAQ, Clips, Leave-Survey | ✅ komplett — bug_reporter bewusst nicht (Redesign), rename ersetzt |
 | 7 | Onboarding (Buttons + 10-Schritte-Wizard) + Coaching (Brücke + Anfragen/Claim) | ✅ Kern komplett — Rest: step_streamer, role_manager, survey, Website-Mirror |
-| 8 | dl-tournament: Balancer, Store, Web :8767 (live-gedifft), Panel-User-Flow | ✅ Kern komplett — Rest: Admin-Flow, customgames-Team-VCs |
+| 8 | ~~dl-tournament: Balancer, Store, Web :8767, Panel-User-Flow~~ | ❌ **entfernt 2026-06-28** — Turnier läuft separat im Repo Deadlock-Turniere |
 | 9 | Dashboard (sauber geschnitten) + Restpflege | ⬜ nicht begonnen — letzter Block |
 
 Bot-Cutover-Checkliste mit Teil-Cutover-Empfehlung: `docs/06-cutover-bot.md`
@@ -108,7 +114,7 @@ Bot-Cutover-Checkliste mit Teil-Cutover-Empfehlung: `docs/06-cutover-bot.md`
 |---|---|
 | `old/` | Archiv, läuft nirgends |
 | `cogs/steam`-Namespace-Brücke | Import-Hack, seit Rust-Steam-Bot per Blocklist deaktiviert |
-| Legacy `/api/tournament/*` | Doppelte Turnier-API; nur `/api/turnier/*` wird portiert |
+| Legacy `/api/tournament/*` + `/api/turnier/*` | Gesamte alte Turnier-API 2026-06-28 entfernt; Turnier läuft im Repo Deadlock-Turniere |
 | Windows/NSSM-Pfade im Dashboard | Betrieb ist vollständig Linux/systemd |
 | `service/hooks/startup_check.py` | No-Op-Stub |
 | `coaching_sessions_legacy` | Migrationsrest; `coaching_sessions` ist aktiv |

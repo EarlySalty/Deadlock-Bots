@@ -56,8 +56,8 @@ impl AccessOutcome {
 }
 
 /// Reine Zugriffsentscheidung — Reihenfolge wie im Original:
-/// Owner → Admin-Permission → Moderator-Rolle (alle Voll-Zugriff) →
-/// Community-Moderator-Rolle (nur Turnier) → sonst kein Zugriff.
+/// Owner → Admin-Permission → Moderator-Rolle (alle Voll-Zugriff) → sonst
+/// kein Zugriff.
 pub fn decide_access(
     cfg: &DashboardConfig,
     user_id: u64,
@@ -71,9 +71,6 @@ pub fn decide_access(
     }
     if info.role_ids.contains(&cfg.moderator_role_id) {
         return AccessOutcome::granted(AccessLevel::Full, "moderator_role");
-    }
-    if info.role_ids.contains(&cfg.turnier_mod_role_id) {
-        return AccessOutcome::granted(AccessLevel::TurnierOnly, "turnier_mod");
     }
     AccessOutcome {
         level: None,
@@ -187,14 +184,6 @@ mod tests {
     }
 
     #[test]
-    fn turnier_rolle_bekommt_nur_turnier() {
-        let cfg = cfg();
-        let out = decide_access(&cfg, 999, &info(false, &[cfg.turnier_mod_role_id]));
-        assert_eq!(out.level, Some(AccessLevel::TurnierOnly));
-        assert_eq!(out.reason, "turnier_mod");
-    }
-
-    #[test]
     fn fremder_ohne_rolle_wird_abgelehnt() {
         let cfg = cfg();
         let out = decide_access(&cfg, 999, &info(false, &[123, 456]));
@@ -203,14 +192,9 @@ mod tests {
     }
 
     #[test]
-    fn voll_schlaegt_turnier_wenn_beide_rollen() {
+    fn moderator_rolle_schlaegt_fremde_rollen() {
         let cfg = cfg();
-        let out = decide_access(
-            &cfg,
-            999,
-            &info(false, &[cfg.moderator_role_id, cfg.turnier_mod_role_id]),
-        );
-        // Moderator-Rolle (Voll) wird vor der Turnier-Rolle geprüft.
+        let out = decide_access(&cfg, 999, &info(false, &[cfg.moderator_role_id, 123]));
         assert_eq!(out.level, Some(AccessLevel::Full));
     }
 }

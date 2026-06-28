@@ -3,6 +3,11 @@
 Stand: 2026-06-10 (nach #114). Jeder Schritt ist user-gated — nichts hiervon
 passiert ohne Nanis Freigabe.
 
+> **Update 2026-06-28:** Die Turnier-Domäne (`dl-tournament`, Turnier-Web `:8767`,
+> `/turnier`-Admin, `!balance`) wurde entfernt — das Turniersystem läuft im separaten
+> Repo **Deadlock-Turniere**. Turnier-Zeilen unten sind historischer Plan-Stand und
+> kein Cutover-Ziel mehr. KEEP: OAuth-/Broker-/Tierlist-Bridge zu Deadlock-Turniere.
+
 ## Was dl-bot beim Flip übernimmt
 
 | Bereich | Module | Python-Cogs (Blocklist) |
@@ -32,11 +37,10 @@ passiert ohne Nanis Freigabe.
 | Coaching-Anfragen (Panel→AI→Rotation→Claim) | dl-community::coaching_requests | coaching_panel + coaching_request |
 | LFG-Lobby-Finder (durchgängig) | dl-activity::lfg | lfg |
 | Nachrichten-Zähler + Beitritts-Protokoll | dl-activity::analyzer | (Teile von user_activity_analyzer) |
-| Turnier-Anmeldung (Panel-User-Flow) | dl-tournament::discord_ui | customgames/turnier (User-Teil) |
 
-dl-web übernimmt zusätzlich: Stats :8768, Tierlist :8771,
-**Turnier-Web :8767** (live-gedifft) — Blocklist: public_stats_cog,
-tierlist_public_cog, turnier_public_cog.
+dl-web übernimmt zusätzlich: Stats :8768, Tierlist :8771 — Blocklist:
+public_stats_cog, tierlist_public_cog. (Turnier-Web :8767 / turnier_public_cog
+und die Turnier-Anmeldung wurden 2026-06-28 entfernt.)
 
 ## Flip-Reihenfolge (ein Wartungsfenster)
 
@@ -48,7 +52,7 @@ tierlist_public_cog, turnier_public_cog.
    eintragen, Bot stoppen.
 4. dl-bot + dl-web starten (Original-Ports). Gateway-Doppelbesitz
    vermeiden: NIE beide gleichzeitig mit aktiven Events.
-5. Smoke: /health auf 8767/8768/8771; Broker-Auth-Fehlpfad auf 8770;
+5. Smoke: /health auf 8768/8771; Broker-Auth-Fehlpfad auf 8770;
    Steam-Panel-Klick; TempVoice-Join-to-create; ein Lane-Panel-Button.
 6. Rollback: dl-Services stoppen, Blocklist-Einträge entfernen,
    Python-Bot starten. Kein Schema wurde geändert — gefahrlos.

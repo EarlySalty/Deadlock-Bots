@@ -1,3 +1,11 @@
+## #165 — Altes In-Bot-Turnier entfernt
+
+**Ausgangslage:** Im Bot steckte noch ein altes, nie richtig fertig gewordenes Turnier-System: eine Anmelde- und Admin-Seite für Turniere sowie ein Befehl, der per Sprachkanal zwei einigermaßen faire Teams zusammenlosen sollte. Das echte, weitergepflegte Turniersystem läuft inzwischen komplett woanders — als eigenständiges Projekt mit eigener Website. Der alte Kram im Bot war damit toter Ballast, der nur noch Pflegeaufwand und Verwechslungsgefahr brachte.
+
+**Was wurde geändert:** Wir haben das alte Turnier restlos aus dem Bot geräumt — die Anmelde-/Admin-Seite samt ihrer Schnittstellen, den Team-Auslosungs-Befehl mit allen Unterbefehlen, die alte interne Turnier-Webseite und den Turnier-Tab im Verwaltungs-Dashboard. Alles, was das neue Turniersystem wirklich braucht, bleibt unangetastet: die Discord-Login-Brücke, die Vermittlung von Kanälen, Rollen und Voice-Verschiebungen, die Tierlist und die verknüpften Steam-/Rang-Daten.
+
+**Wie es jetzt läuft:** Der Bot ist um eine komplette tote Funktionsschicht leichter, das Turnier läuft sauber im separaten System. Für die Website und das neue Turnier ändert sich nichts — deren Anbindung an den Bot blieb vollständig erhalten. Die alten Turnier-Daten liegen vorerst noch unberührt in der Datenbank; das Aufräumen dort kommt später als eigener Schritt.
+
 ## #164 — Rust-Portierung schließt die letzten großen Parität-Lücken
 
 **Ausgangslage:** Neben dem aktiven Python-Bot pflegen wir eine noch nicht produktive Rust-Fassung, die Python später ablösen soll. Eine erneute Gegenprüfung fand die letzten größeren Funktionslücken dieser Portierung: die Owner-Adminbefehle, die Steuer-Panels der temporären Sprachkanäle, die Knöpfe und die Abschluss-Umfrage rund um die Coaching-Anfragen, den kompletten Admin-Dialog der Turnierverwaltung, den KI-gestützten Onboarding-Flow sowie eine zuverlässige Verarbeitung der Build-Veröffentlichungen samt einer internen Schnittstelle.

@@ -1028,41 +1028,6 @@
             color: #adb5bd;
             font-size: 0.9rem;
         }
-        .tournament-controls {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.6rem;
-            align-items: center;
-            margin-bottom: 0.9rem;
-        }
-        .tournament-controls select,
-        .tournament-controls input {
-            padding: 0.45rem 0.65rem;
-            border-radius: 6px;
-            border: 1px solid rgba(255,255,255,0.1);
-            background: #1f1f1f;
-            color: inherit;
-        }
-        .tournament-summary {
-            margin-bottom: 0.8rem;
-            color: #ced4da;
-            font-size: 0.92rem;
-        }
-        .tournament-table-actions {
-            display: flex;
-            gap: 0.35rem;
-            flex-wrap: wrap;
-            align-items: center;
-        }
-        .tournament-table-actions select {
-            min-width: 130px;
-            max-width: 220px;
-            padding: 0.28rem 0.45rem;
-            border-radius: 6px;
-            border: 1px solid rgba(255,255,255,0.14);
-            background: #1f1f1f;
-            color: inherit;
-        }
         .filter-row {
             display: flex;
             flex-wrap: wrap;
@@ -1469,7 +1434,6 @@
         <button class="tab-btn" data-tab="cogs">Cogs</button>
         <button class="tab-btn" data-tab="logs">Logs</button>
         <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
-        <a class="tab-btn" href="/turnier" style="margin-left:auto;text-decoration:none;">🏆 Turnier</a>
     </nav>
 
     <!-- ════════════════════════════════════════════════
@@ -1660,38 +1624,6 @@
         <section>
             <h2>Standalone Dienste</h2>
             <div id="standalone-container" class="standalone-grid"></div>
-        </section>
-
-        <section>
-            <div class="section-header">
-                <h2>Turnier Admin</h2>
-                <div class="section-actions">
-                    <button class="reload" id="tournament-refresh">Neu laden</button>
-                    <span class="voice-meta" id="tournament-meta">Letzte Aktualisierung: -</span>
-                </div>
-            </div>
-            <div class="card">
-                <div class="tournament-controls">
-                    <label>
-                        Guild
-                        <select id="tournament-guild-select"></select>
-                    </label>
-                    <label>
-                        Teamname
-                        <input id="tournament-team-name" type="text" maxlength="32" placeholder="Neues Team..." />
-                    </label>
-                    <button class="load" id="tournament-team-create">Team erstellen</button>
-                </div>
-                <div id="tournament-summary" class="tournament-summary"></div>
-                <div class="voice-table">
-                    <h3>Teams</h3>
-                    <div id="tournament-teams"></div>
-                </div>
-                <div class="voice-table" style="margin-top: 1rem;">
-                    <h3>Anmeldungen</h3>
-                    <div id="tournament-signups"></div>
-                </div>
-            </div>
         </section>
 
     </div><!-- end tab: services -->
@@ -2005,21 +1937,6 @@
     const coNetworkGenerated = document.getElementById('co-network-generated');
     const coNetworkList = document.getElementById('co-network-list');
     let coNetworkSimulation = null;
-
-    const tournamentRefreshBtn = document.getElementById('tournament-refresh');
-    const tournamentGuildSelect = document.getElementById('tournament-guild-select');
-    const tournamentTeamNameInput = document.getElementById('tournament-team-name');
-    const tournamentTeamCreateBtn = document.getElementById('tournament-team-create');
-    const tournamentMeta = document.getElementById('tournament-meta');
-    const tournamentSummary = document.getElementById('tournament-summary');
-    const tournamentTeams = document.getElementById('tournament-teams');
-    const tournamentSignups = document.getElementById('tournament-signups');
-    let tournamentState = {
-        guildId: null,
-        guilds: [],
-        teams: [],
-        signups: [],
-    };
 
     const dashboardRestartBtn = document.getElementById('dashboard-restart');
     const dashboardStatusPill = document.getElementById('dashboard-status-pill');
@@ -2800,44 +2717,6 @@
     if (leaveSurveysRefreshButton) {
         leaveSurveysRefreshButton.addEventListener('click', () => {
             loadLeaveSurveys();
-        });
-    }
-    if (tournamentRefreshBtn) {
-        tournamentRefreshBtn.addEventListener('click', () => {
-            loadTournamentOverview();
-        });
-    }
-    if (tournamentGuildSelect) {
-        tournamentGuildSelect.addEventListener('change', () => {
-            tournamentState.guildId = normalizeTournamentGuildId(tournamentGuildSelect.value);
-            loadTournamentOverview(tournamentState.guildId);
-        });
-    }
-    if (tournamentTeamCreateBtn) {
-        tournamentTeamCreateBtn.addEventListener('click', async () => {
-            tournamentTeamCreateBtn.disabled = true;
-            try {
-                await createTournamentTeam();
-            } catch (err) {
-                log('Team konnte nicht erstellt werden: ' + err.message, 'error');
-            } finally {
-                tournamentTeamCreateBtn.disabled = false;
-            }
-        });
-    }
-    if (tournamentTeamNameInput) {
-        tournamentTeamNameInput.addEventListener('keydown', (event) => {
-            if (event.key !== 'Enter') {
-                return;
-            }
-            event.preventDefault();
-            if (tournamentTeamCreateBtn) {
-                tournamentTeamCreateBtn.click();
-            } else {
-                createTournamentTeam().catch((err) => {
-                    log('Team konnte nicht erstellt werden: ' + err.message, 'error');
-                });
-            }
         });
     }
     if (dashboardRestartBtn) {
@@ -3743,276 +3622,6 @@ function formatFixed(value, digits = 1) {
         return '-';
     }
     return Number(value).toFixed(digits);
-}
-
-function normalizeTournamentGuildId(raw) {
-    const num = Number(raw);
-    if (!Number.isFinite(num) || num <= 0) {
-        return null;
-    }
-    return Math.trunc(num);
-}
-
-function renderTournamentGuildOptions(guilds, selectedGuildId) {
-    if (!tournamentGuildSelect) {
-        return;
-    }
-    tournamentGuildSelect.innerHTML = '';
-    if (!Array.isArray(guilds) || guilds.length === 0) {
-        const opt = document.createElement('option');
-        opt.value = '';
-        opt.textContent = 'Keine Guilds';
-        tournamentGuildSelect.appendChild(opt);
-        return;
-    }
-    guilds.forEach((guild) => {
-        const opt = document.createElement('option');
-        const id = normalizeTournamentGuildId(guild.id);
-        opt.value = id ? String(id) : '';
-        const signups = Number(guild.signups || 0);
-        opt.textContent = `${guild.name || ('Guild ' + id)} (${signups})`;
-        if (id && selectedGuildId && id === selectedGuildId) {
-            opt.selected = true;
-        }
-        tournamentGuildSelect.appendChild(opt);
-    });
-    if (!tournamentGuildSelect.value && tournamentGuildSelect.options.length) {
-        tournamentGuildSelect.options[0].selected = true;
-    }
-}
-
-function renderTournamentSummary(summary) {
-    if (!tournamentSummary) {
-        return;
-    }
-    const total = Number(summary.signups_total || 0);
-    const solo = Number(summary.solo_count || 0);
-    const team = Number(summary.team_count || 0);
-    const unassigned = Number(summary.unassigned_solo || 0);
-    const teams = Number(summary.teams_count || 0);
-    tournamentSummary.textContent =
-        `Eintraege: ${total} | Solo: ${solo} | Team: ${team} | Teams: ${teams} | Solo ohne Team: ${unassigned}`;
-}
-
-function renderTournamentTeams(teams) {
-    if (!tournamentTeams) {
-        return;
-    }
-    tournamentTeams.innerHTML = '';
-    if (!Array.isArray(teams) || teams.length === 0) {
-        tournamentTeams.innerHTML = '<div class="voice-meta">Noch keine Teams vorhanden.</div>';
-        return;
-    }
-    const table = document.createElement('table');
-    const thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>ID</th><th>Name</th><th>Mitglieder</th><th>Erstellt</th></tr>';
-    table.appendChild(thead);
-    const tbody = document.createElement('tbody');
-    teams.forEach((team) => {
-        const tr = document.createElement('tr');
-        const createdAt = team.created_at ? formatTimestamp(team.created_at) : '-';
-        tr.innerHTML = `
-            <td>${Number(team.id || 0)}</td>
-            <td></td>
-            <td>${Number(team.member_count || 0)}</td>
-            <td>${createdAt}</td>
-        `;
-        tr.children[1].textContent = String(team.name || '-');
-        tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    tournamentTeams.appendChild(table);
-}
-
-async function assignTournamentTeam(userId, teamId) {
-    const guildId = normalizeTournamentGuildId(tournamentState.guildId || (tournamentGuildSelect && tournamentGuildSelect.value));
-    if (!guildId) {
-        return;
-    }
-    const payload = {
-        guild_id: guildId,
-        user_id: Number(userId),
-        team_id: teamId ? Number(teamId) : null,
-    };
-    await fetchJSON('/api/tournament/assign', {
-        method: 'POST',
-        body: JSON.stringify(payload),
-    });
-}
-
-async function removeTournamentSignup(userId) {
-    const guildId = normalizeTournamentGuildId(tournamentState.guildId || (tournamentGuildSelect && tournamentGuildSelect.value));
-    if (!guildId) {
-        return;
-    }
-    await fetchJSON('/api/tournament/remove', {
-        method: 'POST',
-        body: JSON.stringify({
-            guild_id: guildId,
-            user_id: Number(userId),
-        }),
-    });
-}
-
-function renderTournamentSignups(signups, teams) {
-    if (!tournamentSignups) {
-        return;
-    }
-    tournamentSignups.innerHTML = '';
-    if (!Array.isArray(signups) || signups.length === 0) {
-        tournamentSignups.innerHTML = '<div class="voice-meta">Noch keine Anmeldungen vorhanden.</div>';
-        return;
-    }
-
-    const teamOptions = Array.isArray(teams) ? teams : [];
-    const table = document.createElement('table');
-    const thead = document.createElement('thead');
-    thead.innerHTML = '<tr><th>User</th><th>Modus</th><th>Rang</th><th>Team</th><th>Updated</th><th>Aktionen</th></tr>';
-    table.appendChild(thead);
-    const tbody = document.createElement('tbody');
-
-    signups.forEach((row) => {
-        const tr = document.createElement('tr');
-        const userId = Number(row.user_id || 0);
-        const mode = row.registration_mode === 'team' ? 'Team' : 'Solo';
-        const rank = row.rank_label || row.rank || '-';
-        const updated = row.updated_at ? formatTimestamp(row.updated_at) : '-';
-        tr.innerHTML = `
-            <td></td>
-            <td>${mode}</td>
-            <td>${rank}</td>
-            <td></td>
-            <td>${updated}</td>
-            <td></td>
-        `;
-        tr.children[0].textContent = row.display_name || ('User ' + userId);
-        tr.children[3].textContent = row.team_name || '—';
-
-        const actions = document.createElement('div');
-        actions.className = 'tournament-table-actions';
-
-        const select = document.createElement('select');
-        const optNone = document.createElement('option');
-        optNone.value = '';
-        optNone.textContent = 'Kein Team';
-        select.appendChild(optNone);
-        teamOptions.forEach((team) => {
-            const opt = document.createElement('option');
-            opt.value = String(team.id);
-            opt.textContent = String(team.name || ('Team ' + team.id));
-            if (Number(row.team_id || 0) === Number(team.id || 0)) {
-                opt.selected = true;
-            }
-            select.appendChild(opt);
-        });
-        actions.appendChild(select);
-
-        const saveBtn = document.createElement('button');
-        saveBtn.className = 'reload';
-        saveBtn.textContent = 'Speichern';
-        saveBtn.addEventListener('click', async () => {
-            saveBtn.disabled = true;
-            try {
-                await assignTournamentTeam(userId, select.value);
-                log(`Turnier: Team fuer ${row.display_name || userId} gespeichert`, 'success');
-                await loadTournamentOverview(tournamentState.guildId);
-            } catch (err) {
-                log('Turnier-Teamzuweisung fehlgeschlagen: ' + err.message, 'error');
-            } finally {
-                saveBtn.disabled = false;
-            }
-        });
-        actions.appendChild(saveBtn);
-
-        const removeBtn = document.createElement('button');
-        removeBtn.className = 'unload';
-        removeBtn.textContent = 'Entfernen';
-        removeBtn.addEventListener('click', async () => {
-            removeBtn.disabled = true;
-            try {
-                await removeTournamentSignup(userId);
-                log(`Turnier: Eintrag fuer ${row.display_name || userId} entfernt`, 'success');
-                await loadTournamentOverview(tournamentState.guildId);
-            } catch (err) {
-                log('Turnier-Eintrag konnte nicht entfernt werden: ' + err.message, 'error');
-            } finally {
-                removeBtn.disabled = false;
-            }
-        });
-        actions.appendChild(removeBtn);
-
-        tr.children[5].appendChild(actions);
-        tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    tournamentSignups.appendChild(table);
-}
-
-async function createTournamentTeam() {
-    const guildId = normalizeTournamentGuildId(tournamentState.guildId || (tournamentGuildSelect && tournamentGuildSelect.value));
-    const name = tournamentTeamNameInput ? tournamentTeamNameInput.value.trim() : '';
-    if (!guildId) {
-        log('Turnier: Keine Guild ausgewaehlt', 'error');
-        return;
-    }
-    if (!name) {
-        log('Turnier: Bitte Teamname eingeben', 'error');
-        return;
-    }
-    await fetchJSON('/api/tournament/team', {
-        method: 'POST',
-        body: JSON.stringify({
-            guild_id: guildId,
-            name,
-        }),
-    });
-    if (tournamentTeamNameInput) {
-        tournamentTeamNameInput.value = '';
-    }
-    log(`Turnier: Team '${name}' gespeichert`, 'success');
-    await loadTournamentOverview(guildId);
-}
-
-async function loadTournamentOverview(preferredGuildId = null) {
-    if (!tournamentSummary || !tournamentTeams || !tournamentSignups) {
-        return;
-    }
-    try {
-        const guildId = normalizeTournamentGuildId(
-            preferredGuildId || tournamentState.guildId || (tournamentGuildSelect && tournamentGuildSelect.value)
-        );
-        const params = new URLSearchParams();
-        if (guildId) {
-            params.set('guild_id', String(guildId));
-        }
-        const query = params.toString();
-        const data = await fetchJSON('/api/tournament/overview' + (query ? ('?' + query) : ''));
-
-        const resolvedGuildId = normalizeTournamentGuildId(data.guild_id) || guildId;
-        tournamentState.guildId = resolvedGuildId;
-        tournamentState.guilds = Array.isArray(data.guilds) ? data.guilds : [];
-        tournamentState.teams = Array.isArray(data.teams) ? data.teams : [];
-        tournamentState.signups = Array.isArray(data.signups) ? data.signups : [];
-
-        renderTournamentGuildOptions(tournamentState.guilds, resolvedGuildId);
-        renderTournamentSummary(data.summary || {});
-        renderTournamentTeams(tournamentState.teams);
-        renderTournamentSignups(tournamentState.signups, tournamentState.teams);
-        if (tournamentMeta) {
-            tournamentMeta.textContent = 'Letzte Aktualisierung: ' + new Date().toLocaleTimeString();
-        }
-    } catch (err) {
-        log('Turnierdaten konnten nicht geladen werden: ' + err.message, 'error');
-        if (tournamentSummary) {
-            tournamentSummary.textContent = 'Fehler beim Laden der Turnierdaten.';
-        }
-        if (tournamentTeams) {
-            tournamentTeams.innerHTML = '<div class="voice-meta">Fehler beim Laden der Teams.</div>';
-        }
-        if (tournamentSignups) {
-            tournamentSignups.innerHTML = '<div class="voice-meta">Fehler beim Laden der Anmeldungen.</div>';
-        }
-    }
 }
 
 // ========== SERVER STATS & USER ACTIVITY ==========
@@ -6110,9 +5719,6 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 if (target === 'entwicklung') {
                     if (typeof loadRepoActivity === 'function') loadRepoActivity();
                 }
-                if (target === 'services') {
-                    if (typeof loadTournamentOverview === 'function') loadTournamentOverview();
-                }
                 if (target === 'deadlock') {
                     if (typeof loadDeadlockHeroes === 'function') loadDeadlockHeroes();
                 }
@@ -6135,8 +5741,6 @@ async function fetchStandaloneLogs(key, limit = 200) {
     setInterval(loadLeaveSurveys, 60000);
     loadCoNetwork();
     setInterval(loadCoNetwork, 120000);
-    loadTournamentOverview();
-    setInterval(loadTournamentOverview, 60000);
     loadDeadlockHeroes();
 
     // Server Stats Initial Load

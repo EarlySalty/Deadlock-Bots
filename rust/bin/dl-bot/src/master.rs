@@ -28,8 +28,6 @@ pub const FEATURE_MODULES: &[&str] = &[
     "security_guard",
     "onboarding",
     "privacy",
-    "tournament",
-    "team_balance",
     "coaching_requests",
     "faq_chat",
     "feedback_hub",
