@@ -15,6 +15,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use crate::tempvoice::logic;
+use crate::tempvoice::TempVoiceEngine;
 
 pub const NP_TARGET_CATEGORY_ID: u64 = 1465839366634209361;
 pub const NP_ANCHOR_CHANNEL_ID: u64 = 1470126503252721845;
@@ -37,6 +38,12 @@ pub const UNVERIFIED_RANK_ROLES: [(u64, i64); 4] = [
 
 /// Stagings, aus denen Anfänger umgeleitet werden (Casual + Comp).
 pub const ELIGIBLE_STAGING_IDS: [u64; 2] = [1501089974093873232, 1412804671432818890];
+pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
+pub const CHILL_CATEGORY_ID: u64 = 1289721245281292290;
+pub const COMP_RANKED_CATEGORY_ID: u64 = 1412804540994162789;
+pub const CASUAL_STAGING_ID: u64 = 1501089974093873232;
+pub const PERMANENT_CHILL_ID: u64 = 1493690350580138114;
+pub const PINNED_CHILL_END_ID: u64 = 1505618194017161267;
 
 // ── Pure Logik (Referenzwerte aus CPython in den Tests) ────────────────────
 
@@ -246,6 +253,7 @@ pub trait AdaptivePort: Send + Sync {
 pub struct AdaptiveLanes {
     pub port: Arc<dyn AdaptivePort>,
     routed_at: tokio::sync::Mutex<HashMap<u64, i64>>,
+    tempvoice: tokio::sync::RwLock<Option<Arc<TempVoiceEngine>>>,
 }
 
 impl AdaptiveLanes {
@@ -253,7 +261,12 @@ impl AdaptiveLanes {
         Arc::new(Self {
             port,
             routed_at: tokio::sync::Mutex::new(HashMap::new()),
+            tempvoice: tokio::sync::RwLock::new(None),
         })
+    }
+
+    pub async fn set_tempvoice(&self, engine: Arc<TempVoiceEngine>) {
+        *self.tempvoice.write().await = Some(engine);
     }
 
     /// Anfänger beim Staging-Join umleiten (wie `maybe_route_new_player`):
@@ -269,8 +282,6 @@ impl AdaptiveLanes {
         }
         let now = chrono::Utc::now().timestamp();
         {
-            // Rückkehr-Fenster: einmal umgeleitete User dürfen 4 min lang
-            // zurück in den normalen Flow
             let routed = self.routed_at.lock().await;
             if routed.contains_key(&user_id) {
                 return false;
@@ -316,18 +327,8 @@ impl AdaptiveLanes {
         true
     }
 
-    /// Rückkehr-Fenster aufräumen (vom Sync mitgenutzt).
-    async fn prune_routed(&self) {
-        let now = chrono::Utc::now().timestamp();
-        self.routed_at
-            .lock()
-            .await
-            .retain(|_, at| now - *at <= RETURN_WINDOW_SECONDS);
-    }
-
     /// Neue-Spieler-Kategorie nachziehen (wie `_sync_guild`).
     pub async fn sync_new_player(&self, guild_id: u64) {
-        self.prune_routed().await;
         self.sync_managed(
             guild_id,
             NP_TARGET_CATEGORY_ID,
@@ -432,33 +433,41 @@ impl AdaptiveLanes {
 
     /// Chill-Lanes nach Rang-Label sortieren (wie lane_sorting).
     pub async fn sort_chill_lanes(&self, guild_id: u64) {
-        const CHILL_CATEGORY_ID: u64 = 1289721245281292290;
-        const SKIP_IDS: [u64; 2] = [1501089974093873232, 1493690350580138114];
-        let channels = self
-            .port
-            .category_channels(guild_id, CHILL_CATEGORY_ID)
+        const SKIP_IDS: [u64; 3] = [CASUAL_STAGING_ID, PERMANENT_CHILL_ID, PINNED_CHILL_END_ID];
+        self.sort_ranked_category(guild_id, CHILL_CATEGORY_ID, &SKIP_IDS)
             .await;
-        let entries: Vec<SortSnapshot> = channels
-            .iter()
-            .filter(|(id, _, _, _)| !SKIP_IDS.contains(id) && *id != DUO_ANCHOR_CHANNEL_ID)
-            .enumerate()
-            .filter_map(|(stable_order, (id, name, _, position))| {
-                let (rank_index, subrank) = parse_rank_label(name);
-                (rank_index > 0).then_some(SortSnapshot {
+    }
+
+    pub async fn sort_comp_ranked_lanes(&self, guild_id: u64) {
+        self.sort_ranked_category(guild_id, COMP_RANKED_CATEGORY_ID, &[])
+            .await;
+    }
+
+    async fn sort_ranked_category(&self, guild_id: u64, category_id: u64, skip_ids: &[u64]) {
+        let channels = self.port.category_channels(guild_id, category_id).await;
+        let mut entries = Vec::new();
+        for (stable_order, (id, name, _, position)) in channels.iter().enumerate() {
+            if skip_ids.contains(id) || *id == DUO_ANCHOR_CHANNEL_ID {
+                continue;
+            }
+            let (rank_index, subrank) = self.rank_sort_key(guild_id, *id, name).await;
+            if rank_index > 0 {
+                entries.push(SortSnapshot {
                     lane_id: *id,
                     current_position: *position,
                     rank_index,
                     subrank,
                     stable_order,
-                })
-            })
-            .collect();
+                });
+            }
+        }
         let plan = plan_lane_reorder(&entries);
         if !plan.is_empty() {
             tracing::info!(
                 rang_lanes = entries.len(),
                 reorders = plan.len(),
-                "RankSort: ordne Chill-Lanes nach Rang neu"
+                category_id,
+                "RankSort: ordne Lanes nach Rang neu"
             );
         }
         for (lane_id, target) in plan {
@@ -466,6 +475,37 @@ impl AdaptiveLanes {
                 tracing::warn!(%err, lane_id, target, "RankSort: Position setzen fehlgeschlagen");
             }
         }
+    }
+
+    async fn rank_sort_key(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        fallback_name: &str,
+    ) -> (usize, i64) {
+        let Some(engine) = self.tempvoice.read().await.clone() else {
+            return parse_rank_label(fallback_name);
+        };
+        let Some(owner_id) = engine.lane_owner(channel_id).await else {
+            return parse_rank_label(fallback_name);
+        };
+        if let Ok((rank, subrank)) = engine.store.rank_pref(owner_id).await {
+            if rank != "unknown" {
+                return (logic::rank_index(&rank), subrank);
+            }
+        }
+        let roles = self.port.member_role_pairs(guild_id, owner_id).await;
+        let mut best = (0usize, 0i64);
+        for (_, role_name) in roles {
+            let candidate = parse_rank_label(&role_name);
+            if candidate.0 > best.0 || (candidate.0 == best.0 && candidate.1 > best.1) {
+                best = candidate;
+            }
+        }
+        if best.0 > 0 {
+            return best;
+        }
+        parse_rank_label(fallback_name)
     }
 }
 
@@ -477,7 +517,33 @@ pub fn spawn(
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
+    let mut channel_events = dispatcher.subscribe_channels();
+    let channel_adaptive = adaptive.clone();
     tokio::spawn(async move {
+        loop {
+            match channel_events.recv().await {
+                Ok(dl_discord::ChannelEvent::VoiceCategoryChanged { guild_id, .. }) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    channel_adaptive.sync_new_player(guild_id).await;
+                    channel_adaptive.sync_duo(guild_id).await;
+                    channel_adaptive.sort_chill_lanes(guild_id).await;
+                    channel_adaptive.sort_comp_ranked_lanes(guild_id).await;
+                }
+                Ok(dl_discord::ChannelEvent::VoiceChannelUpdated { guild_id, .. }) => {
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    channel_adaptive.sort_chill_lanes(guild_id).await;
+                    channel_adaptive.sort_comp_ranked_lanes(guild_id).await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+    tokio::spawn(async move {
+        adaptive.sync_new_player(MAIN_GUILD_ID).await;
+        adaptive.sync_duo(MAIN_GUILD_ID).await;
+        adaptive.sort_chill_lanes(MAIN_GUILD_ID).await;
+        adaptive.sort_comp_ranked_lanes(MAIN_GUILD_ID).await;
         loop {
             match events.recv().await {
                 Ok(event) => {
@@ -507,6 +573,7 @@ pub fn spawn(
                     }
                     adaptive.sync_new_player(guild_id).await;
                     adaptive.sort_chill_lanes(guild_id).await;
+                    adaptive.sort_comp_ranked_lanes(guild_id).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -625,17 +692,10 @@ mod tests {
                 name: name.to_string(),
                 copied_anchor,
             });
-            self.create_results
-                .lock()
-                .expect("lock")
-                .remove(0)
+            self.create_results.lock().expect("lock").remove(0)
         }
 
-        async fn set_channel_position(
-            &self,
-            channel_id: u64,
-            position: i64,
-        ) -> Result<(), String> {
+        async fn set_channel_position(&self, channel_id: u64, position: i64) -> Result<(), String> {
             self.position_calls
                 .lock()
                 .expect("lock")
@@ -808,10 +868,7 @@ mod tests {
                 copied_anchor,
             }]
         );
-        assert_eq!(
-            *port.position_calls.lock().expect("lock"),
-            vec![(200, 11)]
-        );
+        assert_eq!(*port.position_calls.lock().expect("lock"), vec![(200, 11)]);
     }
 
     #[tokio::test]
@@ -834,10 +891,7 @@ mod tests {
 
         adaptive.sync_managed(1, 2, 100, "Lane", 6, None).await;
 
-        assert_eq!(
-            *port.position_calls.lock().expect("lock"),
-            vec![(201, 11)]
-        );
+        assert_eq!(*port.position_calls.lock().expect("lock"), vec![(201, 11)]);
     }
 
     #[tokio::test]

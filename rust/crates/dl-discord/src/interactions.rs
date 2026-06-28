@@ -36,6 +36,8 @@ pub struct BridgeInteraction {
     pub author_can_manage_roles: bool,
     /// manage_guild ODER administrator (für Admin-Slash-Commands wie Changelog).
     pub author_can_manage_guild: bool,
+    /// manage_channels ODER administrator (für TempVoice-Lane-Mod-Guards).
+    pub author_can_manage_channels: bool,
     /// Ob Discord einen Guild-Member-Kontext mitgeliefert hat.
     pub member_present: bool,
     pub guild_id: u64,

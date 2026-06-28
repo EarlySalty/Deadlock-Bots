@@ -38,6 +38,20 @@ pub enum VoiceEvent {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum ChannelEvent {
+    VoiceCategoryChanged {
+        guild_id: u64,
+        channel_id: u64,
+        before_category_id: Option<u64>,
+        after_category_id: Option<u64>,
+    },
+    VoiceChannelUpdated {
+        guild_id: u64,
+        channel_id: u64,
+    },
+}
+
 /// Normalisiertes Nachrichten-Ereignis (Bots bereits herausgefiltert).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageAttachment {
@@ -198,6 +212,7 @@ pub struct Dispatcher {
     message_tx: broadcast::Sender<MessageEvent>,
     member_tx: broadcast::Sender<MemberEvent>,
     role_tx: broadcast::Sender<RoleEvent>,
+    channel_tx: broadcast::Sender<ChannelEvent>,
 }
 
 impl Default for Dispatcher {
@@ -212,11 +227,13 @@ impl Dispatcher {
         let (message_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (role_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (channel_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
             message_tx,
             member_tx,
             role_tx,
+            channel_tx,
         }
     }
 
@@ -236,6 +253,10 @@ impl Dispatcher {
         self.role_tx.subscribe()
     }
 
+    pub fn subscribe_channels(&self) -> broadcast::Receiver<ChannelEvent> {
+        self.channel_tx.subscribe()
+    }
+
     pub fn publish_voice(&self, event: VoiceEvent) {
         // send schlägt nur fehl, wenn niemand subscribed ist — kein Fehler.
         let _ = self.voice_tx.send(event);
@@ -247,6 +268,10 @@ impl Dispatcher {
 
     pub fn publish_member(&self, event: MemberEvent) {
         let _ = self.member_tx.send(event);
+    }
+
+    pub fn publish_channel(&self, event: ChannelEvent) {
+        let _ = self.channel_tx.send(event);
     }
 
     pub fn publish_role(&self, event: RoleEvent) {

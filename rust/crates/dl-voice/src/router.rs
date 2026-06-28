@@ -31,6 +31,7 @@ pub const MAX_LANE_MEMBERS: usize = 6;
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
 pub const ROUTER_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
 pub const ROUTER_INTERFACE_MESSAGE_KEY: &str = "interface_message_id";
+pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Platzhalter";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterPanelMessage {
@@ -476,6 +477,9 @@ impl LaneRouter {
             return; // ohne Präferenz: User bleibt im Router-VC (Panel hilft)
         };
         if !auto_join {
+            self.engine
+                .create_router_lane(guild_id, user_id, &mode, ROUTER_VC_ID)
+                .await;
             return;
         }
         self.smart_route(guild_id, user_id, &mode).await;
@@ -517,7 +521,7 @@ impl LaneRouter {
         }
         // Keine passende Lane → neue über die Engine (User steht im Router-VC)
         self.engine
-            .create_lane_from(guild_id, user_id, mode_to_staging(mode), ROUTER_VC_ID)
+            .create_router_lane(guild_id, user_id, mode, ROUTER_VC_ID)
             .await;
     }
 }
@@ -531,11 +535,9 @@ struct RouterPanelHandler {
 impl InteractionHandler for RouterPanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         if interaction.custom_id == "router_autojoin_toggle" {
-            let (mode, auto_join) = self
-                .router
-                .user_pref(interaction.user_id)
-                .await
-                .unwrap_or(("casual".to_string(), false));
+            let Some((mode, auto_join)) = self.router.user_pref(interaction.user_id).await else {
+                return BridgeReply::ephemeral_text(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN);
+            };
             let new_auto = !auto_join;
             self.router
                 .set_user_pref(interaction.user_id, &mode, new_auto)
@@ -636,6 +638,11 @@ mod tests {
         assert_eq!(mode_to_category("casual"), 1289721245281292290);
         assert_eq!(mode_to_category("quatsch"), 1289721245281292290);
         assert_eq!(mode_to_staging("ranked"), 1412804671432818890);
+    }
+
+    #[test]
+    fn neue_router_texte_bleiben_platzhalter() {
+        assert_eq!(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN, "Platzhalter");
     }
 
     #[test]

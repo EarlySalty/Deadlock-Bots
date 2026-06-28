@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_db::Db;
+use dl_discord::{ChannelSender, Dispatcher};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 pub const PRESENCE_STALE_SECONDS: i64 = 180;
@@ -20,6 +21,11 @@ pub const PARTY_MEMBER_STALE_SECONDS: i64 = 600;
 pub const RENAME_COOLDOWN_SECONDS: f64 = 360.0;
 pub const LATE_MATCH_COOLDOWN_SECONDS: f64 = 600.0;
 pub const MIN_ACTIVE_PLAYERS: usize = 1;
+pub const DEFAULT_MATCH_MINUTE_DISPLAY_OFFSET: i64 = 3;
+pub const LOCALIZED_SLOTS_CACHE_SECONDS: i64 = 60 * 60;
+pub const DLVS_ROOT_REPLY: &str = "Platzhalter";
+pub const DLVS_TRACE_REPLY: &str = "Platzhalter";
+pub const DLVS_SNAPSHOT_REPLY: &str = "Platzhalter";
 
 /// Überwachte Kategorien (VOICE_STATUS_CATEGORY_* = TempVoice-Kategorien).
 pub const TARGET_CATEGORY_IDS: [u64; 3] = [
@@ -29,6 +35,10 @@ pub const TARGET_CATEGORY_IDS: [u64; 3] = [
 ];
 /// Permanenter Chill-Voice — Status wird hier aktiv entfernt.
 pub const EXCLUDED_CHANNEL_IDS: [u64; 1] = [1493690350580138114];
+
+pub fn match_minute_display_offset() -> i64 {
+    DEFAULT_MATCH_MINUTE_DISPLAY_OFFSET
+}
 
 // ── Pure Logik (Referenzwerte aus CPython in den Tests) ────────────────────
 
@@ -65,7 +75,7 @@ fn parse_localized_minutes(localized: &str) -> Option<i64> {
             let tail_lower = tail.to_lowercase();
             if let Some(after) = tail_lower.strip_prefix("min") {
                 let after = after.strip_prefix('.').unwrap_or(after);
-                if after.starts_with(')') {
+                if after.trim_start().starts_with(')') {
                     return digits.parse().ok();
                 }
             }
@@ -73,6 +83,29 @@ fn parse_localized_minutes(localized: &str) -> Option<i64> {
         i = start;
     }
     None
+}
+
+fn parse_localized_slots(localized: &str) -> Option<i64> {
+    let mut best = None;
+    let mut start_from = 0;
+    while let Some(open_offset) = localized[start_from..].find('(') {
+        let open = start_from + open_offset + 1;
+        let Some(close_offset) = localized[open..].find(')') else {
+            break;
+        };
+        let close = open + close_offset;
+        if let Some((left, right)) = localized[open..close].split_once('/') {
+            if let (Ok(current), Ok(total)) =
+                (left.trim().parse::<i64>(), right.trim().parse::<i64>())
+            {
+                if current >= 0 && total > 0 {
+                    best = Some(total.max(current));
+                }
+            }
+        }
+        start_from = close + 1;
+    }
+    best
 }
 
 /// (stage, minutes, server_id) — None wenn stale/leer.
@@ -560,6 +593,14 @@ pub trait StatusPort: Send + Sync {
     /// Alle Voice-Kanäle in den Ziel-Kategorien: (guild, channel, name, non-bot-member-ids).
     async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)>;
     async fn channel_info(&self, channel_id: u64) -> Option<(u64, String, Vec<u64>)>;
+    async fn resolved_base_name(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+        _fallback_base: &str,
+    ) -> Option<String> {
+        None
+    }
     async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String>;
 }
 
@@ -567,6 +608,7 @@ pub struct VoiceStatusWorker {
     pub store: StatusStore,
     pub port: Arc<dyn StatusPort>,
     states: tokio::sync::Mutex<HashMap<u64, ChannelState>>,
+    localized_slots_cache: tokio::sync::Mutex<HashMap<u64, (i64, i64)>>,
 }
 
 impl VoiceStatusWorker {
@@ -575,6 +617,7 @@ impl VoiceStatusWorker {
             store: StatusStore { db },
             port,
             states: tokio::sync::Mutex::new(HashMap::new()),
+            localized_slots_cache: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -618,16 +661,26 @@ impl VoiceStatusWorker {
                     watch.insert(sid.clone(), (sid, *guild_id, *channel_id));
                 }
             }
-            self.process_channel(*channel_id, name, members, &steam_map, &presence_map, now)
-                .await;
+            self.process_channel(
+                *guild_id,
+                *channel_id,
+                name,
+                members,
+                &steam_map,
+                &presence_map,
+                now,
+            )
+            .await;
         }
         self.store
             .persist_voice_watch(watch.into_values().collect(), now)
             .await;
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn process_channel(
         self: &Arc<Self>,
+        guild_id: u64,
         channel_id: u64,
         name: &str,
         members: &[u64],
@@ -635,7 +688,12 @@ impl VoiceStatusWorker {
         presence_map: &HashMap<String, PresenceRow>,
         now: i64,
     ) {
-        let (base_name, _) = split_suffix(name);
+        let (fallback_base, _) = split_suffix(name);
+        let base_name = self
+            .port
+            .resolved_base_name(guild_id, channel_id, &fallback_base)
+            .await
+            .unwrap_or(fallback_base);
         if members.is_empty() {
             self.apply(channel_id, name, &base_name, None, None, None, None, None)
                 .await;
@@ -677,10 +735,19 @@ impl VoiceStatusWorker {
         let player_count = self
             .effective_player_count(members, steam_map, &cohort_steam_ids, raw_count, now)
             .await;
-        let voice_slots = (members.len() as i64).max(player_count);
+        let localized_slots = self
+            .localized_voice_slots(channel_id, &cohort_steam_ids, presence_map, now)
+            .await;
+        let voice_slots = localized_slots
+            .map(|slots| slots.max(player_count))
+            .unwrap_or_else(|| (members.len() as i64).max(player_count));
 
         if cohort.stage == "lobby" {
-            let suffix = "in der Lobby".to_string();
+            let suffix = if localized_slots.is_some_and(|slots| slots > player_count) {
+                format!("in der Lobby ({player_count}/{voice_slots})")
+            } else {
+                "in der Lobby".to_string()
+            };
             self.apply(
                 channel_id,
                 name,
@@ -694,7 +761,8 @@ impl VoiceStatusWorker {
             .await;
         } else {
             let max_minutes = cohort.minute_values.iter().copied().max().unwrap_or(0);
-            let suffix = format!("im Match Min {max_minutes} ({player_count}/{voice_slots})");
+            let display_minutes = max_minutes + match_minute_display_offset();
+            let suffix = format!("im Match Min {display_minutes} ({player_count}/{voice_slots})");
             self.apply(
                 channel_id,
                 name,
@@ -702,10 +770,41 @@ impl VoiceStatusWorker {
                 Some(suffix),
                 Some("match".into()),
                 Some(player_count),
-                Some(max_minutes),
+                Some(display_minutes),
                 cohort.server_id.clone(),
             )
             .await;
+        }
+    }
+
+    async fn localized_voice_slots(
+        &self,
+        channel_id: u64,
+        cohort_steam_ids: &HashSet<String>,
+        presence_map: &HashMap<String, PresenceRow>,
+        now: i64,
+    ) -> Option<i64> {
+        let parsed = cohort_steam_ids
+            .iter()
+            .filter_map(|steam_id| presence_map.get(steam_id))
+            .filter_map(|row| row.deadlock_localized.as_deref())
+            .filter_map(parse_localized_slots)
+            .max();
+        if let Some(slots) = parsed {
+            self.localized_slots_cache
+                .lock()
+                .await
+                .insert(channel_id, (slots, now + LOCALIZED_SLOTS_CACHE_SECONDS));
+            return Some(slots);
+        }
+        let mut cache = self.localized_slots_cache.lock().await;
+        match cache.get(&channel_id).copied() {
+            Some((slots, expires_at)) if expires_at >= now => Some(slots),
+            Some(_) => {
+                cache.remove(&channel_id);
+                None
+            }
+            None => None,
         }
     }
 
@@ -821,6 +920,57 @@ pub fn spawn(worker: Arc<VoiceStatusWorker>) -> tokio::task::JoinHandle<()> {
     })
 }
 
+pub struct StatusCommands {
+    worker: Arc<VoiceStatusWorker>,
+}
+
+impl StatusCommands {
+    pub fn new(worker: Arc<VoiceStatusWorker>) -> Arc<Self> {
+        Arc::new(Self { worker })
+    }
+
+    async fn reply_for(&self, content: &str) -> Option<&'static str> {
+        let mut parts = content.split_whitespace();
+        let root = parts.next()?.to_lowercase();
+        if root != "dlvs" && root != "!dlvs" {
+            return None;
+        }
+        let _state_count = self.worker.states.lock().await.len();
+        match parts.next().unwrap_or_default().to_lowercase().as_str() {
+            "trace" => Some(DLVS_TRACE_REPLY),
+            "snapshot" => Some(DLVS_SNAPSHOT_REPLY),
+            _ => Some(DLVS_ROOT_REPLY),
+        }
+    }
+}
+
+pub fn spawn_command(
+    commands: Arc<StatusCommands>,
+    dispatcher: &Dispatcher,
+    sender: Arc<dyn ChannelSender>,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    if !event.author_can_manage_guild {
+                        continue;
+                    }
+                    let Some(reply) = commands.reply_for(event.content.trim()).await else {
+                        continue;
+                    };
+                    let _ = sender
+                        .send_to_channel(event.channel_id, Some(reply), &[])
+                        .await;
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,6 +1066,22 @@ mod tests {
             select_best_presence(&["c".into(), "b".into(), "a".into()], &map, now, 180),
             Some(("match".into(), Some(23), Some("party9".into()), "b".into()))
         );
+    }
+
+    #[test]
+    fn lokalisierte_minuten_und_slots_sind_tolerant() {
+        assert_eq!(parse_localized_minutes("Spiel (23 min )"), Some(23));
+        assert_eq!(parse_localized_minutes("Spiel (23. min. )"), Some(23));
+        assert_eq!(parse_localized_slots("Lobby (4/6)"), Some(6));
+        assert_eq!(parse_localized_slots("Spiel (23 min ) (5/6)"), Some(6));
+        assert_eq!(match_minute_display_offset(), 3);
+    }
+
+    #[test]
+    fn neue_dlvs_texte_bleiben_platzhalter() {
+        assert_eq!(DLVS_ROOT_REPLY, "Platzhalter");
+        assert_eq!(DLVS_TRACE_REPLY, "Platzhalter");
+        assert_eq!(DLVS_SNAPSHOT_REPLY, "Platzhalter");
     }
 
     #[test]

@@ -6,15 +6,15 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serenity::all::{
-    Context, EventHandler, GatewayIntents, GuildId, GuildMemberUpdateEvent, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, Permissions, Ready, User, VoiceState,
+    Context, EventHandler, GatewayIntents, GuildChannel, GuildId, GuildMemberUpdateEvent,
+    InviteCreateEvent, InviteDeleteEvent, Member, Message, Permissions, Ready, User, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
 use crate::dispatcher::{
-    member_screening_completed_event, role_events_from_diff, Dispatcher, MemberEvent,
+    member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher, MemberEvent,
     MessageAttachment, MessageEvent, VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
@@ -303,6 +303,36 @@ impl EventHandler for Handler {
             (None, None) => return,
         };
         self.dispatcher.publish_voice(event);
+    }
+
+    async fn channel_update(&self, _ctx: Context, old: Option<GuildChannel>, new: GuildChannel) {
+        if new.kind != serenity::all::ChannelType::Voice {
+            return;
+        }
+        let before = old
+            .as_ref()
+            .filter(|channel| channel.kind == serenity::all::ChannelType::Voice)
+            .and_then(|channel| channel.parent_id.map(|parent| parent.get()));
+        let after = new.parent_id.map(|parent| parent.get());
+        if before != after {
+            self.dispatcher
+                .publish_channel(ChannelEvent::VoiceCategoryChanged {
+                    guild_id: new.guild_id.get(),
+                    channel_id: new.id.get(),
+                    before_category_id: before,
+                    after_category_id: after,
+                });
+        }
+        if old
+            .as_ref()
+            .is_some_and(|channel| channel.name != new.name || before != after)
+        {
+            self.dispatcher
+                .publish_channel(ChannelEvent::VoiceChannelUpdated {
+                    guild_id: new.guild_id.get(),
+                    channel_id: new.id.get(),
+                });
+        }
     }
 }
 

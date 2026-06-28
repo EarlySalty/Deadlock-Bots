@@ -861,6 +861,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung
         let adaptive = dl_voice::adaptive::AdaptiveLanes::new(cache_snapshot.clone());
+        adaptive.set_tempvoice(tempvoice.clone()).await;
         tempvoice.set_adaptive(adaptive.clone()).await;
         dl_voice::adaptive::spawn(adaptive, &dispatcher);
 
@@ -869,9 +870,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             db.clone(),
             Arc::new(dl_voice::glue::StatusGlue {
                 adapter: adapter.clone(),
+                tempvoice: Some(tempvoice.clone()),
             }),
         );
-        dl_voice::status::spawn(status_worker);
+        dl_voice::status::spawn(status_worker.clone());
+        let status_commands = dl_voice::status::StatusCommands::new(status_worker.clone());
+        dl_voice::status::spawn_command(status_commands, &dispatcher, adapter.clone());
         // Slash-Commands syncen: Python-Default ist on + guild-scope.
         if command_sync_config.enabled {
             let summary = command_sync.sync_scope(command_sync_config.scope).await;

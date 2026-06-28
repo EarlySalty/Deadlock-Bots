@@ -101,6 +101,38 @@ impl TempVoiceStore {
             .await
     }
 
+    pub async fn set_lane_base(&self, channel_id: u64, base_name: String) -> Result<(), DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE tempvoice_lanes SET base_name = ?1 WHERE channel_id = ?2",
+                    rusqlite::params![base_name, channel_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
+    pub async fn set_lane_category_source(
+        &self,
+        channel_id: u64,
+        category_id: u64,
+        source_staging_id: Option<u64>,
+    ) -> Result<(), DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE tempvoice_lanes
+                        SET category_id = ?1,
+                            source_staging_id = COALESCE(?2, source_staging_id)
+                      WHERE channel_id = ?3",
+                    rusqlite::params![category_id, source_staging_id, channel_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
     pub async fn delete_lane(&self, channel_id: u64) -> Result<(), DbError> {
         self.db
             .write(move |conn| {

@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
-use serenity::all::{ChannelId, GuildId, RoleId, UserId};
+use serenity::all::{
+    ChannelId, GuildId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
+};
 use serenity::builder::GetMessages;
 
 use crate::tempvoice::LanePort;
@@ -13,6 +15,49 @@ use crate::tracker::{VoiceMemberState, VoiceSnapshot};
 /// Discord-Permission-Bit CONNECT (Voice).
 const CONNECT_BIT: u64 = 1 << 20;
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
+
+pub fn merge_connect_overwrite(
+    existing_allow: u64,
+    existing_deny: u64,
+    connect: Option<bool>,
+) -> Option<(u64, u64)> {
+    let mut allow_bits = existing_allow & !CONNECT_BIT;
+    let mut deny_bits = existing_deny & !CONNECT_BIT;
+    match connect {
+        Some(true) => allow_bits |= CONNECT_BIT,
+        Some(false) => deny_bits |= CONNECT_BIT,
+        None => {}
+    }
+    (allow_bits != 0 || deny_bits != 0).then_some((allow_bits, deny_bits))
+}
+
+fn overwrites_to_json(overwrites: &[PermissionOverwrite]) -> Vec<Value> {
+    overwrites
+        .iter()
+        .filter_map(|ow| {
+            let (kind, target_id) = match ow.kind {
+                PermissionOverwriteType::Role(role_id) => (0u8, role_id.get()),
+                PermissionOverwriteType::Member(user_id) => (1u8, user_id.get()),
+                _ => return None,
+            };
+            Some(json!({
+                "id": target_id.to_string(),
+                "type": kind,
+                "allow": ow.allow.bits().to_string(),
+                "deny": ow.deny.bits().to_string(),
+            }))
+        })
+        .collect()
+}
+
+fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
+    match tier {
+        PremiumTier::Tier3 => 384_000,
+        PremiumTier::Tier2 => 256_000,
+        PremiumTier::Tier1 => 128_000,
+        _ => 96_000,
+    }
+}
 
 pub struct CacheSnapshot {
     pub adapter: Arc<DiscordAdapter>,
@@ -76,6 +121,23 @@ impl LanePort for CacheSnapshot {
         body.insert("user_limit".into(), json!(user_limit));
         if let Some(category) = category_id {
             body.insert("parent_id".into(), json!(category.to_string()));
+            let (overwrites, bitrate) = self
+                .adapter
+                .cache()
+                .guild(GuildId::new(guild_id))
+                .map(|guild| {
+                    let overwrites = guild
+                        .channels
+                        .get(&ChannelId::new(category))
+                        .map(|channel| overwrites_to_json(&channel.permission_overwrites))
+                        .unwrap_or_default();
+                    (overwrites, guild_voice_bitrate_limit(guild.premium_tier))
+                })
+                .unwrap_or_else(|| (Vec::new(), 96_000));
+            if !overwrites.is_empty() {
+                body.insert("permission_overwrites".into(), json!(overwrites));
+            }
+            body.insert("bitrate".into(), json!(bitrate));
         }
         self.adapter
             .http
@@ -130,7 +192,26 @@ impl LanePort for CacheSnapshot {
         connect: Option<bool>,
     ) -> Result<(), String> {
         let channel = ChannelId::new(channel_id);
-        match connect {
+        let existing = self
+            .adapter
+            .cache()
+            .guilds()
+            .into_iter()
+            .filter_map(|guild_id| self.adapter.cache().guild(guild_id))
+            .find_map(|guild| {
+                let channel = guild.channels.get(&ChannelId::new(channel_id))?;
+                channel
+                    .permission_overwrites
+                    .iter()
+                    .find_map(|ow| match ow.kind {
+                        PermissionOverwriteType::Member(target) if target.get() == user_id => {
+                            Some((ow.allow.bits(), ow.deny.bits()))
+                        }
+                        _ => None,
+                    })
+            })
+            .unwrap_or((0, 0));
+        match merge_connect_overwrite(existing.0, existing.1, connect) {
             None => self
                 .adapter
                 .http
@@ -141,27 +222,21 @@ impl LanePort for CacheSnapshot {
                 )
                 .await
                 .map_err(|e| e.to_string()),
-            Some(allow) => {
-                let (allow_bits, deny_bits) = if allow {
-                    (CONNECT_BIT, 0)
-                } else {
-                    (0, CONNECT_BIT)
-                };
-                self.adapter
-                    .http
-                    .create_permission(
-                        channel,
-                        serenity::all::TargetId::new(user_id),
-                        &json!({
-                            "type": 1,
-                            "allow": allow_bits.to_string(),
-                            "deny": deny_bits.to_string(),
-                        }),
-                        Some("TempVoice: Owner-Bann"),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+            Some((allow_bits, deny_bits)) => self
+                .adapter
+                .http
+                .create_permission(
+                    channel,
+                    serenity::all::TargetId::new(user_id),
+                    &json!({
+                        "type": 1,
+                        "allow": allow_bits.to_string(),
+                        "deny": deny_bits.to_string(),
+                    }),
+                    Some("TempVoice: Owner-Bann"),
+                )
+                .await
+                .map_err(|e| e.to_string()),
         }
     }
 
@@ -355,6 +430,19 @@ impl LanePort for CacheSnapshot {
             .collect()
     }
 
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|guild| {
+                guild
+                    .members
+                    .get(&UserId::new(user_id))
+                    .map(|member| member.roles.iter().map(|role_id| role_id.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
         let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return Vec::new();
@@ -398,6 +486,21 @@ impl LanePort for CacheSnapshot {
                     && c.kind == serenity::all::ChannelType::Voice
             })
             .map(|c| c.name.to_string())
+            .collect()
+    }
+
+    async fn category_voice_channels(&self, guild_id: u64, category_id: u64) -> Vec<(u64, String)> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .channels
+            .values()
+            .filter(|c| {
+                c.parent_id == Some(ChannelId::new(category_id))
+                    && c.kind == serenity::all::ChannelType::Voice
+            })
+            .map(|c| (c.id.get(), c.name.to_string()))
             .collect()
     }
 
@@ -668,6 +771,7 @@ fn is_missing_or_forbidden(err: &serenity::Error) -> bool {
 /// Voice-Status-Anbindung (Kategorien-Scan + Rename).
 pub struct StatusGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub tempvoice: Option<Arc<crate::tempvoice::TempVoiceEngine>>,
 }
 
 #[async_trait::async_trait]
@@ -732,6 +836,22 @@ impl crate::status::StatusPort for StatusGlue {
             }
         }
         None
+    }
+
+    async fn resolved_base_name(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        fallback_base: &str,
+    ) -> Option<String> {
+        let Some(engine) = &self.tempvoice else {
+            return None;
+        };
+        engine
+            .status_base_name(guild_id, channel_id)
+            .await
+            .filter(|base| !base.trim().is_empty())
+            .or_else(|| Some(fallback_base.to_string()))
     }
 
     async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
@@ -1473,5 +1593,21 @@ mod tests {
 
         assert_eq!(mapped.retry_after_seconds(), Some(1.0));
         assert_eq!(mapped.to_string(), "HTTP 429 (retry_after=1)");
+    }
+
+    #[test]
+    fn member_connect_merge_erhaelt_fremde_bits() {
+        let view_channel = 1 << 10;
+        let speak = 1 << 21;
+
+        assert_eq!(
+            merge_connect_overwrite(view_channel, speak, Some(false)),
+            Some((view_channel, speak | CONNECT_BIT))
+        );
+        assert_eq!(
+            merge_connect_overwrite(view_channel | CONNECT_BIT, speak, None),
+            Some((view_channel, speak))
+        );
+        assert_eq!(merge_connect_overwrite(CONNECT_BIT, 0, None), None);
     }
 }

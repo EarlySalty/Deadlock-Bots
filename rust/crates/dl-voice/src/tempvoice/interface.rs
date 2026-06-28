@@ -17,11 +17,14 @@ use dl_discord::{
 };
 use serde_json::{json, Map, Value};
 
-use super::engine::TempVoiceEngine;
+use super::engine::{TempVoiceEngine, VERIFIED_ROLE_ID};
 use super::store::{InterfaceRecord, PresetRecord};
 
 const NOT_IN_LANE: &str = "Du musst dafür in einer TempVoice-Lane sein.";
 const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
+pub const MIN_RANK_VERIFY_REQUIRED: &str = "Platzhalter";
+pub const MIN_RANK_BLOCKED_REPLY: &str = "Platzhalter";
+pub const RANK_PREF_UNKNOWN_LABEL: &str = "Platzhalter";
 const RANKED_CATEGORY_ID: u64 = 1412804540994162789;
 const GLOBAL_PANEL_TITLE: &str = "🚧 Sprachkanal verwalten";
 
@@ -488,10 +491,16 @@ impl PanelHandler {
         let Some(lane) = self.lane_of(interaction).await else {
             return Err(BridgeReply::ephemeral_text(NOT_IN_LANE));
         };
-        if self.engine.lane_owner(lane).await != Some(interaction.user_id) {
+        if self.engine.lane_owner(lane).await != Some(interaction.user_id)
+            && !interaction.author_can_manage_channels
+        {
             return Err(BridgeReply::ephemeral_text(NOT_OWNER));
         }
         Ok(lane)
+    }
+
+    async fn lane_owner_id(&self, lane: u64, actor_id: u64) -> u64 {
+        self.engine.lane_owner_or_actor(lane, actor_id).await
     }
 
     /// Select mit den anderen Membern der Lane (für Kick/Ban).
@@ -561,7 +570,8 @@ impl InteractionHandler for PanelHandler {
                 } else {
                     "EU"
                 };
-                engine.set_region(lane, interaction.user_id, region).await;
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                engine.set_region(lane, owner_id, region).await;
                 BridgeReply::ephemeral_text(if region == "DE" {
                     "Region gesetzt: **DE** — English-Only-Accounts können nicht mehr verbinden."
                 } else {
@@ -677,7 +687,8 @@ impl InteractionHandler for PanelHandler {
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                let _ = engine.store.add_ban(interaction.user_id, target).await;
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let _ = engine.store.add_ban(owner_id, target).await;
                 let _ = engine
                     .port
                     .set_member_connect(lane, target, Some(false))
@@ -691,11 +702,12 @@ impl InteractionHandler for PanelHandler {
                 ))
             }
             "tv_unban" => {
-                let bans = engine
-                    .store
-                    .list_bans(interaction.user_id)
-                    .await
-                    .unwrap_or_default();
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let bans = engine.store.list_bans(owner_id).await.unwrap_or_default();
                 if bans.is_empty() {
                     return BridgeReply::ephemeral_text("Du hast niemanden gebannt.");
                 }
@@ -720,13 +732,16 @@ impl InteractionHandler for PanelHandler {
                 }
             }
             "tv_unban_sel" => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                let _ = engine.store.remove_ban(interaction.user_id, target).await;
-                if let Some(lane) = self.lane_of(&interaction).await {
-                    let _ = engine.port.set_member_connect(lane, target, None).await;
-                }
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let _ = engine.store.remove_ban(owner_id, target).await;
+                let _ = engine.port.set_member_connect(lane, target, None).await;
                 BridgeReply::ephemeral_text(format!("<@{target}> entbannt."))
             }
 
@@ -736,12 +751,23 @@ impl InteractionHandler for PanelHandler {
                     Ok(lane) => lane,
                     Err(reply) => return reply,
                 };
-                let limit = match interaction.custom_id.as_str() {
-                    "tv_tpl_duo" => 2,
-                    "tv_tpl_trio" => 3,
-                    _ => 6,
+                let (base_name, limit) = match interaction.custom_id.as_str() {
+                    "tv_tpl_duo" => ("Duo Call".to_string(), 2),
+                    "tv_tpl_trio" => ("Trio Call".to_string(), 3),
+                    _ => {
+                        let base = engine
+                            .lane_snapshot(lane)
+                            .await
+                            .map(|(base, _)| base)
+                            .filter(|base| base.to_lowercase().starts_with("lane "))
+                            .unwrap_or_else(|| "Lane".to_string());
+                        (base, engine.default_limit_for_lane(lane).await)
+                    }
                 };
-                match engine.set_limit(lane, limit).await {
+                match engine
+                    .set_lane_template(interaction.guild_id, lane, &base_name, limit)
+                    .await
+                {
                     Ok(effective) => BridgeReply::ephemeral_text(format!(
                         "Lane umgestellt: Limit **{effective}**."
                     )),
@@ -786,23 +812,35 @@ impl InteractionHandler for PanelHandler {
                     return BridgeReply::ephemeral_text("Bitte einen Namen eingeben.");
                 };
                 let info = engine.lane_snapshot(lane).await;
-                let Some((base_name, category_id)) = info else {
+                let Some((_, category_id)) = info else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
+                };
+                let Some((base_name, _, min_rank)) = engine.lane_preset_snapshot(lane).await else {
+                    return BridgeReply::ephemeral_text(NOT_IN_LANE);
+                };
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let limit = match engine
+                    .port
+                    .channel_user_limit(interaction.guild_id, lane)
+                    .await
+                {
+                    Some(limit) => limit,
+                    None => engine.default_limit_for_lane(lane).await,
                 };
                 let region = engine
                     .store
-                    .region_pref(interaction.user_id)
+                    .region_pref(owner_id)
                     .await
                     .unwrap_or_else(|_| "EU".to_string());
                 let result = engine
                     .store
                     .save_preset(PresetRecord {
-                        user_id: interaction.user_id,
+                        user_id: owner_id,
                         category_id,
                         name: name.clone(),
                         base_name,
-                        limit: 6,
-                        min_rank: "unknown".to_string(),
+                        limit,
+                        min_rank,
                         region,
                     })
                     .await;
@@ -823,9 +861,10 @@ impl InteractionHandler for PanelHandler {
                 let Some((_, category_id)) = engine.lane_snapshot(lane).await else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
                 let presets = engine
                     .store
-                    .list_presets(interaction.user_id, category_id)
+                    .list_presets(owner_id, category_id)
                     .await
                     .unwrap_or_default();
                 if presets.is_empty() {
@@ -857,38 +896,62 @@ impl InteractionHandler for PanelHandler {
                 let Some((_, category_id)) = engine.lane_snapshot(lane).await else {
                     return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
-                let Some((_base, limit, _min_rank, region)) = engine
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let Some((base, limit, min_rank, region)) = engine
                     .store
-                    .get_preset(interaction.user_id, category_id, name)
+                    .get_preset(owner_id, category_id, name)
                     .await
                     .ok()
                     .flatten()
                 else {
                     return BridgeReply::ephemeral_text("Preset nicht gefunden.");
                 };
-                let _ = engine.set_limit(lane, limit).await;
-                engine.set_region(lane, interaction.user_id, &region).await;
+                let _ = engine
+                    .set_lane_template(interaction.guild_id, lane, &base, limit)
+                    .await;
+                if !engine.is_min_rank_blocked(lane).await && min_rank != "unknown" {
+                    let _ = engine
+                        .set_min_rank(interaction.guild_id, lane, &min_rank)
+                        .await;
+                }
+                engine.set_region(lane, owner_id, &region).await;
                 BridgeReply::ephemeral_text(format!(
                     "Preset **{name}** angewendet (Limit {limit}, Region {region})."
                 ))
             }
 
             // ── Rang-Präferenz ────────────────────────────────────────
-            "tv_rank_pref" => BridgeReply {
-                content: Some("Welchen Rang soll deine Chill-Lane tragen?".to_string()),
-                components: Some(json!([{ "type": 1, "components": [{
-                    "type": 3, "custom_id": "tv_rank_pref_sel",
-                    "options": super::logic::RANK_ORDER.iter().skip(1)
-                        .map(|rank| json!({
-                            "label": super::logic::capitalize(rank),
-                            "value": rank,
-                        }))
-                        .collect::<Vec<_>>(),
-                    "min_values": 1, "max_values": 1,
-                }]}])),
-                ephemeral: true,
-                ..BridgeReply::default()
-            },
+            "tv_rank_pref" => {
+                let current = engine
+                    .store
+                    .rank_pref(interaction.user_id)
+                    .await
+                    .map(|(rank, _)| rank)
+                    .unwrap_or_else(|_| "unknown".to_string());
+                let options = std::iter::once(json!({
+                    "label": RANK_PREF_UNKNOWN_LABEL,
+                    "value": "unknown",
+                    "default": current == "unknown",
+                }))
+                .chain(super::logic::RANK_ORDER.iter().skip(1).map(|rank| {
+                    json!({
+                        "label": super::logic::capitalize(rank),
+                        "value": rank,
+                        "default": current == *rank,
+                    })
+                }))
+                .collect::<Vec<_>>();
+                BridgeReply {
+                    content: Some("Welchen Rang soll deine Chill-Lane tragen?".to_string()),
+                    components: Some(json!([{ "type": 1, "components": [{
+                        "type": 3, "custom_id": "tv_rank_pref_sel",
+                        "options": options,
+                        "min_values": 1, "max_values": 1,
+                    }]}])),
+                    ephemeral: true,
+                    ..BridgeReply::default()
+                }
+            }
             "tv_rank_pref_sel" => {
                 let Some(rank) = interaction.values.first() else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
@@ -1034,6 +1097,16 @@ impl InteractionHandler for PanelHandler {
                 };
                 if !in_minrank {
                     return BridgeReply::ephemeral_text("Mindest-Rang ist hier deaktiviert.");
+                }
+                if engine.is_min_rank_blocked(lane).await {
+                    return BridgeReply::ephemeral_text(MIN_RANK_BLOCKED_REPLY);
+                }
+                let role_ids = engine
+                    .port
+                    .member_role_ids(interaction.guild_id, interaction.user_id)
+                    .await;
+                if !role_ids.contains(&VERIFIED_ROLE_ID) {
+                    return BridgeReply::ephemeral_text(MIN_RANK_VERIFY_REQUIRED);
                 }
                 let Some(choice) = interaction.values.first() else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
@@ -1354,6 +1427,17 @@ mod tests {
             .filter_map(|option| option["value"].as_str())
             .collect();
         assert_eq!(min_rank_options.first().copied(), Some("initiate"));
+    }
+
+    #[test]
+    fn neue_sichtbare_texte_bleiben_platzhalter() {
+        assert_eq!(MIN_RANK_VERIFY_REQUIRED, "Platzhalter");
+        assert_eq!(MIN_RANK_BLOCKED_REPLY, "Platzhalter");
+        assert_eq!(RANK_PREF_UNKNOWN_LABEL, "Platzhalter");
+        assert_eq!(
+            crate::tempvoice::engine::MIN_RANK_DISABLED_REPLY,
+            "Platzhalter"
+        );
     }
 
     #[test]

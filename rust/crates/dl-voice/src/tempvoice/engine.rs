@@ -11,10 +11,14 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{NaiveDateTime, Utc};
-use dl_discord::{Dispatcher, VoiceEvent};
+use dl_discord::{ChannelEvent, Dispatcher, VoiceEvent};
 
 use super::logic;
 use super::store::{LaneRecord, TempVoiceStore};
+
+pub const PURGE_INTERVAL_SECONDS: u64 = 180;
+pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
+pub const MIN_RANK_DISABLED_REPLY: &str = "Platzhalter";
 
 /// Discord-Seite der Engine (Cache-Reads + REST-Aktionen).
 #[async_trait::async_trait]
@@ -94,20 +98,24 @@ pub trait LanePort: Send + Sync {
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn member_role_names(&self, guild_id: u64, user_id: u64) -> Vec<String>;
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
     async fn channel_name(&self, guild_id: u64, channel_id: u64) -> Option<String>;
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
     async fn category_voice_channel_names(&self, guild_id: u64, category_id: u64) -> Vec<String>;
+    async fn category_voice_channels(&self, guild_id: u64, category_id: u64) -> Vec<(u64, String)>;
     /// Unix-Timestamp der Kanal-Erstellung (Snowflake).
     async fn channel_created_at(&self, channel_id: u64) -> Option<i64>;
 }
 
 /// Regeln pro Staging-Kanal (STAGING_RULES-Pendant).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct StagingRules {
     pub prefix: Option<String>,
     pub user_limit: Option<i64>,
+    pub max_limit: Option<i64>,
     pub prefix_from_rank: bool,
+    pub disable_min_rank: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -139,7 +147,9 @@ impl TempVoiceConfig {
             StagingRules {
                 prefix: Some("Street Brawl".to_string()),
                 user_limit: Some(4),
+                max_limit: Some(4),
                 prefix_from_rank: false,
+                disable_min_rank: true,
             },
         );
         staging_rules.insert(
@@ -147,7 +157,9 @@ impl TempVoiceConfig {
             StagingRules {
                 prefix: None,
                 user_limit: None,
+                max_limit: None,
                 prefix_from_rank: true,
+                disable_min_rank: false,
             },
         );
 
@@ -210,6 +222,7 @@ struct EngineState {
     creating: HashSet<u64>,
     /// channel → von Tag-Filtern geblockte User (Schutz vor Bann-Löschung)
     tag_blocked: HashMap<u64, HashSet<u64>>,
+    minrank_blocked: HashSet<u64>,
 }
 
 pub struct TempVoiceEngine {
@@ -239,29 +252,125 @@ impl TempVoiceEngine {
         })
     }
 
+    fn rules_for_category(&self, category_id: Option<u64>) -> (StagingRules, Option<u64>) {
+        let Some(category_id) = category_id else {
+            return (StagingRules::default(), None);
+        };
+        for staging_id in &self.config.staging_channels {
+            let rules = self.config.rules_for_staging(*staging_id);
+            if rules == StagingRules::default() {
+                continue;
+            }
+            // Produktionsvertrag: Staging-Kanal und Zielkategorie teilen sich die
+            // Staging-Regel. Die konkreten Kategorien sind stabil und bereits in
+            // `production()` abgebildet.
+            let mapped_category = match *staging_id {
+                1501089974093873232 => 1289721245281292290,
+                1357422958544420944 => 1357422957017698478,
+                _ => 0,
+            };
+            if mapped_category == category_id {
+                return (rules, Some(*staging_id));
+            }
+        }
+        (StagingRules::default(), None)
+    }
+
+    fn rules_from_base(
+        &self,
+        base_name: &str,
+        category_id: Option<u64>,
+    ) -> (StagingRules, Option<u64>) {
+        let base_lower = base_name.to_lowercase();
+        for (staging_id, rule) in &self.config.staging_rules {
+            if rule.prefix_from_rank {
+                let first = base_lower.split_whitespace().next().unwrap_or_default();
+                if logic::RANK_ORDER.contains(&first) || first == "lane" {
+                    if category_id
+                        .map(|id| self.config.minrank_categories.contains(&id))
+                        .unwrap_or(false)
+                    {
+                        return (StagingRules::default(), None);
+                    }
+                    return (rule.clone(), Some(*staging_id));
+                }
+                continue;
+            }
+            let prefix = rule.prefix.as_deref().unwrap_or("Lane").to_lowercase();
+            if base_lower.starts_with(&prefix) {
+                return (rule.clone(), Some(*staging_id));
+            }
+        }
+        (StagingRules::default(), None)
+    }
+
+    pub async fn apply_lane_rules(&self, channel_id: u64, rules: &StagingRules) {
+        let mut state = self.state.lock().await;
+        if rules.disable_min_rank {
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.min_rank = "unknown".to_string();
+            }
+            state.minrank_blocked.insert(channel_id);
+        } else {
+            state.minrank_blocked.remove(&channel_id);
+        }
+    }
+
+    pub async fn is_min_rank_blocked(&self, channel_id: u64) -> bool {
+        self.state
+            .lock()
+            .await
+            .minrank_blocked
+            .contains(&channel_id)
+    }
+
     /// Lanes aus der DB rehydrieren (Bot-Neustart).
     pub async fn rehydrate(&self) {
         match self.store.all_lanes().await {
             Ok(lanes) => {
                 let mut state = self.state.lock().await;
+                let mut source_updates = Vec::new();
                 for lane in lanes {
+                    let category_id = Some(lane.category_id).filter(|c| *c > 0);
+                    let (rules, inferred_source) = match lane.source_staging_id {
+                        Some(source_id) => {
+                            (self.config.rules_for_staging(source_id), Some(source_id))
+                        }
+                        None => self.rules_from_base(&lane.base_name, category_id),
+                    };
+                    let source_staging_id = lane.source_staging_id.or(inferred_source);
+                    let should_persist_source =
+                        lane.source_staging_id.is_none() && source_staging_id.is_some();
+                    let channel_id = lane.channel_id;
+                    let persisted_category_id = lane.category_id;
+                    if rules.disable_min_rank {
+                        state.minrank_blocked.insert(channel_id);
+                    }
                     state.lanes.insert(
-                        lane.channel_id,
+                        channel_id,
                         LaneState {
                             owner_id: lane.owner_id,
                             initial_owner_id: lane.initial_owner_id.unwrap_or(lane.owner_id),
                             base_name: lane.base_name,
                             min_rank: "unknown".to_string(),
-                            category_id: Some(lane.category_id).filter(|c| *c > 0),
-                            prefix_from_rank: lane
-                                .source_staging_id
-                                .map(|s| self.config.rules_for_staging(s).prefix_from_rank)
-                                .unwrap_or(false),
-                            source_staging_id: lane.source_staging_id,
+                            category_id,
+                            prefix_from_rank: rules.prefix_from_rank,
+                            source_staging_id,
                         },
                     );
+                    if should_persist_source {
+                        source_updates.push((channel_id, persisted_category_id, source_staging_id));
+                    }
                 }
-                tracing::info!(lanes = state.lanes.len(), "TempVoice: Lanes rehydriert");
+                let lane_count = state.lanes.len();
+                drop(state);
+                for (channel_id, category_id, source_staging_id) in source_updates {
+                    let _ = self
+                        .store
+                        .set_lane_category_source(channel_id, category_id, source_staging_id)
+                        .await;
+                }
+                tracing::info!(lanes = lane_count, "TempVoice: Lanes rehydriert");
             }
             Err(err) => tracing::error!(%err, "TempVoice: Rehydrierung fehlgeschlagen"),
         }
@@ -270,11 +379,27 @@ impl TempVoiceEngine {
     /// Startup-Purge: bekannte Lanes ohne Mitglieder abbauen
     /// (wie `_purge_empty_lanes_once`).
     pub async fn purge_empty_lanes(&self) {
-        let lanes: Vec<u64> = {
+        let mut lanes: HashSet<u64> = {
             let state = self.state.lock().await;
             state.lanes.keys().copied().collect()
         };
         let guild_id = self.config.guild_id_hint;
+        for category_id in &self.config.tempvoice_categories {
+            for (channel_id, name) in self
+                .port
+                .category_voice_channels(guild_id, *category_id)
+                .await
+            {
+                if self.config.fixed_lane_ids.contains(&channel_id)
+                    || self.config.staging_channels.contains(&channel_id)
+                {
+                    continue;
+                }
+                if logic::is_managed_lane_name(&name) {
+                    lanes.insert(channel_id);
+                }
+            }
+        }
         let mut purged = 0usize;
         for channel_id in lanes {
             // Kanal existiert nicht mehr ODER ist leer → aufräumen
@@ -380,8 +505,12 @@ impl TempVoiceEngine {
                 .unwrap_or_default();
             let base_name = logic::strip_suffixes(&name);
             let category_id = self.port.channel_category(guild_id, channel_id).await;
+            let (rules, source_staging_id) = self.rules_from_base(&base_name, category_id);
             {
                 let mut state = self.state.lock().await;
+                if rules.disable_min_rank {
+                    state.minrank_blocked.insert(channel_id);
+                }
                 state.lanes.insert(
                     channel_id,
                     LaneState {
@@ -390,8 +519,8 @@ impl TempVoiceEngine {
                         base_name: base_name.clone(),
                         min_rank: "unknown".to_string(),
                         category_id,
-                        prefix_from_rank: false,
-                        source_staging_id: None,
+                        prefix_from_rank: rules.prefix_from_rank,
+                        source_staging_id,
                     },
                 );
             }
@@ -404,13 +533,14 @@ impl TempVoiceEngine {
                     initial_owner_id: Some(user_id),
                     base_name,
                     category_id: category_id.unwrap_or(0),
-                    source_staging_id: None,
+                    source_staging_id,
                 })
                 .await
             {
                 tracing::warn!(%err, channel_id, "TempVoice: Owner-Backfill-Persist fehlgeschlagen");
             }
-            self.apply_owner_bans(guild_id, channel_id, user_id).await;
+            self.apply_owner_settings(guild_id, channel_id, user_id)
+                .await;
         }
         self.apply_tag_filter(guild_id, channel_id, Some(vec![user_id]), true)
             .await;
@@ -418,18 +548,22 @@ impl TempVoiceEngine {
     }
 
     async fn on_leave(self: &Arc<Self>, guild_id: u64, user_id: u64, channel_id: u64) {
-        if !self.is_managed_lane(guild_id, channel_id).await {
-            return;
-        }
         self.cleanup_lurker_on_leave(guild_id, channel_id, user_id)
             .await;
-        let members = self.port.channel_members(guild_id, channel_id).await;
-
-        let was_owner = {
+        self.cleanup_tag_block_on_leave(channel_id, user_id).await;
+        {
             let mut state = self.state.lock().await;
             if let Some(times) = state.join_time.get_mut(&channel_id) {
                 times.remove(&user_id);
             }
+        }
+        if !self.is_managed_lane(guild_id, channel_id).await {
+            return;
+        }
+        let members = self.port.channel_members(guild_id, channel_id).await;
+
+        let was_owner = {
+            let state = self.state.lock().await;
             state
                 .lanes
                 .get(&channel_id)
@@ -467,7 +601,8 @@ impl TempVoiceEngine {
                 }
                 // Bans des alten Owners von der Lane nehmen, neue anwenden
                 self.clear_owner_bans(channel_id, user_id).await;
-                self.apply_owner_bans(guild_id, channel_id, new_owner).await;
+                self.apply_owner_settings(guild_id, channel_id, new_owner)
+                    .await;
                 tracing::info!(
                     channel_id,
                     old = user_id,
@@ -526,6 +661,119 @@ impl TempVoiceEngine {
         if let Err(err) = result {
             tracing::warn!(%err, user_id, staging_id, "TempVoice: Lane-Erstellung fehlgeschlagen");
         }
+    }
+
+    pub async fn create_router_lane(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+        expected_channel_id: u64,
+    ) {
+        {
+            let mut state = self.state.lock().await;
+            if !state.creating.insert(user_id) {
+                return;
+            }
+        }
+        let result = self
+            .create_router_lane_inner(guild_id, user_id, mode, expected_channel_id)
+            .await;
+        self.state.lock().await.creating.remove(&user_id);
+        if let Err(err) = result {
+            tracing::warn!(%err, user_id, mode, "TempVoice: Router-Lane-Erstellung fehlgeschlagen");
+        }
+    }
+
+    async fn create_router_lane_inner(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+        expected_channel_id: u64,
+    ) -> Result<(), String> {
+        if matches!(
+            self.port.member_voice_channel(guild_id, user_id).await,
+            Some(c) if c != expected_channel_id
+        ) {
+            return Ok(());
+        }
+        let category_id = match mode {
+            "ranked" => 1412804540994162789,
+            "street_brawl" => 1357422957017698478,
+            _ => 1289721245281292290,
+        };
+        let base = if mode == "ranked" {
+            let roles = self.port.member_role_names(guild_id, user_id).await;
+            logic::rank_prefix_for(&roles).unwrap_or_else(|| "Ranked".to_string())
+        } else if mode == "street_brawl" {
+            "Street Brawl".to_string()
+        } else {
+            "Chill Lane".to_string()
+        };
+        let index = self
+            .port
+            .category_voice_channel_names(guild_id, category_id)
+            .await
+            .len()
+            + 1;
+        let create_name = format!("{base} {index}");
+        let cap = if mode == "street_brawl" { 4 } else { 6 };
+        let lane_id = self
+            .port
+            .create_voice_channel(guild_id, Some(category_id), &create_name, cap)
+            .await?;
+        {
+            let mut state = self.state.lock().await;
+            state.lanes.insert(
+                lane_id,
+                LaneState {
+                    owner_id: user_id,
+                    initial_owner_id: user_id,
+                    base_name: base.clone(),
+                    min_rank: "unknown".to_string(),
+                    category_id: Some(category_id),
+                    prefix_from_rank: false,
+                    source_staging_id: Some(crate::router::ROUTER_VC_ID),
+                },
+            );
+            state.join_time.entry(lane_id).or_default();
+        }
+        if let Err(err) = self
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id,
+                owner_id: user_id,
+                initial_owner_id: Some(user_id),
+                base_name: base.clone(),
+                category_id,
+                source_staging_id: Some(crate::router::ROUTER_VC_ID),
+            })
+            .await
+        {
+            tracing::warn!(%err, lane_id, "TempVoice: Router-Lane-Persist fehlgeschlagen");
+        }
+        if matches!(
+            self.port.member_voice_channel(guild_id, user_id).await,
+            Some(c) if c != expected_channel_id
+        ) {
+            self.cleanup_lane(lane_id, "TempVoice: Router-Owner nicht mehr im VC")
+                .await;
+            return Ok(());
+        }
+        if let Err(err) = self
+            .port
+            .move_member(guild_id, user_id, lane_id, "Router: neue Lane erstellt")
+            .await
+        {
+            self.cleanup_lane(lane_id, "Router: Move fehlgeschlagen")
+                .await;
+            return Err(err);
+        }
+        self.apply_owner_settings(guild_id, lane_id, user_id).await;
+        self.refresh_name(guild_id, lane_id).await;
+        Ok(())
     }
 
     async fn create_lane_inner(
@@ -599,6 +847,9 @@ impl TempVoiceEngine {
 
         {
             let mut state = self.state.lock().await;
+            if rules.disable_min_rank {
+                state.minrank_blocked.insert(lane_id);
+            }
             state.lanes.insert(
                 lane_id,
                 LaneState {
@@ -649,7 +900,7 @@ impl TempVoiceEngine {
                 .await;
             return Err(err);
         }
-        self.apply_owner_bans(guild_id, lane_id, user_id).await;
+        self.apply_owner_settings(guild_id, lane_id, user_id).await;
         tracing::info!(lane_id, user_id, staging_id, base = %base, "TempVoice: Lane erstellt");
         Ok(())
     }
@@ -752,7 +1003,8 @@ impl TempVoiceEngine {
             tracing::warn!(%err, channel_id, "TempVoice: Claim-Persist fehlgeschlagen");
         }
         self.clear_owner_bans(channel_id, previous).await;
-        self.apply_owner_bans(guild_id, channel_id, new_owner).await;
+        self.apply_owner_settings(guild_id, channel_id, new_owner)
+            .await;
     }
 
     /// Limit setzen (Street-Brawl-Regel kappt auf max_limit).
@@ -762,7 +1014,7 @@ impl TempVoiceEngine {
             state.lanes.get(&channel_id).and_then(|lane| {
                 lane.source_staging_id
                     .and_then(|s| self.config.staging_rules.get(&s))
-                    .and_then(|r| r.user_limit)
+                    .and_then(|r| r.max_limit.or(r.user_limit))
             })
         };
         let effective = match max_limit {
@@ -794,12 +1046,144 @@ impl TempVoiceEngine {
             .map(|lane| (lane.base_name.clone(), lane.category_id.unwrap_or(0)))
     }
 
+    pub async fn lane_preset_snapshot(&self, channel_id: u64) -> Option<(String, u64, String)> {
+        let state = self.state.lock().await;
+        state.lanes.get(&channel_id).map(|lane| {
+            (
+                lane.base_name.clone(),
+                lane.category_id.unwrap_or(0),
+                lane.min_rank.clone(),
+            )
+        })
+    }
+
+    pub async fn lane_owner_or_actor(&self, channel_id: u64, actor_id: u64) -> u64 {
+        self.lane_owner(channel_id).await.unwrap_or(actor_id)
+    }
+
     /// Owner-Rename: Basisnamen mitführen, damit refresh_name nicht zurücksetzt.
     pub async fn set_base_name(&self, channel_id: u64, name: &str) {
+        let base_name = logic::strip_suffixes(name);
         let mut state = self.state.lock().await;
         if let Some(lane) = state.lanes.get_mut(&channel_id) {
-            lane.base_name = logic::strip_suffixes(name);
+            lane.base_name = base_name.clone();
         }
+        drop(state);
+        let _ = self.store.set_lane_base(channel_id, base_name).await;
+    }
+
+    pub async fn set_lane_template(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        base_name: &str,
+        limit: i64,
+    ) -> Result<i64, String> {
+        let base = logic::strip_suffixes(base_name);
+        if base.trim().is_empty() {
+            return Err("empty base name".to_string());
+        }
+        self.set_base_name(channel_id, &base).await;
+        let effective = self.set_limit(channel_id, limit).await?;
+        self.port
+            .rename_channel(channel_id, &base, "TempVoice: Template")
+            .await?;
+        self.refresh_name(guild_id, channel_id).await;
+        Ok(effective)
+    }
+
+    pub async fn default_limit_for_lane(&self, channel_id: u64) -> i64 {
+        let category_id = self
+            .state
+            .lock()
+            .await
+            .lanes
+            .get(&channel_id)
+            .and_then(|lane| lane.category_id);
+        self.config.default_cap(category_id)
+    }
+
+    pub async fn status_base_name(&self, guild_id: u64, channel_id: u64) -> Option<String> {
+        let (base_name, prefix_from_rank, owner_id) = {
+            let state = self.state.lock().await;
+            let lane = state.lanes.get(&channel_id)?;
+            (lane.base_name.clone(), lane.prefix_from_rank, lane.owner_id)
+        };
+        if !prefix_from_rank {
+            return Some(base_name);
+        }
+        let rank_base = match self.store.rank_pref(owner_id).await {
+            Ok((rank, sub)) if rank != "unknown" => {
+                let mut label = logic::capitalize(&rank);
+                if sub > 0 {
+                    label.push_str(&format!(" {sub}"));
+                }
+                Some(label)
+            }
+            _ => {
+                let roles = self.port.member_role_names(guild_id, owner_id).await;
+                logic::rank_prefix_for(&roles)
+            }
+        };
+        Some(rank_base.unwrap_or(base_name))
+    }
+
+    pub async fn handle_category_changed(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        after_category_id: Option<u64>,
+    ) {
+        if self.config.fixed_lane_ids.contains(&channel_id)
+            || self.config.staging_channels.contains(&channel_id)
+        {
+            return;
+        }
+        let Some(category_id) = after_category_id else {
+            return;
+        };
+        if !self.config.tempvoice_categories.contains(&category_id) {
+            return;
+        }
+        let known = self.state.lock().await.lanes.contains_key(&channel_id);
+        if !known {
+            return;
+        }
+        let (rules, source_staging_id) = self.rules_for_category(Some(category_id));
+        {
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.category_id = Some(category_id);
+                lane.prefix_from_rank = rules.prefix_from_rank;
+                lane.source_staging_id = source_staging_id.or(lane.source_staging_id);
+                if rules.disable_min_rank {
+                    lane.min_rank = "unknown".to_string();
+                }
+            }
+            if rules.disable_min_rank {
+                state.minrank_blocked.insert(channel_id);
+            } else {
+                state.minrank_blocked.remove(&channel_id);
+            }
+        }
+        let _ = self
+            .store
+            .set_lane_category_source(channel_id, category_id, source_staging_id)
+            .await;
+        let base = {
+            let state = self.state.lock().await;
+            state
+                .lanes
+                .get(&channel_id)
+                .map(|lane| lane.base_name.clone())
+                .unwrap_or_else(|| "Lane".to_string())
+        };
+        let desired_limit = rules
+            .user_limit
+            .unwrap_or_else(|| self.config.default_cap(Some(category_id)));
+        let _ = self
+            .set_lane_template(guild_id, channel_id, &base, desired_limit)
+            .await;
     }
 
     pub async fn set_tag_service(&self, tags: Arc<dl_community::tags::TagService>) {
@@ -1045,6 +1429,10 @@ impl TempVoiceEngine {
         }
     }
 
+    async fn cleanup_tag_block_on_leave(&self, channel_id: u64, user_id: u64) {
+        self.set_tag_block(channel_id, user_id, false).await;
+    }
+
     /// Min-Rang setzen: Rang-Rollen unter der Schwelle bekommen connect=deny,
     /// ab Schwelle wird das Overwrite geräumt; "unknown" räumt alles
     /// (wie `_apply_min_rank`). Aktualisiert auch das " • ab X"-Suffix.
@@ -1054,6 +1442,9 @@ impl TempVoiceEngine {
         channel_id: u64,
         min_rank: &str,
     ) -> Result<(), String> {
+        if self.is_min_rank_blocked(channel_id).await {
+            return Err(MIN_RANK_DISABLED_REPLY.to_string());
+        }
         let in_minrank = {
             let state = self.state.lock().await;
             state
@@ -1142,16 +1533,25 @@ impl TempVoiceEngine {
                 lane.category_id = Some(category_id);
             }
         }
+        let (rules, source_staging_id) = self.rules_for_category(Some(category_id));
+        {
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.prefix_from_rank = rules.prefix_from_rank;
+                lane.source_staging_id = source_staging_id.or(lane.source_staging_id);
+                if rules.disable_min_rank {
+                    lane.min_rank = "unknown".to_string();
+                }
+            }
+            if rules.disable_min_rank {
+                state.minrank_blocked.insert(channel_id);
+            } else {
+                state.minrank_blocked.remove(&channel_id);
+            }
+        }
         let _ = self
             .store
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE tempvoice_lanes SET category_id = ?1 WHERE channel_id = ?2",
-                    rusqlite::params![category_id, channel_id],
-                )
-                .map(|_| ())
-            })
+            .set_lane_category_source(channel_id, category_id, source_staging_id)
             .await;
         // Name: Ranked → Rang des Owners, sonst gespeicherter Basisname
         let new_name = if new_mode == "ranked" {
@@ -1257,6 +1657,22 @@ impl TempVoiceEngine {
         }
     }
 
+    async fn apply_owner_settings(&self, guild_id: u64, channel_id: u64, owner_id: u64) {
+        let region = self
+            .store
+            .region_pref(owner_id)
+            .await
+            .unwrap_or_else(|_| "EU".to_string());
+        let connect = if region == "DE" { Some(false) } else { None };
+        let _ = self
+            .port
+            .set_role_connect(channel_id, ENGLISH_ONLY_ROLE_ID, connect)
+            .await;
+        self.apply_owner_bans(guild_id, channel_id, owner_id).await;
+        self.apply_tag_filter(guild_id, channel_id, None, true)
+            .await;
+    }
+
     async fn clear_owner_bans(&self, channel_id: u64, owner_id: u64) {
         let bans = self.store.list_bans(owner_id).await.unwrap_or_default();
         for banned in bans {
@@ -1309,12 +1725,36 @@ pub fn spawn_tag_listener(
 /// Engine als Dispatcher-Subscriber starten.
 pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
+    let mut channel_events = dispatcher.subscribe_channels();
     // Startup-Purge verzögert: erst wenn der Gateway-Cache gefüllt ist
     // (sonst sähen alle Lanes leer aus und würden gelöscht)
     let purge_engine = engine.clone();
     tokio::spawn(async move {
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
-        purge_engine.purge_empty_lanes().await;
+        loop {
+            purge_engine.purge_empty_lanes().await;
+            tokio::time::sleep(std::time::Duration::from_secs(PURGE_INTERVAL_SECONDS)).await;
+        }
+    });
+    let category_engine = engine.clone();
+    tokio::spawn(async move {
+        loop {
+            match channel_events.recv().await {
+                Ok(ChannelEvent::VoiceCategoryChanged {
+                    guild_id,
+                    channel_id,
+                    after_category_id,
+                    ..
+                }) => {
+                    category_engine
+                        .handle_category_changed(guild_id, channel_id, after_category_id)
+                        .await;
+                }
+                Ok(ChannelEvent::VoiceChannelUpdated { .. }) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
     });
     tokio::spawn(async move {
         engine.rehydrate().await;
@@ -1512,6 +1952,9 @@ mod tests {
         async fn member_role_names(&self, _guild_id: u64, _user_id: u64) -> Vec<String> {
             vec!["Phantom 2".to_string()]
         }
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            vec![VERIFIED_ROLE_ID]
+        }
         async fn channel_members(&self, _guild_id: u64, channel_id: u64) -> Vec<u64> {
             self.members
                 .lock()
@@ -1541,6 +1984,19 @@ mod tests {
                 .iter()
                 .filter(|(_, cat)| **cat == category_id)
                 .filter_map(|(id, _)| names.get(id).cloned())
+                .collect()
+        }
+        async fn category_voice_channels(
+            &self,
+            _guild_id: u64,
+            category_id: u64,
+        ) -> Vec<(u64, String)> {
+            let categories = self.categories.lock().expect("lock");
+            let names = self.names.lock().expect("lock");
+            categories
+                .iter()
+                .filter(|(_, cat)| **cat == category_id)
+                .filter_map(|(id, _)| names.get(id).cloned().map(|name| (*id, name)))
                 .collect()
         }
         async fn channel_created_at(&self, _channel_id: u64) -> Option<i64> {

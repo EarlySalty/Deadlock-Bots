@@ -20,6 +20,8 @@ pub const RANKED_SUBRANK_TOLERANCE: i64 = 9;
 pub const SCORE_MIN_ABSOLUTE: i64 = 7;
 pub const SCORE_MAX_ABSOLUTE: i64 = 72;
 pub const PRESENCE_STALE_SECONDS: i64 = 180;
+pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
+pub const RRANG_INFO_BALANCING_RULE: &str = "Platzhalter";
 
 /// Comp/Ranked-Kategorie → Modus "lane".
 pub const MONITORED_CATEGORY_ID: u64 = 1412804540994162789;
@@ -440,6 +442,18 @@ impl RankVoiceManager {
         *self.anchors.lock().await = anchors;
     }
 
+    pub async fn startup_reconcile(self: &Arc<Self>, guild_id: u64) {
+        let channels = self
+            .port
+            .category_voice_channels(guild_id, MONITORED_CATEGORY_ID)
+            .await;
+        for (channel_id, _) in channels {
+            if self.is_monitored(guild_id, channel_id).await {
+                self.reconcile_channel(guild_id, channel_id).await;
+            }
+        }
+    }
+
     pub async fn is_monitored(&self, guild_id: u64, channel_id: u64) -> bool {
         if EXCLUDED_CHANNEL_IDS.contains(&channel_id) {
             return false;
@@ -778,6 +792,7 @@ pub fn spawn(
     let mut events = dispatcher.subscribe_voice();
     tokio::spawn(async move {
         manager.rehydrate().await;
+        manager.startup_reconcile(MAIN_GUILD_ID).await;
         loop {
             match events.recv().await {
                 Ok(event) => manager.handle_event(event).await,
@@ -1264,6 +1279,7 @@ impl RankCommands {
             "fields": [
                 { "name": "Höchster Rang", "value": format!("{rn}{sub_txt}"), "inline": true },
                 { "name": "Rang-Wert", "value": rv.to_string(), "inline": true },
+                { "name": RRANG_INFO_BALANCING_RULE, "value": RRANG_INFO_BALANCING_RULE, "inline": false },
             ],
         }))
     }
@@ -1322,7 +1338,7 @@ pub fn spawn_command(
                     let Some(guild_id) = event.guild_id else {
                         continue;
                     };
-                    if !event.author_is_admin {
+                    if !event.author_can_manage_guild {
                         continue;
                     }
                     let content = event.content.trim();
@@ -1352,6 +1368,11 @@ mod tests {
         assert_eq!(anchor_range(6, 3), (30, 48, 4, 7));
         assert_eq!(anchor_range(11, 6), (63, 72, 10, 11));
         assert_eq!(anchor_range(2, 5), (8, 26, 1, 4));
+    }
+
+    #[test]
+    fn neue_rrang_texte_bleiben_platzhalter() {
+        assert_eq!(RRANG_INFO_BALANCING_RULE, "Platzhalter");
     }
 
     #[test]
@@ -1710,12 +1731,9 @@ mod tests {
     async fn reconcile_channel_loest_erstbesitzer_gildenweit_auf() {
         let mut port = monitored_port();
         port.channel_members = vec![(7, vec![role(1331458016356208680, "Phantom")])];
-        port.guild_member_roles.insert(
-            42,
-            Some(vec![role(1331457949654319114, "Archon")]),
-        );
-        let (_dir, _cmds, manager, port) =
-            rank_setup_with_owner(port, owner_for(500, 42)).await;
+        port.guild_member_roles
+            .insert(42, Some(vec![role(1331457949654319114, "Archon")]));
+        let (_dir, _cmds, manager, port) = rank_setup_with_owner(port, owner_for(500, 42)).await;
 
         manager.reconcile_channel(1, 500).await;
 
@@ -1723,7 +1741,10 @@ mod tests {
         assert_eq!(anchor.user_id, 42);
         assert_eq!(anchor.rank_name, "Archon");
         assert_eq!(anchor.rank_value, 7);
-        assert_eq!(*port.guild_member_role_calls.lock().expect("lock"), vec![42]);
+        assert_eq!(
+            *port.guild_member_role_calls.lock().expect("lock"),
+            vec![42]
+        );
     }
 
     #[tokio::test]
@@ -1733,19 +1754,20 @@ mod tests {
             (42, vec![role(1331457652877955072, "Seeker")]),
             (7, vec![role(1331458087349129296, "Eternus")]),
         ];
-        port.guild_member_roles.insert(
-            42,
-            Some(vec![role(1331458087349129296, "Eternus")]),
-        );
-        let (_dir, _cmds, manager, port) =
-            rank_setup_with_owner(port, owner_for(500, 42)).await;
+        port.guild_member_roles
+            .insert(42, Some(vec![role(1331458087349129296, "Eternus")]));
+        let (_dir, _cmds, manager, port) = rank_setup_with_owner(port, owner_for(500, 42)).await;
 
         manager.reconcile_channel(1, 500).await;
 
         let anchor = manager.anchor_for(500).await.expect("anchor");
         assert_eq!(anchor.user_id, 42);
         assert_eq!(anchor.rank_name, "Seeker");
-        assert!(port.guild_member_role_calls.lock().expect("lock").is_empty());
+        assert!(port
+            .guild_member_role_calls
+            .lock()
+            .expect("lock")
+            .is_empty());
 
         let mut port = monitored_port();
         port.channel_members = vec![
@@ -1766,22 +1788,23 @@ mod tests {
         let mut port = monitored_port();
         port.channel_members = vec![(7, vec![role(1331458016356208680, "Phantom")])];
         port.guild_member_roles.insert(42, None);
-        let (_dir, _cmds, manager, port) =
-            rank_setup_with_owner(port, owner_for(500, 42)).await;
+        let (_dir, _cmds, manager, port) = rank_setup_with_owner(port, owner_for(500, 42)).await;
 
         manager.reconcile_channel(1, 500).await;
 
         let anchor = manager.anchor_for(500).await.expect("anchor");
         assert_eq!(anchor.user_id, 7);
         assert_eq!(anchor.rank_name, "Phantom");
-        assert_eq!(*port.guild_member_role_calls.lock().expect("lock"), vec![42]);
+        assert_eq!(
+            *port.guild_member_role_calls.lock().expect("lock"),
+            vec![42]
+        );
 
         let mut port = monitored_port();
         port.channel_members = vec![(8, vec![role(1331457949654319114, "Archon")])];
         port.guild_member_roles
             .insert(43, Some(vec![role(999, "Moderator")]));
-        let (_dir, _cmds, manager, _port) =
-            rank_setup_with_owner(port, owner_for(500, 43)).await;
+        let (_dir, _cmds, manager, _port) = rank_setup_with_owner(port, owner_for(500, 43)).await;
 
         manager.reconcile_channel(1, 500).await;
 

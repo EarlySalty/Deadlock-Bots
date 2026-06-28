@@ -70,6 +70,12 @@ async fn dispatch_command(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
             .unwrap_or(false),
+        author_can_manage_channels: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_channels() || p.administrator())
+            .unwrap_or(false),
         member_present: cmd.member.is_some(),
         guild_id: cmd.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: cmd.channel_id.get(),
@@ -122,6 +128,12 @@ async fn dispatch_component(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_channels: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_channels() || p.administrator())
             .unwrap_or(false),
         member_present: component.member.is_some(),
         guild_id: component.guild_id.map(|g| g.get()).unwrap_or(0),
@@ -180,6 +192,12 @@ async fn dispatch_modal(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_channels: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_channels() || p.administrator())
             .unwrap_or(false),
         member_present: modal.member.is_some(),
         guild_id: modal.guild_id.map(|g| g.get()).unwrap_or(0),
