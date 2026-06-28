@@ -57,6 +57,8 @@ pub struct MessageEvent {
     pub author_is_admin: bool,
     /// AI-Moderator-Staff-Skip wie Python: manage_messages.
     pub author_can_manage_messages: bool,
+    /// Serverstats-Paritaet: administrator || manage_guild.
+    pub author_can_manage_guild: bool,
     /// Staff-Schutz fuer Moderationspfade: administrator || manage_messages || manage_guild.
     pub author_is_staff: bool,
     /// `true`, wenn der Gateway-Cache den Member enthielt und Staff-Rechte
@@ -106,6 +108,8 @@ pub enum MemberEvent {
     Remove {
         guild_id: u64,
         user_id: u64,
+        display_name: String,
+        is_bot: bool,
     },
     Ban {
         guild_id: u64,
@@ -120,10 +124,7 @@ pub enum MemberEvent {
         is_bot: bool,
     },
     /// Discord Member Screening wurde abgeschlossen (`pending: true -> false`).
-    ScreeningCompleted {
-        guild_id: u64,
-        user_id: u64,
-    },
+    ScreeningCompleted { guild_id: u64, user_id: u64 },
 }
 
 /// Rollenänderung eines Mitglieds (aus `guild_member_update` diffiert) —
@@ -288,6 +289,7 @@ mod tests {
             author_display_name: "x".into(),
             author_is_admin: false,
             author_can_manage_messages: false,
+            author_can_manage_guild: false,
             author_is_staff: false,
             author_staff_status_known: true,
             content: "hallo".into(),

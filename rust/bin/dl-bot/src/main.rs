@@ -673,6 +673,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
         dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
+        // Der Task wartet intern auf READY + Cache-Guilds und retryt leere
+        // Member-Snapshots, statt nach einem fixen Startup-Fenster aufzugeben.
+        dl_activity::analyzer::spawn_member_backfill(
+            db.clone(),
+            Arc::new(modglue::ActivityBackfillGlue {
+                adapter: adapter.clone(),
+            }),
+        );
         dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
         // Text-Gamification (5): Konversations-Punkte → text_stats (speist das
         // öffentliche Text-Leaderboard) + 60-s-Flush-Loop.
@@ -780,6 +788,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter.clone(),
             dispatcher.clone(),
             router.clone(),
+            db.clone(),
             master::FEATURE_MODULES.len(),
             env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
         )

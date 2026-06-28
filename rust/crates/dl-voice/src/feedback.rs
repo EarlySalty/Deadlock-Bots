@@ -784,6 +784,7 @@ mod tests {
             author_display_name: "FeedbackUser".to_string(),
             author_is_admin: false,
             author_can_manage_messages: false,
+            author_can_manage_guild: false,
             author_is_staff: false,
             author_staff_status_known: true,
             content: content.to_string(),

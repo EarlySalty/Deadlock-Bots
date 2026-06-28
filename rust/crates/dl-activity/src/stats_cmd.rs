@@ -18,6 +18,11 @@ use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
 const DAY_NAMES: [&str; 7] = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
+pub const SMARTPING_PING_MESSAGE_PLACEHOLDER: &str =
+    "deine Leute sind gerade aktiv – komm doch in den Voice und zock ne Runde mit! 🎮";
+pub const SMARTPING_USAGE_PLACEHOLDER: &str = "Nutzung: `!smartping @User [grund]`";
+pub const SMARTPING_BLOCKED_PLACEHOLDER: &str =
+    "❌ Dieser User kann gerade nicht gepingt werden (Cooldown oder Opt-out).";
 
 /// Cache-Zugriffe der Befehle (Namen + Guild-Name). Implementiert von der
 /// `StatsNames`-Glue.
@@ -85,7 +90,9 @@ fn left_or_unknown(value: &Option<String>, n: usize) -> String {
 }
 
 fn day_name(d: i64) -> Option<&'static str> {
-    usize::try_from(d).ok().and_then(|i| DAY_NAMES.get(i).copied())
+    usize::try_from(d)
+        .ok()
+        .and_then(|i| DAY_NAMES.get(i).copied())
 }
 
 /// Python-`repr` einer Integer-Liste: `[20, 21, 19]`.
@@ -216,19 +223,49 @@ impl ActivityStatsStore {
     }
 
     /// Neueste Session: `(channel_name, duration_seconds)`.
-    async fn last_voice_session(&self, user_id: u64) -> Option<(String, i64)> {
+    async fn last_voice_session(&self, user_id: u64, guild_id: u64) -> Option<(String, i64)> {
         self.db
             .read(move |conn| {
                 conn.query_row(
                     "SELECT channel_name, duration_seconds FROM voice_session_log \
-                     WHERE user_id = ?1 ORDER BY ended_at DESC LIMIT 1",
-                    [user_id],
+                     WHERE user_id = ?1 AND guild_id = ?2 ORDER BY ended_at DESC LIMIT 1",
+                    rusqlite::params![user_id, guild_id],
                     |r| {
                         Ok((
                             r.get::<_, Option<String>>(0)?.unwrap_or_default(),
                             r.get::<_, i64>(1)?,
                         ))
                     },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn display_name_from_db(&self, user_id: u64) -> Option<String> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT name FROM (
+                       SELECT user_display_name AS name, last_played_together AS ts
+                         FROM user_co_players
+                        WHERE user_id = ?1 AND user_display_name IS NOT NULL
+                       UNION ALL
+                       SELECT co_player_display_name AS name, last_played_together AS ts
+                         FROM user_co_players
+                        WHERE co_player_id = ?1 AND co_player_display_name IS NOT NULL
+                       UNION ALL
+                       SELECT display_name AS name, ended_at AS ts
+                         FROM voice_session_log
+                        WHERE user_id = ?1 AND display_name IS NOT NULL
+                     )
+                     WHERE name IS NOT NULL AND name != ''
+                     ORDER BY ts DESC
+                     LIMIT 1",
+                    [user_id],
+                    |r| r.get::<_, String>(0),
                 )
                 .optional()
             })
@@ -419,6 +456,21 @@ impl ActivityStatsStore {
             .flatten()
     }
 
+    async fn record_ping(&self, user_id: u64) -> Result<(), dl_db::DbError> {
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE user_activity_patterns
+                     SET last_pinged_at = CURRENT_TIMESTAMP,
+                         ping_count_30d = COALESCE(ping_count_30d, 0) + 1
+                     WHERE user_id = ?1",
+                    [user_id],
+                )
+                .map(|_| ())
+            })
+            .await
+    }
+
     async fn server_event_counts(&self, guild_id: u64) -> Vec<(String, i64)> {
         self.db
             .read(move |conn| {
@@ -426,8 +478,9 @@ impl ActivityStatsStore {
                     "SELECT event_type, COUNT(*) c FROM member_events WHERE guild_id = ?1 \
                      GROUP BY event_type ORDER BY c DESC",
                 )?;
-                let rows = stmt
-                    .query_map([guild_id], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
+                let rows = stmt.query_map([guild_id], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                })?;
                 rows.collect::<rusqlite::Result<Vec<_>>>()
             })
             .await
@@ -466,6 +519,12 @@ impl ActivityStatsStore {
 pub struct StatsReply {
     pub content: Option<String>,
     pub embeds: Vec<Value>,
+    post_send: Option<PostSendAction>,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PostSendAction {
+    RecordPing { user_id: u64 },
 }
 
 impl StatsReply {
@@ -473,13 +532,19 @@ impl StatsReply {
         Self {
             content: Some(content.into()),
             embeds: vec![],
+            post_send: None,
         }
     }
     fn embed(embed: Value) -> Self {
         Self {
             content: None,
             embeds: vec![embed],
+            post_send: None,
         }
+    }
+    fn with_post_send(mut self, action: PostSendAction) -> Self {
+        self.post_send = Some(action);
+        self
     }
 }
 
@@ -502,6 +567,8 @@ impl ActivityStatsCommands {
         guild_id: u64,
         author_id: u64,
         is_admin: bool,
+        can_manage_messages: bool,
+        can_manage_guild: bool,
     ) -> Option<StatsReply> {
         let root = content.split_whitespace().next()?.to_lowercase();
         match root.as_str() {
@@ -519,24 +586,37 @@ impl ActivityStatsCommands {
                 Some(self.memberevents(content, guild_id, author_id).await)
             }
             "!checkping" => Some(self.checkping(content, author_id).await),
-            // !serverstats braucht im Original Manage-Server; hier auf Admin
-            // (das einzige im Event verfügbare Permission-Signal) gegated.
+            "!smartping" if can_manage_messages => Some(self.smartping(content).await),
+            // !serverstats braucht im Original Manage-Server.
             // Nicht-Admins werden still ignoriert (kein Reply, wie bei rank/nudge).
-            "!serverstats" if is_admin => Some(self.serverstats(guild_id).await),
+            "!serverstats" if is_admin || can_manage_guild => {
+                Some(self.serverstats(guild_id).await)
+            }
             _ => None,
         }
     }
 
     async fn resolve_one(&self, user_id: u64) -> String {
-        self.port
-            .resolve_names(&[user_id])
+        if let Some(name) = self.port.resolve_names(&[user_id]).await.remove(&user_id) {
+            return name;
+        }
+        self.store
+            .display_name_from_db(user_id)
             .await
-            .remove(&user_id)
             .unwrap_or_else(|| format!("User {user_id}"))
     }
 
     async fn resolve_map(&self, ids: &[u64]) -> HashMap<u64, String> {
-        self.port.resolve_names(ids).await
+        let mut names = self.port.resolve_names(ids).await;
+        for user_id in ids {
+            if names.contains_key(user_id) {
+                continue;
+            }
+            if let Some(name) = self.store.display_name_from_db(*user_id).await {
+                names.insert(*user_id, name);
+            }
+        }
+        names
     }
 
     async fn useranalysis(&self, content: &str, guild_id: u64, author_id: u64) -> StatsReply {
@@ -578,8 +658,12 @@ impl ActivityStatsCommands {
                 vsecs / 3600,
                 (vsecs % 3600) / 60
             );
-            if let Some((channel_name, dur)) = self.store.last_voice_session(target).await {
-                v.push_str(&format!("\n**Letzter Voice:** {channel_name} ({}min)", dur / 60));
+            if let Some((channel_name, dur)) = self.store.last_voice_session(target, guild_id).await
+            {
+                v.push_str(&format!(
+                    "\n**Letzter Voice:** {channel_name} ({}min)",
+                    dur / 60
+                ));
             }
             v
         } else {
@@ -608,7 +692,10 @@ impl ActivityStatsCommands {
                 .await;
             let mut v = String::new();
             for (cid, sessions) in &co {
-                let cname = names.get(cid).cloned().unwrap_or_else(|| format!("User {cid}"));
+                let cname = names
+                    .get(cid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {cid}"));
                 v.push_str(&format!("**{cname}** ({sessions}x)\n"));
             }
             fields.push(json!({ "name": "👥 Top Mitspieler", "value": v, "inline": false }));
@@ -667,7 +754,8 @@ impl ActivityStatsCommands {
                 .map(|h| format!("{h}:00"))
                 .collect::<Vec<_>>()
                 .join(", ");
-            fields.push(json!({ "name": "🕐 Typische Online-Zeiten", "value": hs, "inline": false }));
+            fields
+                .push(json!({ "name": "🕐 Typische Online-Zeiten", "value": hs, "inline": false }));
         }
         let days = parse_json_ints(&p.days);
         if !days.is_empty() {
@@ -711,11 +799,16 @@ impl ActivityStatsCommands {
                 .iter()
                 .take(3)
                 .map(|(cid, sessions)| {
-                    let cname = names.get(cid).cloned().unwrap_or_else(|| format!("User {cid}"));
+                    let cname = names
+                        .get(cid)
+                        .cloned()
+                        .unwrap_or_else(|| format!("User {cid}"));
                     format!("**{cname}** ({sessions}x zusammen)")
                 })
                 .collect();
-            fields.push(json!({ "name": "👥 Top Mitspieler", "value": lines.join("\n"), "inline": false }));
+            fields.push(
+                json!({ "name": "👥 Top Mitspieler", "value": lines.join("\n"), "inline": false }),
+            );
         }
 
         StatsReply::embed(json!({
@@ -746,7 +839,10 @@ impl ActivityStatsCommands {
                         n => format!("{n}."),
                     };
                     // tleaderboard-Fallback ist "Unbekannt" (nicht "User {id}").
-                    let name = names.get(uid).cloned().unwrap_or_else(|| "Unbekannt".to_string());
+                    let name = names
+                        .get(uid)
+                        .cloned()
+                        .unwrap_or_else(|| "Unbekannt".to_string());
                     format!(
                         "{medal} **{name}** — {} Msgs · {} Punkte",
                         format_de(*msgs),
@@ -856,10 +952,8 @@ impl ActivityStatsCommands {
         }))
     }
 
-    /// Ping-Eligibility-Check (read-only, Port von `should_ping_user` +
-    /// `check_ping_command`). Nur Lesepfad; das Senden/Zählen (`record_ping`,
-    /// Smart-Ping) ist im Rust-Bot nicht portiert, daher greifen die
-    /// Rate-Limit-/„Zu früh"-Zweige in der Praxis nicht (ping_count=0/NULL).
+    /// Ping-Eligibility-Check (Port von `should_ping_user` +
+    /// `check_ping_command`).
     async fn checkping(&self, content: &str, author_id: u64) -> StatsReply {
         let target = first_target(content).unwrap_or(author_id);
         let name = self.resolve_one(target).await;
@@ -874,6 +968,29 @@ impl ActivityStatsCommands {
         }))
     }
 
+    async fn smartping(&self, content: &str) -> StatsReply {
+        let Some(target) = first_target(content) else {
+            return StatsReply::text(SMARTPING_USAGE_PLACEHOLDER);
+        };
+        let (can_ping, _reason) = self.ping_eligibility(target).await;
+        if !can_ping {
+            return StatsReply::text(SMARTPING_BLOCKED_PLACEHOLDER);
+        }
+        StatsReply::text(format!("<@{target}> {SMARTPING_PING_MESSAGE_PLACEHOLDER}"))
+            .with_post_send(PostSendAction::RecordPing { user_id: target })
+    }
+
+    async fn run_post_send(&self, reply: &StatsReply) {
+        match reply.post_send {
+            Some(PostSendAction::RecordPing { user_id }) => {
+                if let Err(err) = self.store.record_ping(user_id).await {
+                    tracing::warn!(%err, user_id, "Smartping-Zaehler konnte nicht aktualisiert werden");
+                }
+            }
+            None => {}
+        }
+    }
+
     /// `(can_ping, reason)` — byte-genauer Port der Prüfreihenfolge aus
     /// `should_ping_user` (max 3/30d, ≥24h seit letztem Ping, ≥5 Sessions/2W,
     /// ±2h-Zeitfenster mit Wrap, optionaler Wochentag).
@@ -885,7 +1002,10 @@ impl ActivityStatsCommands {
         if p.ping_count >= max_pings_30d {
             return (
                 false,
-                format!("Rate-Limit erreicht ({}/{} in 30d)", p.ping_count, max_pings_30d),
+                format!(
+                    "Rate-Limit erreicht ({}/{} in 30d)",
+                    p.ping_count, max_pings_30d
+                ),
             );
         }
         if let Some(last) = p.last_pinged.as_deref().filter(|s| !s.is_empty()) {
@@ -904,7 +1024,10 @@ impl ActivityStatsCommands {
             }
         }
         if p.score < 5 {
-            return (false, format!("User zu inaktiv (nur {} Sessions in 2W)", p.score));
+            return (
+                false,
+                format!("User zu inaktiv (nur {} Sessions in 2W)", p.score),
+            );
         }
         let now = chrono::Utc::now().naive_utc();
         let current_hour = now.hour() as i64;
@@ -985,7 +1108,10 @@ impl ActivityStatsCommands {
                 .await;
             let mut v = String::new();
             for (i, (uid, count)) in top.iter().enumerate() {
-                let uname = names.get(uid).cloned().unwrap_or_else(|| format!("User {uid}"));
+                let uname = names
+                    .get(uid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("User {uid}"));
                 v.push_str(&format!(
                     "{}. **{uname}** - {} Messages\n",
                     i + 1,
@@ -1022,14 +1148,24 @@ pub fn spawn_command(
                     };
                     let content = event.content.trim();
                     let Some(reply) = commands
-                        .reply_for(content, guild_id, event.author_id, event.author_is_admin)
+                        .reply_for(
+                            content,
+                            guild_id,
+                            event.author_id,
+                            event.author_is_admin,
+                            event.author_can_manage_messages,
+                            event.author_can_manage_guild,
+                        )
                         .await
                     else {
                         continue;
                     };
-                    let _ = sender
+                    let sent = sender
                         .send_to_channel(event.channel_id, reply.content.as_deref(), &reply.embeds)
                         .await;
+                    if sent.is_ok() {
+                        commands.run_post_send(&reply).await;
+                    }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -1041,6 +1177,8 @@ pub fn spawn_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn format_trenner() {
@@ -1051,7 +1189,10 @@ mod tests {
 
     #[test]
     fn left_or_unknown_faellt_zurueck() {
-        assert_eq!(left_or_unknown(&Some("2026-06-14 20:14:57".into()), 16), "2026-06-14 20:14");
+        assert_eq!(
+            left_or_unknown(&Some("2026-06-14 20:14:57".into()), 16),
+            "2026-06-14 20:14"
+        );
         assert_eq!(left_or_unknown(&None, 16), "Unbekannt");
         assert_eq!(left_or_unknown(&Some(String::new()), 16), "Unbekannt");
     }
@@ -1075,8 +1216,241 @@ mod tests {
 
     #[test]
     fn parse_json_ints_robust() {
-        assert_eq!(parse_json_ints(&Some("[20, 21, 19]".into())), vec![20, 21, 19]);
+        assert_eq!(
+            parse_json_ints(&Some("[20, 21, 19]".into())),
+            vec![20, 21, 19]
+        );
         assert_eq!(parse_json_ints(&None), Vec::<i64>::new());
         assert_eq!(parse_json_ints(&Some("kaputt".into())), Vec::<i64>::new());
+    }
+
+    struct MockNames {
+        names: StdMutex<HashMap<u64, String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl NamePort for MockNames {
+        async fn resolve_names(&self, user_ids: &[u64]) -> HashMap<u64, String> {
+            let names = self.names.lock().expect("names");
+            user_ids
+                .iter()
+                .filter_map(|id| names.get(id).map(|name| (*id, name.clone())))
+                .collect()
+        }
+
+        async fn guild_name(&self, _guild_id: u64) -> Option<String> {
+            Some("Guild".to_string())
+        }
+    }
+
+    async fn stats_test_db() -> (tempfile::TempDir, Db) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("stats.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute_batch(
+                "CREATE TABLE user_activity_patterns(user_id INTEGER PRIMARY KEY, typical_hours TEXT, typical_days TEXT, activity_score_2w INTEGER DEFAULT 0, sessions_count_2w INTEGER DEFAULT 0, total_minutes_2w INTEGER DEFAULT 0, last_active_at DATETIME, last_analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP, last_pinged_at DATETIME, ping_count_30d INTEGER DEFAULT 0);
+                 CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT);
+                 CREATE TABLE user_co_players(user_id INTEGER NOT NULL, co_player_id INTEGER NOT NULL, sessions_together INTEGER DEFAULT 1, total_minutes_together INTEGER DEFAULT 0, last_played_together DATETIME DEFAULT CURRENT_TIMESTAMP, user_display_name TEXT, co_player_display_name TEXT, PRIMARY KEY(user_id, co_player_id));
+                 CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
+                 CREATE TABLE message_activity(user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, channel_id INTEGER, message_count INTEGER DEFAULT 0, last_message_at DATETIME, first_message_at DATETIME, PRIMARY KEY(user_id, guild_id));",
+            )
+        })
+        .await
+        .expect("ddl");
+        (dir, db)
+    }
+
+    fn commands(db: Db) -> Arc<ActivityStatsCommands> {
+        ActivityStatsCommands::new(
+            db,
+            Arc::new(MockNames {
+                names: StdMutex::new(HashMap::new()),
+            }),
+        )
+    }
+
+    struct MockChannelSender {
+        fail: bool,
+        sends: AtomicUsize,
+    }
+
+    impl MockChannelSender {
+        fn new(fail: bool) -> Self {
+            Self {
+                fail,
+                sends: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ChannelSender for MockChannelSender {
+        async fn send_to_channel(
+            &self,
+            _channel_id: u64,
+            _content: Option<&str>,
+            _embeds: &[Value],
+        ) -> Result<u64, String> {
+            self.sends.fetch_add(1, Ordering::SeqCst);
+            if self.fail {
+                Err("send failed".to_string())
+            } else {
+                Ok(123)
+            }
+        }
+    }
+
+    fn message_event(content: &str) -> dl_discord::MessageEvent {
+        dl_discord::MessageEvent {
+            guild_id: Some(1),
+            channel_id: 555,
+            message_id: 777,
+            author_id: 99,
+            author_display_name: "Admin".to_string(),
+            author_is_admin: false,
+            author_can_manage_messages: true,
+            author_can_manage_guild: false,
+            author_is_staff: true,
+            author_staff_status_known: true,
+            content: content.to_string(),
+            message_created_at: 0,
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
+            author_created_at: 0,
+            author_joined_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn useranalysis_letzte_voice_session_ist_guild_scoped() {
+        let (_dir, db) = stats_test_db().await;
+        db.write(|conn| {
+            conn.execute_batch(
+                "INSERT INTO voice_session_log(user_id, guild_id, channel_name, started_at, ended_at, duration_seconds)
+                 VALUES
+                 (42, 2, 'Falsche Guild', '2026-01-01 10:00:00', '2026-01-01 11:00:00', 3600),
+                 (42, 1, 'Richtige Guild', '2026-01-01 09:00:00', '2026-01-01 09:30:00', 1800);",
+            )
+        })
+        .await
+        .expect("seed");
+
+        let store = ActivityStatsStore::new(db);
+        assert_eq!(
+            store.last_voice_session(42, 1).await,
+            Some(("Richtige Guild".to_string(), 1800))
+        );
+    }
+
+    #[tokio::test]
+    async fn namensfallback_nutzt_db_wenn_cache_leer_ist() {
+        let (_dir, db) = stats_test_db().await;
+        db.write(|conn| {
+            conn.execute(
+                "INSERT INTO user_co_players(user_id, co_player_id, sessions_together, total_minutes_together, user_display_name, co_player_display_name, last_played_together)
+                 VALUES(42, 77, 1, 10, 'DB Name', 'Andere', '2026-01-01 10:00:00')",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("seed");
+
+        assert_eq!(commands(db).resolve_one(42).await, "DB Name");
+    }
+
+    #[tokio::test]
+    async fn serverstats_erlaubt_manage_guild_ohne_admin() {
+        let (_dir, db) = stats_test_db().await;
+        let reply = commands(db)
+            .reply_for("!serverstats", 1, 42, false, false, true)
+            .await;
+        assert!(reply.is_some());
+    }
+
+    #[tokio::test]
+    async fn smartping_baut_reply_ohne_vorzeitig_zu_zaehlen() {
+        let (_dir, db) = stats_test_db().await;
+        let now = chrono::Utc::now().naive_utc();
+        let hour = now.hour();
+        let day = now.weekday().num_days_from_monday();
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO user_activity_patterns(user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d)
+                 VALUES(?1, ?2, ?3, 5, 0)",
+                rusqlite::params![42_u64, format!("[{hour}]"), format!("[{day}]")],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("seed");
+
+        let reply = commands(db.clone())
+            .reply_for("!smartping <@42>", 1, 99, false, true, false)
+            .await
+            .expect("reply");
+        let expected = format!("<@42> {SMARTPING_PING_MESSAGE_PLACEHOLDER}");
+        assert_eq!(reply.content.as_deref(), Some(expected.as_str()));
+        let (count, last): (i64, Option<String>) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT ping_count_30d, last_pinged_at FROM user_activity_patterns WHERE user_id=42",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .await
+            .expect("row");
+        assert_eq!(count, 0);
+        assert!(last.is_none());
+    }
+
+    #[tokio::test]
+    async fn smartping_sendfehler_verbraucht_rate_limit_nicht() {
+        let (_dir, db) = stats_test_db().await;
+        let now = chrono::Utc::now().naive_utc();
+        let hour = now.hour();
+        let day = now.weekday().num_days_from_monday();
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO user_activity_patterns(user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d)
+                 VALUES(?1, ?2, ?3, 5, 0)",
+                rusqlite::params![42_u64, format!("[{hour}]"), format!("[{day}]")],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("seed");
+
+        let dispatcher = Dispatcher::new();
+        let sender = Arc::new(MockChannelSender::new(true));
+        let task = spawn_command(commands(db.clone()), &dispatcher, sender.clone());
+        dispatcher.publish_message(message_event("!smartping <@42>"));
+        for _ in 0..20 {
+            if sender.sends.load(Ordering::SeqCst) > 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        task.abort();
+
+        let (count, last): (i64, Option<String>) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT ping_count_30d, last_pinged_at FROM user_activity_patterns WHERE user_id=42",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+            })
+            .await
+            .expect("row");
+        assert_eq!(sender.sends.load(Ordering::SeqCst), 1);
+        assert_eq!(count, 0);
+        assert!(last.is_none());
     }
 }

@@ -745,6 +745,38 @@ mod tests {
             .await;
         assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
     }
+
+    #[test]
+    fn lfg_rankrollen_erkennen_ids_subranks_und_unverifiziert() {
+        assert_eq!(
+            rank_from_roles(&[(1331458016356208680, "irgendein name".to_string())]),
+            ("Phantom".to_string(), 9, None)
+        );
+        assert_eq!(
+            rank_from_roles(&[(0, "Asc 3".to_string())]),
+            ("Ascendant".to_string(), 10, Some(3))
+        );
+        assert_eq!(
+            rank_from_roles(&[(1492959889767534602, "x".to_string())]),
+            ("Oracle".to_string(), 8, Some(3))
+        );
+        assert_eq!(
+            rank_from_roles(&[(0, "Unverifiziert Emissary".to_string())]),
+            ("Emissary".to_string(), 6, Some(3))
+        );
+    }
+
+    #[test]
+    fn lfg_offtopic_channels_werden_erkannt() {
+        assert!(is_lfg_offtopic_channel("Off Topic Voice 1"));
+        assert!(!is_lfg_offtopic_channel("Casual Lane 1"));
+    }
+
+    #[test]
+    fn lfg_member_count_filtert_bots() {
+        let members = visible_lfg_member_ids(&[(1, false), (2, true), (3, false)]);
+        assert_eq!(members, vec![1, 3]);
+    }
 }
 
 pub struct GuardGlue {
@@ -1688,32 +1720,147 @@ const LFG_STAGINGS: [u64; 3] = [
     1357422958544420944,
 ];
 const JUICE_KAMMER_ID: u64 = 1493690350580138114;
+const OFFTOPIC_NAME_SUBSTRING: &str = "off topic voice";
+const DISCORD_RANK_ROLES: [(u64, &str, i64); 12] = [
+    (1331457571118387210, "Initiate", 1),
+    (1331457652877955072, "Seeker", 2),
+    (1331457699992436829, "Alchemist", 3),
+    (1331457724848017539, "Arcanist", 4),
+    (1331457879345070110, "Ritualist", 5),
+    (1331457898781474836, "Emissary", 6),
+    (1331457949654319114, "Archon", 7),
+    (1316966867033653338, "Oracle", 8),
+    (1331458016356208680, "Phantom", 9),
+    (1331458049637875785, "Ascendant", 10),
+    (1331458087349129296, "Eternus", 11),
+    (1397687886580547745, "Unbekannt", 0),
+];
+const UNVERIFIED_RANK_ROLES: [(u64, &str, i64); 11] = [
+    (1492959003700101180, "Eternus", 11),
+    (1491935935414276198, "Ascendant", 10),
+    (1492959474468655134, "Phantom", 9),
+    (1492959889767534602, "Oracle", 8),
+    (1492959936513052672, "Archon", 7),
+    (1492960184920834110, "Emissary", 6),
+    (1492960262184239178, "Ritualist", 5),
+    (1492960274096066831, "Arcanist", 4),
+    (1492960350755225730, "Alchemist", 3),
+    (1492959966284218611, "Seeker", 2),
+    (1492960891619250408, "Initiate", 1),
+];
+const RANK_SHORT_NAMES: [(&str, &str); 11] = [
+    ("ini", "Initiate"),
+    ("see", "Seeker"),
+    ("alc", "Alchemist"),
+    ("arc", "Arcanist"),
+    ("rit", "Ritualist"),
+    ("emi", "Emissary"),
+    ("arch", "Archon"),
+    ("ora", "Oracle"),
+    ("pha", "Phantom"),
+    ("asc", "Ascendant"),
+    ("ete", "Eternus"),
+];
 
-fn rank_from_role_names(names: &[String]) -> (String, i64, Option<i64>) {
-    let mut best: (String, i64, Option<i64>) = (String::new(), 0, None);
-    for name in names {
-        let lower = name.trim().to_lowercase();
-        let mut parts = lower.split_whitespace();
-        let Some(first) = parts.next() else { continue };
-        let Some((rank, value)) = dl_activity::lfg::RANK_NAMES
-            .iter()
-            .find(|(rank, _)| *rank == first)
-        else {
+fn rank_value_by_name(name: &str) -> Option<(&'static str, i64)> {
+    let lower = name.trim().to_lowercase();
+    dl_activity::lfg::RANK_NAMES
+        .iter()
+        .find(|(rank, _)| *rank == lower)
+        .map(|(rank, value)| match *rank {
+            "initiate" => ("Initiate", *value),
+            "seeker" => ("Seeker", *value),
+            "alchemist" => ("Alchemist", *value),
+            "arcanist" => ("Arcanist", *value),
+            "ritualist" => ("Ritualist", *value),
+            "emissary" => ("Emissary", *value),
+            "archon" => ("Archon", *value),
+            "oracle" => ("Oracle", *value),
+            "phantom" => ("Phantom", *value),
+            "ascendant" => ("Ascendant", *value),
+            "eternus" => ("Eternus", *value),
+            _ => ("Unbekannt", 0),
+        })
+}
+
+fn parse_subrank_role_name(role_name: &str) -> Option<(&'static str, i64, i64)> {
+    let mut parts = role_name.split_whitespace();
+    let rank_raw = parts.next()?;
+    let sub = parts
+        .next()
+        .and_then(|raw| raw.trim_end_matches('+').parse::<i64>().ok())
+        .filter(|value| (1..=6).contains(value))?;
+    if parts.next().is_some() {
+        return None;
+    }
+    let rank_lower = rank_raw.to_lowercase();
+    let rank_name = RANK_SHORT_NAMES
+        .iter()
+        .find(|(short, _)| *short == rank_lower)
+        .map(|(_, full)| *full)
+        .unwrap_or(rank_raw);
+    let (name, value) = rank_value_by_name(rank_name)?;
+    Some((name, value, sub))
+}
+
+fn is_lfg_offtopic_channel(name: &str) -> bool {
+    name.to_lowercase().contains(OFFTOPIC_NAME_SUBSTRING)
+}
+
+fn visible_lfg_member_ids(members: &[(u64, bool)]) -> Vec<u64> {
+    members
+        .iter()
+        .filter_map(|(user_id, is_bot)| (!*is_bot).then_some(*user_id))
+        .collect()
+}
+
+fn rank_from_roles(roles: &[(u64, String)]) -> (String, i64, Option<i64>) {
+    let mut best: (String, i64, Option<i64>, i64) = (String::new(), 0, None, -1);
+    for (role_id, name) in roles {
+        let mut candidate: Option<(&str, i64, Option<i64>, i64)> = None;
+        if let Some((rank_name, value, sub)) = parse_subrank_role_name(name) {
+            candidate = Some((rank_name, value, Some(sub), value * 10 + sub));
+        }
+        if candidate.is_none() {
+            if let Some((_, rank_name, value)) =
+                DISCORD_RANK_ROLES.iter().find(|(id, _, _)| id == role_id)
+            {
+                candidate = Some((*rank_name, *value, None, value * 10 + 5));
+            }
+        }
+        if candidate.is_none() {
+            if let Some((_, rank_name, value)) = UNVERIFIED_RANK_ROLES
+                .iter()
+                .find(|(id, _, _)| id == role_id)
+            {
+                candidate = Some((*rank_name, *value, Some(3), value * 10 + 3));
+            }
+        }
+        if candidate.is_none() {
+            let trimmed = name.trim();
+            let lower = trimmed.to_lowercase();
+            if lower.starts_with("unverifiziert ") {
+                let rank_name = trimmed
+                    .split_once(char::is_whitespace)
+                    .map(|(_, rest)| rest.trim())
+                    .unwrap_or_default();
+                if let Some((rank_name, value)) = rank_value_by_name(rank_name) {
+                    candidate = Some((rank_name, value, Some(3), value * 10 + 3));
+                }
+            }
+        }
+        let Some((rank_name, value, sub, score)) = candidate else {
             continue;
         };
-        let sub: Option<i64> = parts
-            .next()
-            .and_then(|raw| raw.parse().ok())
-            .filter(|v| (1..=6).contains(v));
-        if *value > best.1 || (*value == best.1 && sub.is_some()) {
-            let mut display = rank.to_string();
-            if let Some(head) = display.get_mut(0..1) {
-                head.make_ascii_uppercase();
-            }
-            best = (display, *value, sub);
+        if score > best.3 {
+            best = (rank_name.to_string(), value, sub, score);
         }
     }
-    best
+    if best.1 == 0 {
+        ("Unbekannt".to_string(), 0, None)
+    } else {
+        (best.0, best.1, best.2)
+    }
 }
 
 #[async_trait::async_trait]
@@ -1733,6 +1880,9 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
             if channel.kind != serenity::all::ChannelType::Voice {
                 continue;
             }
+            if is_lfg_offtopic_channel(&channel.name) {
+                continue;
+            }
             let Some((category_id, label)) = channel.parent_id.and_then(|parent| {
                 LFG_CATEGORIES
                     .iter()
@@ -1747,25 +1897,33 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
                 "New Player" => LaneLabel::NewPlayer,
                 _ => LaneLabel::Casual,
             };
-            let member_ids: Vec<u64> = guild
+            let voice_members: Vec<(u64, bool)> = guild
                 .voice_states
                 .iter()
                 .filter(|(_, vs)| vs.channel_id == Some(channel.id))
-                .map(|(user_id, _)| user_id.get())
+                .filter_map(|(user_id, _)| {
+                    guild
+                        .members
+                        .get(user_id)
+                        .map(|member| (user_id.get(), member.user.bot))
+                })
                 .collect();
+            let member_ids = visible_lfg_member_ids(&voice_members);
             let mut ranks: Vec<i64> = Vec::new();
             let mut co_names: Vec<String> = Vec::new();
             for user_id in &member_ids {
                 if let Some(member) = guild.members.get(&UserId::new(*user_id)) {
-                    if member.user.bot {
-                        continue;
-                    }
-                    let names: Vec<String> = member
+                    let roles: Vec<(u64, String)> = member
                         .roles
                         .iter()
-                        .filter_map(|rid| guild.roles.get(rid).map(|r| r.name.to_string()))
+                        .filter_map(|rid| {
+                            guild
+                                .roles
+                                .get(rid)
+                                .map(|r| (rid.get(), r.name.to_string()))
+                        })
                         .collect();
-                    let (_, value, _) = rank_from_role_names(&names);
+                    let (_, value, _) = rank_from_roles(&roles);
                     if value > 0 {
                         ranks.push(value);
                     }
@@ -1824,7 +1982,7 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
     }
 
     async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>) {
-        let names: Vec<String> = self
+        let roles: Vec<(u64, String)> = self
             .adapter
             .cache()
             .guild(GuildId::new(guild_id))
@@ -1832,12 +1990,12 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
                 g.members.get(&UserId::new(user_id)).map(|m| {
                     m.roles
                         .iter()
-                        .filter_map(|rid| g.roles.get(rid).map(|r| r.name.to_string()))
+                        .filter_map(|rid| g.roles.get(rid).map(|r| (rid.get(), r.name.to_string())))
                         .collect()
                 })
             })
             .unwrap_or_default();
-        rank_from_role_names(&names)
+        rank_from_roles(&roles)
     }
 
     async fn member_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
@@ -1856,6 +2014,12 @@ impl dl_activity::lfg::LfgPort for LfgGlue {
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("allowed_mentions".into(), json!({ "parse": ["users"] }));
+        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+    }
+
+    async fn post_text(&self, channel_id: u64, content: &str) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
         let _ = self.adapter.send_raw_public(channel_id, &body).await;
     }
 }
@@ -2080,6 +2244,46 @@ impl dl_community::coaching_requests::CoachingPort for CoachingReqGlue {
             .send_raw_public(channel.id.get(), &body)
             .await
             .is_ok()
+    }
+}
+
+pub struct ActivityBackfillGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+fn unix_to_db_ts(ts: i64) -> Option<String> {
+    chrono::DateTime::from_timestamp(ts, 0).map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
+}
+
+#[async_trait::async_trait]
+impl dl_activity::analyzer::MemberBackfillPort for ActivityBackfillGlue {
+    async fn cache_ready(&self) -> bool {
+        self.adapter
+            .gateway_ready
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && !self.adapter.cache().guilds().is_empty()
+    }
+
+    async fn current_members(&self) -> Vec<dl_activity::analyzer::BackfillMember> {
+        let mut out = Vec::new();
+        for guild_id in self.adapter.cache().guilds() {
+            let Some(guild) = self.adapter.cache().guild(guild_id) else {
+                continue;
+            };
+            for member in guild.members.values() {
+                out.push(dl_activity::analyzer::BackfillMember {
+                    guild_id: guild_id.get(),
+                    user_id: member.user.id.get(),
+                    display_name: member.display_name().to_string(),
+                    joined_at: member
+                        .joined_at
+                        .and_then(|ts| unix_to_db_ts(ts.unix_timestamp())),
+                    account_created_at: unix_to_db_ts(member.user.id.created_at().unix_timestamp()),
+                    is_bot: member.user.bot,
+                });
+            }
+        }
+        out
     }
 }
 

@@ -83,6 +83,7 @@ impl EventHandler for Handler {
         let (
             author_is_admin,
             author_can_manage_messages,
+            author_can_manage_guild,
             author_is_staff,
             author_joined_at,
             author_staff_status_known,
@@ -95,12 +96,13 @@ impl EventHandler for Handler {
                 Some((
                     perms.administrator(),
                     perms.manage_messages(),
+                    perms.administrator() || perms.manage_guild(),
                     is_staff_permissions(perms),
                     member.joined_at.map(|t| t.unix_timestamp()),
                     true,
                 ))
             })
-            .unwrap_or((false, false, false, None, false));
+            .unwrap_or((false, false, false, false, None, false));
         let image_attachment_urls: Vec<String> = message
             .attachments
             .iter()
@@ -147,6 +149,7 @@ impl EventHandler for Handler {
                 .unwrap_or_else(|| message.author.name.to_string()),
             author_is_admin,
             author_can_manage_messages,
+            author_can_manage_guild,
             author_is_staff,
             author_staff_status_known,
             content: message.content.clone(),
@@ -186,11 +189,17 @@ impl EventHandler for Handler {
         _ctx: Context,
         guild_id: GuildId,
         user: User,
-        _member: Option<Member>,
+        member: Option<Member>,
     ) {
         self.dispatcher.publish_member(MemberEvent::Remove {
             guild_id: guild_id.get(),
             user_id: user.id.get(),
+            display_name: member
+                .as_ref()
+                .map(|m| m.display_name().to_string())
+                .or_else(|| user.global_name.clone())
+                .unwrap_or_else(|| user.name.to_string()),
+            is_bot: user.bot,
         });
     }
 
@@ -345,6 +354,7 @@ pub async fn build_client(
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
+    db: dl_db::Db,
     feature_module_count: usize,
     command_prefix: String,
 ) -> serenity::Result<serenity::Client> {
@@ -360,7 +370,7 @@ pub async fn build_client(
             adapter,
             dispatcher,
             router,
-            invite_tracker: Arc::new(InviteTracker::new()),
+            invite_tracker: Arc::new(InviteTracker::with_db(db)),
             feature_module_count,
             command_prefix,
         })

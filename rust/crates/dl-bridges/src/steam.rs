@@ -640,7 +640,9 @@ pub fn spawn_member_remove_listener(
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(MemberEvent::Remove { guild_id, user_id }) => {
+                Ok(MemberEvent::Remove {
+                    guild_id, user_id, ..
+                }) => {
                     let mut inner = Map::new();
                     inner.insert("guild_id".into(), json!(guild_id));
                     inner.insert("user_id".into(), json!(user_id));

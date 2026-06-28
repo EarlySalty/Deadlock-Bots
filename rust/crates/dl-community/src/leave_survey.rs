@@ -491,7 +491,9 @@ pub fn spawn(
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(dl_discord::MemberEvent::Remove { guild_id, user_id }) => {
+                Ok(dl_discord::MemberEvent::Remove {
+                    guild_id, user_id, ..
+                }) => {
                     survey.on_member_remove(guild_id, user_id).await;
                 }
                 Ok(_) => {}

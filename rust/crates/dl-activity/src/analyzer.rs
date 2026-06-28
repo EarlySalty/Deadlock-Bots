@@ -23,6 +23,8 @@ pub const ANALYZE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 pub const CO_PLAYER_INTERVAL: Duration = Duration::from_secs(600);
 pub const CO_PLAYER_MINUTES_PER_TICK: i64 = 10;
 pub const WINDOW_DAYS: i64 = 14;
+pub const MEMBER_BACKFILL_RETRY_INTERVAL: Duration = Duration::from_secs(5);
+pub const BACKFILL_JOIN_SOURCE_LABEL_PLACEHOLDER: &str = "Vor Tracking (rückwirkend)";
 
 // ── Pure Muster-Berechnung (Referenzwerte aus CPython im Test) ─────────────
 
@@ -89,6 +91,24 @@ pub trait VoiceGroups: Send + Sync {
 pub struct ActivityAnalyzer {
     pub db: Db,
     pub voice: Arc<dyn VoiceGroups>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackfillMember {
+    pub guild_id: u64,
+    pub user_id: u64,
+    pub display_name: String,
+    pub joined_at: Option<String>,
+    pub account_created_at: Option<String>,
+    pub is_bot: bool,
+}
+
+#[async_trait::async_trait]
+pub trait MemberBackfillPort: Send + Sync {
+    async fn cache_ready(&self) -> bool {
+        true
+    }
+    async fn current_members(&self) -> Vec<BackfillMember>;
 }
 
 impl ActivityAnalyzer {
@@ -238,7 +258,9 @@ impl ActivityAnalyzer {
             .read(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT co_player_id, sessions_together FROM user_co_players
-                      WHERE user_id = ?1 ORDER BY sessions_together DESC LIMIT ?2",
+                      WHERE user_id = ?1
+                      ORDER BY sessions_together DESC, total_minutes_together DESC
+                      LIMIT ?2",
                 )?;
                 let rows = stmt.query_map(rusqlite::params![user_id, limit], |row| {
                     Ok((row.get(0)?, row.get(1)?))
@@ -440,8 +462,16 @@ async fn handle_member_event(
             })
             .await
         }
-        M::Remove { guild_id, user_id } => {
-            insert_simple_event(db, guild_id, user_id, "leave", None).await
+        M::Remove {
+            guild_id,
+            user_id,
+            display_name,
+            is_bot,
+        } => {
+            if is_bot {
+                return Ok(());
+            }
+            insert_simple_event(db, guild_id, user_id, "leave", Some(display_name)).await
         }
         M::Ban {
             guild_id,
@@ -498,6 +528,108 @@ async fn insert_simple_event(
         .map(|_| ())
     })
     .await
+}
+
+pub async fn backfill_member_joins(
+    db: &Db,
+    members: Vec<BackfillMember>,
+) -> Result<usize, dl_db::DbError> {
+    db.write(move |conn| {
+        use rusqlite::OptionalExtension;
+        let mut inserted = 0usize;
+        for member in members {
+            if member.is_bot {
+                continue;
+            }
+            let opted: Option<i64> = conn
+                .query_row(
+                    "SELECT opted_out FROM user_privacy WHERE user_id=?1",
+                    [member.user_id],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .filter(|v| *v != 0);
+            if opted.is_some() {
+                continue;
+            }
+            let exists: Option<i64> = conn
+                .query_row(
+                    "SELECT 1 FROM member_events
+                     WHERE user_id=?1 AND guild_id=?2 AND event_type='join'
+                     LIMIT 1",
+                    rusqlite::params![member.user_id, member.guild_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if exists.is_some() {
+                continue;
+            }
+            let metadata = serde_json::json!({
+                "join_source_bucket": "unknown",
+                "join_source_kind": "backfilled",
+                "join_source_label": BACKFILL_JOIN_SOURCE_LABEL_PLACEHOLDER,
+                "join_source_confidence": "none",
+                "backfilled": true,
+            });
+            let metadata = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+            let changed = conn.execute(
+                "INSERT OR IGNORE INTO member_events(
+                   user_id, guild_id, event_type, timestamp, display_name, account_created_at, metadata
+                 ) VALUES(?1, ?2, 'join', ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    member.user_id,
+                    member.guild_id,
+                    member.joined_at,
+                    member.display_name,
+                    member.account_created_at,
+                    metadata,
+                ],
+            )?;
+            inserted += changed;
+        }
+        Ok(inserted)
+    })
+    .await
+}
+
+pub fn spawn_member_backfill(
+    db: dl_db::Db,
+    port: Arc<dyn MemberBackfillPort>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_member_backfill_with_delays(db, port, Duration::ZERO, MEMBER_BACKFILL_RETRY_INTERVAL)
+}
+
+pub fn spawn_member_backfill_with_delays(
+    db: dl_db::Db,
+    port: Arc<dyn MemberBackfillPort>,
+    initial_delay: Duration,
+    retry_delay: Duration,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if !initial_delay.is_zero() {
+            tokio::time::sleep(initial_delay).await;
+        }
+        loop {
+            if !port.cache_ready().await {
+                tracing::debug!("member_events Startup-Backfill wartet auf Gateway-Cache");
+                tokio::time::sleep(retry_delay).await;
+                continue;
+            }
+            let members = port.current_members().await;
+            if members.is_empty() {
+                tracing::debug!("member_events Startup-Backfill wartet auf Cache-Member");
+                tokio::time::sleep(retry_delay).await;
+                continue;
+            }
+            match backfill_member_joins(&db, members).await {
+                Ok(inserted) => {
+                    tracing::info!(inserted, "member_events Startup-Backfill abgeschlossen")
+                }
+                Err(err) => tracing::warn!(%err, "member_events Startup-Backfill fehlgeschlagen"),
+            }
+            break;
+        }
+    })
 }
 
 /// message_activity-Writer: Nachrichten-Zähler je User×Guild (wie der
@@ -758,5 +890,227 @@ mod tests {
         // Gegenrichtung existiert ebenfalls
         let top = analyzer.top_co_players(200, 5).await;
         assert_eq!(top, vec![(100, 2)]);
+    }
+
+    #[tokio::test]
+    async fn top_co_players_nutzt_minuten_als_tiebreak() {
+        let (_dir, analyzer, _voice) = setup().await;
+        analyzer
+            .db
+            .write(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO user_co_players(user_id, co_player_id, sessions_together, total_minutes_together)
+                     VALUES(1, 10, 3, 30), (1, 20, 3, 90), (1, 30, 2, 200);",
+                )
+            })
+            .await
+            .expect("seed");
+
+        let top = analyzer.top_co_players(1, 3).await;
+        assert_eq!(top, vec![(20, 3), (10, 3), (30, 2)]);
+    }
+
+    #[tokio::test]
+    async fn leave_event_speichert_display_name_und_skippt_bots() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("leave.sqlite3")).expect("db");
+        db.write(|c| {
+            c.execute_batch(
+                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
+                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);",
+            )
+        })
+        .await
+        .expect("ddl");
+
+        handle_member_event(
+            &db,
+            dl_discord::MemberEvent::Remove {
+                guild_id: 1,
+                user_id: 42,
+                display_name: "Gehender User".to_string(),
+                is_bot: false,
+            },
+        )
+        .await
+        .expect("leave");
+        handle_member_event(
+            &db,
+            dl_discord::MemberEvent::Remove {
+                guild_id: 1,
+                user_id: 99,
+                display_name: "Bot".to_string(),
+                is_bot: true,
+            },
+        )
+        .await
+        .expect("bot leave");
+
+        let (name, bot_count): (String, i64) = db
+            .read(|c| {
+                Ok((
+                    c.query_row(
+                        "SELECT display_name FROM member_events WHERE user_id=42 AND event_type='leave'",
+                        [],
+                        |r| r.get(0),
+                    )?,
+                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=99", [], |r| r.get(0))?,
+                ))
+            })
+            .await
+            .expect("rows");
+        assert_eq!(name, "Gehender User");
+        assert_eq!(bot_count, 0);
+    }
+
+    #[tokio::test]
+    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("backfill.sqlite3")).expect("db");
+        db.write(|c| {
+            c.execute_batch(
+                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT, UNIQUE(user_id, guild_id, event_type));
+                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);
+                 INSERT INTO member_events(user_id, guild_id, event_type, display_name) VALUES(10, 1, 'join', 'Schon da');
+                 INSERT INTO user_privacy(user_id, opted_out) VALUES(12, 1);",
+            )
+        })
+        .await
+        .expect("ddl");
+
+        let inserted = backfill_member_joins(
+            &db,
+            vec![
+                BackfillMember {
+                    guild_id: 1,
+                    user_id: 10,
+                    display_name: "Schon da".to_string(),
+                    joined_at: Some("2026-01-01 10:00:00".to_string()),
+                    account_created_at: Some("2025-01-01 10:00:00".to_string()),
+                    is_bot: false,
+                },
+                BackfillMember {
+                    guild_id: 1,
+                    user_id: 11,
+                    display_name: "Neu im Cache".to_string(),
+                    joined_at: Some("2026-01-02 10:00:00".to_string()),
+                    account_created_at: None,
+                    is_bot: false,
+                },
+                BackfillMember {
+                    guild_id: 1,
+                    user_id: 12,
+                    display_name: "Optout".to_string(),
+                    joined_at: None,
+                    account_created_at: None,
+                    is_bot: false,
+                },
+                BackfillMember {
+                    guild_id: 1,
+                    user_id: 13,
+                    display_name: "Bot".to_string(),
+                    joined_at: None,
+                    account_created_at: None,
+                    is_bot: true,
+                },
+            ],
+        )
+        .await
+        .expect("backfill");
+
+        assert_eq!(inserted, 1);
+        let row: (String, String) = db
+            .read(|c| {
+                c.query_row(
+                    "SELECT display_name, json_extract(metadata, '$.join_source_kind') FROM member_events WHERE user_id=11",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+            })
+            .await
+            .expect("row");
+        assert_eq!(row, ("Neu im Cache".to_string(), "backfilled".to_string()));
+    }
+
+    struct SequencedBackfillPort {
+        calls: std::sync::atomic::AtomicUsize,
+        member: BackfillMember,
+    }
+
+    #[async_trait::async_trait]
+    impl MemberBackfillPort for SequencedBackfillPort {
+        async fn current_members(&self) -> Vec<BackfillMember> {
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if call == 0 {
+                Vec::new()
+            } else {
+                vec![self.member.clone()]
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("backfill-retry.sqlite3")).expect("db");
+        db.write(|c| {
+            c.execute_batch(
+                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT, UNIQUE(user_id, guild_id, event_type));
+                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);",
+            )
+        })
+        .await
+        .expect("ddl");
+        let port = Arc::new(SequencedBackfillPort {
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            member: BackfillMember {
+                guild_id: 1,
+                user_id: 55,
+                display_name: "Spaeter im Cache".to_string(),
+                joined_at: Some("2026-01-03 10:00:00".to_string()),
+                account_created_at: None,
+                is_bot: false,
+            },
+        });
+
+        let task = spawn_member_backfill_with_delays(
+            db.clone(),
+            port.clone(),
+            Duration::ZERO,
+            Duration::from_millis(5),
+        );
+        for _ in 0..40 {
+            let count = db
+                .read(|c| {
+                    c.query_row(
+                        "SELECT COUNT(*) FROM member_events WHERE user_id=55 AND event_type='join'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )
+                })
+                .await
+                .unwrap_or(0);
+            if count == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        task.abort();
+
+        let count = db
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*) FROM member_events WHERE user_id=55 AND event_type='join'",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+            })
+            .await
+            .expect("count");
+        assert_eq!(count, 1);
+        assert!(
+            port.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
+            "Backfill muss nach leerem Cache erneut pollen"
+        );
     }
 }

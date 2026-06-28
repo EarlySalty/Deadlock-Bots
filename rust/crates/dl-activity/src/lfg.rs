@@ -5,6 +5,8 @@
 //! Tag-Filter-Parsing. Der Discord-Flow (Routing-Antworten, Empfehlungen,
 //! AI-Zweitprüfung via dl-ai) folgt mit Phase 6.
 
+use serde_json::json;
+
 const RANK_TOKENS: [&str; 35] = [
     // RANK_NAME_TO_VALUE-Schlüssel
     "obscurus",
@@ -49,6 +51,20 @@ const RANK_TOKENS: [&str; 35] = [
 
 fn contains_any(text: &str, words: &[&str]) -> bool {
     words.iter().any(|w| text.contains(w))
+}
+
+fn parse_user_target(token: &str) -> Option<u64> {
+    if let Some(inner) = token.strip_prefix("<@").and_then(|s| s.strip_suffix('>')) {
+        return inner.strip_prefix('!').unwrap_or(inner).parse::<u64>().ok();
+    }
+    token.parse::<u64>().ok()
+}
+
+fn first_target(content: &str) -> Option<u64> {
+    content
+        .split_whitespace()
+        .skip(1)
+        .find_map(parse_user_target)
 }
 
 /// `"suche +2"`, `"lfm+3"`, `"+4"` — SHORT_LFG_COUNT_RE.
@@ -405,10 +421,71 @@ pub enum RouteMode {
 }
 
 #[derive(Debug, Clone)]
+pub struct DecisionLogLine {
+    prefix: DecisionLogPrefix,
+    detail: String,
+}
+
+impl DecisionLogLine {
+    fn new(prefix: DecisionLogPrefix, detail: impl Into<String>) -> Self {
+        Self {
+            prefix,
+            detail: detail.into(),
+        }
+    }
+
+    fn plain_text(&self) -> String {
+        format!("{}: {}", self.prefix.label(), self.detail)
+    }
+
+    fn icon_text(&self) -> String {
+        format!("{} {}", self.prefix.icon(), self.plain_text())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionLogPrefix {
+    Mode,
+    Intent,
+    Scan,
+    RankFilter,
+    CoPlayer,
+    Decision,
+    Duration,
+}
+
+impl DecisionLogPrefix {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Mode => LFG_DLOG_PREFIX_MODE,
+            Self::Intent => LFG_DLOG_PREFIX_INTENT,
+            Self::Scan => LFG_DLOG_PREFIX_SCAN,
+            Self::RankFilter => LFG_DLOG_PREFIX_RANK_FILTER,
+            Self::CoPlayer => LFG_DLOG_PREFIX_COPLAYER,
+            Self::Decision => LFG_DLOG_PREFIX_DECISION,
+            Self::Duration => LFG_DLOG_PREFIX_DURATION,
+        }
+    }
+
+    fn icon(self) -> &'static str {
+        match self {
+            Self::Mode => LFG_DLOG_ICON_MODE,
+            Self::Intent => LFG_DLOG_ICON_INTENT,
+            Self::Scan => LFG_DLOG_ICON_SCAN,
+            Self::RankFilter => LFG_DLOG_ICON_RANK_FILTER,
+            Self::CoPlayer => LFG_DLOG_ICON_COPLAYER,
+            Self::Decision => LFG_DLOG_ICON_DECISION,
+            Self::Duration => LFG_DLOG_ICON_DURATION,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct RouteResult {
     pub mode: RouteMode,
     pub target_channel_id: Option<u64>,
     pub suggested_label: Option<LaneLabel>,
+    pub decision_log: Vec<DecisionLogLine>,
 }
 
 /// Intent aus Keywords (ranked nur ab Emissary/Rang 6 — wie das Original).
@@ -445,7 +522,51 @@ pub fn route_to_lane(
     rank_sub: Option<i64>,
     lanes: &[LaneInfo],
 ) -> RouteResult {
+    let started = std::time::Instant::now();
     let (ranked_intent, sb_intent) = detect_intent(content_lower, rank_value);
+    let intent_label = if sb_intent {
+        "Street Brawl"
+    } else if ranked_intent {
+        "Ranked"
+    } else {
+        "Casual"
+    };
+    let active_lanes: Vec<&LaneInfo> = lanes.iter().filter(|lane| lane.member_count > 0).collect();
+    let mut decision_log = vec![
+        DecisionLogLine::new(
+            DecisionLogPrefix::Intent,
+            format!(
+                "{intent_label}; {rank_value}; {}",
+                rank_sub
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ),
+        ),
+        DecisionLogLine::new(
+            DecisionLogPrefix::Scan,
+            format!(
+                "{}; {}; {}",
+                lanes.len(),
+                active_lanes.len(),
+                lanes.len().saturating_sub(active_lanes.len())
+            ),
+        ),
+    ];
+    let finish = |mode: RouteMode,
+                  target_channel_id: Option<u64>,
+                  suggested_label: Option<LaneLabel>,
+                  mut decision_log: Vec<DecisionLogLine>| {
+        decision_log.push(DecisionLogLine::new(
+            DecisionLogPrefix::Duration,
+            format!("{}ms", started.elapsed().as_millis()),
+        ));
+        RouteResult {
+            mode,
+            target_channel_id,
+            suggested_label,
+            decision_log,
+        }
+    };
     let eligible: Vec<&LaneInfo> = if sb_intent {
         lanes
             .iter()
@@ -492,36 +613,82 @@ pub fn route_to_lane(
             })
             .collect()
     };
+    decision_log.push(DecisionLogLine::new(
+        DecisionLogPrefix::RankFilter,
+        format!("{} Lanes passen", eligible.len()),
+    ));
 
     // Co-Spieler-Lane gewinnt (meiste Co-Spieler, dann meiste Mitglieder)
-    let co_lanes: Vec<&&LaneInfo> = eligible
+    let co_lanes: Vec<&LaneInfo> = eligible
         .iter()
+        .copied()
         .filter(|l| l.co_players_present > 0)
         .collect();
+    for lane in &co_lanes {
+        let co_players = if lane.co_player_names.is_empty() {
+            lane.co_players_present.to_string()
+        } else {
+            lane.co_player_names.join(", ")
+        };
+        decision_log.push(DecisionLogLine::new(
+            DecisionLogPrefix::CoPlayer,
+            format!("{co_players} in '{}'", lane.name),
+        ));
+    }
     if let Some(best) = co_lanes
         .iter()
         .max_by_key(|l| (l.co_players_present, l.member_count))
     {
-        return RouteResult {
-            mode: RouteMode::CoPlayerLane,
-            target_channel_id: Some(best.channel_id),
-            suggested_label: None,
-        };
+        decision_log.push(DecisionLogLine::new(
+            DecisionLogPrefix::Decision,
+            format!(
+                "{:?}; <#{}>; {}",
+                RouteMode::CoPlayerLane,
+                best.channel_id,
+                best.member_count
+            ),
+        ));
+        return finish(
+            RouteMode::CoPlayerLane,
+            Some(best.channel_id),
+            None,
+            decision_log,
+        );
     }
     let occupied: Vec<&&LaneInfo> = eligible.iter().filter(|l| l.member_count > 0).collect();
     if let Some(best) = occupied.iter().max_by_key(|l| l.member_count) {
-        return RouteResult {
-            mode: RouteMode::JoinExisting,
-            target_channel_id: Some(best.channel_id),
-            suggested_label: None,
-        };
+        decision_log.push(DecisionLogLine::new(
+            DecisionLogPrefix::Decision,
+            format!(
+                "{:?}; <#{}>; {}",
+                RouteMode::JoinExisting,
+                best.channel_id,
+                best.member_count
+            ),
+        ));
+        return finish(
+            RouteMode::JoinExisting,
+            Some(best.channel_id),
+            None,
+            decision_log,
+        );
     }
     if let Some(first) = eligible.first() {
-        return RouteResult {
-            mode: RouteMode::CreateNew,
-            target_channel_id: Some(first.channel_id),
-            suggested_label: None,
-        };
+        decision_log.push(DecisionLogLine::new(
+            DecisionLogPrefix::Decision,
+            format!(
+                "{:?}; <#{}>; {}",
+                RouteMode::CreateNew,
+                first.channel_id,
+                lane_label_name(&first.label)
+            ),
+        ));
+        return finish(
+            RouteMode::CreateNew,
+            Some(first.channel_id),
+            None,
+            decision_log,
+        );
     }
     // Nichts passt → neue Lane im vorgeschlagenen Modus
     let label = if sb_intent {
@@ -533,11 +700,11 @@ pub fn route_to_lane(
     } else {
         LaneLabel::Casual
     };
-    RouteResult {
-        mode: RouteMode::CreateNew,
-        target_channel_id: None,
-        suggested_label: Some(label),
-    }
+    decision_log.push(DecisionLogLine::new(
+        DecisionLogPrefix::Decision,
+        format!("{:?}; -; {}", RouteMode::CreateNew, lane_label_name(&label)),
+    ));
+    finish(RouteMode::CreateNew, None, Some(label), decision_log)
 }
 
 // ── Antwort-Schicht (wie _handle_lfg_request; Embed als JSON) ──────────────
@@ -545,6 +712,18 @@ pub fn route_to_lane(
 pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
 pub const OUTPUT_CHANNEL_ID: u64 = 1376335502919335936;
 pub const LFG_LOG_CHANNEL_ID: u64 = 1374364800817303632;
+pub const LFG_DECISION_LOG_TITLE_PLACEHOLDER: &str = "LFG Decision Log";
+pub const LFG_DLOG_PREFIX_MODE: &str = "Mode";
+pub const LFG_DLOG_PREFIX_INTENT: &str = "Intent";
+pub const LFG_DLOG_PREFIX_SCAN: &str = "Scan";
+pub const LFG_DLOG_PREFIX_RANK_FILTER: &str = "Rank-Filter";
+pub const LFG_DLOG_PREFIX_COPLAYER: &str = "Co-Player";
+pub const LFG_DLOG_PREFIX_DECISION: &str = "Entscheidung";
+pub const LFG_DLOG_PREFIX_DURATION: &str = "Dauer";
+pub const LFGTEST_OUTPUT_PLACEHOLDER: &str = "Lane-Übersicht";
+pub const LFGROUTE_TITLE_PLACEHOLDER: &str = "LFG-Routing (Simulation)";
+pub const LFG_STAGING_FIELD_NAME_PLACEHOLDER: &str = "Empfohlene Lane";
+pub const LFG_STAGING_FIELD_VALUE_PLACEHOLDER: &str = "Hier ist noch Platz";
 pub const NEW_PLAYER_LANE_ID: u64 = 1470126503252721845;
 pub const COACH_REQUEST_CHANNEL_ID: u64 = 1494373349944459355;
 pub const STAGING_CASUAL_ID: u64 = 1501089974093873232;
@@ -553,6 +732,21 @@ pub const STAGING_STREET_BRAWL_ID: u64 = 1357422958544420944;
 pub const MAX_JOIN_LOBBIES_SHOWN: usize = 3;
 pub const RANK_WARNING_DIFF: f64 = 1.5;
 pub const LOBBY_MAYBE_FULL_THRESHOLD: usize = 6;
+const LFG_DLOG_ICON_MODE: &str = "🧭";
+const LFG_DLOG_ICON_INTENT: &str = "⚙️";
+const LFG_DLOG_ICON_SCAN: &str = "📡";
+const LFG_DLOG_ICON_RANK_FILTER: &str = "🔎";
+const LFG_DLOG_ICON_COPLAYER: &str = "👥";
+const LFG_DLOG_ICON_DECISION: &str = "🎯";
+const LFG_DLOG_ICON_DURATION: &str = "⏱️";
+
+fn render_decision_log_lines(lines: &[DecisionLogLine]) -> String {
+    lines
+        .iter()
+        .map(DecisionLogLine::icon_text)
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 /// Anfänger-Anfrage (wie _is_new_player_request + _detect_new_player_text).
 pub fn is_new_player_request(content_lower: &str, rank_value: i64, has_rank_role: bool) -> bool {
@@ -835,29 +1029,96 @@ pub fn build_lobby_field_value(lane: &LaneInfo, warning_line: &str) -> String {
     lines.join("\n")
 }
 
-/// Staging-Kanal je Ziel-Modus (wie _resolve_staging_channel; die
-/// Kategorie-Feinsuche für SB/NP übernimmt der Aufrufer über die Lanes).
-pub fn resolve_staging_channel(preferred_label: &str, lanes: &[LaneInfo]) -> u64 {
+fn lane_label_name(label: &LaneLabel) -> &'static str {
+    match label {
+        LaneLabel::Casual => "Casual",
+        LaneLabel::Ranked => "Ranked",
+        LaneLabel::StreetBrawl => "Street Brawl",
+        LaneLabel::NewPlayer => "New Player",
+    }
+}
+
+fn fixed_staging_id(preferred_label: &str) -> u64 {
     match preferred_label {
         "Ranked" => STAGING_RANKED_ID,
-        "Street Brawl" => lanes
-            .iter()
-            .find(|lane| {
-                lane.label == LaneLabel::StreetBrawl
-                    && !lane.is_staging
-                    && lane.member_count < LOBBY_MAYBE_FULL_THRESHOLD
-            })
-            .map(|lane| lane.channel_id)
-            .unwrap_or(STAGING_STREET_BRAWL_ID),
-        "New Player" => lanes
-            .iter()
-            .find(|lane| {
-                lane.label == LaneLabel::NewPlayer && lane.member_count < LOBBY_MAYBE_FULL_THRESHOLD
-            })
-            .map(|lane| lane.channel_id)
-            .unwrap_or(NEW_PLAYER_LANE_ID),
+        "Street Brawl" => STAGING_STREET_BRAWL_ID,
+        "New Player" => NEW_PLAYER_LANE_ID,
         _ => STAGING_CASUAL_ID,
     }
+}
+
+fn build_staging_field(lane: &LaneInfo) -> (String, String) {
+    (
+        format!(
+            "{}: {} ({})",
+            LFG_STAGING_FIELD_NAME_PLACEHOLDER,
+            lane.name,
+            lane_label_name(&lane.label)
+        ),
+        format!(
+            "{}: <#{}> {} {}/{}",
+            LFG_STAGING_FIELD_VALUE_PLACEHOLDER,
+            lane.channel_id,
+            lane_label_name(&lane.label),
+            lane.member_count,
+            lane.user_limit
+        ),
+    )
+}
+
+/// Staging-Kanal je Ziel-Modus (wie _resolve_staging_channel): feste IDs nur,
+/// wenn sie im aktuellen Lane-Scan existieren; sonst echte Lanes aus dem Scan.
+pub fn resolve_staging_channel(preferred_label: &str, lanes: &[LaneInfo]) -> Option<u64> {
+    if preferred_label == "Street Brawl" || preferred_label == "New Player" {
+        if let Some(lane) = lanes.iter().find(|lane| {
+            lane_label_name(&lane.label) == preferred_label
+                && !lane.is_staging
+                && lane.member_count < LOBBY_MAYBE_FULL_THRESHOLD
+        }) {
+            return Some(lane.channel_id);
+        }
+    }
+    let fixed = fixed_staging_id(preferred_label);
+    if lanes.iter().any(|lane| lane.channel_id == fixed) {
+        return Some(fixed);
+    }
+    if preferred_label == "New Player" {
+        return lanes
+            .iter()
+            .find(|lane| lane.label == LaneLabel::NewPlayer)
+            .map(|lane| lane.channel_id);
+    }
+    None
+}
+
+pub fn build_staging_suggestion_fields(
+    preferred_label: &str,
+    lanes: &[LaneInfo],
+) -> Vec<(String, String)> {
+    let mut ordered: Vec<&LaneInfo> = lanes
+        .iter()
+        .filter(|lane| lane.is_staging && lane_label_name(&lane.label) == preferred_label)
+        .collect();
+    ordered.extend(
+        lanes
+            .iter()
+            .filter(|lane| lane.is_staging && lane_label_name(&lane.label) != preferred_label),
+    );
+    let mut fields: Vec<(String, String)> = ordered
+        .into_iter()
+        .take(2)
+        .map(build_staging_field)
+        .collect();
+    if fields.is_empty() {
+        fields.extend(
+            lanes
+                .iter()
+                .filter(|lane| lane.member_count == 0 && !lane.is_staging)
+                .take(1)
+                .map(build_staging_field),
+        );
+    }
+    fields
 }
 
 /// Kompletter Antwort-Embed (wie der Embed-Teil von _handle_lfg_request).
@@ -907,14 +1168,23 @@ pub fn build_lfg_reply(
         }
     }
     if !is_new_player || has_active {
-        let staging_id = resolve_staging_channel(preferred_label, lanes);
-        fields.push(json!({
-            "name": "Oder eigene Lobby aufmachen?",
-            "value": format!(
-                "Wenn nichts passt, mach in <#{staging_id}> eine **{preferred_label}**-Lane auf — erfahrungsgemäß kommen schnell Leute dazu."
-            ),
-            "inline": false,
-        }));
+        if let Some(staging_id) = resolve_staging_channel(preferred_label, lanes) {
+            fields.push(json!({
+                "name": "Oder eigene Lobby aufmachen?",
+                "value": format!(
+                    "Wenn nichts passt, mach in <#{staging_id}> eine **{preferred_label}**-Lane auf — erfahrungsgemäß kommen schnell Leute dazu."
+                ),
+                "inline": false,
+            }));
+        } else {
+            for (name, value) in build_staging_suggestion_fields(preferred_label, lanes) {
+                fields.push(json!({
+                    "name": name,
+                    "value": value,
+                    "inline": false,
+                }));
+            }
+        }
     }
     let _ = route;
     json!({
@@ -952,7 +1222,7 @@ pub const RANK_NAMES: [(&str, i64); 11] = [
 /// Rang aus dem Nachrichtentext ("Oracle 3", "emi II") — wie
 /// `_parse_rank_from_message` inkl. Kurz-Aliasse und römischer Subränge.
 pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>) {
-    const ALIASES: [(&str, &str); 12] = [
+    const ALIASES: [(&str, &str); 13] = [
         ("ini", "initiate"),
         ("seek", "seeker"),
         ("alch", "alchemist"),
@@ -965,6 +1235,7 @@ pub fn parse_rank_from_message(content_lower: &str) -> (String, i64, Option<i64>
         ("et", "eternus"),
         ("arkanist", "arcanist"),
         ("ascendent", "ascendant"),
+        ("ethernus", "eternus"),
     ];
     let parse_sub = |token: &str| -> Option<i64> {
         let token = token.trim().trim_end_matches('+').to_lowercase();
@@ -1028,6 +1299,7 @@ pub trait LfgPort: Send + Sync {
     async fn member_rank(&self, guild_id: u64, user_id: u64) -> (String, i64, Option<i64>);
     async fn member_in_voice(&self, guild_id: u64, user_id: u64) -> bool;
     async fn post_embed(&self, channel_id: u64, embed: serde_json::Value);
+    async fn post_text(&self, channel_id: u64, content: &str);
 }
 
 pub struct LfgResponder {
@@ -1060,6 +1332,137 @@ impl LfgResponder {
             .unwrap_or_default()
     }
 
+    async fn handle_lfgtest(&self, guild_id: u64, channel_id: u64) {
+        let lanes = self.port.scan_lanes(guild_id, &[]).await;
+        let lines: Vec<String> = lanes
+            .iter()
+            .map(|lane| {
+                format!(
+                    "- **{}**: {} (<#{}>, {}/{}, {}, {})",
+                    lane_label_name(&lane.label),
+                    lane.name,
+                    lane.channel_id,
+                    lane.member_count,
+                    lane.user_limit,
+                    lane.avg_rank_label,
+                    lane.has_space()
+                )
+            })
+            .collect();
+        let content = if lines.is_empty() {
+            LFGTEST_OUTPUT_PLACEHOLDER.to_string()
+        } else {
+            format!(
+                "{} ({})\n{}",
+                LFGTEST_OUTPUT_PLACEHOLDER,
+                lanes.len(),
+                lines.join("\n")
+            )
+        };
+        self.port.post_text(channel_id, &content).await;
+    }
+
+    async fn handle_lfgroute(&self, guild_id: u64, channel_id: u64, author_id: u64, content: &str) {
+        let target = first_target(content).unwrap_or(author_id);
+        let (rank_name, rank_value, rank_sub) = self.port.member_rank(guild_id, target).await;
+        let co_player_ids = self.co_player_ids(target).await;
+        let lanes = self.port.scan_lanes(guild_id, &co_player_ids).await;
+        let route = route_to_lane("", rank_value, rank_sub, &lanes);
+        let rank_display = if rank_value > 0 {
+            match rank_sub {
+                Some(sub) => format!("{rank_name} {sub}"),
+                None => rank_name,
+            }
+        } else {
+            "Unbekannt".to_string()
+        };
+	        self.port
+	            .post_embed(
+	                channel_id,
+	                json!({
+	                    "title": LFGROUTE_TITLE_PLACEHOLDER,
+	                    "color": 0xE67E22,
+	                    "fields": [
+	                        {
+	                            "name": LFG_DLOG_PREFIX_DECISION,
+	                            "value": Self::route_debug_value(target, &rank_display, &route, &lanes),
+	                            "inline": false
+	                        }
+	                    ],
+	                }),
+	            )
+            .await;
+    }
+
+    fn route_target_display(route: &RouteResult) -> String {
+        route
+            .target_channel_id
+            .map(|id| format!("<#{id}>"))
+            .unwrap_or_else(|| "-".to_string())
+    }
+
+    fn route_suggested_display(route: &RouteResult) -> &'static str {
+        route
+            .suggested_label
+            .as_ref()
+            .map(lane_label_name)
+            .unwrap_or("-")
+    }
+
+    fn route_debug_value(
+        target_id: u64,
+        rank_display: &str,
+        route: &RouteResult,
+        lanes: &[LaneInfo],
+    ) -> String {
+        let mut lines = vec![
+            DecisionLogLine::new(DecisionLogPrefix::Intent, format!("<@{target_id}>")),
+            DecisionLogLine::new(DecisionLogPrefix::RankFilter, rank_display.to_string()),
+            DecisionLogLine::new(DecisionLogPrefix::Mode, format!("{:?}", route.mode)),
+            DecisionLogLine::new(
+                DecisionLogPrefix::Decision,
+                Self::route_target_display(route),
+            ),
+            DecisionLogLine::new(
+                DecisionLogPrefix::Decision,
+                Self::route_suggested_display(route),
+            ),
+            DecisionLogLine::new(DecisionLogPrefix::Scan, lanes.len().to_string()),
+        ];
+        lines.extend(route.decision_log.iter().cloned());
+        render_decision_log_lines(&lines)
+    }
+
+    fn build_decision_log_embed(
+        author_id: u64,
+        rank_display: &str,
+        route: &RouteResult,
+        suggestion_count: usize,
+    ) -> serde_json::Value {
+        let mut lines = vec![
+            DecisionLogLine::new(DecisionLogPrefix::Mode, "lobby"),
+            DecisionLogLine::new(DecisionLogPrefix::Intent, author_id.to_string()),
+            DecisionLogLine::new(DecisionLogPrefix::Intent, format!("<@{author_id}>")),
+            DecisionLogLine::new(DecisionLogPrefix::RankFilter, rank_display.to_string()),
+            DecisionLogLine::new(DecisionLogPrefix::Mode, format!("{:?}", route.mode)),
+            DecisionLogLine::new(
+                DecisionLogPrefix::Decision,
+                Self::route_target_display(route),
+            ),
+            DecisionLogLine::new(
+                DecisionLogPrefix::Decision,
+                Self::route_suggested_display(route),
+            ),
+            DecisionLogLine::new(DecisionLogPrefix::Scan, suggestion_count.to_string()),
+        ];
+        lines.extend(route.decision_log.iter().cloned());
+        json!({
+            "title": LFG_DECISION_LOG_TITLE_PLACEHOLDER,
+            "color": 0x99AAB5,
+            "description": render_decision_log_lines(&lines),
+        })
+    }
+
     /// Nachricht aus dem LFG-Kanal verarbeiten (wie on_message).
     pub async fn handle_message(
         self: &std::sync::Arc<Self>,
@@ -1067,7 +1470,21 @@ impl LfgResponder {
         channel_id: u64,
         author_id: u64,
         content: &str,
+        is_admin: bool,
     ) {
+        let root = content.split_whitespace().next().unwrap_or_default();
+        if matches!(root, "!lfgtest" | "!lfgroute") {
+            if !is_admin {
+                return;
+            }
+            if root == "!lfgtest" {
+                self.handle_lfgtest(guild_id, channel_id).await;
+            } else {
+                self.handle_lfgroute(guild_id, channel_id, author_id, content)
+                    .await;
+            }
+            return;
+        }
         if channel_id != LFG_CHANNEL_ID {
             return;
         }
@@ -1157,6 +1574,12 @@ impl LfgResponder {
             preferred_label,
         );
         self.port.post_embed(OUTPUT_CHANNEL_ID, embed).await;
+        self.port
+            .post_embed(
+                LFG_LOG_CHANNEL_ID,
+                Self::build_decision_log_embed(author_id, &rank_display, &route, suggestions.len()),
+            )
+            .await;
         tracing::info!(
             author_id,
             rank = %rank_display,
@@ -1183,6 +1606,7 @@ pub fn spawn_responder(
                             event.channel_id,
                             event.author_id,
                             &event.content,
+                            event.author_is_admin,
                         )
                         .await;
                 }
@@ -1324,6 +1748,51 @@ mod tests {
     }
 
     #[test]
+    fn decision_log_prefixe_wie_python() {
+        let lanes = vec![lane(1, LaneLabel::Casual, 3, 8, 5.0, 0)];
+        let route = route_to_lane("wer bock", 6, Some(3), &lanes);
+        let prefixes: Vec<DecisionLogPrefix> =
+            route.decision_log.iter().map(|line| line.prefix).collect();
+        assert_eq!(
+            prefixes,
+            vec![
+                DecisionLogPrefix::Intent,
+                DecisionLogPrefix::Scan,
+                DecisionLogPrefix::RankFilter,
+                DecisionLogPrefix::Decision,
+                DecisionLogPrefix::Duration,
+            ]
+        );
+        let rendered = render_decision_log_lines(&route.decision_log);
+        assert!(rendered.contains(&format!("{LFG_DLOG_ICON_INTENT} {LFG_DLOG_PREFIX_INTENT}:")));
+        assert!(rendered.contains(&format!("{LFG_DLOG_ICON_SCAN} {LFG_DLOG_PREFIX_SCAN}:")));
+        assert!(rendered.contains(&format!(
+            "{LFG_DLOG_ICON_RANK_FILTER} {LFG_DLOG_PREFIX_RANK_FILTER}:"
+        )));
+        assert!(rendered.contains(&format!(
+            "{LFG_DLOG_ICON_DECISION} {LFG_DLOG_PREFIX_DECISION}:"
+        )));
+        assert!(rendered.contains(&format!(
+            "{LFG_DLOG_ICON_DURATION} {LFG_DLOG_PREFIX_DURATION}:"
+        )));
+
+        let co_route = route_to_lane(
+            "wer bock",
+            6,
+            Some(3),
+            &[lane(2, LaneLabel::Casual, 2, 8, 5.0, 2)],
+        );
+        assert!(co_route
+            .decision_log
+            .iter()
+            .any(|line| line.prefix == DecisionLogPrefix::CoPlayer));
+        let co_rendered = render_decision_log_lines(&co_route.decision_log);
+        assert!(co_rendered.contains(&format!(
+            "{LFG_DLOG_ICON_COPLAYER} {LFG_DLOG_PREFIX_COPLAYER}:"
+        )));
+    }
+
+    #[test]
     fn intent_und_rank_fit() {
         assert_eq!(detect_intent("ranked grind", 9), (true, false));
         assert_eq!(detect_intent("ranked grind", 4), (false, false)); // zu niedrig
@@ -1354,6 +1823,10 @@ mod tests {
         );
         assert_eq!(
             parse_rank_from_message("wer bock auf et"),
+            ("Eternus".to_string(), 11, None)
+        );
+        assert_eq!(
+            parse_rank_from_message("wer bock auf ethernus"),
             ("Eternus".to_string(), 11, None)
         );
         assert_eq!(
@@ -1404,21 +1877,30 @@ mod tests {
         assert!(value.contains("<#5>"));
 
         // Staging-Auflösung
-        assert_eq!(resolve_staging_channel("Ranked", &[]), STAGING_RANKED_ID);
-        assert_eq!(resolve_staging_channel("Casual", &[]), STAGING_CASUAL_ID);
+        let mut ranked_staging = lane(STAGING_RANKED_ID, LaneLabel::Ranked, 0, 6, 0.0, 0);
+        ranked_staging.is_staging = true;
+        let mut casual_staging = lane(STAGING_CASUAL_ID, LaneLabel::Casual, 0, 8, 0.0, 0);
+        casual_staging.is_staging = true;
         assert_eq!(
-            resolve_staging_channel("New Player", &[]),
-            NEW_PLAYER_LANE_ID
+            resolve_staging_channel("Ranked", &[ranked_staging.clone()]),
+            Some(STAGING_RANKED_ID)
         );
+        assert_eq!(
+            resolve_staging_channel("Casual", &[casual_staging.clone()]),
+            Some(STAGING_CASUAL_ID)
+        );
+        assert_eq!(resolve_staging_channel("New Player", &[]), None);
 
         // Kompletter Embed
+        let mut reply_lanes = lanes.clone();
+        reply_lanes.push(casual_staging);
         let reply = build_lfg_reply(
             "@u",
             "Phantom",
             9,
             Some(2),
             false,
-            &lanes,
+            &reply_lanes,
             &route,
             &picks,
             "Casual",
@@ -1445,5 +1927,194 @@ mod tests {
         assert_eq!(parse_tag_filters("125+ hp build"), TagFilters::default());
         assert_eq!(parse_tag_filters("25+7 = 32"), TagFilters::default());
         assert!(parse_tag_filters("nur 25+!").min_age_25);
+    }
+
+    #[test]
+    fn staging_fallback_prueft_existenz_und_bietet_echte_lanes_an() {
+        let empty_casual = lane(501, LaneLabel::Casual, 0, 8, 0.0, 0);
+        assert_eq!(
+            resolve_staging_channel("Casual", &[empty_casual.clone()]),
+            None
+        );
+        let fields = build_staging_suggestion_fields("Casual", &[empty_casual]);
+        assert_eq!(fields.len(), 1);
+        let rendered = format!("{} {}", fields[0].0, fields[0].1);
+        assert!(rendered.contains(LFG_STAGING_FIELD_NAME_PLACEHOLDER));
+        assert!(rendered.contains(LFG_STAGING_FIELD_VALUE_PLACEHOLDER));
+        assert!(rendered.contains("Lane 501"));
+        assert!(rendered.contains("Casual"));
+        assert!(rendered.contains("<#501>"));
+
+        let new_player = lane(NEW_PLAYER_LANE_ID + 1, LaneLabel::NewPlayer, 2, 6, 2.0, 0);
+        assert_eq!(
+            resolve_staging_channel("New Player", &[new_player.clone()]),
+            Some(new_player.channel_id)
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_postet_decision_log_embed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dl_db::Db::open_creating(dir.path().join("lfg.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE user_co_players(user_id INTEGER, co_player_id INTEGER, sessions_together INTEGER)",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("ddl");
+        let port = std::sync::Arc::new(MockLfgPort::new(vec![lane(
+            1,
+            LaneLabel::Casual,
+            1,
+            8,
+            4.0,
+            0,
+        )]));
+        let responder = LfgResponder::new(db, port.clone());
+
+        responder
+            .handle_message(1, LFG_CHANNEL_ID, 42, "lfg", false)
+            .await;
+
+        let embeds = port.embeds.lock().expect("embeds");
+        let (_, embed) = embeds
+            .iter()
+            .find(|(channel_id, embed)| {
+                *channel_id == LFG_LOG_CHANNEL_ID
+                    && embed["title"] == LFG_DECISION_LOG_TITLE_PLACEHOLDER
+            })
+            .expect("decision log");
+        let rendered = embed.to_string();
+        assert!(rendered.contains("42"));
+        assert!(rendered.contains("Alchemist 3"));
+        assert!(rendered.contains("JoinExisting"));
+        assert!(rendered.contains("<#1>"));
+        assert!(rendered.contains("1"));
+        let description = embed["description"].as_str().expect("description");
+        assert!(description.contains(&format!("{LFG_DLOG_ICON_MODE} {LFG_DLOG_PREFIX_MODE}:")));
+        assert!(description.contains(&format!("{LFG_DLOG_ICON_INTENT} {LFG_DLOG_PREFIX_INTENT}:")));
+        assert!(description.contains(&format!("{LFG_DLOG_ICON_SCAN} {LFG_DLOG_PREFIX_SCAN}:")));
+        assert!(description.contains(&format!(
+            "{LFG_DLOG_ICON_RANK_FILTER} {LFG_DLOG_PREFIX_RANK_FILTER}:"
+        )));
+        assert!(description.contains(&format!(
+            "{LFG_DLOG_ICON_DECISION} {LFG_DLOG_PREFIX_DECISION}:"
+        )));
+        assert!(description.contains(&format!(
+            "{LFG_DLOG_ICON_DURATION} {LFG_DLOG_PREFIX_DURATION}:"
+        )));
+    }
+
+    #[tokio::test]
+    async fn lfg_debug_commands_sind_admin_only_und_rendern_daten() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dl_db::Db::open_creating(dir.path().join("lfg-debug.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE user_co_players(user_id INTEGER, co_player_id INTEGER, sessions_together INTEGER)",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("ddl");
+        let port = std::sync::Arc::new(MockLfgPort::new(vec![lane(
+            987_654_321,
+            LaneLabel::Casual,
+            2,
+            8,
+            3.5,
+            0,
+        )]));
+        let responder = LfgResponder::new(db, port.clone());
+
+        responder
+            .handle_message(1, 555, 42, "!lfgtest", false)
+            .await;
+        assert!(port.texts.lock().expect("texts").is_empty());
+
+        responder.handle_message(1, 555, 42, "!lfgtest", true).await;
+        responder
+            .handle_message(1, 555, 42, "!lfgroute", true)
+            .await;
+        let texts = port.texts.lock().expect("texts");
+        let overview = texts
+            .iter()
+            .find(|(_, content)| content.contains(LFGTEST_OUTPUT_PLACEHOLDER))
+            .expect("lfgtest output");
+        assert!(overview.1.contains("Lane 987654321"));
+        assert!(overview.1.contains("Casual"));
+        assert!(overview.1.contains("<#987654321>"));
+        assert!(overview.1.contains("2/8"));
+        drop(texts);
+        let embeds = port.embeds.lock().expect("embeds");
+        let route = embeds
+            .iter()
+            .find(|(_, embed)| embed["title"] == LFGROUTE_TITLE_PLACEHOLDER)
+            .expect("route debug embed");
+        let rendered = route.1.to_string();
+        assert!(rendered.contains("42"));
+        assert!(rendered.contains("Alchemist 3"));
+        assert!(rendered.contains("JoinExisting"));
+        assert!(rendered.contains("<#987654321>"));
+        assert!(rendered.contains("1"));
+        let value = route.1["fields"][0]["value"].as_str().expect("route value");
+        assert!(value.contains(&format!("{LFG_DLOG_ICON_MODE} {LFG_DLOG_PREFIX_MODE}:")));
+        assert!(value.contains(&format!("{LFG_DLOG_ICON_INTENT} {LFG_DLOG_PREFIX_INTENT}:")));
+        assert!(value.contains(&format!("{LFG_DLOG_ICON_SCAN} {LFG_DLOG_PREFIX_SCAN}:")));
+        assert!(value.contains(&format!(
+            "{LFG_DLOG_ICON_RANK_FILTER} {LFG_DLOG_PREFIX_RANK_FILTER}:"
+        )));
+        assert!(value.contains(&format!(
+            "{LFG_DLOG_ICON_DECISION} {LFG_DLOG_PREFIX_DECISION}:"
+        )));
+    }
+
+    struct MockLfgPort {
+        lanes: Vec<LaneInfo>,
+        embeds: std::sync::Mutex<Vec<(u64, serde_json::Value)>>,
+        texts: std::sync::Mutex<Vec<(u64, String)>>,
+    }
+
+    impl MockLfgPort {
+        fn new(lanes: Vec<LaneInfo>) -> Self {
+            Self {
+                lanes,
+                embeds: std::sync::Mutex::new(Vec::new()),
+                texts: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LfgPort for MockLfgPort {
+        async fn scan_lanes(&self, _guild_id: u64, _co_player_ids: &[u64]) -> Vec<LaneInfo> {
+            self.lanes.clone()
+        }
+
+        async fn member_rank(&self, _guild_id: u64, _user_id: u64) -> (String, i64, Option<i64>) {
+            ("Alchemist".to_string(), 3, Some(3))
+        }
+
+        async fn member_in_voice(&self, _guild_id: u64, _user_id: u64) -> bool {
+            false
+        }
+
+        async fn post_embed(&self, channel_id: u64, embed: serde_json::Value) {
+            self.embeds
+                .lock()
+                .expect("embeds")
+                .push((channel_id, embed));
+        }
+
+        async fn post_text(&self, channel_id: u64, content: &str) {
+            self.texts
+                .lock()
+                .expect("texts")
+                .push((channel_id, content.to_string()));
+        }
     }
 }
