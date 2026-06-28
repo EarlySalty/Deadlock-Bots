@@ -324,6 +324,45 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 })
                 .unwrap_or_default()
         }
+
+        async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+            self.adapter
+                .cache()
+                .guild(serenity::all::GuildId::new(guild_id))
+                .and_then(|g| {
+                    g.members
+                        .get(&serenity::all::UserId::new(user_id))
+                        .map(|m| m.display_name().to_string())
+                })
+        }
+
+        async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool {
+            let Some(guild) = self
+                .adapter
+                .cache()
+                .guild(serenity::all::GuildId::new(guild_id))
+            else {
+                return false;
+            };
+            if guild.owner_id.get() == user_id {
+                return true;
+            }
+            guild
+                .members
+                .get(&serenity::all::UserId::new(user_id))
+                .map(|member| {
+                    member.roles.iter().any(|role_id| {
+                        guild
+                            .roles
+                            .get(role_id)
+                            .map(|role| {
+                                role.permissions.administrator() || role.permissions.manage_guild()
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
+        }
     }
     let turnier_ui = Arc::new(dl_tournament::discord_ui::TurnierUi {
         store: Arc::new(dl_tournament::store::TournamentStore::new(db.clone())),
