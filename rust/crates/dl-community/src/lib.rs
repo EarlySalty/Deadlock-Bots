@@ -16,6 +16,7 @@ pub mod leave_survey;
 pub mod onboarding;
 pub mod privacy;
 pub mod privacy_ui;
+pub mod reaction_roles;
 pub mod retention;
 pub mod tags;
 pub mod tags_ui;

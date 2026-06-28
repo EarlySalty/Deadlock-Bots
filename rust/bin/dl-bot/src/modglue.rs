@@ -6,8 +6,9 @@ use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Value};
-use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, UserId};
+use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId};
 use serenity::builder::GetMessages;
+use serenity::http::HttpError;
 use tokio::sync::{Mutex, RwLock};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
@@ -725,58 +726,6 @@ pub fn parse_invite_allowlist_fallback(raw: &str) -> Vec<String> {
         }
     }
     out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn invite_resolver_cacht_nur_definitive_guild_ids() {
-        let resolver = GuardInviteResolver::new(1, Vec::new());
-        let now = 1_000_000;
-
-        resolver.remember_resolve_result("expired", None, now).await;
-        assert!(resolver.cache.lock().await.is_empty());
-        assert_eq!(resolver.cached_guild_id("expired", now).await, None);
-
-        resolver
-            .remember_resolve_result("foreign", Some(2), now)
-            .await;
-        assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
-    }
-
-    #[test]
-    fn lfg_rankrollen_erkennen_ids_subranks_und_unverifiziert() {
-        assert_eq!(
-            rank_from_roles(&[(1331458016356208680, "irgendein name".to_string())]),
-            ("Phantom".to_string(), 9, None)
-        );
-        assert_eq!(
-            rank_from_roles(&[(0, "Asc 3".to_string())]),
-            ("Ascendant".to_string(), 10, Some(3))
-        );
-        assert_eq!(
-            rank_from_roles(&[(1492959889767534602, "x".to_string())]),
-            ("Oracle".to_string(), 8, Some(3))
-        );
-        assert_eq!(
-            rank_from_roles(&[(0, "Unverifiziert Emissary".to_string())]),
-            ("Emissary".to_string(), 6, Some(3))
-        );
-    }
-
-    #[test]
-    fn lfg_offtopic_channels_werden_erkannt() {
-        assert!(is_lfg_offtopic_channel("Off Topic Voice 1"));
-        assert!(!is_lfg_offtopic_channel("Casual Lane 1"));
-    }
-
-    #[test]
-    fn lfg_member_count_filtert_bots() {
-        let members = visible_lfg_member_ids(&[(1, false), (2, true), (3, false)]);
-        assert_eq!(members, vec![1, 3]);
-    }
 }
 
 pub struct GuardGlue {
@@ -1702,6 +1651,171 @@ impl dl_community::feedback_hub::FeedbackPort for FeedbackGlue {
     }
 }
 
+// ── Reaction-Roles-Anbindung ───────────────────────────────────────────────
+
+pub struct ReactionRoleGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+fn reaction_role_port_err(err: serenity::Error) -> dl_community::reaction_roles::PortErr {
+    dl_community::reaction_roles::PortErr::Discord(err.to_string())
+}
+
+fn reaction_role_dm_err(err: serenity::Error) -> dl_community::reaction_roles::DmErr {
+    let permanent = matches!(
+        &err,
+        serenity::Error::Http(HttpError::UnsuccessfulRequest(resp))
+            if resp.status_code.as_u16() == 403
+                || resp.status_code.as_u16() == 404
+                || matches!(resp.error.code, 50007 | 10013)
+    );
+    let text = err.to_string();
+    if permanent {
+        dl_community::reaction_roles::DmErr::Permanent(text)
+    } else {
+        dl_community::reaction_roles::DmErr::Transient(text)
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_community::reaction_roles::ReactionRolePort for ReactionRoleGlue {
+    async fn add_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+    ) -> Result<(), dl_community::reaction_roles::PortErr> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some("reaction-role:add"),
+            )
+            .await
+            .map_err(reaction_role_port_err)
+    }
+
+    async fn remove_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+    ) -> Result<(), dl_community::reaction_roles::PortErr> {
+        self.adapter
+            .http
+            .remove_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some("reaction-role:remove"),
+            )
+            .await
+            .map_err(reaction_role_port_err)
+    }
+
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        content: &str,
+    ) -> Result<(), dl_community::reaction_roles::DmErr> {
+        let channel = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+            .map_err(reaction_role_dm_err)?;
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        self.adapter
+            .http
+            .send_message(channel.id, Vec::new(), &body)
+            .await
+            .map(|_| ())
+            .map_err(reaction_role_dm_err)
+    }
+
+    async fn reaction_users(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &ReactionType,
+        after: Option<u64>,
+    ) -> Result<Vec<dl_community::reaction_roles::ReactedUser>, dl_community::reaction_roles::PortErr>
+    {
+        let users = self
+            .adapter
+            .reaction_users(channel_id, message_id, emoji, after)
+            .await
+            .map_err(reaction_role_port_err)?;
+        Ok(users
+            .into_iter()
+            .map(|user| dl_community::reaction_roles::ReactedUser {
+                id: user.id,
+                is_bot: user.is_bot,
+            })
+            .collect())
+    }
+}
+
+pub struct ReactionRoleGatewayGlue {
+    pub service: Arc<dl_community::reaction_roles::ReactionRoleService>,
+}
+
+#[async_trait::async_trait]
+impl dl_discord::gateway::ReactionRoleGatewayPort for ReactionRoleGatewayGlue {
+    async fn reaction_add(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        user_id: u64,
+        emoji: ReactionType,
+        is_bot: bool,
+    ) {
+        if let Err(err) = self
+            .service
+            .handle_reaction_add(guild_id, channel_id, message_id, user_id, &emoji, is_bot)
+            .await
+        {
+            tracing::warn!(
+                %err,
+                guild_id,
+                channel_id,
+                message_id,
+                user_id,
+                "Reaction-Role-Add fehlgeschlagen"
+            );
+        }
+    }
+
+    async fn reaction_remove(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        user_id: u64,
+        emoji: ReactionType,
+        is_bot: bool,
+    ) {
+        if let Err(err) = self
+            .service
+            .handle_reaction_remove(guild_id, channel_id, message_id, user_id, &emoji, is_bot)
+            .await
+        {
+            tracing::warn!(
+                %err,
+                guild_id,
+                channel_id,
+                message_id,
+                user_id,
+                "Reaction-Role-Remove fehlgeschlagen"
+            );
+        }
+    }
+}
+
 // ── LFG-Lobby-Finder-Anbindung ─────────────────────────────────────────────
 
 pub struct LfgGlue {
@@ -2357,5 +2471,57 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
             Err(err) if err.contains("50007") => MissYouDelivery::Blocked,
             Err(err) => MissYouDelivery::Failed(err),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn invite_resolver_cacht_nur_definitive_guild_ids() {
+        let resolver = GuardInviteResolver::new(1, Vec::new());
+        let now = 1_000_000;
+
+        resolver.remember_resolve_result("expired", None, now).await;
+        assert!(resolver.cache.lock().await.is_empty());
+        assert_eq!(resolver.cached_guild_id("expired", now).await, None);
+
+        resolver
+            .remember_resolve_result("foreign", Some(2), now)
+            .await;
+        assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
+    }
+
+    #[test]
+    fn lfg_rankrollen_erkennen_ids_subranks_und_unverifiziert() {
+        assert_eq!(
+            rank_from_roles(&[(1331458016356208680, "irgendein name".to_string())]),
+            ("Phantom".to_string(), 9, None)
+        );
+        assert_eq!(
+            rank_from_roles(&[(0, "Asc 3".to_string())]),
+            ("Ascendant".to_string(), 10, Some(3))
+        );
+        assert_eq!(
+            rank_from_roles(&[(1492959889767534602, "x".to_string())]),
+            ("Oracle".to_string(), 8, Some(3))
+        );
+        assert_eq!(
+            rank_from_roles(&[(0, "Unverifiziert Emissary".to_string())]),
+            ("Emissary".to_string(), 6, Some(3))
+        );
+    }
+
+    #[test]
+    fn lfg_offtopic_channels_werden_erkannt() {
+        assert!(is_lfg_offtopic_channel("Off Topic Voice 1"));
+        assert!(!is_lfg_offtopic_channel("Casual Lane 1"));
+    }
+
+    #[test]
+    fn lfg_member_count_filtert_bots() {
+        let members = visible_lfg_member_ids(&[(1, false), (2, true), (3, false)]);
+        assert_eq!(members, vec![1, 3]);
     }
 }

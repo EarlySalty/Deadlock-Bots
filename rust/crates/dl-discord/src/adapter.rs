@@ -15,7 +15,9 @@ use dl_broker::port::{
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
-use serenity::all::{Cache, ChannelId, ChannelType, GuildId, Http, MessageId, RoleId, UserId};
+use serenity::all::{
+    Cache, ChannelId, ChannelType, GuildId, Http, MessageId, ReactionType, RoleId, UserId,
+};
 
 pub struct DiscordAdapter {
     pub http: Arc<Http>,
@@ -26,6 +28,12 @@ pub struct DiscordAdapter {
     cache: OnceLock<Arc<Cache>>,
     /// Vom Gateway-Handler gesetzt, sobald READY empfangen wurde.
     pub gateway_ready: Arc<AtomicBool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReactedUser {
+    pub id: u64,
+    pub is_bot: bool,
 }
 
 impl DiscordAdapter {
@@ -221,6 +229,32 @@ impl DiscordAdapter {
             .map(|_| ())
     }
 
+    pub async fn reaction_users(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &ReactionType,
+        after: Option<u64>,
+    ) -> Result<Vec<ReactedUser>, serenity::Error> {
+        let users = self
+            .http
+            .get_reaction_users(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                emoji,
+                100,
+                after,
+            )
+            .await?;
+        Ok(users
+            .into_iter()
+            .map(|user| ReactedUser {
+                id: user.id.get(),
+                is_bot: user.bot,
+            })
+            .collect())
+    }
+
     fn move_voice_channel_precheck(
         channel_guild_id: Option<u64>,
         expected_guild_id: u64,
@@ -248,50 +282,6 @@ impl DiscordAdapter {
             serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
                 if resp.status_code.as_u16() == 404
         )
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn view_components_rendern_scam_revoke_button_wie_python() {
-        let spec = ViewSpec::ScamRevoke {
-            verdict_id: 42,
-            channel_login: "earlysalty".to_string(),
-            chatter_login: "sophiaa_star".to_string(),
-            action_taken: "banned".to_string(),
-        };
-
-        assert_eq!(
-            DiscordAdapter::view_components(&spec),
-            json!([{
-                "type": 1,
-                "components": [{
-                    "type": 2,
-                    "style": 4,
-                    "label": "Rückgängig",
-                    "custom_id": "scam-revoke:42",
-                }],
-            }])
-        );
-    }
-
-    #[test]
-    fn move_voice_channel_precheck_liefert_404_semantik() {
-        assert_eq!(
-            DiscordAdapter::move_voice_channel_precheck(None, 1),
-            Err(PortError::ChannelNotFound)
-        );
-        assert_eq!(
-            DiscordAdapter::move_voice_channel_precheck(Some(2), 1),
-            Err(PortError::ChannelNotFound)
-        );
-        assert_eq!(
-            DiscordAdapter::move_voice_channel_precheck(Some(1), 1),
-            Ok(())
-        );
     }
 }
 
@@ -967,4 +957,48 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
             "url": a.url,
         })).collect::<Vec<_>>(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn view_components_rendern_scam_revoke_button_wie_python() {
+        let spec = ViewSpec::ScamRevoke {
+            verdict_id: 42,
+            channel_login: "earlysalty".to_string(),
+            chatter_login: "sophiaa_star".to_string(),
+            action_taken: "banned".to_string(),
+        };
+
+        assert_eq!(
+            DiscordAdapter::view_components(&spec),
+            json!([{
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 4,
+                    "label": "Rückgängig",
+                    "custom_id": "scam-revoke:42",
+                }],
+            }])
+        );
+    }
+
+    #[test]
+    fn move_voice_channel_precheck_liefert_404_semantik() {
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(None, 1),
+            Err(PortError::ChannelNotFound)
+        );
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(Some(2), 1),
+            Err(PortError::ChannelNotFound)
+        );
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(Some(1), 1),
+            Ok(())
+        );
+    }
 }

@@ -30,6 +30,7 @@ pub mod names;
 pub mod oauth;
 pub mod oauth_state;
 pub mod public;
+pub mod reaction_roles;
 pub mod repo_activity;
 pub mod server_stats;
 pub mod session;

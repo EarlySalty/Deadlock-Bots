@@ -831,6 +831,121 @@
             border: 1px solid rgba(248, 113, 113, 0.3);
             color: #fca5a5;
         }
+        .reaction-role-layout {
+            display: grid;
+            grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.7fr);
+            gap: 1rem;
+            align-items: start;
+        }
+        .reaction-role-table-wrap {
+            overflow-x: auto;
+            border: 1px solid rgba(255,255,255,0.08);
+            border-radius: 10px;
+            background: rgba(255,255,255,0.015);
+        }
+        .reaction-role-table {
+            width: 100%;
+            border-collapse: collapse;
+            min-width: 760px;
+        }
+        .reaction-role-table th,
+        .reaction-role-table td {
+            padding: 0.55rem 0.5rem;
+            border-bottom: 1px solid rgba(255,255,255,0.06);
+            text-align: left;
+            vertical-align: middle;
+            font-size: 13px;
+        }
+        .reaction-role-table th {
+            color: #9aa0a6;
+            font-weight: 600;
+            background: rgba(255,255,255,0.03);
+        }
+        .reaction-role-table tr:last-child td {
+            border-bottom: none;
+        }
+        .reaction-role-row {
+            cursor: pointer;
+        }
+        .reaction-role-row:hover,
+        .reaction-role-row.active {
+            background: rgba(125,211,252,0.08);
+        }
+        .reaction-role-form label {
+            display: flex;
+            flex-direction: column;
+            gap: 0.35rem;
+            color: #cbd5e1;
+            font-size: 14px;
+        }
+        .reaction-role-form input[type="text"],
+        .reaction-role-form input[type="number"],
+        .reaction-role-form textarea {
+            padding: 0.7rem 0.9rem;
+            border-radius: 10px;
+            border: 1px solid rgba(255,255,255,0.1);
+            background: rgba(255,255,255,0.03);
+            color: #fff;
+        }
+        .reaction-role-form textarea {
+            min-height: 220px;
+            resize: vertical;
+            line-height: 1.4;
+        }
+        .reaction-role-switch {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.2rem;
+        }
+        .reaction-role-actions {
+            display: flex;
+            gap: 0.6rem;
+            flex-wrap: wrap;
+            margin-top: 0.75rem;
+        }
+        .reaction-role-hint {
+            display: block;
+            color: #9aa0a6;
+            font-size: 12px;
+            margin-top: 0.35rem;
+        }
+        .reaction-role-warning {
+            display: none;
+            color: #fcd34d;
+            border: 1px solid rgba(252,211,77,0.28);
+            background: rgba(252,211,77,0.08);
+            border-radius: 8px;
+            padding: 0.55rem 0.65rem;
+            font-size: 13px;
+        }
+        .reaction-role-warning.visible {
+            display: block;
+        }
+        .reaction-role-message {
+            display: none;
+            padding: 0.6rem 0.75rem;
+            border-radius: 10px;
+            font-size: 13px;
+            margin-bottom: 0.75rem;
+        }
+        .reaction-role-message.success {
+            display: block;
+            background: rgba(74, 222, 128, 0.08);
+            border: 1px solid rgba(74, 222, 128, 0.3);
+            color: #86efac;
+        }
+        .reaction-role-message.error {
+            display: block;
+            background: rgba(248, 113, 113, 0.08);
+            border: 1px solid rgba(248, 113, 113, 0.3);
+            color: #fca5a5;
+        }
+        @media (max-width: 980px) {
+            .reaction-role-layout {
+                grid-template-columns: 1fr;
+            }
+        }
         .stats-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -1720,6 +1835,86 @@
             </div>
         </section>
 
+        <section>
+            <div class="section-header">
+                <h2>Reaction-Rollen</h2>
+                <div class="section-actions">
+                    <button id="reaction-role-new">Neu</button>
+                </div>
+            </div>
+            <div class="reaction-role-layout" style="margin-top:1rem;">
+                <div class="reaction-role-table-wrap">
+                    <table class="reaction-role-table">
+                        <thead>
+                            <tr>
+                                <th>Nachricht</th>
+                                <th>Emoji</th>
+                                <th>Rolle</th>
+                                <th>DM</th>
+                                <th>Bei Reaktion-Entfernen Rolle entziehen</th>
+                                <th>Status</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="reaction-role-rows"></tbody>
+                    </table>
+                </div>
+                <div class="reaction-role-form card">
+                    <div class="reaction-role-message" id="reaction-role-message"></div>
+                    <input type="hidden" id="reaction-role-id">
+                    <input type="hidden" id="reaction-role-guild-id" value="1289721245281292288">
+                    <div class="form-grid" style="display:grid;grid-template-columns:1fr 1fr;gap:0.75rem;">
+                        <label>
+                            Quell-Channel-ID
+                            <input type="text" id="reaction-role-source-channel-id">
+                        </label>
+                        <label>
+                            Nachrichten-ID
+                            <input type="text" id="reaction-role-message-id">
+                        </label>
+                        <label>
+                            Emoji
+                            <input type="text" id="reaction-role-emoji">
+                        </label>
+                        <label>
+                            Rollen-ID
+                            <input type="text" id="reaction-role-role-id">
+                        </label>
+                        <label>
+                            DM senden
+                            <span class="reaction-role-switch">
+                                <input type="checkbox" id="reaction-role-dm-enabled">
+                            </span>
+                        </label>
+                        <label>
+                            Rolle bei Entfernen entziehen
+                            <span class="reaction-role-switch">
+                                <input type="checkbox" id="reaction-role-remove-on-unreact" checked>
+                            </span>
+                        </label>
+                        <label style="grid-column:1 / -1;">
+                            DM-Text
+                            <textarea id="reaction-role-dm-text"></textarea>
+                            <small class="reaction-role-hint">Tipp: &lt;#KANAL-ID&gt; wird zum klickbaren Link.</small>
+                        </label>
+                        <label style="grid-column:1 / -1;">
+                            Bestehende Reaktionen nachverarbeiten
+                            <span class="reaction-role-switch">
+                                <input type="checkbox" id="reaction-role-backfill">
+                            </span>
+                        </label>
+                    </div>
+                    <div class="reaction-role-warning" id="reaction-role-backfill-warning">
+                        Achtung: Backfill verschickt echte DMs an alle, die bereits reagiert haben.
+                    </div>
+                    <div class="reaction-role-actions">
+                        <button id="reaction-role-save" style="background:#1c7ed6;color:#fff;">Speichern</button>
+                        <button id="reaction-role-delete" style="background:#b91c1c;color:#fff;">Löschen</button>
+                    </div>
+                </div>
+            </div>
+        </section>
+
     </div><!-- end tab: deadlock -->
 
     <!-- ════════════════════════════════════════════════
@@ -1896,6 +2091,22 @@
     const heroBuildRows = document.getElementById('deadlock-build-rows');
     const heroBuildAddBtn = document.getElementById('deadlock-build-add');
     const heroBuildEmpty = document.getElementById('deadlock-build-empty');
+    const reactionRoleRows = document.getElementById('reaction-role-rows');
+    const reactionRoleMessage = document.getElementById('reaction-role-message');
+    const reactionRoleNewBtn = document.getElementById('reaction-role-new');
+    const reactionRoleSaveBtn = document.getElementById('reaction-role-save');
+    const reactionRoleDeleteBtn = document.getElementById('reaction-role-delete');
+    const reactionRoleIdInput = document.getElementById('reaction-role-id');
+    const reactionRoleGuildIdInput = document.getElementById('reaction-role-guild-id');
+    const reactionRoleSourceChannelInput = document.getElementById('reaction-role-source-channel-id');
+    const reactionRoleMessageIdInput = document.getElementById('reaction-role-message-id');
+    const reactionRoleEmojiInput = document.getElementById('reaction-role-emoji');
+    const reactionRoleRoleIdInput = document.getElementById('reaction-role-role-id');
+    const reactionRoleDmEnabledInput = document.getElementById('reaction-role-dm-enabled');
+    const reactionRoleDmTextInput = document.getElementById('reaction-role-dm-text');
+    const reactionRoleRemoveInput = document.getElementById('reaction-role-remove-on-unreact');
+    const reactionRoleBackfillInput = document.getElementById('reaction-role-backfill');
+    const reactionRoleBackfillWarning = document.getElementById('reaction-role-backfill-warning');
     const voiceHistoryUser = document.getElementById('voice-history-user');
     const voiceUserApply = document.getElementById('voice-user-apply');
     const voiceUserSummary = document.getElementById('voice-user-summary');
@@ -1979,6 +2190,25 @@
     let selectedHeroId = null;
     let heroesLoading = false;
     let heroBuildDraftRows = [];
+    const REACTION_ROLE_DEFAULT_DM_TEXT = `Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.
+
+Kurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.
+
+Damit wir die Teams gut zusammenbekommen, schreib uns am besten direkt in <#1520842755037855975>:
+• deinen aktuellen Rang
+• deine bevorzugte Lane/Rolle
+• wann du grob Zeit hast (Wochentag/Uhrzeit)
+
+Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
+    const REACTION_ROLE_DEFAULTS = {
+        guild_id: '1289721245281292288',
+        source_channel_id: '1371952264620806214',
+        message_id: '1520838367611322478',
+        emoji: '✅',
+        role_id: '1520849762851618817',
+    };
+    let reactionRoleMappings = [];
+    let selectedReactionRoleId = null;
     if (authLogoutLink) {
         authLogoutLink.style.display = 'none';
     }
@@ -2443,6 +2673,177 @@
         }
     }
 
+    // ─── Reaction-Rollen (Admin) ─────────────────────────────
+    function setReactionRoleMessage(text, type='success') {
+        if (!reactionRoleMessage) return;
+        reactionRoleMessage.textContent = text || '';
+        reactionRoleMessage.className = text
+            ? 'reaction-role-message ' + (type === 'error' ? 'error' : 'success')
+            : 'reaction-role-message';
+    }
+
+    function updateReactionRoleBackfillWarning() {
+        if (!reactionRoleBackfillWarning || !reactionRoleBackfillInput) return;
+        reactionRoleBackfillWarning.classList.toggle('visible', !!reactionRoleBackfillInput.checked);
+    }
+
+    function clearReactionRoleForm() {
+        selectedReactionRoleId = null;
+        if (reactionRoleIdInput) reactionRoleIdInput.value = '';
+        if (reactionRoleGuildIdInput) reactionRoleGuildIdInput.value = REACTION_ROLE_DEFAULTS.guild_id;
+        if (reactionRoleSourceChannelInput) reactionRoleSourceChannelInput.value = REACTION_ROLE_DEFAULTS.source_channel_id;
+        if (reactionRoleMessageIdInput) reactionRoleMessageIdInput.value = REACTION_ROLE_DEFAULTS.message_id;
+        if (reactionRoleEmojiInput) reactionRoleEmojiInput.value = REACTION_ROLE_DEFAULTS.emoji;
+        if (reactionRoleRoleIdInput) reactionRoleRoleIdInput.value = REACTION_ROLE_DEFAULTS.role_id;
+        if (reactionRoleDmEnabledInput) reactionRoleDmEnabledInput.checked = true;
+        if (reactionRoleDmTextInput) reactionRoleDmTextInput.value = REACTION_ROLE_DEFAULT_DM_TEXT;
+        if (reactionRoleRemoveInput) reactionRoleRemoveInput.checked = true;
+        if (reactionRoleBackfillInput) reactionRoleBackfillInput.checked = true;
+        if (reactionRoleDeleteBtn) reactionRoleDeleteBtn.disabled = true;
+        setReactionRoleMessage('', 'success');
+        updateReactionRoleBackfillWarning();
+        renderReactionRoles();
+    }
+
+    function fillReactionRoleForm(mapping) {
+        if (!mapping) {
+            clearReactionRoleForm();
+            return;
+        }
+        selectedReactionRoleId = mapping.id || null;
+        if (reactionRoleIdInput) reactionRoleIdInput.value = mapping.id || '';
+        if (reactionRoleGuildIdInput) reactionRoleGuildIdInput.value = mapping.guild_id || REACTION_ROLE_DEFAULTS.guild_id;
+        if (reactionRoleSourceChannelInput) reactionRoleSourceChannelInput.value = mapping.source_channel_id || '';
+        if (reactionRoleMessageIdInput) reactionRoleMessageIdInput.value = mapping.message_id || '';
+        if (reactionRoleEmojiInput) reactionRoleEmojiInput.value = mapping.emoji || '';
+        if (reactionRoleRoleIdInput) reactionRoleRoleIdInput.value = mapping.role_id || '';
+        if (reactionRoleDmEnabledInput) reactionRoleDmEnabledInput.checked = !!mapping.dm_enabled;
+        if (reactionRoleDmTextInput) reactionRoleDmTextInput.value = mapping.dm_text || '';
+        if (reactionRoleRemoveInput) reactionRoleRemoveInput.checked = !!mapping.remove_on_unreact;
+        if (reactionRoleBackfillInput) reactionRoleBackfillInput.checked = !!mapping.backfill_pending;
+        if (reactionRoleDeleteBtn) reactionRoleDeleteBtn.disabled = false;
+        setReactionRoleMessage('', 'success');
+        updateReactionRoleBackfillWarning();
+        renderReactionRoles();
+    }
+
+    function reactionRoleStatus(mapping) {
+        if (!mapping.active) return 'Inaktiv';
+        if (mapping.backfill_pending) return 'Backfill offen';
+        return 'Aktiv';
+    }
+
+    function renderReactionRoles() {
+        if (!reactionRoleRows) return;
+        reactionRoleRows.innerHTML = '';
+        if (!reactionRoleMappings.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.textContent = '-';
+            td.style.color = '#9aa0a6';
+            tr.appendChild(td);
+            reactionRoleRows.appendChild(tr);
+            return;
+        }
+        reactionRoleMappings.forEach((mapping) => {
+            const tr = document.createElement('tr');
+            tr.className = 'reaction-role-row' + (selectedReactionRoleId === mapping.id ? ' active' : '');
+            const values = [
+                mapping.message_id || '',
+                mapping.emoji || '',
+                mapping.role_id || '',
+                mapping.dm_enabled ? 'an' : 'aus',
+                mapping.remove_on_unreact ? 'ja' : 'nein',
+                reactionRoleStatus(mapping),
+            ];
+            values.forEach((value) => {
+                const td = document.createElement('td');
+                td.textContent = String(value);
+                tr.appendChild(td);
+            });
+            const actionTd = document.createElement('td');
+            const deleteBtn = document.createElement('button');
+            deleteBtn.type = 'button';
+            deleteBtn.textContent = 'Löschen';
+            deleteBtn.style.background = '#7f1d1d';
+            deleteBtn.style.color = '#fff';
+            deleteBtn.addEventListener('click', (event) => {
+                event.stopPropagation();
+                deleteReactionRole(mapping.id);
+            });
+            actionTd.appendChild(deleteBtn);
+            tr.appendChild(actionTd);
+            tr.addEventListener('click', () => fillReactionRoleForm(mapping));
+            reactionRoleRows.appendChild(tr);
+        });
+    }
+
+    async function loadReactionRoles() {
+        if (!reactionRoleRows) return;
+        try {
+            const mappings = await fetchJSON('/api/reaction-roles');
+            reactionRoleMappings = Array.isArray(mappings) ? mappings : [];
+            if (selectedReactionRoleId) {
+                const selected = reactionRoleMappings.find((mapping) => mapping.id === selectedReactionRoleId);
+                if (selected) {
+                    fillReactionRoleForm(selected);
+                } else {
+                    clearReactionRoleForm();
+                }
+            } else {
+                renderReactionRoles();
+            }
+        } catch (err) {
+            setReactionRoleMessage(err.message || 'Laden fehlgeschlagen', 'error');
+        }
+    }
+
+    function collectReactionRolePayload() {
+        const id = reactionRoleIdInput && reactionRoleIdInput.value ? reactionRoleIdInput.value.trim() : '';
+        return {
+            id: id || null,
+            guild_id: reactionRoleGuildIdInput ? reactionRoleGuildIdInput.value.trim() : REACTION_ROLE_DEFAULTS.guild_id,
+            source_channel_id: reactionRoleSourceChannelInput ? reactionRoleSourceChannelInput.value.trim() : '',
+            message_id: reactionRoleMessageIdInput ? reactionRoleMessageIdInput.value.trim() : '',
+            emoji: reactionRoleEmojiInput ? reactionRoleEmojiInput.value.trim() : '',
+            role_id: reactionRoleRoleIdInput ? reactionRoleRoleIdInput.value.trim() : '',
+            dm_enabled: reactionRoleDmEnabledInput ? !!reactionRoleDmEnabledInput.checked : false,
+            dm_text: reactionRoleDmTextInput ? reactionRoleDmTextInput.value : '',
+            remove_on_unreact: reactionRoleRemoveInput ? !!reactionRoleRemoveInput.checked : true,
+            backfill: reactionRoleBackfillInput ? !!reactionRoleBackfillInput.checked : false,
+        };
+    }
+
+    async function saveReactionRole(ev) {
+        if (ev) ev.preventDefault();
+        try {
+            const payload = collectReactionRolePayload();
+            const res = await fetchJSON('/api/reaction-roles', {
+                method: 'POST',
+                body: JSON.stringify(payload),
+            });
+            selectedReactionRoleId = res.mapping ? res.mapping.id : selectedReactionRoleId;
+            setReactionRoleMessage('Gespeichert.', 'success');
+            await loadReactionRoles();
+        } catch (err) {
+            setReactionRoleMessage(err.message || 'Speichern fehlgeschlagen', 'error');
+        }
+    }
+
+    async function deleteReactionRole(id = selectedReactionRoleId) {
+        if (!id) return;
+        try {
+            await fetchJSON(`/api/reaction-roles/${id}`, { method: 'DELETE' });
+            selectedReactionRoleId = null;
+            clearReactionRoleForm();
+            setReactionRoleMessage('Gelöscht.', 'success');
+            await loadReactionRoles();
+        } catch (err) {
+            setReactionRoleMessage(err.message || 'Löschen fehlgeschlagen', 'error');
+        }
+    }
+
     function formatBytes(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
             return '-';
@@ -2696,6 +3097,24 @@
             }
             renderHeroList();
         });
+    }
+    if (reactionRoleNewBtn) {
+        reactionRoleNewBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            clearReactionRoleForm();
+        });
+    }
+    if (reactionRoleSaveBtn) {
+        reactionRoleSaveBtn.addEventListener('click', saveReactionRole);
+    }
+    if (reactionRoleDeleteBtn) {
+        reactionRoleDeleteBtn.addEventListener('click', (ev) => {
+            ev.preventDefault();
+            deleteReactionRole();
+        });
+    }
+    if (reactionRoleBackfillInput) {
+        reactionRoleBackfillInput.addEventListener('change', updateReactionRoleBackfillWarning);
     }
     if (logsRefreshButton) {
         logsRefreshButton.addEventListener('click', () => {
@@ -5721,6 +6140,7 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 }
                 if (target === 'deadlock') {
                     if (typeof loadDeadlockHeroes === 'function') loadDeadlockHeroes();
+                    if (typeof loadReactionRoles === 'function') loadReactionRoles();
                 }
                 if (target === 'logs') {
                     ensureLogsLoaded();
@@ -5742,6 +6162,8 @@ async function fetchStandaloneLogs(key, limit = 200) {
     loadCoNetwork();
     setInterval(loadCoNetwork, 120000);
     loadDeadlockHeroes();
+    clearReactionRoleForm();
+    loadReactionRoles();
 
     // Server Stats Initial Load
     loadServerStats();

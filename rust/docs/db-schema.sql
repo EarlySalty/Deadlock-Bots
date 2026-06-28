@@ -315,6 +315,12 @@ CREATE TABLE coaching_requests (
               updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
             , scheduled_slot TEXT, assigned_coach_id TEXT, reserved_until INTEGER);
 
+-- table: coaching_coach_rotation
+CREATE TABLE coaching_coach_rotation (
+         coach_id TEXT PRIMARY KEY,
+         last_assigned_at INTEGER NOT NULL DEFAULT 0
+     );
+
 -- table: coaching_sessions
 CREATE TABLE coaching_sessions (
           id TEXT PRIMARY KEY,

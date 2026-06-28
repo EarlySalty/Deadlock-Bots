@@ -7,7 +7,8 @@ use std::sync::Arc;
 
 use serenity::all::{
     Context, EventHandler, GatewayIntents, GuildChannel, GuildId, GuildMemberUpdateEvent,
-    InviteCreateEvent, InviteDeleteEvent, Member, Message, Permissions, Ready, User, VoiceState,
+    InviteCreateEvent, InviteDeleteEvent, Member, Message, Permissions, Reaction, ReactionType,
+    Ready, User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -25,6 +26,7 @@ struct Handler {
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
     invite_tracker: Arc<InviteTracker>,
+    reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
     feature_module_count: usize,
     command_prefix: String,
 }
@@ -52,6 +54,71 @@ fn screening_completed_from_member_update(
     member_screening_completed_event(guild_id, user_id, before_pending, after_pending)
 }
 
+fn is_self_reaction_user(
+    user_id: UserId,
+    current_user_id: UserId,
+    application_id: Option<u64>,
+) -> bool {
+    user_id == current_user_id || application_id == Some(user_id.get())
+}
+
+#[async_trait]
+pub trait ReactionRoleGatewayPort: Send + Sync {
+    async fn reaction_add(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        user_id: u64,
+        emoji: ReactionType,
+        is_bot: bool,
+    );
+
+    async fn reaction_remove(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        user_id: u64,
+        emoji: ReactionType,
+        is_bot: bool,
+    );
+}
+
+async fn reaction_user_is_bot(
+    ctx: &Context,
+    guild_id: Option<GuildId>,
+    user_id: UserId,
+    member_is_bot: Option<bool>,
+) -> bool {
+    if is_self_reaction_user(
+        user_id,
+        ctx.cache.current_user().id,
+        ctx.http.application_id().map(|id| id.get()),
+    ) {
+        return true;
+    }
+    if let Some(is_bot) = member_is_bot {
+        return is_bot;
+    }
+    if let Some(guild_id) = guild_id {
+        let cached = ctx
+            .cache
+            .guild(guild_id)
+            .and_then(|guild| guild.members.get(&user_id).map(|member| member.user.bot));
+        if let Some(is_bot) = cached {
+            return is_bot;
+        }
+    }
+    match ctx.http.get_user(user_id).await {
+        Ok(user) => user.bot,
+        Err(err) => {
+            tracing::debug!(%err, user_id = user_id.get(), "Reaction-User nicht auflösbar; Event wird verarbeitet");
+            false
+        }
+    }
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
@@ -72,6 +139,45 @@ impl EventHandler for Handler {
 
     async fn interaction_create(&self, _ctx: Context, interaction: serenity::all::Interaction) {
         crate::dispatch::dispatch(&self.adapter, &self.router, &interaction).await;
+    }
+
+    async fn reaction_add(&self, ctx: Context, add: Reaction) {
+        let Some(port) = &self.reaction_roles else {
+            return;
+        };
+        let (Some(guild_id), Some(user_id)) = (add.guild_id, add.user_id) else {
+            return;
+        };
+        let member_is_bot = add.member.as_ref().map(|member| member.user.bot);
+        let is_bot = reaction_user_is_bot(&ctx, add.guild_id, user_id, member_is_bot).await;
+        port.reaction_add(
+            guild_id.get(),
+            add.channel_id.get(),
+            add.message_id.get(),
+            user_id.get(),
+            add.emoji,
+            is_bot,
+        )
+        .await;
+    }
+
+    async fn reaction_remove(&self, ctx: Context, removed: Reaction) {
+        let Some(port) = &self.reaction_roles else {
+            return;
+        };
+        let (Some(guild_id), Some(user_id)) = (removed.guild_id, removed.user_id) else {
+            return;
+        };
+        let is_bot = reaction_user_is_bot(&ctx, removed.guild_id, user_id, None).await;
+        port.reaction_remove(
+            guild_id.get(),
+            removed.channel_id.get(),
+            removed.message_id.get(),
+            user_id.get(),
+            removed.emoji,
+            is_bot,
+        )
+        .await;
     }
 
     async fn message(&self, ctx: Context, message: Message) {
@@ -336,6 +442,43 @@ impl EventHandler for Handler {
     }
 }
 
+pub struct GatewayClientOptions {
+    pub reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
+    pub db: dl_db::Db,
+    pub feature_module_count: usize,
+    pub command_prefix: String,
+}
+
+/// Baut den serenity-Client. Aufrufer entscheidet über den Start
+/// (DL_BOT_GATEWAY=1) und besitzt die Laufzeit-Task.
+pub async fn build_client(
+    token: &str,
+    adapter: Arc<DiscordAdapter>,
+    dispatcher: Arc<Dispatcher>,
+    router: Arc<InteractionRouter>,
+    options: GatewayClientOptions,
+) -> serenity::Result<serenity::Client> {
+    let intents = GatewayIntents::GUILDS
+        | GatewayIntents::GUILD_MEMBERS
+        | GatewayIntents::GUILD_VOICE_STATES
+        | GatewayIntents::GUILD_MESSAGES
+        | GatewayIntents::GUILD_MESSAGE_REACTIONS
+        | GatewayIntents::GUILD_INVITES
+        | GatewayIntents::DIRECT_MESSAGES
+        | GatewayIntents::MESSAGE_CONTENT;
+    serenity::Client::builder(token, intents)
+        .event_handler(Handler {
+            adapter,
+            dispatcher,
+            router,
+            invite_tracker: Arc::new(InviteTracker::with_db(options.db)),
+            reaction_roles: options.reaction_roles,
+            feature_module_count: options.feature_module_count,
+            command_prefix: options.command_prefix,
+        })
+        .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -375,34 +518,23 @@ mod tests {
             })
         ));
     }
-}
 
-/// Baut den serenity-Client. Aufrufer entscheidet über den Start
-/// (DL_BOT_GATEWAY=1) und besitzt die Laufzeit-Task.
-pub async fn build_client(
-    token: &str,
-    adapter: Arc<DiscordAdapter>,
-    dispatcher: Arc<Dispatcher>,
-    router: Arc<InteractionRouter>,
-    db: dl_db::Db,
-    feature_module_count: usize,
-    command_prefix: String,
-) -> serenity::Result<serenity::Client> {
-    let intents = GatewayIntents::GUILDS
-        | GatewayIntents::GUILD_MEMBERS
-        | GatewayIntents::GUILD_VOICE_STATES
-        | GatewayIntents::GUILD_MESSAGES
-        | GatewayIntents::GUILD_INVITES
-        | GatewayIntents::DIRECT_MESSAGES
-        | GatewayIntents::MESSAGE_CONTENT;
-    serenity::Client::builder(token, intents)
-        .event_handler(Handler {
-            adapter,
-            dispatcher,
-            router,
-            invite_tracker: Arc::new(InviteTracker::with_db(db)),
-            feature_module_count,
-            command_prefix,
-        })
-        .await
+    #[test]
+    fn reaction_self_ignore_erkennt_bot_id_und_application_id() {
+        assert!(is_self_reaction_user(
+            UserId::new(10),
+            UserId::new(10),
+            Some(20)
+        ));
+        assert!(is_self_reaction_user(
+            UserId::new(20),
+            UserId::new(10),
+            Some(20)
+        ));
+        assert!(!is_self_reaction_user(
+            UserId::new(30),
+            UserId::new(10),
+            Some(20)
+        ));
+    }
 }

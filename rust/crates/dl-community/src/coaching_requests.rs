@@ -24,7 +24,7 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use rusqlite::OptionalExtension;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 pub const COACHING_PANEL_CHANNEL_ID: u64 = 1494373349944459355;
 pub const COACH_ROLE_ID: u64 = 1494372744286965941;
@@ -38,8 +38,10 @@ pub const COACHING_FEEDBACK_CHANNEL_ID: u64 = 1494756126644895885;
 /// Reward-Rolle gilt 5 Tage (wie Python: `5 * 24 * 60 * 60`).
 pub const REWARD_ROLE_DURATION_SECS: i64 = 5 * 24 * 60 * 60;
 pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
+/// Coaches die NICHT automatisch per Round-Robin zugewiesen werden (claimen bleibt erlaubt).
+pub const AUTO_ASSIGN_OPTOUT_IDS: &[u64] = &[907263048715239456];
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
-pub const ROLE_EXPIRY_HOURS: i64 = 48;
+pub const ROLE_EXPIRY_HOURS: i64 = 168;
 pub const COACHING_WEBSITE_URL: &str = "https://deutsche-deadlock-community.de/coaching";
 pub const COACHING_WEBSITE_CTA_TEXT: &str = "👉 **Bereit loszulegen?** Stell deine Coaching-Anfrage direkt über den Button unten auf unserer Website — dort füllst du in einer Minute alles aus, der Rest läuft von selbst.";
 pub const COACHING_WEBSITE_BUTTON_LABEL: &str = "Coaching-Anfrage starten";
@@ -65,13 +67,13 @@ Keine Erklärung, kein weiterer Text."#;
 // ── Pure Bausteine ─────────────────────────────────────────────────────────
 
 /// Fairste Coach-Wahl (wie pick_fair_coach): am längsten nicht zugewiesen,
-/// dann wenigste aktive Sessions, dann kleinste ID. Owner/Bots filtert
+/// dann kleinste ID. Owner/Bots filtert
 /// der Aufrufer beim Kandidaten-Sammeln.
-pub fn pick_fair_coach(candidates: &[(u64, i64, i64)]) -> Option<u64> {
+pub fn pick_fair_coach(candidates: &[(u64, i64)]) -> Option<u64> {
     candidates
         .iter()
-        .min_by_key(|(id, last_reserved, active)| (*last_reserved, *active, *id))
-        .map(|(id, _, _)| *id)
+        .min_by_key(|(id, last_assigned_at)| (*last_assigned_at, *id))
+        .map(|(id, _)| *id)
 }
 
 pub fn normalize_inline(value: &str, fallback: &str, limit: usize) -> String {
@@ -576,42 +578,38 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         }
     }
 
+    async fn auto_assign_stats(&self) -> Vec<(u64, i64)> {
+        let mut coach_ids = self.port.coach_member_ids(self.guild_id).await;
+        coach_ids.retain(|id| !AUTO_ASSIGN_OPTOUT_IDS.contains(id));
+        self.db
+            .read(move |conn| {
+                let mut result = Vec::new();
+                for id in coach_ids {
+                    let coach_id = id.to_string();
+                    let last_assigned_at: i64 = conn
+                        .query_row(
+                            "SELECT COALESCE(last_assigned_at, 0)
+                               FROM coaching_coach_rotation WHERE coach_id = ?1",
+                            [coach_id],
+                            |row| row.get(0),
+                        )
+                        .optional()?
+                        .unwrap_or(0);
+                    result.push((id, last_assigned_at));
+                }
+                Ok(result)
+            })
+            .await
+            .unwrap_or_default()
+    }
+
     /// Anfrage posten (wie _post_request_to_channel): faire Rotation +
     /// 24-h-Reservierung.
     async fn post_request(&self, request: &mut RequestData, ai_summary: String) {
         request.ai_summary = ai_summary.clone();
         let now_ts = chrono::Utc::now().timestamp();
         // Kandidaten + Rotations-Daten
-        let coach_ids = self.port.coach_member_ids(self.guild_id).await;
-        let stats: Vec<(u64, i64, i64)> = {
-            let ids = coach_ids.clone();
-            self.db
-                .read(move |conn| {
-                    let mut result = Vec::new();
-                    for id in ids {
-                        let last: i64 = conn
-                            .query_row(
-                                "SELECT COALESCE(MAX(reserved_until), 0) FROM coaching_requests
-                                  WHERE assigned_coach_id = ?1",
-                                [id],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or(0);
-                        let active: i64 = conn
-                            .query_row(
-                                "SELECT COUNT(*) FROM coaching_sessions
-                                  WHERE coach_id = ?1 AND status = 'active'",
-                                [id],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or(0);
-                        result.push((id, last, active));
-                    }
-                    Ok(result)
-                })
-                .await
-                .unwrap_or_default()
-        };
+        let stats = self.auto_assign_stats().await;
         let assigned = pick_fair_coach(&stats);
         let reserved_until = assigned.map(|_| now_ts + CLAIM_RESERVATION_HOURS * 3600);
         let embed = build_request_embed(request, assigned, reserved_until, now_ts);
@@ -633,6 +631,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         {
             Ok(message_id) => {
                 let request_id = request.id;
+                let assigned_coach_id = assigned.map(|coach| coach.to_string());
                 let _ = self
                     .db
                     .write(move |conn| {
@@ -644,13 +643,22 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                                 message_id,
                                 REQUEST_CHANNEL_ID,
                                 ai_summary,
-                                assigned,
+                                assigned_coach_id,
                                 reserved_until,
                                 chrono::Utc::now().timestamp(),
                                 request_id
                             ],
-                        )
-                        .map(|_| ())
+                        )?;
+                        if let (Some(coach), Some(last_assigned_at)) = (assigned, reserved_until) {
+                            conn.execute(
+                                "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
+                                 VALUES (?1, ?2)
+                                 ON CONFLICT(coach_id) DO UPDATE SET
+                                   last_assigned_at = excluded.last_assigned_at",
+                                rusqlite::params![coach.to_string(), last_assigned_at],
+                            )?;
+                        }
+                        Ok(())
                     })
                     .await;
                 // Website-Mirror (Python `_post_request_to_channel`:852) — mit
@@ -1363,7 +1371,7 @@ impl InteractionHandler for CoachingHandler {
                 .send_dm(
                     request.user_id,
                     &format!(
-                        "🎉 Ein Coach hat sich für deine Anfrage gemeldet!\n\n**Coach:** {coach_name}\n\nSchau in den Coaching-Channel um euch abzustimmen und das Coaching innerhalb der nächsten **{ROLE_EXPIRY_HOURS} Stunden** durchzuführen."
+                        "🎉 Ein Coach hat sich für deine Anfrage gemeldet!\n\n**Coach:** {coach_name}\n\nSchau in den Coaching-Channel um euch abzustimmen und das Coaching innerhalb der nächsten **7 Tage** durchzuführen."
                     ),
                 )
                 .await;
@@ -1654,11 +1662,13 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::OptionalExtension;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
     #[derive(Default)]
     struct MockCoachingPort {
+        coach_ids: Mutex<Vec<u64>>,
         role_ids: Mutex<HashMap<u64, Vec<u64>>>,
         admins: Mutex<HashSet<u64>>,
         names: Mutex<HashMap<u64, String>>,
@@ -1690,7 +1700,7 @@ mod tests {
         }
 
         async fn coach_member_ids(&self, _guild_id: u64) -> Vec<u64> {
-            Vec::new()
+            self.coach_ids.lock().expect("coach_ids lock").clone()
         }
 
         async fn member_role_ids(&self, _guild_id: u64, user_id: u64) -> Vec<u64> {
@@ -1847,15 +1857,178 @@ mod tests {
         .expect("session insert");
     }
 
+    fn request_data(request_id: i64, user_id: u64) -> RequestData {
+        RequestData {
+            id: request_id,
+            user_id,
+            username: format!("Player {user_id}"),
+            rank: "Archon 3".into(),
+            hero: "Haze".into(),
+            games_played: "300 / 150".into(),
+            scheduled_slot: "Montag 18:00".into(),
+            current_problems: "Lane-Phase".into(),
+            ai_summary: String::new(),
+        }
+    }
+
+    async fn rotation_last_assigned_at(db: &Db, coach_id: u64) -> i64 {
+        let coach_id = coach_id.to_string();
+        db.read(move |conn| {
+            conn.query_row(
+                "SELECT last_assigned_at FROM coaching_coach_rotation WHERE coach_id = ?1",
+                [coach_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.unwrap_or(0))
+        })
+        .await
+        .expect("rotation lookup")
+    }
+
+    async fn request_assigned_coach(db: &Db, request_id: i64) -> Option<String> {
+        db.read(move |conn| {
+            conn.query_row(
+                "SELECT assigned_coach_id FROM coaching_requests WHERE id = ?1",
+                [request_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map(|value| value.flatten())
+        })
+        .await
+        .expect("request lookup")
+    }
+
     #[test]
     fn faire_rotation() {
         // am längsten nicht zugewiesen gewinnt
-        let coaches = vec![(1u64, 100i64, 0i64), (2, 50, 3), (3, 50, 1)];
-        assert_eq!(pick_fair_coach(&coaches), Some(3)); // 50 < 100, weniger aktive als 2
+        let coaches = vec![(1u64, 100i64), (2, 50), (3, 150)];
+        assert_eq!(pick_fair_coach(&coaches), Some(2));
         assert_eq!(pick_fair_coach(&[]), None);
         // Gleichstand → kleinste ID
-        let tie = vec![(9u64, 0i64, 0i64), (4, 0, 0)];
+        let tie = vec![(9u64, 0i64), (4, 0)];
         assert_eq!(pick_fair_coach(&tie), Some(4));
+    }
+
+    #[tokio::test]
+    async fn round_robin_rotation_bleibt_nach_freigabe_dauerhaft() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        let coach_a = 10;
+        let coach_b = 20;
+        let coach_c = 30;
+        port.coach_ids
+            .lock()
+            .expect("coach_ids lock")
+            .extend([coach_a, coach_b, coach_c]);
+
+        insert_request(&db, 1, 100, "pending").await;
+        let mut request = request_data(1, 100);
+        coaching
+            .post_request(&mut request, "Analyse A".to_string())
+            .await;
+        assert_eq!(request_assigned_coach(&db, 1).await.as_deref(), Some("10"));
+        coaching.open_request_to_all(1, "manual").await;
+        assert_eq!(request_assigned_coach(&db, 1).await, None);
+
+        let first_stamp = rotation_last_assigned_at(&db, coach_a).await;
+        assert!(first_stamp > 0);
+        let stats_after_release = coaching.auto_assign_stats().await;
+        assert_eq!(
+            stats_after_release,
+            vec![(coach_a, first_stamp), (coach_b, 0), (coach_c, 0)]
+        );
+        assert_eq!(pick_fair_coach(&stats_after_release), Some(coach_b));
+
+        insert_request(&db, 2, 101, "pending").await;
+        let mut request = request_data(2, 101);
+        coaching
+            .post_request(&mut request, "Analyse B".to_string())
+            .await;
+        assert_eq!(request_assigned_coach(&db, 2).await.as_deref(), Some("20"));
+        assert_eq!(
+            pick_fair_coach(&coaching.auto_assign_stats().await),
+            Some(coach_c)
+        );
+
+        insert_request(&db, 3, 102, "pending").await;
+        let mut request = request_data(3, 102);
+        coaching
+            .post_request(&mut request, "Analyse C".to_string())
+            .await;
+        assert_eq!(request_assigned_coach(&db, 3).await.as_deref(), Some("30"));
+        assert_eq!(
+            pick_fair_coach(&coaching.auto_assign_stats().await),
+            Some(coach_a)
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_assign_optout_wird_nicht_gepickt_claim_bleibt_erlaubt() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        let optout = AUTO_ASSIGN_OPTOUT_IDS[0];
+        let regular = 333;
+        port.coach_ids
+            .lock()
+            .expect("coach_ids lock")
+            .extend([optout, regular]);
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
+                 VALUES (?1, 0), (?2, 999)",
+                rusqlite::params![optout.to_string(), regular.to_string()],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("rotation seed");
+
+        let stats = coaching.auto_assign_stats().await;
+        assert_eq!(stats, vec![(regular, 999)]);
+        assert_eq!(pick_fair_coach(&stats), Some(regular));
+
+        insert_request(&db, 10, 110, "pending").await;
+        let mut request = request_data(10, 110);
+        coaching
+            .post_request(&mut request, "Analyse Regular".to_string())
+            .await;
+        assert_eq!(
+            request_assigned_coach(&db, 10).await.as_deref(),
+            Some("333")
+        );
+
+        insert_request(&db, 11, 111, "analyzed").await;
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(optout, vec![COACH_ROLE_ID]);
+        let handler = CoachingHandler { coaching };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "coach_claim_11".to_string(),
+                user_id: optout,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Session mit Player gestartet!")
+        );
+        let claimed_coach: String = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT coach_id FROM coaching_sessions WHERE request_id = 11",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("claimed session");
+        assert_eq!(claimed_coach, optout.to_string());
     }
 
     #[test]
@@ -1909,10 +2082,8 @@ mod tests {
         let embed = build_panel_embed();
         assert_eq!(embed["title"], "🎮  Deadlock Coaching");
         let description = embed["description"].as_str().unwrap_or_default();
-        assert!(
-            description
-                .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt.")
-        );
+        assert!(description
+            .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt."));
         assert!(description.contains(
             "Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches."
         ));
@@ -1993,27 +2164,24 @@ mod tests {
             .await
             .expect("ban row");
         assert_eq!(banned_user, 100);
-        assert!(
-            port.removed_roles
-                .lock()
-                .expect("removed_roles lock")
-                .iter()
-                .any(|(_, user_id, role_id, _)| {
-                    *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
-                })
-        );
-        assert!(
-            port.dm_texts
-                .lock()
-                .expect("dm_texts lock")
-                .iter()
-                .any(|(user_id, text)| {
-                    *user_id == 100
-                        && text.contains(
-                            "Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.",
-                        )
-                })
-        );
+        assert!(port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .iter()
+            .any(|(_, user_id, role_id, _)| {
+                *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
+            }));
+        assert!(port
+            .dm_texts
+            .lock()
+            .expect("dm_texts lock")
+            .iter()
+            .any(|(user_id, text)| {
+                *user_id == 100
+                    && text
+                        .contains("Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.")
+            }));
     }
 
     #[tokio::test]
@@ -2035,18 +2203,16 @@ mod tests {
             .await
             .expect("session row");
         assert_eq!(status, "active");
-        assert!(
-            port.added_roles
-                .lock()
-                .expect("added_roles lock")
-                .is_empty()
-        );
-        assert!(
-            port.removed_roles
-                .lock()
-                .expect("removed_roles lock")
-                .is_empty()
-        );
+        assert!(port
+            .added_roles
+            .lock()
+            .expect("added_roles lock")
+            .is_empty());
+        assert!(port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .is_empty());
         assert!(port.dm_embeds.lock().expect("dm_embeds lock").is_empty());
     }
 
@@ -2093,34 +2259,30 @@ mod tests {
             .await
             .expect("request row");
         assert_eq!(request_status, "completed");
-        assert!(
-            port.removed_roles
-                .lock()
-                .expect("removed_roles lock")
-                .iter()
-                .any(|(_, user_id, role_id, _)| {
-                    *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
-                })
-        );
-        assert!(
-            port.added_roles
-                .lock()
-                .expect("added_roles lock")
-                .iter()
-                .any(|(_, user_id, role_id, _)| {
-                    *user_id == 100 && *role_id == COACHING_REWARD_ROLE_ID
-                })
-        );
+        assert!(port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .iter()
+            .any(|(_, user_id, role_id, _)| {
+                *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
+            }));
+        assert!(port
+            .added_roles
+            .lock()
+            .expect("added_roles lock")
+            .iter()
+            .any(|(_, user_id, role_id, _)| {
+                *user_id == 100 && *role_id == COACHING_REWARD_ROLE_ID
+            }));
         let embeds = port.dm_embeds.lock().expect("dm_embeds lock");
         assert_eq!(embeds.len(), 1);
         assert_eq!(embeds[0].0, 100);
         assert_eq!(embeds[0].1["title"], "🎮 Coaching abgeschlossen!");
-        assert!(
-            embeds[0].1["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("**CoachName**")
-        );
+        assert!(embeds[0].1["description"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("**CoachName**"));
     }
 
     #[tokio::test]
@@ -2136,18 +2298,16 @@ mod tests {
 
         coaching.scan_survey_sessions().await;
 
-        assert!(
-            port.added_roles
-                .lock()
-                .expect("added_roles lock")
-                .is_empty()
-        );
-        assert!(
-            port.removed_roles
-                .lock()
-                .expect("removed_roles lock")
-                .is_empty()
-        );
+        assert!(port
+            .added_roles
+            .lock()
+            .expect("added_roles lock")
+            .is_empty());
+        assert!(port
+            .removed_roles
+            .lock()
+            .expect("removed_roles lock")
+            .is_empty());
         assert_eq!(port.dm_embeds.lock().expect("dm_embeds lock").len(), 1);
     }
 
@@ -2183,12 +2343,11 @@ mod tests {
             reply.content.as_deref(),
             Some("✅ Session mit Player gestartet!")
         );
-        assert!(
-            port.added_roles
-                .lock()
-                .expect("added_roles lock")
-                .is_empty()
-        );
+        assert!(port
+            .added_roles
+            .lock()
+            .expect("added_roles lock")
+            .is_empty());
     }
 
     #[test]

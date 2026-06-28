@@ -225,6 +225,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
+    let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
+        Arc::new(db.clone()),
+        Arc::new(modglue::ReactionRoleGlue {
+            adapter: adapter.clone(),
+        }),
+    );
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
@@ -907,9 +913,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter.clone(),
             dispatcher.clone(),
             router.clone(),
-            db.clone(),
-            master::FEATURE_MODULES.len(),
-            env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+            dl_discord::gateway::GatewayClientOptions {
+                reaction_roles: Some(Arc::new(modglue::ReactionRoleGatewayGlue {
+                    service: reaction_roles.clone(),
+                })),
+                db: db.clone(),
+                feature_module_count: master::FEATURE_MODULES.len(),
+                command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+            },
         )
         .await
         .context("Gateway-Client bauen")?;
@@ -918,6 +929,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
         dl_bridges::steam::spawn_panel_restore(steam_client.clone(), db.clone(), adapter.clone());
+        let reaction_backfill = reaction_roles.clone();
+        tokio::spawn(async move {
+            if let Err(err) = reaction_backfill.run_pending_backfills().await {
+                tracing::warn!(%err, "Reaction-Role-Backfill fehlgeschlagen");
+            }
+        });
         tracing::warn!(
             "Gateway AKTIV — sicherstellen, dass der Python-Bot die Events abgegeben hat"
         );

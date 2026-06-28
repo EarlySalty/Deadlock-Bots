@@ -145,7 +145,36 @@ impl Db {
 
 /// Voller Produktions-Schema-Dump (Vertrag). Wird in [`Db::bootstrap_schema`]
 /// idempotent eingespielt.
-const SCHEMA_DUMP: &str = include_str!("../../../docs/db-schema.sql");
+const SCHEMA_DUMP: &str = concat!(
+    include_str!("../../../docs/db-schema.sql"),
+    "\n",
+    r#"
+CREATE TABLE reaction_role_mappings(
+  id                INTEGER PRIMARY KEY AUTOINCREMENT,
+  guild_id          INTEGER NOT NULL,
+  source_channel_id INTEGER NOT NULL,
+  message_id        INTEGER NOT NULL,
+  emoji             TEXT    NOT NULL,
+  role_id           INTEGER NOT NULL,
+  dm_enabled        INTEGER NOT NULL DEFAULT 0,
+  dm_text           TEXT,
+  remove_on_unreact INTEGER NOT NULL DEFAULT 1,
+  backfill_pending  INTEGER NOT NULL DEFAULT 0,
+  active            INTEGER NOT NULL DEFAULT 1,
+  created_at        INTEGER NOT NULL,
+  updated_at        INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX ux_reaction_role_mappings_msg_emoji
+  ON reaction_role_mappings(message_id, emoji);
+
+CREATE TABLE reaction_role_dm_log(
+  mapping_id INTEGER NOT NULL,
+  user_id    INTEGER NOT NULL,
+  sent_at    INTEGER NOT NULL,
+  PRIMARY KEY (mapping_id, user_id)
+);
+"#
+);
 
 #[cfg(test)]
 mod tests {
@@ -245,6 +274,8 @@ mod tests {
             "text_conversation_log",
             "kv_store",
             "user_privacy",
+            "reaction_role_mappings",
+            "reaction_role_dm_log",
         ] {
             let count: i64 = db
                 .read(move |c| {

@@ -324,6 +324,15 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/deadlock/heroes/{hero_id}",
             axum::routing::delete(crate::deadlock::deadlock_delete_hero),
         )
+        .route(
+            "/api/reaction-roles",
+            get(crate::reaction_roles::reaction_roles)
+                .post(crate::reaction_roles::reaction_role_upsert),
+        )
+        .route(
+            "/api/reaction-roles/{id}",
+            axum::routing::delete(crate::reaction_roles::reaction_role_delete),
+        )
         // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
         // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
         .route(
