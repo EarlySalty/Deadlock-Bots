@@ -597,6 +597,7 @@ mod tests {
             attachment_count: 0,
             image_attachment_count: 0,
             image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
             author_created_at: 0,
             author_joined_at: None,
         }

@@ -39,6 +39,13 @@ pub enum VoiceEvent {
 }
 
 /// Normalisiertes Nachrichten-Ereignis (Bots bereits herausgefiltert).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MessageAttachment {
+    pub url: String,
+    pub content_type: String,
+    pub filename: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct MessageEvent {
     pub guild_id: Option<u64>,
@@ -71,6 +78,8 @@ pub struct MessageEvent {
     /// URLs der Bild-Anhänge (gleiche Filterung wie `image_attachment_count`)
     /// — für die Vision-Klassifikation der Moderation.
     pub image_attachment_urls: Vec<String>,
+    /// Metadaten aller Anhänge für Moderations-Cases/Logs.
+    pub attachments: Vec<MessageAttachment>,
     /// Account-Erstellung (Unix, aus der Snowflake) und Guild-Join (Cache).
     pub author_created_at: i64,
     pub author_joined_at: Option<i64>,
@@ -231,6 +240,7 @@ mod tests {
             attachment_count: 0,
             image_attachment_count: 0,
             image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
             author_created_at: 0,
             author_joined_at: None,
         });

@@ -54,6 +54,7 @@ pub const RAGEBAITER_FREE_WARNING_WINDOW_SECONDS: i64 = 1800;
 
 pub const AUTO_DELETE_CATEGORIES: [&str; 5] =
     ["nsfw_explicit", "csam", "raping", "epstein_child", "scam"];
+pub const DISABLED_CATEGORIES: [&str; 1] = ["racism"];
 
 pub const ALLOWED_VERDICTS: [&str; 4] = ["ok", "delete", "propose", "needs_context"];
 pub const ALLOWED_CATEGORIES: [&str; 11] = [
@@ -118,14 +119,25 @@ pub struct AiVerdict {
     pub category: String,
     pub confidence: f64,
     pub reason: String,
+    pub raw_json: String,
 }
 
-fn parse_error_verdict() -> AiVerdict {
+fn raw_envelope(raw_text: Option<&str>, parsed: Option<Value>) -> String {
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("response_text".to_string(), serde_json::json!(raw_text));
+    if let Some(parsed) = parsed {
+        envelope.insert("parsed".to_string(), parsed);
+    }
+    Value::Object(envelope).to_string()
+}
+
+fn parse_error_verdict(raw_text: Option<&str>) -> AiVerdict {
     AiVerdict {
         verdict: "needs_context".to_string(),
         category: "other".to_string(),
         confidence: 0.0,
         reason: "parse_error".to_string(),
+        raw_json: raw_envelope(raw_text, None),
     }
 }
 
@@ -133,16 +145,16 @@ fn parse_error_verdict() -> AiVerdict {
 /// (erstes `{` bis letztes `}`), Felder validieren und klemmen.
 pub fn parse_ai_verdict(raw_text: Option<&str>) -> AiVerdict {
     let Some(raw) = raw_text else {
-        return parse_error_verdict();
+        return parse_error_verdict(raw_text);
     };
     let (Some(open), Some(close)) = (raw.find('{'), raw.rfind('}')) else {
-        return parse_error_verdict();
+        return parse_error_verdict(raw_text);
     };
     if close <= open {
-        return parse_error_verdict();
+        return parse_error_verdict(raw_text);
     }
     let Ok(payload) = serde_json::from_str::<Value>(&raw[open..=close]) else {
-        return parse_error_verdict();
+        return parse_error_verdict(raw_text);
     };
     let mut verdict = payload
         .get("verdict")
@@ -188,6 +200,7 @@ pub fn parse_ai_verdict(raw_text: Option<&str>) -> AiVerdict {
         category,
         confidence,
         reason,
+        raw_json: raw_envelope(raw_text, Some(payload)),
     }
 }
 
@@ -207,6 +220,9 @@ pub enum ModAction {
 
 pub fn decide_action(verdict: &AiVerdict, proposal_threshold: f64) -> ModAction {
     if verdict.verdict == "needs_context" {
+        return ModAction::Ignore;
+    }
+    if DISABLED_CATEGORIES.contains(&verdict.category.as_str()) {
         return ModAction::Ignore;
     }
     if verdict.verdict == "ok" {
@@ -366,8 +382,28 @@ pub trait ModPort: Send + Sync {
     /// Review-Embed mit aimod:*-Buttons posten → message_id.
     async fn post_review(&self, case: &store::CaseDraft, buttons_case_id: &str) -> Option<u64>;
     async fn post_log(&self, text: String);
+    async fn post_case_log(
+        &self,
+        case: &store::CaseDraft,
+        _case_id: &str,
+        action: &str,
+    ) -> Option<u64> {
+        self.post_log(format!(
+            "{action} ({}, {:.0}%): <@{}> in <#{}> — {}",
+            case.category,
+            case.confidence * 100.0,
+            case.user_id,
+            case.channel_id,
+            case.reason,
+        ))
+        .await;
+        None
+    }
     /// Reine Text-DM an einen User (Original: `_send_ragebaiter_free_hint`).
     async fn send_dm(&self, user_id: u64, text: String);
+    async fn add_mod_tag(&self, _user_id: u64, _tag: &str, _reason: &str) -> bool {
+        false
+    }
     async fn fetch_context_lines(
         &self,
         _guild_id: u64,
@@ -461,6 +497,7 @@ impl AiModerator {
         guild_id: u64,
         event: &dl_discord::MessageEvent,
         verdict: &AiVerdict,
+        escalated_with_context: bool,
     ) -> bool {
         if self.required_tone_tag(event.channel_id).await.as_deref() != Some("ragebaiter_free") {
             return false;
@@ -495,8 +532,16 @@ impl AiModerator {
                 .chars()
                 .take(900)
                 .collect(),
+                raw_json: verdict.raw_json.clone(),
             };
-            self.create_proposal(guild_id, event, &escalated).await;
+            self.create_proposal(
+                guild_id,
+                event,
+                &escalated,
+                escalated_with_context,
+                "proposed",
+            )
+            .await;
         } else {
             self.port
                 .send_dm(
@@ -541,7 +586,7 @@ impl AiModerator {
             cooldown.insert(event.author_id, now);
         }
 
-        let (verdict, _escalated_with_context) =
+        let (verdict, escalated_with_context) =
             self.classify_message(guild_id, event, &image_urls).await;
 
         match decide_action(&verdict, PROPOSE_CONFIDENCE) {
@@ -549,7 +594,13 @@ impl AiModerator {
             ModAction::AutoDelete => {
                 let case_id = self
                     .store
-                    .insert_case(self.draft(guild_id, event, &verdict, "auto_delete"))
+                    .insert_case(self.draft(
+                        guild_id,
+                        event,
+                        &verdict,
+                        "auto_delete",
+                        escalated_with_context,
+                    ))
                     .await;
                 let deleted = self
                     .port
@@ -592,7 +643,14 @@ impl AiModerator {
                 tracing::info!(case_id, "AI-Moderation: Auto-Delete-Case angelegt");
             }
             ModAction::Propose => {
-                self.create_proposal(guild_id, event, &verdict).await;
+                self.create_proposal(
+                    guild_id,
+                    event,
+                    &verdict,
+                    escalated_with_context,
+                    "proposed",
+                )
+                .await;
             }
             ModAction::CountRagebait => {
                 let (count, previews) = self
@@ -627,14 +685,30 @@ impl AiModerator {
                             .chars()
                             .take(900)
                             .collect(),
+                        raw_json: verdict.raw_json.clone(),
                     };
-                    self.create_proposal(guild_id, event, &escalated).await;
+                    self.port
+                        .add_mod_tag(event.author_id, "ragebaiter", "auto: persistent_ragebait")
+                        .await;
+                    self.create_proposal(
+                        guild_id,
+                        event,
+                        &escalated,
+                        escalated_with_context,
+                        "ragebait_escalated",
+                    )
+                    .await;
                     return;
                 }
                 // Keine Eskalation: in Ragebaiter-Free-Kanälen ggf. eine
                 // niederschwellige Verwarn-DM (mit Doppel-Schutz).
-                self.maybe_handle_ragebaiter_free_warning(guild_id, event, &verdict)
-                    .await;
+                self.maybe_handle_ragebaiter_free_warning(
+                    guild_id,
+                    event,
+                    &verdict,
+                    escalated_with_context,
+                )
+                .await;
             }
         }
     }
@@ -720,7 +794,7 @@ impl AiModerator {
         }
 
         let Some(vision) = &self.vision else {
-            return parse_error_verdict();
+            return parse_error_verdict(None);
         };
         let raw = vision
             .generate_multimodal(dl_ai::GenerateMultimodalRequest {
@@ -741,6 +815,7 @@ impl AiModerator {
         event: &dl_discord::MessageEvent,
         verdict: &AiVerdict,
         action: &str,
+        escalated_with_context: bool,
     ) -> store::CaseDraft {
         store::CaseDraft {
             guild_id,
@@ -753,6 +828,17 @@ impl AiModerator {
             confidence: verdict.confidence,
             reason: verdict.reason.clone(),
             action: action.to_string(),
+            attachments: event
+                .attachments
+                .iter()
+                .map(|attachment| store::CaseAttachment {
+                    url: attachment.url.clone(),
+                    content_type: attachment.content_type.clone(),
+                    filename: attachment.filename.clone(),
+                })
+                .collect(),
+            ai_raw_json: verdict.raw_json.clone(),
+            escalated_with_context,
         }
     }
 
@@ -761,11 +847,16 @@ impl AiModerator {
         guild_id: u64,
         event: &dl_discord::MessageEvent,
         verdict: &AiVerdict,
+        escalated_with_context: bool,
+        action: &str,
     ) {
-        let draft = self.draft(guild_id, event, verdict, "proposed");
+        let draft = self.draft(guild_id, event, verdict, action, escalated_with_context);
         let case_id = self.store.insert_case(draft.clone()).await;
         if let Some(message_id) = self.port.post_review(&draft, &case_id).await {
             self.store.set_review_message(&case_id, message_id).await;
+        }
+        if let Some(message_id) = self.port.post_case_log(&draft, &case_id, action).await {
+            self.store.set_log_message(&case_id, message_id).await;
         }
     }
 
@@ -926,6 +1017,98 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
+
+    struct StaticGenerator {
+        response: String,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_ai::TextGenerator for StaticGenerator {
+        async fn generate_text(&self, _request: dl_ai::GenerateRequest) -> Option<String> {
+            Some(self.response.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct TestPort {
+        reviews: Mutex<Vec<String>>,
+        logs: Mutex<Vec<String>>,
+        tags: Mutex<Vec<(u64, String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ModPort for TestPort {
+        async fn delete_message(&self, _channel_id: u64, _message_id: u64, _reason: &str) -> bool {
+            true
+        }
+
+        async fn timeout_member(&self, _guild_id: u64, _user_id: u64, _minutes: i64) -> bool {
+            true
+        }
+
+        async fn ban_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
+            true
+        }
+
+        async fn post_review(
+            &self,
+            case: &store::CaseDraft,
+            _buttons_case_id: &str,
+        ) -> Option<u64> {
+            self.reviews.lock().await.push(case.action.clone());
+            Some(42)
+        }
+
+        async fn post_log(&self, text: String) {
+            self.logs.lock().await.push(text);
+        }
+
+        async fn post_case_log(
+            &self,
+            _case: &store::CaseDraft,
+            _case_id: &str,
+            action: &str,
+        ) -> Option<u64> {
+            self.logs.lock().await.push(action.to_string());
+            Some(43)
+        }
+
+        async fn send_dm(&self, _user_id: u64, _text: String) {}
+
+        async fn add_mod_tag(&self, user_id: u64, tag: &str, reason: &str) -> bool {
+            self.tags
+                .lock()
+                .await
+                .push((user_id, tag.to_string(), reason.to_string()));
+            true
+        }
+    }
+
+    fn event(message_id: u64, content: &str) -> dl_discord::MessageEvent {
+        dl_discord::MessageEvent {
+            guild_id: Some(1),
+            channel_id: SCAN_CHANNEL_IDS[0],
+            message_id,
+            author_id: 100,
+            author_display_name: "Anna".into(),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_is_staff: false,
+            author_staff_status_known: true,
+            content: content.into(),
+            message_created_at: 1_000,
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
+            author_created_at: 0,
+            author_joined_at: None,
+        }
+    }
 
     #[test]
     fn verdict_parsing_wie_python() {
@@ -957,6 +1140,7 @@ mod tests {
             category: c.into(),
             confidence: conf,
             reason: String::new(),
+            raw_json: "{}".into(),
         };
         // Auto-Delete nur bei Auto-Kategorie + ≥0.90
         assert_eq!(
@@ -968,10 +1152,10 @@ mod tests {
             decide_action(&verdict("delete", "scam", 0.85), PROPOSE_CONFIDENCE),
             ModAction::Propose
         );
-        // delete in Nicht-Auto-Kategorie trotz 0.95 → Vorschlag
+        // deaktivierte Kategorien werden wie im Python-Pfad verworfen
         assert_eq!(
             decide_action(&verdict("delete", "racism", 0.95), PROPOSE_CONFIDENCE),
-            ModAction::Propose
+            ModAction::Ignore
         );
         // propose unter Schwelle → nichts
         assert_eq!(
@@ -999,6 +1183,7 @@ mod tests {
             category: "other".into(),
             confidence: conf,
             reason: String::new(),
+            raw_json: "{}".into(),
         };
         assert!(needs_context_escalation(&verdict("needs_context", 0.1)));
         assert!(!needs_context_escalation(&verdict("ok", 0.54)));
@@ -1027,6 +1212,11 @@ mod tests {
             attachment_count: 1,
             image_attachment_count: 1,
             image_attachment_urls: vec!["https://img".into()],
+            attachments: vec![dl_discord::MessageAttachment {
+                url: "https://img".into(),
+                content_type: "image/png".into(),
+                filename: "img.png".into(),
+            }],
             author_created_at: 0,
             author_joined_at: None,
         };
@@ -1050,5 +1240,47 @@ mod tests {
         assert_eq!(payload["is_reply_to"]["author"], "Ben");
         assert_eq!(payload["analysis_stage"], "context_escalation");
         assert_eq!(payload["focus_message_id"], "3");
+    }
+
+    #[tokio::test]
+    async fn persistent_ragebait_setzt_mod_tag_und_loggt_case() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("moderation.sqlite3")).expect("db");
+        let port = Arc::new(TestPort::default());
+        let moderator = AiModerator::new(
+            db,
+            Arc::new(StaticGenerator {
+                response:
+                    r#"{"verdict":"ok","category":"ragebait_ok","confidence":0.80,"reason":"Bait"}"#
+                        .into(),
+            }),
+            None,
+            port.clone(),
+        );
+        moderator.store.ensure_schema().await.expect("schema");
+
+        for idx in 0..RAGEBAIT_ESCALATE_THRESHOLD {
+            moderator.cooldown.lock().await.clear();
+            moderator
+                .handle_message(&event(5_000 + idx as u64, &format!("bait {idx}")))
+                .await;
+        }
+
+        assert_eq!(
+            port.tags.lock().await.as_slice(),
+            &[(
+                100,
+                "ragebaiter".to_string(),
+                "auto: persistent_ragebait".to_string()
+            )]
+        );
+        assert_eq!(
+            port.reviews.lock().await.as_slice(),
+            &["ragebait_escalated".to_string()]
+        );
+        assert_eq!(
+            port.logs.lock().await.as_slice(),
+            &["ragebait_escalated".to_string()]
+        );
     }
 }

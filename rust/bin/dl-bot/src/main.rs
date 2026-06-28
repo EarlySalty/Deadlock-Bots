@@ -508,6 +508,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             vision,
             Arc::new(modglue::ModGlue {
                 adapter: adapter.clone(),
+                tags: tag_service.clone(),
             }),
         );
         router.on_prefix(

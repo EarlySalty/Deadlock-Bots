@@ -1111,6 +1111,7 @@ mod tests {
             attachment_count: 0,
             image_attachment_count: 0,
             image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
             author_created_at: created_at,
             author_joined_at: joined_at,
         }

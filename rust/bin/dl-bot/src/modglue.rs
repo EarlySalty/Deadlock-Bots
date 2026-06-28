@@ -5,13 +5,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
-use serde_json::json;
+use serde_json::{json, Value};
 use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, UserId};
 use serenity::builder::GetMessages;
 use tokio::sync::{Mutex, RwLock};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
+const DISCORD_FIELD_LIMIT: usize = 1024;
+const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
+const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -19,6 +22,7 @@ const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
 
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub tags: Arc<dl_community::tags::TagService>,
 }
 
 #[async_trait::async_trait]
@@ -68,7 +72,7 @@ impl dl_moderation::ModPort for ModGlue {
         case_id: &str,
     ) -> Option<u64> {
         let preview: String = case.content.chars().take(900).collect();
-        let embed = json!({
+        let mut embed = json!({
             "title": format!("🛡️ Moderationsvorschlag — {}", case.category),
             "description": format!(
                 "**User:** <@{}> (`{}`)\n**Kanal:** <#{}>\n**Sicherheit:** {:.0}%\n**Begründung:** {}\n\n**Nachricht:**\n{}",
@@ -77,6 +81,7 @@ impl dl_moderation::ModPort for ModGlue {
             ),
             "color": 0xE67E22,
         });
+        apply_case_attachment_rendering(&mut embed, &case.attachments);
         let components = json!([{ "type": 1, "components": [
             { "type": 2, "style": 3, "label": "Annehmen (Löschen + Timeout)",
               "custom_id": format!("aimod:accept:{case_id}") },
@@ -103,6 +108,37 @@ impl dl_moderation::ModPort for ModGlue {
             .await;
     }
 
+    async fn post_case_log(
+        &self,
+        case: &dl_moderation::store::CaseDraft,
+        case_id: &str,
+        action: &str,
+    ) -> Option<u64> {
+        let mut embed = build_case_log_embed(case, case_id, action);
+        apply_case_attachment_rendering(&mut embed, &case.attachments);
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        let log_message_id = self
+            .adapter
+            .send_raw_public(dl_moderation::LOG_CHANNEL_ID, &body)
+            .await
+            .ok();
+
+        let original = safe_message_text(&case.content, DISCORD_MESSAGE_SAFE_LIMIT);
+        let mut content_message = format!(">>> {original}");
+        if case.content.chars().count() > DISCORD_MESSAGE_SAFE_LIMIT {
+            content_message.push_str("\nNachricht gekuerzt");
+        }
+        let mut original_body = serde_json::Map::new();
+        original_body.insert("content".into(), json!(content_message));
+        original_body.insert("allowed_mentions".into(), json!({ "parse": [] }));
+        let _ = self
+            .adapter
+            .send_raw_public(dl_moderation::LOG_CHANNEL_ID, &original_body)
+            .await;
+        log_message_id
+    }
+
     async fn send_dm(&self, user_id: u64, text: String) {
         let Ok(channel) = self
             .adapter
@@ -115,6 +151,19 @@ impl dl_moderation::ModPort for ModGlue {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(text));
         let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
+    }
+
+    async fn add_mod_tag(&self, user_id: u64, tag: &str, reason: &str) -> bool {
+        self.tags
+            .add_mod_tag(
+                user_id,
+                tag,
+                AUTO_RAGEBAITER_TAG_SET_BY,
+                Some(reason.to_string()),
+                None,
+            )
+            .await
+            .is_ok()
     }
 
     async fn fetch_context_lines(
@@ -365,6 +414,149 @@ fn strip_mentions(value: &str) -> String {
     }
     out.push_str(rest);
     normalize_text(&out)
+}
+
+fn category_label(category: &str) -> &'static str {
+    match category {
+        "nsfw_explicit" => "NSFW",
+        "csam" => "CSAM",
+        "raping" => "Raping",
+        "epstein_child" => "Epstein/Child",
+        "racism" => "Racism",
+        "harassment" => "Harassment",
+        "hate_speech" => "Hate Speech",
+        "ragebait_ok" => "Ragebait OK",
+        "game_related_ok" => "Game Related OK",
+        "scam" => "Scam",
+        "persistent_ragebait" => "Persistent Ragebait",
+        _ => "Other",
+    }
+}
+
+fn case_jump_url(guild_id: u64, channel_id: u64, message_id: u64) -> String {
+    format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}")
+}
+
+fn safe_message_text(value: &str, limit: usize) -> String {
+    let text = value.trim();
+    if text.is_empty() {
+        return "[kein Text]".to_string();
+    }
+    truncate_chars(text, limit)
+}
+
+fn embed_fields_mut(embed: &mut Value) -> Option<&mut Vec<Value>> {
+    let object = embed.as_object_mut()?;
+    object
+        .entry("fields")
+        .or_insert_with(|| json!([]))
+        .as_array_mut()
+}
+
+fn push_embed_field(embed: &mut Value, name: &str, value: String, inline: bool) {
+    if value.is_empty() {
+        return;
+    }
+    let Some(fields) = embed_fields_mut(embed) else {
+        return;
+    };
+    fields.push(json!({
+        "name": name,
+        "value": truncate_chars(&value, DISCORD_FIELD_LIMIT),
+        "inline": inline,
+    }));
+}
+
+fn apply_case_attachment_rendering(
+    embed: &mut Value,
+    attachments: &[dl_moderation::store::CaseAttachment],
+) {
+    if attachments.is_empty() {
+        return;
+    }
+    let image_urls: Vec<&str> = attachments
+        .iter()
+        .filter(|attachment| attachment.content_type.to_lowercase().starts_with("image/"))
+        .map(|attachment| attachment.url.as_str())
+        .collect();
+    let other_urls: Vec<String> = attachments
+        .iter()
+        .filter(|attachment| !attachment.content_type.to_lowercase().starts_with("image/"))
+        .map(|attachment| {
+            let filename = if attachment.filename.trim().is_empty() {
+                "attachment"
+            } else {
+                attachment.filename.as_str()
+            };
+            format!("[{}]({})", truncate_chars(filename, 80), attachment.url)
+        })
+        .collect();
+
+    if let Some(first_image) = image_urls.first() {
+        if let Some(object) = embed.as_object_mut() {
+            object.insert("image".into(), json!({ "url": first_image }));
+        }
+    }
+    if image_urls.len() > 1 {
+        push_embed_field(embed, "Weitere Bilder", image_urls[1..].join("\n"), false);
+    }
+    if !other_urls.is_empty() {
+        push_embed_field(embed, "Attachments", other_urls.join("\n"), false);
+    }
+}
+
+fn build_case_log_embed(
+    case: &dl_moderation::store::CaseDraft,
+    case_id: &str,
+    action: &str,
+) -> Value {
+    let title = match action {
+        "auto_delete" => format!(
+            "🚨 Auto-Delete: {} ({:.2})",
+            category_label(&case.category),
+            case.confidence
+        ),
+        "auto_delete_failed" => format!(
+            "⚠️ Auto-Delete Failed: {} ({:.2})",
+            category_label(&case.category),
+            case.confidence
+        ),
+        "proposed" => format!(
+            "📝 Proposed: {} ({:.2})",
+            category_label(&case.category),
+            case.confidence
+        ),
+        "ragebait_escalated" => "📝 Ragebait Escalated".to_string(),
+        other => format!("📝 AI Moderation: {other}"),
+    };
+    let color = match action {
+        "auto_delete" => 0xE74C3C,
+        "auto_delete_failed" => 0x992D22,
+        "proposed" | "ragebait_escalated" => 0xE67E22,
+        _ => 0x5865F2,
+    };
+    let mut embed = json!({
+        "title": title,
+        "color": color,
+        "fields": [
+            { "name": "Author", "value": format!("<@{}> (`{}`)", case.user_id, case.user_tag), "inline": false },
+            { "name": "Channel", "value": format!("<#{}> | [Jump]({})", case.channel_id, case_jump_url(case.guild_id, case.channel_id, case.message_id)), "inline": false },
+            { "name": "Kategorie", "value": category_label(&case.category), "inline": true },
+            { "name": "Confidence", "value": format!("{:.2}", case.confidence), "inline": true },
+            { "name": "AI-Reason", "value": truncate_chars(&case.reason, DISCORD_FIELD_LIMIT), "inline": false },
+            { "name": "Aktion", "value": action, "inline": true },
+            { "name": "Case-ID", "value": case_id, "inline": true }
+        ]
+    });
+    if case.escalated_with_context {
+        push_embed_field(
+            &mut embed,
+            "Detail",
+            "context_escalation".to_string(),
+            false,
+        );
+    }
+    embed
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {

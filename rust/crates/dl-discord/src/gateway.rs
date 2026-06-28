@@ -13,7 +13,7 @@ use serenity::async_trait;
 use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
-use crate::dispatcher::{Dispatcher, MemberEvent, MessageEvent, VoiceEvent};
+use crate::dispatcher::{Dispatcher, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent};
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
 
@@ -99,6 +99,15 @@ impl EventHandler for Handler {
             })
             .map(|a| a.url.clone())
             .collect();
+        let attachments: Vec<MessageAttachment> = message
+            .attachments
+            .iter()
+            .map(|attachment| MessageAttachment {
+                url: attachment.url.clone(),
+                content_type: attachment.content_type.clone().unwrap_or_default(),
+                filename: attachment.filename.clone(),
+            })
+            .collect();
         let image_attachment_count = image_attachment_urls.len() as u32;
         let reply_message_id = message
             .message_reference
@@ -130,6 +139,7 @@ impl EventHandler for Handler {
             attachment_count: message.attachments.len() as u32,
             image_attachment_count,
             image_attachment_urls,
+            attachments,
             author_created_at: message.author.id.created_at().unix_timestamp(),
             author_joined_at,
         });

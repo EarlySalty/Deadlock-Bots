@@ -3,6 +3,14 @@
 
 use dl_db::{Db, DbError};
 use rusqlite::OptionalExtension;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CaseAttachment {
+    pub url: String,
+    pub content_type: String,
+    pub filename: String,
+}
 
 #[derive(Debug, Clone)]
 pub struct CaseDraft {
@@ -16,6 +24,9 @@ pub struct CaseDraft {
     pub confidence: f64,
     pub reason: String,
     pub action: String,
+    pub attachments: Vec<CaseAttachment>,
+    pub ai_raw_json: String,
+    pub escalated_with_context: bool,
 }
 
 /// Persistierter Case (für den Review-Flow: löschen/timeouten/bannen).
@@ -89,11 +100,14 @@ impl ModerationStore {
         let result = self
             .db
             .write(move |conn| {
+                let attachments_json =
+                    serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
                 conn.execute(
                     "INSERT INTO ai_moderation_cases(
                        case_id, guild_id, channel_id, message_id, user_id, user_tag,
-                       original_content, ai_category, ai_confidence, ai_reason, action
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                       original_content, attachments_json, ai_category, ai_confidence,
+                       ai_reason, ai_raw_json, escalated_with_context, action
+                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
                     rusqlite::params![
                         id,
                         draft.guild_id,
@@ -102,9 +116,16 @@ impl ModerationStore {
                         draft.user_id,
                         draft.user_tag,
                         draft.content,
+                        attachments_json,
                         draft.category,
                         draft.confidence,
                         draft.reason,
+                        draft.ai_raw_json,
+                        if draft.escalated_with_context {
+                            1_i64
+                        } else {
+                            0_i64
+                        },
                         draft.action,
                     ],
                 )
@@ -124,6 +145,20 @@ impl ModerationStore {
             .write(move |conn| {
                 conn.execute(
                     "UPDATE ai_moderation_cases SET mod_review_message_id = ?1 WHERE case_id = ?2",
+                    rusqlite::params![message_id, case_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+    }
+
+    pub async fn set_log_message(&self, case_id: &str, message_id: u64) {
+        let case_id = case_id.to_string();
+        let _ = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE ai_moderation_cases SET log_message_id = ?1 WHERE case_id = ?2",
                     rusqlite::params![message_id, case_id],
                 )
                 .map(|_| ())
@@ -233,12 +268,13 @@ impl ModerationStore {
                 let mut stmt = conn.prepare(
                     "SELECT content_preview FROM ai_moderation_ragebait_hits
                       WHERE user_id = ?1
-                        AND created_at >= datetime('now', ?2)
+                        AND guild_id = ?2
+                        AND created_at > datetime('now', ?3)
                       ORDER BY created_at ASC",
                 )?;
                 let window = format!("-{} minutes", super::RAGEBAIT_WINDOW_MINUTES);
                 let previews: Vec<String> = stmt
-                    .query_map(rusqlite::params![user_id, window], |row| {
+                    .query_map(rusqlite::params![user_id, guild_id, window], |row| {
                         row.get::<_, Option<String>>(0)
                             .map(|p| p.unwrap_or_default())
                     })?
@@ -277,6 +313,13 @@ mod tests {
                 confidence: 0.95,
                 reason: "Scam".into(),
                 action: "proposed".into(),
+                attachments: vec![CaseAttachment {
+                    url: "https://cdn.example/image.png".into(),
+                    content_type: "image/png".into(),
+                    filename: "image.png".into(),
+                }],
+                ai_raw_json: "{\"response_text\":\"raw\"}".into(),
+                escalated_with_context: true,
             })
             .await;
         store.set_review_message(&case_id, 999).await;
@@ -296,6 +339,22 @@ mod tests {
             .await
             .expect("case");
         assert_eq!((action.as_str(), mod_id, review), ("accepted", 777, 999));
+
+        let (attachments, raw, escalated): (String, String, i64) = store
+            .db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT attachments_json, ai_raw_json, escalated_with_context
+                       FROM ai_moderation_cases WHERE message_id = 3",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .await
+            .expect("case metadata");
+        assert!(attachments.contains("https://cdn.example/image.png"));
+        assert_eq!(raw, "{\"response_text\":\"raw\"}");
+        assert_eq!(escalated, 1);
     }
 
     #[tokio::test]
@@ -313,6 +372,9 @@ mod tests {
                 confidence: 0.9,
                 reason: "Scam".into(),
                 action: "proposed".into(),
+                attachments: Vec::new(),
+                ai_raw_json: "{}".into(),
+                escalated_with_context: false,
             })
             .await;
         let case = store.fetch_case(&case_id).await.expect("case");
@@ -360,5 +422,65 @@ mod tests {
         // anderer User zählt eigenes Fenster
         let (count, _) = store.insert_ragebait_hit(1, 200, 2000, 2, "x").await;
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn ragebait_fenster_ist_guild_spezifisch() {
+        let (_dir, store) = store().await;
+        for i in 0..3 {
+            let (count, _) = store
+                .insert_ragebait_hit(1, 100, 3000 + i, 2, &format!("g1 bait {i}"))
+                .await;
+            assert_eq!(count, i as i64 + 1);
+        }
+
+        let (count, previews) = store.insert_ragebait_hit(2, 100, 4000, 3, "g2 bait").await;
+        assert_eq!(count, 1);
+        assert_eq!(previews, vec!["g2 bait".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn ragebait_fenster_zaehlt_fensterrand_strikt_nicht_mit() {
+        let (_dir, store) = store().await;
+
+        let second = chrono::Utc::now().timestamp();
+        while chrono::Utc::now().timestamp() == second {
+            tokio::task::yield_now().await;
+        }
+
+        store
+            .db
+            .write(|conn| {
+                let window = format!("-{} minutes", crate::RAGEBAIT_WINDOW_MINUTES);
+                conn.execute(
+                    "INSERT INTO ai_moderation_ragebait_hits(
+                       guild_id, user_id, message_id, channel_id, content_preview, created_at
+                     ) VALUES(?1,?2,?3,?4,?5,datetime('now', ?6))",
+                    rusqlite::params![1_u64, 100_u64, 4998_u64, 2_u64, "genau rand", window],
+                )?;
+                conn.execute(
+                    "INSERT INTO ai_moderation_ragebait_hits(
+                       guild_id, user_id, message_id, channel_id, content_preview, created_at
+                     ) VALUES(?1,?2,?3,?4,?5,datetime('now', ?6, '+1 second'))",
+                    rusqlite::params![
+                        1_u64,
+                        100_u64,
+                        4999_u64,
+                        2_u64,
+                        "knapp drin",
+                        format!("-{} minutes", crate::RAGEBAIT_WINDOW_MINUTES)
+                    ],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("boundary hits");
+
+        let (count, previews) = store.insert_ragebait_hit(1, 100, 5000, 2, "neu").await;
+        assert_eq!(count, 2);
+        assert_eq!(
+            previews,
+            vec!["knapp drin".to_string(), "neu".to_string()]
+        );
     }
 }
