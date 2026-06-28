@@ -57,11 +57,18 @@ async fn dispatch_command(
         interaction_id: cmd.id.get(),
         user_id: cmd.user.id.get(),
         author_name: username(&cmd.user),
+        author_display_name: interaction_display_name(cmd.member.as_deref(), &cmd.user),
         author_can_manage_roles: cmd
             .member
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_guild: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_guild() || p.administrator())
             .unwrap_or(false),
         member_present: cmd.member.is_some(),
         guild_id: cmd.guild_id.map(|g| g.get()).unwrap_or(0),
@@ -103,11 +110,18 @@ async fn dispatch_component(
         interaction_id: component.id.get(),
         user_id: component.user.id.get(),
         author_name: username(&component.user),
+        author_display_name: interaction_display_name(component.member.as_ref(), &component.user),
         author_can_manage_roles: component
             .member
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_guild: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_guild() || p.administrator())
             .unwrap_or(false),
         member_present: component.member.is_some(),
         guild_id: component.guild_id.map(|g| g.get()).unwrap_or(0),
@@ -154,11 +168,18 @@ async fn dispatch_modal(
         interaction_id: modal.id.get(),
         user_id: modal.user.id.get(),
         author_name: username(&modal.user),
+        author_display_name: interaction_display_name(modal.member.as_ref(), &modal.user),
         author_can_manage_roles: modal
             .member
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_guild: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_guild() || p.administrator())
             .unwrap_or(false),
         member_present: modal.member.is_some(),
         guild_id: modal.guild_id.map(|g| g.get()).unwrap_or(0),
@@ -182,6 +203,29 @@ fn username(user: &serenity::all::User) -> String {
         Some(d) => format!("{}#{:04}", user.name, d),
         None => user.name.to_string(),
     }
+}
+
+fn interaction_display_name(
+    member: Option<&serenity::all::Member>,
+    user: &serenity::all::User,
+) -> String {
+    display_name_from_parts(
+        member.and_then(|m| m.nick.as_deref()),
+        user.global_name.as_deref(),
+        &user.name,
+    )
+}
+
+fn display_name_from_parts(
+    member_nick: Option<&str>,
+    global_name: Option<&str>,
+    username: &str,
+) -> String {
+    member_nick
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| global_name.filter(|name| !name.trim().is_empty()))
+        .unwrap_or(username)
+        .to_string()
 }
 
 /// Subcommands abflachen: ("steam", [links {…}]) → ("steam links", Optionen).
@@ -318,7 +362,11 @@ async fn respond(
 
     // Followup nach Defer
     if let Some(channel_message) = &reply.channel_message {
-        send_channel_panel(adapter, channel_id, channel_message).await;
+        if let Some(message_id) = send_channel_panel(adapter, channel_id, channel_message).await {
+            if let Some(hook) = &channel_message.response_message_hook {
+                hook.on_response_message(message_id).await;
+            }
+        }
         let confirmation = json!({
             "content": channel_message.confirmation,
             "flags": EPHEMERAL_FLAG,
@@ -370,7 +418,11 @@ async fn send_initial(
         return;
     }
     if let Some(channel_message) = &reply.channel_message {
-        send_channel_panel(adapter, channel_id, channel_message).await;
+        if let Some(message_id) = send_channel_panel(adapter, channel_id, channel_message).await {
+            if let Some(hook) = &channel_message.response_message_hook {
+                hook.on_response_message(message_id).await;
+            }
+        }
         let response = json!({
             "type": CB_MESSAGE,
             "data": { "content": channel_message.confirmation, "flags": EPHEMERAL_FLAG },
@@ -412,16 +464,70 @@ async fn send_channel_panel(
     adapter: &Arc<DiscordAdapter>,
     channel_id: u64,
     panel: &crate::interactions::ChannelMessage,
-) {
+) -> Option<u64> {
+    let target_channel_id = panel.target_channel_id.unwrap_or(channel_id);
     let mut body = Map::new();
+    if let Some(content) = &panel.content {
+        body.insert("content".into(), json!(content));
+    }
     if !panel.embeds.is_empty() {
         body.insert("embeds".into(), json!(panel.embeds));
     }
     if let Some(components) = &panel.components {
         body.insert("components".into(), components.clone());
     }
-    if let Err(err) = adapter.send_raw_public(channel_id, &body).await {
-        tracing::warn!(%err, channel_id, "Panel-Post fehlgeschlagen");
+    if let Some(message_id) = panel.edit_message_id {
+        match adapter
+            .edit_raw_public(target_channel_id, message_id, &body)
+            .await
+        {
+            Ok(()) => return Some(message_id),
+            Err(err) => {
+                let status = panel_edit_status_code(&err);
+                tracing::warn!(%err, ?status, target_channel_id, message_id, "Panel-Edit fehlgeschlagen");
+                if !should_repost_after_panel_edit_error(&err) {
+                    return None;
+                }
+            }
+        }
+    }
+    match adapter.send_raw_public(target_channel_id, &body).await {
+        Ok(message_id) => Some(message_id),
+        Err(err) => {
+            tracing::warn!(%err, channel_id = target_channel_id, "Panel-Post fehlgeschlagen");
+            None
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PanelEditFailure {
+    NotFound,
+    Other,
+}
+
+fn classify_panel_edit_status(status: Option<u16>) -> PanelEditFailure {
+    match status {
+        Some(404) => PanelEditFailure::NotFound,
+        _ => PanelEditFailure::Other,
+    }
+}
+
+pub fn is_panel_edit_not_found_status(status: Option<u16>) -> bool {
+    matches!(
+        classify_panel_edit_status(status),
+        PanelEditFailure::NotFound
+    )
+}
+
+pub fn should_repost_after_panel_edit_error(err: &serenity::Error) -> bool {
+    is_panel_edit_not_found_status(panel_edit_status_code(err))
+}
+
+pub fn panel_edit_status_code(err: &serenity::Error) -> Option<u16> {
+    match err {
+        serenity::Error::Http(http_err) => http_err.status_code().map(|status| status.as_u16()),
+        _ => None,
     }
 }
 
@@ -489,5 +595,31 @@ mod tests {
         assert_eq!(data["custom_id"], "m1");
         assert_eq!(data["components"][0]["components"][0]["type"], 4);
         assert_eq!(data["components"][0]["components"][0]["max_length"], 32);
+    }
+
+    #[test]
+    fn bridge_display_name_nutzt_nick_vor_global_name_vor_username() {
+        assert_eq!(
+            display_name_from_parts(Some("Server Nick"), Some("Global Name"), "username"),
+            "Server Nick"
+        );
+        assert_eq!(
+            display_name_from_parts(None, Some("Global Name"), "username"),
+            "Global Name"
+        );
+        assert_eq!(display_name_from_parts(None, None, "username"), "username");
+    }
+
+    #[test]
+    fn panel_edit_fallback_nur_bei_404() {
+        assert_eq!(
+            classify_panel_edit_status(Some(404)),
+            PanelEditFailure::NotFound
+        );
+        assert_eq!(
+            classify_panel_edit_status(Some(403)),
+            PanelEditFailure::Other
+        );
+        assert_eq!(classify_panel_edit_status(None), PanelEditFailure::Other);
     }
 }

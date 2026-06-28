@@ -8,7 +8,8 @@
 //!   `POST /text/chatcompletion_v2` (choices/message/content).
 //!
 //! OpenAI ist für den SecurityGuard-Bildpfad als separater Vision-Client
-//! verdrahtet; Text bleibt MiniMax.
+//! verdrahtet; der Streamer-Link-Matcher kann Text über MiniMax, OpenAI oder
+//! Gemini auswählen.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,10 +20,13 @@ use serde_json::{json, Value};
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
+pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
+pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 800;
 const DEFAULT_BASE_URL: &str = "https://api.minimax.chat/v1";
 const DEFAULT_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Debug, Clone)]
@@ -186,13 +190,28 @@ impl OpenAiClient {
                 .map(|v| v.trim().to_string())
                 .filter(|v| !v.is_empty())
         };
-        let api_key = get("OPENAI_API_KEY")?;
-        let base_url = get("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+        let api_key = get("OPENAI_API_KEY").or_else(|| get("DEADLOCK_OPENAI_KEY"))?;
+        let base_url =
+            get("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
         let model = get("AI_IMAGE_MODEL")
             .or_else(|| get("OPENAI_MODEL"))
             .or_else(|| get("AI_OPENAI_MODEL"))
             .unwrap_or_else(|| DEFAULT_OPENAI_MODEL.to_string());
         tracing::info!(%base_url, %model, "OpenAI-Vision-Client initialisiert");
+        Some(Self::new(base_url, api_key, model))
+    }
+
+    pub fn text_from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let api_key = get("OPENAI_API_KEY").or_else(|| get("DEADLOCK_OPENAI_KEY"))?;
+        let base_url =
+            get("OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.to_string());
+        let model = get("AI_OPENAI_MODEL").unwrap_or_else(|| DEFAULT_OPENAI_TEXT_MODEL.to_string());
+        tracing::info!(%base_url, %model, "OpenAI-Text-Client initialisiert");
         Some(Self::new(base_url, api_key, model))
     }
 
@@ -370,12 +389,45 @@ impl OpenAiClient {
             .chars()
             .take(300)
             .collect::<String>();
-        Some(json!({
-            "is_scam": is_scam,
-            "confidence": confidence,
-            "reason": reason,
-        })
-        .to_string())
+        Some(
+            json!({
+                "is_scam": is_scam,
+                "confidence": confidence,
+                "reason": reason,
+            })
+            .to_string(),
+        )
+    }
+}
+
+pub struct GeminiClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+impl GeminiClient {
+    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let api_key = get("GOOGLE_API_KEY").or_else(|| get("GEMINI_API_KEY"))?;
+        let base_url =
+            get("GEMINI_BASE_URL").unwrap_or_else(|| DEFAULT_GEMINI_BASE_URL.to_string());
+        let model = get("AI_GEMINI_MODEL").unwrap_or_else(|| DEFAULT_GEMINI_MODEL.to_string());
+        tracing::info!(%base_url, %model, "Gemini-Text-Client initialisiert");
+        Some(Arc::new(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            api_key,
+            model,
+        }))
     }
 }
 
@@ -438,6 +490,107 @@ impl VisionGenerator for OpenAiClient {
         let data: Value = response.json().await.ok()?;
         let text = Self::extract_openai_text(&data)?;
         Some(Self::normalize_scam_json(&text).unwrap_or(text))
+    }
+}
+
+#[async_trait::async_trait]
+impl TextGenerator for OpenAiClient {
+    async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
+        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let response = self
+            .http
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&json!({
+                "model": model,
+                "input": request.prompt,
+                "instructions": request.system_prompt,
+                "max_output_tokens": max_tokens,
+                "temperature": request.temperature,
+            }))
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "OpenAI-Text-Request fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "OpenAI-Text-API-Fehler");
+            return None;
+        }
+        let data: Value = response.json().await.ok()?;
+        Self::extract_openai_text(&data)
+    }
+}
+
+#[async_trait::async_trait]
+impl TextGenerator for GeminiClient {
+    async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
+        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let contents = match request.system_prompt {
+            Some(system) if !system.trim().is_empty() => format!("{system}\n\n{}", request.prompt),
+            _ => request.prompt,
+        };
+        let response = self
+            .http
+            .post(format!(
+                "{}/models/{}:generateContent?key={}",
+                self.base_url, model, self.api_key
+            ))
+            .json(&json!({
+                "contents": [{
+                    "role": "user",
+                    "parts": [{ "text": contents }],
+                }],
+                "generationConfig": {
+                    "temperature": request.temperature,
+                    "maxOutputTokens": max_tokens,
+                },
+            }))
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "Gemini-Request fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "Gemini-API-Fehler");
+            return None;
+        }
+        let data: Value = response.json().await.ok()?;
+        let mut fragments = Vec::new();
+        for candidate in data
+            .get("candidates")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            for part in candidate
+                .get("content")
+                .and_then(|content| content.get("parts"))
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                if let Some(text) = part.get("text").and_then(Value::as_str) {
+                    fragments.push(text);
+                }
+            }
+        }
+        let text = fragments.concat().trim().to_string();
+        (!text.is_empty()).then_some(text)
     }
 }
 
@@ -1043,6 +1196,32 @@ mod tests {
             std_content[1]["image_url"]["url"],
             "data:image/jpeg;base64,QUJD"
         );
+    }
+
+    #[test]
+    fn openai_text_from_env_nutzt_ai_openai_model_oder_python_fallback() {
+        let explicit = OpenAiClient::text_from_env(|key| match key {
+            "OPENAI_API_KEY" => Some("key".to_string()),
+            "AI_OPENAI_MODEL" => Some("gpt-custom".to_string()),
+            _ => None,
+        })
+        .expect("explicit text client");
+        assert_eq!(explicit.model, "gpt-custom");
+
+        let fallback = OpenAiClient::text_from_env(|key| match key {
+            "OPENAI_API_KEY" => Some("key".to_string()),
+            _ => None,
+        })
+        .expect("fallback text client");
+        assert_eq!(fallback.model, "gpt-4o-mini");
+
+        let legacy_openai_model_ignored = OpenAiClient::text_from_env(|key| match key {
+            "OPENAI_API_KEY" => Some("key".to_string()),
+            "OPENAI_MODEL" => Some("legacy-image-model".to_string()),
+            _ => None,
+        })
+        .expect("legacy text client");
+        assert_eq!(legacy_openai_model_ignored.model, "gpt-4o-mini");
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.

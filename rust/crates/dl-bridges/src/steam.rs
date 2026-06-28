@@ -8,10 +8,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_db::Db;
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
-    InteractionRouter, MemberEvent,
+    InteractionRouter, MemberEvent, ResponseMessageHook,
 };
 use serde_json::{json, Map, Value};
 
@@ -35,6 +36,14 @@ const FRIEND_CODE_MODAL_IDS: [&str; 2] = ["steam_link_panel:friend_code", "linkp
 const RANKCHECK_IDS: [&str; 2] = ["steam_link_panel:rankcheck", "linkpanel_rank_check"];
 const FRIEND_CODE_MODAL_CUSTOM_ID: &str = "steam_bridge:friend_code_modal";
 const FRIEND_CODE_SUBMIT_CUSTOM_ID: &str = "steam_link_panel:friend_code:submit";
+pub const STEAM_PANEL_KV_NS: &str = "steam_link_panel";
+pub const STEAM_PANEL_KV_KEY: &str = "panel_ref";
+pub const BRD08_BETAINVITE_PANEL_POSTED_MSG: &str = "✅ Invite-Panel gepostet.";
+pub const BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC: &str =
+    "Zielkanal fürs Panel (Standard: aktueller Kanal)";
+pub const BRD09_STEAM_PANEL_POSTED_MSG: &str = "✅ Steam-Panel gepostet.";
+pub const BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC: &str =
+    "ID einer bestehenden Message, die editiert werden soll (optional)";
 
 fn component_forward_timeout(custom_id: &str) -> Duration {
     if RANKCHECK_IDS.contains(&custom_id) {
@@ -132,6 +141,12 @@ impl SteamBotClient {
         if !interaction.values.is_empty() {
             inner.insert("values".into(), json!(interaction.values));
         }
+        let discord_name = if interaction.author_display_name.trim().is_empty() {
+            &interaction.author_name
+        } else {
+            &interaction.author_display_name
+        };
+        inner.insert("data".into(), json!({ "discord_name": discord_name }));
         let mut data = Map::new();
         data.insert("interaction".into(), Value::Object(inner));
         data
@@ -363,6 +378,93 @@ impl InteractionHandler for ForwardSlash {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SteamPanelRef {
+    channel_id: u64,
+    message_id: u64,
+}
+
+#[derive(Clone)]
+struct SteamPanelStore {
+    db: Db,
+}
+
+impl SteamPanelStore {
+    fn new(db: Db) -> Self {
+        Self { db }
+    }
+
+    async fn get(&self) -> Option<SteamPanelRef> {
+        let raw = self
+            .db
+            .kv_get(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY)
+            .await
+            .ok()
+            .flatten()?;
+        let value = serde_json::from_str::<Value>(&raw).ok()?;
+        let channel_id = value.get("channel_id").and_then(Value::as_u64)?;
+        let message_id = value.get("message_id").and_then(Value::as_u64)?;
+        (channel_id > 0 && message_id > 0).then_some(SteamPanelRef {
+            channel_id,
+            message_id,
+        })
+    }
+
+    async fn set(&self, channel_id: u64, message_id: u64) {
+        let payload = json!({
+            "channel_id": channel_id,
+            "message_id": message_id,
+        })
+        .to_string();
+        if let Err(err) = self
+            .db
+            .kv_set(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY, payload)
+            .await
+        {
+            tracing::warn!(%err, "Steam-Panel-Referenz konnte nicht gespeichert werden");
+        }
+    }
+
+    async fn clear(&self) {
+        if let Err(err) = self
+            .db
+            .kv_delete(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY)
+            .await
+        {
+            tracing::debug!(%err, "Steam-Panel-Referenz konnte nicht geloescht werden");
+        }
+    }
+}
+
+struct PersistSteamPanelRef {
+    store: SteamPanelStore,
+    channel_id: u64,
+}
+
+#[async_trait::async_trait]
+impl ResponseMessageHook for PersistSteamPanelRef {
+    async fn on_response_message(&self, message_id: u64) {
+        self.store.set(self.channel_id, message_id).await;
+    }
+}
+
+async fn fetch_panel_result(
+    client: &Arc<SteamBotClient>,
+    wire_name: &str,
+    user_id: u64,
+    guild_id: u64,
+) -> Option<Value> {
+    let interaction = BridgeInteraction {
+        user_id,
+        guild_id,
+        ..BridgeInteraction::default()
+    };
+    let payload = SteamBotClient::slash_payload(&interaction, wire_name, None);
+    client
+        .post_event("slash_command", payload, DEFAULT_TIMEOUT)
+        .await
+}
+
 /// checkrank: Discord-User-Option → target_user_id + target_mention.
 struct CheckRank {
     client: Arc<SteamBotClient>,
@@ -395,21 +497,61 @@ struct PublishPanel {
     wire_name: &'static str,
     panel_buttons: Value,
     confirmation: &'static str,
+    panel_store: Option<SteamPanelStore>,
 }
 
 #[async_trait::async_trait]
 impl InteractionHandler for PublishPanel {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        let payload = SteamBotClient::slash_payload(&interaction, self.wire_name, None);
-        let Some(result) = self
-            .client
-            .post_event("slash_command", payload, DEFAULT_TIMEOUT)
-            .await
+        let Some(result) = fetch_panel_result(
+            &self.client,
+            self.wire_name,
+            interaction.user_id,
+            interaction.guild_id,
+        )
+        .await
         else {
             return BridgeReply::ephemeral_text(
                 "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte erneut versuchen.",
             );
         };
+        let target_channel_id = interaction
+            .options
+            .get("channel")
+            .and_then(Value::as_u64)
+            .filter(|id| *id > 0)
+            .unwrap_or(interaction.channel_id);
+        let explicit_message_id = interaction
+            .options
+            .get("message_id")
+            .and_then(|value| match value {
+                Value::Number(n) => n.as_u64(),
+                Value::String(s) => s.trim().parse::<u64>().ok(),
+                _ => None,
+            })
+            .filter(|id| *id > 0);
+        let stored_ref = match &self.panel_store {
+            Some(store) if self.wire_name == "publish_steam_panel" => store.get().await,
+            _ => None,
+        };
+        let edit_message_id = explicit_message_id.or_else(|| {
+            stored_ref
+                .filter(|stored| stored.channel_id == target_channel_id)
+                .map(|stored| stored.message_id)
+        });
+        let response_message_hook = self.panel_store.as_ref().and_then(|store| {
+            (self.wire_name == "publish_steam_panel").then(|| {
+                Arc::new(PersistSteamPanelRef {
+                    store: store.clone(),
+                    channel_id: target_channel_id,
+                }) as Arc<dyn ResponseMessageHook>
+            })
+        });
+        let content = result
+            .get("reply_text")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
         let embeds = result
             .get("reply_embed")
             .and_then(Value::as_object)
@@ -417,9 +559,13 @@ impl InteractionHandler for PublishPanel {
             .unwrap_or_default();
         BridgeReply {
             channel_message: Some(ChannelMessage {
+                target_channel_id: Some(target_channel_id),
+                content,
                 embeds,
                 components: Some(self.panel_buttons.clone()),
+                edit_message_id,
                 confirmation: self.confirmation.to_string(),
+                response_message_hook,
             }),
             ephemeral: true,
             ..BridgeReply::default()
@@ -446,6 +592,18 @@ fn betainvite_panel_components() -> Value {
 
 /// Registriert alle Steam-Bridge-Routen am InteractionRouter.
 pub fn register(router: &mut InteractionRouter, client: Arc<SteamBotClient>) {
+    register_inner(router, client, None);
+}
+
+pub fn register_with_db(router: &mut InteractionRouter, client: Arc<SteamBotClient>, db: Db) {
+    register_inner(router, client, Some(SteamPanelStore::new(db)));
+}
+
+fn register_inner(
+    router: &mut InteractionRouter,
+    client: Arc<SteamBotClient>,
+    panel_store: Option<SteamPanelStore>,
+) {
     // Persistente Buttons: Panels + kompletter Betainvite-Funnel via Präfix
     let forward = Arc::new(ForwardComponent {
         client: client.clone(),
@@ -568,12 +726,19 @@ pub fn register(router: &mut InteractionRouter, client: Arc<SteamBotClient>) {
             "name": "publish_betainvite_panel",
             "description": "Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
             "default_member_permissions": "32",
+            "options": [{
+                "type": 7,
+                "name": "channel",
+                "description": BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC,
+                "required": false
+            }],
         })),
         Arc::new(PublishPanel {
             client: client.clone(),
             wire_name: "publish_betainvite_panel",
             panel_buttons: betainvite_panel_components(),
-            confirmation: "✅ Invite-Panel gepostet.",
+            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
+            panel_store: None,
         }),
     );
     router.on_command(
@@ -619,14 +784,68 @@ pub fn register(router: &mut InteractionRouter, client: Arc<SteamBotClient>) {
             "name": "publish_steam_panel",
             "description": "(Admin) Steam-Verknüpfen-Panel in diesem Channel posten.",
             "default_member_permissions": "8",
+            "options": [{
+                "type": 3,
+                "name": "message_id",
+                "description": BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC,
+                "required": false
+            }],
         })),
         Arc::new(PublishPanel {
             client,
             wire_name: "publish_steam_panel",
             panel_buttons: steam_panel_components(),
-            confirmation: "✅ Steam-Panel gepostet.",
+            confirmation: BRD09_STEAM_PANEL_POSTED_MSG,
+            panel_store,
         }),
     );
+}
+
+pub fn spawn_panel_restore(
+    client: Arc<SteamBotClient>,
+    db: Db,
+    adapter: Arc<dl_discord::DiscordAdapter>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_secs(20)).await;
+        let store = SteamPanelStore::new(db);
+        let Some(panel_ref) = store.get().await else {
+            return;
+        };
+        let Some(result) = fetch_panel_result(&client, "publish_steam_panel", 0, 0).await else {
+            return;
+        };
+        let Some(embed) = result
+            .get("reply_embed")
+            .and_then(Value::as_object)
+            .map(|e| Value::Object(e.clone()))
+        else {
+            return;
+        };
+        let mut body = Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), steam_panel_components());
+        match adapter
+            .edit_raw_public(panel_ref.channel_id, panel_ref.message_id, &body)
+            .await
+        {
+            Ok(()) => tracing::info!(message_id = panel_ref.message_id, "Steam-Panel restored"),
+            Err(err) => {
+                tracing::warn!(%err, message_id = panel_ref.message_id, "Steam-Panel-Restore fehlgeschlagen");
+                if should_clear_panel_ref_after_restore_error(&err) {
+                    store.clear().await;
+                }
+            }
+        }
+    })
+}
+
+fn should_clear_panel_ref_after_restore_error(err: &serenity::Error) -> bool {
+    should_clear_panel_ref_after_restore_status(dl_discord::dispatch::panel_edit_status_code(err))
+}
+
+fn should_clear_panel_ref_after_restore_status(status: Option<u16>) -> bool {
+    dl_discord::dispatch::is_panel_edit_not_found_status(status)
 }
 
 // ── Listener (member_remove + !steam_*-Admin-Kommandos) ───────────────────
@@ -771,6 +990,8 @@ mod tests {
         BridgeInteraction {
             custom_id: custom_id.to_string(),
             user_id: 42,
+            author_name: "Nani".to_string(),
+            author_display_name: "Nani".to_string(),
             guild_id: 7,
             channel_id: 9,
             ..BridgeInteraction::default()
@@ -803,6 +1024,33 @@ mod tests {
         assert_eq!(sent[0]["kind"], "interaction");
         assert_eq!(sent[0]["interaction"]["custom_id"], "steam_link_panel:open");
         assert_eq!(sent[0]["interaction"]["user_id"], 42);
+        assert_eq!(sent[0]["interaction"]["data"]["discord_name"], "Nani");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn rankcheck_forward_sendet_display_name_statt_username() {
+        let (url, received, server) = mock_steam_bot(json!({ "reply_text": "ok" })).await;
+        let client = SteamBotClient::new(url, None);
+        let handler = ForwardComponent { client };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "steam_link_panel:rankcheck".to_string(),
+                user_id: 42,
+                author_name: "discorduser#1234".to_string(),
+                author_display_name: "Server Nick".to_string(),
+                guild_id: 7,
+                channel_id: 9,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("ok"));
+        let sent = received.lock().expect("lock");
+        assert_eq!(
+            sent[0]["interaction"]["data"]["discord_name"],
+            "Server Nick"
+        );
         server.abort();
     }
 
@@ -857,6 +1105,77 @@ mod tests {
             "gabelogan"
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn betainvite_panel_nutzt_optionalen_zielkanal() {
+        let (url, _received, server) = mock_steam_bot(json!({
+            "reply_embed": { "title": "Invite" },
+        }))
+        .await;
+        let handler = PublishPanel {
+            client: SteamBotClient::new(url, None),
+            wire_name: "publish_betainvite_panel",
+            panel_buttons: betainvite_panel_components(),
+            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
+            panel_store: None,
+        };
+        let mut itx = interaction("");
+        itx.options.insert("channel".to_string(), json!(12345));
+        let reply = handler.handle(itx).await;
+        let panel = reply.channel_message.expect("panel");
+
+        assert_eq!(panel.target_channel_id, Some(12345));
+        assert_eq!(panel.confirmation, BRD08_BETAINVITE_PANEL_POSTED_MSG);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn steam_panel_editiert_gespeicherte_message_im_selben_kanal() {
+        let (url, _received, server) = mock_steam_bot(json!({
+            "reply_embed": { "title": "Steam" },
+        }))
+        .await;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = dl_db::Db::open_creating(dir.path().join("steam.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("kv_store");
+        db.kv_set(
+            STEAM_PANEL_KV_NS,
+            STEAM_PANEL_KV_KEY,
+            r#"{"channel_id":9,"message_id":555}"#,
+        )
+        .await
+        .expect("set");
+
+        let handler = PublishPanel {
+            client: SteamBotClient::new(url, None),
+            wire_name: "publish_steam_panel",
+            panel_buttons: steam_panel_components(),
+            confirmation: BRD09_STEAM_PANEL_POSTED_MSG,
+            panel_store: Some(SteamPanelStore::new(db.clone())),
+        };
+        let reply = handler.handle(interaction("")).await;
+        let panel = reply.channel_message.expect("panel");
+
+        assert_eq!(panel.target_channel_id, Some(9));
+        assert_eq!(panel.edit_message_id, Some(555));
+        assert!(panel.response_message_hook.is_some());
+        server.abort();
+    }
+
+    #[test]
+    fn panel_restore_cleart_ref_nur_bei_not_found() {
+        assert!(should_clear_panel_ref_after_restore_status(Some(404)));
+        assert!(!should_clear_panel_ref_after_restore_status(Some(403)));
+        assert!(!should_clear_panel_ref_after_restore_status(None));
     }
 
     #[tokio::test]

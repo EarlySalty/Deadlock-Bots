@@ -203,6 +203,34 @@ impl DiscordAdapter {
             .map_err(|err| err.to_string())
     }
 
+    /// Öffentliche Variante für Panel-Restore/-Edit aus dem Interaction-Dispatch.
+    pub async fn edit_raw_public(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<(), serenity::Error> {
+        self.http
+            .edit_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                body,
+                Vec::new(),
+            )
+            .await
+            .map(|_| ())
+    }
+
+    fn move_voice_channel_precheck(
+        channel_guild_id: Option<u64>,
+        expected_guild_id: u64,
+    ) -> Result<(), PortError> {
+        match channel_guild_id {
+            Some(guild_id) if guild_id == expected_guild_id => Ok(()),
+            _ => Err(PortError::ChannelNotFound),
+        }
+    }
+
     fn is_unknown_channel(err: &serenity::Error) -> bool {
         // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
         // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).
@@ -247,6 +275,22 @@ mod tests {
                     "custom_id": "scam-revoke:42",
                 }],
             }])
+        );
+    }
+
+    #[test]
+    fn move_voice_channel_precheck_liefert_404_semantik() {
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(None, 1),
+            Err(PortError::ChannelNotFound)
+        );
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(Some(2), 1),
+            Err(PortError::ChannelNotFound)
+        );
+        assert_eq!(
+            DiscordAdapter::move_voice_channel_precheck(Some(1), 1),
+            Ok(())
         );
     }
 }
@@ -436,14 +480,60 @@ impl DiscordPort for DiscordAdapter {
         user_id: u64,
         channel_id: Option<u64>,
     ) -> Result<(), PortError> {
+        let gid = GuildId::new(guild_id);
+        let uid = UserId::new(user_id);
+        let guild_cached = self.cache().guild(gid).is_some();
+        if !guild_cached {
+            self.http.get_guild(gid).await.map_err(|err| {
+                if Self::is_http_404(&err) {
+                    PortError::GuildNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })?;
+        }
+
+        let member_cached = self
+            .cache()
+            .guild(gid)
+            .map(|guild| guild.members.contains_key(&uid))
+            .unwrap_or(false);
+        if !member_cached {
+            self.http.get_member(gid, uid).await.map_err(|err| {
+                if Self::is_http_404(&err) {
+                    PortError::MemberNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })?;
+        }
+
+        if let Some(channel_id) = channel_id {
+            let cid = ChannelId::new(channel_id);
+            let cached_channel_guild_id = self.cache().guild(gid).and_then(|guild| {
+                guild
+                    .channels
+                    .get(&cid)
+                    .map(|channel| channel.guild_id.get())
+            });
+            if cached_channel_guild_id.is_some() {
+                Self::move_voice_channel_precheck(cached_channel_guild_id, guild_id)?;
+            } else {
+                let channel = self.http.get_channel(cid).await.map_err(|err| {
+                    if Self::is_http_404(&err) {
+                        PortError::ChannelNotFound
+                    } else {
+                        PortError::Discord(err.to_string())
+                    }
+                })?;
+                let channel_guild_id = channel.guild().map(|channel| channel.guild_id.get());
+                Self::move_voice_channel_precheck(channel_guild_id, guild_id)?;
+            }
+        }
+
         let body = json!({ "channel_id": channel_id.map(|v| v.to_string()) });
         self.http
-            .edit_member(
-                GuildId::new(guild_id),
-                UserId::new(user_id),
-                &body,
-                Some("master-broker:move-voice"),
-            )
+            .edit_member(gid, uid, &body, Some("master-broker:move-voice"))
             .await
             .map(|_| ())
             .map_err(|err| PortError::Discord(err.to_string()))

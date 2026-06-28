@@ -7,13 +7,13 @@ use std::net::SocketAddr;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 use crate::payload::{self};
 use crate::port::{MemberPresence, PortError, RichMessage};
 use crate::{
-    IDEMPOTENCY_HEADER, SharedBroker, authorize, error_body, payload_hash, request_id,
-    require_loopback, respond, run_idempotent, success_body,
+    authorize, error_body, payload_hash, request_id, require_loopback, respond, run_idempotent,
+    success_body, SharedBroker, IDEMPOTENCY_HEADER,
 };
 
 type Peer = ConnectInfo<SocketAddr>;
@@ -358,9 +358,12 @@ pub async fn resolve_user(
     headers: HeaderMap,
     body: axum::body::Bytes,
 ) -> Response {
-    let (rid, payload, _idem) = match begin_action(&state, &peer, &headers, &body) {
-        Ok(v) => v,
-        Err(resp) => return resp,
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let Ok(payload) = json_object(&body) else {
+        return bad_request(&rid, "invalid JSON payload");
     };
     let user_id = match payload::positive_int(&payload, "user_id") {
         Ok(v) => v,
@@ -1732,8 +1735,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_info_returns_loopback_metadata_without_token()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn channel_info_returns_loopback_metadata_without_token(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut params = HashMap::new();
         params.insert("channel_id".to_string(), "42".to_string());
         let response = channel_info(
@@ -1793,8 +1796,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn channel_info_rejects_non_loopback_without_token_check()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn channel_info_rejects_non_loopback_without_token_check(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let response = channel_info(
             State(test_state()?),
             peer("10.0.0.5:3456")?,
@@ -1805,6 +1808,26 @@ mod tests {
         let (status, body) = response_json(response).await?;
         assert_eq!(status, 403);
         assert_eq!(body["error"]["code"], "forbidden");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn resolve_user_is_authorized_read_without_idempotency(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        let response = resolve_user(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            headers,
+            axum::body::Bytes::from_static(br#"{"user_id":42}"#),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["result"]["found"], false);
         Ok(())
     }
 }

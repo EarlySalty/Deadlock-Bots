@@ -10,10 +10,12 @@
 //!   (Registry-Eintrag beim Posten — löst die Phase-2-Kopplung auf).
 
 use std::collections::HashMap;
+use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
+use reqwest::Url;
 use serde_json::{json, Value};
 use tokio::sync::RwLock;
 
@@ -88,26 +90,52 @@ impl TwitchApiClient {
                 .unwrap_or(8776);
             format!("http://{host}:{port}")
         });
+        let allow_non_loopback = get("TWITCH_INTERNAL_API_ALLOW_NON_LOOPBACK")
+            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+            .unwrap_or(false);
         let timeout = get("TWITCH_INTERNAL_API_TIMEOUT_SEC")
             .and_then(|v| v.parse::<f64>().ok())
             .map(|v| v.max(0.5))
             .unwrap_or(10.0);
-        Some(Self::new(base_url, token, Duration::from_secs_f64(timeout)))
+        match Self::try_new(
+            base_url,
+            token,
+            Duration::from_secs_f64(timeout),
+            allow_non_loopback,
+        ) {
+            Ok(client) => Some(client),
+            Err(err) => {
+                tracing::warn!(%err, "Twitch internal API config ungueltig");
+                None
+            }
+        }
     }
 
+    pub fn try_new(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+        timeout: Duration,
+        allow_non_loopback: bool,
+    ) -> Result<Arc<Self>, TwitchBridgeError> {
+        let base_url = normalize_internal_api_base_url(&base_url.into(), allow_non_loopback)
+            .map_err(TwitchBridgeError::Api)?;
+        Ok(Arc::new(Self {
+            http: reqwest::Client::builder()
+                .timeout(timeout)
+                .build()
+                .unwrap_or_default(),
+            base_url,
+            token: token.into(),
+        }))
+    }
+
+    #[cfg(test)]
     pub fn new(
         base_url: impl Into<String>,
         token: impl Into<String>,
         timeout: Duration,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            http: reqwest::Client::builder()
-                .timeout(timeout)
-                .build()
-                .unwrap_or_default(),
-            base_url: base_url.into().trim_end_matches('/').to_string(),
-            token: token.into(),
-        })
+        Self::try_new(base_url, token, timeout, false).expect("valid Twitch API client")
     }
 
     async fn request(
@@ -245,6 +273,13 @@ impl TwitchApiClient {
                     "active live announcement entry is invalid".to_string(),
                 ));
             }
+            if !is_valid_referral_url(&announcement.referral_url) {
+                tracing::warn!(
+                    streamer = %announcement.streamer_login,
+                    "Twitch-Live-Ankuendigung mit ungueltiger referral_url uebersprungen"
+                );
+                continue;
+            }
             entries.push(announcement);
         }
         Ok(entries)
@@ -292,6 +327,65 @@ impl TwitchApiClient {
     }
 }
 
+fn is_loopback_host(host: &str) -> bool {
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if normalized == "localhost" {
+        return true;
+    }
+    normalized
+        .parse::<IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+fn normalize_internal_api_base_url(
+    value: &str,
+    allow_non_loopback: bool,
+) -> Result<String, String> {
+    let mut raw = value.trim().to_string();
+    if raw.is_empty() {
+        return Err("base_url is required".to_string());
+    }
+    if !raw.contains("://") {
+        raw = format!("http://{raw}");
+    }
+    let mut parsed = Url::parse(&raw).map_err(|_| "base_url is invalid".to_string())?;
+    if parsed.scheme().is_empty() || parsed.host_str().is_none() {
+        return Err("base_url is invalid".to_string());
+    }
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err("base_url must not contain credentials".to_string());
+    }
+    let host = parsed
+        .host_str()
+        .map(str::trim)
+        .filter(|host| !host.is_empty())
+        .ok_or_else(|| "base_url is invalid".to_string())?;
+    if !allow_non_loopback && !is_loopback_host(host) {
+        return Err("base_url host must resolve to loopback unless explicitly allowed".to_string());
+    }
+    let mut path = parsed.path().trim_end_matches('/').to_string();
+    let internal_base = TWITCH_INTERNAL_API_BASE_PATH.trim_end_matches('/');
+    if path == internal_base {
+        path.clear();
+    } else if path.ends_with(internal_base) {
+        let keep = path.len() - internal_base.len();
+        path.truncate(keep);
+        path = path.trim_end_matches('/').to_string();
+    }
+    parsed.set_path(&path);
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.as_str().trim_end_matches('/').to_string())
+}
+
+fn is_valid_referral_url(value: &str) -> bool {
+    let Ok(parsed) = Url::parse(value.trim()) else {
+        return false;
+    };
+    matches!(parsed.scheme(), "http" | "https") && parsed.host_str().is_some()
+}
+
 // ── Registry (ersetzt bot.add_view-Rehydrierung) ───────────────────────────
 
 #[derive(Default)]
@@ -305,6 +399,9 @@ impl TrackingRegistry {
     }
 
     pub async fn insert(&self, announcement: Announcement) {
+        if !is_valid_referral_url(&announcement.referral_url) {
+            return;
+        }
         let custom_id = build_custom_id(&announcement.streamer_login, &announcement.tracking_token);
         self.by_custom_id
             .write()
@@ -319,6 +416,9 @@ impl TrackingRegistry {
     pub async fn replace_all(&self, announcements: Vec<Announcement>) {
         let mut map = HashMap::new();
         for announcement in announcements {
+            if !is_valid_referral_url(&announcement.referral_url) {
+                continue;
+            }
             let custom_id =
                 build_custom_id(&announcement.streamer_login, &announcement.tracking_token);
             map.insert(custom_id, announcement);
@@ -377,6 +477,13 @@ impl InteractionHandler for TrackingClickHandler {
                 "Twitch-Live-Klick ohne bekannte Ankündigung");
             return BridgeReply::ephemeral_text("⚠️ Diese Live-Ankündigung ist nicht mehr aktiv.");
         };
+        if !is_valid_referral_url(&announcement.referral_url) {
+            tracing::warn!(
+                streamer = %announcement.streamer_login,
+                "Twitch-Live-Klick mit ungueltiger referral_url uebersprungen"
+            );
+            return BridgeReply::ephemeral_text("⚠️ Diese Live-Ankündigung ist nicht mehr aktiv.");
+        }
 
         // Klick tracken (best effort — der User bekommt seinen Link immer)
         let channel_id = if interaction.channel_id > 0 {
@@ -521,6 +628,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn internal_api_base_url_wird_wie_python_gehaertet() {
+        assert_eq!(
+            normalize_internal_api_base_url("127.0.0.1:8776/internal/twitch/v1", false)
+                .expect("normalized"),
+            "http://127.0.0.1:8776"
+        );
+        assert!(normalize_internal_api_base_url("https://u:p@127.0.0.1:8776", false).is_err());
+        assert!(normalize_internal_api_base_url("https://example.com", false).is_err());
+        assert_eq!(
+            normalize_internal_api_base_url("https://example.com/internal/twitch/v1", true)
+                .expect("override"),
+            "https://example.com"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_announcements_ueberspringt_defekte_referral_urls() {
+        let (url, _received, server) = mock_twitch_bot(
+            json!([
+                {
+                    "streamer_login": "bad",
+                    "message_id": "1",
+                    "tracking_token": "bad",
+                    "referral_url": "javascript:alert(1)",
+                    "channel_id": "7"
+                },
+                {
+                    "streamer_login": "good",
+                    "message_id": "2",
+                    "tracking_token": "good",
+                    "referral_url": "https://twitch.tv/good",
+                    "channel_id": "7"
+                }
+            ]),
+            json!({"ok": true}),
+        )
+        .await;
+        let client = TwitchApiClient::new(url, "tok", Duration::from_secs(5));
+        let restored = client.active_announcements().await.expect("announcements");
+
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].streamer_login, "good");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn klick_trackt_und_liefert_referral_link() {
         let (url, received, server) =
@@ -608,5 +761,35 @@ mod tests {
             .await;
         assert!(reply.content.expect("text").contains("nicht mehr aktiv"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn klick_mit_defekter_referral_url_liefert_keinen_button() {
+        let client = TwitchApiClient::new("http://127.0.0.1:9", "tok", Duration::from_secs(1));
+        let registry = TrackingRegistry::new();
+        registry
+            .insert(Announcement {
+                streamer_login: "bad".to_string(),
+                tracking_token: "tok".to_string(),
+                referral_url: "notaurl".to_string(),
+                button_label: DEFAULT_BUTTON_LABEL.to_string(),
+                channel_id: 1,
+                message_id: 2,
+            })
+            .await;
+        let handler = TrackingClickHandler { client, registry };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "twitch-live:bad:tok".to_string(),
+                interaction_id: 1,
+                user_id: 2,
+                channel_id: 1,
+                message_id: Some(2),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.content.expect("text").contains("nicht mehr aktiv"));
+        assert!(reply.components.is_none());
     }
 }

@@ -30,8 +30,12 @@ pub struct BridgeInteraction {
     pub user_id: u64,
     /// Discord-Username (str(user)-Äquivalent, für Tracking-Zwecke).
     pub author_name: String,
+    /// Discord-Displayname: Guild-Nick vor global_name vor username.
+    pub author_display_name: String,
     /// manage_roles ODER administrator (für Mod-Guards wie den Review-Flow).
     pub author_can_manage_roles: bool,
+    /// manage_guild ODER administrator (für Admin-Slash-Commands wie Changelog).
+    pub author_can_manage_guild: bool,
     /// Ob Discord einen Guild-Member-Kontext mitgeliefert hat.
     pub member_present: bool,
     pub guild_id: u64,
@@ -120,12 +124,33 @@ pub struct BridgeAttachment {
     pub data: Vec<u8>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ChannelMessage {
+    pub target_channel_id: Option<u64>,
+    pub content: Option<String>,
     pub embeds: Vec<Value>,
     pub components: Option<Value>,
+    pub edit_message_id: Option<u64>,
     /// Bestätigungstext als ephemere Interaction-Antwort.
     pub confirmation: String,
+    pub response_message_hook: Option<Arc<dyn ResponseMessageHook>>,
+}
+
+impl fmt::Debug for ChannelMessage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelMessage")
+            .field("target_channel_id", &self.target_channel_id)
+            .field("content", &self.content)
+            .field("embeds", &self.embeds)
+            .field("components", &self.components)
+            .field("edit_message_id", &self.edit_message_id)
+            .field("confirmation", &self.confirmation)
+            .field(
+                "response_message_hook",
+                &self.response_message_hook.as_ref().map(|_| "<hook>"),
+            )
+            .finish()
+    }
 }
 
 impl BridgeReply {

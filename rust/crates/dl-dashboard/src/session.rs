@@ -229,6 +229,7 @@ impl PersistedSession {
     fn into_session(self) -> Option<Session> {
         let access_level = match self.access_level.as_str() {
             "full" => AccessLevel::Full,
+            "turnier_only" => AccessLevel::TurnierOnly,
             _ => return None,
         };
         Some(Session {

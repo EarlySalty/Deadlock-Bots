@@ -26,12 +26,15 @@ const DEFAULT_BROKER_BASE: &str = "http://127.0.0.1:8770";
 pub enum AccessLevel {
     /// Voller Zugriff (Owner, Admin, Moderator-Rolle).
     Full,
+    /// Gültige Session ohne Vollzugriff (z. B. importierte turnier_only-Session).
+    TurnierOnly,
 }
 
 impl AccessLevel {
     pub fn as_str(self) -> &'static str {
         match self {
             AccessLevel::Full => "full",
+            AccessLevel::TurnierOnly => "turnier_only",
         }
     }
 }
@@ -87,6 +90,18 @@ impl DashboardConfig {
         );
         let twitch_tokens = collect_tokens(&get, &["TWITCH_INTERNAL_API_TOKEN"]);
 
+        let public_base_url = Some(
+            get("MASTER_DASHBOARD_PUBLIC_URL")
+                .unwrap_or_else(|| DEFAULT_PUBLIC_BASE_URL.to_string()),
+        );
+        let listen_base_url = get("MASTER_DASHBOARD_LISTEN_URL")
+            .unwrap_or_else(|| DEFAULT_LISTEN_BASE_URL.to_string());
+        let allowed_origins = build_allowed_origins(
+            public_base_url.as_deref(),
+            &listen_base_url,
+            get("MASTER_DASHBOARD_ALLOWED_ORIGINS").as_deref(),
+        );
+
         Self {
             discord_client_id: get("DISCORD_OAUTH_CLIENT_ID"),
             discord_client_secret: get("DISCORD_OAUTH_CLIENT_SECRET"),
@@ -110,15 +125,9 @@ impl DashboardConfig {
                 .and_then(|v| v.parse().ok())
                 .filter(|v: &i64| *v > 0)
                 .unwrap_or(DEFAULT_OAUTH_STATE_TTL_SECONDS),
-            allowed_origins: get("MASTER_DASHBOARD_ALLOWED_ORIGINS")
-                .map(|v| split_csv(&v))
-                .unwrap_or_default(),
-            public_base_url: Some(
-                get("MASTER_DASHBOARD_PUBLIC_URL")
-                    .unwrap_or_else(|| DEFAULT_PUBLIC_BASE_URL.to_string()),
-            ),
-            listen_base_url: get("MASTER_DASHBOARD_LISTEN_URL")
-                .unwrap_or_else(|| DEFAULT_LISTEN_BASE_URL.to_string()),
+            allowed_origins,
+            public_base_url,
+            listen_base_url,
             discord_api_base: get("DISCORD_API_BASE")
                 .unwrap_or_else(|| DISCORD_API_BASE.to_string()),
             broker_base: get("MASTER_BROKER_BASE_URL")
@@ -180,6 +189,48 @@ fn split_csv(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.contains(&value) {
+        values.push(value);
+    }
+}
+
+fn normalize_origin(raw: &str) -> Option<String> {
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    let mut origin = format!("{}://{}", parsed.scheme(), host);
+    if let Some(port) = parsed.port() {
+        origin.push(':');
+        origin.push_str(&port.to_string());
+    }
+    Some(origin)
+}
+
+fn build_allowed_origins(
+    public_base_url: Option<&str>,
+    listen_base_url: &str,
+    extra_raw: Option<&str>,
+) -> Vec<String> {
+    let mut origins = Vec::new();
+    for raw in [public_base_url, Some(listen_base_url)]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(origin) = normalize_origin(raw) {
+            push_unique(&mut origins, origin);
+        }
+    }
+    for raw in extra_raw.into_iter().flat_map(split_csv) {
+        if let Some(origin) = normalize_origin(&raw) {
+            push_unique(&mut origins, origin);
+        }
+    }
+    origins
+}
+
 fn parse_id_list(raw: &str) -> Vec<u64> {
     raw.split(&[',', ' '][..])
         .filter_map(|s| s.trim().parse::<u64>().ok())
@@ -210,6 +261,12 @@ mod tests {
             cfg.public_base_url.as_deref(),
             Some(DEFAULT_PUBLIC_BASE_URL)
         );
+        assert!(cfg
+            .allowed_origins
+            .contains(&"https://admin.deutsche-deadlock-community.de".to_string()));
+        assert!(cfg
+            .allowed_origins
+            .contains(&"http://127.0.0.1:8766".to_string()));
     }
 
     #[test]
@@ -263,6 +320,7 @@ mod tests {
         ]);
         let cfg = DashboardConfig::from_lookup(lookup(&map));
         assert_eq!(cfg.auth_guild_ids, vec![111, 222, 333]);
-        assert_eq!(cfg.allowed_origins, vec!["https://a.de", "https://b.de"]);
+        assert!(cfg.allowed_origins.contains(&"https://a.de".to_string()));
+        assert!(cfg.allowed_origins.contains(&"https://b.de".to_string()));
     }
 }

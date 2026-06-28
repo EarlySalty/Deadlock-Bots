@@ -203,13 +203,12 @@ impl DashboardApp {
         Ok(session)
     }
 
-    /// `_is_allowed_request_origin`: ohne konfigurierte Origins offen (CSRF-
-    /// Token bleibt die eigentliche Absicherung), sonst muss der Origin-Header
-    /// in der Liste stehen.
+    /// `_is_allowed_request_origin`: Origins werden aus Basis-URLs + Env
+    /// geseedet; eine leere Liste ist Misconfig und schliesst ab.
     fn allowed_origin(&self, headers: &HeaderMap) -> bool {
         let allowed = &self.cfg().allowed_origins;
         if allowed.is_empty() {
-            return true;
+            return false;
         }
         match request_origin(headers) {
             Some(origin) => allowed.iter().any(|a| a == &origin),
@@ -1466,13 +1465,18 @@ mod tests {
         }
     }
 
-    async fn test_router(cfg: DashboardConfig) -> (tempfile::TempDir, Router) {
+    async fn test_app(cfg: DashboardConfig) -> (tempfile::TempDir, DashboardApp) {
         let dir = tempfile::tempdir().expect("tempdir");
         let db = dl_db::Db::open_creating(dir.path().join("dashboard.sqlite3")).expect("db");
         db.write(|conn| conn.execute(KV_DDL, []).map(|_| ()))
             .await
             .expect("kv_store");
         let app = DashboardApp::new(cfg, db, Arc::new(NoMemberLookup), Arc::new(NoNameResolver));
+        (dir, app)
+    }
+
+    async fn test_router(cfg: DashboardConfig) -> (tempfile::TempDir, Router) {
+        let (dir, app) = test_app(cfg).await;
         (dir, router(app))
     }
 
@@ -1583,6 +1587,30 @@ mod tests {
             read_cookies(&duplicate, SESSION_COOKIE),
             vec!["alt".to_string(), "gueltig".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn read_guard_akzeptiert_gueltige_non_full_session() {
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let (_dir, app) = test_app(cfg).await;
+        let session_id = app.inner.sessions.create(
+            NewSession {
+                user_id: 42,
+                username: "nani".to_string(),
+                display_name: "Nani".to_string(),
+                reason: "turnier_only".to_string(),
+                access_level: AccessLevel::TurnierOnly,
+            },
+            now_unix_f64(),
+        );
+        let headers = headers_with("cookie", &format!("{SESSION_COOKIE}={session_id}"));
+
+        assert!(app.guard_read(&headers).is_ok());
+        assert!(app.guard_full(&headers).is_err());
     }
 
     #[test]

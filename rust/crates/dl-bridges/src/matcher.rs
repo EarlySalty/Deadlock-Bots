@@ -325,6 +325,7 @@ pub struct MatcherConfig {
     pub max_ai_per_scan: u64,
     pub scan_interval_hours: u64,
     pub state_path: PathBuf,
+    pub ai_provider: String,
 }
 
 impl MatcherConfig {
@@ -364,6 +365,9 @@ impl MatcherConfig {
                 get("STREAMER_LINK_STATE_PATH")
                     .unwrap_or_else(|| "data/streamer_link_state.json".to_string()),
             ),
+            ai_provider: get("STREAMER_LINK_AI_PROVIDER")
+                .unwrap_or_else(|| "minimax".to_string())
+                .to_ascii_lowercase(),
         }
     }
 }
@@ -926,10 +930,11 @@ impl Matcher {
         {
             let mut state = self.state.lock().await;
             state.processed.remove(&login.to_lowercase());
+            let moderator = format!("<@{}>", interaction.user_id);
             state.mark(
                 login,
                 "linked",
-                json!({"discord_user_id": user_id.to_string(), "by": interaction.author_name})
+                json!({"discord_user_id": user_id.to_string(), "by": moderator})
                     .as_object()
                     .cloned()
                     .unwrap_or_default(),
@@ -939,13 +944,14 @@ impl Matcher {
         }
 
         if let (Some(channel_id), Some(message_id)) = (channel_id, message_id) {
+            let moderator = format!("<@{}>", interaction.user_id);
             self.notifier
                 .finalize_review(
                     channel_id,
                     message_id,
                     format!(
                         "Manuell verknüpft von {} → <@{user_id}>. {role_note}",
-                        interaction.author_name
+                        moderator
                     ),
                     0x2ECC71,
                 )
@@ -1014,22 +1020,15 @@ impl InteractionHandler for ReviewHandler {
                 "Nur Mods mit Rollen-Rechten können das bestätigen.",
             );
         }
+        let moderator = format!("<@{}>", interaction.user_id);
         let rest = interaction
             .custom_id
             .strip_prefix(REVIEW_PREFIX)
             .unwrap_or_default();
         let (action, token) = rest.split_once(':').unwrap_or(("", ""));
         match action {
-            "link" => {
-                self.matcher
-                    .confirm_pending(token, true, &interaction.author_name)
-                    .await
-            }
-            "reject" => {
-                self.matcher
-                    .confirm_pending(token, false, &interaction.author_name)
-                    .await
-            }
+            "link" => self.matcher.confirm_pending(token, true, &moderator).await,
+            "reject" => self.matcher.confirm_pending(token, false, &moderator).await,
             "manual" => {
                 // token = login; Button öffnet Modal
                 BridgeReply {
@@ -1233,9 +1232,11 @@ mod tests {
     fn config_und_summary_ai_budget_wie_python() {
         let cfg = MatcherConfig::from_env(|key| match key {
             "STREAMER_LINK_MAX_AI_PER_SCAN" => Some("7".to_string()),
+            "STREAMER_LINK_AI_PROVIDER" => Some("openai".to_string()),
             _ => None,
         });
         assert_eq!(cfg.max_ai_per_scan, 7);
+        assert_eq!(cfg.ai_provider, "openai");
         let stats = ScanStats {
             checked: 3,
             ai_calls: 2,
@@ -1265,6 +1266,7 @@ mod tests {
 
     struct MockNotifier {
         embeds: Mutex<Vec<Value>>,
+        statuses: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -1281,6 +1283,7 @@ mod tests {
             _status: String,
             _color: u32,
         ) {
+            self.statuses.lock().expect("lock").push(_status);
         }
 
         async fn send_text(&self, _channel_id: u64, _text: String) {}
@@ -1341,6 +1344,7 @@ mod tests {
             max_ai_per_scan: 2,
             scan_interval_hours: 6,
             state_path: dir.path().join("state.json"),
+            ai_provider: "minimax".to_string(),
         };
         let guild = Arc::new(MockGuild {
             members: vec![
@@ -1363,6 +1367,7 @@ mod tests {
         });
         let notifier = Arc::new(MockNotifier {
             embeds: Mutex::new(Vec::new()),
+            statuses: Mutex::new(Vec::new()),
         });
         let scorer = Arc::new(CountingAi {
             calls: Mutex::new(Vec::new()),
@@ -1390,6 +1395,64 @@ mod tests {
             .expect("description")
             .contains("**AI-Aufrufe:** 2"));
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn review_status_verwendet_moderator_mention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let notifier = Arc::new(MockNotifier {
+            embeds: Mutex::new(Vec::new()),
+            statuses: Mutex::new(Vec::new()),
+        });
+        let matcher = Matcher::new(
+            MatcherConfig {
+                enabled: true,
+                notify_channel_id: DEFAULT_NOTIFY_CHANNEL_ID,
+                role_id: DEFAULT_STREAMER_ROLE_ID,
+                guild_id: DEFAULT_GUILD_ID,
+                auto_threshold: 90,
+                review_threshold: 70,
+                fuzzy_floor: 0.62,
+                max_ai_per_scan: 40,
+                scan_interval_hours: 6,
+                state_path: dir.path().join("state.json"),
+                ai_provider: "minimax".to_string(),
+            },
+            TwitchApiClient::new(
+                "http://127.0.0.1:9",
+                "tok",
+                std::time::Duration::from_secs(1),
+            ),
+            Arc::new(MockGuild {
+                members: Vec::new(),
+            }),
+            notifier.clone(),
+            Arc::new(NoAi),
+        );
+        matcher.state.lock().await.pending.insert(
+            "tok".to_string(),
+            json!({
+                "login": "dragskope",
+                "channel_id": 10,
+                "message_id": 20,
+            }),
+        );
+        let handler = ReviewHandler {
+            matcher: matcher.clone(),
+        };
+        let _ = handler
+            .handle(BridgeInteraction {
+                custom_id: "slm:reject:tok".to_string(),
+                user_id: 99,
+                author_name: "Moderator".to_string(),
+                author_can_manage_roles: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let statuses = notifier.statuses.lock().expect("lock");
+        assert!(statuses[0].contains("<@99>"));
+        assert!(!statuses[0].contains("Moderator"));
     }
 
     #[test]

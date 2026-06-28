@@ -25,6 +25,8 @@ const EMBED_COLOR: u32 = 0x5865F2;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChangelogError {
+    #[error("{0}")]
+    BadRequest(String),
     #[error("channel {0} not found")]
     ChannelNotFound(u64),
     #[error("{0}")]
@@ -129,6 +131,39 @@ fn build_embed(title: &str, content: &str, target: &str) -> Value {
         "timestamp": utc_now_iso(),
         "footer": { "text": if target == "twitch" { "Twitch Bot" } else { "Deadlock Bots" } },
     })
+}
+
+fn channel_for_target(target: &str) -> Result<u64, ChangelogError> {
+    match target {
+        "all" => Ok(DEV_UPDATES_CHANNEL_ID),
+        "twitch" => Ok(TWITCH_BOT_CHANNEL_ID),
+        _ => Err(ChangelogError::BadRequest(
+            "target must be one of {'all', 'twitch'}".to_string(),
+        )),
+    }
+}
+
+pub async fn publish_changelog(
+    state: &ChangelogState,
+    title: &str,
+    content: &str,
+    target: &str,
+) -> Result<u64, ChangelogError> {
+    let title = title.trim();
+    let content = content.trim();
+    let target = target.trim();
+    if title.is_empty() || content.is_empty() {
+        return Err(ChangelogError::BadRequest(
+            "title and content required".to_string(),
+        ));
+    }
+    let channel_id = channel_for_target(if target.is_empty() { "all" } else { target })?;
+    let embed = build_embed(title, content, target);
+    state
+        .discord
+        .send(channel_id, None, &[embed], false)
+        .await?;
+    Ok(channel_id)
 }
 
 fn parse_channel_id(raw: Option<&Value>) -> Result<Option<u64>, Response> {
@@ -240,16 +275,16 @@ async fn handle_changelog(
     };
     let channel_id = match direct {
         Some(id) => id,
-        None => {
-            if target != "all" && target != "twitch" {
-                return err(400, "target must be one of {'all', 'twitch'}");
+        None => match publish_changelog(&state, title, content, target).await {
+            Ok(channel_id) => {
+                return Json(json!({ "ok": true, "channel_id": channel_id })).into_response();
             }
-            if target == "twitch" {
-                TWITCH_BOT_CHANNEL_ID
-            } else {
-                DEV_UPDATES_CHANNEL_ID
+            Err(ChangelogError::BadRequest(message)) => return err(400, &message),
+            Err(e) => {
+                tracing::warn!(%e, "Changelog-Post fehlgeschlagen");
+                return err(500, &e.to_string());
             }
-        }
+        },
     };
 
     let embed = build_embed(title, content, target);
@@ -585,6 +620,16 @@ mod tests {
         (router(state), mock)
     }
 
+    fn test_state() -> (SharedChangelog, Arc<MockDiscord>) {
+        let mock = Arc::new(MockDiscord {
+            sent: Mutex::new(Vec::new()),
+        });
+        (
+            ChangelogState::new(mock.clone(), Some("test-token".to_string())),
+            mock,
+        )
+    }
+
     async fn post_json(app: Router, path: &str, body: Value) -> (u16, Value) {
         let response = app
             .oneshot(
@@ -662,6 +707,19 @@ mod tests {
         )
         .await;
         assert_eq!(status, 400);
+    }
+
+    #[tokio::test]
+    async fn slash_publish_nutzt_http_changelog_publish_pfad() {
+        let (state, mock) = test_state();
+        let channel_id = publish_changelog(&state, "T", "C", "twitch")
+            .await
+            .expect("publish");
+
+        assert_eq!(channel_id, TWITCH_BOT_CHANNEL_ID);
+        let sent = mock.sent.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, TWITCH_BOT_CHANNEL_ID);
     }
 
     #[tokio::test]

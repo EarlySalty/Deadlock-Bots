@@ -92,6 +92,99 @@ impl dl_broker::ChannelInfoPort for BrokerChannelInfoGlue {
     }
 }
 
+const BRD10_CHANGELOG_COMMAND_DESC: &str = "Changelog-Eintrag in Discord posten";
+const BRD10_CHANGELOG_POST_DESC: &str = "Changelog-Eintrag in Discord posten";
+const BRD10_CHANGELOG_TITLE_OPTION_DESC: &str = "Überschrift des Eintrags";
+const BRD10_CHANGELOG_CONTENT_OPTION_DESC: &str =
+    "Inhalt als Markdown (z. B. '- Feature A\n- Bug gefixt')";
+const BRD10_CHANGELOG_TARGET_OPTION_DESC: &str =
+    "Zielkanal: 'all' für alle Bots, 'twitch' für den Twitch-Bot";
+const BRD10_CHANGELOG_TARGET_ALL_CHOICE: &str = "Alle Bots (Dev Updates)";
+const BRD10_CHANGELOG_TARGET_TWITCH_CHOICE: &str = "Twitch Bot";
+const BRD10_CHANGELOG_NO_PERMISSION_MSG: &str = "Keine Berechtigung.";
+const BRD10_CHANGELOG_POSTED_MSG: &str = "✅ Changelog gepostet.";
+const BRD10_CHANGELOG_FAILED_MSG: &str = "❌ Changelog konnte nicht gepostet werden.";
+
+fn changelog_command_spec() -> dl_discord::CommandSpec {
+    dl_discord::CommandSpec {
+        definition: serde_json::json!({
+            "name": "changelog",
+            "description": BRD10_CHANGELOG_COMMAND_DESC,
+            "options": [{
+                "type": 1,
+                "name": "post",
+                "description": BRD10_CHANGELOG_POST_DESC,
+                "options": [
+                    {
+                        "type": 3,
+                        "name": "title",
+                        "description": BRD10_CHANGELOG_TITLE_OPTION_DESC,
+                        "required": true
+                    },
+                    {
+                        "type": 3,
+                        "name": "content",
+                        "description": BRD10_CHANGELOG_CONTENT_OPTION_DESC,
+                        "required": true
+                    },
+                    {
+                        "type": 3,
+                        "name": "target",
+                        "description": BRD10_CHANGELOG_TARGET_OPTION_DESC,
+                        "required": false,
+                        "choices": [
+                            { "name": BRD10_CHANGELOG_TARGET_ALL_CHOICE, "value": "all" },
+                            { "name": BRD10_CHANGELOG_TARGET_TWITCH_CHOICE, "value": "twitch" }
+                        ]
+                    }
+                ]
+            }],
+        }),
+    }
+}
+
+struct ChangelogPostCommand {
+    state: dl_changelog::SharedChangelog,
+}
+
+#[async_trait::async_trait]
+impl dl_discord::InteractionHandler for ChangelogPostCommand {
+    async fn handle(&self, interaction: dl_discord::BridgeInteraction) -> dl_discord::BridgeReply {
+        if !interaction.author_can_manage_guild {
+            return dl_discord::BridgeReply::ephemeral_text(BRD10_CHANGELOG_NO_PERMISSION_MSG);
+        }
+        let get = |key: &str| {
+            interaction
+                .options
+                .get(key)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string()
+        };
+        let title = get("title");
+        let content = get("content");
+        let target = {
+            let value = get("target");
+            if value.is_empty() {
+                "all".to_string()
+            } else {
+                value
+            }
+        };
+        match dl_changelog::publish_changelog(&self.state, &title, &content, &target).await {
+            Ok(channel_id) => {
+                tracing::info!(channel_id, "Changelog per Slash-Command gepostet");
+                dl_discord::BridgeReply::ephemeral_text(BRD10_CHANGELOG_POSTED_MSG)
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Changelog Slash-Command fehlgeschlagen");
+                dl_discord::BridgeReply::ephemeral_text(BRD10_CHANGELOG_FAILED_MSG)
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
@@ -130,12 +223,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if let Err(err) = adapter.init_application_id().await {
         tracing::error!(%err, "Application-ID nicht setzbar — Interaction-Followups schlagen fehl");
     }
+    let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
     let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
-    dl_bridges::steam::register(&mut router, steam_client.clone());
+    dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), db.clone());
+    router.on_command(
+        "changelog post",
+        changelog_command_spec(),
+        Arc::new(ChangelogPostCommand {
+            state: changelog.clone(),
+        }),
+    );
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {
@@ -153,11 +254,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 adapter: adapter.clone(),
                 notify_channel_id: matcher_config.notify_channel_id,
             });
-            // AI-Scoring: MiniMax wenn konfiguriert, sonst Heuristik (NoAi)
+            // AI-Scoring: Provider wie Python via STREAMER_LINK_AI_PROVIDER.
             let scorer: Arc<dyn dl_bridges::matcher::AiScorer> =
-                match dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()) {
-                    Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
-                    None => Arc::new(dl_bridges::matcher::NoAi),
+                match matcher_config.ai_provider.as_str() {
+                    "minimax" => match dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()) {
+                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                        None => Arc::new(dl_bridges::matcher::NoAi),
+                    },
+                    "openai" => match dl_ai::OpenAiClient::text_from_env(|k| std::env::var(k).ok())
+                    {
+                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                        None => Arc::new(dl_bridges::matcher::NoAi),
+                    },
+                    "gemini" => match dl_ai::GeminiClient::from_env(|k| std::env::var(k).ok()) {
+                        Some(generator) => Arc::new(dl_ai::MatcherScorer { generator }),
+                        None => Arc::new(dl_bridges::matcher::NoAi),
+                    },
+                    _ => Arc::new(dl_bridges::matcher::NoAi),
                 };
             let matcher = dl_bridges::matcher::Matcher::new(
                 matcher_config,
@@ -469,8 +582,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
     let _member_listener =
         dl_bridges::steam::spawn_member_remove_listener(&dispatcher, steam_client.clone());
-    let _admin_listener =
-        dl_bridges::steam::spawn_admin_command_listener(&dispatcher, steam_client, adapter.clone());
+    let _admin_listener = dl_bridges::steam::spawn_admin_command_listener(
+        &dispatcher,
+        steam_client.clone(),
+        adapter.clone(),
+    );
 
     // Master-Broker :8770 — Token-Kette wie das Original
     let broker_token = env("MASTER_BROKER_TOKEN")
@@ -498,7 +614,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Changelog-Empfänger :8899
-    let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let changelog_addr = format!("127.0.0.1:{}", cfg.ports.changelog_api);
     let changelog_listener = tokio::net::TcpListener::bind(&changelog_addr)
         .await
@@ -798,6 +913,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Kopplung läse die gesamte Glue aus einem leeren Adapter-Cache (alle
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
+        dl_bridges::steam::spawn_panel_restore(steam_client.clone(), db.clone(), adapter.clone());
         tracing::warn!(
             "Gateway AKTIV — sicherstellen, dass der Python-Bot die Events abgegeben hat"
         );

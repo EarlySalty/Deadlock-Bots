@@ -326,14 +326,14 @@ pub async fn leave_survey_post(
     ok_json(json!({ "ok": true }))
 }
 
-/// GET `/api/leave-surveys/image/{token}/{filename}` — Admin-geschützter Abruf
+/// GET `/api/leave-surveys/image/{token}/{filename}` — sessiongeschützter Abruf
 /// eines hochgeladenen Bildes (wie `_handle_leave_survey_image`, `_check_auth`).
 pub async fn leave_survey_image(
     State(app): State<DashboardApp>,
     Path((token, filename)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = app.guard_full(&headers) {
+    if let Err(resp) = app.guard_read(&headers) {
         return resp;
     }
     let token = token.trim().to_string();

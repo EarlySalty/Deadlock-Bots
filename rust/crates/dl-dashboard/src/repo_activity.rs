@@ -1,5 +1,5 @@
 //! `/api/repo-activity` — liefert das vom Rust-Collector `dl-repostats`
-//! erzeugte Artefakt `data/repo_activity.json` verbatim aus (Admin-Auth), plus
+//! erzeugte Artefakt `data/repo_activity.json` verbatim aus (Session-Auth), plus
 //! `POST /api/repo-activity/refresh`, der den Collector als Subprozess startet
 //! (On-Demand „Neu sammeln") und das aktualisierte Artefakt zurückgibt.
 //!
@@ -25,7 +25,7 @@ fn unavailable() -> Value {
 }
 
 pub async fn repo_activity(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_full(&headers) {
+    if let Err(resp) = app.guard_read(&headers) {
         return resp;
     }
     // `data/repo_activity.json` liegt neben der DB (= repo/data/).
