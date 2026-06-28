@@ -34,7 +34,6 @@ LOG_TAIL_DEFAULT_LINES = 400
 LOG_TAIL_MAX_LINES = 5000
 LOG_TAIL_MAX_BYTES = 4 * 1024 * 1024
 DEFAULT_DASHBOARD_MODERATOR_ROLE_ID = 1337518124647579661
-TURNIER_MOD_ROLE_ID = 1401891955931222110  # Community-Moderator: nur Turnier-Zugriff
 DEFAULT_DASHBOARD_OWNER_USER_ID = 662995601738170389
 DEADLOCK_MISSING_BUILD_ALERT_CHANNEL_ID = 1374364800817303632
 DEADLOCK_MISSING_BUILD_ALERT_INTERVAL_SECONDS = 300
@@ -85,7 +84,6 @@ except Exception:
 
 
 _DASHBOARD_HTML_PATH = Path(__file__).resolve().parent / "static" / "dashboard.html"
-_TURNIER_HTML_PATH = Path(__file__).resolve().parent / "static" / "turnier.html"
 _LEAVE_SURVEY_UPLOAD_ROOT = Path(__file__).resolve().parent.parent / "data" / "leave_survey_uploads"
 # Repo-Aktivitäts-Artefakt (vom Rust-Collector `dl-repostats` geschrieben) und
 # das Binary für den On-Demand-Refresh aus dem Dashboard.
@@ -448,21 +446,6 @@ class DashboardServer:
                     web.post(
                         "/api/deadlock/heroes/{hero_id}/sync", self._handle_deadlock_sync_hero
                     ),
-                    web.get("/api/tournament/overview", self._handle_tournament_overview),
-                    web.post("/api/tournament/team", self._handle_tournament_team_create),
-                    web.post("/api/tournament/assign", self._handle_tournament_assign),
-                    web.post("/api/tournament/remove", self._handle_tournament_remove),
-                    # Turnier-Seite (Community-Mods + Admins)
-                    web.get("/turnier", self._handle_turnier_page),
-                    web.get("/api/turnier/overview", self._handle_turnier_overview),
-                    web.get("/api/turnier/bracket", self._handle_turnier_bracket),
-                    web.post("/api/turnier/period", self._handle_turnier_period_create),
-                    web.post("/api/turnier/period/close", self._handle_turnier_period_close),
-                    web.post("/api/turnier/team", self._handle_turnier_team_create),
-                    web.post("/api/turnier/team/delete", self._handle_turnier_team_delete),
-                    web.post("/api/turnier/assign", self._handle_turnier_assign),
-                    web.post("/api/turnier/remove", self._handle_turnier_remove),
-                    web.post("/api/turnier/clear", self._handle_turnier_clear),
                     web.post("/api/cogs/discover", self._handle_discover),
                     web.get("/api/logs", self._handle_log_index),
                     web.get("/api/logs/{name}", self._handle_log_read),
@@ -816,7 +799,7 @@ class DashboardServer:
             return fallback
 
         # Allowed destination prefixes
-        allowed = ("/admin", "/api/", "/turnier", "/auth/")
+        allowed = ("/admin", "/api/", "/auth/")
         if any(norm_path.startswith(p) for p in allowed):
             # Reconstruct with original query/fragment
             res = norm_path
@@ -1078,6 +1061,9 @@ class DashboardServer:
         session = self._discord_sessions.get(session_id)
         if not session:
             return None
+        if str(session.get("access_level") or "full") != "full":
+            self._discord_sessions.pop(session_id, None)
+            return None
         now = time.time()
         if float(session.get("expires_at", 0.0)) <= now:
             self._discord_sessions.pop(session_id, None)
@@ -1152,55 +1138,6 @@ class DashboardServer:
             if self._discord_moderator_role_id in role_ids:
                 return True, f"moderator_role:{guild.id}"
         return False, "missing_admin_or_moderator_role"
-
-    async def _check_discord_turnier_only_access(self, discord_user_id: int) -> tuple[bool, str]:
-        """Check if user has the Community-Moderator (turnier-only) role."""
-        guilds = []
-        seen: set[int] = set()
-        for guild_id in self._discord_auth_guild_ids:
-            guild = self.bot.get_guild(guild_id)
-            if guild and guild.id not in seen:
-                guilds.append(guild)
-                seen.add(guild.id)
-        if not guilds:
-            guilds = list(getattr(self.bot, "guilds", []) or [])
-
-        for guild in guilds:
-            member = guild.get_member(discord_user_id)
-            if member is None:
-                try:
-                    member = await guild.fetch_member(discord_user_id)
-                except Exception:
-                    member = None
-            if member is None:
-                continue
-            try:
-                role_ids = {
-                    int(r.id) for r in getattr(member, "roles", []) if getattr(r, "id", None)
-                }
-            except Exception:
-                role_ids = set()
-            if TURNIER_MOD_ROLE_ID in role_ids:
-                return True, f"turnier_mod:{guild.id}"
-        return False, "missing_turnier_mod_role"
-
-    def _check_turnier_auth(self, request: web.Request) -> None:
-        """Auth check for turnier routes: accepts full mods AND community turnier mods."""
-        if not self._is_auth_enforced():
-            return
-        if self._auth_misconfigured:
-            raise web.HTTPServiceUnavailable(text="Dashboard Auth nicht korrekt konfiguriert.")
-        session = self._get_discord_auth_session(request) if self._discord_auth_required else None
-        if session:
-            if self._requires_csrf_check(request):
-                if not self._is_allowed_request_origin(request):
-                    raise web.HTTPForbidden(text="Origin validation failed")
-                if not self._check_csrf(request, session):
-                    raise web.HTTPForbidden(text="CSRF validation failed")
-            return
-        login_url = self._build_discord_login_url(request, next_path="/turnier")
-        headers: dict[str, str] = {"X-Auth-Login": login_url}
-        raise web.HTTPUnauthorized(text="Authentication required", headers=headers)
 
     async def _exchange_discord_code(self, code: str, redirect_uri: str) -> dict[str, Any] | None:
         payload = {
@@ -2442,14 +2379,6 @@ class DashboardServer:
             return web.Response(text="Ungültige Discord-User-ID.", status=401)
 
         allowed, reason = await self._check_discord_member_access(int(user_id))
-        access_level = "full"
-        if not allowed:
-            # Try turnier-only access (Community-Moderator role)
-            turnier_ok, turnier_reason = await self._check_discord_turnier_only_access(int(user_id))
-            if turnier_ok:
-                allowed = True
-                reason = turnier_reason
-                access_level = "turnier_only"
         if not allowed:
             logger.warning(
                 "AUDIT master-dashboard login denied: discord_user=%s reason=%s peer=%s",
@@ -2460,7 +2389,7 @@ class DashboardServer:
             return web.Response(
                 text=(
                     "Kein Zugriff auf das Admin-Dashboard. "
-                    "Benötigt: Administrator-Recht, Moderator-Rolle oder Community-Moderator-Rolle."
+                    "Benötigt: Administrator-Recht oder Moderator-Rolle."
                 ),
                 status=403,
             )
@@ -2483,7 +2412,7 @@ class DashboardServer:
             "username": username,
             "display_name": display_name,
             "reason": reason,
-            "access_level": access_level,  # "full" or "turnier_only"
+            "access_level": "full",
             "csrf_token": secrets.token_urlsafe(32),
             "created_at": now,
             "last_seen_at": now,
@@ -2816,9 +2745,6 @@ class DashboardServer:
             self._check_auth(request)
 
         session = self._get_discord_auth_session(request)
-        # Community-Moderatoren (turnier_only) haben keinen Zugriff auf das Haupt-Dashboard
-        if session and str(session.get("access_level", "full")) == "turnier_only":
-            raise web.HTTPFound(self._safe_internal_redirect("/turnier"))
         display_name = str((session or {}).get("display_name") or "Nicht angemeldet")
         safe_discord_login_url = html.escape(
             self._safe_template_href(
@@ -6061,533 +5987,6 @@ class DashboardServer:
 
         sync_summary = await self._sync_deadlock_hero_builds(hero_id=hero_id)
         return self._json({"hero_id": hero_id, "sync_summary": sync_summary})
-
-    def _resolve_tournament_guild_id(self, raw_value: Any) -> int:
-        parsed = self._coerce_int(raw_value, None)
-        if parsed is not None:
-            return int(parsed)
-        if self.bot.guilds:
-            return int(self.bot.guilds[0].id)
-        raise web.HTTPBadRequest(text="guild_id is required")
-
-    async def _tournament_guilds_payload(self) -> list[dict[str, Any]]:
-        from cogs.customgames import tournament_store as tstore
-
-        counts = await tstore.guild_signup_counts_async()
-        payload: list[dict[str, Any]] = []
-        known_ids: set[int] = set()
-        for guild in sorted(self.bot.guilds, key=lambda g: (g.name or "").lower()):
-            guild_id = int(guild.id)
-            known_ids.add(guild_id)
-            payload.append(
-                {
-                    "id": str(guild_id),
-                    "name": guild.name,
-                    "signups": int(counts.get(guild_id, 0)),
-                }
-            )
-        for guild_id, signups in sorted(counts.items(), key=lambda item: item[0]):
-            gid = int(guild_id)
-            if gid in known_ids:
-                continue
-            payload.append(
-                {
-                    "id": str(gid),
-                    "name": f"Guild {gid}",
-                    "signups": int(signups),
-                }
-            )
-        return payload
-
-    def _decorate_tournament_signups(
-        self,
-        guild_id: int,
-        signups: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
-        guild = self.bot.get_guild(int(guild_id))
-        decorated: list[dict[str, Any]] = []
-        for row in signups:
-            item = dict(row)
-            user_id = int(item.get("user_id") or 0)
-            item["user_id"] = str(user_id)
-            if "guild_id" in item:
-                item["guild_id"] = str(item["guild_id"])
-            member = guild.get_member(user_id) if guild else None
-            item["display_name"] = member.display_name if member else f"User {user_id}"
-            item["mention"] = member.mention if member else None
-            rank_key = str(item.get("rank") or "initiate")
-            item["rank_label"] = rank_key.capitalize()
-            decorated.append(item)
-        return decorated
-
-    async def _handle_tournament_overview(self, request: web.Request) -> web.Response:
-        self._check_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        guild_id = self._resolve_tournament_guild_id(request.query.get("guild_id"))
-        teams = await tstore.list_teams_async(guild_id)
-        signups = await tstore.list_signups_async(guild_id)
-        summary = await tstore.summary_async(guild_id)
-
-        payload = {
-            "guild_id": guild_id,
-            "guilds": await self._tournament_guilds_payload(),
-            "summary": summary,
-            "teams": teams,
-            "signups": self._decorate_tournament_signups(guild_id, signups),
-        }
-        return self._json(payload)
-
-    async def _handle_tournament_team_create(self, request: web.Request) -> web.Response:
-        self._check_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:  # noqa: BLE001
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be a JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        name = str(payload.get("name") or "").strip()
-        if not name:
-            raise web.HTTPBadRequest(text="'name' is required")
-        created_by = self._coerce_int(payload.get("created_by"), None)
-
-        try:
-            team = await tstore.get_or_create_team_async(guild_id, name, created_by=created_by)
-        except ValueError as exc:
-            logger.warning(
-                "Tournament team creation rejected: %s",
-                self._safe_log_value(exc),
-            )
-            raise web.HTTPBadRequest(text="Invalid team payload")
-
-        return self._json(
-            {
-                "ok": True,
-                "team": team,
-                "created": bool(team.get("created")),
-            },
-            status=201 if bool(team.get("created")) else 200,
-        )
-
-    async def _handle_tournament_assign(self, request: web.Request) -> web.Response:
-        self._check_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:  # noqa: BLE001
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be a JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        user_id = self._coerce_int(payload.get("user_id"), None)
-        if user_id is None:
-            raise web.HTTPBadRequest(text="'user_id' must be an integer")
-
-        team_raw = payload.get("team_id")
-        if team_raw in (None, ""):
-            team_id: int | None = None
-        else:
-            team_id = self._coerce_int(team_raw, None)
-            if team_id is None:
-                raise web.HTTPBadRequest(text="'team_id' must be an integer or null")
-
-        try:
-            updated = await tstore.assign_signup_team_async(
-                guild_id,
-                int(user_id),
-                team_id=team_id,
-            )
-        except ValueError as exc:
-            logger.warning(
-                "Tournament signup assignment rejected: %s",
-                self._safe_log_value(exc),
-            )
-            raise web.HTTPBadRequest(text="Invalid team assignment payload")
-
-        if not updated:
-            raise web.HTTPNotFound(text="Signup not found")
-
-        signup = await tstore.get_signup_async(guild_id, int(user_id))
-        decorated = self._decorate_tournament_signups(guild_id, [signup]) if signup else []
-        return self._json({"ok": True, "signup": decorated[0] if decorated else signup})
-
-    async def _handle_tournament_remove(self, request: web.Request) -> web.Response:
-        self._check_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:  # noqa: BLE001
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be a JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        user_id = self._coerce_int(payload.get("user_id"), None)
-        if user_id is None:
-            raise web.HTTPBadRequest(text="'user_id' must be an integer")
-
-        removed = await tstore.remove_signup_async(guild_id, int(user_id))
-        return self._json({"ok": removed, "removed": removed})
-
-    # ─── Turnier-Seite (Community-Mods + Admins) ─────────────────────────────
-
-    def _load_turnier_html(self) -> str:
-        try:
-            return _TURNIER_HTML_PATH.read_text(encoding="utf-8")
-        except Exception as exc:
-            logger.error("Turnier HTML nicht ladbar: %s", exc, exc_info=True)
-            raise
-
-    async def _handle_turnier_page(self, request: web.Request) -> web.Response:
-        if self._auth_misconfigured:
-            raise web.HTTPServiceUnavailable(text="Auth nicht konfiguriert.")
-        if self._is_auth_enforced() and not self._has_valid_auth(request):
-            if self._discord_auth_required:
-                raise web.HTTPFound(self._build_discord_login_url(request, next_path="/turnier"))
-            self._check_turnier_auth(request)
-        session = self._get_discord_auth_session(request)
-        display_name = str((session or {}).get("display_name") or "Nicht angemeldet")
-        safe_logout = html.escape("/auth/logout", quote=True)
-        safe_login = html.escape(
-            self._build_discord_login_url(request, next_path="/turnier"),
-            quote=True,
-        )
-        html_text = (
-            self._load_turnier_html()
-            .replace("{{AUTH_USER_LABEL}}", html.escape(display_name, quote=True))
-            .replace("{{AUTH_LOGOUT_URL}}", safe_logout)
-            .replace("{{DISCORD_LOGIN_URL}}", safe_login)
-        )
-        return web.Response(text=html_text, content_type="text/html")
-
-    @staticmethod
-    def _generate_bracket(
-        signups: list[dict[str, Any]], teams: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        import math
-
-        team_map = {int(t["id"]): t for t in teams}
-        team_scores: dict[int, list[int]] = {}
-        solo_entries: list[dict[str, Any]] = []
-
-        for s in signups:
-            rv = int(s.get("rank_value") or 1)
-            rsub = int(s.get("rank_subvalue") or 3)
-            score = rv * 6 + max(1, min(6, rsub))
-            tid = s.get("team_id")
-            if tid is not None:
-                tid = int(tid)
-                team_scores.setdefault(tid, []).append(score)
-            else:
-                solo_entries.append(
-                    {
-                        "type": "solo",
-                        "id": f"solo_{s.get('user_id')}",
-                        "name": str(s.get("display_name") or s.get("user_id")),
-                        "score": score,
-                    }
-                )
-
-        entries: list[dict[str, Any]] = []
-        for tid, scores in team_scores.items():
-            team = team_map.get(tid, {})
-            avg = sum(scores) / len(scores) if scores else 0
-            entries.append(
-                {
-                    "type": "team",
-                    "id": f"team_{tid}",
-                    "name": str(team.get("name") or f"Team {tid}"),
-                    "score": round(avg, 2),
-                    "member_count": len(scores),
-                }
-            )
-        entries.extend(solo_entries)
-
-        if len(entries) < 2:
-            return {
-                "error": "Mindestens 2 Einträge für einen Bracket benötigt.",
-                "entries": entries,
-                "rounds": [],
-            }
-
-        entries.sort(key=lambda e: e["score"], reverse=True)
-        n = len(entries)
-        slots = 1 << math.ceil(math.log2(n)) if n > 1 else 2
-        num_rounds = int(math.log2(slots))
-
-        # Seeded pairing: seed 1 vs seed N, seed 2 vs seed N-1, …
-        seeded_matches = []
-        for i in range(slots // 2):
-            a_idx = i
-            b_idx = slots - 1 - i
-            a = entries[a_idx] if a_idx < n else None
-            b = entries[b_idx] if b_idx < n else None
-            seeded_matches.append((a, b))
-
-        def round_label(r: int) -> str:
-            rem = num_rounds - r
-            if rem == 0:
-                return "🏆 Finale"
-            if rem == 1:
-                return "🥊 Halbfinale"
-            if rem == 2:
-                return "⚔️ Viertelfinale"
-            return f"Runde {r}"
-
-        rounds: list[dict[str, Any]] = []
-        current: list[dict[str, Any]] = []
-        for i, (a, b) in enumerate(seeded_matches):
-            auto_winner = None
-            if a is None and b is not None:
-                auto_winner = b
-            elif b is None and a is not None:
-                auto_winner = a
-            current.append(
-                {
-                    "match_id": f"R1M{i + 1}",
-                    "entry_a": a,
-                    "entry_b": b,
-                    "winner": auto_winner,
-                    "is_bye": (a is None or b is None),
-                }
-            )
-        rounds.append({"round": 1, "label": round_label(1), "matches": current})
-
-        for r in range(2, num_rounds + 1):
-            nxt = []
-            for i in range(len(current) // 2):
-                nxt.append(
-                    {
-                        "match_id": f"R{r}M{i + 1}",
-                        "entry_a": None,
-                        "entry_b": None,
-                        "winner": None,
-                        "is_bye": False,
-                    }
-                )
-            rounds.append({"round": r, "label": round_label(r), "matches": nxt})
-            current = nxt
-
-        return {
-            "entries": entries,
-            "rounds": rounds,
-            "num_entries": n,
-            "num_rounds": num_rounds,
-            "slots": slots,
-        }
-
-    async def _handle_turnier_overview(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        guild_id = self._resolve_tournament_guild_id(request.query.get("guild_id"))
-        teams = await tstore.list_teams_async(guild_id)
-        signups = await tstore.list_signups_async(guild_id)
-        summary = await tstore.summary_async(guild_id)
-        period = await tstore.get_active_period_async(guild_id)
-        periods = await tstore.list_periods_async(guild_id)
-
-        payload = {
-            "guild_id": str(guild_id),
-            "guilds": await self._tournament_guilds_payload(),
-            "summary": summary,
-            "teams": teams,
-            "signups": self._decorate_tournament_signups(guild_id, signups),
-            "active_period": period,
-            "periods": periods,
-        }
-        return self._json(self._stringify_ids(payload))
-
-    async def _handle_turnier_bracket(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        guild_id = self._resolve_tournament_guild_id(request.query.get("guild_id"))
-        teams = await tstore.list_teams_async(guild_id)
-        signups = self._decorate_tournament_signups(
-            guild_id, await tstore.list_signups_async(guild_id)
-        )
-        bracket = self._generate_bracket(signups, teams)
-        payload = {"guild_id": str(guild_id), "bracket": bracket}
-        return self._json(self._stringify_ids(payload))
-
-    async def _handle_turnier_period_create(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        name = str(payload.get("name") or "").strip()
-        if not name:
-            raise web.HTTPBadRequest(text="'name' is required")
-        reg_start = str(payload.get("registration_start") or "").strip()
-        reg_end = str(payload.get("registration_end") or "").strip()
-        if not reg_start or not reg_end:
-            raise web.HTTPBadRequest(text="'registration_start' and 'registration_end' required")
-        team_size_raw = self._coerce_int(payload.get("team_size"), 6)
-        team_size = max(2, min(20, int(team_size_raw or 6)))
-        created_by = self._coerce_int(payload.get("created_by"), None)
-
-        period = await tstore.create_period_async(
-            guild_id,
-            name=name,
-            registration_start=reg_start,
-            registration_end=reg_end,
-            team_size=team_size,
-            created_by=created_by,
-        )
-        return self._json(self._stringify_ids({"ok": True, "period": period}), status=201)
-
-    async def _handle_turnier_period_close(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        period_id = self._coerce_int(payload.get("period_id"), None)
-        if period_id is None:
-            # Close active period
-            period = await tstore.get_active_period_async(guild_id)
-            if not period:
-                raise web.HTTPNotFound(text="No active period found")
-            period_id = int(period["id"])
-
-        closed = await tstore.close_period_async(guild_id, int(period_id))
-        return self._json(self._stringify_ids({"ok": closed, "closed": closed}))
-
-    async def _handle_turnier_team_create(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        name = str(payload.get("name") or "").strip()
-        if not name:
-            raise web.HTTPBadRequest(text="'name' is required")
-        created_by = self._coerce_int(payload.get("created_by"), None)
-
-        try:
-            team = await tstore.get_or_create_team_async(guild_id, name, created_by=created_by)
-        except ValueError:
-            # CodeQL: Information exposure through an exception. Using generic message.
-            raise web.HTTPBadRequest(text="Ungültiger Team-Name oder Daten.")
-
-        return self._json(
-            self._stringify_ids({"ok": True, "team": team, "created": bool(team.get("created"))}),
-            status=201 if team.get("created") else 200,
-        )
-
-    async def _handle_turnier_team_delete(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        team_id = self._coerce_int(payload.get("team_id"), None)
-        if team_id is None:
-            raise web.HTTPBadRequest(text="'team_id' is required")
-
-        deleted = await tstore.delete_team_async(guild_id, int(team_id))
-        if not deleted:
-            raise web.HTTPNotFound(text="Team not found")
-        return self._json(self._stringify_ids({"ok": True, "deleted": True}))
-
-    async def _handle_turnier_assign(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        user_id = self._coerce_int(payload.get("user_id"), None)
-        if user_id is None:
-            raise web.HTTPBadRequest(text="'user_id' is required")
-        team_raw = payload.get("team_id")
-        team_id: int | None = None if team_raw in (None, "") else self._coerce_int(team_raw, None)
-
-        try:
-            updated = await tstore.assign_signup_team_async(guild_id, int(user_id), team_id=team_id)
-        except ValueError:
-            # CodeQL: Information exposure through an exception. Using generic message.
-            raise web.HTTPBadRequest(text="Ungültige Zuweisung oder Team existiert nicht.")
-
-        if not updated:
-            raise web.HTTPNotFound(text="Signup not found")
-        signup = await tstore.get_signup_async(guild_id, int(user_id))
-        decorated = self._decorate_tournament_signups(guild_id, [signup]) if signup else []
-        return self._json(
-            self._stringify_ids({"ok": True, "signup": decorated[0] if decorated else signup})
-        )
-
-    async def _handle_turnier_remove(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        user_id = self._coerce_int(payload.get("user_id"), None)
-        if user_id is None:
-            raise web.HTTPBadRequest(text="'user_id' is required")
-
-        removed = await tstore.remove_signup_async(guild_id, int(user_id))
-        return self._json(self._stringify_ids({"ok": removed, "removed": removed}))
-
-    async def _handle_turnier_clear(self, request: web.Request) -> web.Response:
-        self._check_turnier_auth(request)
-        from cogs.customgames import tournament_store as tstore
-
-        try:
-            payload = await request.json()
-        except Exception:
-            raise web.HTTPBadRequest(text="Invalid JSON payload")
-        if not isinstance(payload, dict):
-            raise web.HTTPBadRequest(text="Payload must be JSON object")
-
-        guild_id = self._resolve_tournament_guild_id(payload.get("guild_id"))
-        count = await tstore.clear_all_signups_async(guild_id)
-        return self._json(self._stringify_ids({"ok": True, "cleared": count}))
 
     async def _handle_repo_activity(self, request: web.Request) -> web.Response:
         """Liefert das vom Rust-Collector `dl-repostats` erzeugte Aktivitäts-

@@ -121,10 +121,6 @@ impl DashboardApp {
         &self.inner.names
     }
 
-    pub(crate) fn tournament_default_guild(&self) -> u64 {
-        self.cfg().tournament_default_guild
-    }
-
     pub(crate) fn broker_base(&self) -> &str {
         &self.cfg().broker_base
     }
@@ -257,7 +253,6 @@ pub fn router(app: DashboardApp) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/admin", get(index))
-        .route("/turnier", get(turnier_page))
         .route("/api/auth/me", get(auth_me))
         .route("/auth/discord/login", get(login))
         .route("/auth/discord/callback", get(own_callback))
@@ -343,25 +338,6 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/leave-surveys/image/{token}/{filename}",
             get(crate::survey::leave_survey_image),
         )
-        // Turnier-Admin-Mutationen (Phase 9d) — Turnier-Mod/Voll + CSRF.
-        .route(
-            "/api/turnier/period",
-            post(crate::tournament::period_create),
-        )
-        .route(
-            "/api/turnier/period/close",
-            post(crate::tournament::period_close),
-        )
-        .route("/api/turnier/team", post(crate::tournament::team_create))
-        .route(
-            "/api/turnier/team/delete",
-            post(crate::tournament::team_delete),
-        )
-        .route("/api/turnier/assign", post(crate::tournament::assign))
-        .route("/api/turnier/remove", post(crate::tournament::remove))
-        .route("/api/turnier/clear", post(crate::tournament::clear))
-        .route("/api/turnier/overview", get(crate::tournament::overview))
-        .route("/api/turnier/bracket", get(crate::tournament::bracket))
         // Öffentliche Endpunkte (Phase 9e) — kein Auth, CORS für die Website.
         .route(
             "/api/public/patch-notes",
@@ -450,8 +426,7 @@ fn render_spa(html: String, display_name: &str, login_next: &str) -> Response {
 }
 
 /// `/` und `/admin` — liefert die Dashboard-SPA mit eingesetzten Auth-Platzhaltern
-/// (Port von `_handle_index`). Bei erzwungener Auth ohne Session → Discord-Login;
-/// `turnier_only`-Sessions → Turnier-Seite.
+/// (Port von `_handle_index`). Bei erzwungener Auth ohne Session → Discord-Login.
 async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     if app.cfg().auth_misconfigured() {
         return auth_misconfigured_response();
@@ -459,11 +434,6 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
     let session = app.session_from_headers(&headers);
     if app.cfg().auth_enforced() && session.is_none() {
         return redirect("/auth/discord/login?next=%2Fadmin", None);
-    }
-    if let Some(s) = &session {
-        if s.access_level.as_str() == "turnier_only" {
-            return redirect("/turnier", None);
-        }
     }
     let display_name = session
         .as_ref()
@@ -473,27 +443,6 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
         return err_text(500, "dashboard.html nicht ladbar");
     };
     render_spa(html, &display_name, "%2Fadmin")
-}
-
-/// `/turnier` — Turnier-Verwaltungs-SPA (Port von `_handle_turnier_page`).
-/// Wie `index`, aber ohne `turnier_only`-Weiterleitung (Turnier-Mods dürfen
-/// hier rein) und mit Login-Ziel `/turnier`.
-async fn turnier_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if app.cfg().auth_misconfigured() {
-        return auth_misconfigured_response();
-    }
-    let session = app.session_from_headers(&headers);
-    if app.cfg().auth_enforced() && session.is_none() {
-        return redirect("/auth/discord/login?next=%2Fturnier", None);
-    }
-    let display_name = session
-        .as_ref()
-        .map(|s| s.display_name.clone())
-        .unwrap_or_else(|| "Nicht angemeldet".to_string());
-    let Some(html) = load_static_html(&app, "turnier.html").await else {
-        return err_text(500, "turnier.html nicht ladbar");
-    };
-    render_spa(html, &display_name, "%2Fturnier")
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
@@ -1277,14 +1226,6 @@ async fn lookup_role_strings(
 
 pub(crate) fn ok_json(value: Value) -> Response {
     (StatusCode::OK, Json(value)).into_response()
-}
-
-pub(crate) fn ok_json_status(status: u16, value: Value) -> Response {
-    (
-        StatusCode::from_u16(status).unwrap_or(StatusCode::OK),
-        Json(value),
-    )
-        .into_response()
 }
 
 pub(crate) fn err_json(status: u16, code: &str) -> Response {

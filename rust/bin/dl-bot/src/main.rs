@@ -338,79 +338,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     dl_community::privacy_ui::register(&mut router, db.clone());
 
-    // Turnier-User-Flow (8): Panel-Buttons + Solo/Team-Anmeldung
-    struct TurnierRoleGlue {
-        adapter: Arc<dl_discord::DiscordAdapter>,
-    }
-    #[async_trait::async_trait]
-    impl dl_tournament::discord_ui::TurnierPort for TurnierRoleGlue {
-        async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
-            self.adapter
-                .cache()
-                .guild(serenity::all::GuildId::new(guild_id))
-                .and_then(|g| {
-                    g.members
-                        .get(&serenity::all::UserId::new(user_id))
-                        .map(|m| m.roles.iter().map(|r| r.get()).collect())
-                })
-                .unwrap_or_default()
-        }
-
-        async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
-            self.adapter
-                .cache()
-                .guild(serenity::all::GuildId::new(guild_id))
-                .and_then(|g| {
-                    g.members
-                        .get(&serenity::all::UserId::new(user_id))
-                        .map(|m| m.display_name().to_string())
-                })
-        }
-
-        async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool {
-            let Some(guild) = self
-                .adapter
-                .cache()
-                .guild(serenity::all::GuildId::new(guild_id))
-            else {
-                return false;
-            };
-            if guild.owner_id.get() == user_id {
-                return true;
-            }
-            guild
-                .members
-                .get(&serenity::all::UserId::new(user_id))
-                .map(|member| {
-                    member.roles.iter().any(|role_id| {
-                        guild
-                            .roles
-                            .get(role_id)
-                            .map(|role| {
-                                role.permissions.administrator() || role.permissions.manage_guild()
-                            })
-                            .unwrap_or(false)
-                    })
-                })
-                .unwrap_or(false)
-        }
-    }
-    let turnier_ui = Arc::new(dl_tournament::discord_ui::TurnierUi {
-        store: Arc::new(dl_tournament::store::TournamentStore::new(db.clone())),
-        port: Arc::new(TurnierRoleGlue {
-            adapter: adapter.clone(),
-        }),
-    });
-    dl_tournament::discord_ui::register(&mut router, turnier_ui);
-
-    // Team-Balancer (!balance): Prefix-Listener, Spawn ist gateway-gated.
-    let balance_commands = Arc::new(dl_tournament::balance_cmd::BalanceCommands::new(Arc::new(
-        modglue::BalanceGlue {
-            adapter: adapter.clone(),
-            db: db.clone(),
-        },
-    )));
-
     // Coaching (7): Panel postet nur noch einen Link zur Website. Die frühere
     // Discord-Anfrageaufnahme samt KI-Analyse/Rollen-/Stale-Recovery bleibt im
     // Rust-Cutover bewusst aus (Website-driven intake, #17/#18 dropped).
@@ -596,8 +523,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 matcher.client.clone(),
             );
         }
-        // Team-Balancer-Prefix-Listener (!balance auto/voice — read-only Vorschau)
-        dl_tournament::balance_cmd::spawn(balance_commands.clone(), &dispatcher, adapter.clone());
         master::spawn_control(
             &dispatcher,
             adapter.clone(),
@@ -611,24 +536,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             master_action_tx.clone(),
         );
 
-        // Turnier-Auto-Balance (Port von TurnierCog._auto_balance_loop): alle
-        // 300 s pro Gilde nicht-volle Teams nach Rang-Score auffüllen und
-        // unzugewiesene Solo-Anmelder per Snake-Draft auf neue Teams verteilen.
-        // Schreibt autonom in die DB; der Guard (nur bei aktiver Periode) sitzt
-        // in store::auto_balance. Cache-gebunden, daher gateway-gated.
-        {
-            let auto_balance_store =
-                Arc::new(dl_tournament::store::TournamentStore::new(db.clone()));
-            let adapter = adapter.clone();
-            tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-                    for guild_id in adapter.cache().guilds() {
-                        auto_balance_store.auto_balance(guild_id.get()).await;
-                    }
-                }
-            });
-        }
         // Rename-Queue (Port rename_manager): zentrale, rate-limit-bewusste
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker

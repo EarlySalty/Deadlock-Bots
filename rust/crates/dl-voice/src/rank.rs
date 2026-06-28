@@ -791,9 +791,9 @@ pub fn spawn(
 // ── `!rrang`-Admin-Befehlsgruppe ────────────────────────────────────────────
 //
 // Port der `@commands.group("rrang", manage_guild)` aus
-// `cogs/rank_voice_manager.py`. Folgt dem `balance_cmd`-Muster: eigener
-// `MessageEvent`-Subscriber, admin-gated, Antwort über den `ChannelSender`.
-// Discord-Farben analog zum Original.
+// `cogs/rank_voice_manager.py`. Folgt dem Muster eines eigenständigen
+// Spawn-/Listener-Tasks: eigener `MessageEvent`-Subscriber, admin-gated,
+// Antwort über den `ChannelSender`. Discord-Farben analog zum Original.
 
 /// Antwort eines `!rrang`-Subcommands (Text und/oder Embed).
 pub struct RankReply {
@@ -1306,9 +1306,9 @@ fn help_embed() -> Value {
 }
 
 /// Message-Listener für `!rrang` (Python: `@commands.group("rrang")`,
-/// `manage_guild`). Folgt dem `balance_cmd::spawn`-Muster: eigener
-/// `MessageEvent`-Subscriber, admin-gated (Administrator, konsistent mit den
-/// anderen Admin-Command-Listenern), Antwort über den `ChannelSender`.
+/// `manage_guild`). Folgt dem Muster eines eigenständigen Spawn-/Listener-Tasks:
+/// eigener `MessageEvent`-Subscriber, admin-gated (Administrator, konsistent mit
+/// den anderen Admin-Command-Listenern), Antwort über den `ChannelSender`.
 pub fn spawn_command(
     commands: Arc<RankCommands>,
     dispatcher: &Dispatcher,

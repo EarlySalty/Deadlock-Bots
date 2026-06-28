@@ -348,7 +348,6 @@ dependencies = [
  "dl-db",
  "dl-discord",
  "dl-moderation",
- "dl-tournament",
  "dl-voice",
  "dl-webcore",
  "reqwest",
@@ -458,7 +457,6 @@ dependencies = [
  "dl-activity",
  "dl-core",
  "dl-db",
- "dl-tournament",
  "dl-webcore",
  "rand 0.8.6",
  "reqwest",
@@ -567,25 +565,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "dl-tournament"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum",
- "chrono",
- "dl-db",
- "dl-discord",
- "hex",
- "rand 0.8.6",
- "rusqlite",
- "serde_json",
- "tempfile",
- "tokio",
- "tower",
- "tracing",
-]
-
-[[package]]
 name = "dl-twitch-invite-sync"
 version = "0.1.0"
 dependencies = [
@@ -630,7 +609,6 @@ dependencies = [
  "dl-db",
  "dl-stats",
  "dl-tierlist",
- "dl-tournament",
  "dl-webcore",
  "tokio",
  "tracing",

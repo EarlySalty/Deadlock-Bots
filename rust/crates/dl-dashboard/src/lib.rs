@@ -1,7 +1,7 @@
 //! Master-Dashboard (:8766) — Port von `service/dashboard.py`.
 //!
 //! Das Dashboard ist während der Migration der **OAuth-Besitzer**: Stats
-//! (:8768), Tierlist (:8771) und Turnier-Web (:8767) delegieren ihre
+//! (:8768) und Tierlist (:8771) delegieren ihre
 //! Anmeldung hierher (siehe `dl-webcore::DashboardClient`). Darum wird es als
 //! Erstes der Phase 9 portiert — ohne kompatiblen Auth-Provider kann der
 //! Cutover der bereits portierten Webs nicht erfolgen.
@@ -14,7 +14,7 @@
 //! - [`oauth_state`] — DB-gestützte delegierte States (initiate/consume)
 //! - [`session`] — In-Memory-Store der `master_dash_session`-Cookies
 //!
-//! Die Routen-Schicht (Auth-Provider, Analytics, Turnier-Admin, Steuerung)
+//! Die Routen-Schicht (Auth-Provider, Analytics, Steuerung)
 //! baut auf diesen Bausteinen auf und kommt schrittweise dazu.
 
 // axum-Response als Err-Variante ist groß, aber bewusst: die Guards geben die
@@ -35,7 +35,6 @@ pub mod server_stats;
 pub mod session;
 pub mod survey;
 pub mod token;
-pub mod tournament;
 pub mod web;
 
 pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};

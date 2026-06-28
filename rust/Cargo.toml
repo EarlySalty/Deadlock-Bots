@@ -17,7 +17,6 @@ members = [
     "crates/dl-activity",
     "crates/dl-ai",
     "crates/dl-moderation",
-    "crates/dl-tournament",
     "crates/dl-community",
     "crates/dl-dashboard",
     "bin/dl-bot",
@@ -92,7 +91,6 @@ dl-voice = { path = "crates/dl-voice" }
 dl-activity = { path = "crates/dl-activity" }
 dl-ai = { path = "crates/dl-ai" }
 dl-moderation = { path = "crates/dl-moderation" }
-dl-tournament = { path = "crates/dl-tournament" }
 dl-community = { path = "crates/dl-community" }
 dl-dashboard = { path = "crates/dl-dashboard" }
 

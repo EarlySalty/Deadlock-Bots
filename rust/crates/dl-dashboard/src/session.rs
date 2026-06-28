@@ -229,7 +229,6 @@ impl PersistedSession {
     fn into_session(self) -> Option<Session> {
         let access_level = match self.access_level.as_str() {
             "full" => AccessLevel::Full,
-            "turnier_only" => AccessLevel::TurnierOnly,
             _ => return None,
         };
         Some(Session {
@@ -368,15 +367,6 @@ mod tests {
         ));
         let s = store.touch("ext-id", 1000.0).expect("gültig");
         assert_eq!(s.expires_at, 1100.0); // touch schiebt auf now+ttl
-    }
-
-    #[test]
-    fn turnier_only_zugriff() {
-        let store = SessionStore::new(100);
-        let id = store.create(login("turnier_mod:1", AccessLevel::TurnierOnly), 1000.0);
-        let s = store.touch(&id, 1000.0).expect("gültig");
-        assert!(!s.has_full_access());
-        assert_eq!(s.access_level.as_str(), "turnier_only");
     }
 
     #[test]
