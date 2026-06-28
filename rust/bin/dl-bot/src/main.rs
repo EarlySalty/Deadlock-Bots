@@ -559,6 +559,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             db.clone(),
             voice_tracker.clone(),
             cache_snapshot.clone(),
+            Some(voice_feedback.clone()),
         );
         dl_voice::stats::spawn_command(voice_stats, &dispatcher, adapter.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
@@ -595,6 +596,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::rank::spawn_command(rank_commands, &dispatcher, adapter.clone());
 
         // Steam-Link-Nudge (4c): DM nach 30 min Voice am zweiten Tag
+        dl_voice::nudge::spawn_restore(nudge.clone());
         dl_voice::nudge::spawn(nudge.clone(), &dispatcher);
         // !nudgesend/!t30-Admin-Test: schickt die Nudge-DM an ein Ziel.
         dl_voice::nudge::spawn_command(nudge.clone(), &dispatcher, adapter.clone());

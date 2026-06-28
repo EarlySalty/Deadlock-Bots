@@ -629,6 +629,39 @@ impl crate::nudge::NudgePort for NudgeGlue {
             )
             .await;
     }
+
+    async fn refresh_dm(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        embeds: &[serde_json::Value],
+        components: &serde_json::Value,
+    ) -> Result<bool, String> {
+        let body = json!({ "embeds": embeds, "components": components });
+        match self
+            .adapter
+            .http
+            .edit_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                &body,
+                Vec::new(),
+            )
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(err) if is_missing_or_forbidden(&err) => Ok(false),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+fn is_missing_or_forbidden(err: &serenity::Error) -> bool {
+    matches!(
+        err,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+            if matches!(resp.status_code.as_u16(), 403 | 404)
+    )
 }
 
 /// Voice-Status-Anbindung (Kategorien-Scan + Rename).
@@ -1016,10 +1049,7 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
         body.insert("content".into(), json!(text));
         body.insert(
             "components".into(),
-            json!([{ "type": 1, "components": [{
-                "type": 2, "style": 1, "label": "Feedback geben", "emoji": {"name": "📝"},
-                "custom_id": crate::feedback::START_CUSTOM_ID,
-            }]}]),
+            crate::feedback::feedback_button_components(),
         );
         match self.adapter.send_raw_public(channel.id.get(), &body).await {
             Ok(message_id) => ("sent".to_string(), Some(message_id)),
@@ -1039,6 +1069,26 @@ impl crate::feedback::FeedbackPort for FeedbackGlue {
             body.insert("content".into(), json!(text));
             let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
         }
+    }
+
+    async fn delete_feedback_prompt(&self, user_id: u64, message_id: u64) {
+        let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        else {
+            return;
+        };
+        let _ = self
+            .adapter
+            .http
+            .delete_message(
+                channel.id,
+                serenity::all::MessageId::new(message_id),
+                Some("Voice feedback: stale prompt replaced"),
+            )
+            .await;
     }
 
     async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
@@ -1377,7 +1427,12 @@ impl crate::rename_queue::RenameExec for RenameExecGlue {
         None
     }
 
-    async fn edit_name(&self, channel_id: u64, name: &str, reason: &str) -> Result<(), String> {
+    async fn edit_name(
+        &self,
+        channel_id: u64,
+        name: &str,
+        reason: &str,
+    ) -> Result<(), crate::rename_queue::RenameError> {
         self.adapter
             .http
             .edit_channel(
@@ -1387,6 +1442,15 @@ impl crate::rename_queue::RenameExec for RenameExecGlue {
             )
             .await
             .map(|_| ())
-            .map_err(|e| e.to_string())
+            .map_err(rename_error_from_serenity)
     }
+}
+
+fn rename_error_from_serenity(err: serenity::Error) -> crate::rename_queue::RenameError {
+    if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)) = &err {
+        if resp.status_code.as_u16() == 429 {
+            return crate::rename_queue::RenameError::rate_limited(1.0);
+        }
+    }
+    crate::rename_queue::RenameError::from(err.to_string())
 }

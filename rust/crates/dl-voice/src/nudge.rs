@@ -25,6 +25,7 @@ pub const NUDGE_VIEW_VERSION: i64 = 2;
 pub const FIRST_SEEN_NS: &str = "voice_nudge_first_seen";
 pub const DONE_NS: &str = "voice_nudge_done";
 pub const CLOSE_CUSTOM_ID: &str = "nudge_close";
+pub const NUDGE_TEST_TARGET_REQUIRED_TEXT: &str = "Bitte Ziel angeben: `!nudgesend @user`";
 /// English-Only-Rolle ist ausgenommen (wie _EXEMPT_DEFAULT).
 pub const EXEMPT_ROLE_IDS: [u64; 1] = [1309741866098491479];
 
@@ -67,6 +68,22 @@ pub trait NudgePort: Send + Sync {
     /// Frische Steam-Login-URL (Einmal-Link) vom Rust-Steam-Bot.
     async fn fetch_steam_link_url(&self, user_id: u64) -> Option<String>;
     async fn delete_message(&self, channel_id: u64, message_id: u64);
+    async fn refresh_dm(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        embeds: &[Value],
+        components: &Value,
+    ) -> Result<bool, String>;
+}
+
+#[derive(Debug, Clone)]
+struct NudgeState {
+    user_id: u64,
+    notified: bool,
+    message_id: Option<u64>,
+    channel_id: Option<u64>,
+    view_version: i64,
 }
 
 pub struct VoiceNudge {
@@ -126,20 +143,10 @@ impl VoiceNudge {
     }
 
     async fn has_active_nudge(&self, user_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT message_id FROM steam_nudge_state WHERE user_id = ?1",
-                    [user_id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .optional()
-            })
+        self.load_nudge_state(user_id)
             .await
-            .ok()
-            .flatten()
-            .flatten()
-            .is_some()
+            .map(|state| state.notified || state.message_id.is_some())
+            .unwrap_or(false)
     }
 
     pub async fn handle_event(self: &Arc<Self>, event: VoiceEvent) {
@@ -208,8 +215,49 @@ impl VoiceNudge {
         self.send_nudge(user_id).await;
     }
 
-    /// DM bauen + senden + persistieren (auch für !nudgesend nutzbar).
+    /// DM bauen + senden + persistieren (Normalpfad; dupliziert aktive States nicht).
     pub async fn send_nudge(&self, user_id: u64) -> bool {
+        self.send_nudge_inner(user_id, false).await
+    }
+
+    async fn send_nudge_inner(&self, user_id: u64, force: bool) -> bool {
+        if !force {
+            if self.has_steam_link(user_id).await {
+                return false;
+            }
+            if let Some(state) = self.load_nudge_state(user_id).await {
+                if self.refresh_existing_state(&state, false).await {
+                    return false;
+                }
+                if state.notified {
+                    self.clear_nudge_state(user_id).await;
+                    return false;
+                }
+                self.clear_nudge_state(user_id).await;
+            }
+        }
+        let (embed, components) = self.build_dm_payload(user_id).await;
+
+        match self.port.send_dm(user_id, &[embed], &components).await {
+            Ok((channel_id, message_id)) => {
+                self.mark_notified(user_id, channel_id, message_id).await;
+                let _ = self
+                    .db
+                    .kv_set(DONE_NS, user_id.to_string(), "sent".to_string())
+                    .await;
+                self.port
+                    .send_log(format!("📨 Steam-Nudge gesendet an <@{user_id}>"))
+                    .await;
+                true
+            }
+            Err(err) => {
+                tracing::info!(%err, user_id, "Nudge: DM fehlgeschlagen (DMs zu?)");
+                false
+            }
+        }
+    }
+
+    async fn build_dm_payload(&self, user_id: u64) -> (Value, Value) {
         let steam_url = self.port.fetch_steam_link_url(user_id).await;
         let mut description = DM_DESCRIPTION.to_string();
         if steam_url.is_none() {
@@ -238,40 +286,141 @@ impl VoiceNudge {
                 "custom_id": CLOSE_CUSTOM_ID,
             }]},
         ]);
+        (embed, components)
+    }
 
-        match self.port.send_dm(user_id, &[embed], &components).await {
-            Ok((channel_id, message_id)) => {
-                let result = self
-                    .db
-                    .write(move |conn| {
-                        conn.execute(
-                            "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                             VALUES(?1, CURRENT_TIMESTAMP, ?2, ?3, ?4)
-                             ON CONFLICT(user_id) DO UPDATE SET
-                               notified_at = excluded.notified_at,
-                               message_id = excluded.message_id,
-                               channel_id = excluded.channel_id,
-                               view_version = excluded.view_version",
-                            rusqlite::params![user_id, message_id, channel_id, NUDGE_VIEW_VERSION],
-                        )
-                        .map(|_| ())
+    async fn load_nudge_state(&self, user_id: u64) -> Option<NudgeState> {
+        self.db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT user_id, notified_at, message_id, channel_id, view_version
+                       FROM steam_nudge_state
+                      WHERE user_id = ?1",
+                    [user_id],
+                    |row| {
+                        let raw_user_id: i64 = row.get(0)?;
+                        Ok(NudgeState {
+                            user_id: u64::try_from(raw_user_id).unwrap_or(0),
+                            notified: row.get::<_, Option<String>>(1)?.is_some(),
+                            message_id: row
+                                .get::<_, Option<i64>>(2)?
+                                .and_then(|id| u64::try_from(id).ok()),
+                            channel_id: row
+                                .get::<_, Option<i64>>(3)?
+                                .and_then(|id| u64::try_from(id).ok()),
+                            view_version: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn load_all_nudge_states(&self) -> Vec<NudgeState> {
+        self.db
+            .read(|conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT user_id, notified_at, message_id, channel_id, view_version
+                       FROM steam_nudge_state
+                      WHERE message_id IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    let raw_user_id: i64 = row.get(0)?;
+                    Ok(NudgeState {
+                        user_id: u64::try_from(raw_user_id).unwrap_or(0),
+                        notified: row.get::<_, Option<String>>(1)?.is_some(),
+                        message_id: row
+                            .get::<_, Option<i64>>(2)?
+                            .and_then(|id| u64::try_from(id).ok()),
+                        channel_id: row
+                            .get::<_, Option<i64>>(3)?
+                            .and_then(|id| u64::try_from(id).ok()),
+                        view_version: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
                     })
-                    .await;
-                if let Err(err) = result {
-                    tracing::warn!(%err, user_id, "Nudge: State-Persist fehlgeschlagen");
-                }
-                let _ = self
-                    .db
-                    .kv_set(DONE_NS, user_id.to_string(), "sent".to_string())
-                    .await;
-                self.port
-                    .send_log(format!("📨 Steam-Nudge gesendet an <@{user_id}>"))
+                })?;
+                rows.collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .await
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|state| state.user_id > 0)
+            .collect()
+    }
+
+    async fn clear_nudge_state(&self, user_id: u64) {
+        let result = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM steam_nudge_state WHERE user_id = ?1",
+                    [user_id],
+                )
+                .map(|_| ())
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::debug!(%err, user_id, "Nudge: State-Clear fehlgeschlagen");
+        }
+    }
+
+    async fn mark_notified(&self, user_id: u64, channel_id: u64, message_id: u64) {
+        let result = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
+                     VALUES(?1, CURRENT_TIMESTAMP, ?2, ?3, ?4)
+                     ON CONFLICT(user_id) DO UPDATE SET
+                       notified_at = excluded.notified_at,
+                       message_id = excluded.message_id,
+                       channel_id = excluded.channel_id,
+                       view_version = excluded.view_version",
+                    rusqlite::params![user_id, message_id, channel_id, NUDGE_VIEW_VERSION],
+                )
+                .map(|_| ())
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::warn!(%err, user_id, "Nudge: State-Persist fehlgeschlagen");
+        }
+    }
+
+    async fn refresh_existing_state(&self, state: &NudgeState, force: bool) -> bool {
+        let Some(message_id) = state.message_id else {
+            return state.notified;
+        };
+        let Some(channel_id) = state.channel_id else {
+            return state.notified;
+        };
+        if !force && state.view_version >= NUDGE_VIEW_VERSION {
+            return true;
+        }
+        let (embed, components) = self.build_dm_payload(state.user_id).await;
+        match self
+            .port
+            .refresh_dm(channel_id, message_id, &[embed], &components)
+            .await
+        {
+            Ok(true) => {
+                self.mark_notified(state.user_id, channel_id, message_id)
                     .await;
                 true
             }
+            Ok(false) => false,
             Err(err) => {
-                tracing::info!(%err, user_id, "Nudge: DM fehlgeschlagen (DMs zu?)");
-                false
+                tracing::debug!(%err, user_id = state.user_id, "Nudge: bestehende DM konnte nicht aktualisiert werden");
+                true
+            }
+        }
+    }
+
+    pub async fn refresh_persistent_messages(&self) {
+        for state in self.load_all_nudge_states().await {
+            if !self.refresh_existing_state(&state, true).await {
+                self.clear_nudge_state(state.user_id).await;
             }
         }
     }
@@ -329,13 +478,28 @@ impl VoiceNudge {
         guild_id: u64,
         author_id: u64,
     ) -> Option<String> {
+        let default_id = std::env::var("NUDGE_TEST_DEFAULT_ID")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok());
+        self.nudgesend_reply_with_default(content, guild_id, author_id, default_id)
+            .await
+    }
+
+    pub async fn nudgesend_reply_with_default(
+        self: &Arc<Self>,
+        content: &str,
+        guild_id: u64,
+        _author_id: u64,
+        default_id: Option<u64>,
+    ) -> Option<String> {
         let mut parts = content.split_whitespace();
         let root = parts.next()?.to_lowercase();
         if !matches!(root.as_str(), "!nudgesend" | "!t30") {
             return None;
         }
-        // Ziel: erste Mention im Rest, sonst der Aufrufer selbst.
-        let target = parts.find_map(parse_mention).unwrap_or(author_id);
+        let Some(target) = parts.find_map(parse_mention).or(default_id) else {
+            return Some(NUDGE_TEST_TARGET_REQUIRED_TEXT.to_string());
+        };
 
         if self.is_opted_out(target).await {
             return Some(
@@ -348,8 +512,8 @@ impl VoiceNudge {
         }
 
         // force=True im Original: Steam-Link- und State-Check werden übersprungen,
-        // die DM geht direkt raus. `send_nudge` bildet genau das ab.
-        if self.send_nudge(target).await {
+        // die DM geht direkt raus.
+        if self.send_nudge_inner(target, true).await {
             Some(format!("📨 Test-DM an <@{target}> gesendet."))
         } else {
             Some(
@@ -358,6 +522,12 @@ impl VoiceNudge {
             )
         }
     }
+}
+
+pub fn spawn_restore(nudge: Arc<VoiceNudge>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        nudge.refresh_persistent_messages().await;
+    })
 }
 
 /// Parst eine einzelne Discord-User-Mention (`<@123>` / `<@!123>`).
@@ -425,6 +595,8 @@ mod tests {
     struct MockPort {
         in_voice: StdMutex<bool>,
         dms: StdMutex<Vec<u64>>,
+        refreshes: StdMutex<Vec<(u64, u64)>>,
+        missing_messages: StdMutex<HashSet<(u64, u64)>>,
         logs: StdMutex<Vec<String>>,
         url: Option<String>,
         roles: StdMutex<Vec<u64>>,
@@ -458,6 +630,27 @@ mod tests {
             self.url.clone()
         }
         async fn delete_message(&self, _c: u64, _m: u64) {}
+        async fn refresh_dm(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            _embeds: &[Value],
+            _components: &Value,
+        ) -> Result<bool, String> {
+            if self
+                .missing_messages
+                .lock()
+                .expect("lock")
+                .contains(&(channel_id, message_id))
+            {
+                return Ok(false);
+            }
+            self.refreshes
+                .lock()
+                .expect("lock")
+                .push((channel_id, message_id));
+            Ok(true)
+        }
     }
 
     const DDLS: [&str; 4] = [
@@ -478,6 +671,8 @@ mod tests {
         let port = Arc::new(MockPort {
             in_voice: StdMutex::new(true),
             dms: StdMutex::new(Vec::new()),
+            refreshes: StdMutex::new(Vec::new()),
+            missing_messages: StdMutex::new(HashSet::new()),
             logs: StdMutex::new(Vec::new()),
             url: url.map(str::to_string),
             roles: StdMutex::new(Vec::new()),
@@ -532,6 +727,73 @@ mod tests {
         assert_eq!(nudge.kv(DONE_NS, 100).await.as_deref(), Some("sent"));
         assert!(nudge.has_active_nudge(100).await);
         assert!(!port.logs.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn restore_persistent_messages_refreshes_gespeicherte_dm() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        nudge
+            .db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
+                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("state");
+
+        nudge.refresh_persistent_messages().await;
+
+        assert_eq!(
+            port.refreshes.lock().expect("lock").clone(),
+            vec![(900, 901)]
+        );
+        let version: i64 = nudge
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT view_version FROM steam_nudge_state WHERE user_id=100",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("version");
+        assert_eq!(version, NUDGE_VIEW_VERSION);
+    }
+
+    #[tokio::test]
+    async fn normaler_send_refreshes_aktiven_state_und_sendet_nicht_neu() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        nudge
+            .db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
+                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("state");
+
+        assert!(!nudge.send_nudge(100).await);
+        assert!(port.dms.lock().expect("lock").is_empty());
+        assert_eq!(
+            port.refreshes.lock().expect("lock").clone(),
+            vec![(900, 901)]
+        );
+
+        let reply = nudge
+            .nudgesend_reply("!nudgesend <@100>", 1, 9)
+            .await
+            .expect("reply");
+        assert!(reply.contains("Test-DM"), "reply: {reply}");
+        assert_eq!(port.dms.lock().expect("lock").clone(), vec![100]);
     }
 
     #[tokio::test]
@@ -593,12 +855,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nudgesend_ohne_mention_nimmt_aufrufer() {
+    async fn nudgesend_ohne_mention_ohne_default_fordert_ziel() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        // Alias !t30 ohne Mention → Aufrufer (9).
         let reply = nudge.nudgesend_reply("!t30", 1, 9).await.expect("reply");
+        assert_eq!(reply, NUDGE_TEST_TARGET_REQUIRED_TEXT);
+        assert!(port.dms.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn nudgesend_ohne_mention_nutzt_default_id() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        let reply = nudge
+            .nudgesend_reply_with_default("!t30", 1, 9, Some(777))
+            .await
+            .expect("reply");
         assert!(reply.contains("Test-DM"), "reply: {reply}");
-        assert_eq!(port.dms.lock().expect("lock").clone(), vec![9]);
+        assert_eq!(port.dms.lock().expect("lock").clone(), vec![777]);
     }
 
     #[tokio::test]

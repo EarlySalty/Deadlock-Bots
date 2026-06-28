@@ -15,6 +15,7 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, MessageEvent,
 };
 use rusqlite::OptionalExtension;
+use serde_json::{json, Value};
 
 pub const MIN_SECONDS: i64 = 300;
 pub const MAX_NAMES: usize = 10;
@@ -23,6 +24,11 @@ pub const FORWARD_USER_ID: u64 = 662995601738170389;
 pub const START_CUSTOM_ID: &str = "voice_feedback:start";
 pub const MODAL_CUSTOM_ID: &str = "voice_feedback:modal";
 pub const RESPONSE_WINDOW_SECONDS: i64 = 72 * 3600;
+pub const FEEDBACK_BUTTON_LABEL: &str = "Feedback ausfüllen";
+pub const FEEDBACK_ALREADY_RESPONDED_TEXT: &str =
+    "Danke, dein Voice-Feedback ist schon angekommen. 👍";
+pub const FEEDBACK_WINDOW_EXPIRED_TEXT: &str =
+    "Dieses Feedback-Fenster ist abgelaufen. Schreib uns gern direkt, falls noch etwas offen ist.";
 pub const ACK_TEXT: &str = "Danke für dein Feedback! 🙌\n\n\
 Wenn sonst irgendwas sein sollte, kannst du dich jederzeit an unser Team wenden – hier beißt keiner und jeder hilft gerne! :) \
 Falls es doch mal ein Problem geben sollte, wende dich bitte direkt an einen Community Moderator (bei kleineren Dingen), einen Moderator oder an den Owner. ❤️";
@@ -113,6 +119,13 @@ pub fn feedback_modal(request_id: i64) -> ModalSpec {
     }
 }
 
+pub fn feedback_button_components() -> Value {
+    json!([{ "type": 1, "components": [{
+        "type": 2, "style": 1, "label": FEEDBACK_BUTTON_LABEL, "emoji": {"name": "📝"},
+        "custom_id": START_CUSTOM_ID,
+    }]}])
+}
+
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -121,6 +134,7 @@ pub trait FeedbackPort: Send + Sync {
     /// "sent" | "forbidden" (DMs zu) | "error".
     async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>);
     async fn forward_to_owner(&self, owner_id: u64, text: String);
+    async fn delete_feedback_prompt(&self, user_id: u64, message_id: u64);
     async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
 }
 
@@ -239,17 +253,14 @@ impl VoiceFeedback {
             names.join(", ")
         };
 
-        // Request anlegen (alte pending-Requests des Users vorher räumen)
+        self.purge_feedback_requests(user_id).await;
+
+        // Request anlegen.
         let (channel_name_owned, request_type_owned, co_text_owned) =
             (channel_name.to_string(), request_type.to_string(), co_text);
         let request_id: Option<i64> = self
             .db
             .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM voice_feedback_requests
-                      WHERE user_id = ?1 AND status = 'pending'",
-                    [user_id],
-                )?;
                 conn.execute(
                     "INSERT INTO voice_feedback_requests(
                        user_id, guild_id, channel_id, channel_name, co_player_names,
@@ -283,6 +294,73 @@ impl VoiceFeedback {
                 .map(|_| ())
             })
             .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn send_test_request(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        channel_id: u64,
+        channel_name: &str,
+        co_player_ids: &[u64],
+        seconds: i64,
+        request_type: &str,
+    ) {
+        self.send_request(
+            guild_id,
+            user_id,
+            channel_id,
+            channel_name,
+            co_player_ids,
+            seconds,
+            request_type,
+        )
+        .await;
+    }
+
+    async fn purge_feedback_requests(&self, user_id: u64) {
+        let prompt_ids: Vec<u64> = self
+            .db
+            .read(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT prompt_message_id
+                       FROM voice_feedback_requests
+                      WHERE user_id = ?1
+                        AND prompt_message_id IS NOT NULL",
+                )?;
+                let rows = stmt.query_map([user_id], |row| row.get::<_, i64>(0))?;
+                let ids = rows
+                    .filter_map(Result::ok)
+                    .filter_map(|id| u64::try_from(id).ok())
+                    .collect();
+                Ok(ids)
+            })
+            .await
+            .unwrap_or_default();
+        for message_id in prompt_ids {
+            self.port.delete_feedback_prompt(user_id, message_id).await;
+        }
+        let result = self
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "DELETE FROM voice_feedback_responses
+                      WHERE request_id IN (
+                        SELECT id FROM voice_feedback_requests WHERE user_id = ?1
+                      )",
+                    [user_id],
+                )?;
+                conn.execute(
+                    "DELETE FROM voice_feedback_requests WHERE user_id = ?1",
+                    [user_id],
+                )?;
+                Ok(())
+            })
+            .await;
+        if let Err(err) = result {
+            tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht geloescht werden");
+        }
     }
 
     /// Freitext-Antworten auf die Feedback-DM (Python `on_message` in DMs).
@@ -375,15 +453,37 @@ impl VoiceFeedback {
         self.port
             .forward_to_owner(
                 FORWARD_USER_ID,
-                format!(
-                    "📩 Neues Voice-Feedback (Req #{}, Typ: {})\nVon: {} ({})\nKanal: {}\nDauer: {duration_min} Min\nMit im Call: {co_players}\n\nAntwort:\n{content}",
-                    row.id, row.request_type, event.author_display_name, event.author_id, row.channel_name
+                format_feedback_forward(
+                    row.id,
+                    &event.author_display_name,
+                    event.author_id,
+                    &content,
+                    &row.request_type,
+                    &co_players,
+                    &row.channel_name,
+                    &duration_min,
                 ),
             )
             .await;
 
         should_ack.then_some(ACK_TEXT)
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn format_feedback_forward(
+    request_id: i64,
+    author_name: &str,
+    author_id: u64,
+    content: &str,
+    request_type: &str,
+    co_players: &str,
+    channel_name: &str,
+    duration_min: &str,
+) -> String {
+    format!(
+        "📩 Neues Voice-Feedback (Req #{request_id}, Typ: {request_type})\nVon: {author_name} ({author_id})\nKanal: {channel_name}\nDauer: {duration_min} Min\nMit im Call: {co_players}\n\nAntwort:\n{content}",
+    )
 }
 
 /// Button + Modal-Submit (custom_ids: voice_feedback:start / :modal:{id}).
@@ -397,27 +497,45 @@ impl InteractionHandler for FeedbackHandler {
         if interaction.custom_id == START_CUSTOM_ID {
             // Neuester gesendeter Request des klickenden Users
             let user_id = interaction.user_id;
-            let request_id: Option<i64> = self
+            let request: Option<(i64, i64, String)> = self
                 .feedback
                 .db
                 .read(move |conn| {
                     conn.query_row(
-                        "SELECT id FROM voice_feedback_requests
-                          WHERE user_id = ?1 AND status IN ('sent', 'pending')
+                        "SELECT id, sent_at_ts, status FROM voice_feedback_requests
+                          WHERE user_id = ?1
                           ORDER BY id DESC LIMIT 1",
                         [user_id],
-                        |row| row.get(0),
+                        |row| {
+                            Ok((
+                                row.get(0)?,
+                                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            ))
+                        },
                     )
                     .optional()
                 })
                 .await
                 .ok()
                 .flatten();
-            let Some(request_id) = request_id else {
+            let Some((request_id, sent_at_ts, status)) = request else {
                 return BridgeReply::ephemeral_text(
                     "Diese Feedback-Anfrage ist nicht mehr offen — trotzdem danke!",
                 );
             };
+            if status == "responded" {
+                return BridgeReply::ephemeral_text(FEEDBACK_ALREADY_RESPONDED_TEXT);
+            }
+            let now = chrono::Utc::now().timestamp();
+            if sent_at_ts > 0 && now.saturating_sub(sent_at_ts) > RESPONSE_WINDOW_SECONDS {
+                return BridgeReply::ephemeral_text(FEEDBACK_WINDOW_EXPIRED_TEXT);
+            }
+            if !matches!(status.as_str(), "sent" | "pending") {
+                return BridgeReply::ephemeral_text(
+                    "Diese Feedback-Anfrage ist nicht mehr offen — trotzdem danke!",
+                );
+            }
             return BridgeReply {
                 modal: Some(feedback_modal(request_id)),
                 ..BridgeReply::default()
@@ -469,12 +587,74 @@ impl InteractionHandler for FeedbackHandler {
             })
             .await;
 
+        let request_meta: Option<FeedbackRequestResponse> = self
+            .feedback
+            .db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT id, sent_at_ts, status, request_type, co_player_names, channel_name, duration_seconds
+                       FROM voice_feedback_requests
+                      WHERE id = ?1",
+                    [request_id],
+                    |row| {
+                        Ok(FeedbackRequestResponse {
+                            id: row.get(0)?,
+                            sent_at_ts: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
+                            status: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                            request_type: row
+                                .get::<_, Option<String>>(3)?
+                                .unwrap_or_else(|| "first".to_string()),
+                            co_player_names: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                            channel_name: row
+                                .get::<_, Option<String>>(5)?
+                                .unwrap_or_else(|| "Voice".to_string()),
+                            duration_seconds: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+                        })
+                    },
+                )
+                .optional()
+            })
+            .await
+            .ok()
+            .flatten();
+        let (request_type, co_players, channel_name, duration_min) = request_meta
+            .map(|row| {
+                let duration_min = if row.duration_seconds > 0 {
+                    std::cmp::max(1, row.duration_seconds / 60).to_string()
+                } else {
+                    "?".to_string()
+                };
+                let co_players = if row.co_player_names.trim().is_empty() {
+                    "—".to_string()
+                } else {
+                    row.co_player_names
+                };
+                (row.request_type, co_players, row.channel_name, duration_min)
+            })
+            .unwrap_or_else(|| {
+                (
+                    "first".to_string(),
+                    "—".to_string(),
+                    "Voice".to_string(),
+                    "?".to_string(),
+                )
+            });
+
         // An den Owner weiterleiten (best-effort)
         self.feedback
             .port
             .forward_to_owner(
                 FORWARD_USER_ID,
-                format!("📝 Voice-Feedback von <@{user_id}> (Request {request_id}):\n{combined}"),
+                format_feedback_forward(
+                    request_id,
+                    &interaction.author_name,
+                    user_id,
+                    &combined,
+                    &request_type,
+                    &co_players,
+                    &channel_name,
+                    &duration_min,
+                ),
             )
             .await;
 
@@ -538,9 +718,19 @@ mod tests {
         assert!(modal.fields.iter().all(|f| f.paragraph));
     }
 
+    #[test]
+    fn feedback_button_label_kommt_aus_platzhalter_konstante() {
+        let components = feedback_button_components();
+        assert_eq!(
+            components[0]["components"][0]["label"],
+            FEEDBACK_BUTTON_LABEL
+        );
+    }
+
     struct MockPort {
         dms: StdMutex<Vec<(u64, String)>>,
         forwards: StdMutex<Vec<String>>,
+        deletes: StdMutex<Vec<(u64, u64)>>,
     }
 
     #[async_trait::async_trait]
@@ -551,6 +741,12 @@ mod tests {
         }
         async fn forward_to_owner(&self, _owner_id: u64, text: String) {
             self.forwards.lock().expect("lock").push(text);
+        }
+        async fn delete_feedback_prompt(&self, user_id: u64, message_id: u64) {
+            self.deletes
+                .lock()
+                .expect("lock")
+                .push((user_id, message_id));
         }
         async fn display_name(&self, _guild_id: u64, user_id: u64) -> Option<String> {
             Some(format!("User {user_id}"))
@@ -574,6 +770,7 @@ mod tests {
         let port = Arc::new(MockPort {
             dms: StdMutex::new(Vec::new()),
             forwards: StdMutex::new(Vec::new()),
+            deletes: StdMutex::new(Vec::new()),
         });
         (dir, VoiceFeedback::new(db, port.clone()), port)
     }
@@ -631,6 +828,56 @@ mod tests {
             .on_session_end(1, 500, 10, "Lane 1".into(), vec![200], 100, true)
             .await;
         assert_eq!(port.dms.lock().expect("lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn neuer_prompt_loescht_alle_alten_requests_und_responses() {
+        let (_dir, feedback, port) = setup().await;
+        feedback
+            .db
+            .write(|conn| {
+                conn.execute_batch(
+                    "INSERT INTO voice_feedback_requests(id, user_id, status, prompt_message_id)
+                     VALUES (10, 100, 'sent', 900), (11, 100, 'responded', 901);
+                     INSERT INTO voice_feedback_responses(request_id, user_id, content)
+                     VALUES (10, 100, 'alt'), (11, 100, 'alt2');",
+                )
+            })
+            .await
+            .expect("seed");
+
+        feedback
+            .on_session_end(1, 100, 10, "Lane 1".into(), vec![200], 600, true)
+            .await;
+
+        let (old_requests, old_responses, total_requests): (i64, i64, i64) = feedback
+            .db
+            .read(|conn| {
+                Ok((
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM voice_feedback_requests WHERE id IN (10, 11)",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                    conn.query_row("SELECT COUNT(*) FROM voice_feedback_responses", [], |row| {
+                        row.get(0)
+                    })?,
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM voice_feedback_requests WHERE user_id = 100",
+                        [],
+                        |row| row.get(0),
+                    )?,
+                ))
+            })
+            .await
+            .expect("counts");
+        assert_eq!(old_requests, 0);
+        assert_eq!(old_responses, 0);
+        assert_eq!(total_requests, 1);
+        assert_eq!(
+            port.deletes.lock().expect("lock").clone(),
+            vec![(100, 900), (100, 901)]
+        );
     }
 
     #[tokio::test]
@@ -729,5 +976,100 @@ mod tests {
             .handle_dm_message(dm_event(100, 701, "Nachtrag"))
             .await;
         assert_eq!(ack, None);
+    }
+
+    #[tokio::test]
+    async fn feedback_button_respektiert_responded_und_ablauf() {
+        let (_dir, feedback, _port) = setup().await;
+        let now = chrono::Utc::now().timestamp();
+        feedback
+            .db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO voice_feedback_requests(id, user_id, status, sent_at_ts)
+                     VALUES (21, 100, 'responded', ?1)",
+                    [now],
+                )?;
+                conn.execute(
+                    "INSERT INTO voice_feedback_requests(id, user_id, status, sent_at_ts)
+                     VALUES (22, 200, 'sent', ?1)",
+                    [now - RESPONSE_WINDOW_SECONDS - 5],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("seed");
+        let handler = FeedbackHandler {
+            feedback: feedback.clone(),
+        };
+
+        let responded = handler
+            .handle(BridgeInteraction {
+                custom_id: START_CUSTOM_ID.to_string(),
+                user_id: 100,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            responded.content.as_deref(),
+            Some(FEEDBACK_ALREADY_RESPONDED_TEXT)
+        );
+        assert!(responded.modal.is_none());
+
+        let expired = handler
+            .handle(BridgeInteraction {
+                custom_id: START_CUSTOM_ID.to_string(),
+                user_id: 200,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            expired.content.as_deref(),
+            Some(FEEDBACK_WINDOW_EXPIRED_TEXT)
+        );
+        assert!(expired.modal.is_none());
+    }
+
+    #[tokio::test]
+    async fn modal_forward_enthaelt_python_kontext() {
+        let (_dir, feedback, port) = setup().await;
+        feedback
+            .db
+            .write(|conn| {
+                conn.execute(
+                    "INSERT INTO voice_feedback_requests(
+                       id, user_id, guild_id, channel_id, channel_name, co_player_names,
+                       duration_seconds, request_type, status
+                     ) VALUES(30, 100, 1, 10, 'Lane 7', 'Alice, Bob', 725, 'second', 'sent')",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("seed");
+
+        let handler = FeedbackHandler {
+            feedback: feedback.clone(),
+        };
+        let mut options = std::collections::HashMap::new();
+        options.insert("q1".to_string(), serde_json::json!("Alles gut"));
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "voice_feedback:modal:30".to_string(),
+                user_id: 100,
+                author_name: "FeedbackUser".to_string(),
+                options,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(ACK_TEXT));
+        let forwards = port.forwards.lock().expect("lock");
+        assert_eq!(forwards.len(), 1);
+        assert!(forwards[0].contains("Req #30"));
+        assert!(forwards[0].contains("Typ: second"));
+        assert!(forwards[0].contains("Lane 7"));
+        assert!(forwards[0].contains("12 Min"));
+        assert!(forwards[0].contains("Alice, Bob"));
     }
 }

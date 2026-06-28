@@ -14,7 +14,23 @@ use dl_discord::{ChannelSender, Dispatcher};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
+use crate::feedback::VoiceFeedback;
 use crate::tracker::{calculate_points, VoiceTracker};
+
+pub const VOICE_ADMIN_TEST_TITLE: &str = "🔧 Voice-System-Test (zentrale DB)";
+pub const VOICE_ADMIN_STATUS_TITLE: &str = "🔧 Voice-System Admin-Status (zentrale DB)";
+pub const VOICE_ADMIN_CONFIG_TITLE: &str = "⚙️ Voice-Tracker-Konfiguration (zentrale DB)";
+pub const VOICE_ADMIN_LIVE_SESSIONS_LABEL: &str = "🔴 Live-Sessions";
+pub const VOICE_ADMIN_GRACE_DURATION_LABEL: &str = "⏱️ Schonzeit";
+pub const VOICE_ADMIN_MIN_USERS_LABEL: &str = "👥 Min. User";
+pub const VOICE_ADMIN_GRACE_PERIODS_LABEL: &str = "🛡️ Schonzeiten";
+pub const VOICE_ADMIN_ROLE_ID_LABEL: &str = "🎖️ Rollen-ID";
+pub const VOICE_ADMIN_SESSION_TIMEOUT_LABEL: &str = "🔄 Session-Timeout";
+pub const VOICE_ADMIN_MAX_SESSIONS_LABEL: &str = "📊 Max. Sessions";
+pub const VOICE_ADMIN_CONFIG_UPDATED_TEXT: &str = "✅ Einstellung aktualisiert (zentral gespeichert).";
+pub const VOICE_ADMIN_CONFIG_INVALID_TEXT: &str = "❌ Ungültige Eingabe. Optionen: grace_duration (60–600), grace_role (Rollen-ID), min_users (2–10), session_timeout (60–3600), max_sessions (10–10000).";
+pub const VOICE_FEEDBACK_TEST_SENT_TEXT: &str = "Feedback-Test verschickt. Bitte DMs prüfen.";
+pub const VOICE_FEEDBACK_TEST_UNAVAILABLE_TEXT: &str = "Voice-Feedback ist aktuell nicht verfügbar.";
 
 /// Cache-Zugriffe, die die Befehle über den Gateway-Cache brauchen
 /// (Namensauflösung, Rollencheck, Guild-Name). Implementiert von der
@@ -209,15 +225,22 @@ impl VoiceStatsStore {
 pub struct VoiceStatsCommands {
     store: VoiceStatsStore,
     tracker: Arc<VoiceTracker>,
+    feedback: Option<Arc<VoiceFeedback>>,
     port: Arc<dyn StatsPort>,
     limiter: RateLimiter,
 }
 
 impl VoiceStatsCommands {
-    pub fn new(db: Db, tracker: Arc<VoiceTracker>, port: Arc<dyn StatsPort>) -> Arc<Self> {
+    pub fn new(
+        db: Db,
+        tracker: Arc<VoiceTracker>,
+        port: Arc<dyn StatsPort>,
+        feedback: Option<Arc<VoiceFeedback>>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: VoiceStatsStore::new(db),
             tracker,
+            feedback,
             port,
             // Cog-Original: max 5 Anfragen pro 30-s-Fenster pro User.
             limiter: RateLimiter::new(5, 30),
@@ -230,6 +253,7 @@ impl VoiceStatsCommands {
         guild_id: u64,
         author_id: u64,
         author_name: &str,
+        author_is_admin: bool,
     ) -> Option<StatsReply> {
         let root = content.split_whitespace().next()?.to_lowercase();
         match root.as_str() {
@@ -237,8 +261,137 @@ impl VoiceStatsCommands {
             "!vleaderboard" | "!vlb" | "!voicetop" => {
                 Some(self.vleaderboard(guild_id, author_id).await)
             }
+            "!vtest" => Some(self.vtest(guild_id).await),
+            "!vf1" if author_is_admin => Some(
+                self.feedback_test(content, guild_id, author_id, "first")
+                    .await,
+            ),
+            "!vf4" if author_is_admin => Some(
+                self.feedback_test(content, guild_id, author_id, "second")
+                    .await,
+            ),
+            "!voice_status" if author_is_admin => Some(self.voice_status(guild_id).await),
+            "!voice_config" if author_is_admin => Some(self.voice_config(content, guild_id).await),
+            "!vf1" | "!vf4" | "!voice_status" | "!voice_config" => None,
             _ => None,
         }
+    }
+
+    async fn vtest(&self, guild_id: u64) -> StatsReply {
+        let cfg = self.tracker.config(guild_id).await;
+        StatsReply::embed(json!({
+            "title": VOICE_ADMIN_TEST_TITLE,
+            "color": 0x00FF99,
+            "fields": [
+                { "name": VOICE_ADMIN_LIVE_SESSIONS_LABEL, "value": self.tracker.active_session_count().await.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_GRACE_DURATION_LABEL, "value": cfg.grace_period_duration.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_MIN_USERS_LABEL, "value": cfg.min_users_for_tracking.to_string(), "inline": true },
+            ],
+        }))
+    }
+
+    async fn voice_status(&self, guild_id: u64) -> StatsReply {
+        let cfg = self.tracker.config(guild_id).await;
+        StatsReply::embed(json!({
+            "title": VOICE_ADMIN_STATUS_TITLE,
+            "color": 0x00FF99,
+            "fields": [
+                { "name": VOICE_ADMIN_LIVE_SESSIONS_LABEL, "value": self.tracker.active_session_count().await.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_GRACE_PERIODS_LABEL, "value": self.tracker.grace_period_count().await.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_MIN_USERS_LABEL, "value": cfg.min_users_for_tracking.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_GRACE_DURATION_LABEL, "value": cfg.grace_period_duration.to_string(), "inline": true },
+                { "name": VOICE_ADMIN_ROLE_ID_LABEL, "value": cfg.special_role_id.to_string(), "inline": true },
+            ],
+        }))
+    }
+
+    async fn voice_config(&self, content: &str, guild_id: u64) -> StatsReply {
+        let mut parts = content.split_whitespace();
+        let _root = parts.next();
+        let Some(setting) = parts.next() else {
+            let cfg = self.tracker.config(guild_id).await;
+            return StatsReply::embed(json!({
+                "title": VOICE_ADMIN_CONFIG_TITLE,
+                "color": 0x0099FF,
+                "fields": [
+                    { "name": VOICE_ADMIN_MIN_USERS_LABEL, "value": cfg.min_users_for_tracking.to_string(), "inline": true },
+                    { "name": VOICE_ADMIN_GRACE_DURATION_LABEL, "value": cfg.grace_period_duration.to_string(), "inline": true },
+                    { "name": VOICE_ADMIN_ROLE_ID_LABEL, "value": cfg.special_role_id.to_string(), "inline": true },
+                    { "name": VOICE_ADMIN_SESSION_TIMEOUT_LABEL, "value": cfg.session_timeout.to_string(), "inline": true },
+                    { "name": VOICE_ADMIN_MAX_SESSIONS_LABEL, "value": cfg.max_sessions_per_user.to_string(), "inline": true },
+                ],
+            }));
+        };
+        let Some(value) = parts.next() else {
+            return StatsReply::text(VOICE_ADMIN_CONFIG_INVALID_TEXT);
+        };
+        let Ok(parsed) = value.parse::<i64>() else {
+            return StatsReply::text(VOICE_ADMIN_CONFIG_INVALID_TEXT);
+        };
+        let mut cfg = self.tracker.config(guild_id).await;
+        let valid = match setting.to_ascii_lowercase().as_str() {
+            "grace_duration" if (60..=600).contains(&parsed) => {
+                cfg.grace_period_duration = parsed;
+                true
+            }
+            "grace_role" if parsed > 0 => {
+                cfg.special_role_id = parsed as u64;
+                true
+            }
+            "min_users" if (2..=10).contains(&parsed) => {
+                cfg.min_users_for_tracking = parsed;
+                true
+            }
+            "session_timeout" if (60..=3600).contains(&parsed) => {
+                cfg.session_timeout = parsed;
+                true
+            }
+            "max_sessions" if (10..=10000).contains(&parsed) => {
+                cfg.max_sessions_per_user = parsed;
+                true
+            }
+            _ => false,
+        };
+        if !valid {
+            return StatsReply::text(VOICE_ADMIN_CONFIG_INVALID_TEXT);
+        }
+        match self.tracker.store_config(guild_id, cfg).await {
+            Ok(()) => StatsReply::text(VOICE_ADMIN_CONFIG_UPDATED_TEXT),
+            Err(err) => {
+                tracing::warn!(%err, guild_id, "Voice config update failed");
+                StatsReply::text(VOICE_ADMIN_CONFIG_INVALID_TEXT)
+            }
+        }
+    }
+
+    async fn feedback_test(
+        &self,
+        content: &str,
+        guild_id: u64,
+        author_id: u64,
+        request_type: &str,
+    ) -> StatsReply {
+        let Some(feedback) = &self.feedback else {
+            return StatsReply::text(VOICE_FEEDBACK_TEST_UNAVAILABLE_TEXT);
+        };
+        let target = first_target(content).unwrap_or(author_id);
+        let co_players = if target == author_id {
+            Vec::new()
+        } else {
+            vec![author_id]
+        };
+        feedback
+            .send_test_request(
+                guild_id,
+                target,
+                0,
+                "Admin Test",
+                &co_players,
+                300,
+                request_type,
+            )
+            .await;
+        StatsReply::text(VOICE_FEEDBACK_TEST_SENT_TEXT)
     }
 
     async fn vstats(
@@ -371,7 +524,13 @@ pub fn spawn_command(
                     };
                     let content = event.content.trim();
                     let Some(reply) = commands
-                        .reply_for(content, guild_id, event.author_id, &event.author_display_name)
+                        .reply_for(
+                            content,
+                            guild_id,
+                            event.author_id,
+                            &event.author_display_name,
+                            event.author_is_admin,
+                        )
                         .await
                     else {
                         continue;
@@ -390,6 +549,7 @@ pub fn spawn_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn format_de_setzt_punkte() {
@@ -423,5 +583,158 @@ mod tests {
         assert!(rl.check(1).is_err());
         // Anderer User unberührt.
         assert!(rl.check(2).is_ok());
+    }
+
+    struct MockStatsPort;
+
+    #[async_trait::async_trait]
+    impl StatsPort for MockStatsPort {
+        async fn resolve_names(&self, user_ids: &[u64]) -> HashMap<u64, String> {
+            user_ids
+                .iter()
+                .map(|id| (*id, format!("User {id}")))
+                .collect()
+        }
+
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+
+        async fn guild_name(&self, guild_id: u64) -> Option<String> {
+            Some(format!("Guild {guild_id}"))
+        }
+    }
+
+    struct MockSnapshot;
+
+    #[async_trait::async_trait]
+    impl crate::tracker::VoiceSnapshot for MockSnapshot {
+        async fn channel_states(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+            _grace_role_id: u64,
+        ) -> Vec<crate::tracker::VoiceMemberState> {
+            Vec::new()
+        }
+    }
+
+    struct MockFeedbackPort {
+        dms: StdMutex<Vec<(u64, String)>>,
+        forwards: StdMutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::feedback::FeedbackPort for MockFeedbackPort {
+        async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>) {
+            self.dms.lock().expect("lock").push((user_id, text));
+            ("sent".to_string(), Some(555))
+        }
+
+        async fn forward_to_owner(&self, _owner_id: u64, text: String) {
+            self.forwards.lock().expect("lock").push(text);
+        }
+
+        async fn delete_feedback_prompt(&self, _user_id: u64, _message_id: u64) {}
+
+        async fn display_name(&self, _guild_id: u64, user_id: u64) -> Option<String> {
+            Some(format!("User {user_id}"))
+        }
+    }
+
+    const ADMIN_DDLS: [&str; 5] = [
+        "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
+        "CREATE TABLE voice_stats(user_id INTEGER PRIMARY KEY, total_seconds INTEGER NOT NULL DEFAULT 0, total_points INTEGER NOT NULL DEFAULT 0)",
+        "CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME, ended_at DATETIME, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT)",
+        "CREATE TABLE voice_feedback_requests(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, co_player_names TEXT, duration_seconds INTEGER, request_type TEXT DEFAULT 'first', status TEXT, error_message TEXT, prompt_message_id INTEGER, sent_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
+        "CREATE TABLE voice_feedback_responses(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, user_id INTEGER NOT NULL, message_id INTEGER, content TEXT, received_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
+    ];
+
+    async fn admin_setup() -> (
+        tempfile::TempDir,
+        Arc<VoiceStatsCommands>,
+        Arc<crate::tracker::VoiceTracker>,
+        Arc<MockFeedbackPort>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
+        for ddl in ADMIN_DDLS {
+            db.write(move |c| c.execute(ddl, []).map(|_| ()))
+                .await
+                .expect("ddl");
+        }
+        let tracker = crate::tracker::VoiceTracker::new(db.clone(), Arc::new(MockSnapshot));
+        let feedback_port = Arc::new(MockFeedbackPort {
+            dms: StdMutex::new(Vec::new()),
+            forwards: StdMutex::new(Vec::new()),
+        });
+        let feedback = crate::feedback::VoiceFeedback::new(db.clone(), feedback_port.clone());
+        let commands =
+            VoiceStatsCommands::new(db, tracker.clone(), Arc::new(MockStatsPort), Some(feedback));
+        (dir, commands, tracker, feedback_port)
+    }
+
+    #[tokio::test]
+    async fn admin_commands_existieren_und_sind_admin_gated() {
+        let (_dir, commands, _tracker, _feedback_port) = admin_setup().await;
+
+        assert!(commands
+            .reply_for("!vtest", 1, 9, "Admin", false)
+            .await
+            .is_some());
+        assert!(commands
+            .reply_for("!voice_status", 1, 9, "Admin", true)
+            .await
+            .is_some());
+        assert!(commands
+            .reply_for("!voice_config", 1, 9, "Admin", true)
+            .await
+            .is_some());
+        assert!(commands
+            .reply_for("!voice_config", 1, 9, "Admin", false)
+            .await
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn voice_config_schreibt_kv_store() {
+        let (_dir, commands, tracker, _feedback_port) = admin_setup().await;
+        let reply = commands
+            .reply_for("!voice_config min_users 4", 1, 9, "Admin", true)
+            .await
+            .expect("reply");
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(VOICE_ADMIN_CONFIG_UPDATED_TEXT)
+        );
+        assert_eq!(tracker.config(1).await.min_users_for_tracking, 4);
+    }
+
+    #[tokio::test]
+    async fn vf1_und_vf4_senden_feedback_testprompts() {
+        let (_dir, commands, _tracker, feedback_port) = admin_setup().await;
+        let first = commands
+            .reply_for("!vf1 <@200>", 1, 9, "Admin", true)
+            .await
+            .expect("first reply");
+        assert_eq!(
+            first.content.as_deref(),
+            Some(VOICE_FEEDBACK_TEST_SENT_TEXT)
+        );
+
+        let second = commands
+            .reply_for("!vf4 <@300>", 1, 9, "Admin", true)
+            .await
+            .expect("second reply");
+        assert_eq!(
+            second.content.as_deref(),
+            Some(VOICE_FEEDBACK_TEST_SENT_TEXT)
+        );
+
+        let dms = feedback_port.dms.lock().expect("lock");
+        assert_eq!(
+            dms.iter().map(|(user_id, _)| *user_id).collect::<Vec<_>>(),
+            vec![200, 300]
+        );
     }
 }

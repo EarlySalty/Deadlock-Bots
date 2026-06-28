@@ -207,6 +207,30 @@ impl VoiceTracker {
         cfg
     }
 
+    pub async fn store_config(
+        &self,
+        guild_id: u64,
+        config: TrackerConfig,
+    ) -> Result<(), dl_db::KvError> {
+        self.db
+            .kv_set(KV_NAMESPACE, guild_id.to_string(), config.to_json())
+            .await?;
+        self.state
+            .lock()
+            .await
+            .config_cache
+            .insert(guild_id, config);
+        Ok(())
+    }
+
+    pub async fn active_session_count(&self) -> usize {
+        self.state.lock().await.sessions.len()
+    }
+
+    pub async fn grace_period_count(&self) -> usize {
+        self.state.lock().await.grace.len()
+    }
+
     /// Laufende (Live-)Session eines Users in einer Guild, falls vorhanden:
     /// `(live_secs, peak_users)`. `live_secs` = Sekunden seit Session-Start
     /// (>=0), `peak_users` analog zu Pythons `peak_users or 1` mindestens 1.

@@ -20,6 +20,7 @@ use dl_discord::DiscordAdapter;
 use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 use serenity::all::ChannelId;
+use std::fmt;
 
 const QUEUE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const ERROR_BACKOFF: Duration = Duration::from_secs(10);
@@ -27,6 +28,10 @@ const RENAME_THROTTLE: Duration = Duration::from_secs(360);
 const MAX_RETRIES: i64 = 5;
 
 static QUEUE: OnceLock<RenameQueue> = OnceLock::new();
+
+fn worker_id() -> i64 {
+    i64::from(std::process::id())
+}
 
 /// Initialisiert die Prozess-globale Queue (idempotent). Einmalig beim Start,
 /// bevor die Voice-Subscriber laufen.
@@ -139,7 +144,54 @@ pub trait RenameExec: Send + Sync {
     /// Aktueller Channel-Name oder `None` (Channel weg/nicht im Cache).
     async fn current_name(&self, channel_id: u64) -> Option<String>;
     /// Benennt den Channel um. `Err` = Fehler (wird ggf. erneut versucht).
-    async fn edit_name(&self, channel_id: u64, name: &str, reason: &str) -> Result<(), String>;
+    async fn edit_name(&self, channel_id: u64, name: &str, reason: &str)
+        -> Result<(), RenameError>;
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum RenameError {
+    RateLimited { retry_after_seconds: f64 },
+    Other(String),
+}
+
+impl RenameError {
+    pub fn rate_limited(retry_after_seconds: f64) -> Self {
+        Self::RateLimited {
+            retry_after_seconds,
+        }
+    }
+
+    pub fn retry_after_seconds(&self) -> Option<f64> {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            Self::Other(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for RenameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => write!(f, "HTTP 429 (retry_after={retry_after_seconds})"),
+            Self::Other(err) => f.write_str(err),
+        }
+    }
+}
+
+impl From<String> for RenameError {
+    fn from(value: String) -> Self {
+        Self::Other(value)
+    }
+}
+
+impl From<&str> for RenameError {
+    fn from(value: &str) -> Self {
+        Self::Other(value.to_string())
+    }
 }
 
 struct Claimed {
@@ -187,7 +239,11 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
             if let Some(t) = last_attempt.get(&claimed.channel_id) {
                 let elapsed = t.elapsed();
                 if elapsed < RENAME_THROTTLE {
-                    let _ = set_pending(&q.db, claimed.id, false).await;
+                    let last_error = format!(
+                        "Channel throttle active ({:.1}s remaining)",
+                        (RENAME_THROTTLE - elapsed).as_secs_f64()
+                    );
+                    let _ = set_pending(&q.db, claimed.id, Some(&last_error), false).await;
                     let remaining = (RENAME_THROTTLE - elapsed)
                         .min(Duration::from_secs(5))
                         .max(Duration::from_millis(500));
@@ -217,10 +273,15 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
                     let _ = set_done(&q.db, claimed.id).await;
                 }
                 Err(e) => {
-                    if claimed.retry_count + 1 >= MAX_RETRIES {
-                        let _ = set_failed(&q.db, claimed.id, &e).await;
+                    let err_text = e.to_string();
+                    if let Some(retry_after) = e.retry_after_seconds() {
+                        last_attempt.insert(claimed.channel_id, Instant::now());
+                        let _ = set_pending(&q.db, claimed.id, Some(&err_text), true).await;
+                        tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.0))).await;
+                    } else if claimed.retry_count + 1 >= MAX_RETRIES {
+                        let _ = set_failed(&q.db, claimed.id, &err_text).await;
                     } else {
-                        let _ = set_pending(&q.db, claimed.id, true).await;
+                        let _ = set_pending(&q.db, claimed.id, Some(&err_text), true).await;
                     }
                 }
             }
@@ -252,9 +313,12 @@ async fn claim_next(db: &Db) -> Result<Option<Claimed>, DbError> {
             return Ok(None);
         };
         let updated = tx.execute(
-            "UPDATE rename_requests SET status='PROCESSING', processed_at=CURRENT_TIMESTAMP
+            "UPDATE rename_requests
+                SET status='PROCESSING',
+                    assigned_worker_id=?2,
+                    processed_at=CURRENT_TIMESTAMP
              WHERE id=?1 AND status='PENDING'",
-            params![id],
+            params![id, worker_id()],
         )?;
         tx.commit()?;
         if updated == 1 {
@@ -272,19 +336,37 @@ async fn claim_next(db: &Db) -> Result<Option<Claimed>, DbError> {
     .await
 }
 
-async fn set_pending(db: &Db, id: i64, increment_retry: bool) -> Result<(), DbError> {
+async fn set_pending(
+    db: &Db,
+    id: i64,
+    last_error: Option<&str>,
+    increment_retry: bool,
+) -> Result<(), DbError> {
+    let last_error = last_error.map(|err| err.chars().take(1000).collect::<String>());
     db.write(move |conn| {
         if increment_retry {
             // Retry → ans Ende der FIFO-Queue (created_at neu).
             conn.execute(
-                "UPDATE rename_requests SET status='PENDING', retry_count=retry_count+1, created_at=CURRENT_TIMESTAMP, processed_at=NULL WHERE id=?1",
-                params![id],
+                "UPDATE rename_requests
+                    SET status='PENDING',
+                        retry_count=retry_count+1,
+                        created_at=CURRENT_TIMESTAMP,
+                        processed_at=NULL,
+                        assigned_worker_id=0,
+                        last_error=?2
+                  WHERE id=?1",
+                params![id, last_error],
             )?;
         } else {
-            // Throttle-Aufschub → FIFO-Position behalten.
             conn.execute(
-                "UPDATE rename_requests SET status='PENDING', processed_at=NULL WHERE id=?1",
-                params![id],
+                "UPDATE rename_requests
+                    SET status='PENDING',
+                        created_at=CURRENT_TIMESTAMP,
+                        processed_at=NULL,
+                        assigned_worker_id=0,
+                        last_error=?2
+                  WHERE id=?1",
+                params![id, last_error],
             )?;
         }
         Ok(())
@@ -295,8 +377,13 @@ async fn set_pending(db: &Db, id: i64, increment_retry: bool) -> Result<(), DbEr
 async fn set_done(db: &Db, id: i64) -> Result<(), DbError> {
     db.write(move |conn| {
         conn.execute(
-            "UPDATE rename_requests SET status='DONE', processed_at=CURRENT_TIMESTAMP WHERE id=?1",
-            params![id],
+            "UPDATE rename_requests
+                SET status='DONE',
+                    processed_at=CURRENT_TIMESTAMP,
+                    assigned_worker_id=?2,
+                    last_error=NULL
+              WHERE id=?1",
+            params![id, worker_id()],
         )?;
         Ok(())
     })
@@ -307,8 +394,13 @@ async fn set_failed(db: &Db, id: i64, err: &str) -> Result<(), DbError> {
     let err: String = err.chars().take(1000).collect();
     db.write(move |conn| {
         conn.execute(
-            "UPDATE rename_requests SET status='FAILED', processed_at=CURRENT_TIMESTAMP, last_error=?2 WHERE id=?1",
-            params![id, err],
+            "UPDATE rename_requests
+                SET status='FAILED',
+                    processed_at=CURRENT_TIMESTAMP,
+                    assigned_worker_id=?3,
+                    last_error=?2
+              WHERE id=?1",
+            params![id, err, worker_id()],
         )?;
         Ok(())
     })
@@ -374,6 +466,20 @@ mod tests {
 
         let first = claim_next(&q.db).await.unwrap().expect("claim1");
         assert_eq!(first.channel_id, 10, "FIFO: ältester zuerst");
+        let assigned: i64 =
+            q.db.read({
+                let id = first.id;
+                move |c| {
+                    c.query_row(
+                        "SELECT assigned_worker_id FROM rename_requests WHERE id=?1",
+                        params![id],
+                        |r| r.get(0),
+                    )
+                }
+            })
+            .await
+            .unwrap();
+        assert_ne!(assigned, 0, "Claim setzt wie Python eine Worker-ID");
         let second = claim_next(&q.db).await.unwrap().expect("claim2");
         assert_eq!(second.channel_id, 20);
         assert!(
@@ -383,39 +489,46 @@ mod tests {
 
         let fid = first.id;
         set_done(&q.db, fid).await.unwrap();
-        let status: String =
+        let (status, done_worker, done_error): (String, i64, Option<String>) =
             q.db.read(move |c| {
                 c.query_row(
-                    "SELECT status FROM rename_requests WHERE id=?1",
+                    "SELECT status, assigned_worker_id, last_error FROM rename_requests WHERE id=?1",
                     params![fid],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
                 )
             })
             .await
             .unwrap();
         assert_eq!(status, "DONE");
+        assert_ne!(done_worker, 0);
+        assert_eq!(done_error, None);
 
         // Retry erhöht retry_count und setzt zurück auf PENDING.
         let sid = second.id;
-        set_pending(&q.db, sid, true).await.unwrap();
-        let (st, rc): (String, i64) =
+        set_pending(&q.db, sid, Some("HTTP 500: nope"), true)
+            .await
+            .unwrap();
+        let (st, rc, pending_worker, pending_error): (String, i64, i64, Option<String>) =
             q.db.read(move |c| {
-                Ok((
-                    c.query_row(
-                        "SELECT status FROM rename_requests WHERE id=?1",
-                        params![sid],
-                        |r| r.get(0),
-                    )?,
-                    c.query_row(
-                        "SELECT retry_count FROM rename_requests WHERE id=?1",
-                        params![sid],
-                        |r| r.get(0),
-                    )?,
-                ))
+                c.query_row(
+                    "SELECT status, retry_count, assigned_worker_id, last_error
+                       FROM rename_requests WHERE id=?1",
+                    params![sid],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )
             })
             .await
             .unwrap();
         assert_eq!(st, "PENDING");
         assert_eq!(rc, 1);
+        assert_eq!(pending_worker, 0);
+        assert_eq!(pending_error.as_deref(), Some("HTTP 500: nope"));
+    }
+
+    #[test]
+    fn rename_error_erkennt_http_429_retry_after() {
+        let err = RenameError::rate_limited(2.5);
+        assert_eq!(err.retry_after_seconds(), Some(2.5));
+        assert_eq!(err.to_string(), "HTTP 429 (retry_after=2.5)");
     }
 }
