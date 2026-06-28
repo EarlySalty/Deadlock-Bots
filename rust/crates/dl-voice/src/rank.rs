@@ -10,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use dl_db::Db;
-use dl_discord::{ChannelSender, Dispatcher, VoiceEvent};
+use dl_discord::{ChannelSender, Dispatcher, GatewayEvent, VoiceEvent};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
@@ -22,6 +22,24 @@ pub const SCORE_MAX_ABSOLUTE: i64 = 72;
 pub const PRESENCE_STALE_SECONDS: i64 = 180;
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 pub const RRANG_INFO_BALANCING_RULE: &str = "Platzhalter";
+
+async fn wait_for_cache_ready(
+    events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,
+    guild_id: u64,
+) {
+    loop {
+        match events.recv().await {
+            Ok(GatewayEvent::CacheReady { guild_ids }) => {
+                if guild_ids.contains(&guild_id) {
+                    return;
+                }
+            }
+            Ok(GatewayEvent::Ready { .. }) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
 
 /// Comp/Ranked-Kategorie → Modus "lane".
 pub const MONITORED_CATEGORY_ID: u64 = 1412804540994162789;
@@ -145,6 +163,11 @@ pub fn anchor_range(rank_value: i64, subrank: i64) -> (i64, i64, i64, i64) {
     let allowed_min = ((score_min - 1) / 6).max(1);
     let allowed_max = ((score_max - 1) / 6).min(11);
     (score_min, score_max, allowed_min, allowed_max)
+}
+
+pub fn balancing_rule_value() -> String {
+    let full_rank_span = (RANKED_SUBRANK_TOLERANCE / 6).max(1);
+    format!("±{full_rank_span} Ränge")
 }
 
 /// Welche Sub-Rang-Rollen der Guild fallen ins Score-Fenster?
@@ -790,8 +813,10 @@ pub fn spawn(
     dispatcher: &Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
+    let mut gateway_events = dispatcher.subscribe_gateway();
     tokio::spawn(async move {
         manager.rehydrate().await;
+        wait_for_cache_ready(&mut gateway_events, MAIN_GUILD_ID).await;
         manager.startup_reconcile(MAIN_GUILD_ID).await;
         loop {
             match events.recv().await {
@@ -1273,13 +1298,14 @@ impl RankCommands {
         let roles = self.manager.port.member_roles(guild_id, user_id).await;
         let (rn, rv, rs) = user_rank_from_roles(&roles);
         let sub_txt = rs.map(|s| format!(" {s}")).unwrap_or_default();
+        let balancing_value = balancing_rule_value();
         RankReply::embed(json!({
             "title": format!("🎭 Rang-Information: {display_name}"),
             "color": 0x3498DB,
             "fields": [
                 { "name": "Höchster Rang", "value": format!("{rn}{sub_txt}"), "inline": true },
                 { "name": "Rang-Wert", "value": rv.to_string(), "inline": true },
-                { "name": RRANG_INFO_BALANCING_RULE, "value": RRANG_INFO_BALANCING_RULE, "inline": false },
+                { "name": RRANG_INFO_BALANCING_RULE, "value": balancing_value, "inline": false },
             ],
         }))
     }

@@ -34,6 +34,26 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+async fn wait_for_gateway_cache_ready(
+    events: &mut tokio::sync::broadcast::Receiver<dl_discord::GatewayEvent>,
+    guild_id: u64,
+    label: &'static str,
+) {
+    loop {
+        match events.recv().await {
+            Ok(dl_discord::GatewayEvent::CacheReady { guild_ids }) => {
+                if guild_ids.contains(&guild_id) {
+                    tracing::info!(label, guild_id, "Gateway-Cache bereit");
+                    return;
+                }
+            }
+            Ok(dl_discord::GatewayEvent::Ready { .. }) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
+
 struct BrokerChannelInfoGlue {
     adapter: Arc<dl_discord::DiscordAdapter>,
 }
@@ -691,7 +711,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
-        tempvoice_interface.refresh_all_interfaces().await;
         dl_voice::tempvoice::interface::spawn_command(
             tempvoice_interface.clone(),
             &dispatcher,
@@ -862,7 +881,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
-        router_interface.ensure_panel().await;
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
         // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung
@@ -928,6 +946,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Kopplung läse die gesamte Glue aus einem leeren Adapter-Cache (alle
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
+        let mut panel_cache_ready = dispatcher.subscribe_gateway();
+        let tempvoice_interface_ready = tempvoice_interface.clone();
+        let router_interface_ready = router_interface.clone();
+        tokio::spawn(async move {
+            wait_for_gateway_cache_ready(
+                &mut panel_cache_ready,
+                1289721245281292288,
+                "voice_panels",
+            )
+            .await;
+            tempvoice_interface_ready.refresh_all_interfaces().await;
+            router_interface_ready.ensure_panel().await;
+        });
         dl_bridges::steam::spawn_panel_restore(steam_client.clone(), db.clone(), adapter.clone());
         let reaction_backfill = reaction_roles.clone();
         tokio::spawn(async move {

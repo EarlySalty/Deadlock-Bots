@@ -9,6 +9,7 @@
 //! Member-Zahl-Änderungen ohne Spielstatus lösen NIE ein Rename aus.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -37,6 +38,8 @@ pub const TARGET_CATEGORY_IDS: [u64; 3] = [
 pub const EXCLUDED_CHANNEL_IDS: [u64; 1] = [1493690350580138114];
 
 pub fn match_minute_display_offset() -> i64 {
+    // NOTE(tempvoice-blocking-rework): config parity for this offset is deferred;
+    // the fixed Python-default value is not a prod-risk for cutover.
     DEFAULT_MATCH_MINUTE_DISPLAY_OFFSET
 }
 
@@ -929,19 +932,79 @@ impl StatusCommands {
         Arc::new(Self { worker })
     }
 
-    async fn reply_for(&self, content: &str) -> Option<&'static str> {
+    async fn reply_for(&self, content: &str) -> Option<String> {
         let mut parts = content.split_whitespace();
         let root = parts.next()?.to_lowercase();
         if root != "dlvs" && root != "!dlvs" {
             return None;
         }
-        let _state_count = self.worker.states.lock().await.len();
         match parts.next().unwrap_or_default().to_lowercase().as_str() {
-            "trace" => Some(DLVS_TRACE_REPLY),
-            "snapshot" => Some(DLVS_SNAPSHOT_REPLY),
-            _ => Some(DLVS_ROOT_REPLY),
+            "trace" => Some(self.trace_reply().await),
+            "snapshot" => Some(self.snapshot_reply(parts.next()).await),
+            _ => Some(self.root_reply().await),
         }
     }
+
+    async fn root_reply(&self) -> String {
+        let state_count = self.worker.states.lock().await.len();
+        format!("{DLVS_ROOT_REPLY}\nstate_count={state_count}")
+    }
+
+    async fn trace_reply(&self) -> String {
+        let states = self.state_rows(None).await;
+        let mut reply = format!("{DLVS_TRACE_REPLY}\nstate_count={}", states.len());
+        for row in states {
+            let _ = write!(reply, "\n{row}");
+        }
+        reply
+    }
+
+    async fn snapshot_reply(&self, channel_arg: Option<&str>) -> String {
+        let channel_id = channel_arg.and_then(parse_channel_id);
+        let states = self.state_rows(channel_id).await;
+        let mut reply = format!("{DLVS_SNAPSHOT_REPLY}\nstate_count={}", states.len());
+        for row in states {
+            let _ = write!(reply, "\n{row}");
+        }
+        reply
+    }
+
+    async fn state_rows(&self, channel_id: Option<u64>) -> Vec<String> {
+        let mut states: Vec<(u64, ChannelState)> = self
+            .worker
+            .states
+            .lock()
+            .await
+            .iter()
+            .filter(|(id, _)| channel_id.is_none_or(|target| target == **id))
+            .map(|(id, state)| (*id, state.clone()))
+            .collect();
+        states.sort_by_key(|(id, _)| *id);
+        states
+            .into_iter()
+            .map(|(id, state)| {
+                format!(
+                    "channel_id={id} stage={} suffix={} players={} last_rename={:.0}",
+                    state.stage.unwrap_or_else(|| "-".to_string()),
+                    state.suffix.unwrap_or_else(|| "-".to_string()),
+                    state
+                        .previous_member_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "-".to_string()),
+                    state.last_rename,
+                )
+            })
+            .collect()
+    }
+}
+
+fn parse_channel_id(raw: &str) -> Option<u64> {
+    raw.trim()
+        .strip_prefix("<#")
+        .and_then(|value| value.strip_suffix('>'))
+        .unwrap_or_else(|| raw.trim())
+        .parse()
+        .ok()
 }
 
 pub fn spawn_command(
@@ -961,7 +1024,7 @@ pub fn spawn_command(
                         continue;
                     };
                     let _ = sender
-                        .send_to_channel(event.channel_id, Some(reply), &[])
+                        .send_to_channel(event.channel_id, Some(&reply), &[])
                         .await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,

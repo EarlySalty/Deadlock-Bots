@@ -52,6 +52,12 @@ pub enum ChannelEvent {
     },
 }
 
+#[derive(Debug, Clone)]
+pub enum GatewayEvent {
+    Ready { guild_count: usize },
+    CacheReady { guild_ids: Vec<u64> },
+}
+
 /// Normalisiertes Nachrichten-Ereignis (Bots bereits herausgefiltert).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageAttachment {
@@ -213,6 +219,7 @@ pub struct Dispatcher {
     member_tx: broadcast::Sender<MemberEvent>,
     role_tx: broadcast::Sender<RoleEvent>,
     channel_tx: broadcast::Sender<ChannelEvent>,
+    gateway_tx: broadcast::Sender<GatewayEvent>,
 }
 
 impl Default for Dispatcher {
@@ -228,12 +235,14 @@ impl Dispatcher {
         let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (role_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (channel_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (gateway_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
             message_tx,
             member_tx,
             role_tx,
             channel_tx,
+            gateway_tx,
         }
     }
 
@@ -257,6 +266,10 @@ impl Dispatcher {
         self.channel_tx.subscribe()
     }
 
+    pub fn subscribe_gateway(&self) -> broadcast::Receiver<GatewayEvent> {
+        self.gateway_tx.subscribe()
+    }
+
     pub fn publish_voice(&self, event: VoiceEvent) {
         // send schlägt nur fehl, wenn niemand subscribed ist — kein Fehler.
         let _ = self.voice_tx.send(event);
@@ -272,6 +285,10 @@ impl Dispatcher {
 
     pub fn publish_channel(&self, event: ChannelEvent) {
         let _ = self.channel_tx.send(event);
+    }
+
+    pub fn publish_gateway(&self, event: GatewayEvent) {
+        let _ = self.gateway_tx.send(event);
     }
 
     pub fn publish_role(&self, event: RoleEvent) {

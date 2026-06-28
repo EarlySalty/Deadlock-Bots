@@ -15,8 +15,8 @@ use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
 use crate::dispatcher::{
-    member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher, MemberEvent,
-    MessageAttachment, MessageEvent, VoiceEvent,
+    member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
+    GatewayEvent, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
@@ -125,10 +125,16 @@ impl EventHandler for Handler {
         self.adapter.gateway_ready.store(true, Ordering::Relaxed);
         let activity_name = presence_activity_name(self.feature_module_count, &self.command_prefix);
         ctx.set_activity(Some(ActivityData::watching(activity_name)));
+        self.dispatcher.publish_gateway(GatewayEvent::Ready {
+            guild_count: ready.guilds.len(),
+        });
         tracing::info!(user = %ready.user.name, guilds = ready.guilds.len(), "Gateway READY");
     }
 
     async fn cache_ready(&self, ctx: Context, guilds: Vec<GuildId>) {
+        self.dispatcher.publish_gateway(GatewayEvent::CacheReady {
+            guild_ids: guilds.iter().map(|gid| gid.get()).collect(),
+        });
         // Invite-Snapshots primen, damit der erste Join nach Start klassifiziert
         // werden kann (sonst „baseline_missing"). Joins treffen erst nach READY ein.
         for gid in &guilds {

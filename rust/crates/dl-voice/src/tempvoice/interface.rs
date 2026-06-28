@@ -756,11 +756,8 @@ impl InteractionHandler for PanelHandler {
                     "tv_tpl_trio" => ("Trio Call".to_string(), 3),
                     _ => {
                         let base = engine
-                            .lane_snapshot(lane)
-                            .await
-                            .map(|(base, _)| base)
-                            .filter(|base| base.to_lowercase().starts_with("lane "))
-                            .unwrap_or_else(|| "Lane".to_string());
+                            .reset_lane_template_base(interaction.guild_id, lane)
+                            .await;
                         (base, engine.default_limit_for_lane(lane).await)
                     }
                 };
@@ -909,7 +906,7 @@ impl InteractionHandler for PanelHandler {
                 let _ = engine
                     .set_lane_template(interaction.guild_id, lane, &base, limit)
                     .await;
-                if !engine.is_min_rank_blocked(lane).await && min_rank != "unknown" {
+                if !engine.is_min_rank_blocked(lane).await {
                     let _ = engine
                         .set_min_rank(interaction.guild_id, lane, &min_rank)
                         .await;

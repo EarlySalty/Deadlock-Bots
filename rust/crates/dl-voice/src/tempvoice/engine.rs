@@ -11,7 +11,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{NaiveDateTime, Utc};
-use dl_discord::{ChannelEvent, Dispatcher, VoiceEvent};
+use dl_discord::{ChannelEvent, Dispatcher, GatewayEvent, VoiceEvent};
 
 use super::logic;
 use super::store::{LaneRecord, TempVoiceStore};
@@ -19,6 +19,24 @@ use super::store::{LaneRecord, TempVoiceStore};
 pub const PURGE_INTERVAL_SECONDS: u64 = 180;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
 pub const MIN_RANK_DISABLED_REPLY: &str = "Platzhalter";
+
+async fn wait_for_cache_ready(
+    events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,
+    guild_id: u64,
+) {
+    loop {
+        match events.recv().await {
+            Ok(GatewayEvent::CacheReady { guild_ids }) => {
+                if guild_ids.contains(&guild_id) {
+                    return;
+                }
+            }
+            Ok(GatewayEvent::Ready { .. }) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
 
 /// Discord-Seite der Engine (Cache-Reads + REST-Aktionen).
 #[async_trait::async_trait]
@@ -402,15 +420,19 @@ impl TempVoiceEngine {
         }
         let mut purged = 0usize;
         for channel_id in lanes {
-            // Kanal existiert nicht mehr ODER ist leer → aufräumen
-            let exists = self.port.channel_name(guild_id, channel_id).await.is_some();
-            let empty = exists
-                && self
-                    .port
-                    .channel_members(guild_id, channel_id)
-                    .await
-                    .is_empty();
-            if !exists || empty {
+            let Some(_) = self.port.channel_name(guild_id, channel_id).await else {
+                tracing::debug!(
+                    channel_id,
+                    "TempVoice: Startup-Purge ueberspringt Cache-Miss"
+                );
+                continue;
+            };
+            if self
+                .port
+                .channel_members(guild_id, channel_id)
+                .await
+                .is_empty()
+            {
                 self.cleanup_lane(channel_id, "TempVoice: Lane leer (Startup-Purge)")
                     .await;
                 purged += 1;
@@ -1092,6 +1114,42 @@ impl TempVoiceEngine {
         Ok(effective)
     }
 
+    pub async fn reset_lane_template_base(&self, guild_id: u64, channel_id: u64) -> String {
+        let (base_name, category_id, source_staging_id) = {
+            let state = self.state.lock().await;
+            let lane = state.lanes.get(&channel_id);
+            (
+                lane.map(|lane| lane.base_name.clone()).unwrap_or_default(),
+                lane.and_then(|lane| lane.category_id),
+                lane.and_then(|lane| lane.source_staging_id),
+            )
+        };
+        let category_id = match category_id {
+            Some(category_id) if category_id > 0 => Some(category_id),
+            _ => self.port.channel_category(guild_id, channel_id).await,
+        };
+        let rules = source_staging_id
+            .map(|staging_id| self.config.rules_for_staging(staging_id))
+            .unwrap_or_else(|| self.rules_for_category(category_id).0);
+        let prefix = rules.prefix.as_deref().unwrap_or("Lane");
+        let base_lower = base_name.to_lowercase();
+        let prefix_lower = prefix.to_lowercase();
+        let already_numbered = base_lower
+            .strip_prefix(&(prefix_lower + " "))
+            .is_some_and(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()));
+        if already_numbered {
+            return base_name;
+        }
+        let Some(category_id) = category_id else {
+            return format!("{prefix} 1");
+        };
+        let names = self
+            .port
+            .category_voice_channel_names(guild_id, category_id)
+            .await;
+        logic::next_name(&names, prefix)
+    }
+
     pub async fn default_limit_for_lane(&self, channel_id: u64) -> i64 {
         let category_id = self
             .state
@@ -1726,11 +1784,10 @@ pub fn spawn_tag_listener(
 pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
     let mut channel_events = dispatcher.subscribe_channels();
-    // Startup-Purge verzögert: erst wenn der Gateway-Cache gefüllt ist
-    // (sonst sähen alle Lanes leer aus und würden gelöscht)
+    let mut gateway_events = dispatcher.subscribe_gateway();
     let purge_engine = engine.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        wait_for_cache_ready(&mut gateway_events, purge_engine.config.guild_id_hint).await;
         loop {
             purge_engine.purge_empty_lanes().await;
             tokio::time::sleep(std::time::Duration::from_secs(PURGE_INTERVAL_SECONDS)).await;
@@ -2106,6 +2163,33 @@ mod tests {
             .await;
         assert!(engine.store.all_lanes().await.expect("leer").is_empty());
         assert_eq!(port.deleted.lock().expect("lock").clone(), vec![lane_id]);
+    }
+
+    #[tokio::test]
+    async fn startup_purge_loescht_cache_miss_nicht() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let channel_id = 4242;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Lane 1".to_string(),
+                category_id: 1289721245281292290,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        engine.rehydrate().await;
+
+        engine.purge_empty_lanes().await;
+
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].channel_id, channel_id);
+        assert!(port.deleted.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

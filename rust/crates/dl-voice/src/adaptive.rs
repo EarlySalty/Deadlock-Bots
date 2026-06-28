@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use crate::tempvoice::logic;
 use crate::tempvoice::TempVoiceEngine;
+use dl_discord::GatewayEvent;
 
 pub const NP_TARGET_CATEGORY_ID: u64 = 1465839366634209361;
 pub const NP_ANCHOR_CHANNEL_ID: u64 = 1470126503252721845;
@@ -44,6 +45,24 @@ pub const COMP_RANKED_CATEGORY_ID: u64 = 1412804540994162789;
 pub const CASUAL_STAGING_ID: u64 = 1501089974093873232;
 pub const PERMANENT_CHILL_ID: u64 = 1493690350580138114;
 pub const PINNED_CHILL_END_ID: u64 = 1505618194017161267;
+
+async fn wait_for_cache_ready(
+    events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,
+    guild_id: u64,
+) {
+    loop {
+        match events.recv().await {
+            Ok(GatewayEvent::CacheReady { guild_ids }) => {
+                if guild_ids.contains(&guild_id) {
+                    return;
+                }
+            }
+            Ok(GatewayEvent::Ready { .. }) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
+        }
+    }
+}
 
 // ── Pure Logik (Referenzwerte aus CPython in den Tests) ────────────────────
 
@@ -444,6 +463,8 @@ impl AdaptiveLanes {
     }
 
     async fn sort_ranked_category(&self, guild_id: u64, category_id: u64, skip_ids: &[u64]) {
+        // NOTE(tempvoice-blocking-rework): deeper Python tie-break parity is deferred;
+        // current ordering depth has no known prod-risk for cutover.
         let channels = self.port.category_channels(guild_id, category_id).await;
         let mut entries = Vec::new();
         for (stable_order, (id, name, _, position)) in channels.iter().enumerate() {
@@ -518,8 +539,10 @@ pub fn spawn(
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_voice();
     let mut channel_events = dispatcher.subscribe_channels();
+    let mut channel_gateway_events = dispatcher.subscribe_gateway();
     let channel_adaptive = adaptive.clone();
     tokio::spawn(async move {
+        wait_for_cache_ready(&mut channel_gateway_events, MAIN_GUILD_ID).await;
         loop {
             match channel_events.recv().await {
                 Ok(dl_discord::ChannelEvent::VoiceCategoryChanged { guild_id, .. }) => {
@@ -539,7 +562,9 @@ pub fn spawn(
             }
         }
     });
+    let mut gateway_events = dispatcher.subscribe_gateway();
     tokio::spawn(async move {
+        wait_for_cache_ready(&mut gateway_events, MAIN_GUILD_ID).await;
         adaptive.sync_new_player(MAIN_GUILD_ID).await;
         adaptive.sync_duo(MAIN_GUILD_ID).await;
         adaptive.sort_chill_lanes(MAIN_GUILD_ID).await;
