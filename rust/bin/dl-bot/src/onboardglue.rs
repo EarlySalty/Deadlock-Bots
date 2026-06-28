@@ -12,6 +12,7 @@
 
 use std::sync::Arc;
 
+use dl_community::ai_onboarding::{AiOnboardingPort, MemberRole};
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::json;
 use serenity::all::{ChannelId, GuildId, RoleId, UserId};
@@ -22,6 +23,59 @@ pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
 pub struct OnboardingHandler {
     pub adapter: Arc<DiscordAdapter>,
     pub steam: Arc<dl_bridges::steam::SteamBotClient>,
+}
+
+pub struct AiOnboardingGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl AiOnboardingPort for AiOnboardingGlue {
+    async fn post_message(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn add_member_role(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .add_member_role(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                RoleId::new(role_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn member_roles(&self, guild_id: u64, user_id: u64) -> Vec<MemberRole> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        let Some(member) = guild.members.get(&UserId::new(user_id)) else {
+            return Vec::new();
+        };
+        member
+            .roles
+            .iter()
+            .filter_map(|role_id| {
+                guild.roles.get(role_id).map(|role| MemberRole {
+                    id: role_id.get(),
+                    name: role.name.clone(),
+                })
+            })
+            .collect()
+    }
 }
 
 #[async_trait::async_trait]

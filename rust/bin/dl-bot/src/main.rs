@@ -304,6 +304,37 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
     dl_community::onboarding::register(&mut router, wizard);
 
+    // AI-Onboarding (H6): legacy `aiob:*` buttons, modal submit, MiniMax tour.
+    // This complements the static wizard; it does not replace or restart the
+    // disabled old Welcome-DM step flow.
+    let ai_onboarding_tokens = env("DEADLOCK_ONBOARD_TOKENS")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or(dl_community::ai_onboarding::AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS);
+    let ai_onboarding = dl_community::ai_onboarding::AiOnboarding::new(
+        db.clone(),
+        Arc::new(onboardglue::AiOnboardingGlue {
+            adapter: adapter.clone(),
+        }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        dl_community::ai_onboarding::AiOnboardingConfig::new(
+            onboardglue::MAIN_GUILD_ID,
+            onboardglue::ONBOARD_COMPLETE_ROLE_ID,
+        )
+        .with_max_output_tokens(ai_onboarding_tokens),
+    );
+    match ai_onboarding.restore_persistent_views().await {
+        Ok(report) => tracing::info!(
+            scanned = report.scanned,
+            restored = report.restored,
+            removed_invalid = report.removed_invalid,
+            "AI onboarding views restored"
+        ),
+        Err(err) => tracing::warn!(%err, "AI onboarding views could not be loaded"),
+    }
+    dl_community::ai_onboarding::register(&mut router, ai_onboarding);
+
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     dl_community::privacy_ui::register(&mut router, db.clone());
 

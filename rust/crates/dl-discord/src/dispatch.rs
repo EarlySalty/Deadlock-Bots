@@ -63,6 +63,7 @@ async fn dispatch_command(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
             .unwrap_or(false),
+        member_present: cmd.member.is_some(),
         guild_id: cmd.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: cmd.channel_id.get(),
         ..BridgeInteraction::default()
@@ -108,6 +109,7 @@ async fn dispatch_component(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
             .unwrap_or(false),
+        member_present: component.member.is_some(),
         guild_id: component.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: component.channel_id.get(),
         message_id: Some(component.message.id.get()),
@@ -158,6 +160,7 @@ async fn dispatch_modal(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
             .unwrap_or(false),
+        member_present: modal.member.is_some(),
         guild_id: modal.guild_id.map(|g| g.get()).unwrap_or(0),
         channel_id: modal.channel_id.get(),
         message_id: modal.message.as_ref().map(|m| m.id.get()),
@@ -288,8 +291,16 @@ async fn respond(
 
     let reply = match tokio::time::timeout(DEFER_THRESHOLD, &mut handler_future).await {
         Ok(reply) => {
-            send_initial(adapter, &http, reply, interaction_id, token, channel_id, allow_update)
-                .await;
+            send_initial(
+                adapter,
+                &http,
+                reply,
+                interaction_id,
+                token,
+                channel_id,
+                allow_update,
+            )
+            .await;
             return;
         }
         Err(_) => {
@@ -324,11 +335,18 @@ async fn respond(
         tracing::warn!("Modal nach Defer nicht möglich — Handler-Design prüfen");
         return;
     }
-    if let Err(err) = http
+    match http
         .create_followup_message(token, &message_data(&reply), build_files(&reply))
         .await
     {
-        tracing::warn!(%err, "Followup fehlgeschlagen");
+        Ok(message) => run_response_hook(&reply, message.id.get()).await,
+        Err(err) => tracing::warn!(%err, "Followup fehlgeschlagen"),
+    }
+}
+
+async fn run_response_hook(reply: &BridgeReply, message_id: u64) {
+    if let Some(hook) = &reply.response_message_hook {
+        hook.on_response_message(message_id).await;
     }
 }
 
@@ -372,11 +390,21 @@ async fn send_initial(
         CB_MESSAGE
     };
     let response = json!({ "type": cb, "data": message_data(&reply) });
-    if let Err(err) = http
+    match http
         .create_interaction_response(interaction_id.into(), token, &response, build_files(&reply))
         .await
     {
-        tracing::warn!(%err, "Interaction-Response fehlgeschlagen");
+        Ok(()) => {
+            if reply.response_message_hook.is_some() {
+                match http.get_original_interaction_response(token).await {
+                    Ok(message) => run_response_hook(&reply, message.id.get()).await,
+                    Err(err) => {
+                        tracing::warn!(%err, "Interaction-Response-ID konnte nicht geladen werden");
+                    }
+                }
+            }
+        }
+        Err(err) => tracing::warn!(%err, "Interaction-Response fehlgeschlagen"),
     }
 }
 
