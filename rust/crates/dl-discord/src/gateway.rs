@@ -13,7 +13,10 @@ use serenity::async_trait;
 use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
-use crate::dispatcher::{Dispatcher, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent};
+use crate::dispatcher::{
+    member_screening_completed_event, role_events_from_diff, Dispatcher, MemberEvent,
+    MessageAttachment, MessageEvent, VoiceEvent,
+};
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
 
@@ -32,6 +35,21 @@ fn is_staff_permissions(perms: Permissions) -> bool {
 
 pub fn presence_activity_name(feature_module_count: usize, command_prefix: &str) -> String {
     format!("{feature_module_count} Cogs | {command_prefix}help")
+}
+
+fn screening_completed_from_member_update(
+    guild_id: u64,
+    user_id: u64,
+    before_pending: bool,
+    after_pending: Option<bool>,
+) -> Option<MemberEvent> {
+    // Serenity 0.12.5 modelliert `pending` als `bool` mit `#[serde(default)]`;
+    // Feld-Präsenz aus dem Gateway-Payload ist hier nicht mehr rekonstruierbar.
+    // Deshalb nie auf `event.pending` zurückfallen. Restrisiko: Wenn Serenity
+    // den Cache bereits mit einem defaulteten `false` überschrieben hat, bleibt
+    // nur die Auto-Start-Guard-Schicht in `dl-community` als Schadensbegrenzung.
+    let after_pending = after_pending?;
+    member_screening_completed_event(guild_id, user_id, before_pending, after_pending)
 }
 
 #[async_trait]
@@ -183,29 +201,30 @@ impl EventHandler for Handler {
         new: Option<Member>,
         event: GuildMemberUpdateEvent,
     ) {
-        // Neu hinzugekommene Rollen diffen (Onboarding-Verifikations-Abschluss).
-        // Vorher-Rollen aus dem Cache (old); ohne Cache kein Diff möglich.
+        // Rollen und Member-Screening diffen. Vorher-Zustand kommt aus dem
+        // Cache (old); ohne Cache kein sicherer Übergang möglich.
         let Some(old) = old else {
             return;
         };
+        let guild_id = event.guild_id.get();
+        let user_id = event.user.id.get();
+        if let Some(event) = screening_completed_from_member_update(
+            guild_id,
+            user_id,
+            old.pending,
+            new.as_ref().map(|m| m.pending),
+        ) {
+            self.dispatcher.publish_member(event);
+        }
         let after_roles: &[serenity::all::RoleId] = new
             .as_ref()
             .map(|m| m.roles.as_slice())
             .unwrap_or(&event.roles);
-        let gained: Vec<u64> = after_roles
-            .iter()
-            .filter(|r| !old.roles.contains(r))
-            .map(|r| r.get())
-            .collect();
-        if gained.is_empty() {
-            return;
+        let before_roles: Vec<u64> = old.roles.iter().map(|role| role.get()).collect();
+        let after_roles: Vec<u64> = after_roles.iter().map(|role| role.get()).collect();
+        for event in role_events_from_diff(guild_id, user_id, &before_roles, &after_roles) {
+            self.dispatcher.publish_role(event);
         }
-        self.dispatcher
-            .publish_role(crate::dispatcher::RoleEvent::Gained {
-                guild_id: event.guild_id.get(),
-                user_id: event.user.id.get(),
-                role_ids: gained,
-            });
     }
 
     async fn guild_ban_addition(&self, _ctx: Context, guild_id: GuildId, banned_user: User) {
@@ -293,6 +312,29 @@ mod tests {
         assert!(is_staff_permissions(Permissions::MANAGE_MESSAGES));
         assert!(is_staff_permissions(Permissions::MANAGE_GUILD));
         assert!(!is_staff_permissions(Permissions::SEND_MESSAGES));
+    }
+
+    #[test]
+    fn screening_completion_braucht_cache_after_pending() {
+        let event = screening_completed_from_member_update(1, 2, true, None);
+
+        assert!(
+            event.is_none(),
+            "fehlender Cache-After darf event.pending=false nicht als echten Übergang werten"
+        );
+    }
+
+    #[test]
+    fn screening_completion_erkennt_cache_transition() {
+        let event = screening_completed_from_member_update(1, 2, true, Some(false));
+
+        assert!(matches!(
+            event,
+            Some(MemberEvent::ScreeningCompleted {
+                guild_id: 1,
+                user_id: 2,
+            })
+        ));
     }
 }
 

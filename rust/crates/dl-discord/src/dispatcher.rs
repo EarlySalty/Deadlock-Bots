@@ -119,10 +119,15 @@ pub enum MemberEvent {
         display_name: String,
         is_bot: bool,
     },
+    /// Discord Member Screening wurde abgeschlossen (`pending: true -> false`).
+    ScreeningCompleted {
+        guild_id: u64,
+        user_id: u64,
+    },
 }
 
-/// Rollen-Zugewinn eines Mitglieds (aus `guild_member_update` diffiert) —
-/// Konsument: Onboarding-Verifikations-Abschluss.
+/// Rollenänderung eines Mitglieds (aus `guild_member_update` diffiert) —
+/// Konsumenten: Onboarding-Verifikations-Abschluss, Coaching-Roster-Sync.
 #[derive(Debug, Clone)]
 pub enum RoleEvent {
     Gained {
@@ -130,6 +135,59 @@ pub enum RoleEvent {
         user_id: u64,
         role_ids: Vec<u64>,
     },
+    Removed {
+        guild_id: u64,
+        user_id: u64,
+        role_ids: Vec<u64>,
+    },
+}
+
+pub fn role_events_from_diff(
+    guild_id: u64,
+    user_id: u64,
+    before_roles: &[u64],
+    after_roles: &[u64],
+) -> Vec<RoleEvent> {
+    let gained: Vec<u64> = after_roles
+        .iter()
+        .copied()
+        .filter(|role_id| !before_roles.contains(role_id))
+        .collect();
+    let removed: Vec<u64> = before_roles
+        .iter()
+        .copied()
+        .filter(|role_id| !after_roles.contains(role_id))
+        .collect();
+
+    let mut events = Vec::with_capacity(2);
+    if !gained.is_empty() {
+        events.push(RoleEvent::Gained {
+            guild_id,
+            user_id,
+            role_ids: gained,
+        });
+    }
+    if !removed.is_empty() {
+        events.push(RoleEvent::Removed {
+            guild_id,
+            user_id,
+            role_ids: removed,
+        });
+    }
+    events
+}
+
+pub fn member_screening_completed_event(
+    guild_id: u64,
+    user_id: u64,
+    before_pending: bool,
+    after_pending: bool,
+) -> Option<MemberEvent> {
+    if before_pending && !after_pending {
+        Some(MemberEvent::ScreeningCompleted { guild_id, user_id })
+    } else {
+        None
+    }
 }
 
 const CHANNEL_CAPACITY: usize = 1024;
@@ -244,5 +302,41 @@ mod tests {
             author_created_at: 0,
             author_joined_at: None,
         });
+    }
+
+    #[test]
+    fn rollen_diff_liefert_gain_und_remove_events() {
+        let events = role_events_from_diff(1, 2, &[10, 20, 30], &[20, 30, 40]);
+        assert_eq!(events.len(), 2);
+        assert!(matches!(
+            events[0],
+            RoleEvent::Gained {
+                guild_id: 1,
+                user_id: 2,
+                ref role_ids,
+            } if role_ids == &[40]
+        ));
+        assert!(matches!(
+            events[1],
+            RoleEvent::Removed {
+                guild_id: 1,
+                user_id: 2,
+                ref role_ids,
+            } if role_ids == &[10]
+        ));
+    }
+
+    #[test]
+    fn pending_transition_liefert_screening_completed_event() {
+        let event = member_screening_completed_event(1, 2, true, false);
+        assert!(matches!(
+            event,
+            Some(MemberEvent::ScreeningCompleted {
+                guild_id: 1,
+                user_id: 2,
+            })
+        ));
+        assert!(member_screening_completed_event(1, 2, false, false).is_none());
+        assert!(member_screening_completed_event(1, 2, true, true).is_none());
     }
 }

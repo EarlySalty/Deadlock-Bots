@@ -465,6 +465,7 @@ async fn handle_member_event(
             }
             insert_simple_event(db, guild_id, user_id, "unban", Some(display_name)).await
         }
+        M::ScreeningCompleted { .. } => Ok(()),
     }
 }
 

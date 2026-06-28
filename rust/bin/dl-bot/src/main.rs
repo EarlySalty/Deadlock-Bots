@@ -302,6 +302,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }));
     // Verifikations-Abschluss: RoleEvent::Gained(Verified) → Abschluss-Nachricht.
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
+    dl_community::onboarding::spawn_screening_auto_start(
+        wizard.clone(),
+        &dispatcher,
+        onboardglue::MAIN_GUILD_ID,
+    );
     dl_community::onboarding::register(&mut router, wizard);
 
     // AI-Onboarding (H6): legacy `aiob:*` buttons, modal submit, MiniMax tour.

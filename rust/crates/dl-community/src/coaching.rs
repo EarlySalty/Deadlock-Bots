@@ -235,6 +235,13 @@ impl WebsiteClient {
 pub trait CoachingPort: Send + Sync {
     /// Mitglieder mit der Coach-Rolle: (user_id, username, display_name, avatar_url).
     async fn coach_members(&self, role_id: u64) -> Vec<(u64, String, String, String)>;
+    /// Expliziter Fallback, wenn der Cache leer ist (Python: `guild.chunk()`).
+    async fn coach_members_fetch_fallback(
+        &self,
+        _role_id: u64,
+    ) -> Vec<(u64, String, String, String)> {
+        Vec::new()
+    }
     /// DM senden — Ok(false) = DMs deaktiviert (ackbar), Err = später erneut.
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String>;
 }
@@ -246,23 +253,13 @@ pub struct CoachingSync {
 
 impl CoachingSync {
     pub async fn run_role_sync(&self) {
-        let members = self.port.coach_members(COACH_ROLE_ID).await;
-        if members.is_empty() {
+        let Some(coaches) =
+            coach_payload_after_cache_fallback(self.port.as_ref(), COACH_ROLE_ID).await
+        else {
             // Roster-Wipe-Schutz wie das Original
             tracing::warn!("Coach-Rolle hat keine Mitglieder – Sync wird NICHT ausgeführt");
             return;
-        }
-        let coaches: Vec<Value> = members
-            .iter()
-            .map(|(user_id, username, display_name, avatar_url)| {
-                json!({
-                    "discord_user_id": user_id,
-                    "discord_username": username,
-                    "display_name": display_name,
-                    "avatar_url": avatar_url,
-                })
-            })
-            .collect();
+        };
         if self.client.sync_coaches(&coaches).await {
             tracing::info!(count = coaches.len(), "Coach-Sync erfolgreich");
         }
@@ -306,6 +303,42 @@ impl CoachingSync {
 /// bevor ein außerplanmäßiger Roster-Sync läuft.
 pub const ROLE_DEBOUNCE: Duration = Duration::from_secs(5);
 
+pub fn build_coach_payload(members: &[(u64, String, String, String)]) -> Vec<Value> {
+    members
+        .iter()
+        .map(|(user_id, username, display_name, avatar_url)| {
+            json!({
+                "discord_user_id": user_id,
+                "discord_username": username,
+                "display_name": display_name,
+                "avatar_url": avatar_url,
+            })
+        })
+        .collect()
+}
+
+pub async fn coach_payload_after_cache_fallback(
+    port: &dyn CoachingPort,
+    role_id: u64,
+) -> Option<Vec<Value>> {
+    let mut members = port.coach_members(role_id).await;
+    if members.is_empty() {
+        members = port.coach_members_fetch_fallback(role_id).await;
+    }
+    if members.is_empty() {
+        None
+    } else {
+        Some(build_coach_payload(&members))
+    }
+}
+
+pub fn role_event_touches_coach_role(event: &dl_discord::RoleEvent) -> bool {
+    match event {
+        dl_discord::RoleEvent::Gained { role_ids, .. }
+        | dl_discord::RoleEvent::Removed { role_ids, .. } => role_ids.contains(&COACH_ROLE_ID),
+    }
+}
+
 pub fn spawn(
     sync: Arc<CoachingSync>,
     dispatcher: &dl_discord::Dispatcher,
@@ -328,8 +361,8 @@ pub fn spawn(
         loop {
             // Auf das erste Coach-Rollen-Event warten.
             match roles.recv().await {
-                Ok(dl_discord::RoleEvent::Gained { role_ids, .. }) => {
-                    if !role_ids.contains(&COACH_ROLE_ID) {
+                Ok(event) => {
+                    if !role_event_touches_coach_role(&event) {
                         continue;
                     }
                 }
@@ -342,8 +375,7 @@ pub fn spawn(
                 tokio::select! {
                     _ = tokio::time::sleep(ROLE_DEBOUNCE) => break,
                     event = roles.recv() => match event {
-                        Ok(dl_discord::RoleEvent::Gained { role_ids, .. })
-                            if role_ids.contains(&COACH_ROLE_ID) => continue,
+                        Ok(event) if role_event_touches_coach_role(&event) => continue,
                         Ok(_) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => return,
@@ -365,6 +397,33 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestCoachingPort {
+        cached: Vec<(u64, String, String, String)>,
+        fetched: Vec<(u64, String, String, String)>,
+        fetch_calls: Mutex<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoachingPort for TestCoachingPort {
+        async fn coach_members(&self, _role_id: u64) -> Vec<(u64, String, String, String)> {
+            self.cached.clone()
+        }
+
+        async fn coach_members_fetch_fallback(
+            &self,
+            _role_id: u64,
+        ) -> Vec<(u64, String, String, String)> {
+            *self.fetch_calls.lock().await += 1;
+            self.fetched.clone()
+        }
+
+        async fn send_dm(&self, _user_id: u64, _text: String) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
 
     #[test]
     fn datum_formatierung_berlin() {
@@ -402,5 +461,52 @@ mod tests {
         assert!(text.contains("unbekannter Zeitpunkt"));
 
         assert!(build_dm_text(&json!({ "type": "weird" })).is_none());
+    }
+
+    #[tokio::test]
+    async fn coach_payload_nutzt_fetch_fallback_wenn_cache_leer_ist() {
+        let port = TestCoachingPort {
+            fetched: vec![(
+                42,
+                "coach".to_string(),
+                "Coach Display".to_string(),
+                "https://cdn.example/avatar.png?size=256".to_string(),
+            )],
+            ..TestCoachingPort::default()
+        };
+
+        let coaches = coach_payload_after_cache_fallback(&port, COACH_ROLE_ID)
+            .await
+            .expect("payload");
+
+        assert_eq!(*port.fetch_calls.lock().await, 1);
+        assert_eq!(coaches.len(), 1);
+        assert_eq!(coaches[0]["discord_user_id"], json!(42));
+        assert_eq!(coaches[0]["display_name"], json!("Coach Display"));
+    }
+
+    #[test]
+    fn coach_role_event_erkennt_gain_und_removed() {
+        assert!(role_event_touches_coach_role(
+            &dl_discord::RoleEvent::Gained {
+                guild_id: 1,
+                user_id: 2,
+                role_ids: vec![COACH_ROLE_ID],
+            }
+        ));
+        assert!(role_event_touches_coach_role(
+            &dl_discord::RoleEvent::Removed {
+                guild_id: 1,
+                user_id: 2,
+                role_ids: vec![COACH_ROLE_ID],
+            }
+        ));
+        assert!(!role_event_touches_coach_role(
+            &dl_discord::RoleEvent::Removed {
+                guild_id: 1,
+                user_id: 2,
+                role_ids: vec![123],
+            }
+        ));
     }
 }

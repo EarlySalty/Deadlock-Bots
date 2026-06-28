@@ -11,10 +11,12 @@
 //! Flow folgt mit dem Onboarding-Rest (Phase 7).
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use dl_community::ai_onboarding::{AiOnboardingPort, MemberRole};
+use dl_community::onboarding::OnboardingThreadError;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use serenity::all::{ChannelId, GuildId, RoleId, UserId};
 
 pub const ONBOARD_COMPLETE_ROLE_ID: u64 = 1304216250649415771;
@@ -183,6 +185,106 @@ pub struct WizardGlue {
     pub db: dl_db::Db,
 }
 
+const DISCORD_TRANSIENT_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_millis(750), Duration::from_millis(1500)];
+
+fn is_transient_discord_error(err: &serenity::Error) -> bool {
+    matches!(
+        err,
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+            if (500..=599).contains(&resp.status_code.as_u16())
+    )
+}
+
+fn thread_error_from_serenity(err: serenity::Error) -> OnboardingThreadError {
+    if is_transient_discord_error(&err) {
+        OnboardingThreadError::Transient(err.to_string())
+    } else {
+        OnboardingThreadError::Permanent(err.to_string())
+    }
+}
+
+async fn retry_discord_http<T, Op, Fut>(mut operation: Op) -> Result<T, serenity::Error>
+where
+    Op: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, serenity::Error>>,
+{
+    let mut attempt = 0usize;
+    loop {
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(err)
+                if is_transient_discord_error(&err)
+                    && attempt < DISCORD_TRANSIENT_RETRY_DELAYS.len() =>
+            {
+                let delay = DISCORD_TRANSIENT_RETRY_DELAYS[attempt];
+                attempt += 1;
+                tokio::time::sleep(delay).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+fn thread_body(name: &str, channel_type: u8, invitable: Option<bool>) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("name".into(), json!(name));
+    body.insert("type".into(), json!(channel_type));
+    body.insert("auto_archive_duration".into(), json!(60));
+    if let Some(invitable) = invitable {
+        body.insert("invitable".into(), json!(invitable));
+    }
+    body
+}
+
+impl WizardGlue {
+    async fn create_thread_with_retry(
+        &self,
+        body: &Map<String, Value>,
+        reason: &'static str,
+    ) -> Result<serenity::all::GuildChannel, serenity::Error> {
+        retry_discord_http(|| {
+            let http = self.adapter.http.clone();
+            let body = body.clone();
+            async move {
+                http.create_thread(
+                    ChannelId::new(dl_community::onboarding::RULES_CHANNEL_ID),
+                    &body,
+                    Some(reason),
+                )
+                .await
+            }
+        })
+        .await
+    }
+
+    async fn add_thread_member_with_retry(
+        &self,
+        thread_id: ChannelId,
+        user_id: UserId,
+    ) -> Result<(), serenity::Error> {
+        retry_discord_http(|| {
+            let http = self.adapter.http.clone();
+            async move { http.add_thread_channel_member(thread_id, user_id).await }
+        })
+        .await
+    }
+
+    async fn delete_thread_quietly(&self, thread_id: ChannelId) {
+        if let Err(err) = retry_discord_http(|| {
+            let http = self.adapter.http.clone();
+            async move {
+                http.delete_channel(thread_id, Some("Onboarding-Thread-Fallback"))
+                    .await
+            }
+        })
+        .await
+        {
+            tracing::debug!(%err, thread_id = thread_id.get(), "Onboarding: fehlgeschlagenen privaten Thread nicht geloescht");
+        }
+    }
+}
+
 #[async_trait::async_trait]
 impl dl_community::onboarding::OnboardingPort for WizardGlue {
     async fn create_onboarding_thread(
@@ -190,30 +292,40 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
         _guild_id: u64,
         user_id: u64,
         name: &str,
-    ) -> Result<u64, String> {
+    ) -> Result<u64, OnboardingThreadError> {
         // privater Thread (type 12), 60-min-Auto-Archiv, invitable — wie Original
-        let body = serde_json::json!({
-            "name": name,
-            "type": 12,
-            "auto_archive_duration": 60,
-            "invitable": true,
-        });
-        let thread = self
-            .adapter
-            .http
-            .create_thread(
-                ChannelId::new(dl_community::onboarding::RULES_CHANNEL_ID),
-                body.as_object().expect("json object"),
-                Some("Onboarding-Thread"),
-            )
+        let private_body = thread_body(name, 12, Some(true));
+        let mut private_thread_id = None;
+        match self
+            .create_thread_with_retry(&private_body, "Onboarding-Thread")
             .await
-            .map_err(|e| e.to_string())?;
-        let _ = self
-            .adapter
-            .http
-            .add_thread_channel_member(thread.id, UserId::new(user_id))
-            .await;
-        Ok(thread.id.get())
+        {
+            Ok(thread) => {
+                private_thread_id = Some(thread.id);
+                match self
+                    .add_thread_member_with_retry(thread.id, UserId::new(user_id))
+                    .await
+                {
+                    Ok(()) => return Ok(thread.id.get()),
+                    Err(err) => {
+                        tracing::warn!(%err, user_id, thread_id = thread.id.get(), "Onboarding: User konnte privatem Thread nicht hinzugefuegt werden; nutze Public-Fallback");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::debug!(%err, user_id, "Onboarding: privater Thread nicht nutzbar; nutze Public-Fallback");
+            }
+        }
+
+        if let Some(thread_id) = private_thread_id {
+            self.delete_thread_quietly(thread_id).await;
+        }
+
+        let public_body = thread_body(name, 11, None);
+        self.create_thread_with_retry(&public_body, "Onboarding-Thread-Fallback")
+            .await
+            .map(|thread| thread.id.get())
+            .map_err(thread_error_from_serenity)
     }
 
     async fn send_step(
@@ -238,6 +350,49 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
                     .map(|m| m.roles.iter().map(|r| r.get()).collect())
             })
             .unwrap_or_default()
+    }
+
+    async fn member_is_bot(&self, guild_id: u64, user_id: u64) -> bool {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| g.members.get(&UserId::new(user_id)).map(|m| m.user.bot))
+            .unwrap_or(false)
+    }
+
+    async fn has_verified_steam_link(&self, user_id: u64) -> bool {
+        let Ok(user_id_sql) = i64::try_from(user_id) else {
+            return false;
+        };
+        self.db
+            .read(move |conn| {
+                use rusqlite::OptionalExtension;
+                conn.query_row(
+                    "SELECT 1 FROM steam_links
+                     WHERE user_id=?1 AND verified=1 AND is_steam_friend=1
+                     LIMIT 1",
+                    rusqlite::params![user_id_sql],
+                    |row| row.get::<_, i64>(0),
+                )
+                .optional()
+                .map(|row| row.is_some())
+            })
+            .await
+            .unwrap_or(false)
+    }
+
+    async fn claim_screening_auto_start(&self, user_id: u64) -> bool {
+        let key = user_id.to_string();
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT OR IGNORE INTO kv_store(ns, k, v) VALUES(?1, ?2, 'claimed')",
+                    rusqlite::params![dl_community::onboarding::AUTO_ONBOARDING_CLAIM_NS, key],
+                )
+                .map(|affected| affected > 0)
+            })
+            .await
+            .unwrap_or(false)
     }
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {

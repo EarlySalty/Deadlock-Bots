@@ -1231,6 +1231,24 @@ pub struct CoachingGlue {
     pub guild_id: u64,
 }
 
+fn coach_member_tuple(member: &serenity::all::Member) -> (u64, String, String, String) {
+    let avatar = member
+        .user
+        .avatar_url()
+        .unwrap_or_else(|| member.user.default_avatar_url());
+    let avatar = if avatar.contains('?') {
+        format!("{avatar}&size=256")
+    } else {
+        format!("{avatar}?size=256")
+    };
+    (
+        member.user.id.get(),
+        member.user.name.to_string(),
+        member.display_name().to_string(),
+        avatar,
+    )
+}
+
 #[async_trait::async_trait]
 impl dl_community::coaching::CoachingPort for CoachingGlue {
     async fn coach_members(&self, role_id: u64) -> Vec<(u64, String, String, String)> {
@@ -1242,24 +1260,45 @@ impl dl_community::coaching::CoachingPort for CoachingGlue {
             .members
             .values()
             .filter(|member| member.roles.contains(&role))
-            .map(|member| {
-                let avatar = member
-                    .user
-                    .avatar_url()
-                    .unwrap_or_else(|| member.user.default_avatar_url());
-                let avatar = if avatar.contains('?') {
-                    format!("{avatar}&size=256")
-                } else {
-                    format!("{avatar}?size=256")
-                };
-                (
-                    member.user.id.get(),
-                    member.user.name.to_string(),
-                    member.display_name().to_string(),
-                    avatar,
-                )
-            })
+            .map(coach_member_tuple)
             .collect()
+    }
+
+    async fn coach_members_fetch_fallback(
+        &self,
+        role_id: u64,
+    ) -> Vec<(u64, String, String, String)> {
+        let role = serenity::all::RoleId::new(role_id);
+        let guild_id = GuildId::new(self.guild_id);
+        let mut after = None;
+        let mut coaches = Vec::new();
+        loop {
+            let page = match self
+                .adapter
+                .http
+                .get_guild_members(guild_id, Some(1000), after)
+                .await
+            {
+                Ok(page) => page,
+                Err(err) => {
+                    tracing::warn!(%err, guild_id = self.guild_id, "Coach-Member-Fetch-Fallback fehlgeschlagen");
+                    break;
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|member| member.user.id.get());
+            coaches.extend(
+                page.iter()
+                    .filter(|member| member.roles.contains(&role))
+                    .map(coach_member_tuple),
+            );
+            if page.len() < 1000 || after.is_none() {
+                break;
+            }
+        }
+        coaches
     }
 
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
