@@ -1,3 +1,11 @@
+## #167 — Reaction-Rollen, faireres Coaching und der große Rust-Nachzug
+
+**Ausgangslage:** Eine ganze Welle fertiger Arbeit lag bereit, aber noch nicht im laufenden Bot: ein neues Reaction-Rollen-System, eine faire Coach-Verteilung und der Rest der Rust-Portierung — Voice/TempVoice, Moderation, Stats und Spielersuche, Onboarding. Zusätzlich steckte im Voice-Code noch ein heikler Stolperstein: Beim Bot-Start hätte er unter ungünstigen Umständen aktive Sprachkanäle für „leer" halten und aufräumen können, bevor der Bot überhaupt richtig verbunden war.
+
+**Was wurde geändert:** Wir haben alles zusammengeführt und live gebracht. Reaction-Rollen sind neu — ihr klickt unter der passenden Nachricht auf die Reaktion und bekommt die Rolle automatisch, beim ersten Mal mit einer kurzen Erklär-DM; verwaltet wird das komplett im Dashboard. Die Coach-Verteilung läuft jetzt als echtes Round-Robin, also reihum, statt dass einzelne dauernd zuerst drankamen; wer freigibt oder eine Reservierung verfallen lässt, verzerrt die Reihenfolge nicht mehr, Coaches können sich aus der Auto-Verteilung ausklinken, und die Zugriffsrolle gilt jetzt sieben Tage. Den Voice-Stolperstein haben wir entschärft: Aufräumen und Abgleich starten erst, wenn der Bot seinen Kanal-Cache wirklich geladen hat, und ein unbekannter Kanal wird nie mehr vorschnell als „weg" behandelt.
+
+**Wie es jetzt läuft:** Reaction-Rollen, faires Coaching und die übrige Rust-Fassung von Voice, Moderation, Stats und Onboarding laufen jetzt alle im selben Bot. Und der Neustart ist sicher — es kann nichts mehr passieren, das versehentlich aktive Sprachkanäle wegräumt.
+
 ## #166 — Frag das Brain: neuer `!brain`-Befehl
 
 **Ausgangslage:** Wir sammeln seit Monaten in einer eigenen Wissensbasis — dem „Brain" — geprüftes Deadlock-Wissen: offizielle Spielwerte, die Patch-Historie und aus Creator-Videos extrahierte Aussagen, die wir gegen die echten Spieldaten gegengeprüft haben. Bisher lag das alles nur intern; im Discord kam man nicht dran. Wer eine Deadlock-Frage hatte, musste raten, lange suchen oder ein allgemeines KI-Tool fragen, das Deadlock kaum kennt und gern veraltetes Zeug erzählt.
