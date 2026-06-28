@@ -12,6 +12,7 @@ use crate::tracker::{VoiceMemberState, VoiceSnapshot};
 
 /// Discord-Permission-Bit CONNECT (Voice).
 const CONNECT_BIT: u64 = 1 << 20;
+const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
 
 pub struct CacheSnapshot {
     pub adapter: Arc<DiscordAdapter>,
@@ -1449,8 +1450,28 @@ impl crate::rename_queue::RenameExec for RenameExecGlue {
 fn rename_error_from_serenity(err: serenity::Error) -> crate::rename_queue::RenameError {
     if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)) = &err {
         if resp.status_code.as_u16() == 429 {
-            return crate::rename_queue::RenameError::rate_limited(1.0);
+            // Serenity 0.12.5 exposes neither response headers nor Discord's
+            // JSON `retry_after` field on ErrorResponse; fall back like Python
+            // only when the concrete value is unavailable here.
+            return crate::rename_queue::RenameError::rate_limited(
+                SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS,
+            );
         }
     }
     crate::rename_queue::RenameError::from(err.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rename_429_fallback_is_python_default_when_serenity_drops_retry_after() {
+        let mapped = crate::rename_queue::RenameError::rate_limited(
+            SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS,
+        );
+
+        assert_eq!(mapped.retry_after_seconds(), Some(1.0));
+        assert_eq!(mapped.to_string(), "HTTP 429 (retry_after=1)");
+    }
 }

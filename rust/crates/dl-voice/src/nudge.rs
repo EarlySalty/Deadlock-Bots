@@ -142,11 +142,23 @@ impl VoiceNudge {
             .is_some()
     }
 
+    #[cfg(test)]
     async fn has_active_nudge(&self, user_id: u64) -> bool {
         self.load_nudge_state(user_id)
             .await
             .map(|state| state.notified || state.message_id.is_some())
             .unwrap_or(false)
+    }
+
+    async fn active_nudge_blocks_normal_path(&self, user_id: u64) -> bool {
+        let Some(state) = self.load_nudge_state(user_id).await else {
+            return false;
+        };
+        if self.refresh_existing_state(&state, false).await {
+            return true;
+        }
+        self.clear_nudge_message_ref(user_id).await;
+        state.notified
     }
 
     pub async fn handle_event(self: &Arc<Self>, event: VoiceEvent) {
@@ -166,7 +178,7 @@ impl VoiceNudge {
         }
         if self.has_steam_link(user_id).await
             || self.kv(DONE_NS, user_id).await.is_some()
-            || self.has_active_nudge(user_id).await
+            || self.active_nudge_blocks_normal_path(user_id).await
         {
             return;
         }
@@ -229,11 +241,10 @@ impl VoiceNudge {
                 if self.refresh_existing_state(&state, false).await {
                     return false;
                 }
+                self.clear_nudge_message_ref(user_id).await;
                 if state.notified {
-                    self.clear_nudge_state(user_id).await;
                     return false;
                 }
-                self.clear_nudge_state(user_id).await;
             }
         }
         let (embed, components) = self.build_dm_payload(user_id).await;
@@ -350,19 +361,23 @@ impl VoiceNudge {
             .collect()
     }
 
-    async fn clear_nudge_state(&self, user_id: u64) {
+    async fn clear_nudge_message_ref(&self, user_id: u64) {
         let result = self
             .db
             .write(move |conn| {
                 conn.execute(
-                    "DELETE FROM steam_nudge_state WHERE user_id = ?1",
+                    "UPDATE steam_nudge_state
+                        SET message_id=NULL,
+                            channel_id=NULL,
+                            view_version=0
+                      WHERE user_id=?1",
                     [user_id],
                 )
                 .map(|_| ())
             })
             .await;
         if let Err(err) = result {
-            tracing::debug!(%err, user_id, "Nudge: State-Clear fehlgeschlagen");
+            tracing::debug!(%err, user_id, "Nudge: Message-Ref-Clear fehlgeschlagen");
         }
     }
 
@@ -420,7 +435,7 @@ impl VoiceNudge {
     pub async fn refresh_persistent_messages(&self) {
         for state in self.load_all_nudge_states().await {
             if !self.refresh_existing_state(&state, true).await {
-                self.clear_nudge_state(state.user_id).await;
+                self.clear_nudge_message_ref(state.user_id).await;
             }
         }
     }
@@ -794,6 +809,92 @@ mod tests {
             .expect("reply");
         assert!(reply.contains("Test-DM"), "reply: {reply}");
         assert_eq!(port.dms.lock().expect("lock").clone(), vec![100]);
+    }
+
+    #[tokio::test]
+    async fn handle_event_refreshes_aktiven_state_mit_alter_view_und_sendet_nicht_neu() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        nudge
+            .db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
+                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("state");
+
+        nudge
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 100,
+                channel_id: 5,
+            })
+            .await;
+
+        assert_eq!(
+            port.refreshes.lock().expect("lock").clone(),
+            vec![(900, 901)]
+        );
+        assert!(port.dms.lock().expect("lock").is_empty());
+        assert!(nudge.running.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn handle_event_missing_aktive_message_cleart_nur_messagefelder() {
+        let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
+        nudge
+            .db
+            .write(|c| {
+                c.execute(
+                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
+                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
+                    [],
+                )
+                .map(|_| ())
+            })
+            .await
+            .expect("state");
+        port.missing_messages
+            .lock()
+            .expect("lock")
+            .insert((900, 901));
+
+        nudge
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 100,
+                channel_id: 5,
+            })
+            .await;
+
+        assert!(port.refreshes.lock().expect("lock").is_empty());
+        assert!(port.dms.lock().expect("lock").is_empty());
+        assert!(nudge.running.lock().await.is_empty());
+        let (notified, message_id, channel_id, view_version): (
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            i64,
+        ) = nudge
+            .db
+            .read(|c| {
+                c.query_row(
+                    "SELECT notified_at, message_id, channel_id, view_version
+                       FROM steam_nudge_state WHERE user_id=100",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .await
+            .expect("state row");
+        assert!(notified.is_some());
+        assert_eq!(message_id, None);
+        assert_eq!(channel_id, None);
+        assert_eq!(view_version, 0);
     }
 
     #[tokio::test]
