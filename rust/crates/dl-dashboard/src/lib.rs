@@ -14,7 +14,7 @@
 //! - [`oauth_state`] — DB-gestützte delegierte States (initiate/consume)
 //! - [`session`] — In-Memory-Store der `master_dash_session`-Cookies
 //!
-//! Die Routen-Schicht (Auth-Provider, Analytics, Turnier-Admin, Steuerung)
+//! Die Routen-Schicht (Auth-Provider, Analytics, Steuerung)
 //! baut auf diesen Bausteinen auf und kommt schrittweise dazu.
 
 // axum-Response als Err-Variante ist groß, aber bewusst: die Guards geben die
@@ -35,7 +35,6 @@ pub mod server_stats;
 pub mod session;
 pub mod survey;
 pub mod token;
-pub mod tournament;
 pub mod web;
 
 pub use authority::{decide_access, AccessOutcome, MemberAccessInfo, MemberLookup};

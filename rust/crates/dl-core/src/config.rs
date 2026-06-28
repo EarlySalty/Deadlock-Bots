@@ -31,8 +31,6 @@ pub enum ConfigError {
 pub struct Ports {
     /// Admin-Dashboard (Python: DASHBOARD_PORT)
     pub dashboard: u16,
-    /// Öffentliche Turnier-Website (Python: TURNIER_PUBLIC_PORT)
-    pub turnier_public: u16,
     /// Öffentliche Aktivitäts-Statistiken (Python: PUBLIC_STATS_PORT)
     pub public_stats: u16,
     /// Master-Broker, interne Discord-Aktions-API (Python: MASTER_BROKER_PORT)
@@ -73,7 +71,6 @@ impl Config {
 
         let ports = Ports {
             dashboard: port(&lookup, "DASHBOARD_PORT", 8766)?,
-            turnier_public: port(&lookup, "TURNIER_PUBLIC_PORT", 8767)?,
             public_stats: port(&lookup, "PUBLIC_STATS_PORT", 8768)?,
             master_broker: port(&lookup, "MASTER_BROKER_PORT", 8770)?,
             tierlist_public: port(&lookup, "TIERLIST_PUBLIC_PORT", 8771)?,
@@ -118,7 +115,6 @@ mod tests {
         let cfg = Config::from_lookup(|_| None).expect("Defaults müssen gültig sein");
         assert_eq!(cfg.db_path, PathBuf::from("data/deadlock.sqlite3"));
         assert_eq!(cfg.ports.dashboard, 8766);
-        assert_eq!(cfg.ports.turnier_public, 8767);
         assert_eq!(cfg.ports.public_stats, 8768);
         assert_eq!(cfg.ports.master_broker, 8770);
         assert_eq!(cfg.ports.tierlist_public, 8771);
