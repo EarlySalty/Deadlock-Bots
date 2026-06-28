@@ -1,21 +1,40 @@
 //! Discord-Glue für dl-moderation (ModPort + aimod:*-Review-Buttons).
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::{Output, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_ai::TextGenerator;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId};
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
+use tokio::io::{AsyncRead, AsyncReadExt};
+use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
+use tokio::task::JoinHandle;
+use tokio::time::timeout;
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
+const BRAIN_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(20);
+const BRAIN_USAGE: &str = "🧠 Frag mich was zu Deadlock! Z. B. `!brain wie spiel ich Vindicta?` oder `!brain ist Lash grad stark?`";
+const BRAIN_COOLDOWN: &str = "⏳ Ganz ruhig — eine Brain-Frage alle {secs}s. Gleich gehts wieder.";
+const BRAIN_TOO_LONG: &str =
+    "Das ist ja ein halber Roman 😅 — pack deine Frage in unter {max} Zeichen.";
+#[allow(dead_code)]
+const BRAIN_WORKING: &str = "🧠 Moment, ich wühl kurz im Brain…";
+const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad — probier's in ein paar Sekunden nochmal.";
+const BRAIN_NO_ANSWER: &str =
+    "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
+const BRAIN_OUT_OF_DOMAIN: &str =
+    "🧠 Klingt nicht nach Deadlock — dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -24,6 +43,368 @@ const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
+}
+
+pub struct BrainRetrieverGlue {
+    pub bin: PathBuf,
+    pub db_path: Option<PathBuf>,
+}
+
+#[async_trait::async_trait]
+impl dl_brain::BrainRetriever for BrainRetrieverGlue {
+    async fn ask_context(
+        &self,
+        frage: &str,
+    ) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
+        let output = run_brain_cli(
+            &self.bin,
+            self.db_path.as_deref(),
+            frage,
+            BRAIN_SUBPROCESS_TIMEOUT,
+        )
+        .await?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            tracing::warn!(
+                status = ?output.status.code(),
+                stderr = %stderr.trim(),
+                "Brain-CLI lieferte Fehlerstatus"
+            );
+            return Err(dl_brain::BrainError::Backend("exit status".to_string()));
+        }
+        if output.stdout.iter().all(u8::is_ascii_whitespace) {
+            tracing::warn!("Brain-CLI lieferte leeres stdout");
+            return Err(dl_brain::BrainError::Backend("empty stdout".to_string()));
+        }
+
+        let value: Value = serde_json::from_slice(&output.stdout).map_err(|err| {
+            tracing::warn!(%err, "Brain-CLI JSON konnte nicht geparst werden");
+            dl_brain::BrainError::Backend(err.to_string())
+        })?;
+        brain_context_from_value(value)
+    }
+}
+
+async fn run_brain_cli(
+    bin: &Path,
+    db_path: Option<&Path>,
+    frage: &str,
+    timeout_duration: Duration,
+) -> Result<Output, dl_brain::BrainError> {
+    let mut command = Command::new(bin);
+    command.kill_on_drop(true);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    if let Some(db_path) = db_path {
+        command.arg("--db").arg(db_path);
+    }
+    command.arg("ask-context").arg("--").arg(frage);
+
+    let mut child = command.spawn().map_err(|err| {
+        tracing::warn!(
+            %err,
+            bin = %bin.display(),
+            "Brain-CLI konnte nicht gestartet werden"
+        );
+        dl_brain::BrainError::Backend(err.to_string())
+    })?;
+
+    let stdout = child.stdout.take().map(read_pipe);
+    let stderr = child.stderr.take().map(read_pipe);
+    let status = match timeout(timeout_duration, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(err)) => {
+            tracing::warn!(%err, bin = %bin.display(), "Brain-CLI wait fehlgeschlagen");
+            return Err(dl_brain::BrainError::Backend(err.to_string()));
+        }
+        Err(_) => {
+            tracing::warn!(
+                bin = %bin.display(),
+                timeout_secs = timeout_duration.as_secs(),
+                "Brain-CLI Timeout"
+            );
+            if let Err(err) = child.start_kill() {
+                tracing::warn!(%err, bin = %bin.display(), "Brain-CLI Kill fehlgeschlagen");
+            }
+            if let Err(err) = child.wait().await {
+                tracing::warn!(%err, bin = %bin.display(), "Brain-CLI Reap nach Timeout fehlgeschlagen");
+            }
+            let _ = collect_pipe(stdout).await;
+            let _ = collect_pipe(stderr).await;
+            return Err(dl_brain::BrainError::Backend("timeout".to_string()));
+        }
+    };
+
+    let stdout = collect_pipe(stdout).await?;
+    let stderr = collect_pipe(stderr).await?;
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_pipe<R>(mut pipe: R) -> JoinHandle<std::io::Result<Vec<u8>>>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut buffer = Vec::new();
+        pipe.read_to_end(&mut buffer).await?;
+        Ok(buffer)
+    })
+}
+
+async fn collect_pipe(
+    task: Option<JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, dl_brain::BrainError> {
+    let Some(task) = task else {
+        return Ok(Vec::new());
+    };
+    match task.await {
+        Ok(Ok(bytes)) => Ok(bytes),
+        Ok(Err(err)) => Err(dl_brain::BrainError::Backend(err.to_string())),
+        Err(err) => Err(dl_brain::BrainError::Backend(err.to_string())),
+    }
+}
+
+fn brain_context_from_value(value: Value) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
+    let intent = value
+        .get("intent")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let prompt = value
+        .get("prompt")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    if intent.is_empty() {
+        tracing::warn!("Brain-CLI JSON ohne intent");
+        return Err(dl_brain::BrainError::Backend("missing intent".to_string()));
+    }
+    if prompt.trim().is_empty() && intent != "out_of_domain" {
+        tracing::warn!("Brain-CLI JSON ohne prompt");
+        return Err(dl_brain::BrainError::Backend("missing prompt".to_string()));
+    }
+    let sources = match value.get("sources") {
+        Some(Value::Array(values)) => values
+            .iter()
+            .filter_map(brain_source_to_string)
+            .collect::<Vec<_>>(),
+        Some(other) => brain_source_to_string(other).into_iter().collect(),
+        None => Vec::new(),
+    };
+    Ok(dl_brain::BrainContext {
+        intent,
+        prompt,
+        sources,
+    })
+}
+
+fn brain_source_to_string(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(value) => {
+            let value = value.trim();
+            if value.is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        }
+        other => serde_json::to_string(other).ok(),
+    }
+}
+
+pub struct BrainAiGlue {
+    pub client: Option<Arc<dl_ai::MiniMaxClient>>,
+}
+
+#[async_trait::async_trait]
+impl dl_brain::AiAnswerer for BrainAiGlue {
+    async fn answer(&self, prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
+        let Some(client) = &self.client else {
+            tracing::warn!("Brain-Antwort nicht möglich: MiniMax-Client fehlt");
+            return Err(dl_brain::BrainError::Backend(
+                "missing minimax client".to_string(),
+            ));
+        };
+        let Some(text) = client
+            .generate_text(dl_ai::GenerateRequest {
+                prompt: prompt.to_string(),
+                system_prompt: None,
+                model: None,
+                max_output_tokens: Some(700),
+                temperature: 0.25,
+            })
+            .await
+        else {
+            return Err(dl_brain::BrainError::Backend(
+                "missing minimax response".to_string(),
+            ));
+        };
+        let cleaned = dl_ai::strip_think(&text);
+        if cleaned.trim().is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(cleaned))
+        }
+    }
+}
+
+pub struct BrainHandler {
+    pub adapter: Arc<DiscordAdapter>,
+    pub config: dl_brain::BrainConfig,
+    pub cooldowns: Arc<dl_brain::BrainCooldowns>,
+    pub retriever: Arc<dyn dl_brain::BrainRetriever>,
+    pub answerer: Arc<dyn dl_brain::AiAnswerer>,
+    pub channel_allowlist: Option<HashSet<u64>>,
+}
+
+impl BrainHandler {
+    fn channel_allowed(&self, channel_id: u64) -> bool {
+        self.channel_allowlist
+            .as_ref()
+            .map(|allowlist| allowlist.contains(&channel_id))
+            .unwrap_or(true)
+    }
+
+    async fn outcome_for_question(&self, question: &str, user_id: u64) -> dl_brain::BrainOutcome {
+        dl_brain::handle_brain_query(
+            question,
+            user_id,
+            &self.config,
+            &self.cooldowns,
+            self.retriever.as_ref(),
+            self.answerer.as_ref(),
+        )
+        .await
+    }
+
+    fn messages_for_outcome(&self, outcome: dl_brain::BrainOutcome) -> Vec<String> {
+        match outcome {
+            dl_brain::BrainOutcome::Usage => vec![BRAIN_USAGE.to_string()],
+            dl_brain::BrainOutcome::TooLong { .. } => {
+                vec![BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())]
+            }
+            dl_brain::BrainOutcome::Cooldown { remaining_secs } => {
+                vec![BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string())]
+            }
+            dl_brain::BrainOutcome::Answer(chunks) => {
+                if chunks.is_empty() {
+                    vec![BRAIN_NO_ANSWER.to_string()]
+                } else {
+                    chunks
+                }
+            }
+            dl_brain::BrainOutcome::OutOfDomain => vec![BRAIN_OUT_OF_DOMAIN.to_string()],
+            dl_brain::BrainOutcome::NoAnswer => vec![BRAIN_NO_ANSWER.to_string()],
+            dl_brain::BrainOutcome::BackendError => vec![BRAIN_BACKEND_ERR.to_string()],
+        }
+    }
+
+    async fn send_public_messages(&self, channel_id: u64, messages: &[String]) {
+        for message in messages {
+            let body = brain_public_message_body(message);
+            if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
+                tracing::warn!(%err, channel_id, "Brain-Antwort konnte nicht gesendet werden");
+                break;
+            }
+        }
+    }
+
+    pub async fn handle_message_event(&self, event: &dl_discord::MessageEvent) {
+        if !self.channel_allowed(event.channel_id) {
+            return;
+        }
+        let Some(question) = parse_brain_question(&event.content) else {
+            return;
+        };
+        let outcome = self.outcome_for_question(&question, event.author_id).await;
+        let messages = self.messages_for_outcome(outcome);
+        self.send_public_messages(event.channel_id, &messages).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for BrainHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if !self.channel_allowed(interaction.channel_id) {
+            return BridgeReply::default();
+        }
+        let question = parse_brain_question(&interaction.content)
+            .unwrap_or_else(|| interaction.content.trim().to_string());
+        let outcome = self
+            .outcome_for_question(&question, interaction.user_id)
+            .await;
+        let messages = self.messages_for_outcome(outcome);
+        if messages.is_empty() {
+            return BridgeReply::default();
+        }
+        self.send_public_messages(interaction.channel_id, &messages)
+            .await;
+        BridgeReply::default()
+    }
+}
+
+fn brain_public_message_body(message: &str) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("content".into(), json!(message));
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "replied_user": false }),
+    );
+    body
+}
+
+fn parse_brain_question(content: &str) -> Option<String> {
+    let trimmed = content.trim();
+    let rest = trimmed.strip_prefix("!brain")?;
+    if !rest.is_empty() {
+        let first = rest.chars().next()?;
+        if !first.is_whitespace() {
+            return None;
+        }
+    }
+    Some(rest.trim().to_string())
+}
+
+pub fn parse_brain_channel_allowlist(raw: &str) -> Option<HashSet<u64>> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let ids = raw
+        .split([',', ';', '\n', '\r', '\t', ' '])
+        .filter_map(|part| part.trim().parse::<u64>().ok())
+        .collect::<HashSet<_>>();
+    if ids.is_empty() {
+        tracing::warn!(
+            "BRAIN_CHANNEL_ALLOWLIST ist gesetzt, enthaelt aber keine gueltige Channel-ID; Brain-Command deny-all"
+        );
+    } else {
+        tracing::debug!(count = ids.len(), "Brain-Channel-Allowlist geladen");
+    }
+    Some(ids)
+}
+
+pub fn spawn_brain_command(
+    handler: Arc<BrainHandler>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
+    let mut messages = dispatcher.subscribe_messages();
+    tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => handler.handle_message_event(&event).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Brain-Command: Message-Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 #[async_trait::async_trait]
@@ -2477,6 +2858,24 @@ impl dl_community::retention::RetentionPort for RetentionGlue {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use std::path::Path;
+    use std::time::Instant;
+
+    use dl_brain::BrainRetriever as _;
+
+    fn shell_quote(path: &Path) -> String {
+        format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    #[cfg(unix)]
+    fn make_executable(path: &Path) -> std::io::Result<()> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut permissions = fs::metadata(path)?.permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions)
+    }
 
     #[tokio::test]
     async fn invite_resolver_cacht_nur_definitive_guild_ids() {
@@ -2491,6 +2890,132 @@ mod tests {
             .remember_resolve_result("foreign", Some(2), now)
             .await;
         assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn brain_retriever_uebergibt_db_und_separator_vor_dash_frage(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("brain-cli");
+        let argv_log = dir.path().join("argv.log");
+        let db_path = dir.path().join("brain.sqlite3");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\n{{\n  printf '%s\\n' \"$#\"\n  for arg in \"$@\"; do printf '%s\\n' \"$arg\"; done\n}} > {}\nprintf '%s\\n' '{{\"intent\":\"general\",\"prompt\":\"ok\",\"sources\":[]}}'\n",
+                shell_quote(&argv_log)
+            ),
+        )?;
+        make_executable(&script)?;
+
+        let retriever = BrainRetrieverGlue {
+            bin: script,
+            db_path: Some(db_path.clone()),
+        };
+        let context = retriever.ask_context("- Spirit Lifesteal?").await?;
+
+        assert_eq!(context.prompt, "ok");
+        let argv = fs::read_to_string(argv_log)?;
+        let lines = argv.lines().collect::<Vec<_>>();
+        let db_display = db_path.to_string_lossy().to_string();
+        assert_eq!(
+            lines,
+            vec![
+                "5",
+                "--db",
+                db_display.as_str(),
+                "ask-context",
+                "--",
+                "- Spirit Lifesteal?"
+            ]
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn brain_retriever_cancellation_killt_kindprozess(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let dir = tempfile::tempdir()?;
+        let script = dir.path().join("slow-brain-cli");
+        let pid_file = dir.path().join("pid");
+        fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > {}\nexec sleep 5\n",
+                shell_quote(&pid_file)
+            ),
+        )?;
+        make_executable(&script)?;
+
+        let retriever = BrainRetrieverGlue {
+            bin: script,
+            db_path: None,
+        };
+        let timed_out =
+            tokio::time::timeout(Duration::from_millis(200), retriever.ask_context("frage")).await;
+        assert!(timed_out.is_err());
+
+        let started = Instant::now();
+        while !pid_file.exists() && started.elapsed() < Duration::from_secs(1) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let pid = fs::read_to_string(&pid_file)?;
+        let pid = pid.trim();
+        let mut gone = false;
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(1) {
+            if std::process::Command::new("kill")
+                .arg("-0")
+                .arg(pid)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|status| !status.success())
+                .unwrap_or(true)
+            {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        if !gone {
+            let _ = std::process::Command::new("kill")
+                .arg(pid)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
+        assert!(gone);
+        Ok(())
+    }
+
+    #[test]
+    fn brain_allowlist_invalid_config_wird_deny_all() {
+        assert!(parse_brain_channel_allowlist(" \n\t").is_none());
+
+        let parsed = parse_brain_channel_allowlist("#brain, nope")
+            .unwrap_or_else(|| panic!("invalid configured allowlist must not fail open"));
+        assert!(parsed.is_empty());
+
+        let parsed = parse_brain_channel_allowlist("123, nope, 456")
+            .unwrap_or_else(|| panic!("valid IDs should be kept"));
+        assert_eq!(parsed, HashSet::from([123, 456]));
+    }
+
+    #[test]
+    fn brain_public_message_body_deaktiviert_mentions() {
+        let body = brain_public_message_body("@everyone <@123> <@&456>");
+
+        assert_eq!(
+            body.get("content"),
+            Some(&json!("@everyone <@123> <@&456>"))
+        );
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
     }
 
     #[test]
