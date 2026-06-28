@@ -22,9 +22,11 @@ use super::store::{InterfaceRecord, PresetRecord};
 
 const NOT_IN_LANE: &str = "Du musst dafür in einer TempVoice-Lane sein.";
 const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
-pub const MIN_RANK_VERIFY_REQUIRED: &str = "Platzhalter";
-pub const MIN_RANK_BLOCKED_REPLY: &str = "Platzhalter";
-pub const RANK_PREF_UNKNOWN_LABEL: &str = "Platzhalter";
+pub const MIN_RANK_VERIFY_REQUIRED: &str =
+    "Du kannst den Mindest-Rang nur setzen, wenn du verifiziert bist.";
+pub const MIN_RANK_BLOCKED_REPLY: &str =
+    "Du kannst keinen Mindest-Rang über deinem eigenen setzen.";
+pub const RANK_PREF_UNKNOWN_LABEL: &str = "Kein Rang";
 const RANKED_CATEGORY_ID: u64 = 1412804540994162789;
 const GLOBAL_PANEL_TITLE: &str = "🚧 Sprachkanal verwalten";
 
@@ -1427,14 +1429,16 @@ mod tests {
     }
 
     #[test]
-    fn neue_sichtbare_texte_bleiben_platzhalter() {
-        assert_eq!(MIN_RANK_VERIFY_REQUIRED, "Platzhalter");
-        assert_eq!(MIN_RANK_BLOCKED_REPLY, "Platzhalter");
-        assert_eq!(RANK_PREF_UNKNOWN_LABEL, "Platzhalter");
-        assert_eq!(
+    fn sichtbare_texte_sind_final() {
+        for text in [
+            MIN_RANK_VERIFY_REQUIRED,
+            MIN_RANK_BLOCKED_REPLY,
+            RANK_PREF_UNKNOWN_LABEL,
             crate::tempvoice::engine::MIN_RANK_DISABLED_REPLY,
-            "Platzhalter"
-        );
+        ] {
+            assert_ne!(text, "Platzhalter");
+            assert!(!text.is_empty());
+        }
     }
 
     #[test]

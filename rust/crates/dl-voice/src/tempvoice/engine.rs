@@ -18,7 +18,7 @@ use super::store::{LaneRecord, TempVoiceStore};
 
 pub const PURGE_INTERVAL_SECONDS: u64 = 180;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
-pub const MIN_RANK_DISABLED_REPLY: &str = "Platzhalter";
+pub const MIN_RANK_DISABLED_REPLY: &str = "Mindest-Rang ist hier deaktiviert.";
 
 async fn wait_for_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,

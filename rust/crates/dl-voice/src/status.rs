@@ -24,9 +24,9 @@ pub const LATE_MATCH_COOLDOWN_SECONDS: f64 = 600.0;
 pub const MIN_ACTIVE_PLAYERS: usize = 1;
 pub const DEFAULT_MATCH_MINUTE_DISPLAY_OFFSET: i64 = 3;
 pub const LOCALIZED_SLOTS_CACHE_SECONDS: i64 = 60 * 60;
-pub const DLVS_ROOT_REPLY: &str = "Platzhalter";
-pub const DLVS_TRACE_REPLY: &str = "Platzhalter";
-pub const DLVS_SNAPSHOT_REPLY: &str = "Platzhalter";
+pub const DLVS_ROOT_REPLY: &str = "🎙️ Voice-Status — Übersicht";
+pub const DLVS_TRACE_REPLY: &str = "🎙️ Voice-Status — Trace";
+pub const DLVS_SNAPSHOT_REPLY: &str = "🎙️ Voice-Status — Snapshot";
 
 /// Überwachte Kategorien (VOICE_STATUS_CATEGORY_* = TempVoice-Kategorien).
 pub const TARGET_CATEGORY_IDS: [u64; 3] = [
@@ -1141,10 +1141,11 @@ mod tests {
     }
 
     #[test]
-    fn neue_dlvs_texte_bleiben_platzhalter() {
-        assert_eq!(DLVS_ROOT_REPLY, "Platzhalter");
-        assert_eq!(DLVS_TRACE_REPLY, "Platzhalter");
-        assert_eq!(DLVS_SNAPSHOT_REPLY, "Platzhalter");
+    fn dlvs_texte_sind_final() {
+        for text in [DLVS_ROOT_REPLY, DLVS_TRACE_REPLY, DLVS_SNAPSHOT_REPLY] {
+            assert_ne!(text, "Platzhalter");
+            assert!(!text.is_empty());
+        }
     }
 
     #[test]

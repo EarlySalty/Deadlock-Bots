@@ -21,7 +21,7 @@ pub const SCORE_MIN_ABSOLUTE: i64 = 7;
 pub const SCORE_MAX_ABSOLUTE: i64 = 72;
 pub const PRESENCE_STALE_SECONDS: i64 = 180;
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
-pub const RRANG_INFO_BALANCING_RULE: &str = "Platzhalter";
+pub const RRANG_INFO_BALANCING_RULE: &str = "Balancing-Regel";
 
 async fn wait_for_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,
@@ -1397,8 +1397,9 @@ mod tests {
     }
 
     #[test]
-    fn neue_rrang_texte_bleiben_platzhalter() {
-        assert_eq!(RRANG_INFO_BALANCING_RULE, "Platzhalter");
+    fn rrang_texte_sind_final() {
+        assert_ne!(RRANG_INFO_BALANCING_RULE, "Platzhalter");
+        assert!(!RRANG_INFO_BALANCING_RULE.is_empty());
     }
 
     #[test]

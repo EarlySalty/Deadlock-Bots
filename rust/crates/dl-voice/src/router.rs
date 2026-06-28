@@ -31,7 +31,7 @@ pub const MAX_LANE_MEMBERS: usize = 6;
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
 pub const ROUTER_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
 pub const ROUTER_INTERFACE_MESSAGE_KEY: &str = "interface_message_id";
-pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Platzhalter";
+pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Wähle zuerst einen Spielmodus.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterPanelMessage {
@@ -641,8 +641,9 @@ mod tests {
     }
 
     #[test]
-    fn neue_router_texte_bleiben_platzhalter() {
-        assert_eq!(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN, "Platzhalter");
+    fn router_texte_sind_final() {
+        assert_ne!(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN, "Platzhalter");
+        assert!(!ROUTER_SELECT_MODE_BEFORE_AUTOJOIN.is_empty());
     }
 
     #[test]
