@@ -24,7 +24,7 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use rusqlite::OptionalExtension;
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 
 pub const COACHING_PANEL_CHANNEL_ID: u64 = 1494373349944459355;
 pub const COACH_ROLE_ID: u64 = 1494372744286965941;
@@ -41,8 +41,7 @@ pub const OWNER_EXCLUDE_ID: u64 = 662995601738170389;
 pub const CLAIM_RESERVATION_HOURS: i64 = 24;
 pub const ROLE_EXPIRY_HOURS: i64 = 48;
 pub const COACHING_WEBSITE_URL: &str = "https://deutsche-deadlock-community.de/coaching";
-pub const COACHING_WEBSITE_CTA_TEXT: &str =
-    "👉 **Bereit loszulegen?** Stell deine Coaching-Anfrage direkt über den Button unten auf unserer Website — dort füllst du in einer Minute alles aus, der Rest läuft von selbst.";
+pub const COACHING_WEBSITE_CTA_TEXT: &str = "👉 **Bereit loszulegen?** Stell deine Coaching-Anfrage direkt über den Button unten auf unserer Website — dort füllst du in einer Minute alles aus, der Rest läuft von selbst.";
 pub const COACHING_WEBSITE_BUTTON_LABEL: &str = "Coaching-Anfrage starten";
 const PANEL_KV_NS: &str = "coaching";
 const PANEL_KV_KEY: &str = "panel_message_id";
@@ -108,10 +107,23 @@ pub fn new_session_id() -> String {
     let bytes: [u8; 16] = rand::random();
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-4{:01x}{:02x}-{:01x}{:01x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5],
-        bytes[6] & 0x0f, bytes[7],
-        8 + (bytes[8] & 0x03), bytes[8] & 0x0f, bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6] & 0x0f,
+        bytes[7],
+        8 + (bytes[8] & 0x03),
+        bytes[8] & 0x0f,
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -505,7 +517,8 @@ impl CoachingRequests {
                                 ai_summary: row.get(8)?,
                             },
                             row.get::<_, String>(9)?,
-                            row.get::<_, Option<u64>>(10)?,
+                            row.get::<_, Option<String>>(10)?
+                                .and_then(|raw| raw.parse::<u64>().ok()),
                             row.get::<_, Option<i64>>(11)?,
                             row.get::<_, Option<u64>>(12)?,
                             row.get::<_, Option<i64>>(13)?,
@@ -801,14 +814,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .await
             .unwrap_or_default();
         for (req_id, user_id) in active {
-            self.port
-                .remove_role(
-                    guild_id,
-                    user_id,
-                    COACHING_ACTIVE_ROLE_ID,
-                    "Coaching-Rolle abgelaufen (48h)",
-                )
-                .await;
+            self.remove_role_if_present(
+                guild_id,
+                user_id,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching-Rolle abgelaufen (48h)",
+            )
+            .await;
             let _ = self
                 .db
                 .write(move |conn| {
@@ -860,14 +872,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .await
             .unwrap_or_default();
         for (sess_id, user_id) in reward {
-            self.port
-                .remove_role(
-                    guild_id,
-                    user_id,
-                    COACHING_REWARD_ROLE_ID,
-                    "Coaching Reward-Rolle abgelaufen (5 Tage)",
-                )
-                .await;
+            self.remove_role_if_present(
+                guild_id,
+                user_id,
+                COACHING_REWARD_ROLE_ID,
+                "Coaching Reward-Rolle abgelaufen (5 Tage)",
+            )
+            .await;
             let _ = self
                 .db
                 .write(move |conn| {
@@ -885,15 +896,21 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     /// Sessions ohne gesendete Umfrage prüfen.
     pub async fn scan_survey_sessions(&self) {
         for session in self.load_survey_sessions(None).await {
-            self.process_survey_session(session).await;
+            self.process_survey_session(session, SurveyTrigger::Poll)
+                .await;
         }
     }
 
     /// Voice-getriggerte Prüfung (Python `on_voice_state_update`): nur die
     /// Sessions, an denen dieses Mitglied als User oder Coach beteiligt ist.
-    pub async fn survey_sessions_for_member(&self, member_id: u64) {
+    pub async fn survey_sessions_for_member(&self, member_id: u64, voice_transition_can_end: bool) {
+        let trigger = if voice_transition_can_end {
+            SurveyTrigger::VoiceTransition
+        } else {
+            SurveyTrigger::Poll
+        };
         for session in self.load_survey_sessions(Some(member_id)).await {
-            self.process_survey_session(session).await;
+            self.process_survey_session(session, trigger).await;
         }
     }
 
@@ -948,20 +965,23 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     /// noch im selben Coaching-VC, läuft die Session (Tracking-Update). Sind sie
     /// es nicht mehr und war zuvor eine Voice-Session aktiv, gilt sie als beendet
     /// → Active-Rolle weg, Reward-Rolle (5 Tage) und Survey-DM.
-    async fn process_survey_session(&self, session: SurveySession) {
+    async fn process_survey_session(&self, session: SurveySession, trigger: SurveyTrigger) {
         let guild = self.guild_id;
+        let Some(coach_id) = session.coach_id else {
+            tracing::warn!(
+                session_id = %session.id,
+                "Coaching-Survey: aktive Session ohne gueltige coach_id uebersprungen"
+            );
+            return;
+        };
         let user_vc = self
             .port
             .member_voice_channel_in_category(guild, session.user_id, COACHING_VOICE_CATEGORY_ID)
             .await;
-        let coach_vc = match session.coach_id {
-            Some(cid) => {
-                self.port
-                    .member_voice_channel_in_category(guild, cid, COACHING_VOICE_CATEGORY_ID)
-                    .await
-            }
-            None => None,
-        };
+        let coach_vc = self
+            .port
+            .member_voice_channel_in_category(guild, coach_id, COACHING_VOICE_CATEGORY_ID)
+            .await;
         let now = chrono::Utc::now().timestamp();
 
         // Beide noch im selben Coaching-VC → Voice-Tracking aktualisieren.
@@ -990,6 +1010,26 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             return;
         }
 
+        let has_end_evidence = match trigger {
+            // Der Poll darf nicht "beide unbekannt" als Ende interpretieren:
+            // direkt nach Start kann der Gateway-Cache leer sein. Sicher ist
+            // nur: mindestens ein Beteiligter wurde in einem anderen Coaching-
+            // Zustand gesehen, aber beide sind nicht mehr im selben VC.
+            SurveyTrigger::Poll => user_vc.is_some() || coach_vc.is_some(),
+            // Leave/Move eines Beteiligten ist ein echtes Voice-Endsignal, auch
+            // wenn der Cache danach fuer beide Mitglieder leer ist.
+            SurveyTrigger::VoiceTransition => true,
+        };
+        if !has_end_evidence {
+            tracing::debug!(
+                session_id = %session.id,
+                user_id = session.user_id,
+                coach_id,
+                "Coaching-Survey: Poll ohne eindeutigen Voice-Cache, Session bleibt aktiv"
+            );
+            return;
+        }
+
         // Voice-Session beendet → atomar abschließen. Der WHERE-Filter macht den
         // Claim wettlaufsicher: Poll und Voice-Listener können dieselbe Session
         // gleichzeitig sehen, aber nur einer trifft `status='active'`.
@@ -1012,27 +1052,22 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             return;
         }
 
-        let coach_name = match session.coach_id {
-            Some(cid) => self.port.member_display_name(guild, cid).await,
-            None => "Coach".to_string(),
-        };
+        let coach_name = self.port.member_display_name(guild, coach_id).await;
 
-        self.port
-            .remove_role(
-                guild,
-                session.user_id,
-                COACHING_ACTIVE_ROLE_ID,
-                "Coaching Session beendet",
-            )
-            .await;
-        self.port
-            .add_role(
-                guild,
-                session.user_id,
-                COACHING_REWARD_ROLE_ID,
-                "Coaching abgeschlossen - Feedback-Berechtigung",
-            )
-            .await;
+        self.remove_role_if_present(
+            guild,
+            session.user_id,
+            COACHING_ACTIVE_ROLE_ID,
+            "Coaching Session beendet",
+        )
+        .await;
+        self.add_role_if_missing(
+            guild,
+            session.user_id,
+            COACHING_REWARD_ROLE_ID,
+            "Coaching abgeschlossen - Feedback-Berechtigung",
+        )
+        .await;
         if !self
             .port
             .send_dm_embed(session.user_id, survey_embed(&coach_name, guild))
@@ -1061,12 +1096,39 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         // 'completed' spiegeln, inkl. bot_session_id.
         self.mirror_to_website(MirrorOpts {
             request_id: rid,
-            coach_discord_id: session.coach_id,
+            coach_discord_id: Some(coach_id),
             coach_username: Some(coach_name),
             session_status: Some("completed".to_string()),
             bot_session_id: Some(session.id.clone()),
             ..MirrorOpts::default()
         });
+    }
+
+    async fn member_has_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> bool {
+        self.port
+            .member_role_ids(guild_id, user_id)
+            .await
+            .contains(&role_id)
+    }
+
+    async fn add_role_if_missing(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str) {
+        if !self.member_has_role(guild_id, user_id, role_id).await {
+            self.port.add_role(guild_id, user_id, role_id, reason).await;
+        }
+    }
+
+    async fn remove_role_if_present(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        role_id: u64,
+        reason: &str,
+    ) {
+        if self.member_has_role(guild_id, user_id, role_id).await {
+            self.port
+                .remove_role(guild_id, user_id, role_id, reason)
+                .await;
+        }
     }
 }
 
@@ -1077,6 +1139,12 @@ struct SurveySession {
     user_id: u64,
     voice_started_at: Option<i64>,
     request_id: i64,
+}
+
+#[derive(Clone, Copy)]
+enum SurveyTrigger {
+    Poll,
+    VoiceTransition,
 }
 
 /// Survey-Embed wie Python `send_survey_dm` (grün, Link in den Feedback-Kanal).
@@ -1260,7 +1328,7 @@ impl InteractionHandler for CoachingHandler {
                 .await;
             let (sid, cid, uid, uname) = (
                 session_id.clone(),
-                interaction.user_id,
+                interaction.user_id.to_string(),
                 request.user_id,
                 request.username.clone(),
             );
@@ -1283,15 +1351,15 @@ impl InteractionHandler for CoachingHandler {
                     .map(|_| ())
                 })
                 .await;
-            c.port
-                .add_role(
-                    interaction.guild_id,
-                    request.user_id,
-                    COACHING_ACTIVE_ROLE_ID,
-                    "Coaching Session gestartet",
-                )
-                .await;
-            c.port
+            c.add_role_if_missing(
+                interaction.guild_id,
+                request.user_id,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching Session gestartet",
+            )
+            .await;
+            let dm_ok = c
+                .port
                 .send_dm(
                     request.user_id,
                     &format!(
@@ -1329,9 +1397,15 @@ impl InteractionHandler for CoachingHandler {
                 session_status: Some("active".to_string()),
                 ..MirrorOpts::default()
             });
-            return BridgeReply::ephemeral_text(
-                "✅ Session gestartet — der Spieler wurde benachrichtigt.",
-            );
+            let dm_note = if dm_ok {
+                ""
+            } else {
+                " (DM an User fehlgeschlagen – bitte im Channel anpingen.)"
+            };
+            return BridgeReply::ephemeral_text(format!(
+                "✅ Session mit {} gestartet!{dm_note}",
+                request.username
+            ));
         }
 
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_release_") {
@@ -1369,32 +1443,39 @@ impl InteractionHandler for CoachingHandler {
         }
 
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_cancel_") {
-            // {session_id}_{author_id} — session_id enthält Bindestriche, kein '_'
-            let (session_id, author_id) = match rest.rsplit_once('_') {
-                Some((sid, aid)) => (sid.to_string(), aid.parse::<u64>().unwrap_or(0)),
-                None => (rest.to_string(), 0),
+            // Python-Legacy: {session_id}; Rust-neu: {session_id}_{author_id}.
+            // Die DB bleibt Quelle für die betroffene User-ID.
+            let session_id = match rest.rsplit_once('_') {
+                Some((sid, aid)) if aid.parse::<u64>().is_ok() => sid.to_string(),
+                _ => rest.to_string(),
             };
             let sid = session_id.clone();
-            let session: Option<(u64, i64)> =
+            let session: Option<(Option<u64>, i64, u64)> =
                 c.db.read(move |conn| {
                     conn.query_row(
-                        "SELECT coach_id, request_id FROM coaching_sessions WHERE id = ?1",
+                        "SELECT coach_id, request_id, discord_user_id
+                           FROM coaching_sessions WHERE id = ?1",
                         [sid],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
+                        |row| {
+                            let coach_id = row
+                                .get::<_, Option<String>>(0)?
+                                .and_then(|raw| raw.parse::<u64>().ok());
+                            Ok((coach_id, row.get(1)?, row.get(2)?))
+                        },
                     )
                     .optional()
                 })
                 .await
                 .ok()
                 .flatten();
-            let Some((coach_id, request_id)) = session else {
+            let Some((coach_id, request_id, author_id)) = session else {
                 return BridgeReply::ephemeral_text("❌ Session nicht gefunden.");
             };
             let is_owner = interaction.user_id == OWNER_EXCLUDE_ID
                 || c.port
                     .member_is_admin(interaction.guild_id, interaction.user_id)
                     .await;
-            if coach_id != interaction.user_id && !is_owner {
+            if coach_id != Some(interaction.user_id) && !is_owner {
                 return BridgeReply::ephemeral_text(
                     "❌ Nur der zugewiesene Coach oder ein Admin kann abbrechen.",
                 );
@@ -1428,20 +1509,44 @@ impl InteractionHandler for CoachingHandler {
                     .map(|_| ())
                 })
                 .await;
-            c.port
-                .remove_role(
-                    interaction.guild_id,
-                    author_id,
-                    COACHING_ACTIVE_ROLE_ID,
-                    "Coaching abgebrochen - 7D Ban",
-                )
-                .await;
-            // Website-Mirror (Python `CoachCancelButton`:213): Session als
-            // 'cancelled' mit dem abbrechenden Coach spiegeln.
+            c.remove_role_if_present(
+                interaction.guild_id,
+                author_id,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching abgebrochen - 7D Ban",
+            )
+            .await;
             let coach_name = c
                 .port
                 .member_display_name(interaction.guild_id, interaction.user_id)
                 .await;
+            let expiry_text = chrono::DateTime::from_timestamp(ban_expiry, 0)
+                .map(|dt| {
+                    dt.with_timezone(&chrono::Local)
+                        .format("%d.%m.%Y %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| ban_expiry.to_string());
+            c.port
+                .send_dm(
+                    author_id,
+                    &format!(
+                        "❌ Dein Coaching wurde vom Coach abgebrochen (z.B. weil du dich nicht gemeldet hast).\n\
+                         Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.\n\
+                         Sperre endet am: {expiry_text}"
+                    ),
+                )
+                .await;
+            c.port
+                .send_channel_text(
+                    interaction.channel_id,
+                    &format!(
+                        "⚠️ Das Coaching für <@{author_id}> wurde von {coach_name} abgebrochen. Der User wurde für 7 Tage gesperrt."
+                    ),
+                )
+                .await;
+            // Website-Mirror (Python `CoachCancelButton`:213): Session als
+            // 'cancelled' mit dem abbrechenden Coach spiegeln.
             c.mirror_to_website(MirrorOpts {
                 request_id,
                 coach_discord_id: Some(interaction.user_id),
@@ -1450,7 +1555,7 @@ impl InteractionHandler for CoachingHandler {
                 ..MirrorOpts::default()
             });
             return BridgeReply::ephemeral_text(
-                "✅ Session abgebrochen — der Spieler ist 7 Tage fürs Coaching gesperrt.",
+                "✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.",
             );
         }
 
@@ -1483,25 +1588,264 @@ pub fn register(router: &mut InteractionRouter, coaching: Arc<CoachingRequests>)
         handler.clone(),
     );
     router.on_custom_id("coaching_panel_start", handler.clone());
+    router.on_prefix("coach_", handler);
     // Website-driven intake: Der neue Panel-Button ist ein Link-Button ohne
     // Interaction. Der Legacy-custom_id bleibt nur als Redirect-Fallback.
     // #17/#18 entfallen bewusst; Rollen-/Analyse-/Stale-Flows übernimmt die Website.
 }
 
-/// Discord-seitige Intake-/Analyse-/Rollen-Loops sind im Website-Redesign aus.
+/// Survey-Poll + Voice-Event-Listener starten. Der alte Discord-Intake bleibt
+/// im Website-Redesign aus; dieser Worker deckt nur das Python-`coaching_survey`
+/// Verhalten ab.
 pub fn spawn(
-    _coaching: Arc<CoachingRequests>,
-    _dispatcher: &dl_discord::Dispatcher,
+    coaching: Arc<CoachingRequests>,
+    dispatcher: &dl_discord::Dispatcher,
 ) -> Vec<tokio::task::JoinHandle<()>> {
     tracing::info!(
-        "Coaching: Discord-Intake-Loops deaktiviert (Website-driven intake, #17/#18 dropped)"
+        "Coaching: Survey-Poll und Voice-Ende-Listener aktiv; Discord-Intake bleibt website-driven"
     );
-    Vec::new()
+    let poll = coaching.clone();
+    let poll_task = tokio::spawn(async move {
+        // main.rs startet Gateway-Worker vor `client.start()`. Der erste Scan
+        // wartet kurz, damit der Voice-Cache nicht leer als "alle weg" zählt.
+        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        loop {
+            poll.scan_survey_sessions().await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        }
+    });
+
+    let mut voice_events = dispatcher.subscribe_voice();
+    let voice_task = tokio::spawn(async move {
+        loop {
+            match voice_events.recv().await {
+                Ok(event) => {
+                    let (guild_id, user_id, voice_transition_can_end) = match event {
+                        dl_discord::VoiceEvent::Join {
+                            guild_id, user_id, ..
+                        } => (guild_id, user_id, false),
+                        dl_discord::VoiceEvent::Leave {
+                            guild_id, user_id, ..
+                        }
+                        | dl_discord::VoiceEvent::Move {
+                            guild_id, user_id, ..
+                        } => (guild_id, user_id, true),
+                        dl_discord::VoiceEvent::Update {
+                            guild_id, user_id, ..
+                        } => (guild_id, user_id, false),
+                    };
+                    if guild_id == coaching.guild_id {
+                        coaching
+                            .survey_sessions_for_member(user_id, voice_transition_can_end)
+                            .await;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Coaching-Survey: Voice-Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    vec![poll_task, voice_task]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct MockCoachingPort {
+        role_ids: Mutex<HashMap<u64, Vec<u64>>>,
+        admins: Mutex<HashSet<u64>>,
+        names: Mutex<HashMap<u64, String>>,
+        voices: Mutex<HashMap<u64, u64>>,
+        dm_texts: Mutex<Vec<(u64, String)>>,
+        dm_embeds: Mutex<Vec<(u64, Value)>>,
+        channel_texts: Mutex<Vec<(u64, String)>>,
+        added_roles: Mutex<Vec<(u64, u64, u64, String)>>,
+        removed_roles: Mutex<Vec<(u64, u64, u64, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoachingPort for MockCoachingPort {
+        async fn post_panel(
+            &self,
+            _channel_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
+
+        async fn edit_panel(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _body: Map<String, Value>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn coach_member_ids(&self, _guild_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+
+        async fn member_role_ids(&self, _guild_id: u64, user_id: u64) -> Vec<u64> {
+            self.role_ids
+                .lock()
+                .expect("role_ids lock")
+                .get(&user_id)
+                .cloned()
+                .unwrap_or_default()
+        }
+
+        async fn member_display_name(&self, _guild_id: u64, user_id: u64) -> String {
+            self.names
+                .lock()
+                .expect("names lock")
+                .get(&user_id)
+                .cloned()
+                .unwrap_or_else(|| format!("User {user_id}"))
+        }
+
+        async fn member_is_admin(&self, _guild_id: u64, user_id: u64) -> bool {
+            self.admins.lock().expect("admins lock").contains(&user_id)
+        }
+
+        async fn send_request_message(
+            &self,
+            _channel_id: u64,
+            _content: &str,
+            _embed: Value,
+            _components: Value,
+        ) -> Result<u64, String> {
+            Ok(77)
+        }
+
+        async fn edit_request_message(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _content: &str,
+            _embed: Value,
+            _components: Value,
+        ) {
+        }
+
+        async fn send_channel_text(&self, channel_id: u64, content: &str) {
+            self.channel_texts
+                .lock()
+                .expect("channel_texts lock")
+                .push((channel_id, content.to_string()));
+        }
+
+        async fn send_dm(&self, user_id: u64, content: &str) -> bool {
+            self.dm_texts
+                .lock()
+                .expect("dm_texts lock")
+                .push((user_id, content.to_string()));
+            true
+        }
+
+        async fn add_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str) {
+            self.added_roles.lock().expect("added_roles lock").push((
+                guild_id,
+                user_id,
+                role_id,
+                reason.to_string(),
+            ));
+        }
+
+        async fn remove_role(&self, guild_id: u64, user_id: u64, role_id: u64, reason: &str) {
+            self.removed_roles
+                .lock()
+                .expect("removed_roles lock")
+                .push((guild_id, user_id, role_id, reason.to_string()));
+        }
+
+        async fn member_voice_channel_in_category(
+            &self,
+            _guild_id: u64,
+            user_id: u64,
+            _category_id: u64,
+        ) -> Option<u64> {
+            self.voices
+                .lock()
+                .expect("voices lock")
+                .get(&user_id)
+                .copied()
+        }
+
+        async fn send_dm_embed(&self, user_id: u64, embed: Value) -> bool {
+            self.dm_embeds
+                .lock()
+                .expect("dm_embeds lock")
+                .push((user_id, embed));
+            true
+        }
+    }
+
+    async fn test_coaching() -> (
+        tempfile::TempDir,
+        Db,
+        Arc<MockCoachingPort>,
+        Arc<CoachingRequests>,
+    ) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("coaching.sqlite3")).expect("db");
+        db.bootstrap_schema().await.expect("schema");
+        let port = Arc::new(MockCoachingPort::default());
+        let coaching = CoachingRequests::new(db.clone(), port.clone(), None, 1, None);
+        (dir, db, port, coaching)
+    }
+
+    async fn insert_request(db: &Db, request_id: i64, user_id: u64, status: &str) {
+        let status = status.to_string();
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO coaching_requests (
+                    id, discord_user_id, discord_username, rank, subrank,
+                    status, created_at, updated_at
+                 ) VALUES (?1, ?2, 'Player', 'Archon 3', '', ?3, 100, 100)",
+                rusqlite::params![request_id, user_id, status],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("request insert");
+    }
+
+    async fn insert_active_session(
+        db: &Db,
+        session_id: &str,
+        request_id: i64,
+        coach_id: u64,
+        user_id: u64,
+        voice_started_at: Option<i64>,
+    ) {
+        let session_id = session_id.to_string();
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO coaching_sessions (
+                    id, request_id, coach_id, discord_user_id, discord_username,
+                    discord_channel_id, status, voice_started_at, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'Player', 500, 'active', ?5, 100)",
+                rusqlite::params![
+                    session_id,
+                    request_id,
+                    coach_id.to_string(),
+                    user_id,
+                    voice_started_at
+                ],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("session insert");
+    }
 
     #[test]
     fn faire_rotation() {
@@ -1565,8 +1909,10 @@ mod tests {
         let embed = build_panel_embed();
         assert_eq!(embed["title"], "🎮  Deadlock Coaching");
         let description = embed["description"].as_str().unwrap_or_default();
-        assert!(description
-            .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt."));
+        assert!(
+            description
+                .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt.")
+        );
         assert!(description.contains(
             "Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches."
         ));
@@ -1587,5 +1933,290 @@ mod tests {
         assert_eq!(button["style"], 5);
         assert_eq!(button["label"], COACHING_WEBSITE_BUTTON_LABEL);
         assert_eq!(button["url"], COACHING_WEBSITE_URL);
+    }
+
+    #[tokio::test]
+    async fn router_registriert_legacy_coach_button_prefixe() {
+        let (_dir, _db, _port, coaching) = test_coaching().await;
+        let mut router = InteractionRouter::new();
+        register(&mut router, coaching);
+
+        for custom_id in [
+            "coach_claim_7",
+            "coach_release_7",
+            "coach_release_7_42",
+            "coach_cancel_6d9b1b22-5561-4ce4-850d-aa04d6123a87",
+            "coach_cancel_6d9b1b22-5561-4ce4-850d-aa04d6123a87_42",
+        ] {
+            assert!(
+                router.resolve_component(custom_id).is_some(),
+                "{custom_id} muss geroutet werden"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_cancel_ohne_author_id_nutzt_session_user_id() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "matched").await;
+        insert_active_session(&db, "legacy-session", 1, 200, 100, Some(123)).await;
+        port.names
+            .lock()
+            .expect("names lock")
+            .insert(200, "CoachName".to_string());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
+        let handler = CoachingHandler { coaching };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "coach_cancel_legacy-session".to_string(),
+                user_id: 200,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.")
+        );
+        let banned_user: u64 = db
+            .read(|conn| {
+                conn.query_row("SELECT discord_user_id FROM coaching_bans", [], |row| {
+                    row.get(0)
+                })
+            })
+            .await
+            .expect("ban row");
+        assert_eq!(banned_user, 100);
+        assert!(
+            port.removed_roles
+                .lock()
+                .expect("removed_roles lock")
+                .iter()
+                .any(|(_, user_id, role_id, _)| {
+                    *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
+                })
+        );
+        assert!(
+            port.dm_texts
+                .lock()
+                .expect("dm_texts lock")
+                .iter()
+                .any(|(user_id, text)| {
+                    *user_id == 100
+                        && text.contains(
+                            "Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.",
+                        )
+                })
+        );
+    }
+
+    #[tokio::test]
+    async fn survey_poll_beendet_nicht_wenn_voice_cache_unbekannt_ist() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "matched").await;
+        insert_active_session(&db, "unknown-cache-session", 1, 200, 100, Some(123)).await;
+
+        coaching.scan_survey_sessions().await;
+
+        let status: String = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT status FROM coaching_sessions WHERE id='unknown-cache-session'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("session row");
+        assert_eq!(status, "active");
+        assert!(
+            port.added_roles
+                .lock()
+                .expect("added_roles lock")
+                .is_empty()
+        );
+        assert!(
+            port.removed_roles
+                .lock()
+                .expect("removed_roles lock")
+                .is_empty()
+        );
+        assert!(port.dm_embeds.lock().expect("dm_embeds lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn survey_scan_beendet_sicher_abgelaufene_voice_session_nur_einmal() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "matched").await;
+        insert_active_session(&db, "survey-session", 1, 200, 100, Some(123)).await;
+        port.names
+            .lock()
+            .expect("names lock")
+            .insert(200, "CoachName".to_string());
+        port.voices.lock().expect("voices lock").insert(200, 900);
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
+
+        coaching.scan_survey_sessions().await;
+        coaching.scan_survey_sessions().await;
+
+        let session: (String, Option<i64>, Option<i64>) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT status, survey_sent_at, reward_role_expires_at
+                       FROM coaching_sessions WHERE id='survey-session'",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+            })
+            .await
+            .expect("session row");
+        assert_eq!(session.0, "completed");
+        assert!(session.1.is_some());
+        assert!(session.2.is_some());
+        let request_status: String = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT status FROM coaching_requests WHERE id=1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("request row");
+        assert_eq!(request_status, "completed");
+        assert!(
+            port.removed_roles
+                .lock()
+                .expect("removed_roles lock")
+                .iter()
+                .any(|(_, user_id, role_id, _)| {
+                    *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
+                })
+        );
+        assert!(
+            port.added_roles
+                .lock()
+                .expect("added_roles lock")
+                .iter()
+                .any(|(_, user_id, role_id, _)| {
+                    *user_id == 100 && *role_id == COACHING_REWARD_ROLE_ID
+                })
+        );
+        let embeds = port.dm_embeds.lock().expect("dm_embeds lock");
+        assert_eq!(embeds.len(), 1);
+        assert_eq!(embeds[0].0, 100);
+        assert_eq!(embeds[0].1["title"], "🎮 Coaching abgeschlossen!");
+        assert!(
+            embeds[0].1["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("**CoachName**")
+        );
+    }
+
+    #[tokio::test]
+    async fn survey_rollen_werden_nur_bei_bedarf_geaendert() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "matched").await;
+        insert_active_session(&db, "role-idempotent-session", 1, 200, 100, Some(123)).await;
+        port.voices.lock().expect("voices lock").insert(200, 900);
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(100, vec![COACHING_REWARD_ROLE_ID]);
+
+        coaching.scan_survey_sessions().await;
+
+        assert!(
+            port.added_roles
+                .lock()
+                .expect("added_roles lock")
+                .is_empty()
+        );
+        assert!(
+            port.removed_roles
+                .lock()
+                .expect("removed_roles lock")
+                .is_empty()
+        );
+        assert_eq!(port.dm_embeds.lock().expect("dm_embeds lock").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn claim_vergibt_active_rolle_nicht_doppelt() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "analyzed").await;
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(200, vec![COACH_ROLE_ID]);
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
+        port.names
+            .lock()
+            .expect("names lock")
+            .insert(200, "CoachName".to_string());
+        let handler = CoachingHandler { coaching };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "coach_claim_1".to_string(),
+                user_id: 200,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Session mit Player gestartet!")
+        );
+        assert!(
+            port.added_roles
+                .lock()
+                .expect("added_roles lock")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn survey_dm_text_entspricht_python_verbatim() {
+        let embed = survey_embed("CoachName", 1);
+        assert_eq!(embed["title"], "🎮 Coaching abgeschlossen!");
+        assert_eq!(
+            embed["description"],
+            "Deine Coaching-Session mit **CoachName** ist beendet. Wir hoffen, es hat dir geholfen!"
+        );
+        assert_eq!(embed["fields"][0]["name"], "⭐ Gib uns Feedback");
+        assert_eq!(
+            embed["fields"][0]["value"],
+            "Du hast nun für **5 Tage** Zugriff auf unseren Feedback-Kanal. Bitte teile deine Erfahrungen dort mit uns:\n\n👉 [**HIER FEEDBACK ABGEBEN**](https://discord.com/channels/1/1494756126644895885)\n\nDein Feedback hilft uns die Qualität der Coaches sicherzustellen!"
+        );
+        assert_eq!(embed["fields"][0]["inline"], false);
+    }
+
+    #[tokio::test]
+    async fn spawn_startet_survey_poll_und_voice_listener() {
+        let (_dir, _db, _port, coaching) = test_coaching().await;
+        let dispatcher = dl_discord::Dispatcher::new();
+
+        let handles = spawn(coaching, &dispatcher);
+
+        assert_eq!(handles.len(), 2);
+        for handle in handles {
+            handle.abort();
+        }
     }
 }

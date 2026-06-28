@@ -801,7 +801,7 @@ impl TournamentStore {
             .read(move |conn| {
                 conn.query_row(
                     "SELECT id, guild_id, name, registration_start, registration_end,
-                            is_active, created_by, created_at
+                            is_active, team_size, created_by, created_at
                        FROM tournament_periods
                       WHERE guild_id = ?1 AND is_active = 1 ORDER BY id DESC LIMIT 1",
                     [guild_id],
@@ -813,8 +813,9 @@ impl TournamentStore {
                             "registration_start": row.get::<_, String>(3)?,
                             "registration_end": row.get::<_, String>(4)?,
                             "is_active": row.get::<_, i64>(5)?,
-                            "created_by": row.get::<_, Option<i64>>(6)?,
-                            "created_at": row.get::<_, Option<String>>(7)?,
+                            "team_size": row.get::<_, i64>(6)?,
+                            "created_by": row.get::<_, Option<i64>>(7)?,
+                            "created_at": row.get::<_, Option<String>>(8)?,
                         }))
                     },
                 )

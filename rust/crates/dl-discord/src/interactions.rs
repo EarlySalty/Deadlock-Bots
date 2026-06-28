@@ -11,6 +11,7 @@
 //! die das Python-Original für langsame Antworten nutzt).
 
 use std::collections::HashMap;
+use std::fmt;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -31,6 +32,8 @@ pub struct BridgeInteraction {
     pub author_name: String,
     /// manage_roles ODER administrator (für Mod-Guards wie den Review-Flow).
     pub author_can_manage_roles: bool,
+    /// Ob Discord einen Guild-Member-Kontext mitgeliefert hat.
+    pub member_present: bool,
     pub guild_id: u64,
     pub channel_id: u64,
     /// Nachricht, an der die Komponente hing (None bei Slash-Commands).
@@ -58,7 +61,7 @@ pub struct ModalField {
 }
 
 /// Antwort eines Handlers — deklarativ, damit Tests ohne Discord laufen.
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct BridgeReply {
     pub content: Option<String>,
     /// Roh-Embeds im Discord-API-Format.
@@ -80,6 +83,34 @@ pub struct BridgeReply {
     /// `UPDATE_MESSAGE`/Typ 7). Bei Slash/Modal ignoriert. Update-Antworten
     /// sollten `ephemeral` nicht setzen (die Nachricht behält ihre Sichtbarkeit).
     pub update_message: bool,
+    /// Optionaler Hook, der nach erfolgreichem Senden die erzeugte Message-ID
+    /// bekommt. Domain-Code nutzt das fuer persistente View-KV, ohne dass der
+    /// Discord-Dispatch Domänendetails kennen muss.
+    pub response_message_hook: Option<Arc<dyn ResponseMessageHook>>,
+}
+
+impl fmt::Debug for BridgeReply {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("BridgeReply")
+            .field("content", &self.content)
+            .field("embeds", &self.embeds)
+            .field("components", &self.components)
+            .field("ephemeral", &self.ephemeral)
+            .field("modal", &self.modal)
+            .field("channel_message", &self.channel_message)
+            .field("attachments", &self.attachments)
+            .field("update_message", &self.update_message)
+            .field(
+                "response_message_hook",
+                &self.response_message_hook.as_ref().map(|_| "<hook>"),
+            )
+            .finish()
+    }
+}
+
+#[async_trait::async_trait]
+pub trait ResponseMessageHook: Send + Sync {
+    async fn on_response_message(&self, message_id: u64);
 }
 
 /// Ein Datei-Anhang für eine Interaction-Antwort (In-Memory-Bytes).

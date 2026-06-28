@@ -133,6 +133,15 @@ pub struct GuildStats {
     pub vanity_url_code: Option<String>,
 }
 
+/// Read-only Channel-Metadaten für den Broker-Endpunkt `channel-info`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChannelInfo {
+    pub channel_id: u64,
+    pub name: String,
+    pub parent_id: Option<u64>,
+    pub last_message_id: Option<u64>,
+}
+
 /// Zugriffsstatus eines Mitglieds für die Dashboard-Auth: Admin-Permission
 /// und Rollen-IDs, aus dem Member-Cache abgeleitet (ersetzt Pythons
 /// `guild.get_member(...).guild_permissions` / `.roles`).
@@ -253,4 +262,13 @@ pub trait DiscordPort: Send + Sync {
     /// Live-Kennzahlen einer Gilde (Mitglieder-/Online-/Voice-Zahl, Vanity).
     /// guild_id None = erste Bot-Gilde.
     async fn guild_stats(&self, guild_id: Option<u64>) -> Result<GuildStats, PortError>;
+}
+
+#[async_trait::async_trait]
+pub trait ChannelInfoPort: Send + Sync {
+    async fn channel_info(
+        &self,
+        guild_id: Option<u64>,
+        channel_id: u64,
+    ) -> Result<ChannelInfo, PortError>;
 }

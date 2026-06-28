@@ -20,12 +20,24 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
 use rusqlite::OptionalExtension;
+use serde_json::{json, Map, Value};
 
 use crate::tempvoice::TempVoiceEngine;
 
 pub const ROUTER_VC_ID: u64 = 1513468587195633674;
+pub const ROUTER_TEXT_CHANNEL_ID: u64 = 1513468476365209670;
 pub const RANKED_INFO_CHANNEL_ID: u64 = 1474827277610254570;
 pub const MAX_LANE_MEMBERS: usize = 6;
+pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
+pub const ROUTER_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
+pub const ROUTER_INTERFACE_MESSAGE_KEY: &str = "interface_message_id";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouterPanelMessage {
+    pub message_id: u64,
+    pub has_embeds: bool,
+    pub has_components: bool,
+}
 
 /// Die 11 Haupt-Rang-Rollen (wie VERIFIED_RANK_ROLE_IDS).
 pub const VERIFIED_RANK_ROLE_IDS: [u64; 11] = [
@@ -89,6 +101,123 @@ pub fn pick_lane(
     suitable.first().map(|(channel_id, _)| *channel_id)
 }
 
+fn router_guide_embed() -> Value {
+    json!({
+        "title": "📖 Router — Wie funktioniert das?",
+        "color": 0x2B2D31,
+        "fields": [
+            {
+                "name": "1️⃣  Modus wählen",
+                "value": concat!(
+                    "Klick unten auf **Casual**, **Ranked** oder **Street Brawl**. ",
+                    "Deine Wahl wird gespeichert und gilt für alle zukünftigen Joins."
+                ),
+                "inline": false,
+            },
+            {
+                "name": "2️⃣  Auto-Join",
+                "value": concat!(
+                    "**Aus (grau)** → du bekommst immer eine eigene, leere Lane.\n",
+                    "**An (grün)** → der Bot sucht eine passende Lane mit freien Plätzen (<6 Personen). ",
+                    "Bekannte Mitspieler werden dabei bevorzugt. ",
+                    "Gibt es keine freie Lane, wird eine neue für dich erstellt."
+                ),
+                "inline": false,
+            },
+            {
+                "name": "3️⃣  Router-VC betreten",
+                "value": concat!(
+                    "Sobald du den **Deadlock Router**-Sprachkanal betrittst, passiert alles automatisch:\n",
+                    "• Neuer Spieler → New-Player-Lane\n",
+                    "• Kein Modus gesetzt → du bleibst im Router-VC bis du unten einen wählst\n",
+                    "• Modus gesetzt, Auto-Join aus → sofort eigene Lane\n",
+                    "• Modus gesetzt, Auto-Join an → Smart Routing"
+                ),
+                "inline": false,
+            },
+            {
+                "name": "🏆  Ranked",
+                "value": concat!(
+                    "Ranked-Lanes erfordern einen **verifizierten Rang** (Steam-Verknüpfung). ",
+                    "Ohne Rang bekommst du eine DM mit dem Link zur Verifizierung — ",
+                    "du bleibst dann im Router-VC und kannst danach Casual oder Street Brawl wählen."
+                ),
+                "inline": false,
+            },
+            {
+                "name": "🔄  Lane-Modus wechseln",
+                "value": concat!(
+                    "Als Lane-Owner kannst du deinen aktiven Kanal nachträglich umstellen: ",
+                    "im Lane-Control-Interface gibt es **Modus wechseln** (Casual / Ranked / Street Brawl / Off Topic) ",
+                    "und **Umbenennen**. ",
+                    "Der Kanal zieht dabei physisch in die passende Kategorie um."
+                ),
+                "inline": false,
+            },
+        ],
+        "footer": {
+            "text": "Die alten Staging-Kanäle (Casual / Comp / Street Brawl) laufen weiterhin parallel."
+        },
+    })
+}
+
+fn router_interface_embed() -> Value {
+    json!({
+        "title": "🎮 Spielmodus wählen",
+        "description": concat!(
+            "Wähle deinen **Standard-Spielmodus** und stelle den Auto-Join-Toggle ein.\n\n",
+            "**Auto-Join aus** → eigene Lane wird für dich erstellt\n",
+            "**Auto-Join an** → Smart Routing in eine passende Lane"
+        ),
+        "color": 0x5865F2,
+    })
+}
+
+fn router_guide_body() -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("embeds".to_string(), json!([router_guide_embed()]));
+    body
+}
+
+fn router_interface_body() -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("embeds".to_string(), json!([router_interface_embed()]));
+    body.insert(
+        "components".to_string(),
+        json!([
+            router_action_row(vec![
+                router_button("🎮 Casual", 2, "router_mode_casual"),
+                router_button("🏆 Ranked", 2, "router_mode_ranked"),
+                router_button("⚡ Street Brawl", 2, "router_mode_street_brawl"),
+            ]),
+            router_action_row(vec![json!({
+                "type": 2,
+                "style": 2,
+                "label": "Auto-Join",
+                "emoji": {"name": "⬜"},
+                "custom_id": "router_autojoin_toggle",
+            })]),
+        ]),
+    );
+    body
+}
+
+fn router_action_row(components: Vec<Value>) -> Value {
+    json!({
+        "type": 1,
+        "components": components,
+    })
+}
+
+fn router_button(label: &str, style: u8, custom_id: &str) -> Value {
+    json!({
+        "type": 2,
+        "style": style,
+        "label": label,
+        "custom_id": custom_id,
+    })
+}
+
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -100,6 +229,159 @@ pub trait RouterPort: Send + Sync {
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
         -> Result<(), String>;
     async fn send_dm(&self, user_id: u64, text: String);
+}
+
+#[async_trait::async_trait]
+pub trait RouterInterfacePort: Send + Sync {
+    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<(), String>;
+    async fn recent_bot_messages(
+        &self,
+        channel_id: u64,
+        limit: u8,
+    ) -> Result<Vec<RouterPanelMessage>, String>;
+}
+
+pub struct RouterInterface {
+    db: Db,
+    port: Arc<dyn RouterInterfacePort>,
+}
+
+impl RouterInterface {
+    pub fn new(db: Db, port: Arc<dyn RouterInterfacePort>) -> Arc<Self> {
+        Arc::new(Self { db, port })
+    }
+
+    pub async fn ensure_panel(&self) {
+        let recent = match self
+            .port
+            .recent_bot_messages(ROUTER_TEXT_CHANNEL_ID, 15)
+            .await
+        {
+            Ok(messages) => Some(messages),
+            Err(err) => {
+                tracing::warn!(%err, "RouterInterface: History-Scan fehlgeschlagen");
+                None
+            }
+        };
+        let history_checked = recent.is_some();
+        let guide_message_id = recent.as_deref().and_then(find_existing_router_guide);
+        let interface_message_id = recent.as_deref().and_then(find_existing_router_interface);
+        self.upsert_panel_message(
+            ROUTER_GUIDE_MESSAGE_KEY,
+            router_guide_body(),
+            guide_message_id,
+            history_checked,
+        )
+        .await;
+        self.upsert_panel_message(
+            ROUTER_INTERFACE_MESSAGE_KEY,
+            router_interface_body(),
+            interface_message_id,
+            history_checked,
+        )
+        .await;
+    }
+
+    async fn upsert_panel_message(
+        &self,
+        key: &str,
+        body: Map<String, Value>,
+        history_message_id: Option<u64>,
+        history_checked: bool,
+    ) {
+        let kv_message_id = self.panel_message_id(key).await;
+        if let Some(message_id) = kv_message_id {
+            if self
+                .port
+                .edit_rich(ROUTER_TEXT_CHANNEL_ID, message_id, body.clone())
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            if history_message_id == Some(message_id) {
+                tracing::warn!(
+                    key,
+                    message_id,
+                    "RouterInterface: vorhandenes Panel konnte nicht editiert werden"
+                );
+                return;
+            }
+        }
+
+        if !history_checked {
+            tracing::warn!(
+                key,
+                "RouterInterface: ohne erfolgreichen History-Scan wird kein neues Panel gepostet"
+            );
+            return;
+        }
+
+        if let Some(message_id) = history_message_id {
+            match self
+                .port
+                .edit_rich(ROUTER_TEXT_CHANNEL_ID, message_id, body.clone())
+                .await
+            {
+                Ok(()) => {
+                    self.store_panel_message_id(key, message_id).await;
+                    return;
+                }
+                Err(err) => {
+                    tracing::warn!(%err, key, message_id, "RouterInterface: adoptiertes Panel konnte nicht editiert werden");
+                    return;
+                }
+            }
+        }
+
+        match self.port.post_rich(ROUTER_TEXT_CHANNEL_ID, body).await {
+            Ok(message_id) => {
+                self.store_panel_message_id(key, message_id).await;
+            }
+            Err(err) => {
+                tracing::warn!(%err, key, "RouterInterface: Panel konnte nicht gepostet werden")
+            }
+        }
+    }
+
+    async fn panel_message_id(&self, key: &str) -> Option<u64> {
+        self.db
+            .kv_get(ROUTER_PANEL_KV_NS, key)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+
+    async fn store_panel_message_id(&self, key: &str, message_id: u64) {
+        if let Err(err) = self
+            .db
+            .kv_set(ROUTER_PANEL_KV_NS, key, message_id.to_string())
+            .await
+        {
+            tracing::warn!(%err, key, "RouterInterface: Message-ID konnte nicht gespeichert werden");
+        }
+    }
+}
+
+fn find_existing_router_guide(messages: &[RouterPanelMessage]) -> Option<u64> {
+    messages
+        .iter()
+        .find(|message| message.has_embeds && !message.has_components)
+        .map(|message| message.message_id)
+}
+
+fn find_existing_router_interface(messages: &[RouterPanelMessage]) -> Option<u64> {
+    messages
+        .iter()
+        .find(|message| message.has_embeds && message.has_components)
+        .map(|message| message.message_id)
 }
 
 pub struct LaneRouter {
@@ -326,6 +608,8 @@ pub fn spawn(router: Arc<LaneRouter>, dispatcher: &Dispatcher) -> tokio::task::J
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::Map;
+    use std::sync::Mutex as StdMutex;
 
     #[test]
     fn lane_wahl_wie_python() {
@@ -352,5 +636,227 @@ mod tests {
         assert_eq!(mode_to_category("casual"), 1289721245281292290);
         assert_eq!(mode_to_category("quatsch"), 1289721245281292290);
         assert_eq!(mode_to_staging("ranked"), 1412804671432818890);
+    }
+
+    #[test]
+    fn router_panel_body_enthaelt_python_texte_und_buttons() {
+        let guide = router_guide_embed();
+        assert_eq!(guide["title"], "📖 Router — Wie funktioniert das?");
+        assert_eq!(guide["fields"][0]["name"], "1️⃣  Modus wählen");
+        assert!(guide["fields"][1]["value"]
+            .as_str()
+            .expect("value")
+            .contains("**Aus (grau)** → du bekommst immer eine eigene, leere Lane."));
+        assert!(guide["fields"][2]["value"]
+            .as_str()
+            .expect("value")
+            .contains("• Modus gesetzt, Auto-Join an → Smart Routing"));
+
+        let body = router_interface_body();
+        let embed = &body
+            .get("embeds")
+            .and_then(serde_json::Value::as_array)
+            .expect("embeds")[0];
+        assert_eq!(embed["title"], "🎮 Spielmodus wählen");
+        assert!(embed["description"]
+            .as_str()
+            .expect("description")
+            .contains("**Auto-Join aus** → eigene Lane wird für dich erstellt"));
+        let custom_ids: Vec<&str> = body
+            .get("components")
+            .and_then(serde_json::Value::as_array)
+            .expect("components")
+            .iter()
+            .flat_map(|row| row["components"].as_array().into_iter().flatten())
+            .filter_map(|component| component["custom_id"].as_str())
+            .collect();
+        assert_eq!(
+            custom_ids,
+            vec![
+                "router_mode_casual",
+                "router_mode_ranked",
+                "router_mode_street_brawl",
+                "router_autojoin_toggle"
+            ]
+        );
+    }
+
+    #[derive(Default)]
+    struct MockRouterInterfacePort {
+        posts: StdMutex<Vec<(u64, Map<String, serde_json::Value>)>>,
+        edits: StdMutex<Vec<(u64, u64, Map<String, serde_json::Value>)>>,
+        fail_edits: StdMutex<bool>,
+        fail_recent: StdMutex<bool>,
+        recent: StdMutex<Vec<RouterPanelMessage>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RouterInterfacePort for MockRouterInterfacePort {
+        async fn post_rich(
+            &self,
+            channel_id: u64,
+            body: Map<String, serde_json::Value>,
+        ) -> Result<u64, String> {
+            self.posts.lock().expect("posts").push((channel_id, body));
+            Ok(9000 + self.posts.lock().expect("posts").len() as u64)
+        }
+
+        async fn edit_rich(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            body: Map<String, serde_json::Value>,
+        ) -> Result<(), String> {
+            if *self.fail_edits.lock().expect("fail") {
+                return Err("missing".to_string());
+            }
+            self.edits
+                .lock()
+                .expect("edits")
+                .push((channel_id, message_id, body));
+            Ok(())
+        }
+
+        async fn recent_bot_messages(
+            &self,
+            _channel_id: u64,
+            _limit: u8,
+        ) -> Result<Vec<RouterPanelMessage>, String> {
+            if *self.fail_recent.lock().expect("fail recent") {
+                return Err("history failed".to_string());
+            }
+            Ok(self.recent.lock().expect("recent").clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn router_interface_panel_wird_idempotent_ueber_kv_gepflegt() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE kv_store(
+                  ns TEXT NOT NULL,
+                  k  TEXT NOT NULL,
+                  v  TEXT NOT NULL,
+                  PRIMARY KEY(ns, k)
+                )",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("kv");
+        let port = Arc::new(MockRouterInterfacePort::default());
+        let interface = RouterInterface::new(db.clone(), port.clone());
+
+        interface.ensure_panel().await;
+        assert_eq!(port.posts.lock().expect("posts").len(), 2);
+        assert_eq!(
+            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("9001")
+        );
+        assert_eq!(
+            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("9002")
+        );
+
+        interface.ensure_panel().await;
+        assert_eq!(port.posts.lock().expect("posts").len(), 2);
+        assert_eq!(port.edits.lock().expect("edits").len(), 2);
+
+        *port.fail_edits.lock().expect("fail") = true;
+        interface.ensure_panel().await;
+        assert_eq!(port.posts.lock().expect("posts").len(), 4);
+    }
+
+    #[tokio::test]
+    async fn router_interface_adoptiert_python_panels_aus_history_bei_leerer_kv() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE kv_store(
+                  ns TEXT NOT NULL,
+                  k  TEXT NOT NULL,
+                  v  TEXT NOT NULL,
+                  PRIMARY KEY(ns, k)
+                )",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("kv");
+        let port = Arc::new(MockRouterInterfacePort::default());
+        *port.recent.lock().expect("recent") = vec![
+            RouterPanelMessage {
+                message_id: 7001,
+                has_embeds: true,
+                has_components: false,
+            },
+            RouterPanelMessage {
+                message_id: 7002,
+                has_embeds: true,
+                has_components: true,
+            },
+        ];
+        let interface = RouterInterface::new(db.clone(), port.clone());
+
+        interface.ensure_panel().await;
+
+        assert_eq!(port.posts.lock().expect("posts").len(), 0);
+        let edits = port.edits.lock().expect("edits");
+        assert_eq!(edits.len(), 2);
+        assert_eq!(edits[0].1, 7001);
+        assert_eq!(edits[1].1, 7002);
+        assert_eq!(
+            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("7001")
+        );
+        assert_eq!(
+            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("7002")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_interface_postet_nicht_blind_wenn_history_scan_fehlgeschlagen_ist() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
+        db.write(|conn| {
+            conn.execute(
+                "CREATE TABLE kv_store(
+                  ns TEXT NOT NULL,
+                  k  TEXT NOT NULL,
+                  v  TEXT NOT NULL,
+                  PRIMARY KEY(ns, k)
+                )",
+                [],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("kv");
+        let port = Arc::new(MockRouterInterfacePort::default());
+        *port.fail_recent.lock().expect("fail recent") = true;
+        let interface = RouterInterface::new(db, port.clone());
+
+        interface.ensure_panel().await;
+
+        assert_eq!(port.posts.lock().expect("posts").len(), 0);
+        assert_eq!(port.edits.lock().expect("edits").len(), 0);
     }
 }

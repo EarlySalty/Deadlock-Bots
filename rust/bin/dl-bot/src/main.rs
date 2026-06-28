@@ -7,6 +7,7 @@
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
 mod build_publisher;
+mod master;
 mod modglue;
 mod onboardglue;
 
@@ -33,9 +34,69 @@ fn env_bool(name: &str) -> bool {
         .unwrap_or(false)
 }
 
+struct BrokerChannelInfoGlue {
+    adapter: Arc<dl_discord::DiscordAdapter>,
+}
+
+fn cached_channel_info(channel: &serenity::all::GuildChannel) -> dl_broker::port::ChannelInfo {
+    dl_broker::port::ChannelInfo {
+        channel_id: channel.id.get(),
+        name: channel.name.clone(),
+        parent_id: channel.parent_id.map(|id| id.get()),
+        last_message_id: channel.last_message_id.map(|id| id.get()),
+    }
+}
+
+#[async_trait::async_trait]
+impl dl_broker::ChannelInfoPort for BrokerChannelInfoGlue {
+    async fn channel_info(
+        &self,
+        guild_id: Option<u64>,
+        channel_id: u64,
+    ) -> Result<dl_broker::port::ChannelInfo, dl_broker::PortError> {
+        if channel_id == 0 {
+            return Err(dl_broker::PortError::ChannelNotFound);
+        }
+        let cache = self.adapter.cache();
+        let preferred_guild_id = match guild_id {
+            Some(id) => serenity::all::GuildId::new(id),
+            None => cache
+                .guilds()
+                .first()
+                .copied()
+                .ok_or(dl_broker::PortError::GuildNotFound)?,
+        };
+        {
+            let Some(guild) = cache.guild(preferred_guild_id) else {
+                return Err(dl_broker::PortError::GuildNotFound);
+            };
+            if let Some(channel) = guild
+                .channels
+                .get(&serenity::all::ChannelId::new(channel_id))
+            {
+                return Ok(cached_channel_info(channel));
+            }
+        }
+        for candidate_guild_id in cache.guilds() {
+            let Some(guild) = cache.guild(candidate_guild_id) else {
+                continue;
+            };
+            if let Some(channel) = guild
+                .channels
+                .get(&serenity::all::ChannelId::new(channel_id))
+            {
+                return Ok(cached_channel_info(channel));
+            }
+        }
+        Err(dl_broker::PortError::ChannelNotFound)
+    }
+}
+
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_core::observability::init_tracing("info");
+    let _pid_lock = master::PidLock::acquire_default().context("Single-Instance-PID-Lock")?;
+    let startup_text = master::startup_text_now();
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let _web_cfg = WebConfig::from_env();
@@ -147,6 +208,10 @@ async fn main() -> anyhow::Result<()> {
         cache_snapshot.clone(),
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
+    let tempvoice_interface = dl_voice::tempvoice::interface::TempVoiceInterface::new(
+        tempvoice.clone(),
+        cache_snapshot.clone(),
+    );
 
     // Aktivitäts-Analyzer (5) — auch Co-Spieler-Quelle für den Router
     let activity = dl_activity::analyzer::ActivityAnalyzer::new(
@@ -157,15 +222,17 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Lane-Router (4c-Rest) — Panel-Buttons brauchen den Interaction-Router
+    let router_glue = Arc::new(dl_voice::glue::RouterGlue {
+        adapter: adapter.clone(),
+    });
     let lane_router = dl_voice::router::LaneRouter::new(
         db.clone(),
-        Arc::new(dl_voice::glue::RouterGlue {
-            adapter: adapter.clone(),
-        }),
+        router_glue.clone(),
         tempvoice.clone(),
         Some(activity.clone()),
     );
     dl_voice::router::register(&mut router, lane_router.clone());
+    let router_interface = dl_voice::router::RouterInterface::new(db.clone(), router_glue);
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
@@ -237,6 +304,37 @@ async fn main() -> anyhow::Result<()> {
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
     dl_community::onboarding::register(&mut router, wizard);
 
+    // AI-Onboarding (H6): legacy `aiob:*` buttons, modal submit, MiniMax tour.
+    // This complements the static wizard; it does not replace or restart the
+    // disabled old Welcome-DM step flow.
+    let ai_onboarding_tokens = env("DEADLOCK_ONBOARD_TOKENS")
+        .and_then(|raw| raw.parse::<u32>().ok())
+        .filter(|tokens| *tokens > 0)
+        .unwrap_or(dl_community::ai_onboarding::AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS);
+    let ai_onboarding = dl_community::ai_onboarding::AiOnboarding::new(
+        db.clone(),
+        Arc::new(onboardglue::AiOnboardingGlue {
+            adapter: adapter.clone(),
+        }),
+        dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
+            .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
+        dl_community::ai_onboarding::AiOnboardingConfig::new(
+            onboardglue::MAIN_GUILD_ID,
+            onboardglue::ONBOARD_COMPLETE_ROLE_ID,
+        )
+        .with_max_output_tokens(ai_onboarding_tokens),
+    );
+    match ai_onboarding.restore_persistent_views().await {
+        Ok(report) => tracing::info!(
+            scanned = report.scanned,
+            restored = report.restored,
+            removed_invalid = report.removed_invalid,
+            "AI onboarding views restored"
+        ),
+        Err(err) => tracing::warn!(%err, "AI onboarding views could not be loaded"),
+    }
+    dl_community::ai_onboarding::register(&mut router, ai_onboarding);
+
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     dl_community::privacy_ui::register(&mut router, db.clone());
 
@@ -256,6 +354,45 @@ async fn main() -> anyhow::Result<()> {
                         .map(|m| m.roles.iter().map(|r| r.get()).collect())
                 })
                 .unwrap_or_default()
+        }
+
+        async fn member_display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+            self.adapter
+                .cache()
+                .guild(serenity::all::GuildId::new(guild_id))
+                .and_then(|g| {
+                    g.members
+                        .get(&serenity::all::UserId::new(user_id))
+                        .map(|m| m.display_name().to_string())
+                })
+        }
+
+        async fn member_is_admin(&self, guild_id: u64, user_id: u64) -> bool {
+            let Some(guild) = self
+                .adapter
+                .cache()
+                .guild(serenity::all::GuildId::new(guild_id))
+            else {
+                return false;
+            };
+            if guild.owner_id.get() == user_id {
+                return true;
+            }
+            guild
+                .members
+                .get(&serenity::all::UserId::new(user_id))
+                .map(|member| {
+                    member.roles.iter().any(|role_id| {
+                        guild
+                            .roles
+                            .get(role_id)
+                            .map(|role| {
+                                role.permissions.administrator() || role.permissions.manage_guild()
+                            })
+                            .unwrap_or(false)
+                    })
+                })
+                .unwrap_or(false)
         }
     }
     let turnier_ui = Arc::new(dl_tournament::discord_ui::TurnierUi {
@@ -383,6 +520,18 @@ async fn main() -> anyhow::Result<()> {
     });
 
     let router = Arc::new(router);
+    let command_sync_config = master::CommandSyncStartupConfig::from_lookup(env);
+    let command_sync = Arc::new(master::DiscordCommandSync::new(
+        adapter.clone(),
+        router.clone(),
+        command_sync_config.guild_id,
+    ));
+    let owner_id = master::owner_id_from_lookup(env);
+    if owner_id.is_none() {
+        tracing::warn!("OWNER_ID fehlt — !master/!m Owner-Commands bleiben gesperrt");
+    }
+    let (master_action_tx, mut master_action_rx) =
+        tokio::sync::mpsc::unbounded_channel::<master::MasterAction>();
 
     // Listener: member_remove → Steam-Bot, !steam_*-Admin-Kommandos
     let _member_listener =
@@ -395,9 +544,15 @@ async fn main() -> anyhow::Result<()> {
         .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
         .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"))
         .context("Broker-Token fehlt (MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN)")?;
-    let broker =
-        dl_broker::BrokerState::new(adapter.clone(), broker_token, |key| std::env::var(key).ok())
-            .map_err(|e| anyhow::anyhow!(e))?;
+    let broker = dl_broker::BrokerState::new_with_channel_info(
+        adapter.clone(),
+        Arc::new(BrokerChannelInfoGlue {
+            adapter: adapter.clone(),
+        }),
+        broker_token,
+        |key| std::env::var(key).ok(),
+    )
+    .map_err(|e| anyhow::anyhow!(e))?;
     let broker_host = env("MASTER_BROKER_HOST").unwrap_or_else(|| "127.0.0.1".to_string());
     let broker_addr = format!("{broker_host}:{}", cfg.ports.master_broker);
     let broker_listener = tokio::net::TcpListener::bind(&broker_addr)
@@ -442,6 +597,18 @@ async fn main() -> anyhow::Result<()> {
         }
         // Team-Balancer-Prefix-Listener (!balance auto/voice — read-only Vorschau)
         dl_tournament::balance_cmd::spawn(balance_commands.clone(), &dispatcher, adapter.clone());
+        master::spawn_control(
+            &dispatcher,
+            adapter.clone(),
+            command_sync.clone(),
+            Arc::new(master::DiscordStatusPort::new(
+                adapter.clone(),
+                router.clone(),
+                startup_text.clone(),
+            )),
+            owner_id,
+            master_action_tx.clone(),
+        );
 
         // Turnier-Auto-Balance (Port von TurnierCog._auto_balance_loop): alle
         // 300 s pro Gilde nicht-volle Teams nach Rang-Score auffüllen und
@@ -489,6 +656,12 @@ async fn main() -> anyhow::Result<()> {
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
+        tempvoice_interface.refresh_all_interfaces().await;
+        dl_voice::tempvoice::interface::spawn_command(
+            tempvoice_interface.clone(),
+            &dispatcher,
+            adapter.clone(),
+        );
         dl_voice::tempvoice::engine::spawn(tempvoice.clone(), &dispatcher);
         // Tag-Filter: Dienst anbinden + Ragebaiter-Sofort-Durchsetzung
         tag_service.rehydrate().await;
@@ -627,8 +800,11 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        // Kein Start von dl_community::coaching_requests::spawn(): Website-driven
-        // intake ersetzt Discord-seitige Analyse-/Rollen-/Stale-Flows (#17/#18).
+        // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
+        // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
+        // Python Reward-Rolle + Feedback-DM bekommen.
+        let _coaching_request_tasks =
+            dl_community::coaching_requests::spawn(coaching_requests.clone(), &dispatcher);
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
@@ -642,6 +818,7 @@ async fn main() -> anyhow::Result<()> {
         dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
+        router_interface.ensure_panel().await;
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
 
         // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung
@@ -657,19 +834,39 @@ async fn main() -> anyhow::Result<()> {
             }),
         );
         dl_voice::status::spawn(status_worker);
-        // Slash-Commands syncen (optional, wie Pythons COMMAND_SYNC_ON_START)
-        if env("DL_BOT_COMMAND_SYNC").as_deref() == Some("1") {
-            let guild_id = env("DL_BOT_COMMAND_GUILD_ID").and_then(|v| v.parse::<u64>().ok());
-            match dl_discord::dispatch::sync_commands(&adapter.http, &router, guild_id).await {
-                Ok(count) => tracing::info!(count, ?guild_id, "Slash-Commands synchronisiert"),
-                Err(err) => tracing::error!(%err, "Slash-Command-Sync fehlgeschlagen"),
+        // Slash-Commands syncen: Python-Default ist on + guild-scope.
+        if command_sync_config.enabled {
+            let summary = command_sync.sync_scope(command_sync_config.scope).await;
+            match summary.status.as_str() {
+                "synced" => tracing::info!(
+                    scope = summary.scope.as_str(),
+                    global = summary.global_count,
+                    guilds = summary.guild_counts.len(),
+                    "Slash-Commands synchronisiert"
+                ),
+                "partial" => tracing::warn!(
+                    scope = summary.scope.as_str(),
+                    global = summary.global_count,
+                    guilds = summary.guild_counts.len(),
+                    errors = summary.errors.len(),
+                    "Slash-Command-Sync teilweise fehlgeschlagen"
+                ),
+                _ => tracing::error!(
+                    scope = summary.scope.as_str(),
+                    errors = summary.errors.len(),
+                    "Slash-Command-Sync fehlgeschlagen"
+                ),
             }
+        } else {
+            tracing::info!("Startup app-command sync disabled via DL_BOT_COMMAND_SYNC.");
         }
         let mut client = dl_discord::gateway::build_client(
             &discord_token,
             adapter.clone(),
             dispatcher.clone(),
             router.clone(),
+            master::FEATURE_MODULES.len(),
+            env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
         )
         .await
         .context("Gateway-Client bauen")?;
@@ -687,13 +884,30 @@ async fn main() -> anyhow::Result<()> {
     };
 
     tracing::info!("dl-bot läuft — beenden mit Ctrl+C");
+    let mut restart_requested = false;
     tokio::select! {
         result = broker_server => result.context("Broker-Server")?,
         result = changelog_server => result.context("Changelog-Server")?,
+        action = master_action_rx.recv() => {
+            match action {
+                Some(master::MasterAction::Restart) => {
+                    restart_requested = true;
+                    tracing::info!("Restart angefordert — Prozess beendet sich fuer systemd");
+                }
+                None => {
+                    tracing::debug!("Master-Control-Kanal geschlossen");
+                }
+            }
+        },
         _ = tokio::signal::ctrl_c() => tracing::info!("dl-bot beendet"),
     }
     if let Some(task) = gateway_task {
         task.abort();
     }
-    Ok(())
+    if restart_requested {
+        // Kein process::exit: normaler Return laesst PidLock::drop laufen,
+        // der Non-Zero-Code triggert systemd Restart=on-failure.
+        return Ok(master::restart_exit_code());
+    }
+    Ok(std::process::ExitCode::SUCCESS)
 }
