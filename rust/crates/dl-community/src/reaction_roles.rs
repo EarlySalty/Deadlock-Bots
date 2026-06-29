@@ -17,7 +17,6 @@ const BACKFILL_DM_DELAY: Duration = Duration::from_millis(0);
 #[cfg(not(test))]
 const BACKFILL_DM_DELAY: Duration = Duration::from_secs(1);
 
-pub const SCRIM_COACHING_REACTION_ROLE_DM_TEXT: &str = "Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.\n\nKurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.\n\nDamit wir die Teams gut zusammenbekommen, schreib uns am besten direkt in <#1520842755037855975>:\n• deinen aktuellen Rang\n• deine bevorzugte Lane/Rolle\n• wann du grob Zeit hast (Wochentag/Uhrzeit)\n\nWir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮";
 pub const SCRIM_SIGNUP_ROLE_ID: u64 = 1_520_849_762_851_618_817;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
