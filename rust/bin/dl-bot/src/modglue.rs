@@ -2331,26 +2331,25 @@ pub struct ReactionRoleGatewayGlue {
 
 #[async_trait::async_trait]
 impl dl_discord::gateway::ReactionRoleGatewayPort for ReactionRoleGatewayGlue {
-    async fn reaction_add(
-        &self,
-        guild_id: u64,
-        channel_id: u64,
-        message_id: u64,
-        user_id: u64,
-        emoji: ReactionType,
-        is_bot: bool,
-    ) {
+    async fn reaction_add(&self, event: dl_discord::gateway::ReactionRoleAddEvent) {
         if let Err(err) = self
             .service
-            .handle_reaction_add(guild_id, channel_id, message_id, user_id, &emoji, is_bot)
+            .handle_reaction_add_with_display_name(
+                event.guild_id,
+                event.message_id,
+                event.user_id,
+                event.display_name.as_deref(),
+                &event.emoji,
+                event.is_bot,
+            )
             .await
         {
             tracing::warn!(
                 %err,
-                guild_id,
-                channel_id,
-                message_id,
-                user_id,
+                guild_id = event.guild_id,
+                channel_id = event.channel_id,
+                message_id = event.message_id,
+                user_id = event.user_id,
                 "Reaction-Role-Add fehlgeschlagen"
             );
         }

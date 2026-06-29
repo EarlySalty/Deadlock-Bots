@@ -22,6 +22,7 @@ dl-ai.workspace = true
 dl-bridges.workspace = true
 dl-db.workspace = true
 dl-discord.workspace = true
+dl-squads.workspace = true
 rusqlite.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -764,6 +764,60 @@ CREATE TABLE standalone_commands(
               finished_at DATETIME
             );
 
+-- table: scrim_participant
+CREATE TABLE scrim_participant(
+  id              INTEGER PRIMARY KEY AUTOINCREMENT,
+  discord_id      INTEGER,
+  display_name    TEXT NOT NULL,
+  rank            TEXT,
+  rank_source     TEXT NOT NULL DEFAULT 'self',
+  rank_verified   INTEGER NOT NULL DEFAULT 0,
+  roles           TEXT,
+  availability    TEXT,
+  status          TEXT NOT NULL DEFAULT 'new',
+  source          TEXT NOT NULL DEFAULT 'discord_reaction',
+  created_at      TEXT NOT NULL,
+  updated_at      TEXT NOT NULL
+);
+
+CREATE UNIQUE INDEX ux_scrim_participant_discord_id
+  ON scrim_participant(discord_id)
+  WHERE discord_id IS NOT NULL;
+
+CREATE UNIQUE INDEX ux_scrim_participant_display_name
+  ON scrim_participant(display_name);
+
+-- table: scrim_team
+CREATE TABLE scrim_team(
+  id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+  name               TEXT NOT NULL UNIQUE,
+  coach              TEXT,
+  discord_role_id    INTEGER,
+  discord_channel_id INTEGER,
+  created_at         TEXT NOT NULL
+);
+
+-- table: scrim_team_member
+CREATE TABLE scrim_team_member(
+  team_id        INTEGER NOT NULL REFERENCES scrim_team(id),
+  participant_id INTEGER NOT NULL REFERENCES scrim_participant(id),
+  role           TEXT,
+  is_captain     INTEGER NOT NULL DEFAULT 0,
+  is_bench       INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY(team_id, participant_id)
+);
+
+-- table: scrim_match
+CREATE TABLE scrim_match(
+  id           INTEGER PRIMARY KEY AUTOINCREMENT,
+  team_a_id    INTEGER REFERENCES scrim_team(id),
+  team_b_id    INTEGER REFERENCES scrim_team(id),
+  when_text    TEXT,
+  scheduled_at TEXT,
+  status       TEXT NOT NULL DEFAULT 'planned',
+  created_at   TEXT NOT NULL
+);
+
 -- table: steam_beta_invites
 CREATE TABLE steam_beta_invites(
               id INTEGER PRIMARY KEY AUTOINCREMENT,

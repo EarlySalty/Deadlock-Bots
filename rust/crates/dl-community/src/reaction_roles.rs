@@ -18,6 +18,7 @@ const BACKFILL_DM_DELAY: Duration = Duration::from_millis(0);
 const BACKFILL_DM_DELAY: Duration = Duration::from_secs(1);
 
 pub const SCRIM_COACHING_REACTION_ROLE_DM_TEXT: &str = "Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.\n\nKurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.\n\nDamit wir die Teams gut zusammenbekommen, schreib uns am besten direkt in <#1520842755037855975>:\n• deinen aktuellen Rang\n• deine bevorzugte Lane/Rolle\n• wann du grob Zeit hast (Wochentag/Uhrzeit)\n\nWir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮";
+pub const SCRIM_SIGNUP_ROLE_ID: u64 = 1_520_849_762_851_618_817;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
 pub enum PortErr {
@@ -107,11 +108,30 @@ impl ReactionRoleService {
         if is_bot {
             return Ok(());
         }
+        self.handle_reaction_add_with_display_name(
+            guild_id, message_id, user_id, None, emoji, is_bot,
+        )
+        .await
+    }
+
+    pub async fn handle_reaction_add_with_display_name(
+        &self,
+        guild_id: u64,
+        message_id: u64,
+        user_id: u64,
+        display_name: Option<&str>,
+        emoji: &ReactionType,
+        is_bot: bool,
+    ) -> Result<(), ReactionRoleError> {
+        if is_bot {
+            return Ok(());
+        }
         let canonical = canonical_emoji(emoji);
         let Some(mapping) = self.mapping_for_message(message_id, &canonical).await? else {
             return Ok(());
         };
-        self.apply_mapping_add(&mapping, guild_id, user_id).await?;
+        self.apply_mapping_add(&mapping, guild_id, user_id, display_name, true)
+            .await?;
         Ok(())
     }
 
@@ -183,7 +203,7 @@ impl ReactionRoleService {
                         continue;
                     }
                     let outcome = self
-                        .apply_mapping_add(&mapping, mapping.guild_id, user.id)
+                        .apply_mapping_add(&mapping, mapping.guild_id, user.id, None, false)
                         .await?;
                     if outcome.retryable_failure {
                         failed = true;
@@ -209,18 +229,28 @@ impl ReactionRoleService {
         mapping: &ReactionRoleMapping,
         guild_id: u64,
         user_id: u64,
+        display_name: Option<&str>,
+        allow_scrim_pool_upsert: bool,
     ) -> Result<ApplyMappingAddOutcome, ReactionRoleError> {
         let mut outcome = ApplyMappingAddOutcome::default();
-        if let Err(err) = self.port.add_role(guild_id, user_id, mapping.role_id).await {
-            tracing::warn!(
-                %err,
-                mapping_id = mapping.id,
-                guild_id,
-                user_id,
-                role_id = mapping.role_id,
-                "Reaction-Role: Rolle konnte nicht vergeben werden"
-            );
-            outcome.retryable_failure = true;
+        match self.port.add_role(guild_id, user_id, mapping.role_id).await {
+            Ok(()) => {
+                if allow_scrim_pool_upsert {
+                    self.upsert_scrim_signup_participant(mapping, user_id, display_name)
+                        .await;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    mapping_id = mapping.id,
+                    guild_id,
+                    user_id,
+                    role_id = mapping.role_id,
+                    "Reaction-Role: Rolle konnte nicht vergeben werden"
+                );
+                outcome.retryable_failure = true;
+            }
         }
 
         if !mapping.dm_enabled || !self.reserve_dm_log(mapping.id, user_id).await? {
@@ -252,6 +282,39 @@ impl ReactionRoleService {
             }
         }
         Ok(outcome)
+    }
+
+    async fn upsert_scrim_signup_participant(
+        &self,
+        mapping: &ReactionRoleMapping,
+        user_id: u64,
+        display_name: Option<&str>,
+    ) {
+        if mapping.role_id != SCRIM_SIGNUP_ROLE_ID {
+            return;
+        }
+        let Ok(discord_id) = i64::try_from(user_id) else {
+            tracing::warn!(
+                mapping_id = mapping.id,
+                user_id,
+                "Scrim-Signup: Discord-ID passt nicht in i64"
+            );
+            return;
+        };
+        let Some(display_name) = display_name.map(str::trim).filter(|name| !name.is_empty()) else {
+            return;
+        };
+        if let Err(err) =
+            dl_squads::store::upsert_participant_by_discord(&self.db, discord_id, display_name)
+                .await
+        {
+            tracing::warn!(
+                %err,
+                mapping_id = mapping.id,
+                user_id,
+                "Scrim-Signup: Pool-Upsert fehlgeschlagen"
+            );
+        }
     }
 
     async fn mapping_for_message(
@@ -601,6 +664,28 @@ mod tests {
         .await
     }
 
+    async fn scrim_participants(
+        db: &Db,
+    ) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
+        db.read(move |conn| {
+            let mut stmt = conn.prepare(
+                "SELECT id, discord_id, display_name, source
+                   FROM scrim_participant
+                  ORDER BY id ASC",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .await
+    }
+
     #[test]
     fn canonical_emoji_unterscheidet_unicode_und_custom() {
         assert_eq!(
@@ -653,6 +738,145 @@ mod tests {
         assert_eq!(state.add_roles, vec![(42, 900, 500), (42, 900, 500)]);
         assert_eq!(state.dms, vec![(900, "DM".to_string())]);
         assert_eq!(dm_log_count(&db, mapping_id, 900).await?, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_signup_rolle_schreibt_pool_eintrag() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, db, port, service) = test_service().await?;
+        insert_mapping(
+            &db,
+            MappingInsert {
+                message_id: 100,
+                emoji: "✅".to_string(),
+                role_id: SCRIM_SIGNUP_ROLE_ID,
+                dm_enabled: false,
+                remove_on_unreact: true,
+                backfill_pending: false,
+            },
+        )
+        .await?;
+
+        service
+            .handle_reaction_add_with_display_name(
+                42,
+                100,
+                900,
+                Some("Vicky"),
+                &ReactionType::Unicode("✅".to_string()),
+                false,
+            )
+            .await?;
+
+        let participants = scrim_participants(&db).await?;
+        assert_eq!(participants.len(), 1);
+        assert_eq!(
+            participants,
+            vec![(
+                participants[0].0,
+                Some(900),
+                "Vicky".to_string(),
+                "discord_reaction".to_string()
+            )]
+        );
+        let state = mock_state(&port);
+        assert_eq!(state.add_roles, vec![(42, 900, SCRIM_SIGNUP_ROLE_ID)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_signup_backfill_schreibt_keinen_pool_eintrag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, db, port, service) = test_service().await?;
+        let mapping_id = insert_mapping(
+            &db,
+            MappingInsert {
+                message_id: 100,
+                emoji: "✅".to_string(),
+                role_id: SCRIM_SIGNUP_ROLE_ID,
+                dm_enabled: false,
+                remove_on_unreact: true,
+                backfill_pending: true,
+            },
+        )
+        .await?;
+        port.push_reaction_page(Ok(vec![reacted_user(900)]));
+
+        service.run_pending_backfills().await?;
+
+        assert!(scrim_participants(&db).await?.is_empty());
+        assert!(!backfill_pending(&db, mapping_id).await?);
+        let state = mock_state(&port);
+        assert_eq!(state.add_roles, vec![(42, 900, SCRIM_SIGNUP_ROLE_ID)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn andere_reaction_rolle_schreibt_keinen_pool_eintrag(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, db, _port, service) = test_service().await?;
+        insert_mapping(
+            &db,
+            MappingInsert {
+                message_id: 100,
+                emoji: "✅".to_string(),
+                role_id: 500,
+                dm_enabled: false,
+                remove_on_unreact: true,
+                backfill_pending: false,
+            },
+        )
+        .await?;
+
+        service
+            .handle_reaction_add(
+                42,
+                43,
+                100,
+                900,
+                &ReactionType::Unicode("✅".to_string()),
+                false,
+            )
+            .await?;
+
+        assert!(scrim_participants(&db).await?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn scrim_pool_upsert_fehler_bleibt_fail_open() -> Result<(), Box<dyn std::error::Error>> {
+        let (_dir, db, port, service) = test_service().await?;
+        insert_mapping(
+            &db,
+            MappingInsert {
+                message_id: 100,
+                emoji: "✅".to_string(),
+                role_id: SCRIM_SIGNUP_ROLE_ID,
+                dm_enabled: false,
+                remove_on_unreact: true,
+                backfill_pending: false,
+            },
+        )
+        .await?;
+        db.write(|conn| {
+            conn.execute("DROP TABLE scrim_participant", [])?;
+            Ok(())
+        })
+        .await?;
+
+        service
+            .handle_reaction_add_with_display_name(
+                42,
+                100,
+                900,
+                Some("Vicky"),
+                &ReactionType::Unicode("✅".to_string()),
+                false,
+            )
+            .await?;
+
+        let state = mock_state(&port);
+        assert_eq!(state.add_roles, vec![(42, 900, SCRIM_SIGNUP_ROLE_ID)]);
         Ok(())
     }
 

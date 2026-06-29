@@ -25,6 +25,7 @@ dl-moderation.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-discord.workspace = true
+dl-squads.workspace = true
 dl-voice.workspace = true
 dl-webcore.workspace = true
 anyhow.workspace = true

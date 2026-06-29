@@ -64,15 +64,7 @@ fn is_self_reaction_user(
 
 #[async_trait]
 pub trait ReactionRoleGatewayPort: Send + Sync {
-    async fn reaction_add(
-        &self,
-        guild_id: u64,
-        channel_id: u64,
-        message_id: u64,
-        user_id: u64,
-        emoji: ReactionType,
-        is_bot: bool,
-    );
+    async fn reaction_add(&self, event: ReactionRoleAddEvent);
 
     async fn reaction_remove(
         &self,
@@ -83,6 +75,17 @@ pub trait ReactionRoleGatewayPort: Send + Sync {
         emoji: ReactionType,
         is_bot: bool,
     );
+}
+
+#[derive(Debug, Clone)]
+pub struct ReactionRoleAddEvent {
+    pub guild_id: u64,
+    pub channel_id: u64,
+    pub message_id: u64,
+    pub user_id: u64,
+    pub display_name: Option<String>,
+    pub emoji: ReactionType,
+    pub is_bot: bool,
 }
 
 async fn reaction_user_is_bot(
@@ -155,15 +158,20 @@ impl EventHandler for Handler {
             return;
         };
         let member_is_bot = add.member.as_ref().map(|member| member.user.bot);
+        let display_name = add
+            .member
+            .as_ref()
+            .map(|member| member.display_name().to_string());
         let is_bot = reaction_user_is_bot(&ctx, add.guild_id, user_id, member_is_bot).await;
-        port.reaction_add(
-            guild_id.get(),
-            add.channel_id.get(),
-            add.message_id.get(),
-            user_id.get(),
-            add.emoji,
+        port.reaction_add(ReactionRoleAddEvent {
+            guild_id: guild_id.get(),
+            channel_id: add.channel_id.get(),
+            message_id: add.message_id.get(),
+            user_id: user_id.get(),
+            display_name,
+            emoji: add.emoji,
             is_bot,
-        )
+        })
         .await;
     }
 

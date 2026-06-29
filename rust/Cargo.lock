@@ -349,6 +349,7 @@ dependencies = [
  "dl-db",
  "dl-discord",
  "dl-moderation",
+ "dl-squads",
  "dl-voice",
  "dl-webcore",
  "reqwest",
@@ -438,6 +439,7 @@ dependencies = [
  "dl-bridges",
  "dl-db",
  "dl-discord",
+ "dl-squads",
  "rand 0.8.6",
  "regex",
  "reqwest",
@@ -543,6 +545,20 @@ dependencies = [
  "chrono",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "dl-squads"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "dl-db",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
 ]
 
 [[package]]
