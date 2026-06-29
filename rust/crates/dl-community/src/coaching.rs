@@ -106,6 +106,11 @@ pub struct WebsiteClient {
     token: String,
 }
 
+#[async_trait::async_trait]
+pub trait CoachingWebsiteSyncClient: Send + Sync {
+    async fn sync_coaching(&self, payload: &Value) -> bool;
+}
+
 impl WebsiteClient {
     /// Token-Kette wie website_client.py: TWITCH_INTERNAL_API_TOKEN →
     /// MASTER_BROKER_TOKEN; None ohne Token (Loops laufen dann leer).
@@ -227,6 +232,38 @@ impl WebsiteClient {
             }
         }
     }
+
+    pub async fn ack_request_created_notifications(&self, request_ids: &[String]) -> bool {
+        if request_ids.is_empty() {
+            return true;
+        }
+        match self
+            .request(
+                reqwest::Method::POST,
+                "/coaching/platform/notifications/ack",
+            )
+            .json(&json!({ "request_ids": request_ids }))
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => true,
+            Ok(response) => {
+                tracing::warn!(status = %response.status(), "Notification-Ack fehlgeschlagen");
+                false
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Notification-Ack Fehler");
+                false
+            }
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl CoachingWebsiteSyncClient for WebsiteClient {
+    async fn sync_coaching(&self, payload: &Value) -> bool {
+        WebsiteClient::sync_coaching(self, payload).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -234,6 +271,7 @@ pub trait CoachingPlatformClient: Send + Sync {
     async fn sync_coaches(&self, coaches: &[Value]) -> bool;
     async fn due_notifications(&self) -> Vec<Value>;
     async fn ack_notifications(&self, items: &[Value]) -> bool;
+    async fn ack_request_created_notifications(&self, request_ids: &[String]) -> bool;
 }
 
 #[async_trait::async_trait]
@@ -248,6 +286,10 @@ impl CoachingPlatformClient for WebsiteClient {
 
     async fn ack_notifications(&self, items: &[Value]) -> bool {
         WebsiteClient::ack_notifications(self, items).await
+    }
+
+    async fn ack_request_created_notifications(&self, request_ids: &[String]) -> bool {
+        WebsiteClient::ack_request_created_notifications(self, request_ids).await
     }
 }
 
@@ -298,9 +340,14 @@ impl CoachingSync {
         if items.is_empty() {
             return;
         }
-        let mut to_ack: Vec<Value> = Vec::new();
+        let mut item_acks: Vec<Value> = Vec::new();
+        let mut request_acks: Vec<String> = Vec::new();
         for item in items {
             if item.get("type").and_then(Value::as_str) == Some("request_created") {
+                let Some(website_request_id) = notification_request_id(&item) else {
+                    tracing::warn!("request_created Notification ohne request_id");
+                    continue;
+                };
                 let Some(sink) = self.request_sink.as_ref() else {
                     tracing::warn!(
                         "request_created Notification ohne Request-Sink – wird nicht geackt"
@@ -308,7 +355,7 @@ impl CoachingSync {
                     continue;
                 };
                 match sink.post_request_created_notification(&item).await {
-                    Ok(()) => to_ack.push(item),
+                    Ok(()) => request_acks.push(website_request_id),
                     Err(err) => {
                         tracing::warn!(%err, "request_created Notification konnte nicht gepostet werden");
                     }
@@ -327,20 +374,43 @@ impl CoachingSync {
                 continue;
             };
             match self.port.send_dm(user_id, text).await {
-                Ok(true) => to_ack.push(item),
+                Ok(true) => item_acks.push(item),
                 Ok(false) => {
                     tracing::warn!(user_id, "DMs deaktiviert – wird geackt ohne Zustellung");
-                    to_ack.push(item);
+                    item_acks.push(item);
                 }
                 Err(err) => {
                     tracing::warn!(%err, user_id, "DM-Versand fehlgeschlagen (wird erneut versucht)");
                 }
             }
         }
-        if !to_ack.is_empty() && self.client.ack_notifications(&to_ack).await {
-            tracing::info!(count = to_ack.len(), "Notifications geackt");
+        let mut acked_count = 0usize;
+        if !item_acks.is_empty() && self.client.ack_notifications(&item_acks).await {
+            acked_count += item_acks.len();
+        }
+        if !request_acks.is_empty()
+            && self
+                .client
+                .ack_request_created_notifications(&request_acks)
+                .await
+        {
+            acked_count += request_acks.len();
+        }
+        if acked_count > 0 {
+            tracing::info!(count = acked_count, "Notifications geackt");
         }
     }
+}
+
+fn notification_request_id(item: &Value) -> Option<String> {
+    let raw = match item.get("request_id")? {
+        Value::Null => return None,
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    let trimmed = raw.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// Debounce-Fenster nach einer Coach-Rollen-Änderung (wie Python: ~5 s),
@@ -455,6 +525,7 @@ mod tests {
     struct TestPlatformClient {
         due: Mutex<Vec<Value>>,
         acked: Mutex<Vec<Value>>,
+        acked_request_ids: Mutex<Vec<String>>,
         synced_coaches: Mutex<Vec<Vec<Value>>>,
     }
 
@@ -471,6 +542,14 @@ mod tests {
 
         async fn ack_notifications(&self, items: &[Value]) -> bool {
             self.acked.lock().await.extend_from_slice(items);
+            true
+        }
+
+        async fn ack_request_created_notifications(&self, request_ids: &[String]) -> bool {
+            self.acked_request_ids
+                .lock()
+                .await
+                .extend_from_slice(request_ids);
             true
         }
     }
@@ -598,8 +677,49 @@ mod tests {
         );
         assert!(port.dm_calls.lock().await.is_empty());
         assert_eq!(
+            client.acked_request_ids.lock().await.as_slice(),
+            &["99".to_string()]
+        );
+        assert!(client.acked.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_created_und_termine_nutzen_getrennte_ack_payloads() {
+        let request_item = json!({
+            "type": "request_created",
+            "request_id": "AbC-12_xy",
+            "coachee_id": "coachee-token",
+            "discord_user_id": 42,
+        });
+        let appointment_item = json!({
+            "type": "created",
+            "discord_user_id": 42,
+            "coach_display": "Nani",
+            "scheduled_at": "2026-06-10T17:00:00Z",
+        });
+        let client = Arc::new(TestPlatformClient::default());
+        client
+            .due
+            .lock()
+            .await
+            .extend([request_item.clone(), appointment_item.clone()]);
+        let port = Arc::new(TestCoachingPort::default());
+        let sink = Arc::new(TestRequestSink::default());
+        let sync = CoachingSync {
+            client: client.clone(),
+            port,
+            request_sink: Some(sink),
+        };
+
+        sync.process_notifications().await;
+
+        assert_eq!(
             client.acked.lock().await.as_slice(),
-            std::slice::from_ref(&item)
+            std::slice::from_ref(&appointment_item)
+        );
+        assert_eq!(
+            client.acked_request_ids.lock().await.as_slice(),
+            &["AbC-12_xy".to_string()]
         );
     }
 
@@ -627,6 +747,7 @@ mod tests {
         sync.process_notifications().await;
 
         assert!(client.acked.lock().await.is_empty());
+        assert!(client.acked_request_ids.lock().await.is_empty());
     }
 
     #[test]

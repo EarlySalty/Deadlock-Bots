@@ -581,7 +581,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
             .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
         1289721245281292288,
-        coaching_website.clone(),
+        coaching_website
+            .clone()
+            .map(|client| client as Arc<dyn dl_community::coaching::CoachingWebsiteSyncClient>),
     );
     dl_community::coaching_requests::register(&mut router, coaching_requests.clone());
     coaching_requests.ensure_panel().await;

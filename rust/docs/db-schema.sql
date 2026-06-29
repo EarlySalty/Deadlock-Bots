@@ -313,7 +313,8 @@ CREATE TABLE coaching_requests (
               role_removed_at INTEGER,
               created_at INTEGER NOT NULL DEFAULT (strftime('%s','now')),
               updated_at INTEGER NOT NULL DEFAULT (strftime('%s','now'))
-            , scheduled_slot TEXT, assigned_coach_id TEXT, reserved_until INTEGER);
+            , scheduled_slot TEXT, assigned_coach_id TEXT, reserved_until INTEGER,
+              website_request_id TEXT, coachee_id TEXT);
 
 -- table: coaching_coach_rotation
 CREATE TABLE coaching_coach_rotation (

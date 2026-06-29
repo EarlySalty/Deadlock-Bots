@@ -138,9 +138,51 @@ impl Db {
             .replace("CREATE UNIQUE INDEX ", "CREATE UNIQUE INDEX IF NOT EXISTS ")
             .replace("CREATE INDEX ", "CREATE INDEX IF NOT EXISTS ")
             .replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS ");
-        self.write(move |conn| conn.execute_batch(&script)).await?;
+        self.write(move |conn| {
+            conn.execute_batch(&script)?;
+            ensure_coaching_request_mirror_schema(conn)
+        })
+        .await?;
         Ok(())
     }
+}
+
+fn ensure_coaching_request_mirror_schema(conn: &Connection) -> Result<(), rusqlite::Error> {
+    if !column_exists(conn, "coaching_requests", "website_request_id")? {
+        conn.execute(
+            "ALTER TABLE coaching_requests ADD COLUMN website_request_id TEXT",
+            [],
+        )?;
+    }
+    if !column_exists(conn, "coaching_requests", "coachee_id")? {
+        conn.execute(
+            "ALTER TABLE coaching_requests ADD COLUMN coachee_id TEXT",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_coaching_requests_website_request_id
+           ON coaching_requests(website_request_id)
+         WHERE website_request_id IS NOT NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+fn column_exists(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+) -> Result<bool, rusqlite::Error> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let mut rows = stmt.query([])?;
+    while let Some(row) = rows.next()? {
+        let name: String = row.get(1)?;
+        if name == column_name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Voller Produktions-Schema-Dump (Vertrag). Wird in [`Db::bootstrap_schema`]
@@ -289,5 +331,31 @@ mod tests {
                 .expect("query");
             assert_eq!(count, 1, "Tabelle {table} fehlt nach bootstrap_schema");
         }
+
+        let columns: Vec<String> = db
+            .read(|c| {
+                let mut stmt = c.prepare("PRAGMA table_info(coaching_requests)")?;
+                let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+                rows.collect::<Result<Vec<_>, _>>()
+            })
+            .await
+            .expect("coaching_requests columns");
+        assert!(columns.iter().any(|name| name == "website_request_id"));
+        assert!(columns.iter().any(|name| name == "coachee_id"));
+
+        let index_count: i64 = db
+            .read(|c| {
+                c.query_row(
+                    "SELECT COUNT(*)
+                       FROM sqlite_master
+                      WHERE type='index'
+                        AND name='ux_coaching_requests_website_request_id'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("index query");
+        assert_eq!(index_count, 1);
     }
 }

@@ -174,6 +174,7 @@ struct MirrorOpts {
 /// Roh-Zeile aus `coaching_requests` für die Website-Spiegelung.
 struct MirrorRow {
     id: i64,
+    website_request_id: Option<String>,
     discord_user_id: i64,
     discord_username: String,
     rank: String,
@@ -204,7 +205,7 @@ pub struct RequestData {
 
 #[derive(Debug, Clone)]
 struct RequestCreatedNotification {
-    request_id: i64,
+    website_request_id: String,
     coachee_id: String,
     discord_user_id: u64,
     discord_username: String,
@@ -218,14 +219,15 @@ struct RequestCreatedNotification {
     preferred_coach_id: Option<String>,
 }
 
+struct RequestCreatedUpsert {
+    local_request_id: i64,
+    already_posted: bool,
+}
+
 impl RequestCreatedNotification {
     fn from_item(item: &Value) -> Result<Self, String> {
-        let request_id_raw = required_string(item, "request_id")?;
-        let request_id = request_id_raw
-            .parse::<i64>()
-            .map_err(|_| format!("request_id ist nicht numerisch: {request_id_raw}"))?;
         Ok(Self {
-            request_id,
+            website_request_id: required_string(item, "request_id")?,
             coachee_id: required_string(item, "coachee_id")?,
             discord_user_id: required_u64(item, "discord_user_id")?,
             discord_username: optional_string(item, "discord_username").unwrap_or_default(),
@@ -240,9 +242,9 @@ impl RequestCreatedNotification {
         })
     }
 
-    fn request_data(&self) -> RequestData {
+    fn request_data(&self, local_request_id: i64) -> RequestData {
         RequestData {
-            id: self.request_id,
+            id: local_request_id,
             user_id: self.discord_user_id,
             username: self.discord_username.clone(),
             rank: combine_rank(&self.rank, &self.subrank),
@@ -526,7 +528,7 @@ pub struct CoachingRequests {
     /// Website-Spiegelung der Anfrage-/Session-Zustände (Python
     /// `_mirror_to_website`). `None` = inaktiv (kein interner Token), genau
     /// wie wenn `website_client._token()` leer ist.
-    pub website: Option<Arc<crate::coaching::WebsiteClient>>,
+    pub website: Option<Arc<dyn crate::coaching::CoachingWebsiteSyncClient>>,
 }
 
 impl CoachingRequests {
@@ -535,7 +537,7 @@ impl CoachingRequests {
         port: Arc<dyn CoachingPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         guild_id: u64,
-        website: Option<Arc<crate::coaching::WebsiteClient>>,
+        website: Option<Arc<dyn crate::coaching::CoachingWebsiteSyncClient>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             db,
@@ -605,7 +607,7 @@ impl CoachingRequests {
             let row: Option<MirrorRow> = db
                 .read(move |conn| {
                     conn.query_row(
-                        "SELECT id, discord_user_id, COALESCE(discord_username,''),
+                        "SELECT id, website_request_id, discord_user_id, COALESCE(discord_username,''),
                                 rank, subrank, hero, games_played, hours_played,
                                 availability, current_problems, COALESCE(ai_summary,''),
                                 status, assigned_coach_id, reserved_until
@@ -614,19 +616,20 @@ impl CoachingRequests {
                         |r| {
                             Ok(MirrorRow {
                                 id: r.get(0)?,
-                                discord_user_id: r.get(1)?,
-                                discord_username: r.get(2)?,
-                                rank: r.get(3)?,
-                                subrank: r.get(4)?,
-                                hero: r.get::<_, Option<String>>(5)?,
-                                games_played: r.get::<_, Option<String>>(6)?,
-                                hours_played: r.get::<_, Option<String>>(7)?,
-                                availability: r.get::<_, Option<String>>(8)?,
-                                current_problems: r.get::<_, Option<String>>(9)?,
-                                ai_summary: r.get(10)?,
-                                status: r.get(11)?,
-                                assigned_coach_id: r.get::<_, Option<String>>(12)?,
-                                reserved_until: r.get::<_, Option<i64>>(13)?,
+                                website_request_id: r.get::<_, Option<String>>(1)?,
+                                discord_user_id: r.get(2)?,
+                                discord_username: r.get(3)?,
+                                rank: r.get(4)?,
+                                subrank: r.get(5)?,
+                                hero: r.get::<_, Option<String>>(6)?,
+                                games_played: r.get::<_, Option<String>>(7)?,
+                                hours_played: r.get::<_, Option<String>>(8)?,
+                                availability: r.get::<_, Option<String>>(9)?,
+                                current_problems: r.get::<_, Option<String>>(10)?,
+                                ai_summary: r.get(11)?,
+                                status: r.get(12)?,
+                                assigned_coach_id: r.get::<_, Option<String>>(13)?,
+                                reserved_until: r.get::<_, Option<i64>>(14)?,
                             })
                         },
                     )
@@ -664,6 +667,11 @@ impl CoachingRequests {
                 "assigned_coach_username": opts.assigned_coach_username,
                 "reserved_until": row.reserved_until,
             });
+            if let Some(website_request_id) = row.website_request_id {
+                if let Some(map) = payload.as_object_mut() {
+                    map.insert("website_request_id".into(), json!(website_request_id));
+                }
+            }
             if let (Some(coach_id), Some(session_status)) =
                 (opts.coach_discord_id, opts.session_status.as_ref())
             {
@@ -900,8 +908,9 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     async fn upsert_request_created_notification(
         &self,
         data: &RequestCreatedNotification,
-    ) -> Result<bool, String> {
-        let request_id = data.request_id;
+    ) -> Result<RequestCreatedUpsert, String> {
+        let website_request_id = data.website_request_id.clone();
+        let coachee_id = data.coachee_id.clone();
         let discord_user_id = data.discord_user_id;
         let discord_username = data.discord_username.clone();
         let rank = data.rank.clone();
@@ -915,26 +924,62 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let now = chrono::Utc::now().timestamp();
         self.db
             .write(move |conn| {
+                let existing: Option<(i64, Option<i64>)> = conn
+                    .query_row(
+                        "SELECT id, message_id
+                           FROM coaching_requests
+                          WHERE website_request_id = ?1",
+                        [&website_request_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .optional()?;
+                if let Some((local_request_id, message_id)) = existing {
+                    conn.execute(
+                        "UPDATE coaching_requests SET
+                           coachee_id=?1,
+                           discord_user_id=?2,
+                           discord_username=?3,
+                           rank=?4,
+                           subrank=?5,
+                           hero=?6,
+                           games_played=?7,
+                           hours_played=?8,
+                           availability=?9,
+                           scheduled_slot=?10,
+                           current_problems=?11,
+                           updated_at=?12
+                         WHERE id=?13",
+                        rusqlite::params![
+                            coachee_id,
+                            discord_user_id,
+                            discord_username,
+                            rank,
+                            subrank,
+                            hero,
+                            games_played,
+                            hours_played,
+                            availability,
+                            scheduled_slot,
+                            current_problems,
+                            now,
+                            local_request_id,
+                        ],
+                    )?;
+                    return Ok(RequestCreatedUpsert {
+                        local_request_id,
+                        already_posted: message_id.is_some(),
+                    });
+                }
+
                 conn.execute(
                     "INSERT INTO coaching_requests (
-                       id, discord_user_id, discord_username, rank, subrank, hero,
-                       games_played, hours_played, availability, scheduled_slot,
-                       current_problems, ai_summary, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '', 'pending', ?12, ?12)
-                     ON CONFLICT(id) DO UPDATE SET
-                       discord_user_id=excluded.discord_user_id,
-                       discord_username=excluded.discord_username,
-                       rank=excluded.rank,
-                       subrank=excluded.subrank,
-                       hero=excluded.hero,
-                       games_played=excluded.games_played,
-                       hours_played=excluded.hours_played,
-                       availability=excluded.availability,
-                       scheduled_slot=excluded.scheduled_slot,
-                       current_problems=excluded.current_problems,
-                       updated_at=excluded.updated_at",
+                       website_request_id, coachee_id, discord_user_id, discord_username,
+                       rank, subrank, hero, games_played, hours_played, availability,
+                       scheduled_slot, current_problems, ai_summary, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '', 'pending', ?13, ?13)",
                     rusqlite::params![
-                        request_id,
+                        website_request_id,
+                        coachee_id,
                         discord_user_id,
                         discord_username,
                         rank,
@@ -948,12 +993,10 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                         now,
                     ],
                 )?;
-                conn.query_row(
-                    "SELECT message_id FROM coaching_requests WHERE id=?1",
-                    [request_id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .map(|message_id| message_id.is_some())
+                Ok(RequestCreatedUpsert {
+                    local_request_id: conn.last_insert_rowid(),
+                    already_posted: false,
+                })
             })
             .await
             .map_err(|err| err.to_string())
@@ -963,16 +1006,17 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let data = RequestCreatedNotification::from_item(item)?;
         if let Some(preferred_coach_id) = data.preferred_coach_id.as_deref() {
             tracing::debug!(
-                request_id = data.request_id,
+                request_id = %data.website_request_id,
                 preferred_coach_id,
                 "request_created preferred_coach_id gelesen"
             );
         }
-        if self.upsert_request_created_notification(&data).await? {
+        let upsert = self.upsert_request_created_notification(&data).await?;
+        if upsert.already_posted {
             return Ok(());
         }
 
-        let mut request = data.request_data();
+        let mut request = data.request_data(upsert.local_request_id);
         let components =
             claim_components_with_website_link(request.id, request.user_id, &data.coachee_id);
         self.post_request_to_channel(&mut request, String::new(), false, components)
@@ -1032,7 +1076,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     pub async fn analyze_pending(&self) {
         let rows: Vec<i64> = self
             .db
-            .read(|conn| {
+            .read(move |conn| {
                 let mut stmt = conn.prepare(
                     "SELECT id FROM coaching_requests
                       WHERE status='pending' AND current_problems IS NOT NULL
@@ -1982,6 +2026,15 @@ mod tests {
         components: Value,
     }
 
+    struct RequestCreatedDbRow {
+        status: String,
+        message_id: Option<i64>,
+        channel_id: Option<i64>,
+        assigned_coach_id: Option<String>,
+        website_request_id: Option<String>,
+        coachee_id: Option<String>,
+    }
+
     #[derive(Default)]
     struct MockCoachingPort {
         coach_ids: Mutex<Vec<u64>>,
@@ -1996,6 +2049,22 @@ mod tests {
         removed_roles: Mutex<Vec<(u64, u64, u64, String)>>,
         request_messages: Mutex<Vec<RequestMessageCall>>,
         request_message_error: Mutex<Option<String>>,
+    }
+
+    #[derive(Default)]
+    struct MockWebsiteSync {
+        payloads: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::coaching::CoachingWebsiteSyncClient for MockWebsiteSync {
+        async fn sync_coaching(&self, payload: &Value) -> bool {
+            self.payloads
+                .lock()
+                .expect("payloads lock")
+                .push(payload.clone());
+            true
+        }
     }
 
     #[async_trait::async_trait]
@@ -2481,32 +2550,205 @@ mod tests {
             .iter()
             .any(|field| field["name"].as_str() == Some("🤖 AI Analyse")));
 
+        let local_id: i64 = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT id FROM coaching_requests WHERE website_request_id='50'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("local id");
+
         let buttons = call.components[0]["components"]
             .as_array()
             .expect("buttons");
-        assert_eq!(buttons[0]["custom_id"], "coach_claim_50");
-        assert_eq!(buttons[1]["custom_id"], "coach_release_50_4242");
+        assert_eq!(buttons[0]["custom_id"], format!("coach_claim_{local_id}"));
+        assert_eq!(
+            buttons[1]["custom_id"],
+            format!("coach_release_{local_id}_4242")
+        );
         assert_eq!(buttons[2]["style"], 5);
         assert_eq!(
             buttons[2]["url"],
             "https://deutsche-deadlock-community.de/coaching/coachees/coachee-50"
         );
 
-        let row: (String, Option<i64>, Option<i64>, Option<String>) = db
+        let row: RequestCreatedDbRow = db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT status, message_id, channel_id, assigned_coach_id,
+                            website_request_id, coachee_id
+                       FROM coaching_requests WHERE id=?1",
+                    [local_id],
+                    |row| {
+                        Ok(RequestCreatedDbRow {
+                            status: row.get(0)?,
+                            message_id: row.get(1)?,
+                            channel_id: row.get(2)?,
+                            assigned_coach_id: row.get(3)?,
+                            website_request_id: row.get(4)?,
+                            coachee_id: row.get(5)?,
+                        })
+                    },
+                )
+            })
+            .await
+            .expect("request row");
+        assert_eq!(row.status, "analyzed");
+        assert_eq!(row.message_id, Some(77));
+        assert_eq!(row.channel_id, Some(REQUEST_CHANNEL_ID as i64));
+        assert_eq!(row.assigned_coach_id.as_deref(), Some("10"));
+        assert_eq!(row.website_request_id.as_deref(), Some("50"));
+        assert_eq!(row.coachee_id.as_deref(), Some("coachee-50"));
+    }
+
+    #[tokio::test]
+    async fn request_created_token_id_mappt_lokal_und_claim_sync_spiegelt_website_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("coaching.sqlite3")).expect("db");
+        db.bootstrap_schema().await.expect("schema");
+        let port = Arc::new(MockCoachingPort::default());
+        let website = Arc::new(MockWebsiteSync::default());
+        let website_client: Arc<dyn crate::coaching::CoachingWebsiteSyncClient> = website.clone();
+        let coaching =
+            CoachingRequests::new(db.clone(), port.clone(), None, 1, Some(website_client));
+        let item = json!({
+            "type": "request_created",
+            "request_id": "AbC-12_xy",
+            "coachee_id": "coachee-token",
+            "discord_user_id": "4242",
+            "discord_username": "WebsiteUser",
+            "rank": "Archon",
+            "subrank": "3",
+            "hero": "Vindicta",
+            "games_played": "120",
+            "hours_played": "80",
+            "availability": "Montag 18:00",
+            "current_problems": "Lane-Phase",
+        });
+
+        coaching
+            .post_request_created_notification(&item)
+            .await
+            .expect("notification post");
+
+        let local_id: i64 = db
             .read(|conn| {
                 conn.query_row(
-                    "SELECT status, message_id, channel_id, assigned_coach_id
-                       FROM coaching_requests WHERE id=50",
+                    "SELECT id
+                       FROM coaching_requests
+                      WHERE website_request_id='AbC-12_xy'",
                     [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("local id");
+        assert!(local_id > 0);
+
+        {
+            let calls = port.request_messages.lock().expect("request_messages lock");
+            assert_eq!(calls.len(), 1);
+            let buttons = calls[0].components[0]["components"]
+                .as_array()
+                .expect("buttons");
+            assert_eq!(buttons[0]["custom_id"], format!("coach_claim_{local_id}"));
+            assert_eq!(
+                buttons[1]["custom_id"],
+                format!("coach_release_{local_id}_4242")
+            );
+        }
+
+        let row: (Option<String>, Option<String>, String, Option<i64>) = db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT website_request_id, coachee_id, status, message_id
+                       FROM coaching_requests
+                      WHERE id=?1",
+                    [local_id],
                     |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
                 )
             })
             .await
             .expect("request row");
-        assert_eq!(row.0, "analyzed");
-        assert_eq!(row.1, Some(77));
-        assert_eq!(row.2, Some(REQUEST_CHANNEL_ID as i64));
-        assert_eq!(row.3.as_deref(), Some("10"));
+        assert_eq!(row.0.as_deref(), Some("AbC-12_xy"));
+        assert_eq!(row.1.as_deref(), Some("coachee-token"));
+        assert_eq!(row.2, "analyzed");
+        assert_eq!(row.3, Some(77));
+
+        coaching
+            .post_request_created_notification(&item)
+            .await
+            .expect("redelivery post");
+        assert_eq!(
+            port.request_messages
+                .lock()
+                .expect("request_messages lock")
+                .len(),
+            1
+        );
+        let count: i64 = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*)
+                       FROM coaching_requests
+                      WHERE website_request_id='AbC-12_xy'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("request count");
+        assert_eq!(count, 1);
+
+        let coach_id = 900;
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .insert(coach_id, vec![COACH_ROLE_ID]);
+        port.names
+            .lock()
+            .expect("names lock")
+            .insert(coach_id, "Coach 900".to_string());
+        let handler = CoachingHandler {
+            coaching: coaching.clone(),
+        };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("coach_claim_{local_id}"),
+                user_id: coach_id,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Session mit WebsiteUser gestartet!")
+        );
+
+        let mut active_payload = None;
+        for _ in 0..20 {
+            active_payload = website
+                .payloads
+                .lock()
+                .expect("payloads lock")
+                .iter()
+                .rev()
+                .find(|payload| payload["session_status"] == "active")
+                .cloned();
+            if active_payload.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let active_payload = active_payload.expect("active sync payload");
+        assert_eq!(active_payload["bot_request_id"], json!(local_id));
+        assert_eq!(active_payload["website_request_id"], json!("AbC-12_xy"));
+        assert_eq!(active_payload["coach_discord_id"], json!(coach_id));
+        assert_eq!(active_payload["session_status"], json!("active"));
     }
 
     #[test]
