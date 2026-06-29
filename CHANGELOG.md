@@ -1,3 +1,11 @@
+## #170 — `!brain`: aufgeräumte Antworten + „denkt nach"-Anzeige
+
+**Ausgangslage:** Die frischen `!brain`-Antworten kamen als dichte Textwand — die Stichpunkte klebten alle in einer Zeile, weil die Zeilenumbrüche intern beim Zusammenbauen verloren gingen. Und nach dem Absenden stand man ein paar Sekunden vor dem Nichts, bis die Antwort plötzlich da war.
+
+**Was wurde geändert:** Antworten behalten jetzt ihre Struktur — jeder Stichpunkt steht auf einer eigenen Zeile, Abschnitte bekommen fette Überschriften, das Ganze ist gut scannbar. Während der Bot nachdenkt, erscheint sofort eine kleine animierte „💭 . . ."-Nachricht; sobald die Antwort fertig ist, wird genau diese Nachricht durch das Ergebnis ersetzt.
+
+**Wie es jetzt läuft:** `!brain` fühlt sich reaktiv an — man sieht sofort, dass der Bot arbeitet — und liefert eine übersichtliche, gegliederte Antwort statt einer Textwand.
+
 ## #169 — `!brain`: schönere Antworten und immer ein Build
 
 **Ausgangslage:** Der frisch ausgelieferte `!brain`-Befehl hatte zwei Schwächen. Die Antwort kam als unstrukturierte Textwand inklusive roher Markdown-Zeichen, und bei dünner Faktenlage druckte der Bot oft einen langen „dazu hab ich zu wenig gesicherte Daten"-Absatz, statt etwas Brauchbares zu liefern.
