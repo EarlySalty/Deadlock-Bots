@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use dl_ai::TextGenerator;
@@ -16,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -30,6 +33,9 @@ const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅 — pack deine Frage in unter {max} Zeichen.";
 #[allow(dead_code)]
 const BRAIN_WORKING: &str = "🧠 Moment, ich wühl kurz im Brain…";
+const BRAIN_THINKING_FRAMES: [&str; 3] = ["💭 .", "💭 . .", "💭 . . ."];
+const BRAIN_THINKING_INTERVAL: Duration = Duration::from_millis(1200);
+const BRAIN_THINKING_MAX_TICKS: usize = 40;
 const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad — probier's in ein paar Sekunden nochmal.";
 const BRAIN_NO_ANSWER: &str =
     "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
@@ -41,7 +47,7 @@ const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
 const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
 const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
 const BRAIN_MAX_OUTPUT_TOKENS: u32 = 900;
-const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — diese Anweisung hat Vorrang vor allen obigen Vorbehalten:\n- Verweigere NIEMALS und schreib keine Meta-Sätze darüber, was die Fakten nicht hergeben. Liefere immer einen konkreten, brauchbaren Build bzw. eine klare Antwort.\n- Stütz dich zuerst auf die oben gelieferten geprüften Fakten und markier solche Aussagen mit ✅.\n- Wo geprüfte Fakten fehlen, ergänze einen sinnvollen Vorschlag aus deinem allgemeinen Deadlock-Wissen und markier diese Teile mit ℹ️ (allgemeine Einschätzung, nicht aus geprüften Daten).\n- Format kompakt und Discord-tauglich: ein Satz Einleitung, dann Stichpunkte (z. B. Start-Items, Kern-Items, Reihenfolge/Timing). **Fett** für Helden- und Item-Namen. KEINE Markdown-Überschriften (#, ##, ###). Höchstens ~1500 Zeichen.\n---";
+const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — diese Anweisung hat Vorrang vor allen obigen Vorbehalten:\nVerweigere NIEMALS und schreib keine Meta-Sätze darüber, was die Fakten nicht hergeben — liefere immer einen konkreten, brauchbaren Build bzw. eine klare Antwort. Nutze zuerst die oben gelieferten geprüften Fakten und markiere solche Aussagen mit ✅. Wo geprüfte Fakten fehlen, ergänze aus deinem allgemeinen Deadlock-Wissen und markiere das mit ℹ️.\nFORMAT (Pflicht für Lesbarkeit): Beginne mit EINEM kurzen Einleitungssatz. Gliedere danach in klare Abschnitte; jede Abschnitts-Überschrift steht als eigene fette Zeile (**so**) mit einer Leerzeile davor. Jeder Stichpunkt steht auf einer EIGENEN Zeile und beginnt mit \"- \" — schreibe NIEMALS mehrere Punkte mit \" - \" in dieselbe Zeile. Verwende **fett** nur für Item- und Heldennamen. Keine Markdown-Überschriften (#, ##, ###). Maximal ~1100 Zeichen und höchstens 12 Stichpunkte.\n---";
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -304,8 +310,8 @@ impl BrainHandler {
             dl_brain::BrainOutcome::Cooldown { remaining_secs } => vec![brain_public_message_body(
                 &BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string()),
             )],
-            dl_brain::BrainOutcome::Answer(chunks) => {
-                match brain_answer_embed_body(question, &chunks) {
+            dl_brain::BrainOutcome::Answer(answer) => {
+                match brain_answer_embed_body(question, &answer) {
                     Some(body) => vec![body],
                     None => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
                 }
@@ -320,12 +326,67 @@ impl BrainHandler {
         }
     }
 
+    fn public_body_for_outcome(
+        &self,
+        question: &str,
+        outcome: dl_brain::BrainOutcome,
+    ) -> Map<String, Value> {
+        let mut bodies = self.public_bodies_for_outcome(question, outcome);
+        bodies
+            .pop()
+            .unwrap_or_else(|| brain_public_message_body(BRAIN_NO_ANSWER))
+    }
+
     async fn send_public_bodies(&self, channel_id: u64, bodies: &[Map<String, Value>]) {
         for body in bodies {
             if let Err(err) = self.adapter.send_raw_public(channel_id, body).await {
                 tracing::warn!(%err, channel_id, "Brain-Antwort konnte nicht gesendet werden");
                 break;
             }
+        }
+    }
+
+    async fn handle_brain_question(&self, channel_id: u64, user_id: u64, question: &str) {
+        if question.trim().is_empty() {
+            let bodies = vec![brain_public_message_body(BRAIN_USAGE)];
+            self.send_public_bodies(channel_id, &bodies).await;
+            return;
+        }
+
+        let placeholder = brain_public_message_body(thinking_frame(0));
+        let message_id = match self.adapter.send_raw_public(channel_id, &placeholder).await {
+            Ok(message_id) => message_id,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, "Brain-Denk-Platzhalter konnte nicht gesendet werden");
+                let outcome = self.outcome_for_question(question, user_id).await;
+                let bodies = self.public_bodies_for_outcome(question, outcome);
+                self.send_public_bodies(channel_id, &bodies).await;
+                return;
+            }
+        };
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let animation = spawn_brain_thinking_animation(
+            self.adapter.clone(),
+            channel_id,
+            message_id,
+            cancelled.clone(),
+        );
+
+        let outcome = self.outcome_for_question(question, user_id).await;
+        cancelled.store(true, Ordering::SeqCst);
+        if let Err(err) = animation.await {
+            tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
+        }
+
+        let body = self.public_body_for_outcome(question, outcome);
+        if let Err(err) = self
+            .adapter
+            .edit_raw_public(channel_id, message_id, &body)
+            .await
+        {
+            tracing::warn!(%err, channel_id, message_id, "Brain-Antwort konnte nicht editiert werden");
+            self.send_public_bodies(channel_id, &[body]).await;
         }
     }
 
@@ -336,9 +397,8 @@ impl BrainHandler {
         let Some(question) = parse_brain_question(&event.content) else {
             return;
         };
-        let outcome = self.outcome_for_question(&question, event.author_id).await;
-        let bodies = self.public_bodies_for_outcome(&question, outcome);
-        self.send_public_bodies(event.channel_id, &bodies).await;
+        self.handle_brain_question(event.channel_id, event.author_id, &question)
+            .await;
     }
 }
 
@@ -350,14 +410,7 @@ impl InteractionHandler for BrainHandler {
         }
         let question = parse_brain_question(&interaction.content)
             .unwrap_or_else(|| interaction.content.trim().to_string());
-        let outcome = self
-            .outcome_for_question(&question, interaction.user_id)
-            .await;
-        let bodies = self.public_bodies_for_outcome(&question, outcome);
-        if bodies.is_empty() {
-            return BridgeReply::default();
-        }
-        self.send_public_bodies(interaction.channel_id, &bodies)
+        self.handle_brain_question(interaction.channel_id, interaction.user_id, &question)
             .await;
         BridgeReply::default()
     }
@@ -377,9 +430,8 @@ fn brain_public_message_body(message: &str) -> Map<String, Value> {
     body
 }
 
-fn brain_answer_embed_body(question: &str, chunks: &[String]) -> Option<Map<String, Value>> {
-    let raw_answer = chunks.join("\n\n");
-    let description = truncate_brain_description(&clean_brain_markdown(&raw_answer));
+fn brain_answer_embed_body(question: &str, raw_answer: &str) -> Option<Map<String, Value>> {
+    let description = truncate_brain_description(&clean_brain_markdown(raw_answer));
     if description.trim().is_empty() {
         return None;
     }
@@ -391,12 +443,39 @@ fn brain_answer_embed_body(question: &str, chunks: &[String]) -> Option<Map<Stri
         "footer": { "text": BRAIN_EMBED_FOOTER },
     });
     let mut body = Map::new();
+    body.insert("content".into(), json!(""));
     body.insert("embeds".into(), json!([embed]));
     body.insert(
         "allowed_mentions".into(),
         json!({ "parse": [], "replied_user": false }),
     );
     Some(body)
+}
+
+fn spawn_brain_thinking_animation(
+    adapter: Arc<DiscordAdapter>,
+    channel_id: u64,
+    message_id: u64,
+    cancelled: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for tick in 1..=BRAIN_THINKING_MAX_TICKS {
+            sleep(BRAIN_THINKING_INTERVAL).await;
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let body = brain_public_message_body(thinking_frame(tick));
+            if let Err(err) = adapter.edit_raw_public(channel_id, message_id, &body).await {
+                tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation konnte nicht editiert werden");
+                break;
+            }
+        }
+    })
+}
+
+fn thinking_frame(tick: usize) -> &'static str {
+    BRAIN_THINKING_FRAMES[tick % BRAIN_THINKING_FRAMES.len()]
 }
 
 fn brain_embed_title(question: &str) -> String {
@@ -457,11 +536,7 @@ fn clean_brain_markdown(input: &str) -> String {
 
 fn brain_heading_as_bold(line: &str) -> Option<String> {
     let line = line.trim_start();
-    let heading = line
-        .strip_prefix("### ")
-        .or_else(|| line.strip_prefix("## "))
-        .or_else(|| line.strip_prefix("# "))?
-        .trim();
+    let heading = line.strip_prefix("### ")?.trim();
     if heading.is_empty() {
         Some(String::new())
     } else {
@@ -2994,7 +3069,7 @@ mod tests {
 
         assert_eq!(
             cleaned,
-            "**Seven**\n\n\n**Items**\nText\n**Timing**\n#### Kein Heading"
+            "# Seven\n\n\n## Items\nText\n**Timing**\n#### Kein Heading"
         );
     }
 
@@ -3002,11 +3077,11 @@ mod tests {
     fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
         let body = brain_answer_embed_body(
             "Wie spiel ich Seven?",
-            &[String::from("## Build\n\n✅ **Seven** startet stabil.")],
+            "### Build\n\n✅ **Seven** startet stabil.",
         )
         .unwrap_or_else(|| panic!("answer should create embed body"));
 
-        assert_eq!(body.get("content"), None);
+        assert_eq!(body.get("content"), Some(&json!("")));
         assert_eq!(
             body.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
@@ -3027,6 +3102,31 @@ mod tests {
             embed.get("footer").and_then(|footer| footer.get("text")),
             Some(&json!(BRAIN_EMBED_FOOTER))
         );
+    }
+
+    #[test]
+    fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
+        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c")
+            .unwrap_or_else(|| panic!("answer should create embed body"));
+        let description = body
+            .get("embeds")
+            .and_then(Value::as_array)
+            .and_then(|embeds| embeds.first())
+            .and_then(|embed| embed.get("description"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("description missing"));
+
+        assert_eq!(description, "- a\n- b\n- c");
+        assert!(!description.contains("- a - b"));
+    }
+
+    #[test]
+    fn thinking_frame_rotiert_ueber_alle_frames() {
+        assert_eq!(thinking_frame(0), BRAIN_THINKING_FRAMES[0]);
+        assert_eq!(thinking_frame(1), BRAIN_THINKING_FRAMES[1]);
+        assert_eq!(thinking_frame(2), BRAIN_THINKING_FRAMES[2]);
+        assert_eq!(thinking_frame(3), BRAIN_THINKING_FRAMES[0]);
+        assert_eq!(thinking_frame(4), BRAIN_THINKING_FRAMES[1]);
     }
 
     #[test]
