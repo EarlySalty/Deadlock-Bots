@@ -1,3 +1,11 @@
+## #168 — Sprachkanal verschieben passt die Einstellungen an
+
+**Ausgangslage:** Wer einen TempVoice-Kanal in eine andere Kategorie gezogen hat, blieb auf den alten Einstellungen sitzen: Eine Street-Brawl-Lane behielt z. B. ihr 4er-Limit, auch wenn sie nach Ranked oder Chill verschoben wurde — und nach einem Bot-Neustart konnten sogar die alten Regeln weiterwirken.
+
+**Was wurde geändert:** Beim Verschieben übernimmt die Lane jetzt sauber die Einstellungen der Zielkategorie — Platzanzahl, Rang-Regeln und Benennung stellen sich auf die neue Kategorie um. Der Neustart-Abgleich bleibt davon unberührt: bestehende Lanes behalten ihre bekannte Zuordnung wie bisher.
+
+**Wie es jetzt läuft:** Lane verschieben heißt jetzt auch wirklich „Lane passt sich an" — eine nach Ranked gezogene Lane verhält sich wie eine Ranked-Lane, eine nach Chill gezogene wie eine Chill-Lane.
+
 ## #167 — Reaction-Rollen, faireres Coaching und der große Rust-Nachzug
 
 **Ausgangslage:** Eine ganze Welle fertiger Arbeit lag bereit, aber noch nicht im laufenden Bot: ein neues Reaction-Rollen-System, eine faire Coach-Verteilung und der Rest der Rust-Portierung — Voice/TempVoice, Moderation, Stats und Spielersuche, Onboarding. Zusätzlich steckte im Voice-Code noch ein heikler Stolperstein: Beim Bot-Start hätte er unter ungünstigen Umständen aktive Sprachkanäle für „leer" halten und aufräumen können, bevor der Bot überhaupt richtig verbunden war.
