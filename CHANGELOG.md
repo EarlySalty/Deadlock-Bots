@@ -1,3 +1,11 @@
+## #171 — Coaching-Anfragen von der Website landen jetzt in Discord
+
+**Ausgangslage:** Wer auf der Website eine Coaching-Anfrage stellt, war bisher nur dort sichtbar — im Discord, wo die Coaches sich koordinieren, tauchte die Anfrage gar nicht auf. Das hieß: doppelt hinschauen, Sachen von Hand rüberkopieren, und leicht mal eine Anfrage übersehen.
+
+**Was wurde geändert:** Eine neue Website-Anfrage erscheint jetzt automatisch als schickes Embed im Coaching-Anfrage-Kanal — mit Rang, Hero, Verfügbarkeit und den Punkten, an denen jemand arbeiten will, plus einem Button „Auf der Website öffnen", der direkt zur Anfrage führt. Coaches übernehmen sie wie gewohnt per Klick (Claim bzw. faire Reihum-Zuteilung), und die Übernahme wird zurück auf die Website gespiegelt, sodass die Anfrage dort als vergeben auftaucht — ohne Doppel-Einträge.
+
+**Wie es jetzt läuft:** Website und Discord ziehen beim Coaching am selben Strang: eine Anfrage, ein Ort zum Übernehmen, kein Hin- und Herkopieren mehr. Bestehende Anfragen bleiben unberührt — gespiegelt wird ab jetzt, was neu reinkommt.
+
 ## #170 — `!brain`: aufgeräumte Antworten + „denkt nach"-Anzeige
 
 **Ausgangslage:** Die frischen `!brain`-Antworten kamen als dichte Textwand — die Stichpunkte klebten alle in einer Zeile, weil die Zeilenumbrüche intern beim Zusammenbauen verloren gingen. Und nach dem Absenden stand man ein paar Sekunden vor dem Nichts, bis die Antwort plötzlich da war.
