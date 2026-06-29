@@ -870,7 +870,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             website_invites.ensure_invites().await;
         });
 
-        // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Termin-DMs 60s
+        // Coaching-Plattform-Brücke (7): Rollen-Sync 10min + Notifications 60s
         // + Roster-Resync bei Coach-Rollen-Änderung (Debounce). Teilt sich den
         // oben gebauten Website-Client mit CoachingRequests.
         match coaching_website.clone() {
@@ -881,6 +881,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         adapter: adapter.clone(),
                         guild_id: 1289721245281292288,
                     }),
+                    request_sink: Some(coaching_requests.clone()),
                 });
                 dl_community::coaching::spawn(sync, &dispatcher);
             }

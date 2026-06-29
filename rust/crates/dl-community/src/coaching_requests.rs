@@ -45,6 +45,7 @@ pub const ROLE_EXPIRY_HOURS: i64 = 168;
 pub const COACHING_WEBSITE_URL: &str = "https://deutsche-deadlock-community.de/coaching";
 pub const COACHING_WEBSITE_CTA_TEXT: &str = "👉 **Bereit loszulegen?** Stell deine Coaching-Anfrage direkt über den Button unten auf unserer Website — dort füllst du in einer Minute alles aus, der Rest läuft von selbst.";
 pub const COACHING_WEBSITE_BUTTON_LABEL: &str = "Coaching-Anfrage starten";
+pub const COACHING_WEBSITE_OPEN_BUTTON_LABEL: &str = "Auf der Website öffnen";
 const PANEL_KV_NS: &str = "coaching";
 const PANEL_KV_KEY: &str = "panel_message_id";
 
@@ -101,6 +102,34 @@ pub fn format_ai_summary(value: &str) -> String {
     } else {
         let cut: String = trimmed.chars().take(1023).collect();
         format!("{cut}…")
+    }
+}
+
+fn combine_rank(rank: &str, subrank: &str) -> String {
+    let rank = rank.trim();
+    let subrank = subrank.trim();
+    match (rank.is_empty(), subrank.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => rank.to_string(),
+        (true, false) => subrank.to_string(),
+        (false, false) => {
+            if rank.split_whitespace().last() == Some(subrank) {
+                rank.to_string()
+            } else {
+                format!("{rank} {subrank}")
+            }
+        }
+    }
+}
+
+fn combine_games_hours(games_played: &str, hours_played: &str) -> String {
+    let games_played = games_played.trim();
+    let hours_played = hours_played.trim();
+    match (games_played.is_empty(), hours_played.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => games_played.to_string(),
+        (true, false) => hours_played.to_string(),
+        (false, false) => format!("{games_played} / {hours_played}"),
     }
 }
 
@@ -173,21 +202,124 @@ pub struct RequestData {
     pub ai_summary: String,
 }
 
-/// Anfrage-Embed (wie _build_request_embed).
-pub fn build_request_embed(
+#[derive(Debug, Clone)]
+struct RequestCreatedNotification {
+    request_id: i64,
+    coachee_id: String,
+    discord_user_id: u64,
+    discord_username: String,
+    rank: String,
+    subrank: String,
+    hero: Option<String>,
+    games_played: Option<String>,
+    hours_played: Option<String>,
+    availability: Option<String>,
+    current_problems: Option<String>,
+    preferred_coach_id: Option<String>,
+}
+
+impl RequestCreatedNotification {
+    fn from_item(item: &Value) -> Result<Self, String> {
+        let request_id_raw = required_string(item, "request_id")?;
+        let request_id = request_id_raw
+            .parse::<i64>()
+            .map_err(|_| format!("request_id ist nicht numerisch: {request_id_raw}"))?;
+        Ok(Self {
+            request_id,
+            coachee_id: required_string(item, "coachee_id")?,
+            discord_user_id: required_u64(item, "discord_user_id")?,
+            discord_username: optional_string(item, "discord_username").unwrap_or_default(),
+            rank: optional_string(item, "rank").unwrap_or_default(),
+            subrank: optional_string(item, "subrank").unwrap_or_default(),
+            hero: optional_string(item, "hero"),
+            games_played: optional_string(item, "games_played"),
+            hours_played: optional_string(item, "hours_played"),
+            availability: optional_string(item, "availability"),
+            current_problems: optional_string(item, "current_problems"),
+            preferred_coach_id: optional_string(item, "preferred_coach_id"),
+        })
+    }
+
+    fn request_data(&self) -> RequestData {
+        RequestData {
+            id: self.request_id,
+            user_id: self.discord_user_id,
+            username: self.discord_username.clone(),
+            rank: combine_rank(&self.rank, &self.subrank),
+            hero: self.hero.clone().unwrap_or_default(),
+            games_played: combine_games_hours(
+                self.games_played.as_deref().unwrap_or_default(),
+                self.hours_played.as_deref().unwrap_or_default(),
+            ),
+            scheduled_slot: self.availability.clone().unwrap_or_default(),
+            current_problems: self.current_problems.clone().unwrap_or_default(),
+            ai_summary: String::new(),
+        }
+    }
+}
+
+fn required_string(item: &Value, key: &str) -> Result<String, String> {
+    optional_string(item, key).ok_or_else(|| format!("Notification ohne {key}"))
+}
+
+fn optional_string(item: &Value, key: &str) -> Option<String> {
+    let value = item.get(key)?;
+    let raw = match value {
+        Value::Null => return None,
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        _ => return None,
+    };
+    let trimmed = raw.trim().to_string();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
+fn required_u64(item: &Value, key: &str) -> Result<u64, String> {
+    let Some(value) = item.get(key) else {
+        return Err(format!("Notification ohne {key}"));
+    };
+    if let Some(value) = value.as_u64() {
+        return Ok(value);
+    }
+    if let Some(value) = value.as_i64() {
+        if value >= 0 {
+            return Ok(value as u64);
+        }
+    }
+    if let Some(value) = value.as_str().and_then(|raw| raw.trim().parse().ok()) {
+        return Ok(value);
+    }
+    Err(format!("Notification-Feld {key} ist keine Discord-ID"))
+}
+
+fn build_request_embed_inner(
     request: &RequestData,
     assigned_coach_id: Option<u64>,
     reserved_until: Option<i64>,
     now_ts: i64,
+    include_ai: bool,
+    include_player: bool,
 ) -> Value {
-    let mut fields = vec![
+    let mut fields = Vec::new();
+    if include_player {
+        fields.push(json!({
+            "name": "Spieler",
+            "value": format!("<@{}>", request.user_id),
+            "inline": true,
+        }));
+    }
+    fields.extend([
         json!({ "name": "Rang", "value": normalize_inline(&request.rank, "N/A", 256), "inline": true }),
         json!({ "name": "Hero", "value": normalize_inline(&request.hero, "Nicht angegeben", 256), "inline": true }),
         json!({ "name": "Games / Stunden", "value": normalize_inline(&request.games_played, "N/A", 256), "inline": true }),
         json!({ "name": "📅 Bevorzugter Slot", "value": normalize_inline(&request.scheduled_slot, "Nicht angegeben", 256), "inline": false }),
         json!({ "name": "📝 Probleme", "value": normalize_inline(&request.current_problems, "Keine Beschreibung", 1024), "inline": false }),
-        json!({ "name": "🤖 AI Analyse", "value": format_ai_summary(&request.ai_summary), "inline": false }),
-    ];
+    ]);
+    if include_ai {
+        fields.push(
+            json!({ "name": "🤖 AI Analyse", "value": format_ai_summary(&request.ai_summary), "inline": false }),
+        );
+    }
     if let (Some(coach), Some(until)) = (assigned_coach_id, reserved_until) {
         if now_ts < until {
             fields.push(json!({
@@ -205,12 +337,78 @@ pub fn build_request_embed(
     })
 }
 
+/// Anfrage-Embed (wie _build_request_embed).
+pub fn build_request_embed(
+    request: &RequestData,
+    assigned_coach_id: Option<u64>,
+    reserved_until: Option<i64>,
+    now_ts: i64,
+) -> Value {
+    build_request_embed_inner(
+        request,
+        assigned_coach_id,
+        reserved_until,
+        now_ts,
+        true,
+        false,
+    )
+}
+
+pub fn build_request_embed_no_ai(
+    request: &RequestData,
+    assigned_coach_id: Option<u64>,
+    reserved_until: Option<i64>,
+    now_ts: i64,
+) -> Value {
+    build_request_embed_inner(
+        request,
+        assigned_coach_id,
+        reserved_until,
+        now_ts,
+        false,
+        true,
+    )
+}
+
+fn build_request_embed_for_existing_request(
+    request: &RequestData,
+    assigned_coach_id: Option<u64>,
+    reserved_until: Option<i64>,
+    now_ts: i64,
+) -> Value {
+    if request.ai_summary.trim().is_empty() {
+        build_request_embed_no_ai(request, assigned_coach_id, reserved_until, now_ts)
+    } else {
+        build_request_embed(request, assigned_coach_id, reserved_until, now_ts)
+    }
+}
+
 pub fn claim_components(request_id: i64, author_id: u64) -> Value {
     json!([{ "type": 1, "components": [
         { "type": 2, "style": 3, "label": "Coaching übernehmen",
           "custom_id": format!("coach_claim_{request_id}") },
         { "type": 2, "style": 2, "label": "Freigeben",
           "custom_id": format!("coach_release_{request_id}_{author_id}") },
+    ]}])
+}
+
+pub fn coachee_website_url(coachee_id: &str) -> String {
+    let coachee_id = coachee_id.trim().trim_matches('/');
+    format!("{COACHING_WEBSITE_URL}/coachees/{coachee_id}")
+}
+
+pub fn claim_components_with_website_link(
+    request_id: i64,
+    author_id: u64,
+    coachee_id: &str,
+) -> Value {
+    json!([{ "type": 1, "components": [
+        { "type": 2, "style": 3, "label": "Coaching übernehmen",
+          "custom_id": format!("coach_claim_{request_id}") },
+        { "type": 2, "style": 2, "label": "Freigeben",
+          "custom_id": format!("coach_release_{request_id}_{author_id}") },
+        { "type": 2, "style": 5, "label": COACHING_WEBSITE_OPEN_BUTTON_LABEL,
+          "url": coachee_website_url(coachee_id) },
     ]}])
 }
 
@@ -499,31 +697,37 @@ impl CoachingRequests {
             .read(move |conn| {
                 conn.query_row(
                     "SELECT id, discord_user_id, COALESCE(discord_username,''), rank,
-                            COALESCE(hero,''), COALESCE(games_played,''),
-                            COALESCE(scheduled_slot,''), COALESCE(current_problems,''),
-                            COALESCE(ai_summary,''), status, assigned_coach_id,
+                            COALESCE(subrank,''), COALESCE(hero,''),
+                            COALESCE(games_played,''), COALESCE(hours_played,''),
+                            COALESCE(NULLIF(scheduled_slot,''), availability, ''),
+                            COALESCE(current_problems,''), COALESCE(ai_summary,''),
+                            status, assigned_coach_id,
                             reserved_until, message_id, role_expires_at
                        FROM coaching_requests WHERE id = ?1",
                     [request_id],
                     |row| {
+                        let rank: String = row.get(3)?;
+                        let subrank: String = row.get(4)?;
+                        let games_played: String = row.get(6)?;
+                        let hours_played: String = row.get(7)?;
                         Ok(Some((
                             RequestData {
                                 id: row.get(0)?,
                                 user_id: row.get(1)?,
                                 username: row.get(2)?,
-                                rank: row.get(3)?,
-                                hero: row.get(4)?,
-                                games_played: row.get(5)?,
-                                scheduled_slot: row.get(6)?,
-                                current_problems: row.get(7)?,
-                                ai_summary: row.get(8)?,
+                                rank: combine_rank(&rank, &subrank),
+                                hero: row.get(5)?,
+                                games_played: combine_games_hours(&games_played, &hours_played),
+                                scheduled_slot: row.get(8)?,
+                                current_problems: row.get(9)?,
+                                ai_summary: row.get(10)?,
                             },
-                            row.get::<_, String>(9)?,
-                            row.get::<_, Option<String>>(10)?
+                            row.get::<_, String>(11)?,
+                            row.get::<_, Option<String>>(12)?
                                 .and_then(|raw| raw.parse::<u64>().ok()),
-                            row.get::<_, Option<i64>>(11)?,
-                            row.get::<_, Option<u64>>(12)?,
                             row.get::<_, Option<i64>>(13)?,
+                            row.get::<_, Option<u64>>(14)?,
+                            row.get::<_, Option<i64>>(15)?,
                         )))
                     },
                 )
@@ -603,16 +807,24 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .unwrap_or_default()
     }
 
-    /// Anfrage posten (wie _post_request_to_channel): faire Rotation +
-    /// 24-h-Reservierung.
-    async fn post_request(&self, request: &mut RequestData, ai_summary: String) {
+    async fn post_request_to_channel(
+        &self,
+        request: &mut RequestData,
+        ai_summary: String,
+        include_ai: bool,
+        components: Value,
+    ) -> Result<(), String> {
         request.ai_summary = ai_summary.clone();
         let now_ts = chrono::Utc::now().timestamp();
         // Kandidaten + Rotations-Daten
         let stats = self.auto_assign_stats().await;
         let assigned = pick_fair_coach(&stats);
         let reserved_until = assigned.map(|_| now_ts + CLAIM_RESERVATION_HOURS * 3600);
-        let embed = build_request_embed(request, assigned, reserved_until, now_ts);
+        let embed = if include_ai {
+            build_request_embed(request, assigned, reserved_until, now_ts)
+        } else {
+            build_request_embed_no_ai(request, assigned, reserved_until, now_ts)
+        };
         let content = match assigned {
             Some(coach) => format!(
                 "📥 Anfrage von <@{}> – 🎯 reserviert für <@{coach}> ({CLAIM_RESERVATION_HOURS}h)",
@@ -623,59 +835,148 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 request.user_id
             ),
         };
-        let components = claim_components(request.id, request.user_id);
-        match self
+        let message_id = self
             .port
             .send_request_message(REQUEST_CHANNEL_ID, &content, embed, components)
+            .await?;
+        let request_id = request.id;
+        let assigned_coach_id = assigned.map(|coach| coach.to_string());
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "UPDATE coaching_requests SET message_id=?1, channel_id=?2,
+                            ai_summary=?3, status='analyzed', assigned_coach_id=?4,
+                            reserved_until=?5, updated_at=?6 WHERE id=?7",
+                    rusqlite::params![
+                        message_id,
+                        REQUEST_CHANNEL_ID,
+                        ai_summary,
+                        assigned_coach_id,
+                        reserved_until,
+                        chrono::Utc::now().timestamp(),
+                        request_id
+                    ],
+                )?;
+                if let (Some(coach), Some(last_assigned_at)) = (assigned, reserved_until) {
+                    conn.execute(
+                        "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
+                         VALUES (?1, ?2)
+                         ON CONFLICT(coach_id) DO UPDATE SET
+                           last_assigned_at = excluded.last_assigned_at",
+                        rusqlite::params![coach.to_string(), last_assigned_at],
+                    )?;
+                }
+                Ok(())
+            })
+            .await
+            .map_err(|err| err.to_string())?;
+        // Website-Mirror (Python `_post_request_to_channel`:852) — mit
+        // dem Display-Namen des reservierten Coaches, falls einer
+        // zugewiesen wurde.
+        let assigned_coach_username = match assigned {
+            Some(coach) => Some(self.port.member_display_name(self.guild_id, coach).await),
+            None => None,
+        };
+        self.mirror_to_website(MirrorOpts {
+            request_id: request.id,
+            assigned_coach_username,
+            ..MirrorOpts::default()
+        });
+        Ok(())
+    }
+
+    /// Anfrage posten (wie _post_request_to_channel): faire Rotation +
+    /// 24-h-Reservierung.
+    async fn post_request(&self, request: &mut RequestData, ai_summary: String) {
+        let components = claim_components(request.id, request.user_id);
+        if let Err(err) = self
+            .post_request_to_channel(request, ai_summary, true, components)
             .await
         {
-            Ok(message_id) => {
-                let request_id = request.id;
-                let assigned_coach_id = assigned.map(|coach| coach.to_string());
-                let _ = self
-                    .db
-                    .write(move |conn| {
-                        conn.execute(
-                            "UPDATE coaching_requests SET message_id=?1, channel_id=?2,
-                                    ai_summary=?3, status='analyzed', assigned_coach_id=?4,
-                                    reserved_until=?5, updated_at=?6 WHERE id=?7",
-                            rusqlite::params![
-                                message_id,
-                                REQUEST_CHANNEL_ID,
-                                ai_summary,
-                                assigned_coach_id,
-                                reserved_until,
-                                chrono::Utc::now().timestamp(),
-                                request_id
-                            ],
-                        )?;
-                        if let (Some(coach), Some(last_assigned_at)) = (assigned, reserved_until) {
-                            conn.execute(
-                                "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
-                                 VALUES (?1, ?2)
-                                 ON CONFLICT(coach_id) DO UPDATE SET
-                                   last_assigned_at = excluded.last_assigned_at",
-                                rusqlite::params![coach.to_string(), last_assigned_at],
-                            )?;
-                        }
-                        Ok(())
-                    })
-                    .await;
-                // Website-Mirror (Python `_post_request_to_channel`:852) — mit
-                // dem Display-Namen des reservierten Coaches, falls einer
-                // zugewiesen wurde.
-                let assigned_coach_username = match assigned {
-                    Some(coach) => Some(self.port.member_display_name(self.guild_id, coach).await),
-                    None => None,
-                };
-                self.mirror_to_website(MirrorOpts {
-                    request_id: request.id,
-                    assigned_coach_username,
-                    ..MirrorOpts::default()
-                });
-            }
-            Err(err) => tracing::warn!(%err, "Coaching-Post fehlgeschlagen"),
+            tracing::warn!(%err, "Coaching-Post fehlgeschlagen");
         }
+    }
+
+    async fn upsert_request_created_notification(
+        &self,
+        data: &RequestCreatedNotification,
+    ) -> Result<bool, String> {
+        let request_id = data.request_id;
+        let discord_user_id = data.discord_user_id;
+        let discord_username = data.discord_username.clone();
+        let rank = data.rank.clone();
+        let subrank = data.subrank.clone();
+        let hero = data.hero.clone();
+        let games_played = data.games_played.clone();
+        let hours_played = data.hours_played.clone();
+        let availability = data.availability.clone();
+        let scheduled_slot = data.availability.clone();
+        let current_problems = data.current_problems.clone();
+        let now = chrono::Utc::now().timestamp();
+        self.db
+            .write(move |conn| {
+                conn.execute(
+                    "INSERT INTO coaching_requests (
+                       id, discord_user_id, discord_username, rank, subrank, hero,
+                       games_played, hours_played, availability, scheduled_slot,
+                       current_problems, ai_summary, status, created_at, updated_at
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, '', 'pending', ?12, ?12)
+                     ON CONFLICT(id) DO UPDATE SET
+                       discord_user_id=excluded.discord_user_id,
+                       discord_username=excluded.discord_username,
+                       rank=excluded.rank,
+                       subrank=excluded.subrank,
+                       hero=excluded.hero,
+                       games_played=excluded.games_played,
+                       hours_played=excluded.hours_played,
+                       availability=excluded.availability,
+                       scheduled_slot=excluded.scheduled_slot,
+                       current_problems=excluded.current_problems,
+                       updated_at=excluded.updated_at",
+                    rusqlite::params![
+                        request_id,
+                        discord_user_id,
+                        discord_username,
+                        rank,
+                        subrank,
+                        hero,
+                        games_played,
+                        hours_played,
+                        availability,
+                        scheduled_slot,
+                        current_problems,
+                        now,
+                    ],
+                )?;
+                conn.query_row(
+                    "SELECT message_id FROM coaching_requests WHERE id=?1",
+                    [request_id],
+                    |row| row.get::<_, Option<i64>>(0),
+                )
+                .map(|message_id| message_id.is_some())
+            })
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    pub async fn post_request_created_notification(&self, item: &Value) -> Result<(), String> {
+        let data = RequestCreatedNotification::from_item(item)?;
+        if let Some(preferred_coach_id) = data.preferred_coach_id.as_deref() {
+            tracing::debug!(
+                request_id = data.request_id,
+                preferred_coach_id,
+                "request_created preferred_coach_id gelesen"
+            );
+        }
+        if self.upsert_request_created_notification(&data).await? {
+            return Ok(());
+        }
+
+        let mut request = data.request_data();
+        let components =
+            claim_components_with_website_link(request.id, request.user_id, &data.coachee_id);
+        self.post_request_to_channel(&mut request, String::new(), false, components)
+            .await
     }
 
     /// Reservierung aufheben + Nachricht aktualisieren (wie _open_request_to_all).
@@ -708,7 +1009,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             "📥 Anfrage von <@{}> – {prefix}jetzt für alle Coaches offen",
             request.user_id
         );
-        let embed = build_request_embed(&request, None, None, now_ts);
+        let embed = build_request_embed_for_existing_request(&request, None, None, now_ts);
         self.port
             .edit_request_message(
                 REQUEST_CHANNEL_ID,
@@ -1140,6 +1441,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     }
 }
 
+#[async_trait::async_trait]
+impl crate::coaching::RequestNotificationSink for CoachingRequests {
+    async fn post_request_created_notification(&self, item: &Value) -> Result<(), String> {
+        CoachingRequests::post_request_created_notification(self, item).await
+    }
+}
+
 /// Eine aktive Coaching-Session, deren Feedback-Umfrage noch aussteht.
 struct SurveySession {
     id: String,
@@ -1385,7 +1693,7 @@ impl InteractionHandler for CoachingHandler {
                 )
                 .await;
             if let Some(message_id) = message_id {
-                let embed = build_request_embed(&request, None, None, now_ts);
+                let embed = build_request_embed_for_existing_request(&request, None, None, now_ts);
                 c.port
                     .edit_request_message(
                         REQUEST_CHANNEL_ID,
@@ -1666,6 +1974,14 @@ mod tests {
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex;
 
+    #[derive(Debug, Clone)]
+    struct RequestMessageCall {
+        channel_id: u64,
+        content: String,
+        embed: Value,
+        components: Value,
+    }
+
     #[derive(Default)]
     struct MockCoachingPort {
         coach_ids: Mutex<Vec<u64>>,
@@ -1678,6 +1994,8 @@ mod tests {
         channel_texts: Mutex<Vec<(u64, String)>>,
         added_roles: Mutex<Vec<(u64, u64, u64, String)>>,
         removed_roles: Mutex<Vec<(u64, u64, u64, String)>>,
+        request_messages: Mutex<Vec<RequestMessageCall>>,
+        request_message_error: Mutex<Option<String>>,
     }
 
     #[async_trait::async_trait]
@@ -1727,11 +2045,28 @@ mod tests {
 
         async fn send_request_message(
             &self,
-            _channel_id: u64,
-            _content: &str,
-            _embed: Value,
-            _components: Value,
+            channel_id: u64,
+            content: &str,
+            embed: Value,
+            components: Value,
         ) -> Result<u64, String> {
+            if let Some(err) = self
+                .request_message_error
+                .lock()
+                .expect("request_message_error lock")
+                .clone()
+            {
+                return Err(err);
+            }
+            self.request_messages
+                .lock()
+                .expect("request_messages lock")
+                .push(RequestMessageCall {
+                    channel_id,
+                    content: content.to_string(),
+                    embed,
+                    components,
+                });
             Ok(77)
         }
 
@@ -2075,6 +2410,103 @@ mod tests {
             cancel[0]["components"][0]["custom_id"],
             "coach_cancel_abc-def_42"
         );
+
+        let embed = build_request_embed_no_ai(&request, None, None, 500);
+        let fields = embed["fields"].as_array().expect("fields");
+        assert_eq!(fields.len(), 6);
+        assert_eq!(fields[0]["name"], "Spieler");
+        assert_eq!(fields[0]["value"], "<@42>");
+        assert!(!fields
+            .iter()
+            .any(|field| field["name"].as_str() == Some("🤖 AI Analyse")));
+
+        let claim = claim_components_with_website_link(7, 42, "coachee-abc");
+        let buttons = claim[0]["components"].as_array().expect("buttons");
+        assert_eq!(buttons.len(), 3);
+        assert_eq!(buttons[0]["custom_id"], "coach_claim_7");
+        assert_eq!(buttons[1]["custom_id"], "coach_release_7_42");
+        assert_eq!(buttons[2]["style"], 5);
+        assert_eq!(buttons[2]["label"], COACHING_WEBSITE_OPEN_BUTTON_LABEL);
+        assert_eq!(
+            buttons[2]["url"],
+            "https://deutsche-deadlock-community.de/coaching/coachees/coachee-abc"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_created_notification_postet_no_ai_embed_mit_claim_und_link() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        port.coach_ids.lock().expect("coach_ids lock").push(10);
+        let item = json!({
+            "type": "request_created",
+            "request_id": "50",
+            "coachee_id": "coachee-50",
+            "discord_user_id": "4242",
+            "discord_username": "WebsiteUser",
+            "rank": "Archon",
+            "subrank": "3",
+            "hero": "Vindicta",
+            "games_played": "120",
+            "hours_played": "80",
+            "availability": "Montag 18:00",
+            "current_problems": "Lane-Phase",
+            "preferred_coach_id": "10",
+        });
+
+        coaching
+            .post_request_created_notification(&item)
+            .await
+            .expect("notification post");
+
+        let call = {
+            let calls = port.request_messages.lock().expect("request_messages lock");
+            assert_eq!(calls.len(), 1);
+            calls[0].clone()
+        };
+        assert_eq!(call.channel_id, REQUEST_CHANNEL_ID);
+        assert!(call.content.contains("<@4242>"));
+        assert!(port.dm_texts.lock().expect("dm_texts lock").is_empty());
+
+        let fields = call.embed["fields"].as_array().expect("fields");
+        assert!(fields
+            .iter()
+            .any(|field| field["name"] == "Spieler" && field["value"] == "<@4242>"));
+        assert!(fields
+            .iter()
+            .any(|field| field["name"] == "Rang" && field["value"] == "Archon 3"));
+        assert!(fields
+            .iter()
+            .any(|field| { field["name"] == "Games / Stunden" && field["value"] == "120 / 80" }));
+        assert!(!fields
+            .iter()
+            .any(|field| field["name"].as_str() == Some("🤖 AI Analyse")));
+
+        let buttons = call.components[0]["components"]
+            .as_array()
+            .expect("buttons");
+        assert_eq!(buttons[0]["custom_id"], "coach_claim_50");
+        assert_eq!(buttons[1]["custom_id"], "coach_release_50_4242");
+        assert_eq!(buttons[2]["style"], 5);
+        assert_eq!(
+            buttons[2]["url"],
+            "https://deutsche-deadlock-community.de/coaching/coachees/coachee-50"
+        );
+
+        let row: (String, Option<i64>, Option<i64>, Option<String>) = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT status, message_id, channel_id, assigned_coach_id
+                       FROM coaching_requests WHERE id=50",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+            })
+            .await
+            .expect("request row");
+        assert_eq!(row.0, "analyzed");
+        assert_eq!(row.1, Some(77));
+        assert_eq!(row.2, Some(REQUEST_CHANNEL_ID as i64));
+        assert_eq!(row.3.as_deref(), Some("10"));
     }
 
     #[test]

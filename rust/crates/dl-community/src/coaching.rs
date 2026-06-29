@@ -5,10 +5,10 @@
 //! - **Rollen-Sync** (alle 10 min): Mitglieder mit der Coach-Rolle →
 //!   `POST /coaching/platform/coaches/sync` — mit dem Roster-Wipe-Schutz
 //!   des Originals (leere Liste wird NIE gesendet).
-//! - **Notification-Poller** (alle 60 s): fällige Termin-DMs abholen
-//!   (`/notifications/due`), zustellen, bestätigen (`/notifications/ack`).
-//!   DM-Texte wortgleich; deaktivierte DMs werden geackt statt endlos
-//!   wiederholt.
+//! - **Notification-Poller** (alle 60 s): fällige Plattform-Notifications
+//!   abholen (`/notifications/due`), zustellen/spiegeln und bestätigen
+//!   (`/notifications/ack`). Termin-DMs bleiben wortgleich; deaktivierte DMs
+//!   werden geackt statt endlos wiederholt.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -229,6 +229,28 @@ impl WebsiteClient {
     }
 }
 
+#[async_trait::async_trait]
+pub trait CoachingPlatformClient: Send + Sync {
+    async fn sync_coaches(&self, coaches: &[Value]) -> bool;
+    async fn due_notifications(&self) -> Vec<Value>;
+    async fn ack_notifications(&self, items: &[Value]) -> bool;
+}
+
+#[async_trait::async_trait]
+impl CoachingPlatformClient for WebsiteClient {
+    async fn sync_coaches(&self, coaches: &[Value]) -> bool {
+        WebsiteClient::sync_coaches(self, coaches).await
+    }
+
+    async fn due_notifications(&self) -> Vec<Value> {
+        WebsiteClient::due_notifications(self).await
+    }
+
+    async fn ack_notifications(&self, items: &[Value]) -> bool {
+        WebsiteClient::ack_notifications(self, items).await
+    }
+}
+
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
 #[async_trait::async_trait]
@@ -246,9 +268,15 @@ pub trait CoachingPort: Send + Sync {
     async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String>;
 }
 
+#[async_trait::async_trait]
+pub trait RequestNotificationSink: Send + Sync {
+    async fn post_request_created_notification(&self, item: &Value) -> Result<(), String>;
+}
+
 pub struct CoachingSync {
-    pub client: Arc<WebsiteClient>,
+    pub client: Arc<dyn CoachingPlatformClient>,
     pub port: Arc<dyn CoachingPort>,
+    pub request_sink: Option<Arc<dyn RequestNotificationSink>>,
 }
 
 impl CoachingSync {
@@ -272,6 +300,22 @@ impl CoachingSync {
         }
         let mut to_ack: Vec<Value> = Vec::new();
         for item in items {
+            if item.get("type").and_then(Value::as_str) == Some("request_created") {
+                let Some(sink) = self.request_sink.as_ref() else {
+                    tracing::warn!(
+                        "request_created Notification ohne Request-Sink – wird nicht geackt"
+                    );
+                    continue;
+                };
+                match sink.post_request_created_notification(&item).await {
+                    Ok(()) => to_ack.push(item),
+                    Err(err) => {
+                        tracing::warn!(%err, "request_created Notification konnte nicht gepostet werden");
+                    }
+                }
+                continue;
+            }
+
             let Some(user_id) = item.get("discord_user_id").and_then(|v| {
                 v.as_u64()
                     .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
@@ -404,6 +448,48 @@ mod tests {
         cached: Vec<(u64, String, String, String)>,
         fetched: Vec<(u64, String, String, String)>,
         fetch_calls: Mutex<usize>,
+        dm_calls: Mutex<Vec<(u64, String)>>,
+    }
+
+    #[derive(Default)]
+    struct TestPlatformClient {
+        due: Mutex<Vec<Value>>,
+        acked: Mutex<Vec<Value>>,
+        synced_coaches: Mutex<Vec<Vec<Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl CoachingPlatformClient for TestPlatformClient {
+        async fn sync_coaches(&self, coaches: &[Value]) -> bool {
+            self.synced_coaches.lock().await.push(coaches.to_vec());
+            true
+        }
+
+        async fn due_notifications(&self) -> Vec<Value> {
+            std::mem::take(&mut *self.due.lock().await)
+        }
+
+        async fn ack_notifications(&self, items: &[Value]) -> bool {
+            self.acked.lock().await.extend_from_slice(items);
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct TestRequestSink {
+        posted: Mutex<Vec<Value>>,
+        fail: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl RequestNotificationSink for TestRequestSink {
+        async fn post_request_created_notification(&self, item: &Value) -> Result<(), String> {
+            if self.fail {
+                return Err("post failed".to_string());
+            }
+            self.posted.lock().await.push(item.clone());
+            Ok(())
+        }
     }
 
     #[async_trait::async_trait]
@@ -420,7 +506,8 @@ mod tests {
             self.fetched.clone()
         }
 
-        async fn send_dm(&self, _user_id: u64, _text: String) -> Result<bool, String> {
+        async fn send_dm(&self, user_id: u64, text: String) -> Result<bool, String> {
+            self.dm_calls.lock().await.push((user_id, text));
             Ok(true)
         }
     }
@@ -483,6 +570,63 @@ mod tests {
         assert_eq!(coaches.len(), 1);
         assert_eq!(coaches[0]["discord_user_id"], json!(42));
         assert_eq!(coaches[0]["display_name"], json!("Coach Display"));
+    }
+
+    #[tokio::test]
+    async fn request_created_wird_gepostet_statt_dm_und_geackt() {
+        let item = json!({
+            "type": "request_created",
+            "request_id": "99",
+            "coachee_id": "coachee-99",
+            "discord_user_id": 42,
+        });
+        let client = Arc::new(TestPlatformClient::default());
+        client.due.lock().await.push(item.clone());
+        let port = Arc::new(TestCoachingPort::default());
+        let sink = Arc::new(TestRequestSink::default());
+        let sync = CoachingSync {
+            client: client.clone(),
+            port: port.clone(),
+            request_sink: Some(sink.clone()),
+        };
+
+        sync.process_notifications().await;
+
+        assert_eq!(
+            sink.posted.lock().await.as_slice(),
+            std::slice::from_ref(&item)
+        );
+        assert!(port.dm_calls.lock().await.is_empty());
+        assert_eq!(
+            client.acked.lock().await.as_slice(),
+            std::slice::from_ref(&item)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_created_post_fehler_wird_nicht_geackt() {
+        let item = json!({
+            "type": "request_created",
+            "request_id": "99",
+            "coachee_id": "coachee-99",
+            "discord_user_id": 42,
+        });
+        let client = Arc::new(TestPlatformClient::default());
+        client.due.lock().await.push(item);
+        let port = Arc::new(TestCoachingPort::default());
+        let sink = Arc::new(TestRequestSink {
+            fail: true,
+            ..TestRequestSink::default()
+        });
+        let sync = CoachingSync {
+            client: client.clone(),
+            port,
+            request_sink: Some(sink),
+        };
+
+        sync.process_notifications().await;
+
+        assert!(client.acked.lock().await.is_empty());
     }
 
     #[test]
