@@ -1,3 +1,11 @@
+## #169 — `!brain`: schönere Antworten und immer ein Build
+
+**Ausgangslage:** Der frisch ausgelieferte `!brain`-Befehl hatte zwei Schwächen. Die Antwort kam als unstrukturierte Textwand inklusive roher Markdown-Zeichen, und bei dünner Faktenlage druckte der Bot oft einen langen „dazu hab ich zu wenig gesicherte Daten"-Absatz, statt etwas Brauchbares zu liefern.
+
+**Was wurde geändert:** Antworten kommen jetzt als sauberes Embed — Titel ist deine Frage, mit Farbakzent und Fußzeile. Und der Bot verweigert nicht mehr: Wo geprüfte Fakten vorliegen, nutzt er sie und markiert sie mit ✅; wo sie fehlen, ergänzt er einen sinnvollen Build aus allgemeinem Deadlock-Wissen und kennzeichnet diese Teile ehrlich mit ℹ️ (allgemeine Einschätzung, nicht aus geprüften Daten). Echte Nicht-Deadlock-Fragen werden weiterhin freundlich abgewiesen, und der Bot pingt dabei niemanden.
+
+**Wie es jetzt läuft:** `!brain` gibt immer eine konkrete, gut lesbare Antwort — geprüftes Wissen klar getrennt von allgemeiner Einschätzung, statt einer Absage oder einer Textwand.
+
 ## #168 — Sprachkanal verschieben passt die Einstellungen an
 
 **Ausgangslage:** Wer einen TempVoice-Kanal in eine andere Kategorie gezogen hat, blieb auf den alten Einstellungen sitzen: Eine Street-Brawl-Lane behielt z. B. ihr 4er-Limit, auch wenn sie nach Ranked oder Chill verschoben wurde — und nach einem Bot-Neustart konnten sogar die alten Regeln weiterwirken.
