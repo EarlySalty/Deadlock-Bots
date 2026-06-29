@@ -1,0 +1,22 @@
+[package]
+name = "dl-etage"
+description = "Coaching-Etage API (Slice 1 Strangler-Fig-Geruest)"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+dl-core.workspace = true
+dl-db.workspace = true
+anyhow.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+
+[lints]
+workspace = true

@@ -37,6 +37,8 @@ pub struct Ports {
     pub master_broker: u16,
     /// Öffentliche Tierlist (Python: TIERLIST_PUBLIC_PORT)
     pub tierlist_public: u16,
+    /// Coaching-Etage API (Strangler-Fig neben Python :8772)
+    pub etage: u16,
     /// Changelog-Empfänger des Changelog-Publisher-Cogs (Python: CHANGELOG_API_PORT)
     pub changelog_api: u16,
 }
@@ -74,6 +76,7 @@ impl Config {
             public_stats: port(&lookup, "PUBLIC_STATS_PORT", 8768)?,
             master_broker: port(&lookup, "MASTER_BROKER_PORT", 8770)?,
             tierlist_public: port(&lookup, "TIERLIST_PUBLIC_PORT", 8771)?,
+            etage: port(&lookup, "DL_ETAGE_PORT", 8773)?,
             changelog_api: port(&lookup, "CHANGELOG_API_PORT", 8899)?,
         };
 
@@ -118,6 +121,7 @@ mod tests {
         assert_eq!(cfg.ports.public_stats, 8768);
         assert_eq!(cfg.ports.master_broker, 8770);
         assert_eq!(cfg.ports.tierlist_public, 8771);
+        assert_eq!(cfg.ports.etage, 8773);
         assert_eq!(cfg.ports.changelog_api, 8899);
     }
 
@@ -160,5 +164,12 @@ mod tests {
         let map = HashMap::from([("PUBLIC_STATS_PORT", "9000")]);
         let cfg = Config::from_lookup(lookup_from(&map)).expect("gültig");
         assert_eq!(cfg.ports.public_stats, 9000);
+    }
+
+    #[test]
+    fn etage_port_override_wird_uebernommen() {
+        let map = HashMap::from([("DL_ETAGE_PORT", "9773")]);
+        let cfg = Config::from_lookup(lookup_from(&map)).expect("gültig");
+        assert_eq!(cfg.ports.etage, 9773);
     }
 }

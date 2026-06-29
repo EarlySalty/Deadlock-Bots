@@ -22,6 +22,7 @@ members = [
     "crates/dl-community",
     "crates/dl-dashboard",
     "bin/dl-bot",
+    "bin/dl-etage",
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",

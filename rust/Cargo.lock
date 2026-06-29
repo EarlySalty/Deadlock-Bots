@@ -519,6 +519,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-etage"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "dl-core",
+ "dl-db",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "dl-moderation"
 version = "0.1.0"
 dependencies = [
