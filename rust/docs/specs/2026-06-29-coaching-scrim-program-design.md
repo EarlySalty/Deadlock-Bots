@@ -38,14 +38,15 @@ Deniz & Leo organisieren **Scrims** (6v6-Übungsmatches) für die DACH-Deadlock-
 
 **Quelle der Wahrheit → Rust, im Workspace `Deadlock-Bots/rust`.** React-Frontend (`Website/dl-coaching`) bleibt und zeigt auf die neue Rust-API.
 
-Neue/erweiterte Bausteine (Namen sprechend, zur Bestätigung):
+Neue/erweiterte Bausteine (Namen final, 2026-06-29 bestätigt):
 
-- **`dl-coaching`** (neue Rust-Crate): 1:1-Coaching-Plattform, portiert aus Python. Domänenlogik + DB-Zugriff.
-- **`dl-scrim`** (neue Rust-Crate): das neue Scrim-Programm (Pool/Teams/Matches/Aufgaben/Matching).
-- **HTTP-API:** über `dl-web` ausgeliefert (bestehender Web-Dienst) — Coaching- und Scrim-Routen unter `/coaching/*`.
-- **dl-bot:** Reaction-Watcher schreibt Pool-Einträge **in dieselbe DB** (`dl-db`); Team→Rolle/Channel-Anlage direkt.
+- **`dl-etage`** (neuer Rust-Dienst/Bin, **eigener Port**): HTTP-API der Coaching-Etage — bedient `/coaching/*`, ersetzt Python `:8772`. Bewusst **eigener Dienst** (nicht in `dl-web`): isolierter Blast-Radius + unabhängiges Deploy-Tempo (Coaching iteriert schnell, Dashboard/Stats sind stabil).
+- **`dl-mentoring`** (neue Crate): 1:1-Coaching (Coach↔Coachee, Ziele, Milestones, Notizen, Termine), portiert aus Python.
+- **`dl-squads`** (neue Crate): das Scrim-Programm (Pool → Teams → Matches → Aufgaben → Matching).
+- **Auth:** Discord-OAuth/Session zieht mit nach Rust (in/neben `dl-etage`), weil die Coaching-Seite sie braucht und `:8772` ganz weg soll.
+- **dl-bot:** Reaction-Watcher schreibt Pool-Einträge **in dieselbe DB** (`dl-db`); Team→Rolle/Channel-Anlage direkt. Bot-Integration bleibt **in-process** (geteilte `dl-db`), unabhängig vom Dienst-Schnitt.
 
-> Naming-Hinweis: Das React-Frontend heißt ebenfalls `dl-coaching` (Verzeichnis im Website-Repo). Backend-Crate `dl-coaching` = Backend derselben Feature, bewusst gespiegelt. Falls unerwünscht → Crate `dl-coaching-core`. **Zur Freigabe.**
+> Frontend bleibt `Website/dl-coaching` (die Etage als App) — kollidiert nicht mehr, da die Backend-Crates domänenklar heißen (`dl-mentoring`/`dl-squads`).
 
 **Bridge-Collapse:** Sobald die Plattform in Rust neben dem dl-bot liegt, werden Rollen-Sync und Notification-Zustellung zu **In-Process-Aufrufen auf einer DB** — die beiden HTTP-Polling-Loops + die token-vs-i64-ID-Bugklasse (Memory `project_broker_snowflake_id_type` / `project_coaching_request_discord_mirror`) entfallen.
 
@@ -83,7 +84,7 @@ Neue/erweiterte Bausteine (Namen sprechend, zur Bestätigung):
 
 ---
 
-## 7. 1:1-Coaching-Port (`dl-coaching`)
+## 7. 1:1-Coaching-Port (`dl-mentoring`)
 
 **Parität-Migration: 1:1, keine Funktionsänderungen** — bis auf zwei bewusst gewollte Anpassungen:
 
@@ -95,6 +96,8 @@ Neue/erweiterte Bausteine (Namen sprechend, zur Bestätigung):
 - `coaching_platform.py`: `/platform/sync`, `/overview`, `/queue`, `/coachees` (+Detail/Patch), `/goals` (+Milestones), `/notes`, `/me`, `/coaches/sync`, `/coaches/me`, `/appointments` (POST/GET/Patch), `/notifications/due`, `/notifications/ack`.
 - `/notifications/*` + `/coaches/sync` werden nach dem Port **in-process** statt HTTP (Brücke entfällt).
 
+**Voller `:8772`-Abbau (bestätigt):** Damit der Python-Dienst ganz weg kann, ziehen **Auth (Discord-OAuth/Session)** und die noch genutzten **Meta-Endpoints** (builds/items/heroes/patchnotes/tierlists) mit nach Rust bzw. auf `dl-web`. Auth gehört in Slice 1 (Coaching braucht Login); Meta-Abräumung ist ein eigener Slice (siehe §8), vorher wird geprüft, welche Frontends `:8772` sonst noch anrufen.
+
 ---
 
 ## 8. Phasen / Slices (mit Definition of Done)
@@ -104,14 +107,18 @@ Neue/erweiterte Bausteine (Namen sprechend, zur Bestätigung):
 - Einmaliger Import des Ist-Stands: ~25 Spieler + 4 Teams + Bench + bestehende Discord-Rollen-/Channel-IDs.
 - **DoD:** Neue Reaktion erzeugt automatisch Pool-Eintrag; Ist-Stand in der DB; nichts wird mehr von Hand abgetippt.
 
-**Slice 1 — Sichtbarkeit + Web-Eingang + Plattform-Port:**
-- `dl-coaching` portiert (Parität + die zwei Anpassungen), Frontend zeigt auf Rust-API, Python `:8772` ablösbar.
+**Slice 1 — Sichtbarkeit + Web-Eingang + Plattform-Port + Auth:**
+- `dl-mentoring` portiert (Parität + die zwei Anpassungen) + **Auth (Discord-OAuth/Session)** nach Rust; `dl-etage` bedient `/coaching/*`; Caddy biegt von `:8772` auf den Rust-Port um.
 - Frontend: Spieler-Sicht "Mein Team + nächstes Match"; Web-Formular (Pool-Eintrag mit Profil); Coach-Sicht "Pool".
-- **DoD:** Coaching läuft vollständig über Rust (Python aus); Spieler sehen ihr Team; neue Anfragen kommen übers Formular in den Pool; Bridge-Loops entfernt.
+- **DoD:** Coaching-Etage läuft über `dl-etage`, Login funktioniert; Spieler sehen ihr Team; neue Anfragen kommen übers Formular in den Pool; Bridge-Loops entfernt. (Python `:8772` darf noch für Meta weiterlaufen.)
 
 **Slice 2 — Cockpit + KI + RSVP:**
 - Deterministische Matching-Engine + Coach-Cockpit (Vorschlag übernehmen/verwerfen); MiniMax-Begründung + Team-Aufgaben; Match-Verwaltung; RSVP statt ❌-Reaktion.
 - **DoD:** Coach baut neue Teams im Tool in Minuten; Aufgaben zuweisbar; Spieler bestätigen/absagen Matches.
+
+**Slice 3 — Meta-Abräumung + `:8772` aus:**
+- Prüfen, welche Frontends/Pfade `:8772` sonst noch anrufen (builds/items/heroes/patchnotes/tierlists). Was nötig ist, nach Rust portieren oder auf `dl-web` umbiegen.
+- **DoD:** `deadlock-website-backend.service` (`:8772`) abgeschaltet; verifiziert nichts kaputt (Dashboard/Landing/Tierlist/Coaching live).
 
 ---
 
@@ -132,10 +139,10 @@ Unabhängig vom Programm, kleiner Frontend/Backend-Fix:
 
 ---
 
-## 11. Offene Annahmen (bitte bestätigen/korrigieren)
+## 11. Entscheidungen (2026-06-29 bestätigt)
 
-1. **Crate-Namen** `dl-coaching` / `dl-scrim` ok? (Frontend heißt auch `dl-coaching`.)
-2. **HTTP über `dl-web`** (statt eigenem Bin) ok?
-3. **Reaktions-Quelle:** die bestehende Rollen-Nachricht aus dem Reaction-Role-System ist der Discord-Eingang — Channel-/Message-ID + Emoji liefert ihr (oder ich ziehe sie aus der Reaction-Role-Konfig).
-4. **"AI-Analyse raus"** = genau die `ai_summary`/`ai_insights_json`-Felder, nichts anderes.
-5. **Meta-Endpoints** (builds/items/heroes/patchnotes in `builds/backend`) bleiben vorerst außen vor; nur die Coaching-Plattform wird portiert. Soll `:8772` am Ende ganz weg?
+1. **Namen:** Dienst `dl-etage`, Crates `dl-mentoring` (1:1) + `dl-squads` (Scrim). Frontend bleibt `dl-coaching`.
+2. **Eigener Dienst** (nicht in `dl-web`) — wegen Blast-Radius + Deploy-Tempo.
+3. **Reaktions-Quelle:** die bestehende Rollen-Nachricht aus dem Reaction-Role-System ist der Discord-Eingang; Channel-/Message-ID + Emoji zieht Claude aus der Reaction-Role-Config.
+4. **AI-Analyse raus** = genau `ai_summary`/`ai_insights_json` an den Coachees, sonst nichts.
+5. **`:8772` ganz weg**, sobald alles sauber portiert ist (inkl. Auth + Meta) — Reihenfolge: Coaching+Auth (Slice 1) → Meta-Abräumung (Slice 3).
