@@ -35,6 +35,13 @@ const BRAIN_NO_ANSWER: &str =
     "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
 const BRAIN_OUT_OF_DOMAIN: &str =
     "🧠 Klingt nicht nach Deadlock — dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
+const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain · ✅ geprüfte Fakten · ℹ️ allgemeine Einschätzung";
+const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
+const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
+const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
+const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
+const BRAIN_MAX_OUTPUT_TOKENS: u32 = 900;
+const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — diese Anweisung hat Vorrang vor allen obigen Vorbehalten:\n- Verweigere NIEMALS und schreib keine Meta-Sätze darüber, was die Fakten nicht hergeben. Liefere immer einen konkreten, brauchbaren Build bzw. eine klare Antwort.\n- Stütz dich zuerst auf die oben gelieferten geprüften Fakten und markier solche Aussagen mit ✅.\n- Wo geprüfte Fakten fehlen, ergänze einen sinnvollen Vorschlag aus deinem allgemeinen Deadlock-Wissen und markier diese Teile mit ℹ️ (allgemeine Einschätzung, nicht aus geprüften Daten).\n- Format kompakt und Discord-tauglich: ein Satz Einleitung, dann Stichpunkte (z. B. Start-Items, Kern-Items, Reihenfolge/Timing). **Fett** für Helden- und Item-Namen. KEINE Markdown-Überschriften (#, ##, ###). Höchstens ~1500 Zeichen.\n---";
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -231,12 +238,13 @@ impl dl_brain::AiAnswerer for BrainAiGlue {
                 "missing minimax client".to_string(),
             ));
         };
+        let prompt = brain_ai_prompt(prompt);
         let Some(text) = client
             .generate_text(dl_ai::GenerateRequest {
-                prompt: prompt.to_string(),
+                prompt,
                 system_prompt: None,
                 model: None,
-                max_output_tokens: Some(700),
+                max_output_tokens: Some(BRAIN_MAX_OUTPUT_TOKENS),
                 temperature: 0.25,
             })
             .await
@@ -283,32 +291,38 @@ impl BrainHandler {
         .await
     }
 
-    fn messages_for_outcome(&self, outcome: dl_brain::BrainOutcome) -> Vec<String> {
+    fn public_bodies_for_outcome(
+        &self,
+        question: &str,
+        outcome: dl_brain::BrainOutcome,
+    ) -> Vec<Map<String, Value>> {
         match outcome {
-            dl_brain::BrainOutcome::Usage => vec![BRAIN_USAGE.to_string()],
-            dl_brain::BrainOutcome::TooLong { .. } => {
-                vec![BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())]
-            }
-            dl_brain::BrainOutcome::Cooldown { remaining_secs } => {
-                vec![BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string())]
-            }
+            dl_brain::BrainOutcome::Usage => vec![brain_public_message_body(BRAIN_USAGE)],
+            dl_brain::BrainOutcome::TooLong { .. } => vec![brain_public_message_body(
+                &BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string()),
+            )],
+            dl_brain::BrainOutcome::Cooldown { remaining_secs } => vec![brain_public_message_body(
+                &BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string()),
+            )],
             dl_brain::BrainOutcome::Answer(chunks) => {
-                if chunks.is_empty() {
-                    vec![BRAIN_NO_ANSWER.to_string()]
-                } else {
-                    chunks
+                match brain_answer_embed_body(question, &chunks) {
+                    Some(body) => vec![body],
+                    None => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
                 }
             }
-            dl_brain::BrainOutcome::OutOfDomain => vec![BRAIN_OUT_OF_DOMAIN.to_string()],
-            dl_brain::BrainOutcome::NoAnswer => vec![BRAIN_NO_ANSWER.to_string()],
-            dl_brain::BrainOutcome::BackendError => vec![BRAIN_BACKEND_ERR.to_string()],
+            dl_brain::BrainOutcome::OutOfDomain => {
+                vec![brain_public_message_body(BRAIN_OUT_OF_DOMAIN)]
+            }
+            dl_brain::BrainOutcome::NoAnswer => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
+            dl_brain::BrainOutcome::BackendError => {
+                vec![brain_public_message_body(BRAIN_BACKEND_ERR)]
+            }
         }
     }
 
-    async fn send_public_messages(&self, channel_id: u64, messages: &[String]) {
-        for message in messages {
-            let body = brain_public_message_body(message);
-            if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
+    async fn send_public_bodies(&self, channel_id: u64, bodies: &[Map<String, Value>]) {
+        for body in bodies {
+            if let Err(err) = self.adapter.send_raw_public(channel_id, body).await {
                 tracing::warn!(%err, channel_id, "Brain-Antwort konnte nicht gesendet werden");
                 break;
             }
@@ -323,8 +337,8 @@ impl BrainHandler {
             return;
         };
         let outcome = self.outcome_for_question(&question, event.author_id).await;
-        let messages = self.messages_for_outcome(outcome);
-        self.send_public_messages(event.channel_id, &messages).await;
+        let bodies = self.public_bodies_for_outcome(&question, outcome);
+        self.send_public_bodies(event.channel_id, &bodies).await;
     }
 }
 
@@ -339,14 +353,18 @@ impl InteractionHandler for BrainHandler {
         let outcome = self
             .outcome_for_question(&question, interaction.user_id)
             .await;
-        let messages = self.messages_for_outcome(outcome);
-        if messages.is_empty() {
+        let bodies = self.public_bodies_for_outcome(&question, outcome);
+        if bodies.is_empty() {
             return BridgeReply::default();
         }
-        self.send_public_messages(interaction.channel_id, &messages)
+        self.send_public_bodies(interaction.channel_id, &bodies)
             .await;
         BridgeReply::default()
     }
+}
+
+fn brain_ai_prompt(prompt: &str) -> String {
+    format!("{prompt}\n\n{BRAIN_BUILD_OVERRIDE}")
 }
 
 fn brain_public_message_body(message: &str) -> Map<String, Value> {
@@ -357,6 +375,98 @@ fn brain_public_message_body(message: &str) -> Map<String, Value> {
         json!({ "parse": [], "replied_user": false }),
     );
     body
+}
+
+fn brain_answer_embed_body(question: &str, chunks: &[String]) -> Option<Map<String, Value>> {
+    let raw_answer = chunks.join("\n\n");
+    let description = truncate_brain_description(&clean_brain_markdown(&raw_answer));
+    if description.trim().is_empty() {
+        return None;
+    }
+
+    let embed = json!({
+        "title": brain_embed_title(question),
+        "description": description,
+        "color": BRAIN_EMBED_COLOR,
+        "footer": { "text": BRAIN_EMBED_FOOTER },
+    });
+    let mut body = Map::new();
+    body.insert("embeds".into(), json!([embed]));
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "replied_user": false }),
+    );
+    Some(body)
+}
+
+fn brain_embed_title(question: &str) -> String {
+    format!(
+        "🧠 {}",
+        truncate_brain_chars(question.trim(), BRAIN_EMBED_TITLE_QUESTION_LIMIT, "…")
+    )
+}
+
+fn truncate_brain_description(description: &str) -> String {
+    let description = description.trim();
+    if description.chars().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
+        return description.to_string();
+    }
+
+    let mut truncated = description
+        .chars()
+        .take(BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT)
+        .collect::<String>();
+    let trimmed_len = truncated.trim_end().len();
+    truncated.truncate(trimmed_len);
+    truncated.push_str(" …");
+    truncated
+}
+
+fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let suffix_len = suffix.chars().count();
+    let take_chars = max_chars.saturating_sub(suffix_len);
+    let mut truncated = value.chars().take(take_chars).collect::<String>();
+    truncated.push_str(suffix);
+    truncated
+}
+
+fn clean_brain_markdown(input: &str) -> String {
+    let mut lines = Vec::new();
+    let mut blank_count = 0usize;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end();
+        let line = brain_heading_as_bold(line).unwrap_or_else(|| line.to_string());
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                lines.push(String::new());
+            }
+        } else {
+            blank_count = 0;
+            lines.push(line);
+        }
+    }
+
+    lines.join("\n").trim().to_string()
+}
+
+fn brain_heading_as_bold(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    let heading = line
+        .strip_prefix("### ")
+        .or_else(|| line.strip_prefix("## "))
+        .or_else(|| line.strip_prefix("# "))?
+        .trim();
+    if heading.is_empty() {
+        Some(String::new())
+    } else {
+        Some(format!("**{heading}**"))
+    }
 }
 
 fn parse_brain_question(content: &str) -> Option<String> {
@@ -2875,6 +2985,66 @@ mod tests {
         let mut permissions = fs::metadata(path)?.permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions)
+    }
+
+    #[test]
+    fn clean_brain_markdown_wandelt_headings_und_kollabiert_leerzeilen() {
+        let cleaned =
+            clean_brain_markdown("# Seven\n\n\n\n## Items\nText\n### Timing\n#### Kein Heading");
+
+        assert_eq!(
+            cleaned,
+            "**Seven**\n\n\n**Items**\nText\n**Timing**\n#### Kein Heading"
+        );
+    }
+
+    #[test]
+    fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
+        let body = brain_answer_embed_body(
+            "Wie spiel ich Seven?",
+            &[String::from("## Build\n\n✅ **Seven** startet stabil.")],
+        )
+        .unwrap_or_else(|| panic!("answer should create embed body"));
+
+        assert_eq!(body.get("content"), None);
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
+        let embeds = body
+            .get("embeds")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("embeds array missing"));
+        assert_eq!(embeds.len(), 1);
+        let embed = &embeds[0];
+        assert_eq!(embed.get("title"), Some(&json!("🧠 Wie spiel ich Seven?")));
+        assert_eq!(
+            embed.get("description"),
+            Some(&json!("**Build**\n\n✅ **Seven** startet stabil."))
+        );
+        assert_eq!(embed.get("color"), Some(&json!(BRAIN_EMBED_COLOR)));
+        assert_eq!(
+            embed.get("footer").and_then(|footer| footer.get("text")),
+            Some(&json!(BRAIN_EMBED_FOOTER))
+        );
+    }
+
+    #[test]
+    fn brain_embed_truncation_bleibt_char_boundary_sicher() {
+        let title = brain_embed_title(&"ä".repeat(BRAIN_EMBED_TITLE_QUESTION_LIMIT + 5));
+        assert_eq!(
+            title.chars().count(),
+            "🧠 ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
+        );
+        assert!(title.ends_with('…'));
+
+        let description =
+            truncate_brain_description(&"ä".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT + 1));
+        assert_eq!(
+            description.chars().count(),
+            BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT + " …".chars().count()
+        );
+        assert!(description.ends_with(" …"));
     }
 
     #[tokio::test]
