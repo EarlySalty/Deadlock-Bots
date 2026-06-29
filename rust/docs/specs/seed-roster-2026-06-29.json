@@ -1,0 +1,75 @@
+{
+  "_comment": "Einmaliger Seed des Scrim-Roster-Ist-Stands, transkribiert aus dem Google-Sheet (Discord #scrim-team-channel, Bild-Stand 2026-06-29, neueste Version). Best-effort: Verfuegbarkeit ist semi-freitext wie im Sheet; Coaches korrigieren Restfehler im Tool. WICHTIG: Sheet-Namen sind Anzeigenamen, KEINE discord_id -> Verknuepfung passiert spaeter per Login/Reaktion (Name-Match oder manueller Claim).",
+  "captains_note": "is_captain ist tentativ der erstgelistete Spieler je Team; im Sheet nicht eindeutig markiert. Rollen-Kuerzel: S=Support, C=Carry, F=Frontline, Fr=Frontliner, Flex, T/P=Tank/Pick, P=Pick heroes.",
+  "players": [
+    {"name": "Internet Hate Machine", "rank": "Oracle", "roles": "Frontliner", "coach": "Leo", "availability": {"Mo": "Flexibel", "Di": "Flexibel", "Mi": "Flexibel", "Do": "Flexibel", "Fr": "Flexibel", "Sa": "Flexibel", "So": "Flexibel"}},
+    {"name": "Jekoz", "rank": "Phantom", "roles": "Support", "coach": "Deniz", "availability": {"Mo": "19-20", "Di": "19-20", "Mi": "19-20", "Do": "19-20", "Fr": "19-20", "Sa": "19-20", "So": "19-20"}},
+    {"name": "Uber", "rank": "Eternus", "roles": "Carry, Initiator", "coach": "Deniz", "availability": {"Mo": "Immer Zeit", "Di": "Immer Zeit", "Mi": "Immer Zeit", "Do": "Immer Zeit", "Fr": "Immer Zeit", "Sa": "Immer Zeit", "So": "Immer Zeit"}},
+    {"name": "iNephii", "rank": "Oracle", "roles": "Support", "coach": "Deniz", "availability": {"Mo": "Ab 8", "Di": "Ab 8", "Mi": "Ab 8", "Do": "Ab 8", "Fr": "Ab 8", "Sa": "Ab 8", "So": "Ab 8"}},
+    {"name": "Joffrey", "rank": "Ritualist", "roles": "Carry", "coach": "Deniz", "availability": {"Mo": "22:40", "Di": "22:40", "Mi": "20:30", "Do": "22:40", "Fr": "22:40", "Sa": "20:30", "So": "20:30"}},
+    {"name": "Schreckser", "rank": "(Neu)", "roles": "Support", "coach": "Leo", "availability": {"Mo": "Flexibel", "Di": "Flexibel", "Mi": "Flexibel", "Do": "Flexibel", "Fr": "Flexibel", "Sa": "Flexibel", "So": "Flexibel"}},
+    {"name": "Milli", "rank": "Emissary", "roles": "Carry", "coach": "Deniz", "availability": {"Mo": "15-24", "Di": "15-24", "Mi": "15-24", "Do": "15-24", "Fr": "15-24", "Sa": "Immer", "So": "Immer"}},
+    {"name": "Vicky", "rank": "Alchemist", "roles": "Support", "coach": "Leo", "availability": {"Mo": "Ab 14", "Di": "Ab 14", "Mi": "Ab 14", "Do": "Ab 14", "Fr": "Ab 14", "Sa": "Ab 14", "So": "Ab 14"}},
+    {"name": "Jonah", "rank": "Phantom", "roles": "Carry, spirit", "coach": "Leo", "availability": {"Mo": "15-22", "Di": "15-22", "Mi": "15-22", "Do": "15-22", "Fr": "15-22", "Sa": "15-22", "So": "15-22"}},
+    {"name": "Phoenix", "rank": "Archon", "roles": "Carry, Utility", "coach": "Deniz", "availability": {"Mo": "Flexibel", "Di": "Flexibel", "Mi": "Flexibel", "Do": "Flexibel", "Fr": "Flexibel", "Sa": "Flexibel", "So": "Flexibel"}},
+    {"name": "Baho", "rank": "Ascendant", "roles": "Gemischt", "coach": "Deniz", "availability": {"Mo": "16-22", "Di": "16-22", "Mi": "16-22", "Do": "16-22", "Fr": "16-22", "Sa": "optimal", "So": "optimal"}},
+    {"name": "Geilvieh", "rank": "Archon", "roles": "Support", "coach": "Deniz", "availability": {"Mo": "Geht nicht", "Di": "Geht nicht", "Mi": "Geht nicht", "Do": "Geht nicht", "Fr": "17-24", "Sa": "10-24", "So": "10-17"}},
+    {"name": "Fieo", "rank": "Emissary", "roles": "Frontliner", "coach": "Deniz", "availability": {"Mo": "?", "Di": "", "Mi": "so abends", "Do": "?", "Fr": "?", "Sa": "so abends", "So": "so abends"}},
+    {"name": "Sithkiller", "rank": "Phantom", "roles": "Frontliner", "coach": "Deniz", "availability": {"Mo": "19", "Di": "19", "Mi": "19", "Do": "19", "Fr": "19", "Sa": "19", "So": "19"}},
+    {"name": "Torrak53", "rank": "Emissary", "roles": "Gemischt", "coach": "Leo", "availability": {"Mo": "12", "Di": "12", "Mi": "Geht nicht", "Do": "12", "Fr": "12", "Sa": "12", "So": "12"}},
+    {"name": "Obey me monkey", "rank": "Emissary", "roles": "Carry", "coach": "Leo", "availability": {"Mo": "Immer", "Di": "Immer", "Mi": "Immer", "Do": "Immer", "Fr": "Immer", "Sa": "Immer", "So": "Immer"}},
+    {"name": "Minebeule", "rank": "Archon", "roles": "Frontline/Carry", "coach": "Leo", "availability": {"Mo": "Unsicher", "Di": "Unsicher", "Mi": "Unsicher", "Do": "Unsicher", "Fr": "Unsicher", "Sa": "Immer", "So": "Immer"}},
+    {"name": "Meisteradnan", "rank": "Oracle", "roles": "Frontline/pick heroes", "coach": "Leo", "availability": {"Mo": "Abend da/ 20", "Di": "", "Mi": "", "Do": "", "Fr": "", "Sa": "", "So": ""}},
+    {"name": "alzheimber14", "rank": "Alchemist", "roles": "Support", "coach": "Leo", "availability": {"Mo": "in 2-3 Tagen", "Di": "", "Mi": "", "Do": "", "Fr": "", "Sa": "", "So": ""}},
+    {"name": "Nadine", "rank": "Oracle", "roles": "Support/Carry", "coach": "Deniz", "availability": {"Mo": "Ab 17", "Di": "Ab 17", "Mi": "Ab 17", "Do": "Ab 17", "Fr": "Ab 17", "Sa": "Ab 17", "So": "Ab 17"}},
+    {"name": "DabbeliuJR", "rank": "Oracle", "roles": "Frontline/flex", "coach": "Leo", "availability": {"Mo": "ab 19", "Di": "ab 19", "Mi": "ab 19", "Do": "Geht nicht", "Fr": "Geht nicht", "Sa": "ab 19", "So": "ab 19"}},
+    {"name": "Marc", "rank": "Phantom", "roles": "Carry", "coach": "Deniz", "availability": {"Mo": "ab 16-17", "Di": "ab 16-17", "Mi": "ab 16-17", "Do": "ab 16-17", "Fr": "ab 16-17", "Sa": "ab 16-17", "So": "ab 16-17"}},
+    {"name": "Lodo", "rank": "Seeker", "roles": "Frontline/Flex", "coach": "Leo", "availability": {"Mo": "ab 14 (Ferien)", "Di": "ab 14 (Ferien)", "Mi": "ab 14 (Ferien)", "Do": "ab 14 (Ferien)", "Fr": "ab 14 (Ferien)", "Sa": "ab 14 (Ferien)", "So": "ab 14 (Ferien)"}},
+    {"name": "Semi", "rank": "Archon", "roles": "Tank/Pick heroes", "coach": "Leo", "availability": {"Mo": "Bis September", "Di": "Bis September", "Mi": "Bis September", "Do": "Bis September", "Fr": "Bis September", "Sa": "Bis September", "So": "Bis September"}}
+  ],
+  "pool_unassigned": [
+    {"name": "Eno", "rank": "Oracle", "roles": "Roamer", "availability": {"Mo": "18:30-19", "Di": "18:30-19", "Mi": "18:30-19", "Do": "18:30-19", "Fr": "18:30-19", "Sa": "flexibler", "So": "flexibler"}, "note": "auch als Benchspieler gelistet"},
+    {"name": "vxdca", "rank": "Oracle", "roles": "Carry", "availability": {"Mo": "18:30-19", "Di": "18:30-19", "Mi": "18:30-19", "Do": "18:30-19", "Fr": "18:30-19", "Sa": "flexibler", "So": "flexibler"}},
+    {"name": "California", "rank": "Phantom", "roles": "Flex", "availability": {"Mo": "19-20", "Di": "19-20", "Mi": "19-20", "Do": "19-20", "Fr": "19-20", "Sa": "19-20", "So": "19-20"}},
+    {"name": "DraGskopE", "rank": "Eternus", "roles": "Kein M1", "availability": {"Mo": "Arbeitslos", "Di": "Arbeitslos", "Mi": "Arbeitslos", "Do": "Arbeitslos", "Fr": "Arbeitslos", "Sa": "Arbeitslos", "So": "Arbeitslos"}},
+    {"name": "Sliq", "rank": "Oracle", "roles": "Flex", "availability": {"Mo": "17", "Di": "17", "Mi": "17", "Do": "17", "Fr": "17", "Sa": "Flexibel", "So": "Flexibel"}}
+  ],
+  "teams": [
+    {"name": "Team 1", "coach": "Leo", "members": [
+      {"name": "Vicky", "role": "S", "is_captain": true},
+      {"name": "Jonah", "role": "Carry", "is_captain": false},
+      {"name": "Minebeule", "role": "F", "is_captain": false},
+      {"name": "Lodo", "role": "F", "is_captain": false},
+      {"name": "Baho", "role": "Flex", "is_captain": false},
+      {"name": "Schreckser", "role": "S", "is_captain": false}
+    ]},
+    {"name": "Team 2", "coach": "Leo", "members": [
+      {"name": "Semi", "role": "T/P", "is_captain": true},
+      {"name": "DabbeliuJR", "role": "", "is_captain": false},
+      {"name": "Obey me monkey", "role": "C/F", "is_captain": false},
+      {"name": "Jekoz", "role": "S", "is_captain": false},
+      {"name": "alzheimber14", "role": "S", "is_captain": false},
+      {"name": "Meisteradnan", "role": "F/P", "is_captain": false}
+    ]},
+    {"name": "Team 3", "coach": "Deniz", "members": [
+      {"name": "Phoenix", "role": "C", "is_captain": true},
+      {"name": "Geilvieh", "role": "S", "is_captain": false},
+      {"name": "Torrak53", "role": "Flex", "is_captain": false},
+      {"name": "Milli", "role": "", "is_captain": false},
+      {"name": "Uber", "role": "", "is_captain": false},
+      {"name": "Internet Hate Machine", "role": "", "is_captain": false}
+    ]},
+    {"name": "Team 4", "coach": "Deniz", "members": [
+      {"name": "Marc", "role": "C", "is_captain": true},
+      {"name": "Nadine", "role": "S/Carry", "is_captain": false},
+      {"name": "Fieo", "role": "Fr", "is_captain": false},
+      {"name": "Sithkiller", "role": "Fr", "is_captain": false},
+      {"name": "Joffrey", "role": "C", "is_captain": false},
+      {"name": "iNephii", "role": "S", "is_captain": false}
+    ]}
+  ],
+  "matches": [
+    {"team_a": "Team 1", "team_b": "Team 3", "when_text": "Sa 04.07.2026, 16 Uhr", "note": "Team 1+3 = Frueh-Slot"},
+    {"team_a": "Team 2", "team_b": "Team 4", "when_text": "Sa 04.07.2026, 20 Uhr", "note": "Team 2+4 = Spaet-Slot"}
+  ]
+}
