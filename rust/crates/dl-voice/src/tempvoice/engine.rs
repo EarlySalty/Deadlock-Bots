@@ -322,6 +322,31 @@ impl TempVoiceEngine {
         (StagingRules::default(), None)
     }
 
+    async fn apply_category_source(&self, channel_id: u64, category_id: u64) -> StagingRules {
+        let (rules, source_staging_id) = self.rules_for_category(Some(category_id));
+        {
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.category_id = Some(category_id);
+                lane.prefix_from_rank = rules.prefix_from_rank;
+                lane.source_staging_id = source_staging_id;
+                if rules.disable_min_rank {
+                    lane.min_rank = "unknown".to_string();
+                }
+            }
+            if rules.disable_min_rank {
+                state.minrank_blocked.insert(channel_id);
+            } else {
+                state.minrank_blocked.remove(&channel_id);
+            }
+        }
+        let _ = self
+            .store
+            .set_lane_category_source(channel_id, category_id, source_staging_id)
+            .await;
+        rules
+    }
+
     pub async fn apply_lane_rules(&self, channel_id: u64, rules: &StagingRules) {
         let mut state = self.state.lock().await;
         if rules.disable_min_rank {
@@ -1207,27 +1232,7 @@ impl TempVoiceEngine {
         if !known {
             return;
         }
-        let (rules, source_staging_id) = self.rules_for_category(Some(category_id));
-        {
-            let mut state = self.state.lock().await;
-            if let Some(lane) = state.lanes.get_mut(&channel_id) {
-                lane.category_id = Some(category_id);
-                lane.prefix_from_rank = rules.prefix_from_rank;
-                lane.source_staging_id = source_staging_id.or(lane.source_staging_id);
-                if rules.disable_min_rank {
-                    lane.min_rank = "unknown".to_string();
-                }
-            }
-            if rules.disable_min_rank {
-                state.minrank_blocked.insert(channel_id);
-            } else {
-                state.minrank_blocked.remove(&channel_id);
-            }
-        }
-        let _ = self
-            .store
-            .set_lane_category_source(channel_id, category_id, source_staging_id)
-            .await;
+        let rules = self.apply_category_source(channel_id, category_id).await;
         let base = {
             let state = self.state.lock().await;
             state
@@ -1584,33 +1589,11 @@ impl TempVoiceEngine {
         {
             return Some(format!("Fehler beim Verschieben: {err}"));
         }
-        // DB + State nachziehen
-        {
-            let mut state = self.state.lock().await;
-            if let Some(lane) = state.lanes.get_mut(&channel_id) {
-                lane.category_id = Some(category_id);
-            }
-        }
-        let (rules, source_staging_id) = self.rules_for_category(Some(category_id));
-        {
-            let mut state = self.state.lock().await;
-            if let Some(lane) = state.lanes.get_mut(&channel_id) {
-                lane.prefix_from_rank = rules.prefix_from_rank;
-                lane.source_staging_id = source_staging_id.or(lane.source_staging_id);
-                if rules.disable_min_rank {
-                    lane.min_rank = "unknown".to_string();
-                }
-            }
-            if rules.disable_min_rank {
-                state.minrank_blocked.insert(channel_id);
-            } else {
-                state.minrank_blocked.remove(&channel_id);
-            }
-        }
-        let _ = self
-            .store
-            .set_lane_category_source(channel_id, category_id, source_staging_id)
-            .await;
+        let rules = self.apply_category_source(channel_id, category_id).await;
+        let desired_limit = rules
+            .user_limit
+            .unwrap_or_else(|| self.config.default_cap(Some(category_id)));
+        let _ = self.set_limit(channel_id, desired_limit).await;
         // Name: Ranked → Rang des Owners, sonst gespeicherter Basisname
         let new_name = if new_mode == "ranked" {
             let roles = self.port.member_role_names(guild_id, owner_id).await;
@@ -2064,6 +2047,11 @@ mod tests {
     const LANE_DDL: &str = "CREATE TABLE tempvoice_lanes (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, base_name TEXT NOT NULL, category_id INTEGER NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, source_staging_id INTEGER, initial_owner_id INTEGER)";
     const BAN_DDL: &str = "CREATE TABLE tempvoice_bans (owner_id BIGINT NOT NULL, banned_id BIGINT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (owner_id, banned_id))";
     const PREF_DDL: &str = "CREATE TABLE tempvoice_rank_pref (user_id INTEGER PRIMARY KEY, rank TEXT NOT NULL, subrank INTEGER NOT NULL DEFAULT 0)";
+    const CASUAL_STAGING: u64 = 1501089974093873232;
+    const STREET_STAGING: u64 = 1357422958544420944;
+    const CASUAL_CATEGORY: u64 = 1289721245281292290;
+    const RANKED_CATEGORY: u64 = 1412804540994162789;
+    const STREET_CATEGORY: u64 = 1357422957017698478;
 
     async fn setup() -> (
         tempfile::TempDir,
@@ -2079,13 +2067,13 @@ mod tests {
                 .expect("ddl");
         }
         let config = TempVoiceConfig::production();
-        let staging = 1501089974093873232; // casual (prefix_from_rank)
+        let staging = CASUAL_STAGING; // casual (prefix_from_rank)
         let port = Arc::new(MockPort::default());
         // Staging liegt in der Chill-Kategorie
         port.categories
             .lock()
             .expect("lock")
-            .insert(staging, 1289721245281292290);
+            .insert(staging, CASUAL_CATEGORY);
         let engine = TempVoiceEngine::new(config, TempVoiceStore::new(db), port.clone());
         (dir, engine, port, staging)
     }
@@ -2117,6 +2105,117 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].owner_id, 100);
         assert_eq!(lanes[0].source_staging_id, Some(staging));
+    }
+
+    #[tokio::test]
+    async fn switch_mode_to_ranked_clears_street_source_and_limit() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let guild_id = 1;
+        let owner_id = 100;
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(STREET_STAGING, STREET_CATEGORY);
+        port.voice
+            .lock()
+            .expect("lock")
+            .insert((guild_id, owner_id), STREET_STAGING);
+
+        engine
+            .handle_event(VoiceEvent::Join {
+                guild_id,
+                user_id: owner_id,
+                channel_id: STREET_STAGING,
+            })
+            .await;
+        let lane_id = engine.store.all_lanes().await.expect("lanes")[0].channel_id;
+        assert!(engine.is_min_rank_blocked(lane_id).await);
+
+        assert_eq!(
+            engine
+                .switch_lane_mode(guild_id, lane_id, owner_id, "ranked")
+                .await,
+            None
+        );
+
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes[0].category_id, RANKED_CATEGORY);
+        assert_eq!(lanes[0].source_staging_id, None);
+        assert!(!engine.is_min_rank_blocked(lane_id).await);
+        assert_eq!(
+            port.limits.lock().expect("lock").last().copied(),
+            Some((lane_id, logic::DEFAULT_RANKED_CAP))
+        );
+    }
+
+    #[tokio::test]
+    async fn rehydrate_preserves_known_source_and_persists_inferred_source() {
+        let (_dir, engine, _port, _staging) = setup().await;
+        let known_id = 4242;
+        let inferred_id = 4243;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: known_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Lane 1".to_string(),
+                category_id: STREET_CATEGORY,
+                source_staging_id: Some(STREET_STAGING),
+            })
+            .await
+            .expect("known lane");
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: inferred_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 200,
+                initial_owner_id: Some(200),
+                base_name: "Street Brawl 7".to_string(),
+                category_id: STREET_CATEGORY,
+                source_staging_id: None,
+            })
+            .await
+            .expect("inferred lane");
+
+        engine.rehydrate().await;
+
+        {
+            let state = engine.state.lock().await;
+            assert_eq!(
+                state
+                    .lanes
+                    .get(&known_id)
+                    .and_then(|lane| lane.source_staging_id),
+                Some(STREET_STAGING)
+            );
+            assert_eq!(
+                state
+                    .lanes
+                    .get(&inferred_id)
+                    .and_then(|lane| lane.source_staging_id),
+                Some(STREET_STAGING)
+            );
+            assert!(state.minrank_blocked.contains(&known_id));
+            assert!(state.minrank_blocked.contains(&inferred_id));
+        }
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(
+            lanes
+                .iter()
+                .find(|lane| lane.channel_id == known_id)
+                .and_then(|lane| lane.source_staging_id),
+            Some(STREET_STAGING)
+        );
+        assert_eq!(
+            lanes
+                .iter()
+                .find(|lane| lane.channel_id == inferred_id)
+                .and_then(|lane| lane.source_staging_id),
+            Some(STREET_STAGING)
+        );
     }
 
     #[tokio::test]

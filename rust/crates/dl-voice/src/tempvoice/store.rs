@@ -124,7 +124,7 @@ impl TempVoiceStore {
                 conn.execute(
                     "UPDATE tempvoice_lanes
                         SET category_id = ?1,
-                            source_staging_id = COALESCE(?2, source_staging_id)
+                            source_staging_id = ?2
                       WHERE channel_id = ?3",
                     rusqlite::params![category_id, source_staging_id, channel_id],
                 )
