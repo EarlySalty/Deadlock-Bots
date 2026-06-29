@@ -3,7 +3,10 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Output, Stdio};
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use std::time::Duration;
 
 use dl_ai::TextGenerator;
@@ -16,7 +19,7 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 use tokio::sync::{Mutex, RwLock};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{sleep, timeout};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -30,11 +33,21 @@ const BRAIN_TOO_LONG: &str =
     "Das ist ja ein halber Roman 😅 — pack deine Frage in unter {max} Zeichen.";
 #[allow(dead_code)]
 const BRAIN_WORKING: &str = "🧠 Moment, ich wühl kurz im Brain…";
+const BRAIN_THINKING_FRAMES: [&str; 3] = ["💭 .", "💭 . .", "💭 . . ."];
+const BRAIN_THINKING_INTERVAL: Duration = Duration::from_millis(1200);
+const BRAIN_THINKING_MAX_TICKS: usize = 40;
 const BRAIN_BACKEND_ERR: &str = "🧠 Mein Hirn hakt grad — probier's in ein paar Sekunden nochmal.";
 const BRAIN_NO_ANSWER: &str =
     "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
 const BRAIN_OUT_OF_DOMAIN: &str =
     "🧠 Klingt nicht nach Deadlock — dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
+const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain · ✅ geprüfte Fakten · ℹ️ allgemeine Einschätzung";
+const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
+const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
+const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
+const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
+const BRAIN_MAX_OUTPUT_TOKENS: u32 = 900;
+const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — diese Anweisung hat Vorrang vor allen obigen Vorbehalten:\nVerweigere NIEMALS und schreib keine Meta-Sätze darüber, was die Fakten nicht hergeben — liefere immer einen konkreten, brauchbaren Build bzw. eine klare Antwort. Nutze zuerst die oben gelieferten geprüften Fakten und markiere solche Aussagen mit ✅. Wo geprüfte Fakten fehlen, ergänze aus deinem allgemeinen Deadlock-Wissen und markiere das mit ℹ️.\nFORMAT (Pflicht für Lesbarkeit): Beginne mit EINEM kurzen Einleitungssatz. Gliedere danach in klare Abschnitte; jede Abschnitts-Überschrift steht als eigene fette Zeile (**so**) mit einer Leerzeile davor. Jeder Stichpunkt steht auf einer EIGENEN Zeile und beginnt mit \"- \" — schreibe NIEMALS mehrere Punkte mit \" - \" in dieselbe Zeile. Verwende **fett** nur für Item- und Heldennamen. Keine Markdown-Überschriften (#, ##, ###). Maximal ~1100 Zeichen und höchstens 12 Stichpunkte.\n---";
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -231,12 +244,13 @@ impl dl_brain::AiAnswerer for BrainAiGlue {
                 "missing minimax client".to_string(),
             ));
         };
+        let prompt = brain_ai_prompt(prompt);
         let Some(text) = client
             .generate_text(dl_ai::GenerateRequest {
-                prompt: prompt.to_string(),
+                prompt,
                 system_prompt: None,
                 model: None,
-                max_output_tokens: Some(700),
+                max_output_tokens: Some(BRAIN_MAX_OUTPUT_TOKENS),
                 temperature: 0.25,
             })
             .await
@@ -283,35 +297,96 @@ impl BrainHandler {
         .await
     }
 
-    fn messages_for_outcome(&self, outcome: dl_brain::BrainOutcome) -> Vec<String> {
+    fn public_bodies_for_outcome(
+        &self,
+        question: &str,
+        outcome: dl_brain::BrainOutcome,
+    ) -> Vec<Map<String, Value>> {
         match outcome {
-            dl_brain::BrainOutcome::Usage => vec![BRAIN_USAGE.to_string()],
-            dl_brain::BrainOutcome::TooLong { .. } => {
-                vec![BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string())]
-            }
-            dl_brain::BrainOutcome::Cooldown { remaining_secs } => {
-                vec![BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string())]
-            }
-            dl_brain::BrainOutcome::Answer(chunks) => {
-                if chunks.is_empty() {
-                    vec![BRAIN_NO_ANSWER.to_string()]
-                } else {
-                    chunks
+            dl_brain::BrainOutcome::Usage => vec![brain_public_message_body(BRAIN_USAGE)],
+            dl_brain::BrainOutcome::TooLong { .. } => vec![brain_public_message_body(
+                &BRAIN_TOO_LONG.replace("{max}", &self.config.max_question_len.to_string()),
+            )],
+            dl_brain::BrainOutcome::Cooldown { remaining_secs } => vec![brain_public_message_body(
+                &BRAIN_COOLDOWN.replace("{secs}", &remaining_secs.to_string()),
+            )],
+            dl_brain::BrainOutcome::Answer(answer) => {
+                match brain_answer_embed_body(question, &answer) {
+                    Some(body) => vec![body],
+                    None => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
                 }
             }
-            dl_brain::BrainOutcome::OutOfDomain => vec![BRAIN_OUT_OF_DOMAIN.to_string()],
-            dl_brain::BrainOutcome::NoAnswer => vec![BRAIN_NO_ANSWER.to_string()],
-            dl_brain::BrainOutcome::BackendError => vec![BRAIN_BACKEND_ERR.to_string()],
+            dl_brain::BrainOutcome::OutOfDomain => {
+                vec![brain_public_message_body(BRAIN_OUT_OF_DOMAIN)]
+            }
+            dl_brain::BrainOutcome::NoAnswer => vec![brain_public_message_body(BRAIN_NO_ANSWER)],
+            dl_brain::BrainOutcome::BackendError => {
+                vec![brain_public_message_body(BRAIN_BACKEND_ERR)]
+            }
         }
     }
 
-    async fn send_public_messages(&self, channel_id: u64, messages: &[String]) {
-        for message in messages {
-            let body = brain_public_message_body(message);
-            if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
+    fn public_body_for_outcome(
+        &self,
+        question: &str,
+        outcome: dl_brain::BrainOutcome,
+    ) -> Map<String, Value> {
+        let mut bodies = self.public_bodies_for_outcome(question, outcome);
+        bodies
+            .pop()
+            .unwrap_or_else(|| brain_public_message_body(BRAIN_NO_ANSWER))
+    }
+
+    async fn send_public_bodies(&self, channel_id: u64, bodies: &[Map<String, Value>]) {
+        for body in bodies {
+            if let Err(err) = self.adapter.send_raw_public(channel_id, body).await {
                 tracing::warn!(%err, channel_id, "Brain-Antwort konnte nicht gesendet werden");
                 break;
             }
+        }
+    }
+
+    async fn handle_brain_question(&self, channel_id: u64, user_id: u64, question: &str) {
+        if question.trim().is_empty() {
+            let bodies = vec![brain_public_message_body(BRAIN_USAGE)];
+            self.send_public_bodies(channel_id, &bodies).await;
+            return;
+        }
+
+        let placeholder = brain_public_message_body(thinking_frame(0));
+        let message_id = match self.adapter.send_raw_public(channel_id, &placeholder).await {
+            Ok(message_id) => message_id,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, "Brain-Denk-Platzhalter konnte nicht gesendet werden");
+                let outcome = self.outcome_for_question(question, user_id).await;
+                let bodies = self.public_bodies_for_outcome(question, outcome);
+                self.send_public_bodies(channel_id, &bodies).await;
+                return;
+            }
+        };
+
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let animation = spawn_brain_thinking_animation(
+            self.adapter.clone(),
+            channel_id,
+            message_id,
+            cancelled.clone(),
+        );
+
+        let outcome = self.outcome_for_question(question, user_id).await;
+        cancelled.store(true, Ordering::SeqCst);
+        if let Err(err) = animation.await {
+            tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation Task fehlgeschlagen");
+        }
+
+        let body = self.public_body_for_outcome(question, outcome);
+        if let Err(err) = self
+            .adapter
+            .edit_raw_public(channel_id, message_id, &body)
+            .await
+        {
+            tracing::warn!(%err, channel_id, message_id, "Brain-Antwort konnte nicht editiert werden");
+            self.send_public_bodies(channel_id, &[body]).await;
         }
     }
 
@@ -322,9 +397,8 @@ impl BrainHandler {
         let Some(question) = parse_brain_question(&event.content) else {
             return;
         };
-        let outcome = self.outcome_for_question(&question, event.author_id).await;
-        let messages = self.messages_for_outcome(outcome);
-        self.send_public_messages(event.channel_id, &messages).await;
+        self.handle_brain_question(event.channel_id, event.author_id, &question)
+            .await;
     }
 }
 
@@ -336,17 +410,14 @@ impl InteractionHandler for BrainHandler {
         }
         let question = parse_brain_question(&interaction.content)
             .unwrap_or_else(|| interaction.content.trim().to_string());
-        let outcome = self
-            .outcome_for_question(&question, interaction.user_id)
-            .await;
-        let messages = self.messages_for_outcome(outcome);
-        if messages.is_empty() {
-            return BridgeReply::default();
-        }
-        self.send_public_messages(interaction.channel_id, &messages)
+        self.handle_brain_question(interaction.channel_id, interaction.user_id, &question)
             .await;
         BridgeReply::default()
     }
+}
+
+fn brain_ai_prompt(prompt: &str) -> String {
+    format!("{prompt}\n\n{BRAIN_BUILD_OVERRIDE}")
 }
 
 fn brain_public_message_body(message: &str) -> Map<String, Value> {
@@ -357,6 +428,120 @@ fn brain_public_message_body(message: &str) -> Map<String, Value> {
         json!({ "parse": [], "replied_user": false }),
     );
     body
+}
+
+fn brain_answer_embed_body(question: &str, raw_answer: &str) -> Option<Map<String, Value>> {
+    let description = truncate_brain_description(&clean_brain_markdown(raw_answer));
+    if description.trim().is_empty() {
+        return None;
+    }
+
+    let embed = json!({
+        "title": brain_embed_title(question),
+        "description": description,
+        "color": BRAIN_EMBED_COLOR,
+        "footer": { "text": BRAIN_EMBED_FOOTER },
+    });
+    let mut body = Map::new();
+    body.insert("content".into(), json!(""));
+    body.insert("embeds".into(), json!([embed]));
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "replied_user": false }),
+    );
+    Some(body)
+}
+
+fn spawn_brain_thinking_animation(
+    adapter: Arc<DiscordAdapter>,
+    channel_id: u64,
+    message_id: u64,
+    cancelled: Arc<AtomicBool>,
+) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        for tick in 1..=BRAIN_THINKING_MAX_TICKS {
+            sleep(BRAIN_THINKING_INTERVAL).await;
+            if cancelled.load(Ordering::SeqCst) {
+                break;
+            }
+
+            let body = brain_public_message_body(thinking_frame(tick));
+            if let Err(err) = adapter.edit_raw_public(channel_id, message_id, &body).await {
+                tracing::warn!(%err, channel_id, message_id, "Brain-Denk-Animation konnte nicht editiert werden");
+                break;
+            }
+        }
+    })
+}
+
+fn thinking_frame(tick: usize) -> &'static str {
+    BRAIN_THINKING_FRAMES[tick % BRAIN_THINKING_FRAMES.len()]
+}
+
+fn brain_embed_title(question: &str) -> String {
+    format!(
+        "🧠 {}",
+        truncate_brain_chars(question.trim(), BRAIN_EMBED_TITLE_QUESTION_LIMIT, "…")
+    )
+}
+
+fn truncate_brain_description(description: &str) -> String {
+    let description = description.trim();
+    if description.chars().count() <= BRAIN_EMBED_DESCRIPTION_LIMIT {
+        return description.to_string();
+    }
+
+    let mut truncated = description
+        .chars()
+        .take(BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT)
+        .collect::<String>();
+    let trimmed_len = truncated.trim_end().len();
+    truncated.truncate(trimmed_len);
+    truncated.push_str(" …");
+    truncated
+}
+
+fn truncate_brain_chars(value: &str, max_chars: usize, suffix: &str) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+
+    let suffix_len = suffix.chars().count();
+    let take_chars = max_chars.saturating_sub(suffix_len);
+    let mut truncated = value.chars().take(take_chars).collect::<String>();
+    truncated.push_str(suffix);
+    truncated
+}
+
+fn clean_brain_markdown(input: &str) -> String {
+    let mut lines = Vec::new();
+    let mut blank_count = 0usize;
+
+    for raw_line in input.lines() {
+        let line = raw_line.trim_end();
+        let line = brain_heading_as_bold(line).unwrap_or_else(|| line.to_string());
+        if line.trim().is_empty() {
+            blank_count += 1;
+            if blank_count <= 2 {
+                lines.push(String::new());
+            }
+        } else {
+            blank_count = 0;
+            lines.push(line);
+        }
+    }
+
+    lines.join("\n").trim().to_string()
+}
+
+fn brain_heading_as_bold(line: &str) -> Option<String> {
+    let line = line.trim_start();
+    let heading = line.strip_prefix("### ")?.trim();
+    if heading.is_empty() {
+        Some(String::new())
+    } else {
+        Some(format!("**{heading}**"))
+    }
 }
 
 fn parse_brain_question(content: &str) -> Option<String> {
@@ -2875,6 +3060,91 @@ mod tests {
         let mut permissions = fs::metadata(path)?.permissions();
         permissions.set_mode(0o755);
         fs::set_permissions(path, permissions)
+    }
+
+    #[test]
+    fn clean_brain_markdown_wandelt_headings_und_kollabiert_leerzeilen() {
+        let cleaned =
+            clean_brain_markdown("# Seven\n\n\n\n## Items\nText\n### Timing\n#### Kein Heading");
+
+        assert_eq!(
+            cleaned,
+            "# Seven\n\n\n## Items\nText\n**Timing**\n#### Kein Heading"
+        );
+    }
+
+    #[test]
+    fn brain_answer_embed_body_setzt_embed_und_deaktiviert_mentions() {
+        let body = brain_answer_embed_body(
+            "Wie spiel ich Seven?",
+            "### Build\n\n✅ **Seven** startet stabil.",
+        )
+        .unwrap_or_else(|| panic!("answer should create embed body"));
+
+        assert_eq!(body.get("content"), Some(&json!("")));
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
+        let embeds = body
+            .get("embeds")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| panic!("embeds array missing"));
+        assert_eq!(embeds.len(), 1);
+        let embed = &embeds[0];
+        assert_eq!(embed.get("title"), Some(&json!("🧠 Wie spiel ich Seven?")));
+        assert_eq!(
+            embed.get("description"),
+            Some(&json!("**Build**\n\n✅ **Seven** startet stabil."))
+        );
+        assert_eq!(embed.get("color"), Some(&json!(BRAIN_EMBED_COLOR)));
+        assert_eq!(
+            embed.get("footer").and_then(|footer| footer.get("text")),
+            Some(&json!(BRAIN_EMBED_FOOTER))
+        );
+    }
+
+    #[test]
+    fn brain_answer_embed_body_erhaelt_stichpunkt_newlines() {
+        let body = brain_answer_embed_body("Items?", "- a\n- b\n- c")
+            .unwrap_or_else(|| panic!("answer should create embed body"));
+        let description = body
+            .get("embeds")
+            .and_then(Value::as_array)
+            .and_then(|embeds| embeds.first())
+            .and_then(|embed| embed.get("description"))
+            .and_then(Value::as_str)
+            .unwrap_or_else(|| panic!("description missing"));
+
+        assert_eq!(description, "- a\n- b\n- c");
+        assert!(!description.contains("- a - b"));
+    }
+
+    #[test]
+    fn thinking_frame_rotiert_ueber_alle_frames() {
+        assert_eq!(thinking_frame(0), BRAIN_THINKING_FRAMES[0]);
+        assert_eq!(thinking_frame(1), BRAIN_THINKING_FRAMES[1]);
+        assert_eq!(thinking_frame(2), BRAIN_THINKING_FRAMES[2]);
+        assert_eq!(thinking_frame(3), BRAIN_THINKING_FRAMES[0]);
+        assert_eq!(thinking_frame(4), BRAIN_THINKING_FRAMES[1]);
+    }
+
+    #[test]
+    fn brain_embed_truncation_bleibt_char_boundary_sicher() {
+        let title = brain_embed_title(&"ä".repeat(BRAIN_EMBED_TITLE_QUESTION_LIMIT + 5));
+        assert_eq!(
+            title.chars().count(),
+            "🧠 ".chars().count() + BRAIN_EMBED_TITLE_QUESTION_LIMIT
+        );
+        assert!(title.ends_with('…'));
+
+        let description =
+            truncate_brain_description(&"ä".repeat(BRAIN_EMBED_DESCRIPTION_LIMIT + 1));
+        assert_eq!(
+            description.chars().count(),
+            BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT + " …".chars().count()
+        );
+        assert!(description.ends_with(" …"));
     }
 
     #[tokio::test]

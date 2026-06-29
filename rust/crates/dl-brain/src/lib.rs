@@ -12,7 +12,7 @@ pub enum BrainOutcome {
     Usage,
     TooLong { len: usize },
     Cooldown { remaining_secs: u64 },
-    Answer(Vec<String>),
+    Answer(String),
     OutOfDomain,
     NoAnswer,
     BackendError,
@@ -116,14 +116,8 @@ pub async fn handle_brain_query(
         return BrainOutcome::NoAnswer;
     }
 
-    let chunks = chunk_message(&answer, DISCORD_MESSAGE_LIMIT);
-    let outcome = if chunks.is_empty() {
-        BrainOutcome::NoAnswer
-    } else {
-        BrainOutcome::Answer(chunks)
-    };
     register_cooldown(user_id, cfg, cooldowns).await;
-    outcome
+    BrainOutcome::Answer(answer)
 }
 
 fn remaining_secs(duration: std::time::Duration) -> u64 {
@@ -401,10 +395,7 @@ mod tests {
         let out =
             handle_brain_query("Seven build", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
 
-        assert_eq!(
-            out,
-            BrainOutcome::Answer(vec!["fertige antwort".to_string()])
-        );
+        assert_eq!(out, BrainOutcome::Answer("fertige antwort".to_string()));
         assert_eq!(
             seen_prompt.lock().expect("seen_question lock").as_deref(),
             Some("Seven build")
@@ -414,6 +405,18 @@ mod tests {
             Some("brain prompt")
         );
         assert_eq!(answerer.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn normalpfad_erhaelt_rohe_antwort_mit_newlines() {
+        let cooldowns = BrainCooldowns::default();
+        let retriever = retriever(Ok(context("build_recommendation", "brain prompt")));
+        let answerer = answerer(Some("- a\n- b\n- c"));
+
+        let out =
+            handle_brain_query("Seven build", 1, &cfg(), &cooldowns, &retriever, &answerer).await;
+
+        assert_eq!(out, BrainOutcome::Answer("- a\n- b\n- c".to_string()));
     }
 
     #[tokio::test]
