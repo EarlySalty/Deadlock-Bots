@@ -1,0 +1,21 @@
+[Unit]
+Description=Deadlock Central TimescaleDB Stack
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots/rust/infra/central-db
+RemainAfterExit=yes
+# Vorlage: Vor dem Enable muss POSTGRES_PASSWORD via EnvironmentFile/Infisical bereitstehen.
+# Kein Klartext-Secret in diese Unit schreiben.
+# EnvironmentFile=/etc/deadlock-central-db.env
+ExecStart=/usr/bin/docker compose -f /home/naniadm/Documents/Deadlock-Bots/rust/infra/central-db/docker-compose.yml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose -f /home/naniadm/Documents/Deadlock-Bots/rust/infra/central-db/docker-compose.yml down
+Restart=on-failure
+TimeoutStartSec=180
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target
