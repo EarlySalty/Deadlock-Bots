@@ -1,3 +1,11 @@
+## #172 — Rollen-Entzug erkennt fehlende Discord-Mitglieder sauber
+
+**Ausgangslage:** Wenn Steam beim Aufräumen die Verified-Rolle entfernen wollte, Discord den Nutzer aber nicht mehr als Server-Mitglied kannte, meldete der Broker daraus fälschlich einen internen Fehler. Steam retryte deshalb alle paar Stunden, obwohl der Fall eigentlich abgeschlossen war.
+
+**Was wurde geändert:** Der Discord-Adapter erkennt `Unknown Member` beim Rollen-Entzug jetzt als „Mitglied nicht gefunden" und gibt diese Information sauber an den Broker weiter. Der Broker antwortet dadurch mit 404 statt 502.
+
+**Wie es jetzt läuft:** Steam kann solche Cleanup-Einträge bereinigen, statt sie immer wieder gegen den Broker laufen zu lassen. Echte Discord-/Broker-Fehler bleiben weiterhin Fehler.
+
 ## #171 — Coaching-Anfragen von der Website landen jetzt in Discord
 
 **Ausgangslage:** Wer auf der Website eine Coaching-Anfrage stellt, war bisher nur dort sichtbar — im Discord, wo die Coaches sich koordinieren, tauchte die Anfrage gar nicht auf. Das hieß: doppelt hinschauen, Sachen von Hand rüberkopieren, und leicht mal eine Anfrage übersehen.
