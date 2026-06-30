@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT u.username, s.steam_id64, s.verified\n        FROM core.users u\n        JOIN core.steam_links s ON s.discord_id = u.discord_id\n        WHERE u.discord_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "username",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "steam_id64",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "verified",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      false
+    ]
+  },
+  "hash": "f0201e2e8bf2a56121c8ca3b1af777aac80ac829c57563c7861dec1267a09014"
+}

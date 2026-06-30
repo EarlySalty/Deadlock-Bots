@@ -21,10 +21,13 @@ members = [
     "crates/dl-squads",
     "crates/dl-community",
     "crates/dl-dashboard",
+    "crates/dl-central-db",
+    "crates/dl-central-etl",
     "bin/dl-bot",
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",
+    "bin/dl-central-migrate",
 ]
 
 [workspace.package]
@@ -48,6 +51,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # erfolgreich auf exakt dieselbe data/deadlock.sqlite3 zu (WAL, Koexistenz
 # mit dem laufenden Python-Prozess ist bewiesen).
 rusqlite = { version = "0.32", features = ["bundled"] }
+# Postgres — zentrale DB, Migrationen und compile-checked Queries.
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate", "chrono"] }
 # HTTP-Server (dl-web; Broker folgt in Phase 2)
 axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
@@ -57,6 +62,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 # Serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+toml = "0.8"
 regex = "1"
 # Zeit (ISO-Strings kompatibel zu Python datetime.isoformat)
 chrono = "0.4"
@@ -97,6 +103,8 @@ dl-moderation = { path = "crates/dl-moderation" }
 dl-squads = { path = "crates/dl-squads" }
 dl-community = { path = "crates/dl-community" }
 dl-dashboard = { path = "crates/dl-dashboard" }
+dl-central-db = { path = "crates/dl-central-db" }
+dl-central-etl = { path = "crates/dl-central-etl" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

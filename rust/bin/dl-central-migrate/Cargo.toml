@@ -1,0 +1,12 @@
+[package]
+name = "dl-central-migrate"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+dl-central-db.workspace = true
+sqlx.workspace = true
+tokio.workspace = true

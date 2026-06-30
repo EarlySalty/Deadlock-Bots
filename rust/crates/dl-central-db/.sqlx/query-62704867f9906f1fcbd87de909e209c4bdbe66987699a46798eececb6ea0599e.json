@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT count(*)::BIGINT AS \"count!\"\n        FROM core.steam_links\n        WHERE discord_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "62704867f9906f1fcbd87de909e209c4bdbe66987699a46798eececb6ea0599e"
+}

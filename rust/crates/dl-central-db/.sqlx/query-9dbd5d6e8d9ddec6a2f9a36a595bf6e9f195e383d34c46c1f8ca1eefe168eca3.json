@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM core.users WHERE discord_id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9dbd5d6e8d9ddec6a2f9a36a595bf6e9f195e383d34c46c1f8ca1eefe168eca3"
+}
