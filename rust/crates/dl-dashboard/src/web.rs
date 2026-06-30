@@ -20,6 +20,7 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
 
 use crate::auth::{self, InternalReject};
@@ -283,6 +284,10 @@ pub fn router(app: DashboardApp) -> Router {
         .route(
             "/internal/twitch/v1/discord/import-session",
             post(import_session),
+        )
+        .route(
+            "/internal/coaching/v1/no-show-ban",
+            post(coaching_no_show_ban),
         )
         // Analytics-Reads (Phase 9b) — Session-gegatet, reine DB-Reads.
         .route("/api/server-stats", get(crate::server_stats::server_stats))
@@ -1127,6 +1132,58 @@ async fn import_session(
     ok_json(json!({ "ok": true }))
 }
 
+// ── Interne Routen: Coaching ────────────────────────────────────────────────
+
+async fn coaching_no_show_ban(
+    State(app): State<DashboardApp>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = guard_any(&app, &peer, &headers) {
+        return resp;
+    }
+    let payload = match parse_obj(&body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let Some(user_id) = payload.get("discord_user_id").and_then(coerce_u64) else {
+        return err_json(400, "missing_discord_user_id");
+    };
+    let Ok(discord_user_id) = i64::try_from(user_id) else {
+        return err_json(400, "invalid_discord_user_id");
+    };
+    let now = now_unix();
+    let lookup = app
+        .db()
+        .read(move |conn| {
+            conn.query_row(
+                "SELECT expires_at, reason
+                   FROM coaching_bans
+                  WHERE discord_user_id = ?1 AND expires_at > ?2
+                  ORDER BY expires_at DESC
+                  LIMIT 1",
+                rusqlite::params![discord_user_id, now],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
+            )
+            .optional()
+        })
+        .await;
+
+    match lookup {
+        Ok(Some((expires_at, reason))) => ok_json(json!({
+            "banned": true,
+            "expires_at": expires_at,
+            "reason": reason,
+        })),
+        Ok(None) => ok_json(json!({ "banned": false })),
+        Err(err) => {
+            tracing::warn!(%err, "Coaching No-Show-Ban-Lookup fehlgeschlagen");
+            err_json(500, "ban_lookup_failed")
+        }
+    }
+}
+
 // ── Guards ──────────────────────────────────────────────────────────────────
 
 fn guard_any(app: &DashboardApp, peer: &SocketAddr, headers: &HeaderMap) -> Result<(), Response> {
@@ -1498,6 +1555,20 @@ mod tests {
         h
     }
 
+    fn internal_post(uri: &str, token: &str, body: Value) -> axum::http::Request<Body> {
+        let mut request = axum::http::Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header("X-Internal-Token", token)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body.to_string()))
+            .expect("request");
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 45678))));
+        request
+    }
+
     #[test]
     fn html_escape_attr_neutralisiert_xss() {
         assert_eq!(
@@ -1578,6 +1649,108 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("geolocation=(), microphone=(), camera=(), payment=()")
         );
+    }
+
+    #[tokio::test]
+    async fn coaching_no_show_ban_internal_check_liefert_aktive_sperre() {
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
+            _ => None,
+        });
+        let (_dir, app_state) = test_app(cfg).await;
+        let user_id = 424242_i64;
+        let expires_at = now_unix() + 3600;
+        app_state
+            .db()
+            .write(move |conn| {
+                conn.execute(
+                    "CREATE TABLE coaching_bans (
+                        discord_user_id INTEGER PRIMARY KEY,
+                        banned_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        reason TEXT
+                    )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![user_id, now_unix(), expires_at, "no_show"],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("ban fixture");
+
+        let app = router(app_state);
+        let response = app
+            .oneshot(internal_post(
+                "/internal/coaching/v1/no-show-ban",
+                "test-token",
+                json!({ "discord_user_id": user_id }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 2048)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(data["banned"], json!(true));
+        assert_eq!(data["expires_at"], json!(expires_at));
+        assert_eq!(data["reason"], json!("no_show"));
+    }
+
+    #[tokio::test]
+    async fn coaching_no_show_ban_internal_check_ignoriert_abgelaufene_sperre() {
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
+            _ => None,
+        });
+        let (_dir, app_state) = test_app(cfg).await;
+        let user_id = 515151_i64;
+        app_state
+            .db()
+            .write(move |conn| {
+                conn.execute(
+                    "CREATE TABLE coaching_bans (
+                        discord_user_id INTEGER PRIMARY KEY,
+                        banned_at INTEGER NOT NULL,
+                        expires_at INTEGER NOT NULL,
+                        reason TEXT
+                    )",
+                    [],
+                )?;
+                conn.execute(
+                    "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![user_id, now_unix() - 7200, now_unix() - 3600, "old"],
+                )?;
+                Ok(())
+            })
+            .await
+            .expect("ban fixture");
+
+        let response = router(app_state)
+            .oneshot(internal_post(
+                "/internal/coaching/v1/no-show-ban",
+                "test-token",
+                json!({ "discord_user_id": user_id }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 2048)
+            .await
+            .expect("body");
+        let data: Value = serde_json::from_slice(&body).expect("json");
+        assert_eq!(data, json!({ "banned": false }));
     }
 
     #[test]

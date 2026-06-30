@@ -774,10 +774,14 @@ mod tests {
     #[test]
     fn extract_builds_semantik() {
         // kein Schlüssel -> None
-        assert!(extract_builds(&json!({"hero_id": 1})).unwrap().is_none());
+        assert!(extract_builds(&json!({"hero_id": 1}))
+            .expect("extract builds without key")
+            .is_none());
         // null -> leere Liste
         assert_eq!(
-            extract_builds(&json!({"builds": Value::Null})).unwrap().map(|v| v.len()),
+            extract_builds(&json!({"builds": Value::Null}))
+                .expect("extract null builds")
+                .map(|v| v.len()),
             Some(0)
         );
         // Duplikat-build_id -> Fehler
@@ -790,8 +794,8 @@ mod tests {
         let camel = extract_builds(&json!({"heroBuilds": [
             {"buildId": 3, "buildName": "c", "authorName": "z", "sortOrder": 5}
         ]}))
-        .unwrap()
-        .unwrap();
+        .expect("extract camel case builds")
+        .expect("camel case builds present");
         assert_eq!(camel.len(), 1);
         assert_eq!(camel[0].build_id, 3);
         assert_eq!(camel[0].sort_order, 5);

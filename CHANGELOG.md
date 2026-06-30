@@ -1,3 +1,11 @@
+## #173 — Coaching-Sperre ist für die Website direkt prüfbar
+
+**Ausgangslage:** Der Bot hatte die No-Show-Sperre bereits als Wahrheit in seiner Datenbank und blockierte gebannte Coaching-Anfragen beim Discord-Spiegeln. Die Website konnte diese Wahrheit am Formular-Eingang aber nicht selbst prüfen, weil ihre Coaching-Daten in einer eigenen Datenbank liegen.
+
+**Was wurde geändert:** Das Dashboard bietet jetzt eine interne, token-geschützte Coaching-Abfrage für genau diesen Fall: Discord-ID rein, aktive Sperre samt Ablauf zurück. Abgelaufene Sperren zählen nicht, und die Route bleibt lokal/intern geschützt wie die bestehenden Service-zu-Service-Endpunkte.
+
+**Wie es jetzt läuft:** Die Website kann vor dem Speichern beim Bot nachfragen. Damit bleibt die Bot-Datenbank die Quelle der Sperre, ohne dass die Website direkt in fremde Tabellen greifen muss.
+
 ## #172 — Coaching: gesperrte Anfragen werden abgewiesen, kein Doppel-Claim mehr
 
 **Ausgangslage:** Drei Lücken rund ums Coaching. Wer wegen eines verpassten Termins gesperrt war, konnte über die Website trotzdem eine neue Anfrage anstoßen. Klickten zwei Coaches im selben Moment auf „Übernehmen", konnten sich beide als zuständig wähnen. Und die Moderations-Buttons unter einer Review prüften die falsche Berechtigung — jemand mit „Rollen verwalten", aber ohne Moderationsrechte, hätte handeln können.
