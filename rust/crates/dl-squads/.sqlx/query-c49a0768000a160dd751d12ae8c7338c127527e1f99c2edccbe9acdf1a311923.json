@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO scrim.participants(\n            id, discord_id, display_name, rank_source, rank_verified, status,\n            source, created_at, updated_at\n        )\n        VALUES($1, $2, $3, $4, FALSE, $5, $6, $7, $7)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c49a0768000a160dd751d12ae8c7338c127527e1f99c2edccbe9acdf1a311923"
+}

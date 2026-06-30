@@ -5,7 +5,7 @@ use crate::store::{
     add_team_member, create_match, create_team, set_participant_status, upsert_participant_by_name,
     SquadErr,
 };
-use dl_db::Db;
+use sqlx::PgPool;
 
 const STATUS_WAITLIST: &str = "waitlist";
 
@@ -17,34 +17,37 @@ pub struct SeedImportSummary {
     pub matches: usize,
 }
 
-pub async fn import_seed_roster_json(db: &Db, json: &str) -> Result<SeedImportSummary, SquadErr> {
+pub async fn import_seed_roster_json(
+    pool: &PgPool,
+    json: &str,
+) -> Result<SeedImportSummary, SquadErr> {
     let roster: SeedRoster = serde_json::from_str(json)?;
-    import_seed_roster(db, &roster).await
+    import_seed_roster(pool, &roster).await
 }
 
 pub async fn import_seed_roster(
-    db: &Db,
+    pool: &PgPool,
     roster: &SeedRoster,
 ) -> Result<SeedImportSummary, SquadErr> {
     let mut participant_ids = HashMap::new();
     let mut raw_names_by_trimmed = HashMap::new();
     for player in &roster.players {
         let name = register_seed_participant_name(&mut raw_names_by_trimmed, &player.name)?;
-        let participant_id = upsert_participant_by_name(db, player).await?;
+        let participant_id = upsert_participant_by_name(pool, player).await?;
         participant_ids.insert(name, participant_id);
     }
 
     for player in &roster.pool_unassigned {
         let name = register_seed_participant_name(&mut raw_names_by_trimmed, &player.name)?;
-        let participant_id = upsert_participant_by_name(db, player).await?;
-        set_participant_status(db, participant_id, STATUS_WAITLIST).await?;
+        let participant_id = upsert_participant_by_name(pool, player).await?;
+        set_participant_status(pool, participant_id, STATUS_WAITLIST).await?;
         participant_ids.insert(name, participant_id);
     }
 
     let mut team_ids = HashMap::new();
     for team in &roster.teams {
         let team_id = create_team(
-            db,
+            pool,
             &team.name,
             team.coach.as_deref(),
             team.discord_role_id,
@@ -60,7 +63,7 @@ pub async fn import_seed_roster(
                 .copied()
                 .ok_or_else(|| SquadErr::MissingSeedParticipant(member_name.clone()))?;
             add_team_member(
-                db,
+                pool,
                 team_id,
                 participant_id,
                 member.role.as_deref(),
@@ -81,7 +84,7 @@ pub async fn import_seed_roster(
             .copied()
             .ok_or_else(|| SquadErr::MissingSeedTeam(seed_match.team_b.clone()))?;
         create_match(
-            db,
+            pool,
             team_a_id,
             team_b_id,
             seed_match.when_text.as_deref(),

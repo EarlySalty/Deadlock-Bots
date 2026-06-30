@@ -667,11 +667,10 @@ name = "dl-squads"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "dl-db",
- "rusqlite",
+ "dl-central-db",
  "serde",
  "serde_json",
- "tempfile",
+ "sqlx",
  "thiserror 2.0.18",
  "tokio",
 ]

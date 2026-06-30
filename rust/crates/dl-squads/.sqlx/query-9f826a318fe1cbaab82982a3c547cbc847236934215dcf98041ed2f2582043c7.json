@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id\n          FROM scrim.matches\n         WHERE team_a_id = $1\n           AND team_b_id = $2\n           AND COALESCE(when_text, '') = COALESCE($3::text, '')\n         ORDER BY id ASC\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "9f826a318fe1cbaab82982a3c547cbc847236934215dcf98041ed2f2582043c7"
+}
