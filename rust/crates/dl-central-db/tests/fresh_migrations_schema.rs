@@ -145,38 +145,6 @@ async fn primary_key_columns(pool: &PgPool, table: &str) -> Vec<String> {
     .unwrap_or_else(|err| panic!("primary key columns for core.{table}: {err}"))
 }
 
-async fn steam_links_user_fk_contract(pool: &PgPool) -> Vec<(Vec<String>, Vec<String>, String)> {
-    sqlx::query_as(
-        "SELECT array_agg(child_attr.attname::text ORDER BY child_key.ord) AS child_columns,
-                array_agg(parent_attr.attname::text ORDER BY child_key.ord) AS parent_columns,
-                c.confdeltype::text AS on_delete
-           FROM pg_constraint c
-           JOIN pg_class child ON child.oid = c.conrelid
-           JOIN pg_namespace child_ns ON child_ns.oid = child.relnamespace
-           JOIN pg_class parent ON parent.oid = c.confrelid
-           JOIN pg_namespace parent_ns ON parent_ns.oid = parent.relnamespace
-           JOIN unnest(c.conkey) WITH ORDINALITY AS child_key(attnum, ord) ON true
-           JOIN pg_attribute child_attr
-             ON child_attr.attrelid = child.oid
-            AND child_attr.attnum = child_key.attnum
-           JOIN unnest(c.confkey) WITH ORDINALITY AS parent_key(attnum, ord)
-             ON parent_key.ord = child_key.ord
-           JOIN pg_attribute parent_attr
-             ON parent_attr.attrelid = parent.oid
-            AND parent_attr.attnum = parent_key.attnum
-          WHERE c.contype = 'f'
-            AND child_ns.nspname = 'core'
-            AND child.relname = 'steam_links'
-            AND parent_ns.nspname = 'core'
-            AND parent.relname = 'users'
-          GROUP BY c.oid, c.confdeltype
-          ORDER BY c.conname",
-    )
-    .fetch_all(pool)
-    .await
-    .expect("steam_links -> users FK contract")
-}
-
 async fn exact_steam_id64_btree_index_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*)
@@ -204,7 +172,51 @@ async fn exact_steam_id64_btree_index_count(pool: &PgPool) -> i64 {
     .expect("exact steam_id64 btree index count")
 }
 
-async fn migration_row_signature(pool: &PgPool) -> String {
+async fn steam_links_owner_unique_index_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT array_agg(a.attname::text ORDER BY k.ord) AS columns,
+                       pg_get_expr(i.indpred, i.indrelid) AS predicate
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'core'
+                   AND t.relname = 'steam_links'
+                   AND i.indisunique
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, i.indpred, i.indrelid
+           ) indexes
+          WHERE columns = ARRAY['steam_id']::text[]
+            AND predicate LIKE '%discord_id <> 0%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("steam_links owner unique index count")
+}
+
+async fn trigger_names(pool: &PgPool, table: &str) -> Vec<String> {
+    sqlx::query_scalar(
+        "SELECT tg.tgname
+           FROM pg_trigger tg
+           JOIN pg_class t ON t.oid = tg.tgrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = 'core'
+            AND t.relname = $1
+            AND NOT tg.tgisinternal
+          ORDER BY tg.tgname",
+    )
+    .bind(table)
+    .fetch_all(pool)
+    .await
+    .unwrap_or_else(|err| panic!("trigger names for core.{table}: {err}"))
+}
+
+async fn migration_row_signature(pool: &PgPool, version: i64, description: &str) -> String {
     sqlx::query_scalar(
         "SELECT version::text
                 || '|' || description
@@ -213,13 +225,15 @@ async fn migration_row_signature(pool: &PgPool) -> String {
                 || '|' || execution_time::text
                 || '|' || installed_on::text
            FROM _sqlx_migrations
-          WHERE version = 1
-            AND description = 'core and schemas'
+          WHERE version = $1
+            AND description = $2
             AND success",
     )
+    .bind(version)
+    .bind(description)
     .fetch_one(pool)
     .await
-    .expect("migration version 1 row")
+    .unwrap_or_else(|err| panic!("migration version {version} row: {err}"))
 }
 
 fn migrator_command() -> Command {
@@ -290,13 +304,15 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version = 1
-            AND description = 'core and schemas'
+          WHERE version IN (1, 2)
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 1);
-    let migration_signature_after_first = migration_row_signature(&pool).await;
+    assert_eq!(migration_count_after_first, 2);
+    let migration_1_signature_after_first =
+        migration_row_signature(&pool, 1, "core and schemas").await;
+    let migration_2_signature_after_first =
+        migration_row_signature(&pool, 2, "sp1 schemas and core").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -304,16 +320,20 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version = 1
-            AND description = 'core and schemas'
+          WHERE version IN (1, 2)
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 1);
+    assert_eq!(migration_count_after_second, 2);
     assert_eq!(
-        migration_row_signature(&pool).await,
-        migration_signature_after_first,
+        migration_row_signature(&pool, 1, "core and schemas").await,
+        migration_1_signature_after_first,
         "second migrator run must be a no-op for migration version 1"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2, "sp1 schemas and core").await,
+        migration_2_signature_after_first,
+        "second migrator run must be a no-op for migration version 2"
     );
 
     let schema_count = scalar_i64(
@@ -327,11 +347,17 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'steam',
               'turnier',
               'patchnotes',
-              'activity'
+              'activity',
+              'voice',
+              'tierlist',
+              'moderation',
+              'bot',
+              'clips',
+              'content'
           )",
     )
     .await;
-    assert_eq!(schema_count, 7);
+    assert_eq!(schema_count, 13);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -384,11 +410,28 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
 
     assert_eq!(
         table_columns(&pool, "steam_links").await,
-        vec!["discord_id", "steam_id64", "verified", "linked_at"]
+        vec![
+            "discord_id",
+            "steam_id64",
+            "verified",
+            "linked_at",
+            "steam_id",
+            "steam_display_name",
+            "primary_account",
+            "updated_at",
+            "legacy_ref",
+            "migrated_at",
+            "deadlock_rank",
+            "deadlock_subrank",
+            "deadlock_badge_level",
+            "deadlock_rank_name",
+            "deadlock_rank_updated_at",
+            "is_steam_friend"
+        ]
     );
     assert_eq!(
         primary_key_columns(&pool, "steam_links").await,
-        vec!["discord_id", "steam_id64"]
+        vec!["discord_id", "steam_id"]
     );
     assert_column(
         &pool,
@@ -406,7 +449,18 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "steam_id64",
         "bigint",
         "int8",
-        "NO",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(&pool, "steam_links", "steam_id", "text", "text", "NO", None).await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "steam_display_name",
+        "text",
+        "text",
+        "YES",
         None,
     )
     .await;
@@ -423,22 +477,129 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     assert_column(
         &pool,
         "steam_links",
+        "primary_account",
+        "boolean",
+        "bool",
+        "NO",
+        Some("false"),
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
         "linked_at",
         "timestamp with time zone",
         "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "legacy_ref",
+        "text",
+        "text",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "migrated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "deadlock_rank",
+        "integer",
+        "int4",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "deadlock_subrank",
+        "integer",
+        "int4",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "deadlock_badge_level",
+        "integer",
+        "int4",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "deadlock_rank_name",
+        "text",
+        "text",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "deadlock_rank_updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "is_steam_friend",
+        "boolean",
+        "bool",
         "NO",
-        Some("now()"),
+        Some("false"),
     )
     .await;
 
     assert_eq!(
-        steam_links_user_fk_contract(&pool).await,
-        vec![(
-            vec!["discord_id".to_string()],
-            vec!["discord_id".to_string()],
-            "c".to_string()
-        )],
-        "core.steam_links.discord_id must FK to core.users.discord_id ON DELETE CASCADE"
+        trigger_names(&pool, "steam_links").await,
+        vec![
+            "trg_steam_links_owner_guard_insert".to_string(),
+            "trg_steam_links_owner_guard_update".to_string(),
+            "trg_steam_links_user_guard_insert".to_string(),
+            "trg_steam_links_user_guard_update".to_string()
+        ],
+        "core.steam_links keeps owner guard and nonzero-user guard triggers"
+    );
+
+    assert_eq!(
+        trigger_names(&pool, "users").await,
+        vec!["trg_core_users_steam_links_delete_cascade".to_string()],
+        "core.users delete must cascade to core.steam_links through the SP1 trigger"
     );
 
     assert_eq!(
@@ -446,6 +607,116 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         1,
         "expected exactly one non-PK btree index with columns exactly [steam_id64]"
     );
+    assert_eq!(
+        steam_links_owner_unique_index_count(&pool).await,
+        1,
+        "expected one partial unique owner index on steam_id where discord_id != 0"
+    );
+
+    assert_eq!(
+        table_columns(&pool, "meta_users").await,
+        vec![
+            "id",
+            "username",
+            "display_name",
+            "avatar_url",
+            "role",
+            "created_at"
+        ]
+    );
+    assert_eq!(primary_key_columns(&pool, "meta_users").await, vec!["id"]);
+    assert_column(&pool, "meta_users", "id", "bigint", "int8", "NO", None).await;
+    assert_column(&pool, "meta_users", "username", "text", "text", "YES", None).await;
+    assert_column(
+        &pool,
+        "meta_users",
+        "display_name",
+        "text",
+        "text",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "meta_users",
+        "avatar_url",
+        "text",
+        "text",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "meta_users",
+        "role",
+        "text",
+        "text",
+        "NO",
+        Some("'user'::text"),
+    )
+    .await;
+    assert_column(
+        &pool,
+        "meta_users",
+        "created_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        Some("now()"),
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "user_privacy").await,
+        vec!["user_id", "opted_out", "deleted_at", "reason", "updated_at"]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "user_privacy").await,
+        vec!["user_id"]
+    );
+    assert_column(
+        &pool,
+        "user_privacy",
+        "user_id",
+        "bigint",
+        "int8",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_privacy",
+        "opted_out",
+        "boolean",
+        "bool",
+        "NO",
+        Some("false"),
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_privacy",
+        "deleted_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(&pool, "user_privacy", "reason", "text", "text", "YES", None).await;
+    assert_column(
+        &pool,
+        "user_privacy",
+        "updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        Some("now()"),
+    )
+    .await;
 
     pool.close().await;
     drop_db(&admin, &dbname).await;

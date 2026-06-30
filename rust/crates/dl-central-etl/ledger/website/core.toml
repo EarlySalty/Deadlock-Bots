@@ -1,0 +1,23 @@
+[tables.meta_users.columns.id]
+status = "mapped"
+to = "core.meta_users.id"
+
+[tables.meta_users.columns.username]
+status = "mapped"
+to = "core.meta_users.username"
+
+[tables.meta_users.columns.display_name]
+status = "mapped"
+to = "core.meta_users.display_name"
+
+[tables.meta_users.columns.avatar_url]
+status = "mapped"
+to = "core.meta_users.avatar_url"
+
+[tables.meta_users.columns.role]
+status = "mapped"
+to = "core.meta_users.role"
+
+[tables.meta_users.columns.created_at]
+status = "mapped"
+to = "core.meta_users.created_at"

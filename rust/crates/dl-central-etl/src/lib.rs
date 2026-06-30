@@ -8,11 +8,12 @@ pub use convert::{
     optional_sqlite_int_to_bool, optional_text_json_to_value, optional_unix_seconds_to_datetime,
     sqlite_int_to_bool, text_json_to_value, unix_seconds_to_datetime, ConvertError,
 };
-pub use ledger::{ColumnStatus, Ledger, LedgerError, TableLedger};
+pub use ledger::{ColumnStatus, Ledger, LedgerError, LedgerSet, TableLedger};
 pub use source::{SourceError, SourceRow, SourceSqlite};
 pub use target::{TargetError, TargetWriter};
 pub use verify::{
-    check_mapping_completeness, check_row_counts, check_row_counts_with_factor,
-    check_sample_covers_mapped_columns, sample_round_trip, RoundTripFields, RoundTripRows,
-    RowCountFactor, VerifyError,
+    check_ledger_set_mapping_completeness, check_mapping_completeness, check_row_counts,
+    check_row_counts_with_factor, check_sample_covers_mapped_columns,
+    check_source_mapping_completeness, sample_round_trip, RoundTripFields, RoundTripRows,
+    RowCountFactor, SourceSchemas, SourceTableColumns, VerifyError,
 };

@@ -1,11 +1,12 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, fs};
 
 use dl_central_etl::{
-    check_mapping_completeness, check_row_counts, check_row_counts_with_factor,
-    check_sample_covers_mapped_columns, optional_sqlite_int_to_bool, optional_text_json_to_value,
-    optional_unix_seconds_to_datetime, sample_round_trip, sqlite_int_to_bool, text_json_to_value,
-    unix_seconds_to_datetime, Ledger, LedgerError, RoundTripFields, RoundTripRows, RowCountFactor,
-    SourceError, SourceSqlite, VerifyError,
+    check_ledger_set_mapping_completeness, check_mapping_completeness, check_row_counts,
+    check_row_counts_with_factor, check_sample_covers_mapped_columns, optional_sqlite_int_to_bool,
+    optional_text_json_to_value, optional_unix_seconds_to_datetime, sample_round_trip,
+    sqlite_int_to_bool, text_json_to_value, unix_seconds_to_datetime, Ledger, LedgerError,
+    LedgerSet, RoundTripFields, RoundTripRows, RowCountFactor, SourceError, SourceSchemas,
+    SourceSqlite, SourceTableColumns, VerifyError,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -29,6 +30,18 @@ fn fields(entries: &[(&str, Value)]) -> RoundTripFields {
     entries
         .iter()
         .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+fn table_columns(entries: &[(&str, &[&str])]) -> SourceTableColumns {
+    entries
+        .iter()
+        .map(|(table, columns)| {
+            (
+                (*table).to_string(),
+                columns.iter().map(|column| (*column).to_string()).collect(),
+            )
+        })
         .collect()
 }
 
@@ -203,6 +216,163 @@ fn complete_fixture_passes_mapping_counts_and_round_trip() {
 
     check_sample_covers_mapped_columns(table, &source).expect("sample covers all mapped columns");
     sample_round_trip(&source, &target).expect("matching samples pass");
+}
+
+#[test]
+fn ledger_set_keeps_same_table_names_source_qualified_and_fails_missing_source_column() {
+    let dir = tempfile::tempdir().expect("create temp ledger root");
+    let deadlock_dir = dir.path().join("deadlock-sqlite3");
+    let website_dir = dir.path().join("website");
+    fs::create_dir_all(&deadlock_dir).expect("create deadlock ledger dir");
+    fs::create_dir_all(&website_dir).expect("create website ledger dir");
+
+    fs::write(
+        deadlock_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.bot_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+
+        [tables.coaching_requests.columns.message_id]
+        status = "mapped"
+        to = "coaching.requests.message_id"
+        "#,
+    )
+    .expect("write deadlock ledger");
+    fs::write(
+        website_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.website_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+
+        [tables.coaching_requests.columns.bot_request_id]
+        status = "mapped"
+        to = "coaching.requests.bot_request_id"
+        "#,
+    )
+    .expect("write website ledger");
+
+    let ledger_set = LedgerSet::from_dir(dir.path()).expect("ledger set loads");
+    assert!(ledger_set
+        .source("deadlock-sqlite3")
+        .expect("deadlock source")
+        .table("coaching_requests")
+        .is_some());
+    assert!(ledger_set
+        .source("website")
+        .expect("website source")
+        .table("coaching_requests")
+        .is_some());
+
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            table_columns(&[(
+                "coaching_requests",
+                &["id", "discord_user_id", "message_id"],
+            )]),
+        ),
+        (
+            "website".to_string(),
+            table_columns(&[(
+                "coaching_requests",
+                &["id", "discord_user_id", "bot_request_id"],
+            )]),
+        ),
+    ]);
+
+    check_ledger_set_mapping_completeness(&source_schemas, &ledger_set)
+        .expect("same table name in two source DBs is checked separately");
+
+    fs::write(
+        website_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.website_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+        "#,
+    )
+    .expect("remove one website source column from ledger");
+
+    let broken_ledger_set = LedgerSet::from_dir(dir.path()).expect("broken ledger still parses");
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &broken_ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnmappedSourceColumn {
+            source_db: "website".to_string(),
+            table: "coaching_requests".to_string(),
+            column: "bot_request_id".to_string(),
+        })
+    );
+}
+
+#[test]
+fn t1_ledger_fragments_cover_core_source_columns() {
+    let ledger_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ledger");
+    let ledger_set = LedgerSet::from_dir(ledger_root).expect("T1 ledger directory loads");
+
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            table_columns(&[
+                (
+                    "steam_links",
+                    &[
+                        "user_id",
+                        "steam_id",
+                        "name",
+                        "verified",
+                        "primary_account",
+                        "created_at",
+                        "updated_at",
+                        "legacy_ref",
+                        "migrated_at",
+                        "deadlock_rank",
+                        "deadlock_rank_name",
+                        "deadlock_subrank",
+                        "deadlock_badge_level",
+                        "deadlock_rank_updated_at",
+                        "is_steam_friend",
+                    ],
+                ),
+                (
+                    "user_privacy",
+                    &["user_id", "opted_out", "deleted_at", "reason", "updated_at"],
+                ),
+            ]),
+        ),
+        (
+            "website".to_string(),
+            table_columns(&[(
+                "meta_users",
+                &[
+                    "id",
+                    "username",
+                    "display_name",
+                    "avatar_url",
+                    "role",
+                    "created_at",
+                ],
+            )]),
+        ),
+    ]);
+
+    check_ledger_set_mapping_completeness(&source_schemas, &ledger_set)
+        .expect("T1 core ledger fragments cover all source columns");
 }
 
 #[test]

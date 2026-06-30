@@ -2,10 +2,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
 
-use crate::ledger::{ColumnStatus, TableLedger};
+use crate::ledger::{ColumnStatus, Ledger, LedgerSet, TableLedger};
 
 pub type RoundTripFields = BTreeMap<String, Value>;
 pub type RoundTripRows = BTreeMap<String, RoundTripFields>;
+pub type SourceTableColumns = BTreeMap<String, Vec<String>>;
+pub type SourceSchemas = BTreeMap<String, SourceTableColumns>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowCountFactor {
@@ -17,6 +19,16 @@ pub struct RowCountFactor {
 pub enum VerifyError {
     #[error("Quellspalte ist weder gemappt noch gedroppt: {column}")]
     UnmappedColumn { column: String },
+    #[error("Ledger-Quelle fehlt im Quellschema: {source_db}")]
+    MissingSourceSchema { source_db: String },
+    #[error("Ledger-Tabelle fehlt im Quellschema: {source_db}.{table}")]
+    MissingSourceTable { source_db: String, table: String },
+    #[error("Quellspalte ist weder gemappt noch gedroppt: {source_db}.{table}.{column}")]
+    UnmappedSourceColumn {
+        source_db: String,
+        table: String,
+        column: String,
+    },
     #[error("gemappte Spalte fehlt im Round-Trip-Sample: {column} in row={row_key}")]
     MappedColumnMissingFromSample { column: String, row_key: String },
     #[error("Row-Count-Mismatch: erwartet {expected}, bekam {actual}")]
@@ -42,6 +54,52 @@ pub fn check_mapping_completeness(
                 column: column.clone(),
             });
         }
+    }
+
+    Ok(())
+}
+
+pub fn check_source_mapping_completeness(
+    source: &str,
+    source_tables: &SourceTableColumns,
+    ledger: &Ledger,
+) -> Result<(), VerifyError> {
+    for (table_name, table_ledger) in &ledger.tables {
+        let source_columns =
+            source_tables
+                .get(table_name)
+                .ok_or_else(|| VerifyError::MissingSourceTable {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                })?;
+
+        for column in source_columns {
+            if table_ledger.column_status(column).is_none() {
+                return Err(VerifyError::UnmappedSourceColumn {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn check_ledger_set_mapping_completeness(
+    source_schemas: &SourceSchemas,
+    ledger_set: &LedgerSet,
+) -> Result<(), VerifyError> {
+    for (source_name, ledger) in &ledger_set.sources {
+        let source_tables =
+            source_schemas
+                .get(source_name)
+                .ok_or_else(|| VerifyError::MissingSourceSchema {
+                    source_db: source_name.clone(),
+                })?;
+
+        check_source_mapping_completeness(source_name, source_tables, ledger)?;
     }
 
     Ok(())
