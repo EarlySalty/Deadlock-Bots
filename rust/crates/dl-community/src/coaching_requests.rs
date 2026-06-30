@@ -935,7 +935,9 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                     )
                     .optional()?;
                 if active_ban.is_some() {
-                    return Ok(Err("Platzhalter".to_string()));
+                    return Ok(Err(
+                        "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen.".to_string(),
+                    ));
                 }
 
                 let existing: Option<(i64, Option<i64>)> = conn
@@ -1747,7 +1749,9 @@ impl InteractionHandler for CoachingHandler {
                 Ok(claimed) => claimed,
                 Err(err) => {
                     tracing::warn!(%err, request_id, "Coaching-Claim konnte nicht gespeichert werden");
-                    return BridgeReply::ephemeral_text("Platzhalter");
+                    return BridgeReply::ephemeral_text(
+                        "❌ Der Claim konnte gerade nicht gespeichert werden. Bitte versuch es in einem Moment erneut.",
+                    );
                 }
             };
             if !claimed {
@@ -2596,7 +2600,10 @@ mod tests {
             .await
             .expect_err("active no-show ban must reject website intake");
 
-        assert_eq!(err, "Platzhalter");
+        assert_eq!(
+            err,
+            "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen."
+        );
         let request_count: i64 = db
             .read(move |conn| {
                 conn.query_row(

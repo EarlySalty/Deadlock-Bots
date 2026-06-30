@@ -1,3 +1,11 @@
+## #172 — Coaching: gesperrte Anfragen werden abgewiesen, kein Doppel-Claim mehr
+
+**Ausgangslage:** Drei Lücken rund ums Coaching. Wer wegen eines verpassten Termins gesperrt war, konnte über die Website trotzdem eine neue Anfrage anstoßen. Klickten zwei Coaches im selben Moment auf „Übernehmen", konnten sich beide als zuständig wähnen. Und die Moderations-Buttons unter einer Review prüften die falsche Berechtigung — jemand mit „Rollen verwalten", aber ohne Moderationsrechte, hätte handeln können.
+
+**Was wurde geändert:** Eine gesperrte Person bekommt ihre Coaching-Anfrage jetzt schon beim Reinkommen abgewiesen, mit klarer Rückmeldung statt stillem Ins-Leere-Laufen. Das Übernehmen ist eindeutig: nur ein Coach bekommt den Zuschlag, der zweite Klick läuft sauber ins „schon vergeben". Und die Moderations-Buttons prüfen jetzt die passende Berechtigung (Mitglieder moderieren bzw. bannen), bevor überhaupt etwas passiert.
+
+**Wie es jetzt läuft:** Das Coaching ist an den Entscheidungspunkten dicht — gesperrt heißt gesperrt, übernommen heißt von genau einem, und moderieren darf nur, wer auch moderieren darf.
+
 ## #171 — Coaching-Anfragen von der Website landen jetzt in Discord
 
 **Ausgangslage:** Wer auf der Website eine Coaching-Anfrage stellt, war bisher nur dort sichtbar — im Discord, wo die Coaches sich koordinieren, tauchte die Anfrage gar nicht auf. Das hieß: doppelt hinschauen, Sachen von Hand rüberkopieren, und leicht mal eine Anfrage übersehen.
