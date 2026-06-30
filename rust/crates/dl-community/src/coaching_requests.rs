@@ -924,6 +924,22 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let now = chrono::Utc::now().timestamp();
         self.db
             .write(move |conn| {
+                let active_ban: Option<i64> = conn
+                    .query_row(
+                        "SELECT expires_at
+                           FROM coaching_bans
+                          WHERE discord_user_id = ?1 AND expires_at > ?2
+                          LIMIT 1",
+                        rusqlite::params![discord_user_id, now],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if active_ban.is_some() {
+                    return Ok(Err(
+                        "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen.".to_string(),
+                    ));
+                }
+
                 let existing: Option<(i64, Option<i64>)> = conn
                     .query_row(
                         "SELECT id, message_id
@@ -965,10 +981,10 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                             local_request_id,
                         ],
                     )?;
-                    return Ok(RequestCreatedUpsert {
+                    return Ok(Ok(RequestCreatedUpsert {
                         local_request_id,
                         already_posted: message_id.is_some(),
-                    });
+                    }));
                 }
 
                 conn.execute(
@@ -993,13 +1009,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                         now,
                     ],
                 )?;
-                Ok(RequestCreatedUpsert {
+                Ok(Ok(RequestCreatedUpsert {
                     local_request_id: conn.last_insert_rowid(),
                     already_posted: false,
-                })
+                }))
             })
             .await
-            .map_err(|err| err.to_string())
+            .map_err(|err| err.to_string())?
     }
 
     pub async fn post_request_created_notification(&self, item: &Value) -> Result<(), String> {
@@ -1693,9 +1709,30 @@ impl InteractionHandler for CoachingHandler {
                 request.username.clone(),
             );
             let channel_id = interaction.channel_id;
-            let _ =
-                c.db.write(move |conn| {
-                    conn.execute(
+            let is_owner_claim = is_owner;
+            let claimed = match c
+                .db
+                .write(move |conn| {
+                    let tx = conn.transaction()?;
+                    let claimed = tx.execute(
+                        "UPDATE coaching_requests
+                            SET status='matched', updated_at=?1
+                          WHERE id=?2
+                            AND status='analyzed'
+                            AND (
+                              ?3 != 0
+                              OR assigned_coach_id IS NULL
+                              OR assigned_coach_id = ?4
+                              OR reserved_until IS NULL
+                              OR reserved_until <= ?1
+                            )",
+                        rusqlite::params![now_ts, request_id, is_owner_claim as i64, cid],
+                    )?;
+                    if claimed == 0 {
+                        tx.rollback()?;
+                        return Ok(false);
+                    }
+                    tx.execute(
                         "INSERT INTO coaching_sessions (id, request_id, coach_id, discord_user_id,
                            discord_username, discord_channel_id, status,
                            role_assigned_at, role_expires_at, created_at)
@@ -1704,13 +1741,24 @@ impl InteractionHandler for CoachingHandler {
                             sid, request_id, cid, uid, uname, channel_id, now_ts, expires_at
                         ],
                     )?;
-                    conn.execute(
-                        "UPDATE coaching_requests SET status='matched', updated_at=?1 WHERE id=?2",
-                        rusqlite::params![now_ts, request_id],
-                    )
-                    .map(|_| ())
+                    tx.commit()?;
+                    Ok(true)
                 })
-                .await;
+                .await
+            {
+                Ok(claimed) => claimed,
+                Err(err) => {
+                    tracing::warn!(%err, request_id, "Coaching-Claim konnte nicht gespeichert werden");
+                    return BridgeReply::ephemeral_text(
+                        "❌ Der Claim konnte gerade nicht gespeichert werden. Bitte versuch es in einem Moment erneut.",
+                    );
+                }
+            };
+            if !claimed {
+                return BridgeReply::ephemeral_text(
+                    "❌ Diese Anfrage wurde bereits von einem Coach geclaimt.",
+                );
+            }
             c.add_role_if_missing(
                 interaction.guild_id,
                 request.user_id,
@@ -2041,6 +2089,7 @@ mod tests {
         role_ids: Mutex<HashMap<u64, Vec<u64>>>,
         admins: Mutex<HashSet<u64>>,
         names: Mutex<HashMap<u64, String>>,
+        display_name_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
         voices: Mutex<HashMap<u64, u64>>,
         dm_texts: Mutex<Vec<(u64, String)>>,
         dm_embeds: Mutex<Vec<(u64, Value)>>,
@@ -2100,6 +2149,14 @@ mod tests {
         }
 
         async fn member_display_name(&self, _guild_id: u64, user_id: u64) -> String {
+            let barrier = self
+                .display_name_barrier
+                .lock()
+                .expect("display_name_barrier lock")
+                .clone();
+            if let Some(barrier) = barrier {
+                barrier.wait().await;
+            }
             self.names
                 .lock()
                 .expect("names lock")
@@ -2273,6 +2330,36 @@ mod tests {
             current_problems: "Lane-Phase".into(),
             ai_summary: String::new(),
         }
+    }
+
+    fn request_created_item(request_id: &str, user_id: u64) -> Value {
+        json!({
+            "type": "request_created",
+            "request_id": request_id,
+            "coachee_id": format!("coachee-{request_id}"),
+            "discord_user_id": user_id.to_string(),
+            "discord_username": "WebsiteUser",
+            "rank": "Archon",
+            "subrank": "3",
+            "hero": "Vindicta",
+            "games_played": "120",
+            "hours_played": "80",
+            "availability": "Montag 18:00",
+            "current_problems": "Lane-Phase",
+        })
+    }
+
+    async fn insert_no_show_ban(db: &Db, user_id: u64, expires_at: i64) {
+        db.write(move |conn| {
+            conn.execute(
+                "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
+                 VALUES (?1, ?2, ?3, 'test')",
+                rusqlite::params![user_id, expires_at - 60, expires_at],
+            )
+            .map(|_| ())
+        })
+        .await
+        .expect("ban insert");
     }
 
     async fn rotation_last_assigned_at(db: &Db, coach_id: u64) -> i64 {
@@ -2500,6 +2587,39 @@ mod tests {
             buttons[2]["url"],
             "https://deutsche-deadlock-community.de/coaching/coachees/coachee-abc"
         );
+    }
+
+    #[tokio::test]
+    async fn request_created_notification_lehnt_aktiven_no_show_ban_ab() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        let user_id = 4242;
+        insert_no_show_ban(&db, user_id, chrono::Utc::now().timestamp() + 3600).await;
+
+        let err = coaching
+            .post_request_created_notification(&request_created_item("banned-50", user_id))
+            .await
+            .expect_err("active no-show ban must reject website intake");
+
+        assert_eq!(
+            err,
+            "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen."
+        );
+        let request_count: i64 = db
+            .read(move |conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM coaching_requests WHERE discord_user_id=?1",
+                    [user_id],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("request count");
+        assert_eq!(request_count, 0);
+        assert!(port
+            .request_messages
+            .lock()
+            .expect("request_messages lock")
+            .is_empty());
     }
 
     #[tokio::test]
@@ -3022,6 +3142,81 @@ mod tests {
             .lock()
             .expect("added_roles lock")
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn parallele_claims_lassen_nur_einen_coach_gewinnen() {
+        let (_dir, db, port, coaching) = test_coaching().await;
+        insert_request(&db, 1, 100, "analyzed").await;
+        for coach_id in [200, 201] {
+            port.role_ids
+                .lock()
+                .expect("role_ids lock")
+                .insert(coach_id, vec![COACH_ROLE_ID]);
+            port.names
+                .lock()
+                .expect("names lock")
+                .insert(coach_id, format!("Coach {coach_id}"));
+        }
+        port.display_name_barrier
+            .lock()
+            .expect("display_name_barrier lock")
+            .replace(Arc::new(tokio::sync::Barrier::new(2)));
+
+        let handler_a = CoachingHandler {
+            coaching: coaching.clone(),
+        };
+        let handler_b = CoachingHandler { coaching };
+
+        let (reply_a, reply_b) = tokio::join!(
+            handler_a.handle(BridgeInteraction {
+                custom_id: "coach_claim_1".to_string(),
+                user_id: 200,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            }),
+            handler_b.handle(BridgeInteraction {
+                custom_id: "coach_claim_1".to_string(),
+                user_id: 201,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+        );
+
+        let contents = [
+            reply_a.content.as_deref().unwrap_or_default(),
+            reply_b.content.as_deref().unwrap_or_default(),
+        ];
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| content.starts_with("✅ Session mit "))
+                .count(),
+            1
+        );
+        assert_eq!(
+            contents
+                .iter()
+                .filter(|content| {
+                    **content == "❌ Diese Anfrage wurde bereits von einem Coach geclaimt."
+                })
+                .count(),
+            1
+        );
+
+        let session_count: i64 = db
+            .read(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM coaching_sessions WHERE request_id=1",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .await
+            .expect("session count");
+        assert_eq!(session_count, 1);
     }
 
     #[test]

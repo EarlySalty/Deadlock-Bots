@@ -857,9 +857,6 @@ impl ReviewHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for ReviewHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        if !interaction.author_can_manage_roles {
-            return BridgeReply::ephemeral_text("Keine Berechtigung.");
-        }
         let rest = interaction
             .custom_id
             .strip_prefix("aimod:")
@@ -867,6 +864,14 @@ impl InteractionHandler for ReviewHandler {
         let Some((action, case_id)) = rest.split_once(':') else {
             return BridgeReply::ephemeral_text("Unbekannte Aktion.");
         };
+        let authorized = match action {
+            "accept" | "deny" | "denysubmit" => interaction.author_can_moderate_members,
+            "ban" => interaction.author_can_ban_members,
+            _ => true,
+        };
+        if !authorized {
+            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+        }
         match action {
             "accept" => {
                 let outcome = self
@@ -1700,10 +1705,6 @@ impl InteractionHandler for GuardReviewHandler {
             return self.submit_appeal(&interaction, case_id).await;
         }
 
-        // Alle übrigen sg:*-Aktionen sind Mod-Buttons → Rechte-Guard.
-        if !interaction.author_can_manage_roles {
-            return BridgeReply::ephemeral_text("Keine Berechtigung.");
-        }
         let parts: Vec<&str> = rest.split(':').collect();
         let (Some(action), Some(guild_id), Some(user_id)) = (
             parts.first().copied(),
@@ -1712,6 +1713,15 @@ impl InteractionHandler for GuardReviewHandler {
         ) else {
             return BridgeReply::ephemeral_text("Unbekannte Aktion.");
         };
+        // Alle übrigen sg:*-Aktionen sind Mod-Buttons → action-spezifischer Rechte-Guard.
+        let authorized = match action {
+            "ban" | "unban" => interaction.author_can_ban_members,
+            "untimeout" => interaction.author_can_moderate_members,
+            _ => true,
+        };
+        if !authorized {
+            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+        }
         match action {
             "ban" => {
                 let ok = self
@@ -3047,9 +3057,61 @@ mod tests {
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
+    use dl_db::Db;
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
+    }
+
+    struct StaticGenerator;
+
+    #[async_trait::async_trait]
+    impl dl_ai::TextGenerator for StaticGenerator {
+        async fn generate_text(&self, _request: dl_ai::GenerateRequest) -> Option<String> {
+            Some("{\"verdict\":\"ok\"}".to_string())
+        }
+    }
+
+    #[derive(Default)]
+    struct NoopModPort;
+
+    #[async_trait::async_trait]
+    impl dl_moderation::ModPort for NoopModPort {
+        async fn delete_message(&self, _channel_id: u64, _message_id: u64, _reason: &str) -> bool {
+            true
+        }
+
+        async fn timeout_member(&self, _guild_id: u64, _user_id: u64, _minutes: i64) -> bool {
+            true
+        }
+
+        async fn ban_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
+            true
+        }
+
+        async fn post_review(
+            &self,
+            _case: &dl_moderation::store::CaseDraft,
+            _buttons_case_id: &str,
+        ) -> Option<u64> {
+            None
+        }
+
+        async fn post_log(&self, _text: String) {}
+
+        async fn send_dm(&self, _user_id: u64, _text: String) {}
+    }
+
+    fn test_review_handler() -> (tempfile::TempDir, ReviewHandler) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = Db::open_creating(dir.path().join("moderation.sqlite3")).expect("db");
+        let moderator = dl_moderation::AiModerator::new(
+            db,
+            Arc::new(StaticGenerator),
+            None,
+            Arc::new(NoopModPort),
+        );
+        (dir, ReviewHandler { moderator })
     }
 
     #[cfg(unix)]
@@ -3271,6 +3333,74 @@ mod tests {
         let parsed = parse_brain_channel_allowlist("123, nope, 456")
             .unwrap_or_else(|| panic!("valid IDs should be kept"));
         assert_eq!(parsed, HashSet::from([123, 456]));
+    }
+
+    #[tokio::test]
+    async fn aimod_accept_braucht_moderate_members_nicht_manage_roles() {
+        let (_dir, handler) = test_review_handler();
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "aimod:accept:test-case".to_string(),
+                user_id: 7,
+                author_can_manage_roles: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+    }
+
+    #[tokio::test]
+    async fn aimod_ban_braucht_ban_members_nicht_manage_roles() {
+        let (_dir, handler) = test_review_handler();
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "aimod:ban:test-case".to_string(),
+                user_id: 7,
+                author_can_manage_roles: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+    }
+
+    #[tokio::test]
+    async fn securityguard_untimeout_braucht_moderate_members_nicht_manage_roles() {
+        let handler = GuardReviewHandler {
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "sg:untimeout:1:2".to_string(),
+                user_id: 7,
+                author_can_manage_roles: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+    }
+
+    #[tokio::test]
+    async fn securityguard_ban_braucht_ban_members_nicht_manage_roles() {
+        let handler = GuardReviewHandler {
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "sg:ban:1:2".to_string(),
+                user_id: 7,
+                author_can_manage_roles: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
     }
 
     #[test]
