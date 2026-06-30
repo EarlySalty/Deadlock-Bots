@@ -1,3 +1,11 @@
+## #175 — Rang-Lanes schreiben Rechte gebündelt
+
+**Ausgangslage:** Beim Mindest-Rang und beim Laden eines Presets wurden Rang-Rollen einzeln angefasst und niedrigere Rollen aktiv gesperrt. Das passte nicht zu den Comp-Lanes, die über erlaubte Rang-Rollen funktionieren: Bei `Phantom+` müssen Phantom, Ascendant und Eternus rein dürfen, nicht die unteren Rollen als Deny-Liste landen.
+
+**Was wurde geändert:** Rang-Rollen werden jetzt gesammelt und in einem Batch auf den Kanal geschrieben. Erlaubte Rang-Rollen bekommen `Verbinden` erlaubt, alle nicht erlaubten Rang-Rollen werden aus den Kanalrechten entfernt statt auf `deny` gesetzt. Auch andere Voice-Overwrite-Änderungen laufen über denselben gebündelten Kanal-Update-Pfad.
+
+**Wie es jetzt läuft:** Ein Preset oder Mindest-Rang wie `Phantom+` öffnet die passenden höheren Rang-Rollen sauber per Allow. Die Deny-Liste wird nicht mehr mit Rang-Rollen vollgeschrieben.
+
 ## #174 — `!brain` beantwortet einfache Fragen wieder direkt
 
 **Ausgangslage:** `!brain` behandelte auch kurze Rechen- oder Mechanikfragen wie eine Build-Analyse. Dadurch kamen Antworten mit internen Vertrauenshinweisen, langen Verifikationsabschnitten und zusätzlichem Build-Gelaber, obwohl eigentlich nur ein kurzer Zahlenwert gefragt war.
