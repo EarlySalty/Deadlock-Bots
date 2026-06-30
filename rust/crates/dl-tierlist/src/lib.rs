@@ -7,6 +7,7 @@
 
 mod admin;
 mod data;
+mod error;
 mod refresh;
 mod settings;
 mod util;
@@ -19,9 +20,9 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{middleware, Json, Router};
-use dl_db::Db;
 use dl_webcore::envelope::error_message;
 use dl_webcore::DashboardClient;
+use sqlx::PgPool;
 
 pub use refresh::refresh_loop;
 pub use settings::SESSION_COOKIE;
@@ -29,7 +30,7 @@ pub use settings::SESSION_COOKIE;
 pub const DEADLOCK_API_BASE: &str = "https://api.deadlock-api.com/v1";
 
 pub struct TierlistApp {
-    pub db: Db,
+    pub pool: PgPool,
     pub dashboard: DashboardClient,
     /// HTTP-Client für api.deadlock-api.com (30-s-Timeout wie das Original).
     pub api: reqwest::Client,
@@ -41,13 +42,13 @@ pub struct TierlistApp {
 pub type SharedApp = Arc<TierlistApp>;
 
 impl TierlistApp {
-    pub fn new(db: Db, dashboard: DashboardClient, api_base: impl Into<String>) -> SharedApp {
+    pub fn new(pool: PgPool, dashboard: DashboardClient, api_base: impl Into<String>) -> SharedApp {
         let api = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("reqwest-Client bauen");
         Arc::new(Self {
-            db,
+            pool,
             dashboard,
             api,
             api_base: api_base.into().trim_end_matches('/').to_string(),
@@ -128,7 +129,7 @@ fn internal(err: impl std::fmt::Display) -> Response {
 }
 
 async fn handle_heroes(State(app): State<SharedApp>) -> Response {
-    match app.db.read(data::heroes_payload).await {
+    match data::heroes_payload(&app.pool).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => internal(err),
     }
@@ -141,15 +142,11 @@ async fn handle_tierlist(
     let Some(bucket) = parse_bucket(&params) else {
         return invalid_bucket();
     };
-    let settings = match app.db.write(|c| settings::read_settings(c)).await {
+    let settings = match settings::read_settings(&app.pool).await {
         Ok(s) => s,
         Err(err) => return internal(err),
     };
-    match app
-        .db
-        .read(move |conn| data::tierlist_payload(conn, &bucket, &settings))
-        .await
-    {
+    match data::tierlist_payload(&app.pool, &bucket, &settings).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => internal(err),
     }
@@ -162,15 +159,11 @@ async fn handle_tierlist_history(
     let Some(bucket) = parse_bucket(&params) else {
         return invalid_bucket();
     };
-    let settings = match app.db.write(|c| settings::read_settings(c)).await {
+    let settings = match settings::read_settings(&app.pool).await {
         Ok(s) => s,
         Err(err) => return internal(err),
     };
-    match app
-        .db
-        .read(move |conn| data::history_payload(conn, &bucket, &settings))
-        .await
-    {
+    match data::history_payload(&app.pool, &bucket, &settings).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => internal(err),
     }

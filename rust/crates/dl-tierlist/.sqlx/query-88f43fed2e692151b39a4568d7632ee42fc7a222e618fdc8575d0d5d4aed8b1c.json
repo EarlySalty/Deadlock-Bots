@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO tierlist.tierlist_settings (k, v, updated_at)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (k) DO UPDATE\n           SET v = EXCLUDED.v,\n               updated_at = EXCLUDED.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "88f43fed2e692151b39a4568d7632ee42fc7a222e618fdc8575d0d5d4aed8b1c"
+}

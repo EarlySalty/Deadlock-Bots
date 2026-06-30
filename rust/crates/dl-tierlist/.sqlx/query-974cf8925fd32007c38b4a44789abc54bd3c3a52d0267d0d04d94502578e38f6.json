@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id\n          FROM tierlist.tierlist_snapshots\n         WHERE bucket = $1 AND id != $2\n         ORDER BY fetched_at DESC, id DESC\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "974cf8925fd32007c38b4a44789abc54bd3c3a52d0267d0d04d94502578e38f6"
+}
