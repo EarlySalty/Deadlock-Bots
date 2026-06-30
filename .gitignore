@@ -80,3 +80,6 @@ master_bot.bot.pid
 .runtime/master_bot_infisical.pid
 docs/superpowers/
 .claude/worktrees/*
+
+# Added by ggshield
+.cache_ggshield
