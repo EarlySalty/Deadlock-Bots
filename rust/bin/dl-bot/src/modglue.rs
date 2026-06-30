@@ -1012,6 +1012,72 @@ fn safe_message_text(value: &str, limit: usize) -> String {
     truncate_chars(text, limit)
 }
 
+fn guard_shadow_mode(case: &dl_moderation::guard::Incident) -> bool {
+    !case.delete_attempted && !case.action_ok && !case.dm_sent && case.deleted_count == 0
+}
+
+fn guard_action_text(
+    case: &dl_moderation::guard::Incident,
+    action: &dl_moderation::guard::GuardAction,
+) -> String {
+    let status = if guard_shadow_mode(case) {
+        "nicht ausgeführt (Shadow)"
+    } else if case.action_ok {
+        "yes"
+    } else {
+        "failed"
+    };
+    match action {
+        dl_moderation::guard::GuardAction::Enforce => format!("Ban: {status}"),
+        dl_moderation::guard::GuardAction::Propose => format!(
+            "Timeout {}m: {status}",
+            dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
+        ),
+        dl_moderation::guard::GuardAction::Hijack => {
+            format!(
+                "Timeout {}m: {status}",
+                dl_moderation::guard::TIMEOUT_MINUTES
+            )
+        }
+        dl_moderation::guard::GuardAction::SoftWarn => format!("Soft-Warn: {status}"),
+    }
+}
+
+fn guard_deleted_text(case: &dl_moderation::guard::Incident) -> String {
+    if !case.delete_attempted {
+        return "nicht ausgeführt (Shadow)".to_string();
+    }
+    let total = case.messages.len() as i64;
+    if total == 0 {
+        return case.deleted_count.to_string();
+    }
+    if case.deleted_count >= total {
+        format!("{}/{total}", case.deleted_count)
+    } else {
+        format!("{}/{total} failed", case.deleted_count)
+    }
+}
+
+fn guard_locations(case: &dl_moderation::guard::Incident) -> String {
+    case.messages
+        .iter()
+        .map(|msg| {
+            let jump = case_jump_url(case.guild_id, msg.channel_id, msg.message_id);
+            let mut parts = vec![format!("<#{}> | [Jump]({jump})", msg.channel_id)];
+            if msg.image_count > 0 {
+                parts.push(format!("Bilder: {}", msg.image_count));
+            } else if msg.attachment_count > 0 {
+                parts.push(format!("Anhänge: {}", msg.attachment_count));
+            }
+            if !msg.content.trim().is_empty() {
+                parts.push(safe_message_text(&msg.content, 120));
+            }
+            parts.join(" | ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn embed_fields_mut(embed: &mut Value) -> Option<&mut Vec<Value>> {
     let object = embed.as_object_mut()?;
     object
@@ -1326,7 +1392,8 @@ impl GuardGlue {
 #[async_trait::async_trait]
 impl dl_moderation::guard::GuardPort for GuardGlue {
     async fn ban(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
-        self.adapter
+        match self
+            .adapter
             .http
             .ban_user(
                 GuildId::new(guild_id),
@@ -1335,12 +1402,19 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
                 Some(reason),
             )
             .await
-            .is_ok()
+        {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(%err, guild_id, user_id, "SecurityGuard: Ban fehlgeschlagen");
+                false
+            }
+        }
     }
 
     async fn timeout(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str) -> bool {
         let until = chrono::Utc::now() + chrono::Duration::minutes(minutes);
-        self.adapter
+        match self
+            .adapter
             .http
             .edit_member(
                 GuildId::new(guild_id),
@@ -1349,11 +1423,18 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
                 Some(reason),
             )
             .await
-            .is_ok()
+        {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(%err, guild_id, user_id, minutes, "SecurityGuard: Timeout fehlgeschlagen");
+                false
+            }
+        }
     }
 
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool {
-        self.adapter
+        match self
+            .adapter
             .http
             .delete_message(
                 ChannelId::new(channel_id),
@@ -1361,7 +1442,13 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
                 Some("SecurityGuard: Beweissicherung/Aufräumen"),
             )
             .await
-            .is_ok()
+        {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, message_id, "SecurityGuard: Nachricht konnte nicht geloescht werden");
+                false
+            }
+        }
     }
 
     async fn send_dm(&self, user_id: u64, text: String) -> bool {
@@ -1412,16 +1499,21 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         case: &dl_moderation::guard::Incident,
         action: &dl_moderation::guard::GuardAction,
     ) {
-        let (title, color) = match action {
-            dl_moderation::guard::GuardAction::Enforce => ("🛡️ Scam-Vollzug (Ban)", 0xED4245),
-            dl_moderation::guard::GuardAction::Propose => {
-                ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
+        let shadow = guard_shadow_mode(case);
+        let (title, color) = if shadow {
+            ("🛡️ Scam-Verdacht (Shadow, keine Aktion)", 0x95A5A6)
+        } else {
+            match action {
+                dl_moderation::guard::GuardAction::Enforce => ("🛡️ Scam-Vollzug (Ban)", 0xED4245),
+                dl_moderation::guard::GuardAction::Propose => {
+                    ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
+                }
+                dl_moderation::guard::GuardAction::SoftWarn => ("🛡️ Soft-Warn", 0x95A5A6),
+                dl_moderation::guard::GuardAction::Hijack => (
+                    "⚠️ Account-Hijack/Takeover — Quarantäne (24h-Timeout, reversibel)",
+                    0xE74C3C,
+                ),
             }
-            dl_moderation::guard::GuardAction::SoftWarn => ("🛡️ Soft-Warn", 0x95A5A6),
-            dl_moderation::guard::GuardAction::Hijack => (
-                "⚠️ Account-Hijack/Takeover — Quarantäne (24h-Timeout, reversibel)",
-                0xE74C3C,
-            ),
         };
         let preview: String = case
             .messages
@@ -1444,24 +1536,9 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         // Zeit seit Join, Aktivitätsfenster, Signale, Aktionen.
         let now = chrono::Utc::now().timestamp();
         let is_ban = matches!(action, dl_moderation::guard::GuardAction::Enforce);
-        let action_ok_text = if case.action_ok { "yes" } else { "failed" };
-        let action_text = if is_ban {
-            format!("Ban: {action_ok_text}")
-        } else {
-            let minutes = match action {
-                dl_moderation::guard::GuardAction::Propose => {
-                    dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
-                }
-                dl_moderation::guard::GuardAction::Hijack => dl_moderation::guard::TIMEOUT_MINUTES,
-                dl_moderation::guard::GuardAction::SoftWarn => 0,
-                _ => dl_moderation::guard::TIMEOUT_MINUTES,
-            };
-            if matches!(action, dl_moderation::guard::GuardAction::SoftWarn) {
-                format!("Soft-Warn: {action_ok_text}")
-            } else {
-                format!("Timeout {minutes}m: {action_ok_text}")
-            }
-        };
+        let action_text = guard_action_text(case, action);
+        let deleted_text = guard_deleted_text(case);
+        let locations = guard_locations(case);
         let reason_value: String = if case.reason.is_empty() {
             "auto-detected burst".to_string()
         } else {
@@ -1484,10 +1561,13 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
             ), "inline": true }),
             json!({ "name": "Actions", "value": format!(
                 "{action_text}\nDeleted: {}\nDM sent: {}",
-                case.deleted_count, if case.dm_sent { "yes" } else { "no" }
+                deleted_text, if case.dm_sent { "yes" } else { "no" }
             ), "inline": true }),
             json!({ "name": "Reason", "value": reason_value, "inline": false }),
         ];
+        if !locations.is_empty() {
+            fields.push(json!({ "name": "Fundorte", "value": truncate_chars(&locations, DISCORD_FIELD_LIMIT), "inline": false }));
+        }
         if !preview.is_empty() {
             fields.push(json!({ "name": "Nachrichten", "value": preview, "inline": false }));
         }
@@ -1517,17 +1597,22 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
                 "fields": fields,
             })
         };
-        // Ban/Timeout-aufheben immer (Mod-Aktionen); „Entbannen" wie das
-        // Original (`UnbanView`) nur, wenn tatsächlich gebannt wurde.
-        let mut buttons = vec![
-            json!({ "type": 2, "style": 4, "label": "Ban",
-                    "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) }),
-            json!({ "type": 2, "style": 3, "label": "Timeout aufheben",
-                    "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) }),
-        ];
+        let mut buttons = Vec::new();
         if is_ban && case.action_ok {
             buttons.push(json!({ "type": 2, "style": 2, "label": "Entbannen",
                 "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) }));
+        } else {
+            buttons.push(json!({ "type": 2, "style": 4, "label": "Ban",
+                    "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) }));
+            if matches!(
+                action,
+                dl_moderation::guard::GuardAction::Propose
+                    | dl_moderation::guard::GuardAction::Hijack
+            ) && case.action_ok
+            {
+                buttons.push(json!({ "type": 2, "style": 3, "label": "Timeout aufheben",
+                        "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) }));
+            }
         }
         let components = json!([{ "type": 1, "components": buttons }]);
         let mut body = serde_json::Map::new();

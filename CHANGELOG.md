@@ -1,3 +1,11 @@
+## #173 — Scam-Guard meldet ehrlich und greift wieder durch
+
+**Ausgangslage:** Der Scam-Guard erkannte Bild-Scam korrekt, lief live aber im Shadow-Modus. Dadurch standen in der Mod-Meldung „Ban failed", „Deleted: 0" und ein Timeout-Button, obwohl keine automatische Aktion ausgeführt wurde. Außerdem konnten schnelle Folgeposts desselben Accounts mehrere fast gleiche Mod-Meldungen auslösen, und bei bildlosen Textvorschauen war nicht klar genug sichtbar, in welchen Kanälen der Scam stand.
+
+**Was wurde geändert:** Der Guard läuft standardmäßig wieder im Durchsetzungsmodus; Shadow muss jetzt bewusst gesetzt werden. Nach einem Fall gibt es einen kurzen User-Cooldown gegen Alert-Spam. Mod-Meldungen zeigen Fundorte mit Kanal und Sprunglink, unterscheiden Shadow sauber von echten Fehlversuchen und zeigen den Timeout-Aufheben-Button nur noch bei echten Timeout-Fällen. Fehler beim Bannen, Timeouten oder Löschen landen mit Discord-Fehler im Log.
+
+**Wie es jetzt läuft:** Neue Treffer werden automatisch ausgeführt statt nur gemeldet. Mods sehen sofort, wo gepostet wurde, ob Löschung wirklich versucht wurde und welche manuelle Aktion noch sinnvoll ist.
+
 ## #172 — Rollen-Entzug erkennt fehlende Discord-Mitglieder sauber
 
 **Ausgangslage:** Wenn Steam beim Aufräumen die Verified-Rolle entfernen wollte, Discord den Nutzer aber nicht mehr als Server-Mitglied kannte, meldete der Broker daraus fälschlich einen internen Fehler. Steam retryte deshalb alle paar Stunden, obwohl der Fall eigentlich abgeschlossen war.

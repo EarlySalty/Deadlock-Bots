@@ -23,17 +23,6 @@ fn env(name: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-fn env_bool(name: &str) -> bool {
-    env(name)
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or(false)
-}
-
 fn env_bool_default(name: &str, default: bool) -> bool {
     env(name)
         .map(|value| {
@@ -262,6 +251,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .await
         .context("DB-Smoke-Check")?;
     tracing::info!(db = %cfg.db_path.display(), tabellen = tables, "DB-Vertrag ok");
+    let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
+    let central_pool = dl_central_db::connect_pool(&central_dsn)
+        .await
+        .context("zentrale DB verbinden")?;
 
     // Discord-Adapter (REST sofort, Cache erst mit Gateway)
     let Some(discord_token) = env("DISCORD_TOKEN") else {
@@ -286,7 +279,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
     let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
-    dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), db.clone());
+    dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), central_pool.clone());
     router.on_command(
         "changelog post",
         changelog_command_spec(),
@@ -350,7 +343,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Streamer-Partner-Verknüpfung (vereinfacht): /streamer verweist auf die
     // Website und merkt sich die Discord-ID im 1-h-Fenster. Der Korrelations-
     // Watcher (mappt neu auftauchende Streamer auf die Absicht) folgt.
-    let streamer_intents = dl_bridges::streamer_intent::StreamerIntents::new(db.clone());
+    let streamer_intents = dl_bridges::streamer_intent::StreamerIntents::new(central_pool.clone());
     if let Err(err) = streamer_intents.ensure_schema().await {
         tracing::warn!(%err, "streamer_link_intents-Schema konnte nicht angelegt werden");
     }
@@ -442,7 +435,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     guard_glue.refresh_invite_allowlist().await;
     let escalation_contact_handle = env("ESCALATION_CONTACT_HANDLE")
         .unwrap_or_else(|| dl_moderation::guard::DEFAULT_ESCALATION_CONTACT_HANDLE.to_string());
-    let security_guard_enforce = env_bool("SECURITY_GUARD_ENFORCE");
+    let security_guard_enforce = env_bool_default("SECURITY_GUARD_ENFORCE", true);
     tracing::info!(
         enforce = security_guard_enforce,
         "SecurityGuard Enforcement-Modus gelesen (SECURITY_GUARD_ENFORCE)"
@@ -1025,7 +1018,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 reaction_roles: Some(Arc::new(modglue::ReactionRoleGatewayGlue {
                     service: reaction_roles.clone(),
                 })),
-                db: db.clone(),
+                pool: central_pool.clone(),
                 feature_module_count: master::FEATURE_MODULES.len(),
                 command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
             },
@@ -1049,7 +1042,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             tempvoice_interface_ready.refresh_all_interfaces().await;
             router_interface_ready.ensure_panel().await;
         });
-        dl_bridges::steam::spawn_panel_restore(steam_client.clone(), db.clone(), adapter.clone());
+        dl_bridges::steam::spawn_panel_restore(
+            steam_client.clone(),
+            central_pool.clone(),
+            adapter.clone(),
+        );
         let reaction_backfill = reaction_roles.clone();
         tokio::spawn(async move {
             if let Err(err) = reaction_backfill.run_pending_backfills().await {

@@ -424,6 +424,7 @@ dependencies = [
  "dl-brain",
  "dl-bridges",
  "dl-broker",
+ "dl-central-db",
  "dl-changelog",
  "dl-community",
  "dl-core",

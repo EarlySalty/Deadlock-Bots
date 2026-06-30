@@ -304,8 +304,7 @@ impl ReactionRoleService {
             return;
         };
         if let Err(err) =
-            dl_squads::store::upsert_participant_by_discord(&self.db, discord_id, display_name)
-                .await
+            upsert_scrim_participant_by_discord(&self.db, discord_id, display_name).await
         {
             tracing::warn!(
                 %err,
@@ -426,6 +425,74 @@ impl ReactionRoleService {
             })
             .await
     }
+}
+
+async fn upsert_scrim_participant_by_discord(
+    db: &Db,
+    discord_id: i64,
+    display_name: &str,
+) -> Result<i64, DbError> {
+    let display_name = display_name.trim().to_string();
+    let now = chrono::Utc::now().to_rfc3339();
+    db.write(move |conn| {
+        let tx = conn.transaction()?;
+        let existing_id = tx
+            .query_row(
+                "SELECT id
+                   FROM scrim_participant
+                  WHERE discord_id = ?1
+                  ORDER BY id ASC
+                  LIMIT 1",
+                params![discord_id],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(id) = existing_id {
+            tx.execute(
+                "UPDATE scrim_participant
+                    SET display_name = ?2,
+                        updated_at = ?3
+                  WHERE id = ?1",
+                params![id, display_name, now],
+            )?;
+            tx.commit()?;
+            return Ok(id);
+        }
+
+        let name_id = tx
+            .query_row(
+                "SELECT id
+                   FROM scrim_participant
+                  WHERE display_name = ?1
+                  ORDER BY id ASC
+                  LIMIT 1",
+                params![display_name],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()?;
+        if let Some(id) = name_id {
+            tx.execute(
+                "UPDATE scrim_participant
+                    SET discord_id = COALESCE(discord_id, ?2),
+                        updated_at = ?3
+                  WHERE id = ?1",
+                params![id, discord_id, now],
+            )?;
+            tx.commit()?;
+            return Ok(id);
+        }
+
+        tx.execute(
+            "INSERT INTO scrim_participant(
+                 discord_id, display_name, status, source, created_at, updated_at
+             ) VALUES (?1, ?2, 'new', 'discord_reaction', ?3, ?3)",
+            params![discord_id, display_name, now],
+        )?;
+        let id = tx.last_insert_rowid();
+        tx.commit()?;
+        Ok(id)
+    })
+    .await
 }
 
 fn row_to_mapping(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRoleMapping> {

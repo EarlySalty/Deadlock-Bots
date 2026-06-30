@@ -45,6 +45,7 @@ pub const TAKEOVER_WINDOW_SECONDS: i64 = 30;
 pub const TAKEOVER_IMAGE_CHANNELS: usize = 2;
 pub const TIMEOUT_MINUTES: i64 = 1440;
 pub const PROPOSAL_TIMEOUT_MINUTES: i64 = 60;
+pub const CASE_COOLDOWN_SECONDS: i64 = 600;
 pub const HISTORY_MAX: usize = 20;
 pub const EVIDENCE_IMAGE_LIMIT: usize = 4;
 /// Einspruch-Modal-Grenzen (Original: APPEAL_MIN_CHARS / APPEAL_MAX_CHARS).
@@ -430,6 +431,7 @@ pub struct SecurityGuard {
     pub config: SecurityGuardConfig,
     history: tokio::sync::Mutex<HashMap<u64, VecDeque<RecentMsg>>>,
     active: tokio::sync::Mutex<std::collections::HashSet<u64>>,
+    suppressed_until: tokio::sync::Mutex<HashMap<u64, i64>>,
 }
 
 impl SecurityGuard {
@@ -457,6 +459,7 @@ impl SecurityGuard {
             config,
             history: tokio::sync::Mutex::new(HashMap::new()),
             active: tokio::sync::Mutex::new(std::collections::HashSet::new()),
+            suppressed_until: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -499,6 +502,9 @@ impl SecurityGuard {
             return; // do not police staff: administrator || manage_messages || manage_guild
         }
         let now = chrono::Utc::now().timestamp();
+        if self.is_suppressed(event.author_id, now).await {
+            return;
+        }
 
         // History pflegen (Ringpuffer 20, Fenster 1 h)
         let recent: Vec<RecentMsg> = {
@@ -528,6 +534,7 @@ impl SecurityGuard {
         self.release(event.author_id).await;
         if result {
             self.history.lock().await.remove(&event.author_id);
+            self.suppress_user(event.author_id, now).await;
         }
     }
 
@@ -537,6 +544,19 @@ impl SecurityGuard {
 
     async fn release(&self, user_id: u64) {
         self.active.lock().await.remove(&user_id);
+    }
+
+    async fn is_suppressed(&self, user_id: u64, now: i64) -> bool {
+        let mut suppressed = self.suppressed_until.lock().await;
+        suppressed.retain(|_, until| *until > now);
+        suppressed.get(&user_id).is_some_and(|until| *until > now)
+    }
+
+    async fn suppress_user(&self, user_id: u64, now: i64) {
+        self.suppressed_until
+            .lock()
+            .await
+            .insert(user_id, now + CASE_COOLDOWN_SECONDS);
     }
 
     async fn foreign_invite_code(&self, guild_id: u64, content: &str) -> Option<String> {
@@ -862,7 +882,7 @@ impl SecurityGuard {
         action: GuardAction,
         trigger: &str,
     ) {
-        let case_id = format!("sg-{}-{}", event.author_id, chrono::Utc::now().timestamp());
+        let case_id = format!("sg-{}-{}", event.author_id, event.message_id);
         let mut incident = Incident {
             case_id: case_id.clone(),
             guild_id,
@@ -1116,6 +1136,23 @@ mod tests {
             author_created_at: created_at,
             author_joined_at: joined_at,
         }
+    }
+
+    fn image_event(
+        user_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        created_at: i64,
+        joined_at: Option<i64>,
+    ) -> dl_discord::MessageEvent {
+        let mut event = event(user_id, channel_id, message_id, "", created_at, joined_at);
+        event.attachment_count = 2;
+        event.image_attachment_count = 2;
+        event.image_attachment_urls = vec![
+            format!("https://img/{message_id}-1.png"),
+            format!("https://img/{message_id}-2.png"),
+        ];
+        event
     }
 
     #[derive(Default)]
@@ -1488,6 +1525,58 @@ mod tests {
             .await;
         let calls = unresolved_port.calls().await;
         assert_eq!(calls, vec!["resolve:expired"]);
+    }
+
+    #[tokio::test]
+    async fn takeover_case_setzt_user_cooldown_gegen_mehrfachalerts() {
+        let now = chrono::Utc::now().timestamp();
+        let hour = 3600;
+        let port = FakePort::with_resolves(&[]);
+        let (_dir, guard) = test_guard(port.clone()).await;
+
+        guard
+            .handle_message(&image_event(
+                80,
+                81,
+                811,
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        guard
+            .handle_message(&image_event(
+                80,
+                82,
+                812,
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        let calls_after_first_case = port.calls().await;
+        assert!(calls_after_first_case.contains(&"ban".to_string()));
+        assert!(calls_after_first_case.contains(&"delete:81:811".to_string()));
+        assert!(calls_after_first_case.contains(&"delete:82:812".to_string()));
+        assert!(calls_after_first_case.contains(&"mod:Enforce".to_string()));
+
+        guard
+            .handle_message(&image_event(
+                80,
+                83,
+                813,
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        guard
+            .handle_message(&image_event(
+                80,
+                84,
+                814,
+                now - 100 * hour,
+                Some(now - 10 * hour),
+            ))
+            .await;
+        assert_eq!(port.calls().await, calls_after_first_case);
     }
 
     #[tokio::test(flavor = "current_thread")]
