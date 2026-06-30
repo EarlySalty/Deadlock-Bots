@@ -1,0 +1,24 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.reaction_role_mappings\n               SET guild_id = $1,\n                   source_channel_id = $2,\n                   message_id = $3,\n                   emoji = $4,\n                   role_id = $5,\n                   dm_enabled = $6,\n                   dm_text = $7,\n                   remove_on_unreact = $8,\n                   backfill_pending = $9,\n                   active = TRUE,\n                   updated_at = $10\n             WHERE id = $11\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7343e58dc46cab2d950710b581ee9c9cca85d801fe1386ac65b12f99af21b7df"
+}

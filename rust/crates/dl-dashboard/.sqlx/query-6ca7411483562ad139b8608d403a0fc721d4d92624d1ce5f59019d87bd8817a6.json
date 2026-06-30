@@ -1,0 +1,31 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.reaction_role_mappings(\n                guild_id, source_channel_id, message_id, emoji, role_id,\n                dm_enabled, dm_text, remove_on_unreact, backfill_pending,\n                active, created_at, updated_at\n            )\n            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)\n             ON CONFLICT(message_id, emoji) DO UPDATE SET\n                guild_id = EXCLUDED.guild_id,\n                source_channel_id = EXCLUDED.source_channel_id,\n                role_id = EXCLUDED.role_id,\n                dm_enabled = EXCLUDED.dm_enabled,\n                dm_text = EXCLUDED.dm_text,\n                remove_on_unreact = EXCLUDED.remove_on_unreact,\n                backfill_pending = EXCLUDED.backfill_pending,\n                active = TRUE,\n                updated_at = EXCLUDED.updated_at\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8",
+        "Bool",
+        "Text",
+        "Bool",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6ca7411483562ad139b8608d403a0fc721d4d92624d1ce5f59019d87bd8817a6"
+}

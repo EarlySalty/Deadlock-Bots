@@ -10,11 +10,11 @@ use std::collections::{HashMap, HashSet};
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use chrono::{NaiveDateTime, Utc};
+use chrono::{Duration, NaiveDateTime, Utc};
 use dl_core::pyfloat::py_round;
-use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
 
+use crate::db::{i64_to_i32, DashboardDbResult};
 use crate::names::display_name_or_default;
 use crate::web::{err_text, ok_json, DashboardApp};
 
@@ -52,7 +52,7 @@ pub async fn member_events(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let limit = match parse_limit(&params, 50, 200) {
@@ -68,81 +68,102 @@ pub async fn member_events(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
-    let result = app
-        .db()
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, user_id, guild_id, event_type, timestamp,
-                        display_name, account_created_at, join_position, metadata
-                 FROM member_events
-                 WHERE (? IS NULL OR guild_id = ?)
-                   AND (? IS NULL OR event_type = ?)
-                 ORDER BY timestamp DESC
-                 LIMIT ?",
-            )?;
-            let events: Vec<Value> = stmt
-                .query_map(
-                    params![guild, guild, event_filter, event_filter, limit],
-                    |row| {
-                        Ok(json!({
-                            "id": row.get::<_, Option<i64>>(0)?,
-                            "user_id": row.get::<_, Option<i64>>(1)?,
-                            "guild_id": row.get::<_, Option<i64>>(2)?,
-                            "event_type": row.get::<_, Option<String>>(3)?,
-                            "timestamp": row.get::<_, Option<String>>(4)?,
-                            "display_name": row.get::<_, Option<String>>(5)?,
-                            "account_created_at": row.get::<_, Option<String>>(6)?,
-                            "join_position": row.get::<_, Option<i64>>(7)?,
-                            "metadata": row.get::<_, Option<String>>(8)?,
-                        }))
-                    },
-                )?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
+    let result: DashboardDbResult<Value> = async {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, user_id, guild_id, event_type,
+                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "timestamp?",
+                   display_name,
+                   to_char(account_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "account_created_at?",
+                   join_position,
+                   metadata::text AS "metadata?"
+              FROM activity.member_events
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+               AND ($2::TEXT IS NULL OR event_type = $2)
+             ORDER BY occurred_at DESC NULLS LAST
+             LIMIT $3
+            "#,
+            guild,
+            event_filter.as_deref(),
+            limit,
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let events: Vec<Value> = rows
+            .into_iter()
+            .map(|row| {
+                json!({
+                    "id": row.id,
+                    "user_id": row.user_id,
+                    "guild_id": row.guild_id,
+                    "event_type": row.event_type,
+                    "timestamp": row.timestamp,
+                    "display_name": row.display_name,
+                    "account_created_at": row.account_created_at,
+                    "join_position": row.join_position,
+                    "metadata": row.metadata,
+                })
+            })
+            .collect();
 
-            let mut counts_stmt = conn.prepare(
-                "SELECT event_type, COUNT(*) as count
-                 FROM member_events
-                 WHERE (? IS NULL OR guild_id = ?)
-                   AND (? IS NULL OR event_type = ?)
-                 GROUP BY event_type
-                 ORDER BY count DESC",
-            )?;
-            let mut counts = Map::new();
-            let mut rows = counts_stmt.query(params![guild, guild, event_filter, event_filter])?;
-            while let Some(row) = rows.next()? {
-                let key: Option<String> = row.get(0)?;
-                let value: i64 = row.get(1)?;
-                counts.insert(key.unwrap_or_default(), json!(value));
-            }
+        let count_rows = sqlx::query!(
+            r#"
+            SELECT event_type, COUNT(*) AS "count!"
+              FROM activity.member_events
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+               AND ($2::TEXT IS NULL OR event_type = $2)
+             GROUP BY event_type
+             ORDER BY COUNT(*) DESC
+            "#,
+            guild,
+            event_filter.as_deref(),
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let mut counts = Map::new();
+        for row in count_rows {
+            counts.insert(row.event_type, json!(row.count));
+        }
 
-            let recent_joins: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM member_events
-                 WHERE event_type = 'join'
-                   AND timestamp >= datetime('now', '-7 days')
-                   AND (? IS NULL OR guild_id = ?)",
-                params![guild, guild],
-                |row| row.get(0),
-            )?;
-            let recent_leaves: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM member_events
-                 WHERE event_type = 'leave'
-                   AND timestamp >= datetime('now', '-7 days')
-                   AND (? IS NULL OR guild_id = ?)",
-                params![guild, guild],
-                |row| row.get(0),
-            )?;
+        let cutoff = Utc::now() - Duration::days(7);
+        let recent_joins = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.member_events
+             WHERE event_type = 'join'
+               AND occurred_at >= $2
+               AND ($1::BIGINT IS NULL OR guild_id = $1)
+            "#,
+            guild,
+            cutoff,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let recent_leaves = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.member_events
+             WHERE event_type = 'leave'
+               AND occurred_at >= $2
+               AND ($1::BIGINT IS NULL OR guild_id = $1)
+            "#,
+            guild,
+            cutoff,
+        )
+        .fetch_one(app.pool())
+        .await?;
 
-            Ok(json!({
-                "events": events,
-                "summary": {
-                    "total_events": events.len(),
-                    "event_counts": counts,
-                    "recent_joins_7d": recent_joins,
-                    "recent_leaves_7d": recent_leaves,
-                },
-            }))
-        })
-        .await;
+        Ok(json!({
+            "events": events,
+            "summary": {
+                "total_events": events.len(),
+                "event_counts": counts,
+                "recent_joins_7d": recent_joins,
+                "recent_leaves_7d": recent_leaves,
+            },
+        }))
+    }
+    .await;
 
     match result {
         Ok(payload) => ok_json(payload),
@@ -175,7 +196,7 @@ pub async fn message_activity(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let limit = match parse_limit(&params, 20, 100) {
@@ -187,46 +208,55 @@ pub async fn message_activity(
         Err(resp) => return resp,
     };
 
-    let read = app
-        .db()
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT user_id, guild_id, channel_id, message_count,
-                        last_message_at, first_message_at
-                 FROM message_activity
-                 WHERE (? IS NULL OR guild_id = ?)
-                 ORDER BY message_count DESC
-                 LIMIT ?",
-            )?;
-            let rows: Vec<MaRow> = stmt
-                .query_map(params![guild, guild, limit], |row| {
-                    Ok(MaRow {
-                        user_id: row.get(0)?,
-                        guild_id: row.get(1)?,
-                        channel_id: row.get(2)?,
-                        message_count: row.get(3)?,
-                        last_message_at: row.get(4)?,
-                        first_message_at: row.get(5)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-
-            let summary = conn.query_row(
-                "SELECT COUNT(*), SUM(message_count), AVG(message_count)
-                 FROM message_activity
-                 WHERE (? IS NULL OR guild_id = ?)",
-                params![guild, guild],
-                |row| {
-                    Ok(MaSummary {
-                        total_users: row.get(0)?,
-                        total_messages: row.get(1)?,
-                        avg: row.get(2)?,
-                    })
-                },
-            )?;
-            Ok((rows, summary))
+    let read: DashboardDbResult<(Vec<MaRow>, MaSummary)> = async {
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, guild_id, channel_id, COALESCE(message_count, 0)::BIGINT AS "message_count!",
+                   to_char(last_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_message_at?",
+                   to_char(first_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "first_message_at?"
+              FROM activity.message_activity
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+             ORDER BY message_count DESC
+             LIMIT $2
+            "#,
+            guild,
+            limit,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| MaRow {
+            user_id: row.user_id,
+            guild_id: Some(row.guild_id),
+            channel_id: row.channel_id,
+            message_count: row.message_count,
+            last_message_at: row.last_message_at,
+            first_message_at: row.first_message_at,
         })
-        .await;
+        .collect::<Vec<_>>();
+
+        let summary = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "total_users!",
+                   SUM(message_count)::BIGINT AS "total_messages?",
+                   AVG(message_count)::DOUBLE PRECISION AS "avg?"
+              FROM activity.message_activity
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+            "#,
+            guild,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        Ok((
+            rows,
+            MaSummary {
+                total_users: summary.total_users,
+                total_messages: summary.total_messages,
+                avg: summary.avg,
+            },
+        ))
+    }
+    .await;
 
     let (rows, summary) = match read {
         Ok(v) => v,
@@ -286,94 +316,105 @@ fn parse_survey_json(raw: Option<String>) -> Value {
 }
 
 pub async fn leave_surveys(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
-    let result = app
-        .db()
-        .read(move |conn| {
-            let (total, responded_count, web_count): (i64, Option<i64>, Option<i64>) = conn
-                .query_row(
-                    "SELECT COUNT(*),
-                            SUM(CASE WHEN responded_at IS NOT NULL THEN 1 ELSE 0 END),
-                            SUM(CASE WHEN web_submitted_at IS NOT NULL THEN 1 ELSE 0 END)
-                     FROM member_leave_surveys",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )?;
+    let result: DashboardDbResult<Value> = async {
+        let totals = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "total!",
+                   COALESCE(SUM(CASE WHEN responded_at IS NOT NULL THEN 1 ELSE 0 END), 0)::BIGINT AS "responded!",
+                   COALESCE(SUM(CASE WHEN web_submitted_at IS NOT NULL THEN 1 ELSE 0 END), 0)::BIGINT AS "web!"
+              FROM activity.member_leave_surveys
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
 
-            let count_map = |sql: &str| -> rusqlite::Result<Map<String, Value>> {
-                let mut stmt = conn.prepare(sql)?;
-                let mut out = Map::new();
-                let mut rows = stmt.query([])?;
-                while let Some(row) = rows.next()? {
-                    let key: String = row.get(0)?;
-                    let count: i64 = row.get(1)?;
-                    out.insert(key, json!(count));
-                }
-                Ok(out)
-            };
-            let by_user_bucket = count_map(
-                "SELECT COALESCE(NULLIF(user_bucket, ''), 'unknown') AS user_bucket, COUNT(*)
-                 FROM member_leave_surveys
-                 GROUP BY COALESCE(NULLIF(user_bucket, ''), 'unknown')
-                 ORDER BY user_bucket ASC",
-            )?;
-            let by_dm_status = count_map(
-                "SELECT COALESCE(NULLIF(dm_status, ''), 'unknown') AS dm_status, COUNT(*)
-                 FROM member_leave_surveys
-                 GROUP BY COALESCE(NULLIF(dm_status, ''), 'unknown')
-                 ORDER BY dm_status ASC",
-            )?;
+        let user_bucket_rows = sqlx::query!(
+            r#"
+            SELECT COALESCE(NULLIF(user_bucket, ''), 'unknown') AS "bucket!",
+                   COUNT(*) AS "count!"
+              FROM activity.member_leave_surveys
+             GROUP BY COALESCE(NULLIF(user_bucket, ''), 'unknown')
+             ORDER BY 1 ASC
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let mut by_user_bucket = Map::new();
+        for row in user_bucket_rows {
+            by_user_bucket.insert(row.bucket, json!(row.count));
+        }
 
-            let mut by_reason = Vec::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT COALESCE(NULLIF(reason_code, ''), 'unknown') AS reason_code, COUNT(*)
-                     FROM member_leave_surveys
-                     GROUP BY COALESCE(NULLIF(reason_code, ''), 'unknown')
-                     ORDER BY COUNT(*) DESC, reason_code ASC",
-                )?;
-                let mut rows = stmt.query([])?;
-                while let Some(row) = rows.next()? {
-                    let reason: String = row.get(0)?;
-                    let count: i64 = row.get(1)?;
-                    by_reason.push(json!({ "reason_code": reason, "count": count }));
-                }
-            }
+        let dm_rows = sqlx::query!(
+            r#"
+            SELECT COALESCE(NULLIF(dm_status, ''), 'unknown') AS "status!",
+                   COUNT(*) AS "count!"
+              FROM activity.member_leave_surveys
+             GROUP BY COALESCE(NULLIF(dm_status, ''), 'unknown')
+             ORDER BY 1 ASC
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let mut by_dm_status = Map::new();
+        for row in dm_rows {
+            by_dm_status.insert(row.status, json!(row.count));
+        }
 
-            let mut recent = Vec::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT display_name, survey_token, user_bucket, reason_code,
-                            follow_up_question, follow_up_text, extra_text,
-                            web_submitted_at, web_payload, left_at, responded_at
-                     FROM member_leave_surveys
-                     WHERE responded_at IS NOT NULL OR web_submitted_at IS NOT NULL
-                     ORDER BY COALESCE(web_submitted_at, responded_at) DESC, id DESC
-                     LIMIT 30",
-                )?;
-                let mut rows = stmt.query([])?;
-                while let Some(row) = rows.next()? {
-                    let web_payload: Option<String> = row.get(8)?;
-                    recent.push(json!({
-                        "display_name": row.get::<_, Option<String>>(0)?,
-                        "survey_token": row.get::<_, Option<String>>(1)?,
-                        "user_bucket": row.get::<_, Option<String>>(2)?,
-                        "reason_code": row.get::<_, Option<String>>(3)?,
-                        "follow_up_question": row.get::<_, Option<String>>(4)?,
-                        "follow_up_text": row.get::<_, Option<String>>(5)?,
-                        "extra_text": row.get::<_, Option<String>>(6)?,
-                        "web_submitted_at": row.get::<_, Option<i64>>(7)?,
-                        "web_payload": parse_survey_json(web_payload),
-                        "left_at": row.get::<_, Option<i64>>(9)?,
-                        "responded_at": row.get::<_, Option<i64>>(10)?,
-                    }));
-                }
-            }
+        let by_reason = sqlx::query!(
+            r#"
+            SELECT COALESCE(NULLIF(reason_code, ''), 'unknown') AS "reason_code!",
+                   COUNT(*) AS "count!"
+              FROM activity.member_leave_surveys
+             GROUP BY COALESCE(NULLIF(reason_code, ''), 'unknown')
+             ORDER BY COUNT(*) DESC, 1 ASC
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| json!({ "reason_code": row.reason_code, "count": row.count }))
+        .collect::<Vec<_>>();
 
-            let responded = responded_count.unwrap_or(0);
-            let web = web_count.unwrap_or(0);
+        let recent = sqlx::query!(
+            r#"
+            SELECT display_name, survey_token, user_bucket, reason_code,
+                   follow_up_question, follow_up_text, extra_text,
+                   EXTRACT(EPOCH FROM web_submitted_at)::BIGINT AS "web_submitted_at?",
+                   web_payload::text AS "web_payload?",
+                   EXTRACT(EPOCH FROM left_at)::BIGINT AS "left_at!",
+                   EXTRACT(EPOCH FROM responded_at)::BIGINT AS "responded_at?"
+              FROM activity.member_leave_surveys
+             WHERE responded_at IS NOT NULL OR web_submitted_at IS NOT NULL
+             ORDER BY COALESCE(web_submitted_at, responded_at) DESC, id DESC
+             LIMIT 30
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| {
+            json!({
+                "display_name": row.display_name,
+                "survey_token": row.survey_token,
+                "user_bucket": row.user_bucket,
+                "reason_code": row.reason_code,
+                "follow_up_question": row.follow_up_question,
+                "follow_up_text": row.follow_up_text,
+                "extra_text": row.extra_text,
+                "web_submitted_at": row.web_submitted_at,
+                "web_payload": parse_survey_json(row.web_payload),
+                "left_at": row.left_at,
+                "responded_at": row.responded_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+            let total = totals.total;
+            let responded = totals.responded;
+            let web = totals.web;
             let rate = |count: i64| -> Value {
                 if total > 0 {
                     json!(count as f64 / total as f64)
@@ -395,8 +436,8 @@ pub async fn leave_surveys(State(app): State<DashboardApp>, headers: HeaderMap) 
                 "by_reason": by_reason,
                 "recent": recent,
             }))
-        })
-        .await;
+    }
+    .await;
 
     match result {
         Ok(payload) => ok_json(payload),
@@ -462,7 +503,7 @@ pub async fn co_player_network(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let limit = match parse_limit(&params, 120, 400) {
@@ -474,34 +515,41 @@ pub async fn co_player_network(
         Err(resp) => return resp,
     };
 
-    let read = app
-        .db()
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT user_id, co_player_id, sessions_together, total_minutes_together,
-                        last_played_together, user_display_name, co_player_display_name
-                 FROM user_co_players
-                 WHERE sessions_together >= ?
-                 ORDER BY sessions_together DESC, total_minutes_together DESC,
-                          last_played_together DESC
-                 LIMIT ?",
-            )?;
-            let rows: Vec<CpRow> = stmt
-                .query_map(params![min_sessions, limit * 2], |row| {
-                    Ok(CpRow {
-                        user_id: row.get(0)?,
-                        co_player_id: row.get(1)?,
-                        sessions: row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                        minutes: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                        last_played: row.get(4)?,
-                        user_name: row.get(5)?,
-                        co_name: row.get(6)?,
-                    })
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(rows)
+    let read: DashboardDbResult<Vec<CpRow>> = async {
+        let min_sessions = i64_to_i32(min_sessions, "min_sessions")?;
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, co_player_id,
+                   COALESCE(sessions_together, 0)::BIGINT AS "sessions!",
+                   COALESCE(total_minutes_together, 0)::BIGINT AS "minutes!",
+                   to_char(last_played_together AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_played?",
+                   user_display_name, co_player_display_name
+              FROM activity.user_co_players
+             WHERE COALESCE(sessions_together, 0) >= $1
+             ORDER BY sessions_together DESC NULLS LAST,
+                      total_minutes_together DESC NULLS LAST,
+                      last_played_together DESC NULLS LAST
+             LIMIT $2
+            "#,
+            min_sessions,
+            limit * 2,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| CpRow {
+            user_id: row.user_id,
+            co_player_id: row.co_player_id,
+            sessions: row.sessions,
+            minutes: row.minutes,
+            last_played: row.last_played,
+            user_name: row.user_display_name,
+            co_name: row.co_player_display_name,
         })
-        .await;
+        .collect();
+        Ok(rows)
+    }
+    .await;
 
     let rows = match read {
         Ok(v) => v,
@@ -726,12 +774,31 @@ struct VhData {
     user: Option<VhUserData>,
 }
 
+struct RetentionData {
+    total_tracked: i64,
+    opted_out: i64,
+    regular_active: i64,
+    inactive_candidates: i64,
+    miss_you_sent: i64,
+    feedback_received: i64,
+    candidates: Vec<Value>,
+}
+
+struct VoiceStatsData {
+    tracked_users: i64,
+    total_seconds: i64,
+    total_points: i64,
+    last_update: Option<String>,
+    top_time: Vec<Value>,
+    top_points: Vec<Value>,
+}
+
 pub async fn voice_history(
     State(app): State<DashboardApp>,
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let days = match parse_capped(
@@ -783,178 +850,214 @@ pub async fn voice_history(
             Err(_) => return err_text(400, "user_id must be an integer"),
         },
     };
-    let cutoff = format!("-{days} day");
+    let cutoff = Utc::now() - Duration::days(days);
     let mode_sql = mode.clone();
 
-    let read = app
-        .db()
-        .read(move |conn| {
-            let daily = {
-                let mut stmt = conn.prepare(
-                    "SELECT date(started_at) AS day, SUM(duration_seconds), COUNT(*),
-                            COUNT(DISTINCT user_id)
-                     FROM voice_session_log
-                     WHERE started_at >= datetime('now', ?)
-                     GROUP BY date(started_at)
-                     ORDER BY day DESC",
-                )?;
-                let rows = stmt
-                    .query_map(params![cutoff], |r| {
-                        Ok(VhDaily {
-                            day: r.get(0)?,
-                            total_seconds: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            sessions: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            users: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-
-            let top = {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, MAX(display_name), SUM(duration_seconds),
-                            SUM(points), COUNT(*)
-                     FROM voice_session_log
-                     WHERE started_at >= datetime('now', ?)
-                       AND (? IS NULL OR user_id = ?)
-                     GROUP BY user_id
-                     ORDER BY SUM(duration_seconds) DESC, SUM(points) DESC
-                     LIMIT ?",
-                )?;
-                let rows = stmt
-                    .query_map(params![cutoff, user_id, user_id, top_limit], |r| {
-                        Ok(VhTop {
-                            user_id: r.get(0)?,
-                            display_name: r.get(1)?,
-                            total_seconds: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            total_points: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                            sessions: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                        })
-                    })?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-
-            let buckets = {
-                let mut stmt = conn.prepare(
-                    "WITH grouped AS (
-                        SELECT CASE
-                                 WHEN ? = 'hour' THEN strftime('%H', started_at)
-                                 WHEN ? = 'day' THEN strftime('%w', started_at)
-                                 WHEN ? = 'week' THEN strftime('%Y-%W', started_at)
-                                 ELSE strftime('%Y-%m', started_at)
-                               END AS bucket,
-                               duration_seconds,
-                               COALESCE(peak_users, 0) AS peak_users
-                        FROM voice_session_log
-                        WHERE started_at >= datetime('now', ?)
-                          AND (? IS NULL OR user_id = ?)
-                     )
-                     SELECT bucket, SUM(duration_seconds), COUNT(*), SUM(peak_users)
-                     FROM grouped GROUP BY bucket ORDER BY bucket",
-                )?;
-                let rows = stmt
-                    .query_map(
-                        params![mode_sql, mode_sql, mode_sql, cutoff, user_id, user_id],
-                        |r| {
-                            Ok(VhBucket {
-                                bucket: r.get(0)?,
-                                total_seconds: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                                sessions: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                                sum_peak: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                            })
-                        },
-                    )?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                rows
-            };
-
-            let user = if let Some(uid) = user_id {
-                let range = conn.query_row(
-                    "SELECT SUM(duration_seconds), SUM(points), COUNT(*),
-                            SUM(COALESCE(peak_users, 0)),
-                            COUNT(DISTINCT date(started_at)), MAX(ended_at)
-                     FROM voice_session_log
-                     WHERE started_at >= datetime('now', ?) AND (? IS NULL OR user_id = ?)",
-                    params![cutoff, user_id, user_id],
-                    |r| {
-                        Ok(VhRange {
-                            total_seconds: r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                            total_points: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            sessions: r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            sum_peak: r.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                            active_days: r.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                            last_session: r.get(5)?,
-                        })
-                    },
-                )?;
-                let lifetime = conn
-                    .query_row(
-                        "SELECT total_seconds, total_points, last_update
-                         FROM voice_stats WHERE user_id = ?",
-                        params![uid],
-                        |r| {
-                            Ok(VhLifetime {
-                                total_seconds: r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                                total_points: r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                                last_update: r.get(2)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                let (lifetime_sessions, lifetime_last_session): (i64, Option<String>) = conn
-                    .query_row(
-                        "SELECT COUNT(*), MAX(ended_at) FROM voice_session_log WHERE user_id = ?",
-                        params![uid],
-                        |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0), r.get(1)?)),
-                    )?;
-                let recent = {
-                    let mut stmt = conn.prepare(
-                        "SELECT id, guild_id, channel_id, channel_name, started_at, ended_at,
-                                duration_seconds, points, peak_users, co_player_ids
-                         FROM voice_session_log
-                         WHERE user_id = ?
-                         ORDER BY datetime(ended_at) DESC, id DESC
-                         LIMIT ?",
-                    )?;
-                    let rows = stmt
-                        .query_map(params![uid, recent_limit], |r| {
-                            Ok(VhRecent {
-                                id: r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                                guild_id: r.get(1)?,
-                                channel_id: r.get(2)?,
-                                channel_name: r.get(3)?,
-                                started_at: r.get(4)?,
-                                ended_at: r.get(5)?,
-                                duration_seconds: r.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                                points: r.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                                peak_users: r.get::<_, Option<i64>>(8)?.unwrap_or(0),
-                                co_player_ids: r.get(9)?,
-                            })
-                        })?
-                        .collect::<rusqlite::Result<Vec<_>>>()?;
-                    rows
-                };
-                Some(VhUserData {
-                    range,
-                    lifetime,
-                    lifetime_sessions,
-                    lifetime_last_session,
-                    recent,
-                })
-            } else {
-                None
-            };
-
-            Ok(VhData {
-                daily,
-                top,
-                buckets,
-                user,
-            })
+    let read: DashboardDbResult<VhData> = async {
+        let daily = sqlx::query!(
+            r#"
+            SELECT (started_at AT TIME ZONE 'UTC')::date::text AS "day!",
+                   COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+                   COUNT(*) AS "sessions!",
+                   COUNT(DISTINCT user_id) AS "users!"
+              FROM activity.voice_session_log
+             WHERE started_at >= $1
+             GROUP BY (started_at AT TIME ZONE 'UTC')::date
+             ORDER BY (started_at AT TIME ZONE 'UTC')::date DESC
+            "#,
+            cutoff,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| VhDaily {
+            day: Some(row.day),
+            total_seconds: row.total_seconds,
+            sessions: row.sessions,
+            users: row.users,
         })
-        .await;
+        .collect();
+
+        let top = sqlx::query!(
+            r#"
+            SELECT user_id, MAX(display_name) AS "display_name?",
+                   COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+                   COALESCE(SUM(points), 0)::BIGINT AS "total_points!",
+                   COUNT(*) AS "sessions!"
+              FROM activity.voice_session_log
+             WHERE started_at >= $1
+               AND ($2::BIGINT IS NULL OR user_id = $2)
+             GROUP BY user_id
+             ORDER BY SUM(duration_seconds) DESC, SUM(points) DESC
+             LIMIT $3
+            "#,
+            cutoff,
+            user_id,
+            top_limit,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| VhTop {
+            user_id: row.user_id,
+            display_name: row.display_name,
+            total_seconds: row.total_seconds,
+            total_points: row.total_points,
+            sessions: row.sessions,
+        })
+        .collect();
+
+        let buckets = sqlx::query!(
+            r#"
+            WITH source AS (
+                SELECT started_at AT TIME ZONE 'UTC' AS utc_started,
+                       duration_seconds,
+                       COALESCE(peak_users, 0) AS peak_users
+                  FROM activity.voice_session_log
+                 WHERE started_at >= $2
+                   AND ($3::BIGINT IS NULL OR user_id = $3)
+            ),
+            grouped AS (
+                SELECT CASE
+                        WHEN $1 = 'hour' THEN to_char(utc_started, 'HH24')
+                        WHEN $1 = 'day' THEN EXTRACT(DOW FROM utc_started)::INT::TEXT
+                        WHEN $1 = 'week' THEN to_char(utc_started, 'YYYY-') ||
+                            lpad(((EXTRACT(DOY FROM utc_started)::INT - 1 -
+                                ((8 - EXTRACT(ISODOW FROM date_trunc('year', utc_started))::INT) % 7) + 7) / 7)::TEXT, 2, '0')
+                        ELSE to_char(utc_started, 'YYYY-MM')
+                       END AS bucket,
+                       duration_seconds,
+                       peak_users
+                  FROM source
+            )
+            SELECT bucket AS "bucket!",
+                   COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+                   COUNT(*) AS "sessions!",
+                   COALESCE(SUM(peak_users), 0)::BIGINT AS "sum_peak!"
+              FROM grouped
+             GROUP BY bucket
+             ORDER BY bucket
+            "#,
+            mode_sql,
+            cutoff,
+            user_id,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|row| VhBucket {
+            bucket: Some(row.bucket),
+            total_seconds: row.total_seconds,
+            sessions: row.sessions,
+            sum_peak: row.sum_peak,
+        })
+        .collect();
+
+        let user = if let Some(uid) = user_id {
+            let range_row = sqlx::query!(
+                r#"
+                SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+                       COALESCE(SUM(points), 0)::BIGINT AS "total_points!",
+                       COUNT(*) AS "sessions!",
+                       COALESCE(SUM(COALESCE(peak_users, 0)), 0)::BIGINT AS "sum_peak!",
+                       COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS "active_days!",
+                       to_char(MAX(ended_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_session?"
+                  FROM activity.voice_session_log
+                 WHERE started_at >= $1
+                   AND user_id = $2
+                "#,
+                cutoff,
+                uid,
+            )
+            .fetch_one(app.pool())
+            .await?;
+            let range = VhRange {
+                total_seconds: range_row.total_seconds,
+                total_points: range_row.total_points,
+                sessions: range_row.sessions,
+                sum_peak: range_row.sum_peak,
+                active_days: range_row.active_days,
+                last_session: range_row.last_session,
+            };
+            let lifetime = sqlx::query!(
+                r#"
+                SELECT total_seconds, total_points,
+                       to_char(last_update AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_update?"
+                  FROM voice.voice_stats
+                 WHERE user_id = $1
+                "#,
+                uid,
+            )
+            .fetch_optional(app.pool())
+            .await?
+            .map(|row| VhLifetime {
+                total_seconds: row.total_seconds,
+                total_points: row.total_points,
+                last_update: row.last_update,
+            });
+            let lifetime_row = sqlx::query!(
+                r#"
+                SELECT COUNT(*) AS "sessions!",
+                       to_char(MAX(ended_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_session?"
+                  FROM activity.voice_session_log
+                 WHERE user_id = $1
+                "#,
+                uid,
+            )
+            .fetch_one(app.pool())
+            .await?;
+            let recent = sqlx::query!(
+                r#"
+                SELECT id, guild_id, channel_id, channel_name,
+                       to_char(started_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "started_at?",
+                       to_char(ended_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "ended_at?",
+                       duration_seconds,
+                       points::BIGINT AS "points!",
+                       COALESCE(peak_users, 0)::BIGINT AS "peak_users!",
+                       co_player_ids::text AS "co_player_ids?"
+                  FROM activity.voice_session_log
+                 WHERE user_id = $1
+                 ORDER BY ended_at DESC, id DESC
+                 LIMIT $2
+                "#,
+                uid,
+                recent_limit,
+            )
+            .fetch_all(app.pool())
+            .await?
+            .into_iter()
+            .map(|row| VhRecent {
+                id: row.id,
+                guild_id: row.guild_id,
+                channel_id: row.channel_id,
+                channel_name: row.channel_name,
+                started_at: row.started_at,
+                ended_at: row.ended_at,
+                duration_seconds: row.duration_seconds,
+                points: row.points,
+                peak_users: row.peak_users,
+                co_player_ids: row.co_player_ids,
+            })
+            .collect();
+            Some(VhUserData {
+                range,
+                lifetime,
+                lifetime_sessions: lifetime_row.sessions,
+                lifetime_last_session: lifetime_row.last_session,
+                recent,
+            })
+        } else {
+            None
+        };
+
+        Ok(VhData {
+            daily,
+            top,
+            buckets,
+            user,
+        })
+    }
+    .await;
 
     let data = match read {
         Ok(v) => v,
@@ -1195,7 +1298,7 @@ pub async fn voice_history(
 /// entfällt — Kandidaten werden rein über die DB-Schwellen bestimmt. Beide
 /// Retention-Tabellen werden existenz-geschützt gelesen.
 pub async fn user_retention(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     const MIN_WEEKLY: f64 = 0.5;
@@ -1204,114 +1307,148 @@ pub async fn user_retention(State(app): State<DashboardApp>, headers: HeaderMap)
     const MIN_BETWEEN: i64 = 30;
     const MAX_MISS: i64 = 1;
 
-    let data = app
-        .db()
-        .read(move |conn| {
-            let exists = |name: &str| -> rusqlite::Result<bool> {
-                Ok(conn
-                    .query_row(
-                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-                        [name],
-                        |_| Ok(()),
-                    )
-                    .optional()?
-                    .is_some())
-            };
-            if !exists("user_retention_tracking")? {
-                return Ok((0i64, 0i64, 0i64, 0i64, 0i64, 0i64, Vec::<Value>::new()));
-            }
-            let has_msgs = exists("user_retention_messages")?;
+    let data: DashboardDbResult<RetentionData> = async {
+        let min_days = i64_to_i32(MIN_DAYS, "MIN_DAYS")?;
+        let max_miss = i64_to_i32(MAX_MISS, "MAX_MISS")?;
+        let now = Utc::now();
+        let inactive_cutoff = now - Duration::days(INACTIVITY);
+        let miss_cutoff = now - Duration::days(MIN_BETWEEN);
 
-            let total_tracked: i64 =
-                conn.query_row("SELECT COUNT(*) FROM user_retention_tracking", [], |r| r.get(0))?;
-            let opted_out: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM user_retention_tracking WHERE opted_out=1",
-                [],
-                |r| r.get(0),
-            )?;
-            let regular_active: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM user_retention_tracking WHERE avg_weekly_sessions>=?1 AND total_active_days>=?2",
-                params![MIN_WEEKLY, MIN_DAYS],
-                |r| r.get(0),
-            )?;
-            let (miss_you_sent, feedback_received): (i64, i64) = if has_msgs {
-                (
-                    conn.query_row("SELECT COUNT(*) FROM user_retention_messages WHERE message_type='miss_you'", [], |r| r.get(0))?,
-                    conn.query_row("SELECT COUNT(*) FROM user_retention_messages WHERE message_type='feedback'", [], |r| r.get(0))?,
-                )
-            } else {
-                (0, 0)
-            };
+        let total_tracked = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_tracking
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let opted_out = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_tracking
+             WHERE opted_out = TRUE
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let regular_active = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_tracking
+             WHERE avg_weekly_sessions >= $1
+               AND total_active_days >= $2
+            "#,
+            MIN_WEEKLY,
+            min_days,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let miss_you_sent = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_messages
+             WHERE message_type = 'miss_you'
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let feedback_received = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_messages
+             WHERE message_type = 'feedback'
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let inactive_candidates = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.user_retention_tracking
+             WHERE avg_weekly_sessions >= $1
+               AND total_active_days >= $2
+               AND last_active_at <= $3
+               AND opted_out = FALSE
+               AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at <= $4)
+               AND miss_you_count < $5
+            "#,
+            MIN_WEEKLY,
+            min_days,
+            inactive_cutoff,
+            miss_cutoff,
+            max_miss,
+        )
+        .fetch_one(app.pool())
+        .await?;
 
-            let where_sql = "avg_weekly_sessions>=?1 AND total_active_days>=?2
-                AND (strftime('%s','now')-last_active_at)/86400 >= ?3 AND opted_out=0
-                AND (last_miss_you_sent_at IS NULL OR (strftime('%s','now')-last_miss_you_sent_at)/86400 >= ?4)
-                AND (miss_you_count IS NULL OR miss_you_count < ?5)";
-            let inactive_candidates: i64 = conn.query_row(
-                &format!("SELECT COUNT(*) FROM user_retention_tracking WHERE {where_sql}"),
-                params![MIN_WEEKLY, MIN_DAYS, INACTIVITY, MIN_BETWEEN, MAX_MISS],
-                |r| r.get(0),
-            )?;
-
-            let (status_sql, at_sql) = if has_msgs {
-                (
-                    "(SELECT m.delivery_status FROM user_retention_messages m WHERE m.user_id=urt.user_id AND m.message_type='miss_you' ORDER BY m.sent_at DESC LIMIT 1)",
-                    "(SELECT m.sent_at FROM user_retention_messages m WHERE m.user_id=urt.user_id AND m.message_type='miss_you' ORDER BY m.sent_at DESC LIMIT 1)",
-                )
-            } else {
-                ("NULL", "NULL")
-            };
-            let sql = format!(
-                "SELECT urt.user_id, urt.guild_id, urt.last_active_at, urt.total_active_days,
-                        urt.avg_weekly_sessions,
-                        (strftime('%s','now')-urt.last_active_at)/86400 AS days_inactive,
-                        {status_sql} AS last_message_status, {at_sql} AS last_message_at,
-                        urt.last_miss_you_sent_at, urt.miss_you_count
-                   FROM user_retention_tracking urt
-                  WHERE {where_sql}
-                  ORDER BY days_inactive DESC LIMIT 50"
-            );
-            let mut stmt = conn.prepare(&sql)?;
-            let cands: Vec<Value> = stmt
-                .query_map(
-                    params![MIN_WEEKLY, MIN_DAYS, INACTIVITY, MIN_BETWEEN, MAX_MISS],
-                    |r| {
-                        Ok(json!({
-                            "user_id": r.get::<_, i64>(0)?,
-                            "guild_id": r.get::<_, i64>(1)?,
-                            "last_active_at": r.get::<_, Option<i64>>(2)?,
-                            "total_active_days": r.get::<_, Option<i64>>(3)?,
-                            "avg_weekly_sessions": r.get::<_, Option<f64>>(4)?,
-                            "days_inactive": r.get::<_, Option<i64>>(5)?.unwrap_or(0).max(0),
-                            "last_message_status": r.get::<_, Option<String>>(6)?,
-                            "last_message_at": r.get::<_, Option<i64>>(7)?,
-                            "last_miss_you_sent_at": r.get::<_, Option<i64>>(8)?,
-                            "miss_you_count": r.get::<_, Option<i64>>(9)?,
-                        }))
-                    },
-                )?
-                .collect::<rusqlite::Result<_>>()?;
-            Ok((
-                total_tracked,
-                opted_out,
-                regular_active,
-                inactive_candidates,
-                miss_you_sent,
-                feedback_received,
-                cands,
-            ))
+        let cands = sqlx::query!(
+            r#"
+            SELECT urt.user_id, urt.guild_id,
+                   EXTRACT(EPOCH FROM urt.last_active_at)::BIGINT AS "last_active_at!",
+                   urt.total_active_days,
+                   urt.avg_weekly_sessions,
+                   GREATEST(FLOOR(EXTRACT(EPOCH FROM ($6 - urt.last_active_at)) / 86400)::BIGINT, 0) AS "days_inactive!",
+                   msg.delivery_status AS "last_message_status?",
+                   EXTRACT(EPOCH FROM msg.sent_at)::BIGINT AS "last_message_at?",
+                   EXTRACT(EPOCH FROM urt.last_miss_you_sent_at)::BIGINT AS "last_miss_you_sent_at?",
+                   urt.miss_you_count
+              FROM activity.user_retention_tracking urt
+              LEFT JOIN LATERAL (
+                    SELECT delivery_status, sent_at
+                      FROM activity.user_retention_messages m
+                     WHERE m.user_id = urt.user_id
+                       AND m.message_type = 'miss_you'
+                     ORDER BY m.sent_at DESC
+                     LIMIT 1
+              ) msg ON TRUE
+             WHERE urt.avg_weekly_sessions >= $1
+               AND urt.total_active_days >= $2
+               AND urt.last_active_at <= $3
+               AND urt.opted_out = FALSE
+               AND (urt.last_miss_you_sent_at IS NULL OR urt.last_miss_you_sent_at <= $4)
+               AND urt.miss_you_count < $5
+             ORDER BY 6 DESC
+             LIMIT 50
+            "#,
+            MIN_WEEKLY,
+            min_days,
+            inactive_cutoff,
+            miss_cutoff,
+            max_miss,
+            now,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "user_id": r.user_id,
+                "guild_id": r.guild_id,
+                "last_active_at": r.last_active_at,
+                "total_active_days": r.total_active_days,
+                "avg_weekly_sessions": r.avg_weekly_sessions,
+                "days_inactive": r.days_inactive,
+                "last_message_status": r.last_message_status,
+                "last_message_at": r.last_message_at,
+                "last_miss_you_sent_at": r.last_miss_you_sent_at,
+                "miss_you_count": r.miss_you_count,
+            })
         })
-        .await;
+        .collect::<Vec<_>>();
 
-    let (
-        total_tracked,
-        opted_out,
-        regular_active,
-        inactive_candidates,
-        miss_you_sent,
-        feedback_received,
-        mut candidates,
-    ) = match data {
+        Ok(RetentionData {
+            total_tracked,
+            opted_out,
+            regular_active,
+            inactive_candidates,
+            miss_you_sent,
+            feedback_received,
+            candidates: cands,
+        })
+    }
+    .await;
+
+    let mut data = match data {
         Ok(v) => v,
         Err(err) => {
             tracing::error!(%err, "user_retention fehlgeschlagen");
@@ -1319,30 +1456,32 @@ pub async fn user_retention(State(app): State<DashboardApp>, headers: HeaderMap)
         }
     };
 
-    let ids: Vec<u64> = candidates
+    let ids: Vec<u64> = data
+        .candidates
         .iter()
         .filter_map(|c| c["user_id"].as_i64().and_then(|i| u64::try_from(i).ok()))
         .collect();
     let names = app.names().resolve(&ids).await;
-    for c in candidates.iter_mut() {
+    for c in data.candidates.iter_mut() {
         let uid = c["user_id"]
             .as_i64()
             .and_then(|i| u64::try_from(i).ok())
             .unwrap_or(0);
         c["display_name"] = json!(display_name_or_default(&names, uid));
     }
+    let recent = data.candidates.clone();
 
     ok_json(json!({
         "summary": {
-            "total_tracked": total_tracked,
-            "opted_out": opted_out,
-            "regular_active": regular_active,
-            "inactive_candidates": inactive_candidates,
-            "miss_you_sent": miss_you_sent,
-            "feedback_received": feedback_received,
+            "total_tracked": data.total_tracked,
+            "opted_out": data.opted_out,
+            "regular_active": data.regular_active,
+            "inactive_candidates": data.inactive_candidates,
+            "miss_you_sent": data.miss_you_sent,
+            "feedback_received": data.feedback_received,
         },
-        "candidates": candidates,
-        "recent": candidates,
+        "candidates": data.candidates,
+        "recent": recent,
     }))
 }
 
@@ -1355,7 +1494,7 @@ pub async fn voice_stats(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let limit = match parse_limit(&params, 10, 50) {
@@ -1363,58 +1502,89 @@ pub async fn voice_stats(
         Err(resp) => return resp,
     };
 
-    let data = app
-        .db()
-        .read(move |conn| {
-            let (tracked_users, total_seconds, total_points, last_update): (i64, i64, i64, Option<String>) =
-                conn.query_row(
-                    "SELECT COUNT(*), COALESCE(SUM(total_seconds),0), COALESCE(SUM(total_points),0), MAX(last_update)
-                       FROM voice_stats",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )?;
-            let rows = |sql: &str| -> rusqlite::Result<Vec<Value>> {
-                let mut stmt = conn.prepare(sql)?;
-                let mut out = Vec::new();
-                let mut q = stmt.query(params![limit])?;
-                while let Some(r) = q.next()? {
-                    out.push(json!({
-                        "user_id": r.get::<_, i64>(0)?,
-                        "total_seconds": r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        "total_points": r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                        "last_update": r.get::<_, Option<String>>(3)?,
-                    }));
-                }
-                Ok(out)
-            };
-            let top_time = rows(
-                "SELECT user_id, total_seconds, total_points, last_update FROM voice_stats
-                  ORDER BY total_seconds DESC, total_points DESC LIMIT ?1",
-            )?;
-            let top_points = rows(
-                "SELECT user_id, total_seconds, total_points, last_update FROM voice_stats
-                  ORDER BY total_points DESC, total_seconds DESC LIMIT ?1",
-            )?;
-            Ok((tracked_users, total_seconds, total_points, last_update, top_time, top_points))
+    let data: DashboardDbResult<VoiceStatsData> = async {
+        let summary = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "tracked_users!",
+                   COALESCE(SUM(total_seconds), 0)::BIGINT AS "total_seconds!",
+                   COALESCE(SUM(total_points), 0)::BIGINT AS "total_points!",
+                   to_char(MAX(last_update) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_update?"
+              FROM voice.voice_stats
+            "#
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let top_time = sqlx::query!(
+            r#"
+            SELECT user_id, total_seconds, total_points,
+                   to_char(last_update AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_update?"
+              FROM voice.voice_stats
+             ORDER BY total_seconds DESC, total_points DESC
+             LIMIT $1
+            "#,
+            limit,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "user_id": r.user_id,
+                "total_seconds": r.total_seconds,
+                "total_points": r.total_points,
+                "last_update": r.last_update,
+            })
         })
-        .await;
+        .collect::<Vec<_>>();
+        let top_points = sqlx::query!(
+            r#"
+            SELECT user_id, total_seconds, total_points,
+                   to_char(last_update AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_update?"
+              FROM voice.voice_stats
+             ORDER BY total_points DESC, total_seconds DESC
+             LIMIT $1
+            "#,
+            limit,
+        )
+        .fetch_all(app.pool())
+        .await?
+        .into_iter()
+        .map(|r| {
+            json!({
+                "user_id": r.user_id,
+                "total_seconds": r.total_seconds,
+                "total_points": r.total_points,
+                "last_update": r.last_update,
+            })
+        })
+        .collect::<Vec<_>>();
+        Ok(VoiceStatsData {
+            tracked_users: summary.tracked_users,
+            total_seconds: summary.total_seconds,
+            total_points: summary.total_points,
+            last_update: summary.last_update,
+            top_time,
+            top_points,
+        })
+    }
+    .await;
 
-    let (tracked_users, total_seconds, total_points, last_update, mut top_time, mut top_points) =
-        match data {
-            Ok(v) => v,
-            Err(err) => {
-                tracing::error!(%err, "voice_stats fehlgeschlagen");
-                return err_text(500, "Voice stats unavailable");
-            }
-        };
+    let mut data = match data {
+        Ok(v) => v,
+        Err(err) => {
+            tracing::error!(%err, "voice_stats fehlgeschlagen");
+            return err_text(500, "Voice stats unavailable");
+        }
+    };
 
-    let ids: Vec<u64> = top_time
+    let ids: Vec<u64> = data
+        .top_time
         .iter()
-        .chain(top_points.iter())
+        .chain(data.top_points.iter())
         .filter_map(|c| c["user_id"].as_i64().and_then(|i| u64::try_from(i).ok()))
         .collect();
     let names = app.names().resolve(&ids).await;
-    for c in top_time.iter_mut().chain(top_points.iter_mut()) {
+    for c in data.top_time.iter_mut().chain(data.top_points.iter_mut()) {
         let uid = c["user_id"]
             .as_i64()
             .and_then(|i| u64::try_from(i).ok())
@@ -1422,22 +1592,22 @@ pub async fn voice_stats(
         c["display_name"] = json!(display_name_or_default(&names, uid));
     }
 
-    let avg = if tracked_users > 0 {
-        json!(total_seconds as f64 / tracked_users as f64)
+    let avg = if data.tracked_users > 0 {
+        json!(data.total_seconds as f64 / data.tracked_users as f64)
     } else {
         json!(0)
     };
 
     ok_json(json!({
         "summary": {
-            "tracked_users": tracked_users,
-            "total_seconds": total_seconds,
-            "total_points": total_points,
-            "last_update": last_update,
+            "tracked_users": data.tracked_users,
+            "total_seconds": data.total_seconds,
+            "total_points": data.total_points,
+            "last_update": data.last_update,
             "avg_seconds_per_user": avg,
         },
-        "top_by_time": top_time,
-        "top_by_points": top_points,
+        "top_by_time": data.top_time,
+        "top_by_points": data.top_points,
         "live": { "summary": { "active_sessions": 0, "total_seconds": 0 }, "sessions": [] },
     }))
 }

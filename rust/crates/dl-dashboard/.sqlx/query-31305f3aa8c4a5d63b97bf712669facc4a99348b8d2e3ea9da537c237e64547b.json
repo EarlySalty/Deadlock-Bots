@@ -1,0 +1,72 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, user_id, guild_id, event_type,\n                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"timestamp?\",\n                   display_name,\n                   to_char(account_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"account_created_at?\",\n                   join_position,\n                   metadata::text AS \"metadata?\"\n              FROM activity.member_events\n             WHERE ($1::BIGINT IS NULL OR guild_id = $1)\n               AND ($2::TEXT IS NULL OR event_type = $2)\n             ORDER BY occurred_at DESC NULLS LAST\n             LIMIT $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "timestamp?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "account_created_at?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "join_position",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 8,
+        "name": "metadata?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      true,
+      null,
+      true,
+      null
+    ]
+  },
+  "hash": "31305f3aa8c4a5d63b97bf712669facc4a99348b8d2e3ea9da537c237e64547b"
+}

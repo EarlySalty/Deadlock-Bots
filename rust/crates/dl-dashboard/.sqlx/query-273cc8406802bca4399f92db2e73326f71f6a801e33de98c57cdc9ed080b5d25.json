@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT (started_at AT TIME ZONE 'UTC')::date::text AS \"day!\",\n                   COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"total_seconds!\",\n                   COUNT(*) AS \"sessions!\",\n                   COUNT(DISTINCT user_id) AS \"users!\"\n              FROM activity.voice_session_log\n             WHERE started_at >= $1\n             GROUP BY (started_at AT TIME ZONE 'UTC')::date\n             ORDER BY (started_at AT TIME ZONE 'UTC')::date DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "users!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "273cc8406802bca4399f92db2e73326f71f6a801e33de98c57cdc9ed080b5d25"
+}

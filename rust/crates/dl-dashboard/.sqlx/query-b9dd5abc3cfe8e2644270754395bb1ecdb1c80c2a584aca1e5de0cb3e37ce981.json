@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM bot.reaction_role_dm_log WHERE mapping_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b9dd5abc3cfe8e2644270754395bb1ecdb1c80c2a584aca1e5de0cb3e37ce981"
+}

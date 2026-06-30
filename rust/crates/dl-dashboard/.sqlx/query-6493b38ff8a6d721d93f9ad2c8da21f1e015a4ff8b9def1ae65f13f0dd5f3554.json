@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(NULLIF(dm_status, ''), 'unknown') AS \"status!\",\n                   COUNT(*) AS \"count!\"\n              FROM activity.member_leave_surveys\n             GROUP BY COALESCE(NULLIF(dm_status, ''), 'unknown')\n             ORDER BY 1 ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "6493b38ff8a6d721d93f9ad2c8da21f1e015a4ff8b9def1ae65f13f0dd5f3554"
+}

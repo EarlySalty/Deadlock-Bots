@@ -11,13 +11,16 @@ use std::path::{Path as FsPath, PathBuf};
 use axum::extract::{FromRequest, Multipart, Path, Request, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use chrono::{Duration, Utc};
 use rand::Rng;
-use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
+use crate::db::{advisory_lock, DashboardDbError, DashboardDbResult};
 use crate::web::{err_json, err_text, ok_json, DashboardApp};
 
-const TOKEN_MAX_AGE: &str = "-30 days";
+const TOKEN_MAX_AGE_DAYS: i64 = 30;
+const MEMBER_LEAVE_SURVEYS_TOKEN_LOCK: i64 = 0x4441_5348_5355_5256;
 /// Wie `LEAVE_SURVEY_MAX_IMAGES`.
 const MAX_IMAGES: usize = 5;
 /// Wie `LEAVE_SURVEY_MAX_IMAGE_BYTES` (5 MiB pro Bild).
@@ -32,6 +35,10 @@ pub(crate) fn is_valid_token(token: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
+fn token_cutoff() -> chrono::DateTime<Utc> {
+    Utc::now() - Duration::days(TOKEN_MAX_AGE_DAYS)
+}
+
 pub async fn leave_survey_get(
     State(app): State<DashboardApp>,
     Path(token): Path<String>,
@@ -40,34 +47,29 @@ pub async fn leave_survey_get(
     if !is_valid_token(&token) {
         return err_json(404, "not_found");
     }
-    let row = app
-        .db()
-        .read(move |conn| {
-            conn.query_row(
-                "SELECT display_name, user_bucket, reason_code, web_submitted_at
-                 FROM member_leave_surveys
-                 WHERE survey_token = ? AND created_at >= datetime('now', ?)
-                 LIMIT 1",
-                params![token, TOKEN_MAX_AGE],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<String>>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                        r.get::<_, Option<String>>(2)?,
-                        r.get::<_, Option<i64>>(3)?,
-                    ))
-                },
-            )
-            .optional()
-        })
-        .await;
+    let cutoff = token_cutoff();
+    let row = sqlx::query!(
+        r#"
+        SELECT display_name, user_bucket, reason_code,
+               web_submitted_at IS NOT NULL AS "already_submitted!"
+          FROM activity.member_leave_surveys
+         WHERE survey_token = $1
+           AND created_at >= $2
+         ORDER BY id
+         LIMIT 1
+        "#,
+        token,
+        cutoff,
+    )
+    .fetch_optional(app.pool())
+    .await;
 
     match row {
-        Ok(Some((display_name, user_bucket, reason_code, web_submitted_at))) => ok_json(json!({
-            "display_name": display_name,
-            "user_bucket": user_bucket,
-            "reason_code": reason_code,
-            "already_submitted": web_submitted_at.is_some(),
+        Ok(Some(row)) => ok_json(json!({
+            "display_name": row.display_name,
+            "user_bucket": row.user_bucket,
+            "reason_code": row.reason_code,
+            "already_submitted": row.already_submitted,
         })),
         Ok(None) => err_json(404, "not_found"),
         Err(err) => {
@@ -120,13 +122,74 @@ fn mime_for_name(name: &str) -> &'static str {
 /// Upload-Verzeichnis = `<DB-Parent>/leave_survey_uploads/<token>` (entspricht
 /// `repo/data/leave_survey_uploads/<token>`, da die DB unter `data/` liegt).
 fn upload_dir(app: &DashboardApp, token: &str) -> PathBuf {
-    let base = app
-        .db()
-        .path()
-        .parent()
-        .map(|p| p.to_path_buf())
-        .unwrap_or_else(|| PathBuf::from("."));
-    base.join("leave_survey_uploads").join(token)
+    app.data_dir().join("leave_survey_uploads").join(token)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SubmitOutcome {
+    Updated,
+    AlreadySubmitted,
+    NotFound,
+}
+
+async fn submit_leave_survey(
+    pool: &PgPool,
+    token: &str,
+    payload: &str,
+    now: chrono::DateTime<Utc>,
+) -> DashboardDbResult<SubmitOutcome> {
+    let mut tx = pool.begin().await?;
+    advisory_lock(&mut tx, MEMBER_LEAVE_SURVEYS_TOKEN_LOCK).await?;
+    let cutoff = now - Duration::days(TOKEN_MAX_AGE_DAYS);
+    let summary = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "count!",
+               COALESCE(BOOL_OR(web_submitted_at IS NOT NULL), FALSE) AS "submitted!"
+          FROM activity.member_leave_surveys
+         WHERE survey_token = $1
+           AND created_at >= $2
+        "#,
+        token,
+        cutoff,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    if summary.count == 0 {
+        tx.commit().await?;
+        return Ok(SubmitOutcome::NotFound);
+    }
+    if summary.count > 1 {
+        return Err(DashboardDbError::UniqueViolation(
+            "activity.member_leave_surveys.survey_token",
+        ));
+    }
+    if summary.submitted {
+        tx.commit().await?;
+        return Ok(SubmitOutcome::AlreadySubmitted);
+    }
+    let updated = sqlx::query!(
+        r#"
+        UPDATE activity.member_leave_surveys
+           SET web_payload = $1::text::jsonb,
+               web_submitted_at = $2
+         WHERE survey_token = $3
+           AND created_at >= $4
+           AND web_submitted_at IS NULL
+        "#,
+        payload,
+        now,
+        token,
+        cutoff,
+    )
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+    tx.commit().await?;
+    if updated > 0 {
+        Ok(SubmitOutcome::Updated)
+    } else {
+        Ok(SubmitOutcome::AlreadySubmitted)
+    }
 }
 
 /// `secrets.token_hex(n)`-Äquivalent: n Zufallsbytes als Hex.
@@ -153,23 +216,26 @@ pub async fn leave_survey_post(
 
     // 1. Row prüfen (Existenz + bereits abgesendet) vor dem Body-Konsum.
     let token_check = token.clone();
-    let existing = app
-        .db()
-        .read(move |conn| {
-            conn.query_row(
-                "SELECT web_submitted_at
-                 FROM member_leave_surveys
-                 WHERE survey_token = ? AND created_at >= datetime('now', ?)
-                 LIMIT 1",
-                params![token_check, TOKEN_MAX_AGE],
-                |r| r.get::<_, Option<i64>>(0),
-            )
-            .optional()
-        })
-        .await;
+    let cutoff = token_cutoff();
+    let existing = sqlx::query!(
+        r#"
+        SELECT web_submitted_at
+          FROM activity.member_leave_surveys
+         WHERE survey_token = $1
+           AND created_at >= $2
+         ORDER BY id
+         LIMIT 1
+        "#,
+        token_check,
+        cutoff,
+    )
+    .fetch_optional(app.pool())
+    .await;
     match existing {
-        Ok(Some(Some(_))) => return err_json(409, "already_submitted"),
-        Ok(Some(None)) => {}
+        Ok(Some(row)) if row.web_submitted_at.is_some() => {
+            return err_json(409, "already_submitted");
+        }
+        Ok(Some(_)) => {}
         Ok(None) => return err_json(404, "not_found"),
         Err(err) => {
             tracing::error!(%err, "leave_survey_post Row-Lookup fehlgeschlagen");
@@ -295,33 +361,24 @@ pub async fn leave_survey_post(
 
     // 5. Atomar setzen (nur wenn noch nicht abgesendet).
     let payload = json!({ "answers": answers, "images": saved }).to_string();
-    let now = chrono::Utc::now().timestamp();
+    let now = chrono::Utc::now();
     let token_db = token.clone();
-    let updated = app
-        .db()
-        .write(move |conn| {
-            conn.execute(
-                "UPDATE member_leave_surveys
-                 SET web_payload = ?, web_submitted_at = ?
-                 WHERE survey_token = ?
-                   AND created_at >= datetime('now', ?)
-                   AND web_submitted_at IS NULL",
-                params![payload, now, token_db, TOKEN_MAX_AGE],
-            )
-        })
-        .await;
-    let updated = match updated {
-        Ok(n) => n,
+    let updated = match submit_leave_survey(app.pool(), &token_db, &payload, now).await {
+        Ok(outcome) => outcome,
         Err(err) => {
             tracing::error!(%err, "leave_survey_post UPDATE fehlgeschlagen");
             return err_json(500, "submission_failed");
         }
     };
-    if updated == 0 {
+    if updated != SubmitOutcome::Updated {
         for f in &saved {
             let _ = tokio::fs::remove_file(dir.join(f)).await;
         }
-        return err_json(409, "already_submitted");
+        return match updated {
+            SubmitOutcome::AlreadySubmitted => err_json(409, "already_submitted"),
+            SubmitOutcome::NotFound => err_json(404, "not_found"),
+            SubmitOutcome::Updated => ok_json(json!({ "ok": true })),
+        };
     }
     ok_json(json!({ "ok": true }))
 }
@@ -333,7 +390,7 @@ pub async fn leave_survey_image(
     Path((token, filename)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let token = token.trim().to_string();
@@ -389,5 +446,49 @@ mod tests {
     fn rand_hex_laenge() {
         assert_eq!(rand_hex(8).len(), 16);
         assert!(rand_hex(8).chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn submit_leave_survey_emuliert_token_unique_constraint(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let now = Utc::now();
+        for id in [1_i64, 2_i64] {
+            sqlx::query!(
+                r#"
+                INSERT INTO activity.member_leave_surveys(
+                    id, user_id, guild_id, left_at, display_name, user_bucket,
+                    survey_token, created_at
+                )
+                VALUES ($1, $2, 42, $3, 'Nani', 'regular', 'dup-token', $3)
+                "#,
+                id,
+                1000_i64 + id,
+                now,
+            )
+            .execute(db.pool())
+            .await?;
+        }
+
+        let err = submit_leave_survey(db.pool(), "dup-token", r#"{"answers":{},"images":[]}"#, now)
+            .await
+            .expect_err("duplicate token must fail");
+
+        assert!(matches!(
+            err,
+            DashboardDbError::UniqueViolation("activity.member_leave_surveys.survey_token")
+        ));
+        let updated = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.member_leave_surveys
+             WHERE web_submitted_at IS NOT NULL
+            "#
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(updated, 0);
+        Ok(())
     }
 }

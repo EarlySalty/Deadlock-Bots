@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(NULLIF(reason_code, ''), 'unknown') AS \"reason_code!\",\n                   COUNT(*) AS \"count!\"\n              FROM activity.member_leave_surveys\n             GROUP BY COALESCE(NULLIF(reason_code, ''), 'unknown')\n             ORDER BY COUNT(*) DESC, 1 ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "reason_code!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "7fa496cc55a880f8db9306df77857e8afc4795f935ec38351b2a73f647e09e03"
+}

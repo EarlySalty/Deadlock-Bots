@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM tierlist.deadlock_hero_builds WHERE hero_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "49d794115a41d369ec6045b88f3df1ff96f40dcf93ad980ddf861031b2a4c82e"
+}

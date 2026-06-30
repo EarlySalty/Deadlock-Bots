@@ -13,10 +13,12 @@ use std::time::Duration;
 use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
+use chrono::Utc;
 use dl_activity::join_source::{self, website_subpage_label};
-use rusqlite::{params, OptionalExtension};
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
+use crate::db::DashboardDbResult;
 use crate::web::{err_text, ok_json, DashboardApp};
 
 const WEBSITE_SLUGS: [&str; 6] = [
@@ -97,7 +99,7 @@ pub async fn server_stats(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
     let guild = match parse_guild_filter(&params) {
@@ -106,59 +108,79 @@ pub async fn server_stats(
     };
 
     // ── Top-Level-Aggregate ────────────────────────────────────────────────
-    let aggregates = app
-        .db()
-        .read(move |conn| {
-            let mut member_events = Map::new();
-            {
-                let mut stmt = conn.prepare(
-                    "SELECT event_type, COUNT(*) FROM member_events
-                     WHERE (? IS NULL OR guild_id = ?) GROUP BY event_type",
-                )?;
-                let mut rows = stmt.query(params![guild, guild])?;
-                while let Some(r) = rows.next()? {
-                    let t: Option<String> = r.get(0)?;
-                    let c: i64 = r.get(1)?;
-                    member_events.insert(t.unwrap_or_default(), json!(c));
-                }
-            }
-            let total_messages: i64 = conn
-                .query_row(
-                    "SELECT SUM(message_count) FROM message_activity WHERE (? IS NULL OR guild_id = ?)",
-                    params![guild, guild],
-                    |r| r.get::<_, Option<i64>>(0),
-                )?
-                .unwrap_or(0);
-            let total_seconds: i64 = conn
-                .query_row(
-                    "SELECT SUM(duration_seconds) FROM voice_session_log WHERE (? IS NULL OR guild_id = ?)",
-                    params![guild, guild],
-                    |r| r.get::<_, Option<i64>>(0),
-                )?
-                .unwrap_or(0);
-            let active_users_7d: i64 = conn.query_row(
-                "SELECT COUNT(DISTINCT user_id) FROM message_activity
-                 WHERE (? IS NULL OR guild_id = ?) AND last_message_at >= datetime('now', '-7 days')",
-                params![guild, guild],
-                |r| r.get(0),
-            )?;
-            let (joins, leaves): (i64, i64) = conn.query_row(
-                "SELECT SUM(CASE WHEN event_type='join' THEN 1 ELSE 0 END),
-                        SUM(CASE WHEN event_type='leave' THEN 1 ELSE 0 END)
-                 FROM member_events
-                 WHERE (? IS NULL OR guild_id = ?) AND timestamp >= datetime('now', '-30 days')",
-                params![guild, guild],
-                |r| Ok((r.get::<_, Option<i64>>(0)?.unwrap_or(0), r.get::<_, Option<i64>>(1)?.unwrap_or(0))),
-            )?;
-            Ok(json!({
+    let aggregates: DashboardDbResult<Value> = async {
+        let mut member_events = Map::new();
+        let event_rows = sqlx::query!(
+            r#"
+            SELECT event_type, COUNT(*) AS "count!"
+              FROM activity.member_events
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+             GROUP BY event_type
+            "#,
+            guild,
+        )
+        .fetch_all(app.pool())
+        .await?;
+        for row in event_rows {
+            member_events.insert(row.event_type, json!(row.count));
+        }
+
+        let total_messages = sqlx::query_scalar!(
+            r#"
+            SELECT COALESCE(SUM(message_count), 0)::BIGINT AS "total!"
+              FROM activity.message_activity
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+            "#,
+            guild,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let total_seconds = sqlx::query_scalar!(
+            r#"
+            SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total!"
+              FROM activity.voice_session_log
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+            "#,
+            guild,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let active_cutoff = Utc::now() - chrono::Duration::days(7);
+        let active_users_7d = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(DISTINCT user_id) AS "count!"
+              FROM activity.message_activity
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+               AND last_message_at >= $2
+            "#,
+            guild,
+            active_cutoff,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        let growth_cutoff = Utc::now() - chrono::Duration::days(30);
+        let growth = sqlx::query!(
+            r#"
+            SELECT COALESCE(SUM(CASE WHEN event_type = 'join' THEN 1 ELSE 0 END), 0)::BIGINT AS "joins!",
+                   COALESCE(SUM(CASE WHEN event_type = 'leave' THEN 1 ELSE 0 END), 0)::BIGINT AS "leaves!"
+              FROM activity.member_events
+             WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+               AND occurred_at >= $2
+            "#,
+            guild,
+            growth_cutoff,
+        )
+        .fetch_one(app.pool())
+        .await?;
+        Ok(json!({
                 "member_events": member_events,
                 "total_messages": total_messages,
                 "total_voice_hours": total_seconds / 3600,
                 "active_users_7d": active_users_7d,
-                "growth_30d": { "joins": joins, "leaves": leaves, "net": joins - leaves },
+                "growth_30d": { "joins": growth.joins, "leaves": growth.leaves, "net": growth.joins - growth.leaves },
             }))
-        })
-        .await;
+    }
+    .await;
     let mut payload = match aggregates {
         Ok(v) => v,
         Err(err) => {
@@ -168,10 +190,7 @@ pub async fn server_stats(
     };
 
     // ── Beitritts-Quellen ──────────────────────────────────────────────────
-    let source_data = app
-        .db()
-        .read(move |conn| load_source_data(conn, guild))
-        .await;
+    let source_data = load_source_data(app.pool(), guild).await;
     let mut source = match source_data {
         Ok(d) => build_member_sources(d),
         Err(err) => {
@@ -188,116 +207,112 @@ pub async fn server_stats(
     ok_json(payload)
 }
 
-fn load_source_data(
-    conn: &rusqlite::Connection,
-    guild: Option<i64>,
-) -> rusqlite::Result<SourceData> {
-    let mut stmt = conn.prepare(
-        "SELECT user_id, timestamp, display_name, metadata FROM member_events
-         WHERE event_type='join' AND (? IS NULL OR guild_id = ?) ORDER BY timestamp DESC",
-    )?;
-    let joins: Vec<JoinRow> = stmt
-        .query_map(params![guild, guild], |r| {
-            let meta_raw: Option<String> = r.get(3)?;
+async fn load_source_data(pool: &PgPool, guild: Option<i64>) -> DashboardDbResult<SourceData> {
+    let join_rows = sqlx::query!(
+        r#"
+        SELECT user_id,
+               to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "timestamp?",
+               display_name,
+               metadata::text AS "metadata?"
+          FROM activity.member_events
+         WHERE event_type = 'join'
+           AND ($1::BIGINT IS NULL OR guild_id = $1)
+         ORDER BY occurred_at DESC
+        "#,
+        guild,
+    )
+    .fetch_all(pool)
+    .await?;
+    let joins = join_rows
+        .into_iter()
+        .map(|r| {
+            let meta_raw = r.metadata;
             let metadata = meta_raw
                 .and_then(|s| serde_json::from_str::<Value>(&s).ok())
                 .filter(Value::is_object)
                 .unwrap_or_else(|| json!({}));
-            Ok(JoinRow {
-                user_id: r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                timestamp: r.get(1)?,
-                display_name: r.get(2)?,
+            JoinRow {
+                user_id: r.user_id,
+                timestamp: r.timestamp,
+                display_name: r.display_name,
                 metadata,
-            })
-        })?
-        .collect::<rusqlite::Result<Vec<_>>>()?;
+            }
+        })
+        .collect::<Vec<_>>();
 
     // website_invites-KV → code → slug.
     let mut website_lookup = HashMap::new();
-    {
-        let mut s = conn.prepare("SELECT k, v FROM kv_store WHERE ns = 'website_invites'")?;
-        let mut rows = s.query([])?;
-        while let Some(r) = rows.next()? {
-            let k: String = r.get(0)?;
-            let v: Option<String> = r.get(1)?;
-            let slug = if k == "main" {
-                "landing".to_string()
-            } else {
-                k.trim().to_lowercase()
-            };
-            if !WEBSITE_SLUGS.contains(&slug.as_str()) {
-                continue;
-            }
-            if let Some(code) = v
-                .and_then(|raw| serde_json::from_str::<Value>(&raw).ok())
-                .and_then(|p| {
-                    p.get("code")
-                        .and_then(Value::as_str)
-                        .map(|c| c.trim().to_string())
-                })
-                .filter(|c| !c.is_empty())
-            {
-                website_lookup.entry(code.to_lowercase()).or_insert(slug);
-            }
+    let kv_rows = sqlx::query!(
+        r#"
+        SELECT k, v
+          FROM bot.kv_store
+         WHERE ns = 'website_invites'
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    for r in kv_rows {
+        let slug = if r.k == "main" {
+            "landing".to_string()
+        } else {
+            r.k.trim().to_lowercase()
+        };
+        if !WEBSITE_SLUGS.contains(&slug.as_str()) {
+            continue;
+        }
+        if let Some(code) = serde_json::from_str::<Value>(&r.v)
+            .ok()
+            .and_then(|p| {
+                p.get("code")
+                    .and_then(Value::as_str)
+                    .map(|c| c.trim().to_string())
+            })
+            .filter(|c| !c.is_empty())
+        {
+            website_lookup.entry(code.to_lowercase()).or_insert(slug);
         }
     }
 
-    // twitch_streamer_invites (existiert evtl. nicht — dann leer).
+    // twitch_streamer_invites ist Teil der zentralen Migration.
     let mut twitch_lookup = HashMap::new();
     let mut twitch_assigned_links = Vec::new();
-    let table_exists = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='twitch_streamer_invites'",
-            [],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some();
-    if table_exists {
-        let mut s = conn.prepare(
-            "SELECT streamer_login, invite_code, invite_url, created_at, last_sent_at
-             FROM twitch_streamer_invites WHERE (? IS NULL OR guild_id = ?) ORDER BY streamer_login",
-        )?;
-        let mut rows = s.query(params![guild, guild])?;
-        while let Some(r) = rows.next()? {
-            let login = r
-                .get::<_, Option<String>>(0)?
-                .unwrap_or_default()
-                .trim()
-                .to_lowercase();
-            let code = r
-                .get::<_, Option<String>>(1)?
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let url = r
-                .get::<_, Option<String>>(2)?
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-            let created: Option<String> = r.get(3)?;
-            let last: Option<String> = r.get(4)?;
-            if !code.is_empty() && !login.is_empty() {
-                twitch_lookup
-                    .entry(code.to_lowercase())
-                    .or_insert(login.clone());
-            }
-            if !login.is_empty() || !code.is_empty() || !url.is_empty() {
-                let invite_url = if !url.is_empty() {
-                    Some(url)
-                } else if !code.is_empty() {
-                    Some(format!("https://discord.gg/{code}"))
-                } else {
-                    None
-                };
-                twitch_assigned_links.push(json!({
-                    "streamer_login": (!login.is_empty()).then_some(login),
-                    "invite_code": (!code.is_empty()).then_some(code),
-                    "invite_url": invite_url,
-                    "created_at": created,
-                    "last_sent_at": last,
-                }));
-            }
+    let twitch_rows = sqlx::query!(
+        r#"
+        SELECT streamer_login, invite_code, invite_url,
+               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "created_at?",
+               to_char(last_sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_sent_at?"
+          FROM bot.twitch_streamer_invites
+         WHERE ($1::BIGINT IS NULL OR guild_id = $1)
+         ORDER BY streamer_login
+        "#,
+        guild,
+    )
+    .fetch_all(pool)
+    .await?;
+    for r in twitch_rows {
+        let login = r.streamer_login.trim().to_lowercase();
+        let code = r.invite_code.unwrap_or_default().trim().to_string();
+        let url = r.invite_url.unwrap_or_default().trim().to_string();
+        if !code.is_empty() && !login.is_empty() {
+            twitch_lookup
+                .entry(code.to_lowercase())
+                .or_insert(login.clone());
+        }
+        if !login.is_empty() || !code.is_empty() || !url.is_empty() {
+            let invite_url = if !url.is_empty() {
+                Some(url)
+            } else if !code.is_empty() {
+                Some(format!("https://discord.gg/{code}"))
+            } else {
+                None
+            };
+            twitch_assigned_links.push(json!({
+                "streamer_login": (!login.is_empty()).then_some(login),
+                "invite_code": (!code.is_empty()).then_some(code),
+                "invite_url": invite_url,
+                "created_at": r.created_at,
+                "last_sent_at": r.last_sent_at,
+            }));
         }
     }
 
