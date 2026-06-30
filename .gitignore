@@ -83,3 +83,7 @@ docs/superpowers/
 
 # Added by ggshield
 .cache_ggshield
+
+# sqlx Offline-Cache muss eingecheckt sein (trotz globalem *.json-Ignore)
+!**/.sqlx/
+!**/.sqlx/*.json
