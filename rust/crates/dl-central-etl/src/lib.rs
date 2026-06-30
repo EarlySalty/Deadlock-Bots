@@ -10,11 +10,12 @@ pub mod verify;
 pub use convert::{
     integer_to_text, optional_integer_to_text, optional_real_unix_seconds_to_datetime,
     optional_sqlite_int_to_bool, optional_sqlite_numeric_to_bool, optional_text_json_to_value,
-    optional_text_to_bigint, optional_text_to_date, optional_unix_seconds_to_datetime,
-    real_unix_seconds_to_datetime, sqlite_int_to_bool, sqlite_numeric_to_bool, text_json_to_value,
-    text_to_bigint, text_to_date, unix_seconds_to_datetime, ConvertError,
+    optional_text_to_bigint, optional_text_to_date, optional_text_to_datetime,
+    optional_unix_seconds_to_datetime, real_unix_seconds_to_datetime, sqlite_int_to_bool,
+    sqlite_numeric_to_bool, text_json_or_integer_csv_list_to_value, text_json_to_value,
+    text_to_bigint, text_to_date, text_to_datetime, unix_seconds_to_datetime, ConvertError,
 };
-pub use engine::{migrate_table, run, EngineError, EtlReport, TableResult};
+pub use engine::{migrate_table, run, EngineError, EtlReport, OrphanReport, TableResult};
 pub use ledger::{ColumnStatus, Ledger, LedgerError, LedgerSet, TableLedger};
 pub use plan::{build_table_plan, conversion_for, ColumnPlan, Converter, TablePlan};
 pub use snapshot::{

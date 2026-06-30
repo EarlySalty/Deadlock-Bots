@@ -9,8 +9,9 @@ use dl_central_etl::{
     check_row_counts_with_factor, check_sample_covers_mapped_columns, integer_to_text,
     optional_integer_to_text, optional_real_unix_seconds_to_datetime, optional_sqlite_int_to_bool,
     optional_sqlite_numeric_to_bool, optional_text_json_to_value, optional_text_to_date,
-    optional_unix_seconds_to_datetime, real_unix_seconds_to_datetime, sample_round_trip,
-    sqlite_int_to_bool, sqlite_numeric_to_bool, text_json_to_value, text_to_date,
+    optional_text_to_datetime, optional_unix_seconds_to_datetime, real_unix_seconds_to_datetime,
+    sample_round_trip, sqlite_int_to_bool, sqlite_numeric_to_bool,
+    text_json_or_integer_csv_list_to_value, text_json_to_value, text_to_date, text_to_datetime,
     unix_seconds_to_datetime, Ledger, LedgerError, LedgerSet, RoundTripFields, RoundTripRows,
     RowCountFactor, SourceError, SourceSchemas, SourceSqlite, SourceTableColumns, VerifyError,
 };
@@ -762,6 +763,64 @@ fn converters_preserve_types_and_null_semantics() {
         None
     );
 
+    let rfc822_offset = text_to_datetime("2025-10-24T16:54:51-0700").expect("RFC822 offset parses");
+    assert_eq!(rfc822_offset.to_rfc3339(), "2025-10-24T23:54:51+00:00");
+    assert_eq!(
+        text_to_datetime("2026-06-30T12:00:00Z")
+            .expect("RFC3339 Z parses")
+            .to_rfc3339(),
+        "2026-06-30T12:00:00+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("2026-06-30T12:00:00+02:30")
+            .expect("RFC3339 offset parses")
+            .to_rfc3339(),
+        "2026-06-30T09:30:00+00:00"
+    );
+    let fractional_naive =
+        text_to_datetime("2026-06-10T16:08:41.709852").expect("fractional naive UTC parses");
+    assert_eq!(fractional_naive.timestamp_subsec_micros(), 709_852);
+    assert_eq!(
+        text_to_datetime("2026-06-10T16:08:41.123456789")
+            .expect("naive nanoseconds parse")
+            .timestamp_subsec_nanos(),
+        123_456_789
+    );
+    assert_eq!(
+        text_to_datetime("2026-06-10 16:08:41.709852+02:30")
+            .expect("fractional offset parses")
+            .to_rfc3339(),
+        "2026-06-10T13:38:41.709852+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("2026-04-15T21:30")
+            .expect("minute precision naive timestamp parses")
+            .to_rfc3339(),
+        "2026-04-15T21:30:00+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("1772833020")
+            .expect("real unix seconds text parses")
+            .timestamp(),
+        1_772_833_020
+    );
+    for invalid in ["26-06-30T12:00:00", "2026063013", "123"] {
+        assert!(matches!(
+            text_to_datetime(invalid),
+            Err(dl_central_etl::ConvertError::InvalidTimestampText { value })
+                if value == invalid
+        ));
+    }
+    assert!(matches!(
+        text_to_datetime("not-a-timestamp"),
+        Err(dl_central_etl::ConvertError::InvalidTimestampText { value })
+            if value == "not-a-timestamp"
+    ));
+    assert_eq!(
+        optional_text_to_datetime(None).expect("null timestamp is allowed"),
+        None
+    );
+
     assert_eq!(
         text_to_date("2026-06-30").expect("date parses").to_string(),
         "2026-06-30"
@@ -782,6 +841,10 @@ fn converters_preserve_types_and_null_semantics() {
         text_to_date("30.06.2026"),
         Err(dl_central_etl::ConvertError::InvalidDateText { value }) if value == "30.06.2026"
     ));
+    assert!(matches!(
+        text_to_date("26-06-30"),
+        Err(dl_central_etl::ConvertError::InvalidDateText { value }) if value == "26-06-30"
+    ));
     assert_eq!(
         optional_text_to_date(None).expect("null date is allowed"),
         None
@@ -791,8 +854,22 @@ fn converters_preserve_types_and_null_semantics() {
         text_json_to_value(r#"{"roles":["coach"],"active":true}"#).expect("valid json parses"),
         json!({"roles": ["coach"], "active": true})
     );
+    assert_eq!(
+        text_json_or_integer_csv_list_to_value("123, 456")
+            .expect("integer CSV list normalizes losslessly"),
+        json!([123, 456])
+    );
+    assert_eq!(
+        text_json_or_integer_csv_list_to_value("123")
+            .expect("single integer list normalizes to array"),
+        json!([123])
+    );
     assert!(matches!(
         text_json_to_value("{not valid json"),
+        Err(dl_central_etl::ConvertError::Json(_))
+    ));
+    assert!(matches!(
+        text_json_or_integer_csv_list_to_value("123,,456"),
         Err(dl_central_etl::ConvertError::Json(_))
     ));
     assert_eq!(

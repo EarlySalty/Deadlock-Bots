@@ -6,8 +6,8 @@ use std::{
 
 use dl_central_etl::{
     conversion_for, reconcile_total, run, snapshot_db, source_snapshot_path, text_to_bigint,
-    ConvertError, Converter, EngineError, Ledger, LedgerSet, SourceSqlite, DEADLOCK_SQLITE3_SOURCE,
-    TOURNAMENT_SOURCE, WEBSITE_SOURCE,
+    ConvertError, Converter, EngineError, Ledger, LedgerSet, SourceSqlite, TargetError,
+    DEADLOCK_SQLITE3_SOURCE, TOURNAMENT_SOURCE, WEBSITE_SOURCE,
 };
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -265,6 +265,107 @@ async fn no_pk_targets_replace_instead_of_append_against_central_db() {
     let count_after_second = table_count(&pool, "bot.schema_version").await;
 
     assert_eq!(count_after_second, count_after_first);
+}
+
+#[tokio::test]
+#[ignore]
+async fn steam_links_trigger_scope_rolls_back_on_conversion_error_against_central_db() {
+    let pool = test_pool().await;
+    assert_steam_links_triggers_enabled(&pool).await;
+
+    let snapshot_dir = TempDir::new().expect("create trigger rollback snapshot dir");
+    seed_sqlite(
+        snapshot_dir.path(),
+        "deadlock-sqlite3",
+        r#"
+        CREATE TABLE steam_links (
+            user_id INTEGER NOT NULL,
+            steam_id TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, steam_id)
+        );
+        INSERT INTO steam_links VALUES
+            (424242424242, 'STEAM_TRIGGER_ROLLBACK', '26-06-30T12:00:00');
+        "#,
+    );
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(STEAM_LINKS_BAD_TIMESTAMP_LEDGER)
+                .expect("steam links rollback ledger parses"),
+        )]),
+    };
+
+    let err = run(&ledger_set, snapshot_dir.path(), &pool)
+        .await
+        .expect_err("bad timestamp fails while steam_links triggers are disabled");
+    assert!(matches!(
+        err,
+        EngineError::Conversion {
+            source_db,
+            table,
+            column,
+            source,
+            ..
+        } if source_db == "deadlock-sqlite3"
+            && table == "steam_links"
+            && column == "created_at"
+            && matches!(
+                source.as_ref(),
+                ConvertError::InvalidTimestampText { value }
+                    if value == "26-06-30T12:00:00"
+            )
+    ));
+
+    assert_steam_links_triggers_enabled(&pool).await;
+    assert_all_foreign_keys_valid(&pool).await;
+}
+
+#[tokio::test]
+#[ignore]
+async fn fk_fallback_rolls_back_schema_on_retry_error_against_central_db() {
+    let pool = test_pool().await;
+    sqlx::query("TRUNCATE TABLE bot.faq_chat_messages, bot.faq_chat_sessions RESTART IDENTITY")
+        .execute(&pool)
+        .await
+        .expect("clean faq chat test tables");
+    assert_all_foreign_keys_valid(&pool).await;
+
+    let snapshot_dir = TempDir::new().expect("create FK rollback snapshot dir");
+    seed_sqlite(
+        snapshot_dir.path(),
+        "deadlock-sqlite3",
+        r#"
+        CREATE TABLE faq_chat_messages (
+            id INTEGER PRIMARY KEY,
+            session_id TEXT NOT NULL,
+            role TEXT,
+            content TEXT
+        );
+        INSERT INTO faq_chat_messages VALUES
+            (900001, 'missing-session', 'user', 'first row trips the FK'),
+            (900002, 'missing-session', 'user', NULL);
+        "#,
+    );
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(FAQ_CHAT_MESSAGES_BAD_RETRY_LEDGER)
+                .expect("faq chat rollback ledger parses"),
+        )]),
+    };
+
+    let err = run(&ledger_set, snapshot_dir.path(), &pool)
+        .await
+        .expect_err("retry after FK drop fails on NOT NULL");
+    assert!(matches!(
+        err,
+        EngineError::Target(TargetError::Sqlx(sqlx::Error::Database(database)))
+            if database.code().as_deref() == Some("23502")
+    ));
+
+    assert_eq!(table_count(&pool, "bot.faq_chat_messages").await, 0);
+    assert_all_foreign_keys_valid(&pool).await;
 }
 
 async fn test_pool() -> PgPool {
@@ -564,6 +665,58 @@ async fn table_count(pool: &PgPool, target: &str) -> i64 {
     row.try_get::<i64, _>("count").expect("count as i64")
 }
 
+async fn assert_steam_links_triggers_enabled(pool: &PgPool) {
+    let rows = sqlx::query(
+        r#"
+        SELECT t.tgname, t.tgenabled::text AS tgenabled
+        FROM pg_trigger t
+        JOIN pg_class c ON c.oid = t.tgrelid
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'core'
+          AND c.relname = 'steam_links'
+          AND NOT t.tgisinternal
+        ORDER BY t.tgname
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("load steam_links trigger states");
+    assert!(!rows.is_empty(), "core.steam_links user triggers exist");
+
+    let mut states = Vec::new();
+    for row in rows {
+        let name: String = row.try_get("tgname").expect("trigger name");
+        let enabled: String = row.try_get("tgenabled").expect("trigger state");
+        assert_eq!(enabled, "O", "trigger {name} is enabled");
+        states.push(format!("{name}={enabled}"));
+    }
+    println!("ddl_tooth steam_links_triggers={}", states.join(","));
+}
+
+async fn assert_all_foreign_keys_valid(pool: &PgPool) {
+    let invalid = sqlx::query(
+        r#"
+        SELECT conrelid::regclass::text AS child_table, conname
+        FROM pg_constraint
+        WHERE contype = 'f'
+          AND NOT convalidated
+        ORDER BY child_table, conname
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .expect("load invalid FKs");
+    assert!(invalid.is_empty(), "FKs left NOT VALID: {invalid:#?}");
+
+    let row =
+        sqlx::query("SELECT COUNT(*)::bigint AS count FROM pg_constraint WHERE contype = 'f'")
+            .fetch_one(pool)
+            .await
+            .expect("count FKs");
+    let count: i64 = row.try_get("count").expect("FK count");
+    println!("ddl_tooth all_fks_valid=true fk_count={count}");
+}
+
 async fn idempotence_sample(pool: &PgPool) -> BTreeMap<String, String> {
     let mut sample = BTreeMap::new();
     for (name, sql) in [
@@ -751,4 +904,36 @@ const SCHEMA_VERSION_LEDGER: &str = r#"
 [tables.schema_version.columns.version]
 status = "mapped"
 to = "bot.schema_version.version"
+"#;
+
+const STEAM_LINKS_BAD_TIMESTAMP_LEDGER: &str = r#"
+[tables.steam_links.columns.user_id]
+status = "mapped"
+to = "core.steam_links.discord_id"
+
+[tables.steam_links.columns.steam_id]
+status = "mapped"
+to = "core.steam_links.steam_id"
+
+[tables.steam_links.columns.created_at]
+status = "mapped"
+to = "core.steam_links.linked_at"
+"#;
+
+const FAQ_CHAT_MESSAGES_BAD_RETRY_LEDGER: &str = r#"
+[tables.faq_chat_messages.columns.id]
+status = "mapped"
+to = "bot.faq_chat_messages.id"
+
+[tables.faq_chat_messages.columns.session_id]
+status = "mapped"
+to = "bot.faq_chat_messages.session_id"
+
+[tables.faq_chat_messages.columns.role]
+status = "mapped"
+to = "bot.faq_chat_messages.role"
+
+[tables.faq_chat_messages.columns.content]
+status = "mapped"
+to = "bot.faq_chat_messages.content"
 "#;

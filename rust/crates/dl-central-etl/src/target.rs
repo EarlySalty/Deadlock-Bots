@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::{
     postgres::{PgArguments, PgQueryResult},
     query::Query,
-    PgPool, Postgres,
+    PgPool, Postgres, Transaction,
 };
 
 use crate::plan::TablePlan;
@@ -56,8 +56,20 @@ impl TargetWriter {
         plan: &TablePlan,
         rows: &[TargetRow],
     ) -> Result<u64, TargetError> {
+        let mut tx = self.pool.begin().await?;
+        let loaded = self.upsert_rows_in_tx(&mut tx, plan, rows).await?;
+        tx.commit().await?;
+        Ok(loaded)
+    }
+
+    pub(crate) async fn upsert_rows_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        plan: &TablePlan,
+        rows: &[TargetRow],
+    ) -> Result<u64, TargetError> {
         if plan.primary_key.is_empty() {
-            return self.replace_rows(plan, rows).await;
+            return self.replace_rows_in_tx(tx, plan, rows).await;
         }
 
         if rows.is_empty() {
@@ -70,7 +82,6 @@ impl TargetWriter {
             .map(|column| column.target_column.clone())
             .collect::<Vec<_>>();
         let sql = build_upsert_sql(plan, &columns, &rows[0])?;
-        let mut tx = self.pool.begin().await?;
 
         for row in rows {
             let mut query = sqlx::query(&sql);
@@ -83,22 +94,24 @@ impl TargetWriter {
                         })?;
                 query = bind_value(query, value);
             }
-            query.execute(&mut *tx).await?;
+            query.execute(&mut **tx).await?;
         }
 
-        tx.commit().await?;
         Ok(rows.len() as u64)
     }
 
-    async fn replace_rows(&self, plan: &TablePlan, rows: &[TargetRow]) -> Result<u64, TargetError> {
+    async fn replace_rows_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        plan: &TablePlan,
+        rows: &[TargetRow],
+    ) -> Result<u64, TargetError> {
         let table = quote_pg_path(&plan.target)?;
         let delete_sql = format!("DELETE FROM {table}");
-        let mut tx = self.pool.begin().await?;
 
-        sqlx::query(&delete_sql).execute(&mut *tx).await?;
+        sqlx::query(&delete_sql).execute(&mut **tx).await?;
 
         if rows.is_empty() {
-            tx.commit().await?;
             return Ok(0);
         }
 
@@ -120,10 +133,9 @@ impl TargetWriter {
                         })?;
                 query = bind_value(query, value);
             }
-            query.execute(&mut *tx).await?;
+            query.execute(&mut **tx).await?;
         }
 
-        tx.commit().await?;
         Ok(rows.len() as u64)
     }
 
