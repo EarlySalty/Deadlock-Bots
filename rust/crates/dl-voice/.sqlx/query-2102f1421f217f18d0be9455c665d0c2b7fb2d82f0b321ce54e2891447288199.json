@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS \"days!\"\n              FROM activity.voice_session_log\n             WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "days!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2102f1421f217f18d0be9455c665d0c2b7fb2d82f0b321ce54e2891447288199"
+}

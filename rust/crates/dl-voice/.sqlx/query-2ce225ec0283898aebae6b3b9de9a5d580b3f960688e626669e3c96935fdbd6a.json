@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_owner_prefs (owner_id, region, updated_at)\n            VALUES ($1, $2, NOW())\n            ON CONFLICT (owner_id) DO UPDATE SET\n                region = EXCLUDED.region,\n                updated_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ce225ec0283898aebae6b3b9de9a5d580b3f960688e626669e3c96935fdbd6a"
+}

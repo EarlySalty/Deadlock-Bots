@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.tempvoice_bans\n             WHERE owner_id = $1\n               AND banned_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "850df4df0a2769e3eaaac6313fdaadcab8380dd7b4f37f3a5024a7aae46d1e56"
+}

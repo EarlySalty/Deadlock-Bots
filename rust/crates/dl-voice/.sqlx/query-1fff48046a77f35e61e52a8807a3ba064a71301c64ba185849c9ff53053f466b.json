@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_lane_tag_filter (\n                channel_id, min_age_tag, required_tone_tag, deny_ragebaiter, updated_at\n            )\n            VALUES ($1, $2, $3, $4, NOW())\n            ON CONFLICT (channel_id) DO UPDATE SET\n                min_age_tag = EXCLUDED.min_age_tag,\n                required_tone_tag = EXCLUDED.required_tone_tag,\n                deny_ragebaiter = EXCLUDED.deny_ragebaiter,\n                updated_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1fff48046a77f35e61e52a8807a3ba064a71301c64ba185849c9ff53053f466b"
+}

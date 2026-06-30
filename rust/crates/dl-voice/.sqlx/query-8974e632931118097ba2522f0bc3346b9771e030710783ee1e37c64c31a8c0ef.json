@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                DELETE FROM voice.voice_channel_anchors\n                 WHERE channel_id = $1\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8974e632931118097ba2522f0bc3346b9771e030710783ee1e37c64c31a8c0ef"
+}

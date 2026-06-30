@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS \"next_id!\"\n          FROM activity.voice_session_log\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2f01f8cf70d839ef03817f49ae5d651ee3aa2347f8e419c7a3ea856d33fdec1e"
+}

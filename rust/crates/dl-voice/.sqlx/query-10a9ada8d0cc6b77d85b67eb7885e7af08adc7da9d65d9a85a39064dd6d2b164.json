@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_session_log (\n                id, user_id, display_name, guild_id, channel_id, channel_name,\n                started_at, ended_at, duration_seconds, points, peak_users,\n                user_counts, co_player_ids\n            )\n            VALUES (\n                $1, $2, $3, $4, $5, $6,\n                $7, $8, $9, $10, $11,\n                $12::text::jsonb, $13::text::jsonb\n            )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Int8",
+        "Int4",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10a9ada8d0cc6b77d85b67eb7885e7af08adc7da9d65d9a85a39064dd6d2b164"
+}

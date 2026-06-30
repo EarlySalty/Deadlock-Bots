@@ -13,8 +13,10 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::Db;
 use dl_discord::{ChannelSender, Dispatcher};
+use sqlx::PgPool;
+
+use crate::db::{i64_to_u64, u64_to_i64, unix_to_utc};
 
 pub const POLL_INTERVAL: Duration = Duration::from_secs(60);
 pub const PRESENCE_STALE_SECONDS: i64 = 180;
@@ -420,7 +422,7 @@ pub fn select_best_party(cohort_steam_ids: &HashSet<String>, rows: &[PartyRow]) 
 // ── DB-Zugriffe ────────────────────────────────────────────────────────────
 
 pub struct StatusStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl StatusStore {
@@ -429,65 +431,91 @@ impl StatusStore {
         if user_ids.is_empty() {
             return HashMap::new();
         }
-        let ids_json = serde_json::to_string(&user_ids).unwrap_or_default();
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, steam_id FROM steam_links
-                      WHERE user_id IN (SELECT value FROM json_each(?1))
-                        AND steam_id IS NOT NULL AND steam_id != ''
-                      ORDER BY primary_account DESC, verified DESC, updated_at DESC",
-                )?;
-                let rows = stmt.query_map([ids_json], |row| {
-                    Ok((row.get::<_, u64>(0)?, row.get::<_, String>(1)?))
-                })?;
-                let mut map: HashMap<u64, Vec<String>> = HashMap::new();
-                for row in rows {
-                    let (uid, sid) = row?;
-                    let bucket = map.entry(uid).or_default();
-                    if !bucket.contains(&sid) {
-                        bucket.push(sid);
-                    }
-                }
-                Ok(map)
-            })
-            .await
-            .unwrap_or_default()
+        let ids: Vec<i64> = match user_ids
+            .into_iter()
+            .map(|id| u64_to_i64("core.steam_links.discord_id", id))
+            .collect()
+        {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: User-ID-Liste ungueltig");
+                return HashMap::new();
+            }
+        };
+        let rows = match sqlx::query!(
+            r#"
+            SELECT discord_id, steam_id
+              FROM core.steam_links
+             WHERE discord_id = ANY($1)
+               AND steam_id != ''
+             ORDER BY primary_account DESC, verified DESC, updated_at DESC
+            "#,
+            &ids,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Steam-IDs konnten nicht geladen werden");
+                return HashMap::new();
+            }
+        };
+
+        let mut map: HashMap<u64, Vec<String>> = HashMap::new();
+        for row in rows {
+            let Ok(uid) = i64_to_u64("core.steam_links.discord_id", row.discord_id) else {
+                continue;
+            };
+            let bucket = map.entry(uid).or_default();
+            if !bucket.contains(&row.steam_id) {
+                bucket.push(row.steam_id);
+            }
+        }
+        map
     }
 
     pub async fn presence_rows(&self, steam_ids: Vec<String>) -> HashMap<String, PresenceRow> {
         if steam_ids.is_empty() {
             return HashMap::new();
         }
-        let ids_json = serde_json::to_string(&steam_ids).unwrap_or_default();
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT steam_id, deadlock_stage, deadlock_minutes, deadlock_localized,
-                            deadlock_updated_at, last_seen_ts, in_match_now_strict,
-                            last_server_id, deadlock_party_hint
-                       FROM live_player_state
-                      WHERE steam_id IN (SELECT value FROM json_each(?1))",
-                )?;
-                let rows = stmt.query_map([ids_json], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        PresenceRow {
-                            deadlock_stage: row.get(1)?,
-                            deadlock_minutes: row.get(2)?,
-                            deadlock_localized: row.get(3)?,
-                            deadlock_updated_at: row.get(4)?,
-                            last_seen_ts: row.get(5)?,
-                            in_match_now_strict: row.get::<_, Option<i64>>(6)?.unwrap_or(0) != 0,
-                            last_server_id: row.get(7)?,
-                            deadlock_party_hint: row.get(8)?,
-                        },
-                    ))
-                })?;
-                rows.collect::<Result<HashMap<_, _>, _>>()
+        let rows = match sqlx::query!(
+            r#"
+            SELECT steam_id, deadlock_stage, deadlock_minutes, deadlock_localized,
+                   deadlock_updated_at, last_seen_at, in_match_now_strict,
+                   last_server_id, deadlock_party_hint
+              FROM activity.live_player_state
+             WHERE steam_id = ANY($1)
+            "#,
+            &steam_ids,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Presence-Zeilen konnten nicht geladen werden");
+                return HashMap::new();
+            }
+        };
+
+        rows.into_iter()
+            .map(|row| {
+                (
+                    row.steam_id,
+                    PresenceRow {
+                        deadlock_stage: row.deadlock_stage,
+                        deadlock_minutes: row.deadlock_minutes.map(i64::from),
+                        deadlock_localized: row.deadlock_localized,
+                        deadlock_updated_at: row.deadlock_updated_at.map(|ts| ts.timestamp()),
+                        last_seen_ts: row.last_seen_at.map(|ts| ts.timestamp()),
+                        in_match_now_strict: row.in_match_now_strict.unwrap_or(false),
+                        last_server_id: row.last_server_id,
+                        deadlock_party_hint: row.deadlock_party_hint,
+                    },
+                )
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     pub async fn party_rows_for_steam_ids(
@@ -498,27 +526,44 @@ impl StatusStore {
         if steam_ids.is_empty() {
             return Vec::new();
         }
-        let ids_json = serde_json::to_string(&steam_ids).unwrap_or_default();
-        let cutoff = now - PARTY_MEMBER_STALE_SECONDS;
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT party_id, steam_id, party_size, seen_at
-                       FROM deadlock_party_members
-                      WHERE steam_id IN (SELECT value FROM json_each(?1)) AND seen_at >= ?2",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![ids_json, cutoff], |row| {
-                    Ok(PartyRow {
-                        party_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        steam_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        party_size: row.get(2)?,
-                        seen_at: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    })
-                })?;
-                rows.collect()
+        let cutoff = match unix_to_utc(
+            "deadlock_party_members.seen_at",
+            now - PARTY_MEMBER_STALE_SECONDS,
+        ) {
+            Ok(cutoff) => cutoff,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Party-Cutoff ungueltig");
+                return Vec::new();
+            }
+        };
+        let rows = match sqlx::query!(
+            r#"
+            SELECT party_id, steam_id, party_size, seen_at
+              FROM voice.deadlock_party_members
+             WHERE steam_id = ANY($1)
+               AND seen_at >= $2
+            "#,
+            &steam_ids,
+            cutoff,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Party-Zeilen konnten nicht geladen werden");
+                return Vec::new();
+            }
+        };
+
+        rows.into_iter()
+            .map(|row| PartyRow {
+                party_id: row.party_id,
+                steam_id: row.steam_id,
+                party_size: row.party_size.map(i64::from),
+                seen_at: row.seen_at.timestamp(),
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     pub async fn party_rows_for_party_ids(
@@ -529,59 +574,96 @@ impl StatusStore {
         if party_ids.is_empty() {
             return Vec::new();
         }
-        let ids_json = serde_json::to_string(&party_ids).unwrap_or_default();
-        let cutoff = now - PARTY_MEMBER_STALE_SECONDS;
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT party_id, steam_id, party_size, seen_at
-                       FROM deadlock_party_members
-                      WHERE party_id IN (SELECT value FROM json_each(?1)) AND seen_at >= ?2",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![ids_json, cutoff], |row| {
-                    Ok(PartyRow {
-                        party_id: row.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                        steam_id: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        party_size: row.get(2)?,
-                        seen_at: row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    })
-                })?;
-                rows.collect()
+        let cutoff = match unix_to_utc(
+            "deadlock_party_members.seen_at",
+            now - PARTY_MEMBER_STALE_SECONDS,
+        ) {
+            Ok(cutoff) => cutoff,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Party-Cutoff ungueltig");
+                return Vec::new();
+            }
+        };
+        let rows = match sqlx::query!(
+            r#"
+            SELECT party_id, steam_id, party_size, seen_at
+              FROM voice.deadlock_party_members
+             WHERE party_id = ANY($1)
+               AND seen_at >= $2
+            "#,
+            &party_ids,
+            cutoff,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStatus: Party-Zeilen konnten nicht geladen werden");
+                return Vec::new();
+            }
+        };
+
+        rows.into_iter()
+            .map(|row| PartyRow {
+                party_id: row.party_id,
+                steam_id: row.steam_id,
+                party_size: row.party_size.map(i64::from),
+                seen_at: row.seen_at.timestamp(),
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     /// `deadlock_voice_watch` synchronisieren (Voice-Standorte je Steam-ID).
     pub async fn persist_voice_watch(&self, entries: Vec<(String, u64, u64)>, now: i64) {
-        let result = self
-            .db
-            .write(move |conn| {
-                if entries.is_empty() {
-                    conn.execute("DELETE FROM deadlock_voice_watch", [])?;
-                    return Ok(());
-                }
-                for (steam_id, guild_id, channel_id) in &entries {
-                    conn.execute(
-                        "INSERT INTO deadlock_voice_watch(steam_id, guild_id, channel_id, updated_at)
-                         VALUES(?1, ?2, ?3, ?4)
-                         ON CONFLICT(steam_id) DO UPDATE SET
-                           guild_id=excluded.guild_id,
-                           channel_id=excluded.channel_id,
-                           updated_at=excluded.updated_at",
-                        rusqlite::params![steam_id, guild_id, channel_id, now],
-                    )?;
-                }
-                let keep: Vec<String> = entries.iter().map(|(s, _, _)| s.clone()).collect();
-                let keep_json = serde_json::to_string(&keep).unwrap_or_default();
-                conn.execute(
-                    "DELETE FROM deadlock_voice_watch
-                      WHERE steam_id NOT IN (SELECT value FROM json_each(?1))",
-                    [keep_json],
-                )?;
-                Ok(())
-            })
-            .await;
+        let result = async {
+            let updated_at = unix_to_utc("deadlock_voice_watch.updated_at", now)?;
+            if entries.is_empty() {
+                sqlx::query!("DELETE FROM voice.deadlock_voice_watch")
+                    .execute(&self.pool)
+                    .await?;
+                return Ok::<(), crate::db::VoiceDbError>(());
+            }
+            let mut tx = self.pool.begin().await?;
+            for (steam_id, guild_id, channel_id) in &entries {
+                let guild_id = u64_to_i64("deadlock_voice_watch.guild_id", *guild_id)?;
+                let channel_id = u64_to_i64("deadlock_voice_watch.channel_id", *channel_id)?;
+                sqlx::query!(
+                    r#"
+                    INSERT INTO voice.deadlock_voice_watch (
+                        steam_id, guild_id, channel_id, updated_at
+                    )
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT (steam_id) DO UPDATE SET
+                        guild_id = EXCLUDED.guild_id,
+                        channel_id = EXCLUDED.channel_id,
+                        updated_at = EXCLUDED.updated_at
+                    "#,
+                    steam_id,
+                    guild_id,
+                    channel_id,
+                    updated_at,
+                )
+                .execute(&mut *tx)
+                .await?;
+            }
+            let keep: Vec<String> = entries
+                .iter()
+                .map(|(steam_id, _, _)| steam_id.clone())
+                .collect();
+            sqlx::query!(
+                r#"
+                DELETE FROM voice.deadlock_voice_watch
+                 WHERE NOT (steam_id = ANY($1))
+                "#,
+                &keep,
+            )
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
+            Ok::<(), crate::db::VoiceDbError>(())
+        }
+        .await;
         if let Err(err) = result {
             tracing::warn!(%err, "VoiceStatus: voice_watch-Persist fehlgeschlagen");
         }
@@ -615,9 +697,9 @@ pub struct VoiceStatusWorker {
 }
 
 impl VoiceStatusWorker {
-    pub fn new(db: Db, port: Arc<dyn StatusPort>) -> Arc<Self> {
+    pub fn new(pool: PgPool, port: Arc<dyn StatusPort>) -> Arc<Self> {
         Arc::new(Self {
-            store: StatusStore { db },
+            store: StatusStore { pool },
             port,
             states: tokio::sync::Mutex::new(HashMap::new()),
             localized_slots_cache: tokio::sync::Mutex::new(HashMap::new()),
@@ -1347,5 +1429,139 @@ mod tests {
         ];
         // p1 gewinnt: 2 Überlappungen schlagen p2 (1) trotz größerer Size; p3 hat keinen Überlapp
         assert_eq!(select_best_party(&cohort, &rows).as_deref(), Some("p1"));
+    }
+
+    #[tokio::test]
+    async fn status_store_any_arrays_und_watch_pruning() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = StatusStore { pool: pool.clone() };
+        let now = chrono::Utc::now();
+        let old = now - chrono::Duration::seconds(PARTY_MEMBER_STALE_SECONDS + 30);
+
+        sqlx::query!(
+            r#"
+            INSERT INTO core.users (discord_id)
+            VALUES (100), (200)
+            "#
+        )
+        .execute(&pool)
+        .await
+        .expect("users");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.steam_links (
+                discord_id, steam_id, steam_display_name, verified, primary_account, updated_at
+            )
+            VALUES
+                (100, 'steam-a', 'A', TRUE, TRUE, $1),
+                (100, 'steam-b', 'B', TRUE, FALSE, $1),
+                (200, 'steam-c', 'C', FALSE, FALSE, $1)
+            "#,
+            now,
+        )
+        .execute(&pool)
+        .await
+        .expect("steam links");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.live_player_state (
+                steam_id, deadlock_stage, deadlock_minutes, deadlock_localized,
+                deadlock_updated_at, last_seen_at, in_match_now_strict,
+                last_server_id, deadlock_party_hint
+            )
+            VALUES
+                ('steam-a', 'match', 12, 'Spiel (12. min.)', $1, $1, TRUE, 'srv-1', NULL),
+                ('steam-c', 'lobby', NULL, 'Lobby (2/6)', $1, $1, FALSE, 'srv-2', NULL)
+            "#,
+            now,
+        )
+        .execute(&pool)
+        .await
+        .expect("presence");
+        sqlx::query!(
+            r#"
+            INSERT INTO voice.deadlock_party_members (party_id, steam_id, party_size, seen_at)
+            VALUES
+                ('party-1', 'steam-a', 4, $1),
+                ('party-1', 'steam-b', 4, $1),
+                ('party-old', 'steam-a', 6, $2),
+                ('party-2', 'steam-c', 2, $1)
+            "#,
+            now,
+            old,
+        )
+        .execute(&pool)
+        .await
+        .expect("party rows");
+
+        assert!(store.steam_ids_for(Vec::new()).await.is_empty());
+        let steam = store.steam_ids_for(vec![100, 200, 999]).await;
+        assert_eq!(
+            steam.get(&100).cloned().unwrap_or_default(),
+            vec!["steam-a".to_string(), "steam-b".to_string()]
+        );
+        assert_eq!(
+            steam.get(&200).cloned().unwrap_or_default(),
+            vec!["steam-c".to_string()]
+        );
+
+        let presence = store
+            .presence_rows(vec!["steam-a".to_string(), "missing".to_string()])
+            .await;
+        assert_eq!(presence.len(), 1);
+        assert_eq!(presence["steam-a"].deadlock_minutes, Some(12));
+        assert!(presence["steam-a"].in_match_now_strict);
+
+        let party_rows = store
+            .party_rows_for_steam_ids(
+                vec!["steam-a".to_string(), "steam-b".to_string()],
+                now.timestamp(),
+            )
+            .await;
+        assert_eq!(party_rows.len(), 2);
+        assert!(party_rows.iter().all(|row| row.party_id == "party-1"));
+
+        let full_party = store
+            .party_rows_for_party_ids(vec!["party-1".to_string()], now.timestamp())
+            .await;
+        assert_eq!(full_party.len(), 2);
+
+        store
+            .persist_voice_watch(
+                vec![
+                    ("steam-a".to_string(), 1, 10),
+                    ("steam-c".to_string(), 1, 20),
+                ],
+                now.timestamp(),
+            )
+            .await;
+        store
+            .persist_voice_watch(vec![("steam-a".to_string(), 2, 30)], now.timestamp())
+            .await;
+        let rows = sqlx::query!(
+            r#"
+            SELECT steam_id, guild_id, channel_id
+              FROM voice.deadlock_voice_watch
+             ORDER BY steam_id
+            "#
+        )
+        .fetch_all(&pool)
+        .await
+        .expect("watch rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].steam_id, "steam-a");
+        assert_eq!(rows[0].guild_id, Some(2));
+        assert_eq!(rows[0].channel_id, Some(30));
+
+        store.persist_voice_watch(Vec::new(), now.timestamp()).await;
+        let count =
+            sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!" FROM voice.deadlock_voice_watch"#)
+                .fetch_one(&pool)
+                .await
+                .expect("count");
+        assert_eq!(count, 0);
     }
 }

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_rank_pref (user_id, rank, subrank, updated_at)\n            VALUES ($1, $2, $3, NOW())\n            ON CONFLICT (user_id) DO UPDATE SET\n                rank = EXCLUDED.rank,\n                subrank = EXCLUDED.subrank,\n                updated_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "967803f82d7c7d94f44c5f50434617c77e7594944d8b6311b6f9e72d44b0e041"
+}

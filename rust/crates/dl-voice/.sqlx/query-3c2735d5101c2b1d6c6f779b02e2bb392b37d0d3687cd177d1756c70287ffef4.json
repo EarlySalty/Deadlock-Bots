@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.deadlock_party_members (party_id, steam_id, party_size, seen_at)\n            VALUES\n                ('party-1', 'steam-a', 4, $1),\n                ('party-1', 'steam-b', 4, $1),\n                ('party-old', 'steam-a', 6, $2),\n                ('party-2', 'steam-c', 2, $1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "3c2735d5101c2b1d6c6f779b02e2bb392b37d0d3687cd177d1756c70287ffef4"
+}

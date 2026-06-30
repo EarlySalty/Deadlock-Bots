@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT assigned_worker_id AS \"assigned_worker_id!\"\n              FROM voice.rename_requests\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "assigned_worker_id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "e33548e7a6b4ae8bbd29a1e621d749a306d5da99912b459beae94c702e82c679"
+}

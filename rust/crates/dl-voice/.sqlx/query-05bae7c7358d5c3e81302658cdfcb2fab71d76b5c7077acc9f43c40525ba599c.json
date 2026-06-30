@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_feedback_responses (\n                id, request_id, user_id, content, received_at\n            )\n            VALUES (20, 10, 100, 'alt', $1), (21, 11, 100, 'alt2', $1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "05bae7c7358d5c3e81302658cdfcb2fab71d76b5c7077acc9f43c40525ba599c"
+}

@@ -10,18 +10,20 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, Dispatcher, InteractionHandler,
     InteractionRouter, VoiceEvent,
 };
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
+
+use crate::db::{i64_to_u64, opt_i64_to_u64, u64_to_i64};
 
 pub const MIN_VOICE_MINUTES: u64 = 30;
 pub const POLL_INTERVAL: Duration = Duration::from_secs(15);
 pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
-pub const NUDGE_VIEW_VERSION: i64 = 2;
+pub const NUDGE_VIEW_VERSION: i32 = 2;
 pub const FIRST_SEEN_NS: &str = "voice_nudge_first_seen";
 pub const DONE_NS: &str = "voice_nudge_done";
 pub const CLOSE_CUSTOM_ID: &str = "nudge_close";
@@ -83,19 +85,19 @@ struct NudgeState {
     notified: bool,
     message_id: Option<u64>,
     channel_id: Option<u64>,
-    view_version: i64,
+    view_version: i32,
 }
 
 pub struct VoiceNudge {
-    db: Db,
+    pool: PgPool,
     port: Arc<dyn NudgePort>,
     running: tokio::sync::Mutex<HashSet<u64>>,
 }
 
 impl VoiceNudge {
-    pub fn new(db: Db, port: Arc<dyn NudgePort>) -> Arc<Self> {
+    pub fn new(pool: PgPool, port: Arc<dyn NudgePort>) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             port,
             running: tokio::sync::Mutex::new(HashSet::new()),
         })
@@ -106,40 +108,49 @@ impl VoiceNudge {
     }
 
     async fn kv(&self, ns: &'static str, user_id: u64) -> Option<String> {
-        self.db.kv_get(ns, user_id.to_string()).await.ok().flatten()
+        kv::get(&self.pool, ns, &user_id.to_string())
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn is_opted_out(&self, user_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
-                    [user_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v != 0)
-            .unwrap_or(false)
+        let Ok(user_id) = u64_to_i64("core.user_privacy.user_id", user_id) else {
+            return false;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT opted_out
+              FROM core.user_privacy
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
     }
 
     async fn has_steam_link(&self, user_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT 1 FROM steam_links WHERE user_id = ?1 LIMIT 1",
-                    [user_id],
-                    |_| Ok(()),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+        let Ok(user_id) = u64_to_i64("core.steam_links.discord_id", user_id) else {
+            return false;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM core.steam_links
+                 WHERE discord_id = $1
+                 LIMIT 1
+            ) AS "exists!"
+            "#,
+            user_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false)
     }
 
     #[cfg(test)]
@@ -187,10 +198,7 @@ impl VoiceNudge {
         let today = Self::today();
         match self.kv(FIRST_SEEN_NS, user_id).await {
             None => {
-                let _ = self
-                    .db
-                    .kv_set(FIRST_SEEN_NS, user_id.to_string(), today)
-                    .await;
+                let _ = kv::set(&self.pool, FIRST_SEEN_NS, &user_id.to_string(), &today).await;
                 return;
             }
             Some(first_seen) if first_seen == today => return,
@@ -252,10 +260,7 @@ impl VoiceNudge {
         match self.port.send_dm(user_id, &[embed], &components).await {
             Ok((channel_id, message_id)) => {
                 self.mark_notified(user_id, channel_id, message_id).await;
-                let _ = self
-                    .db
-                    .kv_set(DONE_NS, user_id.to_string(), "sent".to_string())
-                    .await;
+                let _ = kv::set(&self.pool, DONE_NS, &user_id.to_string(), "sent").await;
                 self.port
                     .send_log(format!("📨 Steam-Nudge gesendet an <@{user_id}>"))
                     .await;
@@ -301,103 +306,115 @@ impl VoiceNudge {
     }
 
     async fn load_nudge_state(&self, user_id: u64) -> Option<NudgeState> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT user_id, notified_at, message_id, channel_id, view_version
-                       FROM steam_nudge_state
-                      WHERE user_id = ?1",
-                    [user_id],
-                    |row| {
-                        let raw_user_id: i64 = row.get(0)?;
-                        Ok(NudgeState {
-                            user_id: u64::try_from(raw_user_id).unwrap_or(0),
-                            notified: row.get::<_, Option<String>>(1)?.is_some(),
-                            message_id: row
-                                .get::<_, Option<i64>>(2)?
-                                .and_then(|id| u64::try_from(id).ok()),
-                            channel_id: row
-                                .get::<_, Option<i64>>(3)?
-                                .and_then(|id| u64::try_from(id).ok()),
-                            view_version: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = u64_to_i64("steam_nudge_state.user_id", user_id) else {
+            return None;
+        };
+        let row = sqlx::query!(
+            r#"
+            SELECT user_id, notified_at, message_id, channel_id, view_version
+              FROM steam.steam_nudge_state
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+        Some(NudgeState {
+            user_id: i64_to_u64("steam_nudge_state.user_id", row.user_id).ok()?,
+            notified: row.notified_at.is_some(),
+            message_id: opt_i64_to_u64("steam_nudge_state.message_id", row.message_id)
+                .ok()
+                .flatten(),
+            channel_id: opt_i64_to_u64("steam_nudge_state.channel_id", row.channel_id)
+                .ok()
+                .flatten(),
+            view_version: row.view_version.unwrap_or(0),
+        })
     }
 
     async fn load_all_nudge_states(&self) -> Vec<NudgeState> {
-        self.db
-            .read(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, notified_at, message_id, channel_id, view_version
-                       FROM steam_nudge_state
-                      WHERE message_id IS NOT NULL",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    let raw_user_id: i64 = row.get(0)?;
-                    Ok(NudgeState {
-                        user_id: u64::try_from(raw_user_id).unwrap_or(0),
-                        notified: row.get::<_, Option<String>>(1)?.is_some(),
-                        message_id: row
-                            .get::<_, Option<i64>>(2)?
-                            .and_then(|id| u64::try_from(id).ok()),
-                        channel_id: row
-                            .get::<_, Option<i64>>(3)?
-                            .and_then(|id| u64::try_from(id).ok()),
-                        view_version: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
-                    })
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
+        let rows = sqlx::query!(
+            r#"
+            SELECT user_id, notified_at, message_id, channel_id, view_version
+              FROM steam.steam_nudge_state
+             WHERE message_id IS NOT NULL
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                let user_id = i64_to_u64("steam_nudge_state.user_id", row.user_id).ok()?;
+                Some(NudgeState {
+                    user_id,
+                    notified: row.notified_at.is_some(),
+                    message_id: opt_i64_to_u64("steam_nudge_state.message_id", row.message_id)
+                        .ok()
+                        .flatten(),
+                    channel_id: opt_i64_to_u64("steam_nudge_state.channel_id", row.channel_id)
+                        .ok()
+                        .flatten(),
+                    view_version: row.view_version.unwrap_or(0),
+                })
             })
-            .await
-            .unwrap_or_default()
-            .into_iter()
-            .filter(|state| state.user_id > 0)
             .collect()
     }
 
     async fn clear_nudge_message_ref(&self, user_id: u64) {
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE steam_nudge_state
-                        SET message_id=NULL,
-                            channel_id=NULL,
-                            view_version=0
-                      WHERE user_id=?1",
-                    [user_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = match u64_to_i64("steam_nudge_state.user_id", user_id) {
+            Ok(user_id) => sqlx::query!(
+                r#"
+                    UPDATE steam.steam_nudge_state
+                       SET message_id = NULL,
+                           channel_id = NULL,
+                           view_version = 0
+                     WHERE user_id = $1
+                    "#,
+                user_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map(|_| ()),
+            Err(err) => Err(sqlx::Error::Protocol(err.to_string())),
+        };
         if let Err(err) = result {
             tracing::debug!(%err, user_id, "Nudge: Message-Ref-Clear fehlgeschlagen");
         }
     }
 
     async fn mark_notified(&self, user_id: u64, channel_id: u64, message_id: u64) {
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                     VALUES(?1, CURRENT_TIMESTAMP, ?2, ?3, ?4)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       notified_at = excluded.notified_at,
-                       message_id = excluded.message_id,
-                       channel_id = excluded.channel_id,
-                       view_version = excluded.view_version",
-                    rusqlite::params![user_id, message_id, channel_id, NUDGE_VIEW_VERSION],
+        let result = async {
+            let user_id = u64_to_i64("steam_nudge_state.user_id", user_id)
+                .map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+            let channel_id = u64_to_i64("steam_nudge_state.channel_id", channel_id)
+                .map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+            let message_id = u64_to_i64("steam_nudge_state.message_id", message_id)
+                .map_err(|err| sqlx::Error::Protocol(err.to_string()))?;
+            sqlx::query!(
+                r#"
+                INSERT INTO steam.steam_nudge_state (
+                    user_id, notified_at, message_id, channel_id, view_version
                 )
-                .map(|_| ())
-            })
-            .await;
+                VALUES ($1, NOW(), $2, $3, $4)
+                ON CONFLICT (user_id) DO UPDATE SET
+                    notified_at = EXCLUDED.notified_at,
+                    message_id = EXCLUDED.message_id,
+                    channel_id = EXCLUDED.channel_id,
+                    view_version = EXCLUDED.view_version
+                "#,
+                user_id,
+                message_id,
+                channel_id,
+                NUDGE_VIEW_VERSION,
+            )
+            .execute(&self.pool)
+            .await
+            .map(|_| ())
+        }
+        .await;
         if let Err(err) = result {
             tracing::warn!(%err, user_id, "Nudge: State-Persist fehlgeschlagen");
         }
@@ -455,17 +472,20 @@ impl InteractionHandler for CloseHandler {
                 .delete_message(interaction.channel_id, message_id)
                 .await;
             let user_id = interaction.user_id;
-            let _ = self
-                .nudge
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE steam_nudge_state SET message_id=NULL, channel_id=NULL, view_version=0 WHERE user_id=?1",
-                        [user_id],
-                    )
-                    .map(|_| ())
-                })
+            if let Ok(user_id) = u64_to_i64("steam_nudge_state.user_id", user_id) {
+                let _ = sqlx::query!(
+                    r#"
+                    UPDATE steam.steam_nudge_state
+                       SET message_id = NULL,
+                           channel_id = NULL,
+                           view_version = 0
+                     WHERE user_id = $1
+                    "#,
+                    user_id,
+                )
+                .execute(&self.nudge.pool)
                 .await;
+            }
         }
         BridgeReply {
             content: Some("Geschlossen.".to_string()),
@@ -668,21 +688,11 @@ mod tests {
         }
     }
 
-    const DDLS: [&str; 4] = [
-        "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-        "CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER NOT NULL DEFAULT 0)",
-        "CREATE TABLE steam_links(user_id INTEGER NOT NULL, steam_id TEXT NOT NULL, name TEXT, verified INTEGER DEFAULT 0, primary_account INTEGER DEFAULT 0, PRIMARY KEY (user_id, steam_id))",
-        "CREATE TABLE steam_nudge_state(user_id INTEGER PRIMARY KEY, notified_at DATETIME, first_seen DATETIME DEFAULT CURRENT_TIMESTAMP, message_id INTEGER, channel_id INTEGER, view_version INTEGER DEFAULT 0)",
-    ];
-
-    async fn setup(url: Option<&str>) -> (tempfile::TempDir, Arc<VoiceNudge>, Arc<MockPort>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+    async fn setup(url: Option<&str>) -> (dl_central_db::TestDb, Arc<VoiceNudge>, Arc<MockPort>) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
         let port = Arc::new(MockPort {
             in_voice: StdMutex::new(true),
             dms: StdMutex::new(Vec::new()),
@@ -693,7 +703,7 @@ mod tests {
             roles: StdMutex::new(Vec::new()),
             fail_dm: StdMutex::new(false),
         });
-        (dir, VoiceNudge::new(db, port.clone()), port)
+        (db, VoiceNudge::new(pool, port.clone()), port)
     }
 
     #[tokio::test]
@@ -719,9 +729,7 @@ mod tests {
     async fn zweiter_tag_started_watch() {
         let (_dir, nudge, _port) = setup(Some("https://s.test/login")).await;
         // Erst-Sichtung war gestern
-        nudge
-            .db
-            .kv_set(FIRST_SEEN_NS, "100", "2020-01-01".to_string())
+        kv::set(&nudge.pool, FIRST_SEEN_NS, "100", "2020-01-01")
             .await
             .expect("kv");
         nudge
@@ -747,18 +755,17 @@ mod tests {
     #[tokio::test]
     async fn restore_persistent_messages_refreshes_gespeicherte_dm() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("state");
+        sqlx::query!(
+            r#"
+            INSERT INTO steam.steam_nudge_state (
+                user_id, notified_at, message_id, channel_id, view_version
+            )
+            VALUES (100, NOW(), 901, 900, 1)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("state");
 
         nudge.refresh_persistent_messages().await;
 
@@ -766,35 +773,33 @@ mod tests {
             port.refreshes.lock().expect("lock").clone(),
             vec![(900, 901)]
         );
-        let version: i64 = nudge
-            .db
-            .read(|c| {
-                c.query_row(
-                    "SELECT view_version FROM steam_nudge_state WHERE user_id=100",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("version");
+        let version = sqlx::query_scalar!(
+            r#"
+            SELECT view_version AS "view_version!"
+              FROM steam.steam_nudge_state
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&nudge.pool)
+        .await
+        .expect("version");
         assert_eq!(version, NUDGE_VIEW_VERSION);
     }
 
     #[tokio::test]
     async fn normaler_send_refreshes_aktiven_state_und_sendet_nicht_neu() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("state");
+        sqlx::query!(
+            r#"
+            INSERT INTO steam.steam_nudge_state (
+                user_id, notified_at, message_id, channel_id, view_version
+            )
+            VALUES (100, NOW(), 901, 900, 1)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("state");
 
         assert!(!nudge.send_nudge(100).await);
         assert!(port.dms.lock().expect("lock").is_empty());
@@ -814,18 +819,17 @@ mod tests {
     #[tokio::test]
     async fn handle_event_refreshes_aktiven_state_mit_alter_view_und_sendet_nicht_neu() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("state");
+        sqlx::query!(
+            r#"
+            INSERT INTO steam.steam_nudge_state (
+                user_id, notified_at, message_id, channel_id, view_version
+            )
+            VALUES (100, NOW(), 901, 900, 1)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("state");
 
         nudge
             .handle_event(VoiceEvent::Join {
@@ -846,18 +850,17 @@ mod tests {
     #[tokio::test]
     async fn handle_event_missing_aktive_message_cleart_nur_messagefelder() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO steam_nudge_state(user_id, notified_at, message_id, channel_id, view_version)
-                     VALUES(100, CURRENT_TIMESTAMP, 901, 900, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("state");
+        sqlx::query!(
+            r#"
+            INSERT INTO steam.steam_nudge_state (
+                user_id, notified_at, message_id, channel_id, view_version
+            )
+            VALUES (100, NOW(), 901, 900, 1)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("state");
         port.missing_messages
             .lock()
             .expect("lock")
@@ -874,23 +877,20 @@ mod tests {
         assert!(port.refreshes.lock().expect("lock").is_empty());
         assert!(port.dms.lock().expect("lock").is_empty());
         assert!(nudge.running.lock().await.is_empty());
-        let (notified, message_id, channel_id, view_version): (
-            Option<String>,
-            Option<i64>,
-            Option<i64>,
-            i64,
-        ) = nudge
-            .db
-            .read(|c| {
-                c.query_row(
-                    "SELECT notified_at, message_id, channel_id, view_version
-                       FROM steam_nudge_state WHERE user_id=100",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-            })
-            .await
-            .expect("state row");
+        let row = sqlx::query!(
+            r#"
+            SELECT notified_at, message_id, channel_id, view_version
+              FROM steam.steam_nudge_state
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&nudge.pool)
+        .await
+        .expect("state row");
+        let notified = row.notified_at;
+        let message_id = row.message_id;
+        let channel_id = row.channel_id;
+        let view_version = row.view_version.unwrap_or(0);
         assert!(notified.is_some());
         assert_eq!(message_id, None);
         assert_eq!(channel_id, None);
@@ -909,20 +909,27 @@ mod tests {
     #[tokio::test]
     async fn bereits_verlinkt_oder_done_wird_uebersprungen() {
         let (_dir, nudge, port) = setup(None).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO steam_links(user_id, steam_id) VALUES(100, 'x')",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("link");
-        nudge
-            .db
-            .kv_set(FIRST_SEEN_NS, "100", "2020-01-01".to_string())
+        sqlx::query!(
+            r#"
+            INSERT INTO core.users (discord_id)
+            VALUES (100)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("user");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.steam_links (
+                discord_id, steam_id, verified, primary_account, updated_at
+            )
+            VALUES (100, 'x', TRUE, TRUE, NOW())
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("link");
+        kv::set(&nudge.pool, FIRST_SEEN_NS, "100", "2020-01-01")
             .await
             .expect("kv");
         nudge
@@ -989,17 +996,15 @@ mod tests {
     #[tokio::test]
     async fn nudgesend_opt_out_bricht_ab() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
-        nudge
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO user_privacy(user_id, opted_out) VALUES(200, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("opt-out");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy (user_id, opted_out, updated_at)
+            VALUES (200, TRUE, NOW())
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("opt-out");
         let reply = nudge
             .nudgesend_reply("!nudgesend <@200>", 1, 9)
             .await

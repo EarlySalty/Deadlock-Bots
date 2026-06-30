@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE steam.steam_nudge_state\n                       SET message_id = NULL,\n                           channel_id = NULL,\n                           view_version = 0\n                     WHERE user_id = $1\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "10818caa342da45264176b289ad42ff59af5a6f0f26f536837b3a2fe196c2c7b"
+}

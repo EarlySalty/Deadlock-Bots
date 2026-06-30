@@ -15,13 +15,14 @@
 
 use std::sync::Arc;
 
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
-use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
+use crate::db::u64_to_i64;
 use crate::tempvoice::TempVoiceEngine;
 
 pub const ROUTER_VC_ID: u64 = 1513468587195633674;
@@ -249,13 +250,13 @@ pub trait RouterInterfacePort: Send + Sync {
 }
 
 pub struct RouterInterface {
-    db: Db,
+    pool: PgPool,
     port: Arc<dyn RouterInterfacePort>,
 }
 
 impl RouterInterface {
-    pub fn new(db: Db, port: Arc<dyn RouterInterfacePort>) -> Arc<Self> {
-        Arc::new(Self { db, port })
+    pub fn new(pool: PgPool, port: Arc<dyn RouterInterfacePort>) -> Arc<Self> {
+        Arc::new(Self { pool, port })
     }
 
     pub async fn ensure_panel(&self) {
@@ -352,8 +353,7 @@ impl RouterInterface {
     }
 
     async fn panel_message_id(&self, key: &str) -> Option<u64> {
-        self.db
-            .kv_get(ROUTER_PANEL_KV_NS, key)
+        kv::get(&self.pool, ROUTER_PANEL_KV_NS, key)
             .await
             .ok()
             .flatten()
@@ -361,10 +361,8 @@ impl RouterInterface {
     }
 
     async fn store_panel_message_id(&self, key: &str, message_id: u64) {
-        if let Err(err) = self
-            .db
-            .kv_set(ROUTER_PANEL_KV_NS, key, message_id.to_string())
-            .await
+        if let Err(err) =
+            kv::set(&self.pool, ROUTER_PANEL_KV_NS, key, &message_id.to_string()).await
         {
             tracing::warn!(%err, key, "RouterInterface: Message-ID konnte nicht gespeichert werden");
         }
@@ -386,7 +384,7 @@ fn find_existing_router_interface(messages: &[RouterPanelMessage]) -> Option<u64
 }
 
 pub struct LaneRouter {
-    pub db: Db,
+    pub pool: PgPool,
     pub port: Arc<dyn RouterPort>,
     pub engine: Arc<TempVoiceEngine>,
     pub analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
@@ -394,65 +392,67 @@ pub struct LaneRouter {
 
 impl LaneRouter {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn RouterPort>,
         engine: Arc<TempVoiceEngine>,
         analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             port,
             engine,
             analyzer,
         })
     }
 
-    pub async fn ensure_schema(&self) -> Result<(), dl_db::DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS router_user_prefs (
-                        user_id    INTEGER PRIMARY KEY,
-                        mode       TEXT NOT NULL CHECK(mode IN ('ranked', 'casual', 'street_brawl')),
-                        auto_join  INTEGER NOT NULL DEFAULT 0,
-                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );",
-                )
-            })
-            .await
+    pub async fn ensure_schema(&self) -> Result<(), crate::db::VoiceDbError> {
+        // Zentraler Cutover: voice.router_user_prefs wird vom zentralen Migrator
+        // bereitgestellt; lokales DDL ist hier absichtlich entfernt.
+        Ok(())
     }
 
     pub async fn user_pref(&self, user_id: u64) -> Option<(String, bool)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT mode, auto_join FROM router_user_prefs WHERE user_id = ?1",
-                    [user_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)? != 0)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let user_id = u64_to_i64("router_user_prefs.user_id", user_id).ok()?;
+        sqlx::query!(
+            r#"
+            SELECT mode, auto_join
+              FROM voice.router_user_prefs
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.mode, row.auto_join))
     }
 
     pub async fn set_user_pref(&self, user_id: u64, mode: &str, auto_join: bool) {
         let mode = mode.to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO router_user_prefs (user_id, mode, auto_join, updated_at)
-                     VALUES (?1, ?2, ?3, CURRENT_TIMESTAMP)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       mode = excluded.mode, auto_join = excluded.auto_join,
-                       updated_at = CURRENT_TIMESTAMP",
-                    rusqlite::params![user_id, mode, i64::from(auto_join)],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = async {
+            let user_id = u64_to_i64("router_user_prefs.user_id", user_id)?;
+            sqlx::query!(
+                r#"
+                INSERT INTO voice.router_user_prefs (user_id, mode, auto_join, updated_at)
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (user_id) DO UPDATE SET
+                    mode = EXCLUDED.mode,
+                    auto_join = EXCLUDED.auto_join,
+                    updated_at = NOW()
+                "#,
+                user_id,
+                mode,
+                auto_join,
+            )
+            .execute(&self.pool)
+            .await?;
+            Ok::<(), crate::db::VoiceDbError>(())
+        }
+        .await;
+        if let Err(err) = result {
+            tracing::warn!(%err, user_id, "Router: User-Pref konnte nicht gespeichert werden");
+        }
     }
 
     pub async fn handle_event(self: &Arc<Self>, event: VoiceEvent) {
@@ -611,6 +611,7 @@ pub fn spawn(router: Arc<LaneRouter>, dispatcher: &Dispatcher) -> tokio::task::J
 mod tests {
     use super::*;
     use serde_json::Map;
+    use std::collections::{HashMap, HashSet};
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -737,38 +738,232 @@ mod tests {
         }
     }
 
+    struct NoopRouterPort;
+
+    #[async_trait::async_trait]
+    impl RouterPort for NoopRouterPort {
+        async fn category_lanes(&self, _guild_id: u64, _category_id: u64) -> Vec<(u64, Vec<u64>)> {
+            Vec::new()
+        }
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
+            None
+        }
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn send_dm(&self, _user_id: u64, _text: String) {}
+    }
+
+    struct NoopLanePort;
+
+    #[async_trait::async_trait]
+    impl crate::tempvoice::LanePort for NoopLanePort {
+        async fn create_voice_channel(
+            &self,
+            _guild_id: u64,
+            _category_id: Option<u64>,
+            _name: &str,
+            _user_limit: i64,
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
+        async fn delete_channel(&self, _channel_id: u64, _reason: &str) -> Result<(), String> {
+            Ok(())
+        }
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn rename_channel(
+            &self,
+            _channel_id: u64,
+            _name: &str,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_member_connect(
+            &self,
+            _channel_id: u64,
+            _user_id: u64,
+            _connect: Option<bool>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn apply_member_connect_batch(
+            &self,
+            _channel_id: u64,
+            _denied_user_ids: &HashSet<u64>,
+            _clear_user_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_role_connect(
+            &self,
+            _channel_id: u64,
+            _role_id: u64,
+            _connect: Option<bool>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn apply_role_connect_batch(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+            _allowed_role_ids: &HashSet<u64>,
+            _clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_user_limit(
+            &self,
+            _channel_id: u64,
+            _limit: i64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn disconnect_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn member_display_name(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            None
+        }
+        async fn add_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn remove_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn set_nick(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _nick: Option<&str>,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn member_nick(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            None
+        }
+        async fn channel_user_limit(&self, _guild_id: u64, _channel_id: u64) -> Option<i64> {
+            None
+        }
+        async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+        async fn set_channel_category(
+            &self,
+            _channel_id: u64,
+            _category_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
+            None
+        }
+        async fn member_role_names(&self, _guild_id: u64, _user_id: u64) -> Vec<String> {
+            Vec::new()
+        }
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+        async fn channel_members(&self, _guild_id: u64, _channel_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+        async fn channel_name(&self, _guild_id: u64, _channel_id: u64) -> Option<String> {
+            None
+        }
+        async fn channel_category(&self, _guild_id: u64, _channel_id: u64) -> Option<u64> {
+            None
+        }
+        async fn category_voice_channel_names(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+        async fn category_voice_channels(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+        ) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+        async fn channel_created_at(&self, _channel_id: u64) -> Option<i64> {
+            None
+        }
+    }
+
+    fn test_engine(pool: sqlx::PgPool) -> Arc<TempVoiceEngine> {
+        TempVoiceEngine::new(
+            crate::tempvoice::TempVoiceConfig {
+                guild_id_hint: 1,
+                staging_channels: HashSet::new(),
+                fixed_lane_ids: HashSet::new(),
+                tempvoice_categories: HashSet::new(),
+                minrank_categories: HashSet::new(),
+                ranked_category_id: 0,
+                staging_rules: HashMap::new(),
+            },
+            crate::tempvoice::TempVoiceStore::new(pool),
+            Arc::new(NoopLanePort),
+        )
+    }
+
     #[tokio::test]
     async fn router_interface_panel_wird_idempotent_ueber_kv_gepflegt() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE kv_store(
-                  ns TEXT NOT NULL,
-                  k  TEXT NOT NULL,
-                  v  TEXT NOT NULL,
-                  PRIMARY KEY(ns, k)
-                )",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("kv");
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
         let port = Arc::new(MockRouterInterfacePort::default());
-        let interface = RouterInterface::new(db.clone(), port.clone());
+        let interface = RouterInterface::new(pool.clone(), port.clone());
 
         interface.ensure_panel().await;
         assert_eq!(port.posts.lock().expect("posts").len(), 2);
         assert_eq!(
-            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
             Some("9001")
         );
         assert_eq!(
-            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
@@ -786,22 +981,10 @@ mod tests {
 
     #[tokio::test]
     async fn router_interface_adoptiert_python_panels_aus_history_bei_leerer_kv() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE kv_store(
-                  ns TEXT NOT NULL,
-                  k  TEXT NOT NULL,
-                  v  TEXT NOT NULL,
-                  PRIMARY KEY(ns, k)
-                )",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("kv");
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
         let port = Arc::new(MockRouterInterfacePort::default());
         *port.recent.lock().expect("recent") = vec![
             RouterPanelMessage {
@@ -815,7 +998,7 @@ mod tests {
                 has_components: true,
             },
         ];
-        let interface = RouterInterface::new(db.clone(), port.clone());
+        let interface = RouterInterface::new(pool.clone(), port.clone());
 
         interface.ensure_panel().await;
 
@@ -825,14 +1008,14 @@ mod tests {
         assert_eq!(edits[0].1, 7001);
         assert_eq!(edits[1].1, 7002);
         assert_eq!(
-            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
             Some("7001")
         );
         assert_eq!(
-            db.kv_get(ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
@@ -842,29 +1025,42 @@ mod tests {
 
     #[tokio::test]
     async fn router_interface_postet_nicht_blind_wenn_history_scan_fehlgeschlagen_ist() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("router.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE kv_store(
-                  ns TEXT NOT NULL,
-                  k  TEXT NOT NULL,
-                  v  TEXT NOT NULL,
-                  PRIMARY KEY(ns, k)
-                )",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("kv");
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let port = Arc::new(MockRouterInterfacePort::default());
         *port.fail_recent.lock().expect("fail recent") = true;
-        let interface = RouterInterface::new(db, port.clone());
+        let interface = RouterInterface::new(db.pool().clone(), port.clone());
 
         interface.ensure_panel().await;
 
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         assert_eq!(port.edits.lock().expect("edits").len(), 0);
+    }
+
+    #[tokio::test]
+    async fn router_user_pref_roundtrip() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let router = LaneRouter::new(
+            pool.clone(),
+            Arc::new(NoopRouterPort),
+            test_engine(pool),
+            None,
+        );
+
+        assert_eq!(router.user_pref(42).await, None);
+        router.set_user_pref(42, "ranked", true).await;
+        assert_eq!(
+            router.user_pref(42).await,
+            Some(("ranked".to_string(), true))
+        );
+        router.set_user_pref(42, "casual", false).await;
+        assert_eq!(
+            router.user_pref(42).await,
+            Some(("casual".to_string(), false))
+        );
     }
 }

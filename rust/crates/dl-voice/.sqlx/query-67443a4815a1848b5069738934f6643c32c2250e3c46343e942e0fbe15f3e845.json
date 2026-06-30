@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO steam.steam_nudge_state (\n                user_id, notified_at, message_id, channel_id, view_version\n            )\n            VALUES (100, NOW(), 901, 900, 1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "67443a4815a1848b5069738934f6643c32c2250e3c46343e942e0fbe15f3e845"
+}

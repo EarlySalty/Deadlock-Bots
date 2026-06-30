@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO voice.tempvoice_interface (\n                    guild_id, channel_id, message_id, category_id, lane_id, updated_at\n                )\n                VALUES ($1, $2, $3, $4, NULL, NOW())\n                ON CONFLICT (guild_id, message_id) DO UPDATE SET\n                    channel_id = EXCLUDED.channel_id,\n                    category_id = EXCLUDED.category_id,\n                    updated_at = NOW()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "60739caf02ecfef794b3668e45864275bd95a936f0fa112a6572aba8a6c810eb"
+}

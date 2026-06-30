@@ -2139,9 +2139,6 @@ mod tests {
         }
     }
 
-    const LANE_DDL: &str = "CREATE TABLE tempvoice_lanes (channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, owner_id INTEGER NOT NULL, base_name TEXT NOT NULL, category_id INTEGER NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, source_staging_id INTEGER, initial_owner_id INTEGER)";
-    const BAN_DDL: &str = "CREATE TABLE tempvoice_bans (owner_id BIGINT NOT NULL, banned_id BIGINT NOT NULL, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, PRIMARY KEY (owner_id, banned_id))";
-    const PREF_DDL: &str = "CREATE TABLE tempvoice_rank_pref (user_id INTEGER PRIMARY KEY, rank TEXT NOT NULL, subrank INTEGER NOT NULL DEFAULT 0)";
     const CASUAL_STAGING: u64 = 1501089974093873232;
     const STREET_STAGING: u64 = 1357422958544420944;
     const CASUAL_CATEGORY: u64 = 1289721245281292290;
@@ -2149,18 +2146,14 @@ mod tests {
     const STREET_CATEGORY: u64 = 1357422957017698478;
 
     async fn setup() -> (
-        tempfile::TempDir,
+        dl_central_db::TestDb,
         Arc<TempVoiceEngine>,
         Arc<MockPort>,
         u64, // casual staging id
     ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in [LANE_DDL, BAN_DDL, PREF_DDL] {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let config = TempVoiceConfig::production();
         let staging = CASUAL_STAGING; // casual (prefix_from_rank)
         let port = Arc::new(MockPort::default());
@@ -2169,8 +2162,9 @@ mod tests {
             .lock()
             .expect("lock")
             .insert(staging, CASUAL_CATEGORY);
-        let engine = TempVoiceEngine::new(config, TempVoiceStore::new(db), port.clone());
-        (dir, engine, port, staging)
+        let engine =
+            TempVoiceEngine::new(config, TempVoiceStore::new(db.pool().clone()), port.clone());
+        (db, engine, port, staging)
     }
 
     #[tokio::test]

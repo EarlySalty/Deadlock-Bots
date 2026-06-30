@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT EXISTS(\n                SELECT 1 FROM voice.voice_stats WHERE user_id = $1\n                UNION ALL\n                SELECT 1 FROM activity.voice_session_log WHERE user_id = $1\n                LIMIT 1\n            ) AS \"exists!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "730fe0a555b2e8f4c69da925f08267b969b29a99036119c03bbe99642f0014ca"
+}

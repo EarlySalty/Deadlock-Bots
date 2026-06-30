@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO voice.router_user_prefs (user_id, mode, auto_join, updated_at)\n                VALUES ($1, $2, $3, NOW())\n                ON CONFLICT (user_id) DO UPDATE SET\n                    mode = EXCLUDED.mode,\n                    auto_join = EXCLUDED.auto_join,\n                    updated_at = NOW()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "20ce492596f7ed9ec6e8303908b190e77b42802ff26b60b81c2c77806da9fe98"
+}

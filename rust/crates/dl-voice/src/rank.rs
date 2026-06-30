@@ -9,11 +9,11 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use dl_db::Db;
 use dl_discord::{ChannelSender, Dispatcher, GatewayEvent, VoiceEvent};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
+use crate::db::{i64_to_i32, i64_to_u64, u64_to_i64};
 use crate::status::{select_best_presence, select_channel_cohort, CohortEntry, PresenceRow};
 
 pub const RANKED_SUBRANK_TOLERANCE: i64 = 9;
@@ -225,123 +225,171 @@ pub struct Anchor {
 }
 
 pub struct RankStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl RankStore {
     pub async fn upsert_anchor(&self, channel_id: u64, guild_id: u64, anchor: Anchor) {
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_channel_anchors(
-                       channel_id, guild_id, user_id, rank_name, rank_value,
-                       allowed_min, allowed_max, anchor_subrank, score_min, score_max, updated_at
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,CURRENT_TIMESTAMP)
-                     ON CONFLICT(channel_id) DO UPDATE SET
-                       user_id=excluded.user_id, rank_name=excluded.rank_name,
-                       rank_value=excluded.rank_value, allowed_min=excluded.allowed_min,
-                       allowed_max=excluded.allowed_max, anchor_subrank=excluded.anchor_subrank,
-                       score_min=excluded.score_min, score_max=excluded.score_max,
-                       updated_at=CURRENT_TIMESTAMP",
-                    rusqlite::params![
-                        channel_id,
-                        guild_id,
-                        anchor.user_id,
-                        anchor.rank_name,
-                        anchor.rank_value,
-                        anchor.allowed_min,
-                        anchor.allowed_max,
-                        anchor.subrank,
-                        anchor.score_min,
-                        anchor.score_max,
-                    ],
+        let result = async {
+            let channel_id = u64_to_i64("voice_channel_anchors.channel_id", channel_id)?;
+            let guild_id = u64_to_i64("voice_channel_anchors.guild_id", guild_id)?;
+            let user_id = u64_to_i64("voice_channel_anchors.user_id", anchor.user_id)?;
+            let rank_value = i64_to_i32("voice_channel_anchors.rank_value", anchor.rank_value)?;
+            let allowed_min = i64_to_i32("voice_channel_anchors.allowed_min", anchor.allowed_min)?;
+            let allowed_max = i64_to_i32("voice_channel_anchors.allowed_max", anchor.allowed_max)?;
+            let anchor_subrank =
+                i64_to_i32("voice_channel_anchors.anchor_subrank", anchor.subrank)?;
+            let score_min = i64_to_i32("voice_channel_anchors.score_min", anchor.score_min)?;
+            let score_max = i64_to_i32("voice_channel_anchors.score_max", anchor.score_max)?;
+            sqlx::query!(
+                r#"
+                INSERT INTO voice.voice_channel_anchors (
+                    channel_id, guild_id, user_id, rank_name, rank_value,
+                    allowed_min, allowed_max, anchor_subrank, score_min, score_max, updated_at
                 )
-                .map(|_| ())
-            })
-            .await;
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
+                ON CONFLICT (channel_id) DO UPDATE SET
+                    user_id = EXCLUDED.user_id,
+                    rank_name = EXCLUDED.rank_name,
+                    rank_value = EXCLUDED.rank_value,
+                    allowed_min = EXCLUDED.allowed_min,
+                    allowed_max = EXCLUDED.allowed_max,
+                    anchor_subrank = EXCLUDED.anchor_subrank,
+                    score_min = EXCLUDED.score_min,
+                    score_max = EXCLUDED.score_max,
+                    updated_at = NOW()
+                "#,
+                channel_id,
+                guild_id,
+                user_id,
+                anchor.rank_name,
+                rank_value,
+                allowed_min,
+                allowed_max,
+                anchor_subrank,
+                score_min,
+                score_max,
+            )
+            .execute(&self.pool)
+            .await?;
+            Ok::<(), crate::db::VoiceDbError>(())
+        }
+        .await;
         if let Err(err) = result {
             tracing::warn!(%err, channel_id, "RankVoice: Anchor-Persist fehlgeschlagen");
         }
     }
 
     pub async fn delete_anchor(&self, channel_id: u64) {
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM voice_channel_anchors WHERE channel_id = ?1",
-                    [channel_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = async {
+            let channel_id = u64_to_i64("voice_channel_anchors.channel_id", channel_id)?;
+            sqlx::query!(
+                r#"
+                DELETE FROM voice.voice_channel_anchors
+                 WHERE channel_id = $1
+                "#,
+                channel_id,
+            )
+            .execute(&self.pool)
+            .await?;
+            Ok::<(), crate::db::VoiceDbError>(())
+        }
+        .await;
+        if let Err(err) = result {
+            tracing::debug!(%err, channel_id, "RankVoice: Anchor-Delete fehlgeschlagen");
+        }
     }
 
     pub async fn load_anchors(&self) -> HashMap<u64, Anchor> {
-        self.db
-            .read(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT channel_id, user_id, rank_name, rank_value, allowed_min,
-                            allowed_max, COALESCE(anchor_subrank, 3),
-                            COALESCE(score_min, 7), COALESCE(score_max, 72)
-                       FROM voice_channel_anchors",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        Anchor {
-                            user_id: row.get(1)?,
-                            rank_name: row.get(2)?,
-                            rank_value: row.get(3)?,
-                            allowed_min: row.get(4)?,
-                            allowed_max: row.get(5)?,
-                            subrank: row.get(6)?,
-                            score_min: row.get(7)?,
-                            score_max: row.get(8)?,
-                        },
-                    ))
-                })?;
-                rows.collect::<Result<HashMap<_, _>, _>>()
-            })
-            .await
-            .unwrap_or_default()
+        let rows = match sqlx::query!(
+            r#"
+            SELECT channel_id, user_id, rank_name, rank_value, allowed_min,
+                   allowed_max, COALESCE(anchor_subrank, 3) AS "anchor_subrank!",
+                   COALESCE(score_min, 7) AS "score_min!",
+                   COALESCE(score_max, 72) AS "score_max!"
+              FROM voice.voice_channel_anchors
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "RankVoice: Anchor-Rehydrate fehlgeschlagen");
+                return HashMap::new();
+            }
+        };
+
+        let mut anchors = HashMap::new();
+        for row in rows {
+            let Ok(channel_id) = i64_to_u64("voice_channel_anchors.channel_id", row.channel_id)
+            else {
+                continue;
+            };
+            let Ok(user_id) = i64_to_u64("voice_channel_anchors.user_id", row.user_id) else {
+                continue;
+            };
+            anchors.insert(
+                channel_id,
+                Anchor {
+                    user_id,
+                    rank_name: row.rank_name,
+                    rank_value: i64::from(row.rank_value),
+                    allowed_min: i64::from(row.allowed_min),
+                    allowed_max: i64::from(row.allowed_max),
+                    subrank: i64::from(row.anchor_subrank),
+                    score_min: i64::from(row.score_min),
+                    score_max: i64::from(row.score_max),
+                },
+            );
+        }
+        anchors
     }
 
     pub async fn is_enabled(&self, channel_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT enabled FROM voice_channel_settings WHERE channel_id = ?1",
-                    [channel_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v != 0)
-            .unwrap_or(true)
+        let Ok(channel_id) = u64_to_i64("voice_channel_settings.channel_id", channel_id) else {
+            return true;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT enabled
+              FROM voice.voice_channel_settings
+             WHERE channel_id = $1
+            "#,
+            channel_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(true)
     }
 
     /// Persistiert den Ein/Aus-Zustand des Rang-Systems je VC
     /// (`voice_channel_settings`, Port von `_db_upsert_setting`).
     pub async fn set_enabled(&self, channel_id: u64, guild_id: u64, enabled: bool) {
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_channel_settings(channel_id, guild_id, enabled, updated_at)
-                     VALUES(?1, ?2, ?3, CURRENT_TIMESTAMP)
-                     ON CONFLICT(channel_id) DO UPDATE SET
-                       enabled = excluded.enabled,
-                       updated_at = CURRENT_TIMESTAMP",
-                    rusqlite::params![channel_id, guild_id, i64::from(enabled)],
+        let result = async {
+            let channel_id = u64_to_i64("voice_channel_settings.channel_id", channel_id)?;
+            let guild_id = u64_to_i64("voice_channel_settings.guild_id", guild_id)?;
+            sqlx::query!(
+                r#"
+                INSERT INTO voice.voice_channel_settings (
+                    channel_id, guild_id, enabled, updated_at
                 )
-                .map(|_| ())
-            })
-            .await;
+                VALUES ($1, $2, $3, NOW())
+                ON CONFLICT (channel_id) DO UPDATE SET
+                    enabled = EXCLUDED.enabled,
+                    updated_at = NOW()
+                "#,
+                channel_id,
+                guild_id,
+                enabled,
+            )
+            .execute(&self.pool)
+            .await?;
+            Ok::<(), crate::db::VoiceDbError>(())
+        }
+        .await;
         if let Err(err) = result {
             tracing::warn!(%err, channel_id, "RankVoice: Setting-Persist fehlgeschlagen");
         }
@@ -349,28 +397,33 @@ impl RankStore {
 
     /// Sub-Rang des primären Steam-Accounts (Fallback 3 = Mitte).
     pub async fn subrank_from_db(&self, user_id: u64) -> i64 {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT deadlock_subrank FROM steam_links
-                      WHERE user_id=?1 AND deadlock_rank IS NOT NULL AND deadlock_rank > 0
-                      ORDER BY primary_account DESC, updated_at DESC LIMIT 1",
-                    [user_id],
-                    |row| row.get::<_, Option<i64>>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .flatten()
-            .map(|s| s.clamp(1, 6))
-            .unwrap_or(3)
+        let Ok(user_id) = u64_to_i64("core.steam_links.discord_id", user_id) else {
+            return 3;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT deadlock_subrank
+              FROM core.steam_links
+             WHERE discord_id = $1
+               AND deadlock_rank IS NOT NULL
+               AND deadlock_rank > 0
+             ORDER BY primary_account DESC, updated_at DESC
+             LIMIT 1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .map(|subrank| i64::from(subrank).clamp(1, 6))
+        .unwrap_or(3)
     }
 
     pub async fn steam_ids_for(&self, user_ids: Vec<u64>) -> HashMap<u64, Vec<String>> {
         crate::status::StatusStore {
-            db: self.db.clone(),
+            pool: self.pool.clone(),
         }
         .steam_ids_for(user_ids)
         .await
@@ -378,7 +431,7 @@ impl RankStore {
 
     pub async fn presence_rows(&self, steam_ids: Vec<String>) -> HashMap<String, PresenceRow> {
         crate::status::StatusStore {
-            db: self.db.clone(),
+            pool: self.pool.clone(),
         }
         .presence_rows(steam_ids)
         .await
@@ -446,12 +499,12 @@ pub struct RankVoiceManager {
 
 impl RankVoiceManager {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn RankPort>,
         initial_owner: Arc<dyn Fn(u64) -> Option<u64> + Send + Sync>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            store: RankStore { db },
+            store: RankStore { pool },
             port,
             initial_owner,
             anchors: tokio::sync::Mutex::new(HashMap::new()),
@@ -1593,37 +1646,28 @@ mod tests {
         }
     }
 
-    const RANK_DDLS: [&str; 2] = [
-        "CREATE TABLE voice_channel_settings(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, updated_at TEXT)",
-        "CREATE TABLE voice_channel_anchors(channel_id INTEGER PRIMARY KEY, guild_id INTEGER NOT NULL, user_id INTEGER NOT NULL, rank_name TEXT NOT NULL, rank_value INTEGER NOT NULL, allowed_min INTEGER NOT NULL, allowed_max INTEGER NOT NULL, anchor_subrank INTEGER DEFAULT 3, score_min INTEGER, score_max INTEGER, updated_at TEXT)",
-    ];
-
     async fn rank_setup_with_owner(
         port: MockRankPort,
         initial_owner: Arc<dyn Fn(u64) -> Option<u64> + Send + Sync>,
     ) -> (
-        tempfile::TempDir,
+        dl_central_db::TestDb,
         Arc<RankCommands>,
         Arc<RankVoiceManager>,
         Arc<MockRankPort>,
     ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in RANK_DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let port = Arc::new(port);
-        let manager = RankVoiceManager::new(db, port.clone(), initial_owner);
+        let manager = RankVoiceManager::new(db.pool().clone(), port.clone(), initial_owner);
         let commands = RankCommands::new(manager.clone());
-        (dir, commands, manager, port)
+        (db, commands, manager, port)
     }
 
     async fn rank_setup(
         port: MockRankPort,
     ) -> (
-        tempfile::TempDir,
+        dl_central_db::TestDb,
         Arc<RankCommands>,
         Arc<RankVoiceManager>,
         Arc<MockRankPort>,

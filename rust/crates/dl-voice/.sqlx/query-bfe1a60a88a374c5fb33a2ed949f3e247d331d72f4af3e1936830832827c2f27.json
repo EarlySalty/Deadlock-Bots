@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE voice.tempvoice_lanes\n               SET owner_id = $1\n             WHERE channel_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bfe1a60a88a374c5fb33a2ed949f3e247d331d72f4af3e1936830832827c2f27"
+}
