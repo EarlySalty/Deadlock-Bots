@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT total_seconds, total_points\n        FROM voice.voice_stats\n        WHERE user_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_seconds",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_points",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "c2cf173beae30012429ea61b58feaee5b81719cf810582e344c9a9ab5a312fde"
+}

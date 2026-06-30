@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT lower(deadlock_rank_name) AS \"rank!\", COUNT(*) AS \"cnt!\"\n        FROM core.steam_links\n        WHERE verified = TRUE\n          AND deadlock_rank_name IS NOT NULL\n        GROUP BY deadlock_rank_name\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rank!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "cnt!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "5e3106b1dfba2f0042c4b6cf7f63e4d90c40c9716795c02a82b68eed3029e1a7"
+}

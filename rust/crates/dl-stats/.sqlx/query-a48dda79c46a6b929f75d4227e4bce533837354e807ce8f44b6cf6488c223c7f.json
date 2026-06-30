@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT co_player_id, sessions_together, total_minutes_together,\n               last_played_together, co_player_display_name\n        FROM activity.user_co_players\n        WHERE user_id = $1\n        ORDER BY sessions_together DESC NULLS LAST,\n                 total_minutes_together DESC NULLS LAST,\n                 last_played_together DESC NULLS LAST\n        LIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "co_player_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "sessions_together",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_minutes_together",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_played_together",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "co_player_display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "a48dda79c46a6b929f75d4227e4bce533837354e807ce8f44b6cf6488c223c7f"
+}

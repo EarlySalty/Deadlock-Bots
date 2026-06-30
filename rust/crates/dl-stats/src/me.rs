@@ -6,17 +6,13 @@ use axum::extract::{Query, State};
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::Json;
-use chrono::Duration;
-use rusqlite::types::Value as SqlValue;
-use rusqlite::{Connection, OptionalExtension};
+use chrono::{DateTime, Duration, Timelike, Utc};
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
 use crate::public::resolve_display_names;
-use crate::timeutil::{isoformat, now_local, parse_iso, to_iso};
-use crate::{
-    internal_error, is_missing_table, parse_positive_int, require_session, safe_int,
-    session_user_id, SharedApp,
-};
+use crate::timeutil::{hour, to_iso, utc_naive, weekday_mon0};
+use crate::{internal_error, parse_positive_int, require_session, session_user_id, SharedApp};
 
 type Params = Query<HashMap<String, String>>;
 
@@ -65,27 +61,98 @@ pub async fn handle_me(State(app): State<SharedApp>, headers: HeaderMap) -> Resp
     .into_response()
 }
 
-/// `_rank_for_points`: Platz = Anzahl mit mehr Punkten + 1; fehlende Tabelle → null.
-fn rank_for_points(conn: &Connection, table: &str, user_id: i64) -> rusqlite::Result<Option<i64>> {
-    let points: Option<SqlValue> = match conn.query_row(
-        &format!("SELECT total_points FROM {table} WHERE user_id = ?1"),
-        [user_id],
-        |row| row.get(0),
-    ) {
-        Ok(v) => Some(v),
-        Err(rusqlite::Error::QueryReturnedNoRows) => None,
-        Err(err) if err.to_string().to_lowercase().contains("no such table") => None,
-        Err(err) => return Err(err),
-    };
-    let Some(points) = points else {
+async fn voice_rank_for_points(pool: &PgPool, user_id: i64) -> Result<Option<i64>, sqlx::Error> {
+    let Some(row) = sqlx::query!(
+        r#"
+        SELECT total_points
+        FROM voice.voice_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    else {
         return Ok(None);
     };
-    let better: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM {table} WHERE total_points > ?1"),
-        [safe_int(&points)],
-        |row| row.get(0),
-    )?;
-    Ok(Some(better + 1))
+
+    let better = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "better!"
+        FROM voice.voice_stats
+        WHERE total_points > $1
+        "#,
+        row.total_points,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(Some(better.better + 1))
+}
+
+async fn text_rank_for_points(pool: &PgPool, user_id: i64) -> Result<Option<i64>, sqlx::Error> {
+    let Some(row) = sqlx::query!(
+        r#"
+        SELECT total_points
+        FROM activity.text_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let better = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "better!"
+        FROM activity.text_stats
+        WHERE total_points > $1
+        "#,
+        row.total_points,
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(Some(better.better + 1))
+}
+
+async fn me_stats_payload(pool: &PgPool, user_id: i64) -> Result<Value, sqlx::Error> {
+    let voice = sqlx::query!(
+        r#"
+        SELECT total_seconds, total_points
+        FROM voice.voice_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let text = sqlx::query!(
+        r#"
+        SELECT total_messages, total_points
+        FROM activity.text_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let voice_rank = voice_rank_for_points(pool, user_id).await?;
+    let text_rank = text_rank_for_points(pool, user_id).await?;
+
+    Ok(json!({
+        "voice": {
+            "lifetime_seconds": voice.as_ref().map(|row| row.total_seconds).unwrap_or(0),
+            "lifetime_points": voice.as_ref().map(|row| row.total_points).unwrap_or(0),
+            "rank": voice_rank,
+        },
+        "text": {
+            "lifetime_messages": text.as_ref().map(|row| row.total_messages).unwrap_or(0),
+            "lifetime_points": text.as_ref().map(|row| row.total_points).unwrap_or(0),
+            "rank": text_rank,
+        },
+    }))
 }
 
 /// `GET /api/public/me/stats`.
@@ -99,44 +166,7 @@ pub async fn handle_me_stats(State(app): State<SharedApp>, headers: HeaderMap) -
         Err(resp) => return resp,
     };
 
-    let result = app
-        .db
-        .read(move |conn| {
-            let voice: Option<(SqlValue, SqlValue)> = conn
-                .query_row(
-                    "SELECT total_seconds, total_points FROM voice_stats WHERE user_id = ?1",
-                    [user_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()?;
-            let text: Option<(SqlValue, SqlValue)> = match conn.query_row(
-                "SELECT total_messages, total_points FROM text_stats WHERE user_id = ?1",
-                [user_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            ) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(err) if err.to_string().to_lowercase().contains("no such table") => None,
-                Err(err) => return Err(err),
-            };
-            let voice_rank = rank_for_points(conn, "voice_stats", user_id)?;
-            let text_rank = rank_for_points(conn, "text_stats", user_id)?;
-            Ok(json!({
-                "voice": {
-                    "lifetime_seconds": voice.as_ref().map(|(s, _)| safe_int(s)).unwrap_or(0),
-                    "lifetime_points": voice.as_ref().map(|(_, p)| safe_int(p)).unwrap_or(0),
-                    "rank": voice_rank,
-                },
-                "text": {
-                    "lifetime_messages": text.as_ref().map(|(m, _)| safe_int(m)).unwrap_or(0),
-                    "lifetime_points": text.as_ref().map(|(_, p)| safe_int(p)).unwrap_or(0),
-                    "rank": text_rank,
-                },
-            }))
-        })
-        .await;
-
-    match result {
+    match me_stats_payload(&app.pool, user_id).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => db_error(err),
     }
@@ -177,6 +207,21 @@ fn parse_co_ids(raw: Option<&str>, user_id: i64) -> Vec<i64> {
     out
 }
 
+fn normalize_mode(raw: Option<&String>) -> Result<String, Response> {
+    let mode = raw
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "day".to_string());
+    if ["hour", "day", "week", "month"].contains(&mode.as_str()) {
+        Ok(mode)
+    } else {
+        Err(dl_webcore::envelope::error_code(
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid_mode",
+        ))
+    }
+}
+
 /// `GET /api/public/me/voice-history`.
 pub async fn handle_me_voice_history(
     State(app): State<SharedApp>,
@@ -203,247 +248,284 @@ pub async fn handle_me_voice_history(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let cutoff = format!("-{days} day");
-    let mode_for_db = mode.clone();
+    let cutoff = Utc::now() - Duration::days(days);
 
-    let result = app
-        .db
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT date(started_at) AS day, SUM(duration_seconds) AS total_seconds,
-                        COUNT(*) AS sessions, COUNT(DISTINCT user_id) AS users
-                   FROM voice_session_log
-                  WHERE started_at >= datetime('now', ?1) AND user_id = ?2
-                  GROUP BY date(started_at) ORDER BY day DESC",
-            )?;
-            let daily: Vec<Value> = stmt
-                .query_map(rusqlite::params![&cutoff, user_id], |row| {
-                    Ok(json!({
-                        "day": row.get::<_, Option<String>>(0)?,
-                        "total_seconds": row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        "sessions": row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                        "users": row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    }))
-                })?
-                .collect::<Result<_, _>>()?;
-
-            let top_user: Option<(Option<String>, i64, i64, i64)> = conn
-                .query_row(
-                    "SELECT MAX(display_name), SUM(duration_seconds), SUM(points), COUNT(*)
-                       FROM voice_session_log
-                      WHERE started_at >= datetime('now', ?1) AND user_id = ?2
-                      GROUP BY user_id",
-                    rusqlite::params![&cutoff, user_id],
-                    |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            row.get(3)?,
-                        ))
-                    },
-                )
-                .optional()?;
-
-            let mut stmt = conn.prepare(
-                "WITH grouped AS (
-                    SELECT CASE
-                        WHEN ?1 = 'hour' THEN strftime('%H', started_at)
-                        WHEN ?1 = 'day' THEN strftime('%w', started_at)
-                        WHEN ?1 = 'week' THEN strftime('%Y-%W', started_at)
-                        ELSE strftime('%Y-%m', started_at)
-                    END AS bucket, duration_seconds, COALESCE(peak_users, 0) AS peak_users
-                    FROM voice_session_log
-                    WHERE started_at >= datetime('now', ?2) AND user_id = ?3
-                 )
-                 SELECT bucket, SUM(duration_seconds), COUNT(*), SUM(peak_users)
-                   FROM grouped GROUP BY bucket ORDER BY bucket",
-            )?;
-            let bucket_rows: Vec<(Option<String>, i64, i64, i64)> = stmt
-                .query_map(rusqlite::params![&mode_for_db, &cutoff, user_id], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                    ))
-                })?
-                .collect::<Result<_, _>>()?;
-
-            let range_stats: Option<(i64, i64, i64, i64, i64, SqlValue)> = conn
-                .query_row(
-                    "SELECT SUM(duration_seconds), SUM(points), COUNT(*),
-                            SUM(COALESCE(peak_users, 0)), COUNT(DISTINCT date(started_at)),
-                            MAX(ended_at)
-                       FROM voice_session_log
-                      WHERE started_at >= datetime('now', ?1) AND user_id = ?2",
-                    rusqlite::params![&cutoff, user_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            row.get(2)?,
-                            row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                            row.get(4)?,
-                            row.get(5)?,
-                        ))
-                    },
-                )
-                .optional()?;
-
-            let lifetime: Option<(i64, i64, SqlValue)> = conn
-                .query_row(
-                    "SELECT total_seconds, total_points, last_update FROM voice_stats
-                      WHERE user_id = ?1",
-                    [user_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            row.get(2)?,
-                        ))
-                    },
-                )
-                .optional()?;
-
-            let (lifetime_sessions, lifetime_last): (i64, SqlValue) = conn.query_row(
-                "SELECT COUNT(*), MAX(ended_at) FROM voice_session_log WHERE user_id = ?1",
-                [user_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-
-            struct RecentRow {
-                id: i64,
-                guild_id: Option<SqlValue>,
-                channel_id: Option<SqlValue>,
-                channel_name: Option<String>,
-                started_at: SqlValue,
-                ended_at: SqlValue,
-                duration_seconds: i64,
-                points: i64,
-                peak_users: i64,
-                co_ids: Vec<i64>,
-            }
-            let mut stmt = conn.prepare(
-                "SELECT id, guild_id, channel_id, channel_name, started_at, ended_at,
-                        duration_seconds, points, peak_users, co_player_ids
-                   FROM voice_session_log WHERE user_id = ?1
-                  ORDER BY datetime(ended_at) DESC, id DESC LIMIT ?2",
-            )?;
-            let recent: Vec<RecentRow> = stmt
-                .query_map(rusqlite::params![user_id, recent_limit], |row| {
-                    let guild: SqlValue = row.get(1)?;
-                    let channel: SqlValue = row.get(2)?;
-                    let co_raw: Option<String> = row.get(9)?;
-                    Ok(RecentRow {
-                        id: row.get(0)?,
-                        guild_id: (guild != SqlValue::Null).then_some(guild),
-                        channel_id: (channel != SqlValue::Null).then_some(channel),
-                        channel_name: row.get(3)?,
-                        started_at: row.get(4)?,
-                        ended_at: row.get(5)?,
-                        duration_seconds: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                        points: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-                        peak_users: row.get::<_, Option<i64>>(8)?.unwrap_or(0),
-                        co_ids: parse_co_ids(co_raw.as_deref(), user_id),
-                    })
-                })?
-                .collect::<Result<_, _>>()?;
-
-            let name_map = resolve_display_names(conn, &[user_id])?;
-            let all_co: Vec<i64> = recent.iter().flat_map(|r| r.co_ids.iter().copied()).collect();
-            let co_names = if all_co.is_empty() {
-                HashMap::new()
-            } else {
-                resolve_display_names(conn, &all_co)?
-            };
-
-            let own_name = name_map
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("User {user_id}"));
-
-            let buckets = normalize_buckets_voice(&mode_for_db, &bucket_rows);
-
-            let recent_sessions: Vec<Value> = recent
-                .iter()
-                .map(|r| {
-                    json!({
-                        "id": r.id,
-                        "guild_id": r.guild_id.as_ref().map(|v| safe_int(v).to_string()),
-                        "channel_id": r.channel_id.as_ref().map(|v| safe_int(v).to_string()),
-                        "channel_name": r.channel_name.as_deref().filter(|s| !s.is_empty()),
-                        "started_at": to_iso(r.started_at.clone()),
-                        "ended_at": to_iso(r.ended_at.clone()),
-                        "duration_seconds": r.duration_seconds,
-                        "points": r.points,
-                        "peak_users": r.peak_users,
-                        "co_player_count": r.co_ids.len(),
-                        "co_players": r.co_ids.iter().map(|id| json!({
-                            "user_id": id.to_string(),
-                            "display_name": co_names.get(id).cloned()
-                                .unwrap_or_else(|| format!("User {id}")),
-                        })).collect::<Vec<_>>(),
-                    })
-                })
-                .collect();
-
-            let (range_seconds, range_points, range_sessions, sum_peak, active_days, range_last) =
-                range_stats.unwrap_or((0, 0, 0, 0, 0, SqlValue::Null));
-            let last_session = if range_last == SqlValue::Null {
-                lifetime_last
-            } else {
-                range_last
-            };
-            let (lifetime_seconds, lifetime_points, lifetime_update) =
-                lifetime.unwrap_or((0, 0, SqlValue::Null));
-
-            Ok(json!({
-                "range_days": days,
-                "mode": mode_for_db,
-                "user": { "user_id": user_id.to_string(), "display_name": own_name },
-                "daily": daily,
-                "top_users": top_user.map(|(display_name, seconds, points, sessions)| vec![json!({
-                    "user_id": user_id.to_string(),
-                    "display_name": display_name.filter(|s| !s.is_empty()).unwrap_or_else(|| own_name.clone()),
-                    "total_seconds": seconds,
-                    "total_points": points,
-                    "sessions": sessions,
-                })]).unwrap_or_default(),
-                "buckets": buckets,
-                "user_summary": {
-                    "user_id": user_id.to_string(),
-                    "display_name": own_name,
-                    "range_seconds": range_seconds,
-                    "range_points": range_points,
-                    "range_sessions": range_sessions,
-                    "range_days": active_days,
-                    "range_avg_session_seconds": if range_sessions > 0 {
-                        json!(range_seconds as f64 / range_sessions as f64)
-                    } else { json!(0) },
-                    "range_avg_peak": if range_sessions > 0 {
-                        json!(sum_peak as f64 / range_sessions as f64)
-                    } else { json!(0) },
-                    "lifetime_seconds": lifetime_seconds,
-                    "lifetime_points": lifetime_points,
-                    "lifetime_sessions": lifetime_sessions,
-                    "lifetime_last_update": to_iso(lifetime_update),
-                    "last_session": to_iso(last_session),
-                },
-                "recent_sessions_limit": recent_limit,
-                "recent_sessions": recent_sessions,
-            }))
-        })
-        .await;
-
-    match result {
+    match voice_history_payload(&app.pool, user_id, days, recent_limit, &mode, cutoff).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => db_error(err),
     }
 }
 
-/// Bucket-Normalisierung (voice): hour → 24 Slots "00".."23",
-/// day → deutsche Wochentage (SQLite %w: 0=Sonntag).
+async fn voice_history_payload(
+    pool: &PgPool,
+    user_id: i64,
+    days: i64,
+    recent_limit: i64,
+    mode: &str,
+    cutoff: DateTime<Utc>,
+) -> Result<Value, sqlx::Error> {
+    let daily_rows = sqlx::query!(
+        r#"
+        SELECT (started_at AT TIME ZONE 'UTC')::date::text AS "day!",
+               COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+               COUNT(*) AS "sessions!",
+               COUNT(DISTINCT user_id) AS "users!"
+        FROM activity.voice_session_log
+        WHERE started_at >= $1
+          AND user_id = $2
+        GROUP BY (started_at AT TIME ZONE 'UTC')::date
+        ORDER BY (started_at AT TIME ZONE 'UTC')::date DESC
+        "#,
+        cutoff,
+        user_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let daily: Vec<Value> = daily_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "day": row.day,
+                "total_seconds": row.total_seconds,
+                "sessions": row.sessions,
+                "users": row.users,
+            })
+        })
+        .collect();
+
+    let top_user = sqlx::query!(
+        r#"
+        SELECT MAX(display_name) AS "display_name?",
+               COALESCE(SUM(duration_seconds), 0)::BIGINT AS "seconds!",
+               COALESCE(SUM(points), 0)::BIGINT AS "points!",
+               COUNT(*) AS "sessions!"
+        FROM activity.voice_session_log
+        WHERE started_at >= $1
+          AND user_id = $2
+        GROUP BY user_id
+        "#,
+        cutoff,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let bucket_rows = sqlx::query!(
+        r#"
+        WITH source AS (
+            SELECT started_at AT TIME ZONE 'UTC' AS utc_started,
+                   duration_seconds,
+                   COALESCE(peak_users, 0) AS peak_users
+            FROM activity.voice_session_log
+            WHERE started_at >= $2
+              AND user_id = $3
+        ),
+        grouped AS (
+            SELECT CASE
+                    WHEN $1 = 'hour' THEN to_char(utc_started, 'HH24')
+                    WHEN $1 = 'day' THEN EXTRACT(DOW FROM utc_started)::INT::TEXT
+                    WHEN $1 = 'week' THEN to_char(utc_started, 'YYYY-') ||
+                        lpad(((EXTRACT(DOY FROM utc_started)::INT - 1 -
+                            ((8 - EXTRACT(ISODOW FROM date_trunc('year', utc_started))::INT) % 7) + 7) / 7)::TEXT, 2, '0')
+                    ELSE to_char(utc_started, 'YYYY-MM')
+                   END AS bucket,
+                   duration_seconds,
+                   peak_users
+            FROM source
+        )
+        SELECT bucket AS "bucket!",
+               COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total_seconds!",
+               COUNT(*) AS "sessions!",
+               COALESCE(SUM(peak_users), 0)::BIGINT AS "sum_peak!"
+        FROM grouped
+        GROUP BY bucket
+        ORDER BY bucket
+        "#,
+        mode,
+        cutoff,
+        user_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let bucket_rows: Vec<(Option<String>, i64, i64, i64)> = bucket_rows
+        .into_iter()
+        .map(|row| {
+            (
+                Some(row.bucket),
+                row.total_seconds,
+                row.sessions,
+                row.sum_peak,
+            )
+        })
+        .collect();
+
+    let range_stats = sqlx::query!(
+        r#"
+        SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS "range_seconds!",
+               COALESCE(SUM(points), 0)::BIGINT AS "range_points!",
+               COUNT(*) AS "range_sessions!",
+               COALESCE(SUM(COALESCE(peak_users, 0)), 0)::BIGINT AS "sum_peak!",
+               COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS "active_days!",
+               MAX(ended_at) AS "range_last?"
+        FROM activity.voice_session_log
+        WHERE started_at >= $1
+          AND user_id = $2
+        "#,
+        cutoff,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let lifetime = sqlx::query!(
+        r#"
+        SELECT total_seconds, total_points, last_update
+        FROM voice.voice_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let lifetime_sessions = sqlx::query!(
+        r#"
+        SELECT COUNT(*) AS "sessions!", MAX(ended_at) AS "last?"
+        FROM activity.voice_session_log
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let recent_rows = sqlx::query!(
+        r#"
+        SELECT id, guild_id, channel_id, channel_name, started_at, ended_at,
+               duration_seconds, points, peak_users, co_player_ids::text AS "co_player_ids?"
+        FROM activity.voice_session_log
+        WHERE user_id = $1
+        ORDER BY ended_at DESC, id DESC
+        LIMIT $2
+        "#,
+        user_id,
+        recent_limit,
+    )
+    .fetch_all(pool)
+    .await?;
+    struct RecentRow {
+        id: i64,
+        guild_id: Option<i64>,
+        channel_id: Option<i64>,
+        channel_name: Option<String>,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+        duration_seconds: i64,
+        points: i64,
+        peak_users: i64,
+        co_ids: Vec<i64>,
+    }
+    let recent: Vec<RecentRow> = recent_rows
+        .into_iter()
+        .map(|row| RecentRow {
+            id: row.id,
+            guild_id: row.guild_id,
+            channel_id: row.channel_id,
+            channel_name: row.channel_name,
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+            duration_seconds: row.duration_seconds,
+            points: i64::from(row.points),
+            peak_users: i64::from(row.peak_users.unwrap_or(0)),
+            co_ids: parse_co_ids(row.co_player_ids.as_deref(), user_id),
+        })
+        .collect();
+
+    let name_map = resolve_display_names(pool, &[user_id]).await?;
+    let all_co: Vec<i64> = recent
+        .iter()
+        .flat_map(|r| r.co_ids.iter().copied())
+        .collect();
+    let co_names = if all_co.is_empty() {
+        HashMap::new()
+    } else {
+        resolve_display_names(pool, &all_co).await?
+    };
+
+    let own_name = name_map
+        .get(&user_id)
+        .cloned()
+        .unwrap_or_else(|| format!("User {user_id}"));
+
+    let buckets = normalize_buckets_voice(mode, &bucket_rows);
+    let last_session = range_stats.range_last.or(lifetime_sessions.last);
+    let (lifetime_seconds, lifetime_points, lifetime_update) = lifetime
+        .as_ref()
+        .map(|row| (row.total_seconds, row.total_points, row.last_update))
+        .unwrap_or((0, 0, None));
+
+    let recent_sessions: Vec<Value> = recent
+        .iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "guild_id": r.guild_id.map(|v| v.to_string()),
+                "channel_id": r.channel_id.map(|v| v.to_string()),
+                "channel_name": r.channel_name.as_deref().filter(|s| !s.is_empty()),
+                "started_at": to_iso(Some(r.started_at)),
+                "ended_at": to_iso(Some(r.ended_at)),
+                "duration_seconds": r.duration_seconds,
+                "points": r.points,
+                "peak_users": r.peak_users,
+                "co_player_count": r.co_ids.len(),
+                "co_players": r.co_ids.iter().map(|id| json!({
+                    "user_id": id.to_string(),
+                    "display_name": co_names.get(id).cloned()
+                        .unwrap_or_else(|| format!("User {id}")),
+                })).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "range_days": days,
+        "mode": mode,
+        "user": { "user_id": user_id.to_string(), "display_name": own_name },
+        "daily": daily,
+        "top_users": top_user.map(|row| vec![json!({
+            "user_id": user_id.to_string(),
+            "display_name": row.display_name.filter(|s| !s.is_empty()).unwrap_or_else(|| own_name.clone()),
+            "total_seconds": row.seconds,
+            "total_points": row.points,
+            "sessions": row.sessions,
+        })]).unwrap_or_default(),
+        "buckets": buckets,
+        "user_summary": {
+            "user_id": user_id.to_string(),
+            "display_name": own_name,
+            "range_seconds": range_stats.range_seconds,
+            "range_points": range_stats.range_points,
+            "range_sessions": range_stats.range_sessions,
+            "range_days": range_stats.active_days,
+            "range_avg_session_seconds": if range_stats.range_sessions > 0 {
+                json!(range_stats.range_seconds as f64 / range_stats.range_sessions as f64)
+            } else { json!(0) },
+            "range_avg_peak": if range_stats.range_sessions > 0 {
+                json!(range_stats.sum_peak as f64 / range_stats.range_sessions as f64)
+            } else { json!(0) },
+            "lifetime_seconds": lifetime_seconds,
+            "lifetime_points": lifetime_points,
+            "lifetime_sessions": lifetime_sessions.sessions,
+            "lifetime_last_update": to_iso(lifetime_update),
+            "last_session": to_iso(last_session),
+        },
+        "recent_sessions_limit": recent_limit,
+        "recent_sessions": recent_sessions,
+    }))
+}
+
+/// Bucket-Normalisierung (voice): hour -> 24 Slots "00".."23",
+/// day -> deutsche Wochentage (Postgres DOW: 0=Sonntag).
 fn normalize_buckets_voice(mode: &str, rows: &[(Option<String>, i64, i64, i64)]) -> Vec<Value> {
     let entry = |label: &str, total: i64, sessions: i64, sum_peak: i64| {
         json!({
@@ -489,22 +571,7 @@ fn normalize_buckets_voice(mode: &str, rows: &[(Option<String>, i64, i64, i64)])
     }
 }
 
-fn normalize_mode(raw: Option<&String>) -> Result<String, Response> {
-    let mode = raw
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "day".to_string());
-    if ["hour", "day", "week", "month"].contains(&mode.as_str()) {
-        Ok(mode)
-    } else {
-        Err(dl_webcore::envelope::error_code(
-            axum::http::StatusCode::BAD_REQUEST,
-            "invalid_mode",
-        ))
-    }
-}
-
-/// `GET /api/public/me/text-history` — text_conversation_log/text_stats optional.
+/// `GET /api/public/me/text-history`.
 pub async fn handle_me_text_history(
     State(app): State<SharedApp>,
     headers: HeaderMap,
@@ -530,182 +597,193 @@ pub async fn handle_me_text_history(
         Ok(m) => m,
         Err(resp) => return resp,
     };
-    let cutoff = format!("-{days} day");
-    let mode_for_db = mode.clone();
+    let cutoff = Utc::now() - Duration::days(days);
 
-    let result = app
-        .db
-        .read(move |conn| {
-            let missing =
-                |e: &rusqlite::Error| e.to_string().to_lowercase().contains("no such table");
-
-            let daily: Vec<Value> = match conn.prepare(
-                "SELECT date(started_at) AS day, SUM(message_count), SUM(points), COUNT(*)
-                   FROM text_conversation_log
-                  WHERE started_at >= datetime('now', ?1) AND user_id = ?2
-                  GROUP BY date(started_at) ORDER BY day DESC",
-            ) {
-                Ok(mut stmt) => stmt
-                    .query_map(rusqlite::params![&cutoff, user_id], |row| {
-                        Ok(json!({
-                            "day": row.get::<_, Option<String>>(0)?,
-                            "total_messages": row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            "total_points": row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            "sessions": row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                        }))
-                    })?
-                    .collect::<Result<_, _>>()?,
-                Err(e) if missing(&e) => Vec::new(),
-                Err(e) => return Err(e),
-            };
-
-            let bucket_rows: Vec<(Option<String>, i64, i64, i64)> = match conn.prepare(
-                "WITH grouped AS (
-                    SELECT CASE
-                        WHEN ?1 = 'hour' THEN strftime('%H', started_at)
-                        WHEN ?1 = 'day' THEN strftime('%w', started_at)
-                        WHEN ?1 = 'week' THEN strftime('%Y-%W', started_at)
-                        ELSE strftime('%Y-%m', started_at)
-                    END AS bucket, message_count, points
-                    FROM text_conversation_log
-                    WHERE started_at >= datetime('now', ?2) AND user_id = ?3
-                 )
-                 SELECT bucket, SUM(message_count), SUM(points), COUNT(*)
-                   FROM grouped GROUP BY bucket ORDER BY bucket",
-            ) {
-                Ok(mut stmt) => stmt
-                    .query_map(rusqlite::params![&mode_for_db, &cutoff, user_id], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                            row.get::<_, Option<i64>>(3)?.unwrap_or(0),
-                        ))
-                    })?
-                    .collect::<Result<_, _>>()?,
-                Err(e) if missing(&e) => Vec::new(),
-                Err(e) => return Err(e),
-            };
-
-            let range_stats: Option<(i64, i64, i64, SqlValue)> = match conn.query_row(
-                "SELECT SUM(message_count), SUM(points), COUNT(*), MAX(ended_at)
-                   FROM text_conversation_log
-                  WHERE started_at >= datetime('now', ?1) AND user_id = ?2",
-                rusqlite::params![&cutoff, user_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        row.get(2)?,
-                        row.get(3)?,
-                    ))
-                },
-            ) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) if missing(&e) => None,
-                Err(e) => return Err(e),
-            };
-
-            let lifetime: Option<(i64, i64, SqlValue)> = match conn.query_row(
-                "SELECT total_messages, total_points, last_update FROM text_stats
-                  WHERE user_id = ?1",
-                [user_id],
-                |row| {
-                    Ok((
-                        row.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        row.get(2)?,
-                    ))
-                },
-            ) {
-                Ok(v) => Some(v),
-                Err(rusqlite::Error::QueryReturnedNoRows) => None,
-                Err(e) if missing(&e) => None,
-                Err(e) => return Err(e),
-            };
-
-            struct TextRow {
-                id: i64,
-                channel_id: Option<SqlValue>,
-                started_at: SqlValue,
-                ended_at: SqlValue,
-                message_count: i64,
-                points: i64,
-                had_interaction: i64,
-                co_participants: usize,
-            }
-            let recent: Vec<TextRow> = match conn.prepare(
-                "SELECT id, guild_id, channel_id, started_at, ended_at,
-                        message_count, points, co_participant_ids, had_interaction
-                   FROM text_conversation_log WHERE user_id = ?1
-                  ORDER BY datetime(ended_at) DESC, id DESC LIMIT ?2",
-            ) {
-                Ok(mut stmt) => stmt
-                    .query_map(rusqlite::params![user_id, recent_limit], |row| {
-                        let channel: SqlValue = row.get(2)?;
-                        let co_raw: Option<String> = row.get(7)?;
-                        let had: SqlValue = row.get(8)?;
-                        Ok(TextRow {
-                            id: row.get(0)?,
-                            channel_id: (channel != SqlValue::Null).then_some(channel),
-                            started_at: row.get(3)?,
-                            ended_at: row.get(4)?,
-                            message_count: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-                            points: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                            had_interaction: safe_int(&had),
-                            co_participants: parse_co_ids(co_raw.as_deref(), user_id).len(),
-                        })
-                    })?
-                    .collect::<Result<_, _>>()?,
-                Err(e) if missing(&e) => Vec::new(),
-                Err(e) => return Err(e),
-            };
-
-            let buckets = normalize_buckets_text(&mode_for_db, &bucket_rows);
-            let (range_messages, range_points, range_sessions, range_last) =
-                range_stats.unwrap_or((0, 0, 0, SqlValue::Null));
-            let (lifetime_messages, lifetime_points, lifetime_update) =
-                lifetime.unwrap_or((0, 0, SqlValue::Null));
-            let last_session = if range_last == SqlValue::Null {
-                lifetime_update
-            } else {
-                range_last
-            };
-
-            Ok(json!({
-                "range_days": days,
-                "mode": mode_for_db,
-                "user_summary": {
-                    "user_id": user_id.to_string(),
-                    "lifetime_messages": lifetime_messages,
-                    "lifetime_points": lifetime_points,
-                    "range_messages": range_messages,
-                    "range_points": range_points,
-                    "range_sessions": range_sessions,
-                    "last_session": to_iso(last_session),
-                },
-                "daily": daily,
-                "buckets": buckets,
-                "recent_sessions_limit": recent_limit,
-                "recent_sessions": recent.iter().map(|r| json!({
-                    "id": r.id,
-                    "channel_id": r.channel_id.as_ref().map(|v| safe_int(v).to_string()),
-                    "started_at": to_iso(r.started_at.clone()),
-                    "ended_at": to_iso(r.ended_at.clone()),
-                    "message_count": r.message_count,
-                    "points": r.points,
-                    "had_interaction": r.had_interaction,
-                    "co_participants": r.co_participants,
-                })).collect::<Vec<_>>(),
-            }))
-        })
-        .await;
-
-    match result {
+    match text_history_payload(&app.pool, user_id, days, recent_limit, &mode, cutoff).await {
         Ok(payload) => Json(payload).into_response(),
         Err(err) => db_error(err),
     }
+}
+
+async fn text_history_payload(
+    pool: &PgPool,
+    user_id: i64,
+    days: i64,
+    recent_limit: i64,
+    mode: &str,
+    cutoff: DateTime<Utc>,
+) -> Result<Value, sqlx::Error> {
+    let daily_rows = sqlx::query!(
+        r#"
+        SELECT (started_at AT TIME ZONE 'UTC')::date::text AS "day!",
+               COALESCE(SUM(message_count), 0)::BIGINT AS "total_messages!",
+               COALESCE(SUM(points), 0)::BIGINT AS "total_points!",
+               COUNT(*) AS "sessions!"
+        FROM activity.text_conversation_log
+        WHERE started_at >= $1
+          AND user_id = $2
+        GROUP BY (started_at AT TIME ZONE 'UTC')::date
+        ORDER BY (started_at AT TIME ZONE 'UTC')::date DESC
+        "#,
+        cutoff,
+        user_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let daily: Vec<Value> = daily_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "day": row.day,
+                "total_messages": row.total_messages,
+                "total_points": row.total_points,
+                "sessions": row.sessions,
+            })
+        })
+        .collect();
+
+    let bucket_rows = sqlx::query!(
+        r#"
+        WITH source AS (
+            SELECT started_at AT TIME ZONE 'UTC' AS utc_started,
+                   message_count,
+                   points
+            FROM activity.text_conversation_log
+            WHERE started_at >= $2
+              AND user_id = $3
+        ),
+        grouped AS (
+            SELECT CASE
+                    WHEN $1 = 'hour' THEN to_char(utc_started, 'HH24')
+                    WHEN $1 = 'day' THEN EXTRACT(DOW FROM utc_started)::INT::TEXT
+                    WHEN $1 = 'week' THEN to_char(utc_started, 'YYYY-') ||
+                        lpad(((EXTRACT(DOY FROM utc_started)::INT - 1 -
+                            ((8 - EXTRACT(ISODOW FROM date_trunc('year', utc_started))::INT) % 7) + 7) / 7)::TEXT, 2, '0')
+                    ELSE to_char(utc_started, 'YYYY-MM')
+                   END AS bucket,
+                   message_count,
+                   points
+            FROM source
+        )
+        SELECT bucket AS "bucket!",
+               COALESCE(SUM(message_count), 0)::BIGINT AS "messages!",
+               COALESCE(SUM(points), 0)::BIGINT AS "points!",
+               COUNT(*) AS "sessions!"
+        FROM grouped
+        GROUP BY bucket
+        ORDER BY bucket
+        "#,
+        mode,
+        cutoff,
+        user_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let bucket_rows: Vec<(Option<String>, i64, i64, i64)> = bucket_rows
+        .into_iter()
+        .map(|row| (Some(row.bucket), row.messages, row.points, row.sessions))
+        .collect();
+
+    let range_stats = sqlx::query!(
+        r#"
+        SELECT COALESCE(SUM(message_count), 0)::BIGINT AS "range_messages!",
+               COALESCE(SUM(points), 0)::BIGINT AS "range_points!",
+               COUNT(*) AS "range_sessions!",
+               MAX(ended_at) AS "range_last?"
+        FROM activity.text_conversation_log
+        WHERE started_at >= $1
+          AND user_id = $2
+        "#,
+        cutoff,
+        user_id,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    let lifetime = sqlx::query!(
+        r#"
+        SELECT total_messages, total_points, last_update
+        FROM activity.text_stats
+        WHERE user_id = $1
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    let recent_rows = sqlx::query!(
+        r#"
+        SELECT id, channel_id, started_at, ended_at,
+               message_count, points, co_participant_ids::text AS "co_participant_ids?",
+               had_interaction
+        FROM activity.text_conversation_log
+        WHERE user_id = $1
+        ORDER BY ended_at DESC, id DESC
+        LIMIT $2
+        "#,
+        user_id,
+        recent_limit,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    struct TextRow {
+        id: i64,
+        channel_id: Option<i64>,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+        message_count: i64,
+        points: i64,
+        had_interaction: i64,
+        co_participants: usize,
+    }
+    let recent: Vec<TextRow> = recent_rows
+        .into_iter()
+        .map(|row| TextRow {
+            id: row.id,
+            channel_id: row.channel_id,
+            started_at: row.started_at,
+            ended_at: row.ended_at,
+            message_count: i64::from(row.message_count),
+            points: i64::from(row.points),
+            had_interaction: if row.had_interaction { 1 } else { 0 },
+            co_participants: parse_co_ids(row.co_participant_ids.as_deref(), user_id).len(),
+        })
+        .collect();
+
+    let buckets = normalize_buckets_text(mode, &bucket_rows);
+    let (lifetime_messages, lifetime_points, lifetime_update) = lifetime
+        .as_ref()
+        .map(|row| (row.total_messages, row.total_points, row.last_update))
+        .unwrap_or((0, 0, None));
+    let last_session = range_stats.range_last.or(lifetime_update);
+
+    Ok(json!({
+        "range_days": days,
+        "mode": mode,
+        "user_summary": {
+            "user_id": user_id.to_string(),
+            "lifetime_messages": lifetime_messages,
+            "lifetime_points": lifetime_points,
+            "range_messages": range_stats.range_messages,
+            "range_points": range_stats.range_points,
+            "range_sessions": range_stats.range_sessions,
+            "last_session": to_iso(last_session),
+        },
+        "daily": daily,
+        "buckets": buckets,
+        "recent_sessions_limit": recent_limit,
+        "recent_sessions": recent.iter().map(|r| json!({
+            "id": r.id,
+            "channel_id": r.channel_id.map(|v| v.to_string()),
+            "started_at": to_iso(Some(r.started_at)),
+            "ended_at": to_iso(Some(r.ended_at)),
+            "message_count": r.message_count,
+            "points": r.points,
+            "had_interaction": r.had_interaction,
+            "co_participants": r.co_participants,
+        })).collect::<Vec<_>>(),
+    }))
 }
 
 fn normalize_buckets_text(mode: &str, rows: &[(Option<String>, i64, i64, i64)]) -> Vec<Value> {
@@ -747,7 +825,7 @@ fn normalize_buckets_text(mode: &str, rows: &[(Option<String>, i64, i64, i64)]) 
     }
 }
 
-/// `GET /api/public/me/heatmap` — 7×24-Sekunden-Matrix.
+/// `GET /api/public/me/heatmap` — 7x24-Sekunden-Matrix.
 pub async fn handle_me_heatmap(
     State(app): State<SharedApp>,
     headers: HeaderMap,
@@ -765,74 +843,64 @@ pub async fn handle_me_heatmap(
         Ok(v) => v,
         Err(resp) => return resp,
     };
-    let cutoff = isoformat(now_local() - Duration::days(days));
+    let cutoff = Utc::now() - Duration::days(days);
 
-    let result = app
-        .db
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT started_at, ended_at, duration_seconds FROM voice_session_log
-                  WHERE user_id = ?1 AND started_at >= ?2 ORDER BY started_at",
-            )?;
-            let rows: Vec<(Option<String>, Option<String>, i64)> = stmt
-                .query_map(rusqlite::params![user_id, &cutoff], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    ))
-                })?
-                .collect::<Result<_, _>>()?;
-            Ok(rows)
-        })
-        .await;
+    match me_heatmap_payload(&app.pool, user_id, cutoff).await {
+        Ok((matrix, total_seconds)) => {
+            Json(json!({ "matrix": matrix, "total_seconds": total_seconds })).into_response()
+        }
+        Err(err) => db_error(err),
+    }
+}
 
-    let rows = match result {
-        Ok(v) => v,
-        Err(err) => return db_error(err),
-    };
+async fn me_heatmap_payload(
+    pool: &PgPool,
+    user_id: i64,
+    cutoff: DateTime<Utc>,
+) -> Result<([[i64; 24]; 7], i64), sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT started_at, ended_at, duration_seconds
+        FROM activity.voice_session_log
+        WHERE user_id = $1
+          AND started_at >= $2
+        ORDER BY started_at
+        "#,
+        user_id,
+        cutoff,
+    )
+    .fetch_all(pool)
+    .await?;
 
-    // _build_voice_matrix: Sessions stundenweise aufteilen
     let mut matrix = [[0i64; 24]; 7];
     let mut total_seconds = 0i64;
-    for (started_raw, ended_raw, duration) in &rows {
-        let Some(started) = started_raw.as_deref().and_then(parse_iso) else {
-            continue;
-        };
-        let ended = match ended_raw.as_deref().and_then(parse_iso) {
-            Some(e) => e,
-            None => {
-                if *duration <= 0 {
-                    continue;
-                }
-                started + Duration::seconds(*duration)
-            }
-        };
-        if ended <= started {
+    for row in rows {
+        if row.ended_at <= row.started_at {
             continue;
         }
-        let mut cursor = started;
-        while cursor < ended {
-            let next_hour = cursor
-                .date()
-                .and_hms_opt(chrono::Timelike::hour(&cursor.time()), 0, 0)
+        let mut cursor = row.started_at;
+        while cursor < row.ended_at {
+            let next_hour_naive = cursor
+                .date_naive()
+                .and_hms_opt(cursor.hour(), 0, 0)
                 .expect("gültige Stunde")
                 + Duration::hours(1);
-            let segment_end = next_hour.min(ended);
+            let next_hour = DateTime::<Utc>::from_naive_utc_and_offset(next_hour_naive, Utc);
+            let segment_end = next_hour.min(row.ended_at);
             let seconds = (segment_end - cursor).num_seconds();
             if seconds > 0 {
-                matrix[crate::timeutil::weekday_mon0(&cursor)][crate::timeutil::hour(&cursor)] +=
-                    seconds;
+                let naive = utc_naive(&cursor);
+                matrix[weekday_mon0(&naive)][hour(&naive)] += seconds;
                 total_seconds += seconds;
             }
             cursor = segment_end;
         }
     }
 
-    Json(json!({ "matrix": matrix, "total_seconds": total_seconds })).into_response()
+    Ok((matrix, total_seconds))
 }
 
-/// `GET /api/public/me/co-players` — user_co_players ist optional.
+/// `GET /api/public/me/co-players`.
 pub async fn handle_me_co_players(
     State(app): State<SharedApp>,
     headers: HeaderMap,
@@ -851,58 +919,264 @@ pub async fn handle_me_co_players(
         Err(resp) => return resp,
     };
 
-    let result = app
-        .db
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT co_player_id, sessions_together, total_minutes_together,
-                        last_played_together, co_player_display_name
-                   FROM user_co_players WHERE user_id = ?1
-                  ORDER BY sessions_together DESC, total_minutes_together DESC,
-                           last_played_together DESC
-                  LIMIT ?2",
-            )?;
-            let rows: Vec<(SqlValue, i64, i64, SqlValue, Option<String>)> = stmt
-                .query_map(rusqlite::params![user_id, limit], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })?
-                .collect::<Result<_, _>>()?;
-            let ids: Vec<i64> = rows.iter().map(|(id, ..)| safe_int(id)).collect();
-            let fallback = resolve_display_names(conn, &ids)?;
-            let entries: Vec<Value> = rows
-                .iter()
-                .map(|(id, sessions, minutes, last, display)| {
-                    let uid = safe_int(id);
-                    let name = display
-                        .as_deref()
-                        .filter(|s| !s.is_empty())
-                        .map(str::to_string)
-                        .or_else(|| fallback.get(&uid).cloned())
-                        .unwrap_or_else(|| format!("User {uid}"));
-                    json!({
-                        "user_id": uid.to_string(),
-                        "name": name,
-                        "sessions_together": sessions,
-                        "total_minutes_together": minutes,
-                        "last_played": to_iso(last.clone()),
-                    })
-                })
-                .collect();
-            Ok(json!({ "entries": entries }))
-        })
-        .await;
+    let rows = match sqlx::query!(
+        r#"
+        SELECT co_player_id, sessions_together, total_minutes_together,
+               last_played_together, co_player_display_name
+        FROM activity.user_co_players
+        WHERE user_id = $1
+        ORDER BY sessions_together DESC NULLS LAST,
+                 total_minutes_together DESC NULLS LAST,
+                 last_played_together DESC NULLS LAST
+        LIMIT $2
+        "#,
+        user_id,
+        limit,
+    )
+    .fetch_all(&app.pool)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return db_error(err),
+    };
 
-    match result {
-        Ok(payload) => Json(payload).into_response(),
-        Err(ref err) if is_missing_table(err, &["user_co_players"]) => {
-            Json(json!({ "entries": [] })).into_response()
+    let ids: Vec<i64> = rows.iter().map(|row| row.co_player_id).collect();
+    let fallback = match resolve_display_names(&app.pool, &ids).await {
+        Ok(names) => names,
+        Err(err) => return db_error(err),
+    };
+    let entries: Vec<Value> = rows
+        .iter()
+        .map(|row| {
+            let uid = row.co_player_id;
+            let name = row
+                .co_player_display_name
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .or_else(|| fallback.get(&uid).cloned())
+                .unwrap_or_else(|| format!("User {uid}"));
+            json!({
+                "user_id": uid.to_string(),
+                "name": name,
+                "sessions_together": i64::from(row.sessions_together.unwrap_or(0)),
+                "total_minutes_together": i64::from(row.total_minutes_together.unwrap_or(0)),
+                "last_played": to_iso(row.last_played_together),
+            })
+        })
+        .collect();
+    Json(json!({ "entries": entries })).into_response()
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use super::*;
+
+    fn ts(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("gültiger Test-Zeitpunkt")
+            .with_timezone(&Utc)
+    }
+
+    async fn insert_voice_session(
+        pool: &PgPool,
+        id: i64,
+        user_id: i64,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO activity.voice_session_log
+                (id, user_id, started_at, ended_at, duration_seconds, points)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(started_at)
+        .bind(ended_at)
+        .bind((ended_at - started_at).num_seconds())
+        .bind(1_i32)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_text_session(
+        pool: &PgPool,
+        id: i64,
+        user_id: i64,
+        started_at: DateTime<Utc>,
+        ended_at: DateTime<Utc>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO activity.text_conversation_log
+                (id, user_id, started_at, ended_at, message_count, points)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+        )
+        .bind(id)
+        .bind(user_id)
+        .bind(started_at)
+        .bind(ended_at)
+        .bind(1_i32)
+        .bind(1_i32)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    fn field_for<'a>(rows: &'a [Value], key: &str, expected: &str, field: &str) -> &'a Value {
+        rows.iter()
+            .find(|row| row[key] == json!(expected))
+            .unwrap_or_else(|| panic!("Zeile mit {key}={expected} fehlt"))
+            .get(field)
+            .unwrap_or_else(|| panic!("Feld {field} fehlt"))
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn me_stats_roundtrip_and_missing_user() -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let now = Utc::now();
+
+        sqlx::query!(
+            r#"
+            INSERT INTO voice.voice_stats (user_id, total_seconds, total_points, last_update)
+            VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)
+            "#,
+            1001_i64,
+            3600_i64,
+            42_i64,
+            now,
+            1002_i64,
+            7200_i64,
+            100_i64,
+            now,
+        )
+        .execute(db.pool())
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.text_stats (user_id, total_messages, total_points, last_update)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            1001_i64,
+            25_i64,
+            7_i64,
+            now,
+        )
+        .execute(db.pool())
+        .await?;
+
+        let payload = me_stats_payload(db.pool(), 1001).await?;
+        assert_eq!(payload["voice"]["lifetime_seconds"], json!(3600));
+        assert_eq!(payload["voice"]["lifetime_points"], json!(42));
+        assert_eq!(payload["voice"]["rank"], json!(2));
+        assert_eq!(payload["text"]["lifetime_messages"], json!(25));
+        assert_eq!(payload["text"]["rank"], json!(1));
+
+        let missing = me_stats_payload(db.pool(), 9999).await?;
+        assert_eq!(missing["voice"]["lifetime_seconds"], json!(0));
+        assert_eq!(missing["voice"]["rank"], Value::Null);
+        assert_eq!(missing["text"]["lifetime_messages"], json!(0));
+        assert_eq!(missing["text"]["rank"], Value::Null);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn me_history_and_heatmap_bucket_utc_wall_time_edges(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let user_id = 4242_i64;
+        let cases = [
+            (ts("2026-06-30T23:30:00Z"), ts("2026-06-30T23:40:00Z")),
+            (ts("2026-07-01T00:30:00Z"), ts("2026-07-01T00:40:00Z")),
+            (ts("2026-01-04T23:30:00Z"), ts("2026-01-04T23:40:00Z")),
+            (ts("2026-01-05T00:30:00Z"), ts("2026-01-05T00:40:00Z")),
+            (ts("2026-03-29T01:30:00Z"), ts("2026-03-29T01:45:00Z")),
+        ];
+
+        for (idx, (started_at, ended_at)) in cases.iter().copied().enumerate() {
+            insert_voice_session(
+                db.pool(),
+                10_000 + idx as i64,
+                user_id,
+                started_at,
+                ended_at,
+            )
+            .await?;
+            insert_text_session(
+                db.pool(),
+                20_000 + idx as i64,
+                user_id,
+                started_at,
+                ended_at,
+            )
+            .await?;
         }
-        Err(err) => db_error(err),
+
+        let cutoff = ts("2025-01-01T00:00:00Z");
+        let voice_week = voice_history_payload(db.pool(), user_id, 365, 10, "week", cutoff).await?;
+        let voice_daily = voice_week["daily"].as_array().expect("voice daily array");
+        assert_eq!(
+            field_for(voice_daily, "day", "2026-06-30", "sessions"),
+            &json!(1)
+        );
+        assert_eq!(
+            field_for(voice_daily, "day", "2026-07-01", "sessions"),
+            &json!(1)
+        );
+        let voice_buckets = voice_week["buckets"]
+            .as_array()
+            .expect("voice bucket array");
+        assert_eq!(
+            field_for(voice_buckets, "label", "2026-00", "sessions"),
+            &json!(1)
+        );
+        assert_eq!(
+            field_for(voice_buckets, "label", "2026-01", "sessions"),
+            &json!(1)
+        );
+
+        let voice_hour = voice_history_payload(db.pool(), user_id, 365, 10, "hour", cutoff).await?;
+        let voice_hours = voice_hour["buckets"].as_array().expect("voice hours array");
+        assert_eq!(field_for(voice_hours, "label", "01", "sessions"), &json!(1));
+        assert_eq!(field_for(voice_hours, "label", "03", "sessions"), &json!(0));
+
+        let text_week = text_history_payload(db.pool(), user_id, 365, 10, "week", cutoff).await?;
+        let text_daily = text_week["daily"].as_array().expect("text daily array");
+        assert_eq!(
+            field_for(text_daily, "day", "2026-06-30", "sessions"),
+            &json!(1)
+        );
+        assert_eq!(
+            field_for(text_daily, "day", "2026-07-01", "sessions"),
+            &json!(1)
+        );
+        let text_buckets = text_week["buckets"].as_array().expect("text bucket array");
+        assert_eq!(
+            field_for(text_buckets, "label", "2026-00", "sessions"),
+            &json!(1)
+        );
+        assert_eq!(
+            field_for(text_buckets, "label", "2026-01", "sessions"),
+            &json!(1)
+        );
+
+        let text_hour = text_history_payload(db.pool(), user_id, 365, 10, "hour", cutoff).await?;
+        let text_hours = text_hour["buckets"].as_array().expect("text hours array");
+        assert_eq!(field_for(text_hours, "label", "01", "sessions"), &json!(1));
+        assert_eq!(field_for(text_hours, "label", "03", "sessions"), &json!(0));
+
+        let (matrix, total_seconds) = me_heatmap_payload(db.pool(), user_id, cutoff).await?;
+        assert_eq!(matrix[6][1], 900);
+        assert_eq!(matrix[6][3], 0);
+        assert_eq!(total_seconds, 3_300);
+        Ok(())
     }
 }

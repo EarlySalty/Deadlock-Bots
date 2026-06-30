@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (started_at AT TIME ZONE 'UTC')::date::text AS \"day!\",\n               COALESCE(SUM(message_count), 0)::BIGINT AS \"total_messages!\",\n               COALESCE(SUM(points), 0)::BIGINT AS \"total_points!\",\n               COUNT(*) AS \"sessions!\"\n        FROM activity.text_conversation_log\n        WHERE started_at >= $1\n          AND user_id = $2\n        GROUP BY (started_at AT TIME ZONE 'UTC')::date\n        ORDER BY (started_at AT TIME ZONE 'UTC')::date DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "day!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_messages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_points!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sessions!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "264a1a5d92bd9e1ae486697d60a2ee82744370f7e96b2d772d25df5f4cffcd6e"
+}
