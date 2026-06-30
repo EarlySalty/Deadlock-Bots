@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"ok!\"\n            FROM bot.streamer_link_intents\n            LIMIT 0\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4684061961e0ac6a522a0d8ac1ccf0765fb722bb2061ff3622d448509cd639ec"
+}

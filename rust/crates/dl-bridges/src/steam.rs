@@ -8,13 +8,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::interactions::{ChannelMessage, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, ChannelSender, CommandSpec, Dispatcher, InteractionHandler,
     InteractionRouter, MemberEvent, ResponseMessageHook,
 };
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
 pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -386,18 +387,16 @@ struct SteamPanelRef {
 
 #[derive(Clone)]
 struct SteamPanelStore {
-    db: Db,
+    pool: PgPool,
 }
 
 impl SteamPanelStore {
-    fn new(db: Db) -> Self {
-        Self { db }
+    fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     async fn get(&self) -> Option<SteamPanelRef> {
-        let raw = self
-            .db
-            .kv_get(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY)
+        let raw = kv::get(&self.pool, STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY)
             .await
             .ok()
             .flatten()?;
@@ -416,21 +415,14 @@ impl SteamPanelStore {
             "message_id": message_id,
         })
         .to_string();
-        if let Err(err) = self
-            .db
-            .kv_set(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY, payload)
-            .await
+        if let Err(err) = kv::set(&self.pool, STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY, &payload).await
         {
             tracing::warn!(%err, "Steam-Panel-Referenz konnte nicht gespeichert werden");
         }
     }
 
     async fn clear(&self) {
-        if let Err(err) = self
-            .db
-            .kv_delete(STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY)
-            .await
-        {
+        if let Err(err) = kv::delete(&self.pool, STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY).await {
             tracing::debug!(%err, "Steam-Panel-Referenz konnte nicht geloescht werden");
         }
     }
@@ -595,8 +587,16 @@ pub fn register(router: &mut InteractionRouter, client: Arc<SteamBotClient>) {
     register_inner(router, client, None);
 }
 
-pub fn register_with_db(router: &mut InteractionRouter, client: Arc<SteamBotClient>, db: Db) {
-    register_inner(router, client, Some(SteamPanelStore::new(db)));
+pub fn register_with_pool(
+    router: &mut InteractionRouter,
+    client: Arc<SteamBotClient>,
+    pool: PgPool,
+) {
+    register_inner(router, client, Some(SteamPanelStore::new(pool)));
+}
+
+pub fn register_with_db(router: &mut InteractionRouter, client: Arc<SteamBotClient>, pool: PgPool) {
+    register_with_pool(router, client, pool);
 }
 
 fn register_inner(
@@ -803,12 +803,12 @@ fn register_inner(
 
 pub fn spawn_panel_restore(
     client: Arc<SteamBotClient>,
-    db: Db,
+    pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tokio::time::sleep(Duration::from_secs(20)).await;
-        let store = SteamPanelStore::new(db);
+        let store = SteamPanelStore::new(pool);
         let Some(panel_ref) = store.get().await else {
             return;
         };
@@ -1130,24 +1130,19 @@ mod tests {
         server.abort();
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn steam_panel_editiert_gespeicherte_message_im_selben_kanal() {
         let (url, _received, server) = mock_steam_bot(json!({
             "reply_embed": { "title": "Steam" },
         }))
         .await;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("steam.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("kv_store");
-        db.kv_set(
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("central test db");
+        kv::set(
+            db.pool(),
             STEAM_PANEL_KV_NS,
             STEAM_PANEL_KV_KEY,
             r#"{"channel_id":9,"message_id":555}"#,
@@ -1160,7 +1155,7 @@ mod tests {
             wire_name: "publish_steam_panel",
             panel_buttons: steam_panel_components(),
             confirmation: BRD09_STEAM_PANEL_POSTED_MSG,
-            panel_store: Some(SteamPanelStore::new(db.clone())),
+            panel_store: Some(SteamPanelStore::new(db.pool().clone())),
         };
         let reply = handler.handle(interaction("")).await;
         let panel = reply.channel_message.expect("panel");
