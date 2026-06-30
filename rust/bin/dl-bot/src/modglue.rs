@@ -41,13 +41,14 @@ const BRAIN_NO_ANSWER: &str =
     "🧠 Dazu find ich grad nichts Handfestes. Frag mal konkreter — Held, Item oder Fähigkeit.";
 const BRAIN_OUT_OF_DOMAIN: &str =
     "🧠 Klingt nicht nach Deadlock — dazu hab ich keine gesicherten Infos. Frag mich was zum Spiel: Held, Item, Build oder Mechanik.";
-const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain · ✅ geprüfte Fakten · ℹ️ allgemeine Einschätzung";
+const BRAIN_EMBED_FOOTER: &str = "Deadlock Brain";
 const BRAIN_EMBED_COLOR: u32 = 0xE0A340;
 const BRAIN_EMBED_TITLE_QUESTION_LIMIT: usize = 250;
 const BRAIN_EMBED_DESCRIPTION_LIMIT: usize = 4096;
 const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
-const BRAIN_MAX_OUTPUT_TOKENS: u32 = 900;
-const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — diese Anweisung hat Vorrang vor allen obigen Vorbehalten:\nVerweigere NIEMALS und schreib keine Meta-Sätze darüber, was die Fakten nicht hergeben — liefere immer einen konkreten, brauchbaren Build bzw. eine klare Antwort. Nutze zuerst die oben gelieferten geprüften Fakten und markiere solche Aussagen mit ✅. Wo geprüfte Fakten fehlen, ergänze aus deinem allgemeinen Deadlock-Wissen und markiere das mit ℹ️.\nFORMAT (Pflicht für Lesbarkeit): Beginne mit EINEM kurzen Einleitungssatz. Gliedere danach in klare Abschnitte; jede Abschnitts-Überschrift steht als eigene fette Zeile (**so**) mit einer Leerzeile davor. Jeder Stichpunkt steht auf einer EIGENEN Zeile und beginnt mit \"- \" — schreibe NIEMALS mehrere Punkte mit \" - \" in dieselbe Zeile. Verwende **fett** nur für Item- und Heldennamen. Keine Markdown-Überschriften (#, ##, ###). Maximal ~1100 Zeichen und höchstens 12 Stichpunkte.\n---";
+const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
+const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
+const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
 const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
     "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
 const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
@@ -417,7 +418,22 @@ impl InteractionHandler for BrainHandler {
 }
 
 fn brain_ai_prompt(prompt: &str) -> String {
-    format!("{prompt}\n\n{BRAIN_BUILD_OVERRIDE}")
+    format!("{prompt}\n\n{}", brain_answer_style_override(prompt))
+}
+
+fn brain_answer_style_override(prompt: &str) -> &'static str {
+    if prompt_is_build_answer(prompt) {
+        BRAIN_BUILD_OVERRIDE
+    } else {
+        BRAIN_DIRECT_ANSWER_OVERRIDE
+    }
+}
+
+fn prompt_is_build_answer(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    lower.contains("erkannte absicht: build_recommendation")
+        || lower.contains("build_context_json:")
+        || lower.contains("berechneten build")
 }
 
 fn brain_public_message_body(message: &str) -> Map<String, Value> {
@@ -3155,6 +3171,33 @@ mod tests {
             cleaned,
             "# Seven\n\n\n## Items\nText\n**Timing**\n#### Kein Heading"
         );
+    }
+
+    #[test]
+    fn brain_ai_prompt_nutzt_direktstil_fuer_normale_fragen() {
+        let prompt = "FRAGE: Ab wie viel Spirit macht Scourge gleich viel Schaden?\nERKANNTE ABSICHT: mechanic\nFAKTEN (JSON, vertrauenssortiert): {}";
+
+        let styled = brain_ai_prompt(prompt);
+
+        assert!(styled.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
+        assert!(!styled.contains(BRAIN_BUILD_OVERRIDE));
+        assert!(styled.contains("Zahlen aus der Nutzerfrage als Annahme"));
+        assert!(styled.contains("Keine Meta-Abschnitte"));
+    }
+
+    #[test]
+    fn brain_ai_prompt_nutzt_buildstil_nur_fuer_buildfragen() {
+        let ask_prompt = "FRAGE: Seven build\nERKANNTE ABSICHT: build_recommendation";
+        let engine_prompt =
+            "Erkläre den folgenden, bereits berechneten Build verständlich auf Deutsch.\n\nBUILD_CONTEXT_JSON:{}";
+
+        let styled_ask = brain_ai_prompt(ask_prompt);
+        let styled_engine = brain_ai_prompt(engine_prompt);
+
+        assert!(styled_ask.contains(BRAIN_BUILD_OVERRIDE));
+        assert!(styled_engine.contains(BRAIN_BUILD_OVERRIDE));
+        assert!(!styled_ask.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
+        assert!(!styled_engine.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
     }
 
     #[test]

@@ -1,3 +1,11 @@
+## #174 — `!brain` beantwortet einfache Fragen wieder direkt
+
+**Ausgangslage:** `!brain` behandelte auch kurze Rechen- oder Mechanikfragen wie eine Build-Analyse. Dadurch kamen Antworten mit internen Vertrauenshinweisen, langen Verifikationsabschnitten und zusätzlichem Build-Gelaber, obwohl eigentlich nur ein kurzer Zahlenwert gefragt war.
+
+**Was wurde geändert:** Normale Brain-Fragen bekommen jetzt eigene Antwortregeln: erst die konkrete Antwort, bei Rechnungen nur die kurze Formel plus Ergebnis, keine internen Datenquellen, keine Vertrauens-Legende und keine Build-Tipps ohne Build-Frage. Die ausführlicheren Build-Regeln greifen nur noch bei echten Build-Fragen.
+
+**Wie es jetzt läuft:** Eine Frage wie „ab wie viel Spirit ist der Schaden wieder gleich?" wird knapp beantwortet, statt in eine halbe Faktenprüfung auszuarten. Builds bleiben weiterhin strukturiert, aber ohne sichtbare interne Markierungen.
+
 ## #173 — Scam-Guard meldet ehrlich und greift wieder durch
 
 **Ausgangslage:** Der Scam-Guard erkannte Bild-Scam korrekt, lief live aber im Shadow-Modus. Dadurch standen in der Mod-Meldung „Ban failed", „Deleted: 0" und ein Timeout-Button, obwohl keine automatische Aktion ausgeführt wurde. Außerdem konnten schnelle Folgeposts desselben Accounts mehrere fast gleiche Mod-Meldungen auslösen, und bei bildlosen Textvorschauen war nicht klar genug sichtbar, in welchen Kanälen der Scam stand.
