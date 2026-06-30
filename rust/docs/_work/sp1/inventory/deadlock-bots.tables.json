@@ -1,0 +1,7055 @@
+{
+ "project": "Deadlock-Bots",
+ "db_path": "/home/naniadm/Documents/Deadlock-Bots/data/deadlock.sqlite3",
+ "db_tech": "rusqlite",
+ "tables": [
+  {
+   "name": "ai_moderation_cases",
+   "rows": 36,
+   "columns": [
+    {
+     "name": "case_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_tag",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "original_content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "attachments_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_category",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_confidence",
+     "type": "REAL",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_raw_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "escalated_with_context",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "action",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mod_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mod_action_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mod_deny_reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mod_review_message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "log_message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-moderation"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'moderation'"
+  },
+  {
+   "name": "ai_moderation_ragebait_hits",
+   "rows": 3,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "content_preview",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-moderation"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'moderation'"
+  },
+  {
+   "name": "beta_invite_audit",
+   "rows": 129,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "steam_id64",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_profile",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "invited_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "beta_invite_auto_failure_alerts",
+   "rows": 3,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_alert_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "beta_invite_friendship_auto_poll",
+   "rows": 10,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "invite_record_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_id64",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "next_check_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "attempts_completed",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "max_attempts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_checked_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "finished_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "beta_invite_intent",
+   "rows": 200,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "intent",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "decided_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "locked",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "beta_invite_panel_clicks",
+   "rows": 181,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "click_count",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "first_clicked_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_clicked_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "beta_invite_pending_payments",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "token",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "paid_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "consumed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "beta_invite_supporter_role_grants",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "role_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "granted_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_payment_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_applied_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "revoked_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "beta_invite_tickets",
+   "rows": 101,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "closed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "changelog_entries",
+   "rows": 6290,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "post_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "section",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "subject",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "subject_type",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "change_text",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386; BEHALTEN dauerhaft #385 (0 Konsumenten, Feature offen)"
+  },
+  {
+   "name": "changelog_posts",
+   "rows": 117,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "url",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "posted_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "raw_content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "translated_content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-dashboard"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "claimed_threads",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "thread_id",
+     "type": "BIGINT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "assigned_user_id",
+     "type": "BIGINT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "claimed_by_id",
+     "type": "BIGINT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_contest_submissions",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "contest_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "submission_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_contests",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "start_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "end_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "announce_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "video_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "winner_user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_fetch_history",
+   "rows": 2429,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "streamer_login",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "fetched_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "clips_found",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "clips_new",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "fetch_duration_ms",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_last_hashtags",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "streamer_login",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hashtags",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_used_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_submissions",
+   "rows": 25,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "link",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "credit",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "permission",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "info",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot)"
+  },
+  {
+   "name": "clip_templates_global",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "template_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description_template",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hashtags",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "category",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "usage_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_templates_streamer",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "streamer_login",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "template_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description_template",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hashtags",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_default",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "clip_window_submissions",
+   "rows": 21,
+   "columns": [
+    {
+     "name": "window_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "submission_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot)"
+  },
+  {
+   "name": "clip_windows",
+   "rows": 39,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "start_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "end_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "dump_sent_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Namespace 'clips' (groesstenteils tot)"
+  },
+  {
+   "name": "coach_applications",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "application_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "experience_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "specialties_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reviewed_by",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reviewed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "coaching",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "coaches",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "avatar_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bio",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "specialties_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "website_coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "avg_rating",
+     "type": "REAL",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_reviews",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_sessions",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-community"
+   ],
+   "proposed_schema": "coaching",
+   "notes": ""
+  },
+  {
+   "name": "coaching_bans",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "banned_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "coaching",
+   "notes": ""
+  },
+  {
+   "name": "coaching_coach_rotation",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_assigned_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "coaching",
+   "notes": ""
+  },
+  {
+   "name": "coaching_requests",
+   "rows": 56,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "subrank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hero",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "games_played",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hours_played",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "current_problems",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_summary",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_insights_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_assigned_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_expires_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_removed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_slot",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "assigned_coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reserved_until",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "website_request_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coachee_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-community",
+    "dl-db"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Cross-SP #387: kanonische Form mit Website (id TEXT) vereinen"
+  },
+  {
+   "name": "coaching_sessions",
+   "rows": 43,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "request_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_thread_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_assigned_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_reminder_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role_expires_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_started_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_last_seen_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "survey_sent_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "completed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reward_role_expires_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reward_role_removed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "coaching",
+   "notes": ""
+  },
+  {
+   "name": "coaching_sessions_legacy",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "thread_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "subrank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hero",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "comment",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "step",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_started_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "voice_last_seen_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "survey_sent_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "coaching",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "coaching_surveys",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rating",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "feedback_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "improved_areas",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "unresolved_items",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "would_recommend",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "coaching",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "customgames_tournament_signups",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "registration_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank_value",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "assigned_by_admin",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_subvalue",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "customgames_tournament_teams",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name_key",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_by",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "deadlock_changelogs",
+   "rows": 117,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "posted_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "deadlock_hero_builds",
+   "rows": 71,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "build_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "build_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "author_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sort_order",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sync_status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "sync_message",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_checked_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_synced_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_alerted_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_version",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_last_updated_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "clone_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "clone_version",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-dashboard",
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "deadlock_heroes",
+   "rows": 38,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "origin_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "target_build_name_override",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-dashboard",
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "deadlock_party_members",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "party_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "party_size",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "seen_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "deadlock_subrank_roles",
+   "rows": 66,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "rank_value",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "subrank",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 3
+    },
+    {
+     "name": "role_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "role_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "deadlock_voice_watch",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "discord_invite_codes",
+   "rows": 89,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "invite_code",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_seen_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "dm_response_tracking",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_dm_sent",
+     "type": "TIMESTAMP",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "response_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_response",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "faq_chat_messages",
+   "rows": 44,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "role",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "content",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "faq_chat_sessions",
+   "rows": 13,
+   "columns": [
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_activity_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "hero_build_clones",
+   "rows": 68,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "origin_hero_build_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "origin_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "author_account_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_language",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_version",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_last_updated_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "target_language",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "target_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "target_description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status_info",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "uploaded_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "uploaded_version",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_attempt_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "attempts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "hero_build_sources",
+   "rows": 107,
+   "columns": [
+    {
+     "name": "hero_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "origin_build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "author_account_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "language",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "version",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tags_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "details_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "publish_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_updated_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "fetched_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_seen_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "invite_snapshot_cache",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "snapshot_json",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-discord"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "issue_reports",
+   "rows": 17,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "category",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "ai_response",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_model",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "answered_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "kv_store",
+   "rows": 974,
+   "columns": [
+    {
+     "name": "ns",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "k",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "v",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-bot",
+    "dl-bridges",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db",
+    "dl-twitch-invite-sync",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "live_player_state",
+   "rows": 526,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_gameid",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_server_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_seen_ts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "in_deadlock_now",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "in_match_now_strict",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_stage",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_minutes",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_localized",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_hero",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_party_hint",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-db",
+    "dl-voice"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: last_seen_ts)"
+  },
+  {
+   "name": "member_events",
+   "rows": 2946,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "event_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "timestamp",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "account_created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "join_position",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "metadata",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db",
+    "dl-stats",
+    "dl-twitch-invite-sync"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: timestamp)"
+  },
+  {
+   "name": "member_leave_surveys",
+   "rows": 95,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "left_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_bucket",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "days_on_server",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "survey_token",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "dm_status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reason_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "follow_up_question",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "follow_up_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "extra_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "responded_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "web_submitted_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "web_payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-dashboard"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: left_at)"
+  },
+  {
+   "name": "message_activity",
+   "rows": 1705,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "message_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_message_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "first_message_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: last_message_at)"
+  },
+  {
+   "name": "notification_log",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notification_time",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "notification_queue",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "queue_date",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "added_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "processed",
+     "type": "BOOLEAN",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "oauth_states",
+   "rows": 83,
+   "columns": [
+    {
+     "name": "state",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "provider",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "flow_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "requesting_service",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "redirect_after",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "used",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "metadata",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-dashboard"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "onboarding_pending_verify",
+   "rows": 289,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "persistent_views",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "message_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "channel_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "view_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "reaction_role_dm_log",
+   "rows": 42,
+   "columns": [
+    {
+     "name": "mapping_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "sent_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-dashboard",
+    "dl-db"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "reaction_role_mappings",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "source_channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "emoji",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "role_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "dm_enabled",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "dm_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "remove_on_unreact",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "backfill_pending",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-dashboard",
+    "dl-db"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "rename_global_state",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_rename_timestamp",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "next_worker_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "rename_requests",
+   "rows": 17447,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "new_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "processed_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "retry_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "assigned_worker_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "router_user_prefs",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "auto_join",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "schema_version",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "version",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "scrim_match",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "team_a_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "team_b_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "when_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-db",
+    "dl-squads"
+   ],
+   "proposed_schema": "scrim",
+   "notes": ""
+  },
+  {
+   "name": "scrim_participant",
+   "rows": 29,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank_verified",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "roles",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-db",
+    "dl-squads"
+   ],
+   "proposed_schema": "scrim",
+   "notes": ""
+  },
+  {
+   "name": "scrim_team",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "coach",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_role_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-db",
+    "dl-squads"
+   ],
+   "proposed_schema": "scrim",
+   "notes": ""
+  },
+  {
+   "name": "scrim_team_member",
+   "rows": 24,
+   "columns": [
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "participant_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "role",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_captain",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_bench",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-db",
+    "dl-squads"
+   ],
+   "proposed_schema": "scrim",
+   "notes": ""
+  },
+  {
+   "name": "security_guard_incidents",
+   "rows": 11,
+   "columns": [
+    {
+     "name": "case_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_tag",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "action",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "message_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "attachment_count",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "keyword_hit",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "messages_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-moderation"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'moderation'"
+  },
+  {
+   "name": "server_faq_logs",
+   "rows": 35,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "question",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "answer",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "model",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "metadata",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "standalone_bot_state",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "bot",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "heartbeat",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "standalone_commands",
+   "rows": 25,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bot",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "command",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "result",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "finished_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_beta_invites",
+   "rows": 157,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_id64",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "account_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "friend_requested_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "friend_confirmed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_sent_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_notified_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_invite_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "dispatch_attempts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_cleanup_poll_state",
+   "rows": 616,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_polled_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_result",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "miss_count",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_flow_throttle",
+   "rows": 93,
+   "columns": [
+    {
+     "name": "key",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "last_run",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_friend_check_cache",
+   "rows": 614,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "friend",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "checked_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_friend_requests",
+   "rows": 389,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "requested_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_attempt",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "attempts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_friendship_miss_tracker",
+   "rows": 421,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "miss_count",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_polled_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_seen_friend_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_miss_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_action_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_launch_tokens",
+   "rows": 13541,
+   "columns": [
+    {
+     "name": "token",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "consumed_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_links",
+   "rows": 509,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "verified",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "primary_account",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "legacy_ref",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "migrated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_subrank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_badge_level",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_steam_friend",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-bot",
+    "dl-bridges",
+    "dl-central-db",
+    "dl-community",
+    "dl-db",
+    "dl-stats",
+    "dl-voice"
+   ],
+   "proposed_schema": "core",
+   "notes": "Cross-SP #387: zentralisieren in core.steam_links (auch Steam-Bot SP3)"
+  },
+  {
+   "name": "steam_links_archive",
+   "rows": 299,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "verified",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "primary_account",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_subrank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_badge_level",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "left_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "leave_reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_links_leave_archive",
+   "rows": 99,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "verified",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "primary_account",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_subrank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_badge_level",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_rank_updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "left_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "leave_reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_nudge_state",
+   "rows": 384,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "notified_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "opt_out",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "first_seen",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "view_version",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_presence_watchlist",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "note",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "added_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_quick_invites",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "token",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "invite_link",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "invite_limit",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_duration",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reserved_by",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reserved_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_seen",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_rank_assignments",
+   "rows": 182,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "role_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "steam_rank_history",
+   "rows": 3959,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "badge_level",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "captured_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "steam",
+   "notes": "0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386; BEHALTEN dauerhaft #385 (0 Konsumenten, Feature offen)"
+  },
+  {
+   "name": "steam_rich_presence",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "app_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "player_group",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "player_group_size",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "connect",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mode",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "map",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "party_size",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "raw_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_update",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_role_cleanup_pending",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "attempts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "steam_tasks",
+   "rows": 1000,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "result",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "finished_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "attempts",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot"
+   ],
+   "proposed_schema": "steam",
+   "notes": ""
+  },
+  {
+   "name": "streamer_link_intents",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "linked_login",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-bridges"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "tempvoice_bans",
+   "rows": 27,
+   "columns": [
+    {
+     "name": "owner_id",
+     "type": "BIGINT",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "banned_id",
+     "type": "BIGINT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_interface",
+   "rows": 3,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "category_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "lane_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_lane_tag_filter",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "min_age_tag",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "required_tone_tag",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deny_ragebaiter",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-moderation",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_lanes",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "owner_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "base_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "category_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_staging_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "initial_owner_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_lurkers",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "original_nick",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_owner_prefs",
+   "rows": 46,
+   "columns": [
+    {
+     "name": "owner_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "region",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_presets",
+   "rows": 13,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "category_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 3
+    },
+    {
+     "name": "base_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "limit",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "min_rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "region",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_rank_pref",
+   "rows": 7,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "subrank",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "tempvoice_staging_channels",
+   "rows": 6,
+   "columns": [
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config); 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "text_conversation_log",
+   "rows": 4078,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "ended_at",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_count",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "co_participant_ids",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "had_interaction",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-db",
+    "dl-stats"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: started_at)"
+  },
+  {
+   "name": "text_stats",
+   "rows": 578,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "total_messages",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "total_points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_update",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-bot",
+    "dl-db",
+    "dl-stats"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: last_update)"
+  },
+  {
+   "name": "tierlist_build_votes",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "build_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "upvotes",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "downvotes",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tierlist_hero_meta",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tierlist_settings",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "k",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "v",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tierlist_snapshot_heroes",
+   "rows": 3420,
+   "columns": [
+    {
+     "name": "snapshot_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "matches",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "wins",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "losses",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "winrate",
+     "type": "REAL",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tierlist_snapshots",
+   "rows": 90,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bucket",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "patch_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "patch_unix",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "fetched_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tierlist_streamers",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "twitch_login",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sort_order",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-tierlist"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  },
+  {
+   "name": "tournament_periods",
+   "rows": 3,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "registration_start",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "registration_end",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_size",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_by",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "turnier_auth_tokens",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "token",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "REAL",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden; 0 Rust-Konsumenten (tot/Legacy) — migrieren, Drop spaeter #386"
+  },
+  {
+   "name": "twitch_streamer_invites",
+   "rows": 84,
+   "columns": [
+    {
+     "name": "streamer_login",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_sent_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-dashboard",
+    "dl-twitch-invite-sync"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag Catch-all-Namespace 'bot' (State/Infra) — in Phase 1 entscheiden"
+  },
+  {
+   "name": "user_activity_patterns",
+   "rows": 787,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "typical_hours",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "typical_days",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "activity_score_2w",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "sessions_count_2w",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_minutes_2w",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_active_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_analyzed_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_pinged_at",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ping_count_30d",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-db"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: last_active_at)"
+  },
+  {
+   "name": "user_co_players",
+   "rows": 25178,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "co_player_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "sessions_together",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_minutes_together",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_played_together",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "co_player_display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db",
+    "dl-stats"
+   ],
+   "proposed_schema": "activity",
+   "notes": ""
+  },
+  {
+   "name": "user_data",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "custom_interval",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "paused_until",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "core",
+   "notes": ""
+  },
+  {
+   "name": "user_mod_tags",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "mod_tag",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "set_by",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "set_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community"
+   ],
+   "proposed_schema": "core",
+   "notes": ""
+  },
+  {
+   "name": "user_privacy",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "opted_out",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "deleted_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-db",
+    "dl-voice"
+   ],
+   "proposed_schema": "core",
+   "notes": ""
+  },
+  {
+   "name": "user_retention_messages",
+   "rows": 1664,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sent_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "delivery_status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "error_message",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-dashboard"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: sent_at)"
+  },
+  {
+   "name": "user_retention_tracking",
+   "rows": 890,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "first_seen_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_active_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "total_active_days",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "avg_weekly_sessions",
+     "type": "REAL",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_miss_you_sent_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "miss_you_count",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "opted_out",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot",
+    "dl-community",
+    "dl-dashboard"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: first_seen_at)"
+  },
+  {
+   "name": "user_tags",
+   "rows": 190,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "tag_key",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 2
+    },
+    {
+     "name": "tag_value",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "set_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "core",
+   "notes": ""
+  },
+  {
+   "name": "voice_channel_anchors",
+   "rows": 34,
+   "columns": [
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rank_value",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "allowed_min",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "allowed_max",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "anchor_subrank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "score_min",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "score_max",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "voice_channel_settings",
+   "rows": 385,
+   "columns": [
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "enabled",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-voice"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'voice' (TempVoice/Voice-Config)"
+  },
+  {
+   "name": "voice_feedback_requests",
+   "rows": 457,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "co_player_names",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "duration_seconds",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "request_type",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error_message",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "prompt_message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "sent_at_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: sent_at_ts)"
+  },
+  {
+   "name": "voice_feedback_responses",
+   "rows": 31,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "request_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "message_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "received_at_ts",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-community",
+    "dl-voice"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: received_at_ts)"
+  },
+  {
+   "name": "voice_session_log",
+   "rows": 63844,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "guild_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "ended_at",
+     "type": "DATETIME",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "duration_seconds",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "peak_users",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_counts_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "co_player_ids",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db",
+    "dl-stats",
+    "dl-voice"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: started_at)"
+  },
+  {
+   "name": "voice_stats",
+   "rows": 864,
+   "columns": [
+    {
+     "name": "user_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "total_seconds",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_update",
+     "type": "DATETIME",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-activity",
+    "dl-bot",
+    "dl-community",
+    "dl-dashboard",
+    "dl-db",
+    "dl-stats",
+    "dl-voice"
+   ],
+   "proposed_schema": "activity",
+   "notes": "Hypertable-Kandidat (Zeit-Spalte: last_update)"
+  },
+  {
+   "name": "watched_build_authors",
+   "rows": 10,
+   "columns": [
+    {
+     "name": "author_account_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 1
+    },
+    {
+     "name": "notes",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "BOOLEAN",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "last_checked_at",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "priority",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_checked_status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "last_checked_message",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "dl-bot"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "Vorschlag neues Namespace 'tierlist' (Tierlist/Builds)"
+  }
+ ]
+}

@@ -1,0 +1,1463 @@
+{
+ "project": "Website",
+ "db_path": "/home/naniadm/Documents/Website/builds/backend/deadlock.db",
+ "db_tech": "aiosqlite",
+ "tables": [
+  {
+   "name": "coach_applications",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "application_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "experience_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "specialties_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reviewed_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reviewed_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Coach-Bewerbungen; aktuell leer, aber create/review-Routen aktiv."
+  },
+  {
+   "name": "coach_reviews",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "user_display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rating",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "feedback_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "improved_areas",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Review-Historie aus Surveys; aktuell leer; Hypertable-Kandidat nur bei starkem Wachstum."
+  },
+  {
+   "name": "coachees",
+   "rows": 14,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "main_heroes_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "current_focus",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notes",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Coaching-Plattformprofil fuer gecoachte Spieler; Bot-Sync und Coach/User-Routen aktiv."
+  },
+  {
+   "name": "coaches",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "avatar_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bio",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "specialties_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "avg_rating",
+     "type": "REAL",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_reviews",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "total_sessions",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "twitch_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.auth",
+    "app.routers.coaching",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Coach-Roster/Profile; Bot-Roster-Sync, Public-Profil und Auth-Coach-Gate aktiv."
+  },
+  {
+   "name": "coaching_appointments",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coachee_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "duration_minutes",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "note",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notify_created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notify_reminder_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notify_cancelled_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Termin- und Notification-Queue; aktuell leer; Hypertable-Kandidat bei laengerer Termin-Historie."
+  },
+  {
+   "name": "coaching_goals",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "coachee_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "sort_order",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "target_date",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "completed_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Coach-gepflegte Ziele; aktuell leer, aber Plattform-Routen aktiv."
+  },
+  {
+   "name": "coaching_milestones",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "goal_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "achieved",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "achieved_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "sort_order",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Meilensteine unter coaching_goals; aktuell leer, aber Plattform-Routen aktiv."
+  },
+  {
+   "name": "coaching_requests",
+   "rows": 21,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "subrank",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hero",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "games_played",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hours_played",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "availability",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "current_problems",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_summary",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ai_insights_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "assigned_coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "assigned_coach_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reserved_until",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bot_request_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "preferred_coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notify_discord_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "SP1/#387: Website id TEXT plus Plattform-Spalten assigned_coach_username, bot_request_id, preferred_coach_id, notify_discord_at; Bot-Seite hat id INTEGER plus Discord-Message/Rollen/Scheduling-Linkfelder. Kanonisch braucht TEXT-id, bot_request_id, website_request_id, gemeinsame Request-Felder, Status/Timestamps, Coach-Claim-Felder, Notify-Felder, Discord-Message/Rollenfelder, scheduled_slot und coachee_id. Hypertable-Kandidat fuer Request-Historie."
+  },
+  {
+   "name": "coaching_sessions",
+   "rows": 16,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "request_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_user_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_channel_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "completed_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coachee_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bot_session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Session-Historie aus Bot/API-Match und Plattform-Sync; Hypertable-Kandidat ueber started_at/completed_at/created_at."
+  },
+  {
+   "name": "coaching_surveys",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rating",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "feedback_text",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "improved_areas",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "unresolved_items",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "would_recommend",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Post-Coaching-Surveys; aktuell leer, Bot-Route schreibt; Hypertable-Kandidat bei Survey-Historie."
+  },
+  {
+   "name": "meta_announcements",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "message",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_active",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.admin"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Admin-Announcement-Meta, nicht Coaching; aktuell leer, aber Writer aktiv."
+  },
+  {
+   "name": "meta_builds",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "author_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "author_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "ability_order_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "items_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "upvotes",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "downvotes",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.admin",
+    "app.routers.builds"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Build-/Hero-Content, nicht Coaching."
+  },
+  {
+   "name": "meta_heroes",
+   "rows": 38,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "tier",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "image_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "abilities_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "stats_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.heroes"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Hero-Katalog/Seed-Daten, Referenzdaten statt Coaching."
+  },
+  {
+   "name": "meta_items",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "type",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "stats_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "image_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.items"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN/tot: aktuell leer; nur Read-Router, kein Writer/Seed in Live-DB gefunden."
+  },
+  {
+   "name": "meta_patch_notes",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "title",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "version",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.patchnotes"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Patchnote-Content, nicht Coaching."
+  },
+  {
+   "name": "meta_reports",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "build_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reporter_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reporter_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "reason",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.admin",
+    "app.routers.builds"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Build-Reports/Ticketdaten, nicht Coaching; aktuell leer, Writer aktiv."
+  },
+  {
+   "name": "meta_tier_history",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "hero_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hero_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "old_tier",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "new_tier",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "changed_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "changed_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.history"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN/tot: aktuell leer; Read-Route vorhanden, kein Writer gefunden; Hypertable-Kandidat falls Tier-Audit reaktiviert wird."
+  },
+  {
+   "name": "meta_tier_lists",
+   "rows": 1,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "owner_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_public",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "secret_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tiers_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "forked_from",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.tierlists"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Tierlist-Content, nicht Coaching."
+  },
+  {
+   "name": "meta_users",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "username",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "avatar_url",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.auth",
+    "app.routers.admin",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN: Website-Auth/Admin-Rollen, quer genutzte Identitaetstabelle."
+  },
+  {
+   "name": "meta_votes",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "build_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "vote_type",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.admin"
+   ],
+   "proposed_schema": "OFFEN",
+   "notes": "OFFEN/tot: aktuell leer; Admin liest/deletet, Build-Vote schreibt nur Zaehler in meta_builds; kein Insert in meta_votes gefunden; Hypertable-Kandidat falls Vote-Events reaktiviert werden."
+  },
+  {
+   "name": "session_notes",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "session_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coachee_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "coach_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "content",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "visibility",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TIMESTAMP",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "app.database",
+    "app.routers.coaching_platform",
+    "tests.test_appointments"
+   ],
+   "proposed_schema": "coaching",
+   "notes": "Coach/User-Notizen; aktuell leer, aktive Plattform-Routen; eher Dokumentdaten, kein primaerer Hypertable-Kandidat."
+  }
+ ]
+}

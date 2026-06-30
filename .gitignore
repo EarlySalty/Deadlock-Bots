@@ -87,3 +87,9 @@ docs/superpowers/
 # sqlx Offline-Cache muss eingecheckt sein (trotz globalem *.json-Ignore)
 !**/.sqlx/
 !**/.sqlx/*.json
+
+# SP1-Discovery: DB-Inventare sind die Wahrheit fuers Completeness-Gate (trotz globalem *.json-Ignore)
+!rust/docs/_work/sp1/inventory/*.tables.json
+
+# Laufzeit-PID des Rust-Discord-Bots
+deadlock-bot-rust.pid
