@@ -35,8 +35,12 @@ pub struct BridgeInteraction {
     pub author_name: String,
     /// Discord-Displayname: Guild-Nick vor global_name vor username.
     pub author_display_name: String,
-    /// manage_roles ODER administrator (für Mod-Guards wie den Review-Flow).
+    /// manage_roles ODER administrator (für Rollen-/Legacy-Guards).
     pub author_can_manage_roles: bool,
+    /// moderate_members ODER administrator (Timeouts/Timeout-Aufhebung).
+    pub author_can_moderate_members: bool,
+    /// ban_members ODER administrator (Ban/Unban-Aktionen).
+    pub author_can_ban_members: bool,
     /// manage_guild ODER administrator (für Admin-Slash-Commands wie Changelog).
     pub author_can_manage_guild: bool,
     /// manage_channels ODER administrator (für TempVoice-Lane-Mod-Guards).

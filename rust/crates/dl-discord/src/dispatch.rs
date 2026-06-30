@@ -64,6 +64,18 @@ async fn dispatch_command(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
             .unwrap_or(false),
+        author_can_moderate_members: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.moderate_members() || p.administrator())
+            .unwrap_or(false),
+        author_can_ban_members: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.ban_members() || p.administrator())
+            .unwrap_or(false),
         author_can_manage_guild: cmd
             .member
             .as_ref()
@@ -122,6 +134,18 @@ async fn dispatch_component(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
+        author_can_moderate_members: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.moderate_members() || p.administrator())
+            .unwrap_or(false),
+        author_can_ban_members: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.ban_members() || p.administrator())
             .unwrap_or(false),
         author_can_manage_guild: component
             .member
@@ -186,6 +210,18 @@ async fn dispatch_modal(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_roles() || p.administrator())
+            .unwrap_or(false),
+        author_can_moderate_members: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.moderate_members() || p.administrator())
+            .unwrap_or(false),
+        author_can_ban_members: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.ban_members() || p.administrator())
             .unwrap_or(false),
         author_can_manage_guild: modal
             .member

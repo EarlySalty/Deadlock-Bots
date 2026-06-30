@@ -1,3 +1,28 @@
+# Deadlock-Bots Enforcement-Gaps (2026-06-30)
+
+## Ziel
+Genau drei Rust-Enforcement-Befunde im isolierten Worktree `fix/enforcement-gaps` fixen: Review-Button-Rechte, Coaching-No-Show-Ban im Website-Intake, atomarer Coaching-Claim. Kein Commit/Push/Deploy. TempVoice bleibt unberuehrt.
+
+## Root-Cause
+- #1 Review-Buttons: `rust/bin/dl-bot/src/modglue.rs:860` und `:1704` pruefen `author_can_manage_roles`; die Aktionen fuehren aber Timeout/Ban/Unban aus. Die Interaction-Bridge liefert bisher nur `author_can_manage_roles` (`rust/crates/dl-discord/src/interactions.rs:38-43`, `rust/crates/dl-discord/src/dispatch.rs:61-78`, `:120-137`, `:184-200`).
+- #2 Website-Intake: `rust/crates/dl-community/src/coaching_requests.rs:1005-1023` nimmt `request_created` an; `upsert_request_created_notification` schreibt bei `:974-995` ohne aktive `coaching_bans` (`rust/docs/db-schema.sql:286-292`) zu pruefen. No-Show-Bans entstehen bei Cancel in `coaching_requests.rs:1857-1868`.
+- #3 Claim-Race: `coaching_requests.rs:1661-1681` liest Status/Reservierung vorab; `:1697-1711` legt danach Session an und setzt `status='matched'` ohne konditionales Claim-Update. Zwei parallele Handler koennen denselben alten Status sehen.
+
+## TDD Rot
+- `cargo test -p dl-bot aimod_ -- --nocapture`: beide neuen Tests rot, `Manage Roles` reicht aktuell bis zum Case-Lookup (`Case nicht gefunden.` statt `Keine Berechtigung.`).
+- `cargo test -p dl-community request_created_notification_lehnt_aktiven_no_show_ban_ab -- --nocapture`: rot, aktiver Ban wird angenommen (`expect_err` bekam `Ok(())`).
+- `cargo test -p dl-community parallele_claims_lassen_nur_einen_coach_gewinnen -- --nocapture`: rot, zwei parallele Claims gewinnen (`left: 2`, `right: 1`).
+
+## Fortschritt
+- Rote Tests fuer alle drei Befunde ergaenzt.
+- Fix umgesetzt:
+  - Review-Buttons nutzen jetzt `Moderate Members` fuer Timeout/Timeout-Aufhebung und `Ban Members` fuer Ban/Unban; `Manage Roles` bleibt fuer andere Pfade unveraendert.
+  - Website-`request_created` lehnt aktive No-Show-Bans mit `"Platzhalter"` ab und schreibt keinen Request.
+  - Coach-Claim ist per Transaktion/konditionalem `UPDATE ... WHERE status='analyzed'` atomar; nur der Gewinner legt eine Session an.
+- Verifikation gruen: `cargo test -p dl-discord -p dl-community -p dl-bot`; `cargo build --release -p dl-bot`; `rustfmt --edition 2021 --check` fuer geaenderte Rust-Dateien.
+- Clippy: `cargo clippy -p dl-discord -p dl-community -p dl-bot --all-targets` laeuft mit Exit 0, zeigt bestehende Warnungen ausserhalb der Aenderungen (`unwrap_used` in alten dl-community-Tests, `too_many_arguments` in build_publisher). Strenger Zusatzlauf mit diesen bestehenden Warnklassen unterdrueckt: gruen mit `-D warnings`.
+- Platzhalterstellen: `rust/crates/dl-community/src/coaching_requests.rs` No-Show-Reject und Claim-DB-Fehler.
+
 # Invite/New-Account SecurityGuard (2026-06-21)
 
 ## Ziel
