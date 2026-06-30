@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO clips.clip_windows(guild_id, start_at, end_at, status)\n            VALUES ($1, $2, $3, 'running')\n            ON CONFLICT(guild_id, start_at, end_at) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ca155787830b20b9cdae201a227daae4b4b90581ab6326d3c9815516ef137beb"
+}

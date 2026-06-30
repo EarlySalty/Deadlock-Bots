@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT MIN(occurred_at) AS \"join_at?\"\n              FROM activity.member_events\n             WHERE user_id = $1 AND guild_id = $2 AND event_type = 'join'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "join_at?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "88c041314459f181f53df899018e20ed6f3e6af43879ee60311b7e246669acda"
+}

@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, start_at, end_at, status, dump_sent_at\n              FROM clips.clip_windows\n             WHERE guild_id = $1 AND start_at = $2 AND end_at = $3\n             LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "start_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "end_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "dump_sent_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "968f665c840b461482740c547f2bfab5a7139d58390bb1dad1c31e1ab1f54dca"
+}

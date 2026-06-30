@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE coaching.sessions\n               SET status = 'completed',\n                   completed_at = $1,\n                   survey_sent_at = $1,\n                   reward_role_expires_at = $2,\n                   voice_last_seen_at = $1\n             WHERE id = $3 AND status = 'active' AND survey_sent_at IS NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "647ad6b9cbdfd6884c953860bdd8661b0600a5d0f44d626411bd65621f16209a"
+}

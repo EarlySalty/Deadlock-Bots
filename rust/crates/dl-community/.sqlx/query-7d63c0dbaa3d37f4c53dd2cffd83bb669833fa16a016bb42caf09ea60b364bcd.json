@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT coach_id, bot_request_id, discord_user_id\n                  FROM coaching.sessions\n                 WHERE id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "coach_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "bot_request_id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_user_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "7d63c0dbaa3d37f4c53dd2cffd83bb669833fa16a016bb42caf09ea60b364bcd"
+}

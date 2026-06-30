@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(MAX(id), 0) + 1 AS \"next_id!: i32\"\n          FROM scrim.participants\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!: i32",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "febf036e87f03858dfe1050cb6a16df6d91bdde54563ee4da949d0310657be14"
+}

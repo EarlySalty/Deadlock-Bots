@@ -9,10 +9,11 @@
 
 use std::sync::Arc;
 
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
 /// Empfänger der anonymen Feedback-DMs (wie `FEEDBACK_RECIPIENT_ID`).
 pub const FEEDBACK_RECIPIENT_ID: u64 = 662995601738170389;
@@ -43,7 +44,7 @@ pub trait FeedbackPort: Send + Sync {
 
 pub struct FeedbackHub {
     pub port: Arc<dyn FeedbackPort>,
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 struct FeedbackHandler {
@@ -182,9 +183,7 @@ impl FeedbackHub {
     /// wenn das fehlschlägt (z. B. gelöscht), wird eine neue gepostet.
     async fn post_panel(&self) {
         let body = panel_body();
-        let stored = self
-            .db
-            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+        let stored = kv::get(&self.pool, PANEL_KV_NS, PANEL_KV_KEY)
             .await
             .ok()
             .flatten()
@@ -201,10 +200,13 @@ impl FeedbackHub {
         }
         match self.port.post_rich(FEEDBACK_CHANNEL_ID, body).await {
             Ok(message_id) => {
-                if let Err(err) = self
-                    .db
-                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
-                    .await
+                if let Err(err) = kv::set(
+                    &self.pool,
+                    PANEL_KV_NS,
+                    PANEL_KV_KEY,
+                    &message_id.to_string(),
+                )
+                .await
                 {
                     tracing::warn!(%err, "Feedback-Panel-ID konnte nicht gespeichert werden");
                 }

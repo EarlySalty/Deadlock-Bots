@@ -9,13 +9,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use dl_ai::{GenerateRequest, TextGenerator};
-use dl_db::{Db, DbError, KvError};
+use dl_central_db::kv;
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ResponseMessageHook,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
 pub const CUSTOM_ID_START: &str = "aiob:start";
 pub const CUSTOM_ID_RULES_CONFIRM: &str = "aiob:rules_confirm";
@@ -120,9 +121,9 @@ pub enum AiOnboardingError {
     #[error("Discord port error: {0}")]
     Discord(String),
     #[error(transparent)]
-    Db(#[from] DbError),
+    Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
-    Kv(#[from] KvError),
+    Central(#[from] dl_central_db::CentralDbError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
 }
@@ -190,7 +191,7 @@ struct PersistedView {
 }
 
 struct PersistResponseView {
-    db: Db,
+    pool: PgPool,
     user_id: Option<u64>,
     thread_id: Option<u64>,
 }
@@ -209,10 +210,7 @@ impl ResponseMessageHook for PersistResponseView {
                 return;
             }
         };
-        if let Err(err) = self
-            .db
-            .kv_set(NS_PERSIST_VIEWS, message_id.to_string(), raw)
-            .await
+        if let Err(err) = kv::set(&self.pool, NS_PERSIST_VIEWS, &message_id.to_string(), &raw).await
         {
             tracing::debug!(%err, message_id, "AI onboarding response view persist failed");
         }
@@ -248,7 +246,7 @@ pub trait AiOnboardingPort: Send + Sync {
 }
 
 pub struct AiOnboarding {
-    db: Db,
+    pool: PgPool,
     port: Arc<dyn AiOnboardingPort>,
     ai: Option<Arc<dyn TextGenerator>>,
     config: AiOnboardingConfig,
@@ -256,13 +254,13 @@ pub struct AiOnboarding {
 
 impl AiOnboarding {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn AiOnboardingPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         config: AiOnboardingConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             port,
             ai,
             config,
@@ -290,19 +288,20 @@ impl AiOnboarding {
     }
 
     pub async fn restore_persistent_views(&self) -> Result<RestoreReport, AiOnboardingError> {
-        let rows = self
-            .db
-            .read(|conn| {
-                let mut stmt =
-                    conn.prepare("SELECT k, v FROM kv_store WHERE ns = ?1 ORDER BY k")?;
-                let rows = stmt
-                    .query_map([NS_PERSIST_VIEWS], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })?
-                    .collect::<Result<Vec<_>, _>>()?;
-                Ok(rows)
-            })
-            .await?;
+        let rows = sqlx::query!(
+            r#"
+            SELECT k, v
+              FROM bot.kv_store
+             WHERE ns = $1
+             ORDER BY k
+            "#,
+            NS_PERSIST_VIEWS,
+        )
+        .fetch_all(&self.pool)
+        .await?
+        .into_iter()
+        .map(|row| (row.k, row.v))
+        .collect::<Vec<_>>();
 
         let mut report = RestoreReport {
             scanned: rows.len(),
@@ -315,9 +314,8 @@ impl AiOnboarding {
             if valid_message_id && valid_payload {
                 report.restored += 1;
             } else {
-                if self.db.kv_delete(NS_PERSIST_VIEWS, key).await? {
-                    report.removed_invalid += 1;
-                }
+                kv::delete(&self.pool, NS_PERSIST_VIEWS, &key).await?;
+                report.removed_invalid += 1;
             }
         }
         Ok(report)
@@ -330,10 +328,7 @@ impl AiOnboarding {
         let Some(message_id) = message_id else {
             return Ok(None);
         };
-        let Some(raw) = self
-            .db
-            .kv_get(NS_PERSIST_VIEWS, message_id.to_string())
-            .await?
+        let Some(raw) = kv::get(&self.pool, NS_PERSIST_VIEWS, &message_id.to_string()).await?
         else {
             return Ok(None);
         };
@@ -341,10 +336,7 @@ impl AiOnboarding {
             Ok(view) => Ok(Some(view)),
             Err(err) => {
                 tracing::debug!(%err, message_id, "invalid AI onboarding persisted view");
-                let _ = self
-                    .db
-                    .kv_delete(NS_PERSIST_VIEWS, message_id.to_string())
-                    .await;
+                let _ = kv::delete(&self.pool, NS_PERSIST_VIEWS, &message_id.to_string()).await;
                 Ok(None)
             }
         }
@@ -357,22 +349,20 @@ impl AiOnboarding {
         thread_id: Option<u64>,
     ) -> Result<(), AiOnboardingError> {
         let payload = PersistedView { user_id, thread_id };
-        self.db
-            .kv_set(
-                NS_PERSIST_VIEWS,
-                message_id.to_string(),
-                serde_json::to_string(&payload)?,
-            )
-            .await?;
+        kv::set(
+            &self.pool,
+            NS_PERSIST_VIEWS,
+            &message_id.to_string(),
+            &serde_json::to_string(&payload)?,
+        )
+        .await?;
         Ok(())
     }
 
     async fn clear_persisted_view(&self, message_id: Option<u64>) {
         if let Some(message_id) = message_id {
-            if let Err(err) = self
-                .db
-                .kv_delete(NS_PERSIST_VIEWS, message_id.to_string())
-                .await
+            if let Err(err) =
+                kv::delete(&self.pool, NS_PERSIST_VIEWS, &message_id.to_string()).await
             {
                 tracing::debug!(%err, message_id, "AI onboarding persisted view delete failed");
             }
@@ -431,7 +421,10 @@ impl AiOnboarding {
         answers: &UserAnswers,
         llm_meta: Value,
     ) {
-        if crate::privacy::is_opted_out(&self.db, user_id as i64).await {
+        let Ok(user_id_i64) = crate::db::u64_to_i64(user_id, "user_id") else {
+            return;
+        };
+        if crate::privacy::is_opted_out(&self.pool, user_id_i64).await {
             return;
         }
         let payload = json!({
@@ -440,10 +433,13 @@ impl AiOnboarding {
             "answers": answers,
             "llm": llm_meta,
         });
-        if let Err(err) = self
-            .db
-            .kv_set(NS_SESSION_LOG, user_id.to_string(), payload.to_string())
-            .await
+        if let Err(err) = kv::set(
+            &self.pool,
+            NS_SESSION_LOG,
+            &user_id.to_string(),
+            &payload.to_string(),
+        )
+        .await
         {
             tracing::debug!(%err, user_id, "AI onboarding session log failed");
         }
@@ -555,7 +551,7 @@ impl AiOnboarding {
             })],
             components: Some(quick_actions_components(self.config.guild_id)),
             response_message_hook: Some(Arc::new(PersistResponseView {
-                db: self.db.clone(),
+                pool: self.pool.clone(),
                 user_id: context.allowed_user_id,
                 thread_id,
             })),
@@ -820,31 +816,22 @@ fn sanitize_prompt_fragment(value: &str) -> String {
         .join(" ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use rusqlite::params;
-
-    const KV_DDL: &str = "CREATE TABLE kv_store(
-              ns TEXT NOT NULL,
-              k  TEXT NOT NULL,
-              v  TEXT NOT NULL,
-              PRIMARY KEY(ns, k)
-            )";
+    use dl_central_db::{
+        kv,
+        testing::{test_pool, TestDb},
+    };
 
     fn config() -> AiOnboardingConfig {
         AiOnboardingConfig::new(1289721245281292288, 1304216250649415771)
     }
 
-    async fn test_db() -> (tempfile::TempDir, Db) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("test.sqlite3")).expect("open_creating");
-        db.write(|conn| conn.execute(KV_DDL, []).map(|_| ()))
-            .await
-            .expect("kv_store");
-        (dir, db)
+    async fn test_db() -> TestDb {
+        test_pool().await.expect("test_pool")
     }
 
     #[derive(Default)]
@@ -971,8 +958,13 @@ mod tests {
 
     #[tokio::test]
     async fn router_registers_all_aiob_handlers() {
-        let (_dir, db) = test_db().await;
-        let service = AiOnboarding::new(db, Arc::new(MockPort::default()), None, config());
+        let db = test_db().await;
+        let service = AiOnboarding::new(
+            db.pool().clone(),
+            Arc::new(MockPort::default()),
+            None,
+            config(),
+        );
         let mut router = InteractionRouter::new();
         register(&mut router, service);
 
@@ -983,16 +975,15 @@ mod tests {
 
     #[tokio::test]
     async fn start_in_channel_posts_panel_and_persists_view() {
-        let (_dir, db) = test_db().await;
+        let db = test_db().await;
         let port = Arc::new(MockPort::default());
-        let service = AiOnboarding::new(db.clone(), port.clone(), None, config());
+        let service = AiOnboarding::new(db.pool().clone(), port.clone(), None, config());
 
         let message_id = service.start_in_channel(123, 77).await.expect("start");
         assert_eq!(message_id, 555);
         assert_eq!(port.posts.lock().expect("posts").len(), 1);
 
-        let raw = db
-            .kv_get(NS_PERSIST_VIEWS, "555")
+        let raw = kv::get(db.pool(), NS_PERSIST_VIEWS, "555")
             .await
             .expect("kv")
             .expect("view");
@@ -1003,26 +994,26 @@ mod tests {
 
     #[tokio::test]
     async fn start_in_channel_persists_owner_even_when_user_is_opted_out() {
-        let (_dir, db) = test_db().await;
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER)",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO user_privacy(user_id, opted_out) VALUES(?1, 1)",
-                params![77],
-            )?;
-            Ok(())
-        })
+        let db = test_db().await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+            VALUES (77, TRUE, now())
+            "#
+        )
+        .execute(db.pool())
         .await
         .expect("privacy");
-        let service = AiOnboarding::new(db.clone(), Arc::new(MockPort::default()), None, config());
+        let service = AiOnboarding::new(
+            db.pool().clone(),
+            Arc::new(MockPort::default()),
+            None,
+            config(),
+        );
 
         service.start_in_channel(123, 77).await.expect("start");
 
-        let raw = db
-            .kv_get(NS_PERSIST_VIEWS, "555")
+        let raw = kv::get(db.pool(), NS_PERSIST_VIEWS, "555")
             .await
             .expect("kv")
             .expect("view");
@@ -1033,11 +1024,12 @@ mod tests {
 
     #[tokio::test]
     async fn restore_counts_valid_and_removes_invalid_views() {
-        let (_dir, db) = test_db().await;
-        db.kv_set(
+        let db = test_db().await;
+        kv::set(
+            db.pool(),
             NS_PERSIST_VIEWS,
             "100",
-            serde_json::to_string(&PersistedView {
+            &serde_json::to_string(&PersistedView {
                 user_id: Some(1),
                 thread_id: Some(2),
             })
@@ -1045,14 +1037,19 @@ mod tests {
         )
         .await
         .expect("set valid");
-        db.kv_set(NS_PERSIST_VIEWS, "bad", "{}")
+        kv::set(db.pool(), NS_PERSIST_VIEWS, "bad", "{}")
             .await
             .expect("set invalid key");
-        db.kv_set(NS_PERSIST_VIEWS, "101", "{")
+        kv::set(db.pool(), NS_PERSIST_VIEWS, "101", "{")
             .await
             .expect("set invalid json");
 
-        let service = AiOnboarding::new(db.clone(), Arc::new(MockPort::default()), None, config());
+        let service = AiOnboarding::new(
+            db.pool().clone(),
+            Arc::new(MockPort::default()),
+            None,
+            config(),
+        );
         let report = service.restore_persistent_views().await.expect("restore");
         assert_eq!(
             report,
@@ -1062,13 +1059,11 @@ mod tests {
                 removed_invalid: 2,
             }
         );
-        assert!(db
-            .kv_get(NS_PERSIST_VIEWS, "100")
+        assert!(kv::get(db.pool(), NS_PERSIST_VIEWS, "100")
             .await
             .expect("valid")
             .is_some());
-        assert!(db
-            .kv_get(NS_PERSIST_VIEWS, "101")
+        assert!(kv::get(db.pool(), NS_PERSIST_VIEWS, "101")
             .await
             .expect("invalid")
             .is_none());
@@ -1076,9 +1071,9 @@ mod tests {
 
     #[tokio::test]
     async fn rules_confirm_dm_aborts_without_guild_fallback() {
-        let (_dir, db) = test_db().await;
+        let db = test_db().await;
         let port = Arc::new(MockPort::default());
-        let service = AiOnboarding::new(db, port.clone(), None, config());
+        let service = AiOnboarding::new(db.pool().clone(), port.clone(), None, config());
 
         let reply = service
             .handle_rules_confirm(BridgeInteraction {
@@ -1099,9 +1094,9 @@ mod tests {
 
     #[tokio::test]
     async fn rules_confirm_grants_configured_complete_role() {
-        let (_dir, db) = test_db().await;
+        let db = test_db().await;
         let port = Arc::new(MockPort::default());
-        let service = AiOnboarding::new(db, port.clone(), None, config());
+        let service = AiOnboarding::new(db.pool().clone(), port.clone(), None, config());
         let mut router = InteractionRouter::new();
         register(&mut router, service);
         let handler = router
@@ -1134,24 +1129,21 @@ mod tests {
 
     #[tokio::test]
     async fn rules_confirm_uses_persisted_view_owner_even_when_session_log_missing() {
-        let (_dir, db) = test_db().await;
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER)",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO user_privacy(user_id, opted_out) VALUES(?1, 1)",
-                params![42],
-            )?;
-            Ok(())
-        })
+        let db = test_db().await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+            VALUES (42, TRUE, now())
+            "#
+        )
+        .execute(db.pool())
         .await
         .expect("privacy");
-        db.kv_set(
+        kv::set(
+            db.pool(),
             NS_PERSIST_VIEWS,
             "777",
-            serde_json::to_string(&PersistedView {
+            &serde_json::to_string(&PersistedView {
                 user_id: Some(42),
                 thread_id: Some(333),
             })
@@ -1160,7 +1152,7 @@ mod tests {
         .await
         .expect("view");
         let port = Arc::new(MockPort::default());
-        let service = AiOnboarding::new(db, port.clone(), None, config());
+        let service = AiOnboarding::new(db.pool().clone(), port.clone(), None, config());
 
         let rejected = service
             .handle_rules_confirm(BridgeInteraction {
@@ -1201,11 +1193,12 @@ mod tests {
 
     #[tokio::test]
     async fn start_button_opens_modal_and_clears_persisted_view() {
-        let (_dir, db) = test_db().await;
-        db.kv_set(
+        let db = test_db().await;
+        kv::set(
+            db.pool(),
             NS_PERSIST_VIEWS,
             "900",
-            serde_json::to_string(&PersistedView {
+            &serde_json::to_string(&PersistedView {
                 user_id: Some(42),
                 thread_id: Some(321),
             })
@@ -1213,7 +1206,12 @@ mod tests {
         )
         .await
         .expect("set");
-        let service = AiOnboarding::new(db.clone(), Arc::new(MockPort::default()), None, config());
+        let service = AiOnboarding::new(
+            db.pool().clone(),
+            Arc::new(MockPort::default()),
+            None,
+            config(),
+        );
 
         let reply = service
             .handle_start(BridgeInteraction {
@@ -1232,8 +1230,7 @@ mod tests {
                 thread_id: Some(321),
             }
         );
-        assert!(db
-            .kv_get(NS_PERSIST_VIEWS, "900")
+        assert!(kv::get(db.pool(), NS_PERSIST_VIEWS, "900")
             .await
             .expect("kv")
             .is_none());
@@ -1241,7 +1238,7 @@ mod tests {
 
     #[tokio::test]
     async fn prompt_assembly_uses_minimax_path_and_constants() {
-        let (_dir, db) = test_db().await;
+        let db = test_db().await;
         let port = Arc::new(MockPort::default());
         port.member_roles.lock().expect("roles").push(MemberRole {
             id: ROLE_RANKED_ID,
@@ -1256,7 +1253,7 @@ mod tests {
             seen: Mutex::new(Vec::new()),
         });
         let service = AiOnboarding::new(
-            db,
+            db.pool().clone(),
             port,
             Some(ai.clone()),
             config().with_max_output_tokens(321),
@@ -1342,13 +1339,13 @@ mod tests {
 
     #[tokio::test]
     async fn modal_submit_logs_session_and_returns_quick_actions() {
-        let (_dir, db) = test_db().await;
+        let db = test_db().await;
         let ai = Arc::new(MockAi {
             response: Mutex::new(Some("generated".to_string())),
             seen: Mutex::new(Vec::new()),
         });
         let service = AiOnboarding::new(
-            db.clone(),
+            db.pool().clone(),
             Arc::new(MockPort::default()),
             Some(ai),
             config(),
@@ -1383,16 +1380,14 @@ mod tests {
             .expect("response hook")
             .on_response_message(777)
             .await;
-        let raw_view = db
-            .kv_get(NS_PERSIST_VIEWS, "777")
+        let raw_view = kv::get(db.pool(), NS_PERSIST_VIEWS, "777")
             .await
             .expect("kv")
             .expect("view");
         let view: PersistedView = serde_json::from_str(&raw_view).expect("json");
         assert_eq!(view.user_id, Some(42));
         assert_eq!(view.thread_id, Some(333));
-        let raw = db
-            .kv_get(NS_SESSION_LOG, "42")
+        let raw = kv::get(db.pool(), NS_SESSION_LOG, "42")
             .await
             .expect("kv")
             .expect("session");
@@ -1404,21 +1399,22 @@ mod tests {
 
     #[tokio::test]
     async fn opt_out_skips_session_logging() {
-        let (_dir, db) = test_db().await;
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER)",
-                [],
-            )?;
-            conn.execute(
-                "INSERT INTO user_privacy(user_id, opted_out) VALUES(?1, 1)",
-                params![42],
-            )?;
-            Ok(())
-        })
+        let db = test_db().await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+            VALUES (42, TRUE, now())
+            "#
+        )
+        .execute(db.pool())
         .await
         .expect("privacy");
-        let service = AiOnboarding::new(db.clone(), Arc::new(MockPort::default()), None, config());
+        let service = AiOnboarding::new(
+            db.pool().clone(),
+            Arc::new(MockPort::default()),
+            None,
+            config(),
+        );
         service
             .log_session(
                 42,
@@ -1431,6 +1427,9 @@ mod tests {
                 json!({"provider": "fallback"}),
             )
             .await;
-        assert!(db.kv_get(NS_SESSION_LOG, "42").await.expect("kv").is_none());
+        assert!(kv::get(db.pool(), NS_SESSION_LOG, "42")
+            .await
+            .expect("kv")
+            .is_none());
     }
 }

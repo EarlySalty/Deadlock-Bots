@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT bot_request_id AS \"bot_request_id!: i32\"\n              FROM coaching.requests\n             WHERE status = 'analyzed'\n               AND assigned_coach_id IS NOT NULL\n               AND reserved_until IS NOT NULL\n               AND reserved_until < $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bot_request_id!: i32",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "b9d74c949a06fd9d0b2aca6c22c55487f372c8d4ec4682ec2eaf2a4cbadaf024"
+}

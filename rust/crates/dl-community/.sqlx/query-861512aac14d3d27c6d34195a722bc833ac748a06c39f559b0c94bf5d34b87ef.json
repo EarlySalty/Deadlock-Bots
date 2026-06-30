@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE activity.member_leave_surveys\n               SET dm_status = $1\n             WHERE id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "861512aac14d3d27c6d34195a722bc833ac748a06c39f559b0c94bf5d34b87ef"
+}

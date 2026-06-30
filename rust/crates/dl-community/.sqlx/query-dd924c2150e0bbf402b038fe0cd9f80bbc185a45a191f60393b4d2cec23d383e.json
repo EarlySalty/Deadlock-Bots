@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM core.user_mod_tags\n             WHERE user_id = $1 AND mod_tag = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd924c2150e0bbf402b038fe0cd9f80bbc185a45a191f60393b4d2cec23d383e"
+}

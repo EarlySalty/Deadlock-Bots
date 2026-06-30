@@ -10,13 +10,14 @@
 
 use std::sync::Arc;
 
-use dl_db::Db;
 use dl_discord::{
     BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler,
     InteractionRouter,
 };
 use serde_json::json;
+use sqlx::PgPool;
 
+use crate::db::u64_to_i64;
 use crate::privacy::{delete_user_data, export_user_data, set_opt_in};
 
 #[derive(Clone, Copy)]
@@ -28,7 +29,7 @@ enum Action {
 }
 
 struct PrivacyHandler {
-    db: Db,
+    pool: PgPool,
     action: Action,
 }
 
@@ -36,7 +37,14 @@ struct PrivacyHandler {
 impl InteractionHandler for PrivacyHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let now = chrono::Utc::now().timestamp();
-        let uid = interaction.user_id as i64;
+        let uid = match u64_to_i64(interaction.user_id, "interaction.user_id") {
+            Ok(uid) => uid,
+            Err(_) => {
+                return BridgeReply::ephemeral_text(
+                    "Diese Discord-ID kann nicht verarbeitet werden. Bitte dem Team melden.",
+                );
+            }
+        };
         match self.action {
             Action::Datenschutz => BridgeReply {
                 content: Some(
@@ -67,13 +75,13 @@ impl InteractionHandler for PrivacyHandler {
                 ..Default::default()
             },
             Action::OptIn => {
-                let _ = set_opt_in(&self.db, uid, now).await;
+                let _ = set_opt_in(&self.pool, uid, now).await;
                 BridgeReply::ephemeral_text(
                     "Du hast wieder eingewilligt. Ab jetzt dürfen Features wieder Daten speichern.",
                 )
             }
             Action::Confirm => {
-                match delete_user_data(&self.db, uid, "slash_datenschutz".to_string(), now).await {
+                match delete_user_data(&self.pool, uid, "slash_datenschutz".to_string(), now).await {
                     Ok(s) => {
                         let voice = s.sum(&["voice_session_log.user_id", "voice_stats.user_id"]);
                         let steam = s.steam_ids.len();
@@ -89,7 +97,7 @@ impl InteractionHandler for PrivacyHandler {
                     ),
                 }
             }
-            Action::Export => match export_user_data(&self.db, uid, now).await {
+            Action::Export => match export_user_data(&self.pool, uid, now).await {
                 Ok(value) => {
                     let bytes =
                         serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec());
@@ -126,7 +134,7 @@ fn command_spec(name: &str, description: &str) -> CommandSpec {
 }
 
 /// Registriert `/datenschutz`, `/datenschutz-optin` und den Bestätigungs-Button.
-pub fn register(router: &mut InteractionRouter, db: Db) {
+pub fn register(router: &mut InteractionRouter, pool: PgPool) {
     router.on_command(
         "datenschutz",
         command_spec(
@@ -134,7 +142,7 @@ pub fn register(router: &mut InteractionRouter, db: Db) {
             "Löscht deine gespeicherten Daten und deaktiviert zukünftige Speicherung.",
         ),
         Arc::new(PrivacyHandler {
-            db: db.clone(),
+            pool: pool.clone(),
             action: Action::Datenschutz,
         }),
     );
@@ -145,21 +153,21 @@ pub fn register(router: &mut InteractionRouter, db: Db) {
             "Reaktiviere Speicherung nach einem Opt-out.",
         ),
         Arc::new(PrivacyHandler {
-            db: db.clone(),
+            pool: pool.clone(),
             action: Action::OptIn,
         }),
     );
     router.on_custom_id(
         "privacy:confirm",
         Arc::new(PrivacyHandler {
-            db: db.clone(),
+            pool: pool.clone(),
             action: Action::Confirm,
         }),
     );
     router.on_custom_id(
         "privacy:export",
         Arc::new(PrivacyHandler {
-            db,
+            pool,
             action: Action::Export,
         }),
     );

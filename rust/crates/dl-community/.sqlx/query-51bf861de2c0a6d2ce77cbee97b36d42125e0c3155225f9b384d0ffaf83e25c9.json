@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT role, content\n              FROM (\n                    SELECT role, content, id\n                      FROM bot.faq_chat_messages\n                     WHERE session_id = $1\n                     ORDER BY id DESC\n                     LIMIT 10\n                   ) recent\n             ORDER BY id ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "role",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "content",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "51bf861de2c0a6d2ce77cbee97b36d42125e0c3155225f9b384d0ffaf83e25c9"
+}

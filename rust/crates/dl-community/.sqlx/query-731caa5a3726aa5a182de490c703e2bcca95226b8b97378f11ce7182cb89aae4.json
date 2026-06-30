@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id AS \"id!: i32\"\n          FROM scrim.participants\n         WHERE display_name = $1\n         ORDER BY id ASC\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: i32",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "731caa5a3726aa5a182de490c703e2bcca95226b8b97378f11ce7182cb89aae4"
+}

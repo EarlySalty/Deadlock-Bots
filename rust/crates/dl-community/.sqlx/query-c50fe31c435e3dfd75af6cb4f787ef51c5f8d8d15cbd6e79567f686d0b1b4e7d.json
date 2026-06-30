@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT avg_weekly_sessions\n              FROM activity.user_retention_tracking\n             WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "avg_weekly_sessions",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "c50fe31c435e3dfd75af6cb4f787ef51c5f8d8d15cbd6e79567f686d0b1b4e7d"
+}

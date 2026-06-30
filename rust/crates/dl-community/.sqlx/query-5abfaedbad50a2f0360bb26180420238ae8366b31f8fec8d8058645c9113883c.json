@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO coaching.bans(discord_user_id, banned_at, expires_at, reason)\n                    VALUES ($1, $2, $3, $4)\n                    ON CONFLICT(discord_user_id) DO UPDATE SET\n                      banned_at = excluded.banned_at,\n                      expires_at = excluded.expires_at,\n                      reason = excluded.reason\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5abfaedbad50a2f0360bb26180420238ae8366b31f8fec8d8058645c9113883c"
+}

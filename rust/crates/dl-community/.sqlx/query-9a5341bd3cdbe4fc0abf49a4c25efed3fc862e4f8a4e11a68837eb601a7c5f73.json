@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT message_count\n              FROM activity.message_activity\n             WHERE user_id = $1 AND guild_id = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "message_count",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "9a5341bd3cdbe4fc0abf49a4c25efed3fc862e4f8a4e11a68837eb601a7c5f73"
+}

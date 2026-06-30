@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.reaction_role_mappings\n               SET backfill_pending = FALSE,\n                   updated_at = $1\n             WHERE id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "48a99e8190b947bc8653846db239612bc6da2458ed73bdec9c74c65d1e9ded5d"
+}

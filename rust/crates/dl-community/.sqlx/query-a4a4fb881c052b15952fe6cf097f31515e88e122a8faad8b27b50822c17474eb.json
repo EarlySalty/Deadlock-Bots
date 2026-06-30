@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM bot.persistent_views\n             WHERE guild_id = $1 AND view_type = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a4a4fb881c052b15952fe6cf097f31515e88e122a8faad8b27b50822c17474eb"
+}

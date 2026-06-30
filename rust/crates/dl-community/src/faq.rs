@@ -25,13 +25,15 @@ use dl_ai::{
     GenerateRequest, TextGenerator, ToolDefinition, ToolExecutor, ToolTextGenerator, ToolUseRequest,
 };
 use dl_bridges::twitch::TwitchApiClient;
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use regex::Regex;
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
+
+use crate::db::{i64_to_u64, u64_to_i64};
 
 pub const PANEL_CHANNEL_ID: u64 = 1491953161747955853;
 pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
@@ -528,72 +530,51 @@ fn panel_body() -> serde_json::Map<String, serde_json::Value> {
 // ── Store ──────────────────────────────────────────────────────────────────
 
 pub struct FaqStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl FaqStore {
-    pub async fn ensure_schema(&self) -> Result<(), dl_db::DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS faq_chat_sessions(
-                        session_id TEXT PRIMARY KEY,
-                        user_id INTEGER NOT NULL,
-                        user_name TEXT,
-                        channel_id INTEGER NOT NULL,
-                        guild_id INTEGER NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        expires_at DATETIME NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'active',
-                        last_activity_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE TABLE IF NOT EXISTS faq_chat_messages(
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        session_id TEXT NOT NULL,
-                        role TEXT NOT NULL,
-                        content TEXT NOT NULL,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                        FOREIGN KEY(session_id) REFERENCES faq_chat_sessions(session_id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_faq_messages_session
-                        ON faq_chat_messages(session_id, created_at);
-                    CREATE INDEX IF NOT EXISTS idx_faq_sessions_expires
-                        ON faq_chat_sessions(expires_at, status);",
-                )
-            })
-            .await
+    pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            SELECT to_regclass('bot.faq_chat_sessions') IS NOT NULL AS "exists!"
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map(|_| ())
     }
 
     pub async fn active_session_of_user(&self, user_id: u64) -> Option<(String, u64)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT session_id, channel_id FROM faq_chat_sessions
-                      WHERE user_id = ?1 AND status = 'active'",
-                    [user_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let user_id = u64_to_i64(user_id, "user_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT session_id, channel_id
+              FROM bot.faq_chat_sessions
+             WHERE user_id = $1 AND status = 'active'
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        Some((row.session_id, i64_to_u64(row.channel_id, "channel_id")?))
     }
 
     pub async fn active_session_in_channel(&self, channel_id: u64) -> Option<(String, u64)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT session_id, user_id FROM faq_chat_sessions
-                      WHERE channel_id = ?1 AND status = 'active'",
-                    [channel_id],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let channel_id = u64_to_i64(channel_id, "channel_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT session_id, user_id
+              FROM bot.faq_chat_sessions
+             WHERE channel_id = $1 AND status = 'active'
+            "#,
+            channel_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        Some((row.session_id, i64_to_u64(row.user_id, "user_id")?))
     }
 
     pub async fn create_session(
@@ -604,21 +585,30 @@ impl FaqStore {
         channel_id: u64,
         guild_id: u64,
     ) {
-        let expires = (chrono::Utc::now() + chrono::Duration::hours(SESSION_TIMEOUT_HOURS))
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO faq_chat_sessions(session_id, user_id, user_name, channel_id, guild_id, expires_at)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![session_id, user_id, user_name, channel_id, guild_id, expires],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let (Ok(user_id), Ok(channel_id), Ok(guild_id)) = (
+            u64_to_i64(user_id, "user_id"),
+            u64_to_i64(channel_id, "channel_id"),
+            u64_to_i64(guild_id, "guild_id"),
+        ) else {
+            return;
+        };
+        let expires = chrono::Utc::now() + chrono::Duration::hours(SESSION_TIMEOUT_HOURS);
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO bot.faq_chat_sessions(
+                session_id, user_id, user_name, channel_id, guild_id, expires_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            session_id,
+            user_id,
+            user_name,
+            channel_id,
+            guild_id,
+            expires,
+        )
+        .execute(&self.pool)
+        .await;
     }
 
     pub async fn add_message(&self, session_id: &str, role: &str, content: &str) {
@@ -627,68 +617,82 @@ impl FaqStore {
             role.to_string(),
             content.to_string(),
         );
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO faq_chat_messages(session_id, role, content) VALUES (?1, ?2, ?3)",
-                    rusqlite::params![session_id, role, content],
-                )?;
-                conn.execute(
-                    "UPDATE faq_chat_sessions SET last_activity_at = CURRENT_TIMESTAMP
-                      WHERE session_id = ?1",
-                    [session_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO bot.faq_chat_messages(session_id, role, content)
+            VALUES ($1, $2, $3)
+            "#,
+            session_id,
+            role,
+            content,
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE bot.faq_chat_sessions
+               SET last_activity_at = now()
+             WHERE session_id = $1
+            "#,
+            session_id,
+        )
+        .execute(&self.pool)
+        .await;
     }
 
     /// Letzte 10 Nachrichten (chronologisch) für das Gesprächs-Gedächtnis.
     pub async fn recent_messages(&self, session_id: &str) -> Vec<(String, String)> {
-        let session_id = session_id.to_string();
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT role, content FROM (
-                        SELECT role, content, id FROM faq_chat_messages
-                         WHERE session_id = ?1 ORDER BY id DESC LIMIT 10
-                     ) ORDER BY id ASC",
-                )?;
-                let rows = stmt.query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default()
+        sqlx::query!(
+            r#"
+            SELECT role, content
+              FROM (
+                    SELECT role, content, id
+                      FROM bot.faq_chat_messages
+                     WHERE session_id = $1
+                     ORDER BY id DESC
+                     LIMIT 10
+                   ) recent
+             ORDER BY id ASC
+            "#,
+            session_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|row| (row.role, row.content))
+        .collect()
     }
 
     pub async fn close_session(&self, session_id: &str) {
-        let session_id = session_id.to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE faq_chat_sessions SET status = 'closed' WHERE session_id = ?1",
-                    [session_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE bot.faq_chat_sessions
+               SET status = 'closed'
+             WHERE session_id = $1
+            "#,
+            session_id,
+        )
+        .execute(&self.pool)
+        .await;
     }
 
     /// (session_id, channel_id) aller abgelaufenen aktiven Sessions.
     pub async fn expired_sessions(&self) -> Vec<(String, u64)> {
-        self.db
-            .read(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT session_id, channel_id FROM faq_chat_sessions
-                      WHERE status = 'active' AND expires_at <= datetime('now')",
-                )?;
-                let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default()
+        let rows = sqlx::query!(
+            r#"
+            SELECT session_id, channel_id
+              FROM bot.faq_chat_sessions
+             WHERE status = 'active' AND expires_at <= $1
+            "#,
+            chrono::Utc::now(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| Some((row.session_id, i64_to_u64(row.channel_id, "channel_id")?)))
+            .collect()
     }
 }
 
@@ -740,16 +744,16 @@ pub struct FaqChat {
 
 impl FaqChat {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn FaqPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         docs: String,
     ) -> Arc<Self> {
-        Self::new_with_ticket_support(db, port, ai, None, None, docs)
+        Self::new_with_ticket_support(pool, port, ai, None, None, docs)
     }
 
     pub fn new_with_ticket_support(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn FaqPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         tool_ai: Option<Arc<dyn ToolTextGenerator>>,
@@ -757,7 +761,7 @@ impl FaqChat {
         docs: String,
     ) -> Arc<Self> {
         Arc::new(Self {
-            store: FaqStore { db },
+            store: FaqStore { pool },
             port,
             ai,
             tool_ai,
@@ -793,11 +797,13 @@ impl FaqChat {
         }
         match self.port.post_rich(PANEL_CHANNEL_ID, body).await {
             Ok(message_id) => {
-                if let Err(err) = self
-                    .store
-                    .db
-                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
-                    .await
+                if let Err(err) = kv::set(
+                    &self.store.pool,
+                    PANEL_KV_NS,
+                    PANEL_KV_KEY,
+                    &message_id.to_string(),
+                )
+                .await
                 {
                     tracing::warn!(%err, "FAQ-Panel-ID konnte nicht gespeichert werden");
                 }
@@ -826,9 +832,7 @@ impl FaqChat {
 
     /// Gemerkte Panel-Message-ID aus dem KV-Store.
     async fn panel_message_id(&self) -> Option<u64> {
-        self.store
-            .db
-            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+        kv::get(&self.store.pool, PANEL_KV_NS, PANEL_KV_KEY)
             .await
             .ok()
             .flatten()
@@ -838,10 +842,7 @@ impl FaqChat {
     /// Entfernt ein unter dem alten Key (`message_id`) gemerktes Duplikat-Panel.
     async fn heal_legacy_panel(&self) {
         const LEGACY_KEY: &str = "message_id";
-        let legacy = self
-            .store
-            .db
-            .kv_get(PANEL_KV_NS, LEGACY_KEY)
+        let legacy = kv::get(&self.store.pool, PANEL_KV_NS, LEGACY_KEY)
             .await
             .ok()
             .flatten()
@@ -854,7 +855,7 @@ impl FaqChat {
             self.port.delete_panel(PANEL_CHANNEL_ID, legacy_id).await;
             tracing::info!(legacy_id, "FAQ: Duplikat-Panel aus Cutover-Bug gelöscht");
         }
-        let _ = self.store.db.kv_delete(PANEL_KV_NS, LEGACY_KEY).await;
+        let _ = kv::delete(&self.store.pool, PANEL_KV_NS, LEGACY_KEY).await;
     }
 
     async fn generate_answer(&self, session_id: &str, question: &str) -> String {
@@ -1254,6 +1255,7 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "testing")]
     use dl_ai::ToolGeneration;
 
     #[test]
@@ -1299,11 +1301,15 @@ mod tests {
             .contains("Du bist BEREITS in einem Ticket. Verweise NIEMALS"));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn session_lifecycle() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        let store = FaqStore { db };
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = FaqStore {
+            pool: db.pool().clone(),
+        };
         store.ensure_schema().await.expect("schema");
         store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
@@ -1330,12 +1336,14 @@ mod tests {
     }
 
     // Port-Mock, der Panel-Post/-Edit/-Delete zählt.
+    #[cfg(feature = "testing")]
     struct MockPanelPort {
         posts: std::sync::Mutex<u32>,
         edits: std::sync::Mutex<u32>,
         deleted: std::sync::Mutex<Vec<u64>>,
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl FaqPort for MockPanelPort {
         async fn create_faq_channel(&self, _g: u64, _u: u64, _n: &str) -> Result<u64, String> {
@@ -1370,6 +1378,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     fn panel_port() -> Arc<MockPanelPort> {
         Arc::new(MockPanelPort {
             posts: std::sync::Mutex::new(0),
@@ -1378,26 +1387,19 @@ mod tests {
         })
     }
 
-    async fn db_with_kv() -> (tempfile::TempDir, Db) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute(
-                "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("kv_store");
-        (dir, db)
+    #[cfg(feature = "testing")]
+    async fn db_with_kv() -> dl_central_db::testing::TestDb {
+        dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool")
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn panel_postet_einmal_dann_editiert() {
-        let (_dir, db) = db_with_kv().await;
+        let db = db_with_kv().await;
         let port = panel_port();
-        let faq = FaqChat::new(db, port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
 
         // Erster ensure: ein Post, kein Edit; ID wird gemerkt.
         faq.ensure_panel().await;
@@ -1411,11 +1413,12 @@ mod tests {
         assert_eq!(*port.edits.lock().unwrap(), 1);
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn faqpanel_command_meldet_bestehend_und_erstellt() {
-        let (_dir, db) = db_with_kv().await;
+        let db = db_with_kv().await;
         let port = panel_port();
-        let faq = FaqChat::new(db, port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
 
         // Noch kein Panel → Command erstellt es und meldet „wurde erstellt".
         let reply = faq.faqpanel_command(42).await;
@@ -1433,14 +1436,19 @@ mod tests {
         assert_eq!(*port.posts.lock().unwrap(), 1);
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn heilt_duplikat_aus_altem_key() {
-        let (_dir, db) = db_with_kv().await;
+        let db = db_with_kv().await;
         // Kanonisches Panel (Python-Key) = 100, Duplikat unter Alt-Key = 200.
-        db.kv_set(PANEL_KV_NS, PANEL_KV_KEY, "100").await.unwrap();
-        db.kv_set(PANEL_KV_NS, "message_id", "200").await.unwrap();
+        dl_central_db::kv::set(db.pool(), PANEL_KV_NS, PANEL_KV_KEY, "100")
+            .await
+            .unwrap();
+        dl_central_db::kv::set(db.pool(), PANEL_KV_NS, "message_id", "200")
+            .await
+            .unwrap();
         let port = panel_port();
-        let faq = FaqChat::new(db.clone(), port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
 
         faq.ensure_panel().await;
 
@@ -1449,13 +1457,20 @@ mod tests {
         assert_eq!(*port.posts.lock().unwrap(), 0);
         assert_eq!(*port.edits.lock().unwrap(), 1);
         // Der Alt-Key ist entfernt.
-        assert_eq!(db.kv_get(PANEL_KV_NS, "message_id").await.unwrap(), None);
+        assert_eq!(
+            dl_central_db::kv::get(db.pool(), PANEL_KV_NS, "message_id")
+                .await
+                .unwrap(),
+            None
+        );
     }
 
+    #[cfg(feature = "testing")]
     struct SequenceAi {
         responses: std::sync::Mutex<std::collections::VecDeque<Option<String>>>,
     }
 
+    #[cfg(feature = "testing")]
     impl SequenceAi {
         fn new(responses: Vec<Option<&str>>) -> Arc<Self> {
             Arc::new(Self {
@@ -1469,6 +1484,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl TextGenerator for SequenceAi {
         async fn generate_text(&self, _request: GenerateRequest) -> Option<String> {
@@ -1480,10 +1496,12 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     struct StaticToolAi {
         result: std::sync::Mutex<Option<ToolGeneration>>,
     }
 
+    #[cfg(feature = "testing")]
     impl StaticToolAi {
         fn new(result: ToolGeneration) -> Arc<Self> {
             Arc::new(Self {
@@ -1492,6 +1510,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl ToolTextGenerator for StaticToolAi {
         async fn generate_text_with_tools(
@@ -1507,15 +1526,16 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn ticket_guard_fehler_schweigt_fail_closed() {
-        let (_dir, db) = db_with_kv().await;
+        let db = db_with_kv().await;
         let port = panel_port();
         let ai: Arc<dyn TextGenerator> = SequenceAi::new(vec![
             Some("Dokumentierte Antwort"),
             None, // Guard-Reviewer leer/Fehler => fail-closed
         ]);
-        let faq = FaqChat::new(db, port, Some(ai), "DOCS".to_string());
+        let faq = FaqChat::new(db.pool().clone(), port, Some(ai), "DOCS".to_string());
 
         let outcome = faq
             .ticket_auto_answer("Steam geht nicht", 111111111111111111)
@@ -1526,9 +1546,10 @@ mod tests {
         assert_eq!(outcome.guard_reason.as_deref(), Some("guard_error"));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn ticket_tool_loop_faellt_auf_textpfad_zurueck_und_behaelt_tool_trace() {
-        let (_dir, db) = db_with_kv().await;
+        let db = db_with_kv().await;
         let port = panel_port();
         let ai: Arc<dyn TextGenerator> =
             SequenceAi::new(vec![Some("Fallback Antwort"), Some("FREIGABE")]);
@@ -1537,7 +1558,7 @@ mod tests {
             tool_calls: vec!["twitch_diagnose".to_string()],
         });
         let faq = FaqChat::new_with_ticket_support(
-            db,
+            db.pool().clone(),
             port,
             Some(ai),
             Some(tool_ai),
