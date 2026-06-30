@@ -6,11 +6,13 @@ use std::{
 
 use dl_central_etl::{
     check_ledger_set_mapping_completeness, check_mapping_completeness, check_row_counts,
-    check_row_counts_with_factor, check_sample_covers_mapped_columns, optional_sqlite_int_to_bool,
-    optional_text_json_to_value, optional_unix_seconds_to_datetime, sample_round_trip,
-    sqlite_int_to_bool, text_json_to_value, unix_seconds_to_datetime, Ledger, LedgerError,
-    LedgerSet, RoundTripFields, RoundTripRows, RowCountFactor, SourceError, SourceSchemas,
-    SourceSqlite, SourceTableColumns, VerifyError,
+    check_row_counts_with_factor, check_sample_covers_mapped_columns, integer_to_text,
+    optional_integer_to_text, optional_real_unix_seconds_to_datetime, optional_sqlite_int_to_bool,
+    optional_sqlite_numeric_to_bool, optional_text_json_to_value, optional_text_to_date,
+    optional_unix_seconds_to_datetime, real_unix_seconds_to_datetime, sample_round_trip,
+    sqlite_int_to_bool, sqlite_numeric_to_bool, text_json_to_value, text_to_date,
+    unix_seconds_to_datetime, Ledger, LedgerError, LedgerSet, RoundTripFields, RoundTripRows,
+    RowCountFactor, SourceError, SourceSchemas, SourceSqlite, SourceTableColumns, VerifyError,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -720,6 +722,68 @@ fn converters_preserve_types_and_null_semantics() {
     ));
     assert_eq!(
         optional_sqlite_int_to_bool(None).expect("null bool is allowed"),
+        None
+    );
+    assert!(!sqlite_numeric_to_bool(0).expect("numeric 0 converts to false"));
+    assert!(sqlite_numeric_to_bool(1).expect("numeric 1 converts to true"));
+    assert!(matches!(
+        sqlite_numeric_to_bool(3),
+        Err(dl_central_etl::ConvertError::InvalidBoolInteger { value }) if value == 3
+    ));
+    assert_eq!(
+        optional_sqlite_numeric_to_bool(None).expect("null numeric bool is allowed"),
+        None
+    );
+
+    assert_eq!(integer_to_text(1_234_567_890_123), "1234567890123");
+    assert_eq!(optional_integer_to_text(None), None);
+
+    let real_timestamp =
+        real_unix_seconds_to_datetime(1_700_000_000.123_456_7).expect("valid real unix timestamp");
+    assert_eq!(real_timestamp.timestamp(), 1_700_000_000);
+    assert!(
+        real_timestamp
+            .timestamp_subsec_nanos()
+            .abs_diff(123_456_700)
+            <= 100
+    );
+    assert!(matches!(
+        real_unix_seconds_to_datetime(f64::INFINITY),
+        Err(dl_central_etl::ConvertError::InvalidRealUnixTimestamp { seconds })
+            if seconds.is_infinite()
+    ));
+    assert!(matches!(
+        real_unix_seconds_to_datetime(1.0e30),
+        Err(dl_central_etl::ConvertError::InvalidRealUnixTimestamp { seconds })
+            if seconds.to_bits() == 1.0e30_f64.to_bits()
+    ));
+    assert_eq!(
+        optional_real_unix_seconds_to_datetime(None).expect("null real timestamp is allowed"),
+        None
+    );
+
+    assert_eq!(
+        text_to_date("2026-06-30").expect("date parses").to_string(),
+        "2026-06-30"
+    );
+    assert_eq!(
+        text_to_date("2026-06-30T13:45:59Z")
+            .expect("RFC3339 datetime date part parses")
+            .to_string(),
+        "2026-06-30"
+    );
+    assert_eq!(
+        text_to_date("2026-06-30 13:45:59.123")
+            .expect("SQLite datetime date part parses")
+            .to_string(),
+        "2026-06-30"
+    );
+    assert!(matches!(
+        text_to_date("30.06.2026"),
+        Err(dl_central_etl::ConvertError::InvalidDateText { value }) if value == "30.06.2026"
+    ));
+    assert_eq!(
+        optional_text_to_date(None).expect("null date is allowed"),
         None
     );
 

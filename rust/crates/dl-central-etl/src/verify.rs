@@ -1,7 +1,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
+use sqlx::{PgPool, Row};
 
+use crate::engine::TableResult;
 use crate::ledger::{ColumnStatus, Ledger, LedgerSet, TableLedger};
 
 pub type RoundTripFields = BTreeMap<String, Value>;
@@ -52,6 +54,14 @@ pub enum VerifyError {
         source_value: Option<Value>,
         target_value: Option<Value>,
     },
+    #[error("Total-Reconciliation-Mismatch fuer {target}: erwartet {expected}, bekam {actual}")]
+    TotalReconcileMismatch {
+        target: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("Total-Reconciliation-Query fehlgeschlagen fuer {target}: {message}")]
+    TotalReconcileQuery { target: String, message: String },
 }
 
 pub fn check_mapping_completeness(
@@ -237,6 +247,49 @@ pub fn sample_round_trip(
     Ok(())
 }
 
+pub async fn reconcile_total(
+    pool: &PgPool,
+    table_results: &[TableResult],
+) -> Result<(), VerifyError> {
+    let mut expected_by_target = BTreeMap::<String, u64>::new();
+    for result in table_results {
+        *expected_by_target.entry(result.target.clone()).or_default() += result.source_rows;
+    }
+
+    for (target, expected) in expected_by_target {
+        let sql = format!(
+            "SELECT COUNT(*)::bigint AS count FROM {}",
+            quote_pg_path(&target)?
+        );
+        let row = sqlx::query(&sql).fetch_one(pool).await.map_err(|source| {
+            VerifyError::TotalReconcileQuery {
+                target: target.clone(),
+                message: source.to_string(),
+            }
+        })?;
+        let actual_i64: i64 =
+            row.try_get("count")
+                .map_err(|source| VerifyError::TotalReconcileQuery {
+                    target: target.clone(),
+                    message: source.to_string(),
+                })?;
+        let actual = u64::try_from(actual_i64).map_err(|_| VerifyError::TotalReconcileQuery {
+            target: target.clone(),
+            message: format!("negative row count {actual_i64}"),
+        })?;
+
+        if expected != actual {
+            return Err(VerifyError::TotalReconcileMismatch {
+                target,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn compare_fields(
     key: &str,
     source_fields: &RoundTripFields,
@@ -269,4 +322,31 @@ fn fields_to_value(fields: &RoundTripFields) -> Value {
         map.insert(key.clone(), value.clone());
     }
     Value::Object(map)
+}
+
+fn quote_pg_path(path: &str) -> Result<String, VerifyError> {
+    let mut parts = Vec::new();
+    for part in path.split('.') {
+        parts.push(quote_pg_ident(part)?);
+    }
+
+    if parts.is_empty() {
+        return Err(VerifyError::TotalReconcileQuery {
+            target: path.to_string(),
+            message: "ungueltiger leerer Tabellenpfad".to_string(),
+        });
+    }
+
+    Ok(parts.join("."))
+}
+
+fn quote_pg_ident(identifier: &str) -> Result<String, VerifyError> {
+    if identifier.trim().is_empty() {
+        return Err(VerifyError::TotalReconcileQuery {
+            target: identifier.to_string(),
+            message: "ungueltiger leerer Identifier".to_string(),
+        });
+    }
+
+    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
 }
