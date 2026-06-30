@@ -27,8 +27,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dl_db::Db;
 use serde_json::Value;
+use sqlx::PgPool;
 
 pub mod guard;
 pub mod store;
@@ -450,13 +450,13 @@ pub struct AiModerator {
 
 impl AiModerator {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         generator: Arc<dyn dl_ai::TextGenerator>,
         vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn ModPort>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            store: store::ModerationStore { db },
+            store: store::ModerationStore { pool },
             generator,
             vision,
             port,
@@ -469,22 +469,26 @@ impl AiModerator {
     /// `_get_required_tone_tag_sync`). Tabelle/Spalte werden von dl-voice
     /// gepflegt — hier nur lesend.
     async fn required_tone_tag(&self, channel_id: u64) -> Option<String> {
-        use rusqlite::OptionalExtension;
-        let raw: Option<String> = self
-            .store
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT required_tone_tag FROM tempvoice_lane_tag_filter WHERE channel_id = ?1",
-                    [channel_id],
-                    |row| row.get::<_, Option<String>>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .flatten();
+        let channel_id = match i64::try_from(channel_id) {
+            Ok(channel_id) => channel_id,
+            Err(err) => {
+                tracing::warn!(%err, channel_id, "Moderation: Channel-ID passt nicht in BIGINT");
+                return None;
+            }
+        };
+        let raw = sqlx::query!(
+            r#"
+            SELECT required_tone_tag
+            FROM voice.tempvoice_lane_tag_filter
+            WHERE channel_id = $1
+            "#,
+            channel_id,
+        )
+        .fetch_optional(&self.store.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| row.required_tone_tag);
         raw.map(|t| t.trim().to_lowercase())
             .filter(|t| !t.is_empty())
     }
@@ -1035,6 +1039,7 @@ mod tests {
         reviews: Mutex<Vec<String>>,
         logs: Mutex<Vec<String>>,
         tags: Mutex<Vec<(u64, String, String)>>,
+        dms: Mutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -1074,7 +1079,9 @@ mod tests {
             Some(43)
         }
 
-        async fn send_dm(&self, _user_id: u64, _text: String) {}
+        async fn send_dm(&self, user_id: u64, _text: String) {
+            self.dms.lock().await.push(user_id);
+        }
 
         async fn add_mod_tag(&self, user_id: u64, tag: &str, reason: &str) -> bool {
             self.tags
@@ -1244,13 +1251,15 @@ mod tests {
         assert_eq!(payload["focus_message_id"], "3");
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn persistent_ragebait_setzt_mod_tag_und_loggt_case() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("moderation.sqlite3")).expect("db");
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn persistent_ragebait_setzt_mod_tag_und_loggt_case(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
         let port = Arc::new(TestPort::default());
         let moderator = AiModerator::new(
-            db,
+            db.pool().clone(),
             Arc::new(StaticGenerator {
                 response:
                     r#"{"verdict":"ok","category":"ragebait_ok","confidence":0.80,"reason":"Bait"}"#
@@ -1284,5 +1293,46 @@ mod tests {
             port.logs.lock().await.as_slice(),
             &["ragebait_escalated".to_string()]
         );
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn ragebaiter_free_lane_tag_filter_reads_voice_schema(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let channel_id = i64::try_from(SCAN_CHANNEL_IDS[0])?;
+        sqlx::query!(
+            r#"
+            INSERT INTO voice.tempvoice_lane_tag_filter
+                (channel_id, required_tone_tag, updated_at)
+            VALUES ($1, $2, now())
+            "#,
+            channel_id,
+            "ragebaiter_free",
+        )
+        .execute(db.pool())
+        .await?;
+
+        let port = Arc::new(TestPort::default());
+        let moderator = AiModerator::new(
+            db.pool().clone(),
+            Arc::new(StaticGenerator {
+                response:
+                    r#"{"verdict":"ok","category":"ragebait_ok","confidence":0.50,"reason":"Bait"}"#
+                        .into(),
+            }),
+            None,
+            port.clone(),
+        );
+        moderator.store.ensure_schema().await?;
+
+        moderator.handle_message(&event(6_000, "milder bait")).await;
+
+        assert_eq!(port.dms.lock().await.as_slice(), &[100]);
+        assert!(port.reviews.lock().await.is_empty());
+        assert!(port.logs.lock().await.is_empty());
+        Ok(())
     }
 }

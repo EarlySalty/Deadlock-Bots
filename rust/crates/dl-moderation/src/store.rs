@@ -1,9 +1,9 @@
-//! Persistenz: ai_moderation_cases + ai_moderation_ragebait_hits
-//! (Schema wie SCHEMA_SQL des Originals — das Original legt selbst an).
+//! Persistenz: moderation.ai_moderation_cases + moderation.ai_moderation_ragebait_hits.
 
-use dl_db::{Db, DbError};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use sqlx::{PgPool, Postgres, Transaction};
+
+const RAGEBAIT_HITS_ID_LOCK_KEY: i64 = 0x5241_4745_4241_4954;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CaseAttachment {
@@ -44,94 +44,86 @@ pub struct CaseRecord {
     pub action: String,
 }
 
+#[derive(Clone)]
 pub struct ModerationStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl ModerationStore {
-    pub async fn ensure_schema(&self) -> Result<(), DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS ai_moderation_cases (
-                        case_id TEXT PRIMARY KEY,
-                        guild_id INTEGER NOT NULL,
-                        channel_id INTEGER NOT NULL,
-                        message_id INTEGER NOT NULL,
-                        user_id INTEGER NOT NULL,
-                        user_tag TEXT,
-                        original_content TEXT,
-                        attachments_json TEXT,
-                        ai_category TEXT,
-                        ai_confidence REAL,
-                        ai_reason TEXT,
-                        ai_raw_json TEXT,
-                        escalated_with_context INTEGER DEFAULT 0,
-                        action TEXT,
-                        mod_id INTEGER,
-                        mod_action_at TIMESTAMP,
-                        mod_deny_reason TEXT,
-                        mod_review_message_id INTEGER,
-                        log_message_id INTEGER,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_mod_cases_user ON ai_moderation_cases(user_id);
-                    CREATE INDEX IF NOT EXISTS idx_mod_cases_created ON ai_moderation_cases(created_at);
-                    CREATE TABLE IF NOT EXISTS ai_moderation_ragebait_hits (
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        guild_id INTEGER NOT NULL,
-                        user_id INTEGER NOT NULL,
-                        message_id INTEGER NOT NULL,
-                        channel_id INTEGER NOT NULL,
-                        content_preview TEXT,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_ragebait_user_time ON ai_moderation_ragebait_hits(user_id, created_at);",
-                )
-            })
-            .await
+    pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM moderation.ai_moderation_cases
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM moderation.ai_moderation_ragebait_hits
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
-    /// Case anlegen → case_id (message_id-basiert, kollisionsfrei genug
-    /// wie das Original mit Zeit-Suffix).
+    /// Case anlegen → case_id (message_id-basiert, wie das Original mit Zeit-Suffix).
     pub async fn insert_case(&self, draft: CaseDraft) -> String {
         let case_id = format!("{}-{}", draft.message_id, chrono::Utc::now().timestamp());
-        let id = case_id.clone();
-        let result = self
-            .db
-            .write(move |conn| {
-                let attachments_json =
-                    serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
-                conn.execute(
-                    "INSERT INTO ai_moderation_cases(
-                       case_id, guild_id, channel_id, message_id, user_id, user_tag,
-                       original_content, attachments_json, ai_category, ai_confidence,
-                       ai_reason, ai_raw_json, escalated_with_context, action
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
-                    rusqlite::params![
-                        id,
-                        draft.guild_id,
-                        draft.channel_id,
-                        draft.message_id,
-                        draft.user_id,
-                        draft.user_tag,
-                        draft.content,
-                        attachments_json,
-                        draft.category,
-                        draft.confidence,
-                        draft.reason,
-                        draft.ai_raw_json,
-                        if draft.escalated_with_context {
-                            1_i64
-                        } else {
-                            0_i64
-                        },
-                        draft.action,
-                    ],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Some(guild_id) = discord_id_to_i64(draft.guild_id, "guild_id") else {
+            return case_id;
+        };
+        let Some(channel_id) = discord_id_to_i64(draft.channel_id, "channel_id") else {
+            return case_id;
+        };
+        let Some(message_id) = discord_id_to_i64(draft.message_id, "message_id") else {
+            return case_id;
+        };
+        let Some(user_id) = discord_id_to_i64(draft.user_id, "user_id") else {
+            return case_id;
+        };
+        let attachments_json =
+            serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
+        let ai_raw_json = jsonb_text_or_string(&draft.ai_raw_json);
+
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO moderation.ai_moderation_cases(
+                case_id, guild_id, channel_id, message_id, user_id, user_tag,
+                original_content, attachments, ai_category, ai_confidence,
+                ai_reason, ai_raw, escalated_with_context, action, created_at
+            )
+            VALUES(
+                $1, $2, $3, $4, $5, $6,
+                $7, $8::text::jsonb, $9, $10,
+                $11, $12::text::jsonb, $13, $14, now()
+            )
+            "#,
+            &case_id,
+            guild_id,
+            channel_id,
+            message_id,
+            user_id,
+            draft.user_tag,
+            draft.content,
+            attachments_json,
+            draft.category,
+            draft.confidence,
+            draft.reason,
+            ai_raw_json,
+            draft.escalated_with_context,
+            draft.action,
+        )
+        .execute(&self.pool)
+        .await;
+
         if let Err(err) = result {
             tracing::warn!(%err, "Moderation: Case-Insert fehlgeschlagen");
         }
@@ -139,112 +131,156 @@ impl ModerationStore {
     }
 
     pub async fn set_review_message(&self, case_id: &str, message_id: u64) {
-        let case_id = case_id.to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE ai_moderation_cases SET mod_review_message_id = ?1 WHERE case_id = ?2",
-                    rusqlite::params![message_id, case_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Some(message_id) = discord_id_to_i64(message_id, "mod_review_message_id") else {
+            return;
+        };
+        if let Err(err) = sqlx::query!(
+            r#"
+            UPDATE moderation.ai_moderation_cases
+            SET mod_review_message_id = $1
+            WHERE case_id = $2
+            "#,
+            message_id,
+            case_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, case_id, "Moderation: Review-Message konnte nicht gespeichert werden");
+        }
     }
 
     pub async fn set_log_message(&self, case_id: &str, message_id: u64) {
-        let case_id = case_id.to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE ai_moderation_cases SET log_message_id = ?1 WHERE case_id = ?2",
-                    rusqlite::params![message_id, case_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Some(message_id) = discord_id_to_i64(message_id, "log_message_id") else {
+            return;
+        };
+        if let Err(err) = sqlx::query!(
+            r#"
+            UPDATE moderation.ai_moderation_cases
+            SET log_message_id = $1
+            WHERE case_id = $2
+            "#,
+            message_id,
+            case_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, case_id, "Moderation: Log-Message konnte nicht gespeichert werden");
+        }
     }
 
     pub async fn update_case_action(&self, case_id: &str, action: &str) {
-        let (case_id, action) = (case_id.to_string(), action.to_string());
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE ai_moderation_cases SET action = ?1 WHERE case_id = ?2",
-                    rusqlite::params![action, case_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        if let Err(err) = sqlx::query!(
+            r#"
+            UPDATE moderation.ai_moderation_cases
+            SET action = $1
+            WHERE case_id = $2
+            "#,
+            action,
+            case_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, case_id, action, "Moderation: Case-Action konnte nicht aktualisiert werden");
+        }
     }
 
     pub async fn resolve_case(&self, case_id: &str, action: &str, mod_id: u64) {
-        let (case_id, action) = (case_id.to_string(), action.to_string());
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE ai_moderation_cases
-                        SET action = ?1, mod_id = ?2, mod_action_at = CURRENT_TIMESTAMP
-                      WHERE case_id = ?3",
-                    rusqlite::params![action, mod_id, case_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Some(mod_id) = discord_id_to_i64(mod_id, "mod_id") else {
+            return;
+        };
+        if let Err(err) = sqlx::query!(
+            r#"
+            UPDATE moderation.ai_moderation_cases
+            SET action = $1, mod_id = $2, mod_action_at = now()
+            WHERE case_id = $3
+            "#,
+            action,
+            mod_id,
+            case_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, case_id, action, "Moderation: Case konnte nicht resolved werden");
+        }
     }
 
-    /// Wie `resolve_case`, aber mit Pflicht-Begründung (`mod_deny_reason`) —
+    /// Wie `resolve_case`, aber mit Pflicht-Begründung (`mod_deny_reason`) -
     /// für den Deny-Flow (Original: `_mark_case_denied_sync`).
     pub async fn resolve_case_denied(&self, case_id: &str, mod_id: u64, reason: &str) {
-        let (case_id, reason) = (case_id.to_string(), reason.to_string());
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE ai_moderation_cases
-                        SET action = 'denied', mod_id = ?1,
-                            mod_action_at = CURRENT_TIMESTAMP, mod_deny_reason = ?2
-                      WHERE case_id = ?3",
-                    rusqlite::params![mod_id, reason, case_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Some(mod_id) = discord_id_to_i64(mod_id, "mod_id") else {
+            return;
+        };
+        if let Err(err) = sqlx::query!(
+            r#"
+            UPDATE moderation.ai_moderation_cases
+            SET action = 'denied',
+                mod_id = $1,
+                mod_action_at = now(),
+                mod_deny_reason = $2
+            WHERE case_id = $3
+            "#,
+            mod_id,
+            reason,
+            case_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, case_id, "Moderation: Case-Deny konnte nicht gespeichert werden");
+        }
     }
 
     /// Case laden (für den Review-Flow). None, wenn nicht vorhanden.
     pub async fn fetch_case(&self, case_id: &str) -> Option<CaseRecord> {
-        let case_id = case_id.to_string();
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT case_id, guild_id, channel_id, message_id, user_id, user_tag,
-                            ai_category, ai_confidence, ai_reason, action
-                       FROM ai_moderation_cases WHERE case_id = ?1",
-                    [case_id],
-                    |row| {
-                        Ok(CaseRecord {
-                            case_id: row.get(0)?,
-                            guild_id: row.get::<_, i64>(1)? as u64,
-                            channel_id: row.get::<_, i64>(2)? as u64,
-                            message_id: row.get::<_, i64>(3)? as u64,
-                            user_id: row.get::<_, i64>(4)? as u64,
-                            user_tag: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                            category: row.get::<_, Option<String>>(6)?.unwrap_or_default(),
-                            confidence: row.get::<_, Option<f64>>(7)?.unwrap_or(0.0),
-                            reason: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
-                            action: row.get::<_, Option<String>>(9)?.unwrap_or_default(),
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let row = match sqlx::query!(
+            r#"
+            SELECT
+                case_id AS "case_id!",
+                guild_id AS "guild_id!",
+                channel_id AS "channel_id!",
+                message_id AS "message_id!",
+                user_id AS "user_id!",
+                user_tag,
+                ai_category,
+                ai_confidence,
+                ai_reason,
+                action
+            FROM moderation.ai_moderation_cases
+            WHERE case_id = $1
+            "#,
+            case_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        {
+            Ok(row) => row?,
+            Err(err) => {
+                tracing::warn!(%err, case_id, "Moderation: Case konnte nicht geladen werden");
+                return None;
+            }
+        };
+
+        let guild_id = db_id_to_u64(row.guild_id, "guild_id")?;
+        let channel_id = db_id_to_u64(row.channel_id, "channel_id")?;
+        let message_id = db_id_to_u64(row.message_id, "message_id")?;
+        let user_id = db_id_to_u64(row.user_id, "user_id")?;
+
+        Some(CaseRecord {
+            case_id: row.case_id,
+            guild_id,
+            channel_id,
+            message_id,
+            user_id,
+            user_tag: row.user_tag.unwrap_or_default(),
+            category: row.ai_category.unwrap_or_default(),
+            confidence: row.ai_confidence.unwrap_or(0.0),
+            reason: row.ai_reason.unwrap_or_default(),
+            action: row.action.unwrap_or_default(),
+        })
     }
 
     /// Hit zählen → (Anzahl im 120-min-Fenster, Previews ältester→neuester).
@@ -256,127 +292,245 @@ impl ModerationStore {
         channel_id: u64,
         content: &str,
     ) -> (i64, Vec<String>) {
+        let Some(guild_id) = discord_id_to_i64(guild_id, "guild_id") else {
+            return (0, Vec::new());
+        };
+        let Some(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return (0, Vec::new());
+        };
+        let Some(message_id) = discord_id_to_i64(message_id, "message_id") else {
+            return (0, Vec::new());
+        };
+        let Some(channel_id) = discord_id_to_i64(channel_id, "channel_id") else {
+            return (0, Vec::new());
+        };
+        let Ok(window_minutes) = i32::try_from(super::RAGEBAIT_WINDOW_MINUTES) else {
+            tracing::warn!("Moderation: Ragebait-Fenster passt nicht in INTEGER");
+            return (0, Vec::new());
+        };
         let preview: String = content.chars().take(180).collect();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO ai_moderation_ragebait_hits(
-                       guild_id, user_id, message_id, channel_id, content_preview
-                     ) VALUES(?1,?2,?3,?4,?5)",
-                    rusqlite::params![guild_id, user_id, message_id, channel_id, preview],
-                )?;
-                let mut stmt = conn.prepare(
-                    "SELECT content_preview FROM ai_moderation_ragebait_hits
-                      WHERE user_id = ?1
-                        AND guild_id = ?2
-                        AND created_at > datetime('now', ?3)
-                      ORDER BY created_at ASC",
-                )?;
-                let window = format!("-{} minutes", super::RAGEBAIT_WINDOW_MINUTES);
-                let previews: Vec<String> = stmt
-                    .query_map(rusqlite::params![user_id, guild_id, window], |row| {
-                        row.get::<_, Option<String>>(0)
-                            .map(|p| p.unwrap_or_default())
-                    })?
-                    .collect::<Result<_, _>>()?;
-                Ok((previews.len() as i64, previews))
-            })
-            .await
-            .unwrap_or((0, Vec::new()))
+
+        let result: Result<(i64, Vec<String>), sqlx::Error> = async {
+            let mut tx = self.pool.begin().await?;
+            lock_ragebait_hit_ids(&mut tx).await?;
+            let hit_id = next_ragebait_hit_id(&mut tx).await?;
+
+            sqlx::query!(
+                r#"
+                INSERT INTO moderation.ai_moderation_ragebait_hits(
+                    id, guild_id, user_id, message_id, channel_id, content_preview, created_at
+                )
+                VALUES($1, $2, $3, $4, $5, $6, now())
+                "#,
+                hit_id,
+                guild_id,
+                user_id,
+                message_id,
+                channel_id,
+                preview,
+            )
+            .execute(&mut *tx)
+            .await?;
+
+            let rows = sqlx::query!(
+                r#"
+                SELECT content_preview
+                FROM moderation.ai_moderation_ragebait_hits
+                WHERE user_id = $1
+                  AND guild_id = $2
+                  AND created_at > now() - make_interval(mins => $3::int)
+                ORDER BY created_at ASC, id ASC
+                "#,
+                user_id,
+                guild_id,
+                window_minutes,
+            )
+            .fetch_all(&mut *tx)
+            .await?;
+
+            let previews = rows
+                .into_iter()
+                .map(|row| row.content_preview.unwrap_or_default())
+                .collect::<Vec<_>>();
+            let count = i64::try_from(previews.len()).unwrap_or(0);
+            tx.commit().await?;
+            Ok((count, previews))
+        }
+        .await;
+
+        match result {
+            Ok(result) => result,
+            Err(err) => {
+                tracing::warn!(%err, "Moderation: Ragebait-Hit konnte nicht persistiert werden");
+                (0, Vec::new())
+            }
+        }
     }
 }
 
-#[cfg(test)]
+async fn lock_ragebait_hit_ids(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        SELECT 1 AS "locked!"
+        FROM pg_advisory_xact_lock($1)
+        "#,
+        RAGEBAIT_HITS_ID_LOCK_KEY,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn next_ragebait_hit_id(tx: &mut Transaction<'_, Postgres>) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS "next_id!"
+        FROM moderation.ai_moderation_ragebait_hits
+        "#
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.next_id)
+}
+
+fn discord_id_to_i64(value: u64, field: &'static str) -> Option<i64> {
+    match i64::try_from(value) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, value, "Discord-ID passt nicht in PostgreSQL BIGINT");
+            None
+        }
+    }
+}
+
+fn db_id_to_u64(value: i64, field: &'static str) -> Option<u64> {
+    match u64::try_from(value) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, value, "PostgreSQL BIGINT ist keine gueltige Discord-ID");
+            None
+        }
+    }
+}
+
+fn jsonb_text_or_string(raw: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(raw)
+        .map(|value| value.to_string())
+        .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()).to_string())
+}
+
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
 
-    async fn store() -> (tempfile::TempDir, ModerationStore) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        let store = ModerationStore { db };
-        store.ensure_schema().await.expect("schema");
-        (dir, store)
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    async fn store() -> Result<(dl_central_db::TestDb, ModerationStore), Box<dyn std::error::Error>>
+    {
+        let db = dl_central_db::testing::test_pool().await?;
+        let store = ModerationStore {
+            pool: db.pool().clone(),
+        };
+        store.ensure_schema().await?;
+        Ok((db, store))
+    }
+
+    fn draft() -> CaseDraft {
+        CaseDraft {
+            guild_id: 1,
+            channel_id: 2,
+            message_id: 3,
+            user_id: 100,
+            user_tag: "Anna".into(),
+            content: "böse nachricht".into(),
+            category: "scam".into(),
+            confidence: 0.95,
+            reason: "Scam".into(),
+            action: "proposed".into(),
+            attachments: vec![CaseAttachment {
+                url: "https://cdn.example/image.png".into(),
+                content_type: "image/png".into(),
+                filename: "image.png".into(),
+            }],
+            ai_raw_json: "{\"response_text\":\"raw\"}".into(),
+            escalated_with_context: true,
+        }
     }
 
     #[tokio::test]
-    async fn case_lifecycle() {
-        let (_dir, store) = store().await;
-        let case_id = store
-            .insert_case(CaseDraft {
-                guild_id: 1,
-                channel_id: 2,
-                message_id: 3,
-                user_id: 100,
-                user_tag: "Anna".into(),
-                content: "böse nachricht".into(),
-                category: "scam".into(),
-                confidence: 0.95,
-                reason: "Scam".into(),
-                action: "proposed".into(),
-                attachments: vec![CaseAttachment {
-                    url: "https://cdn.example/image.png".into(),
-                    content_type: "image/png".into(),
-                    filename: "image.png".into(),
-                }],
-                ai_raw_json: "{\"response_text\":\"raw\"}".into(),
-                escalated_with_context: true,
-            })
-            .await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn case_lifecycle() -> TestResult {
+        let (db, store) = store().await?;
+        let case_id = store.insert_case(draft()).await;
         store.set_review_message(&case_id, 999).await;
         store
             .update_case_action(&case_id, "auto_delete_failed")
             .await;
         store.resolve_case(&case_id, "accepted", 777).await;
-        let (action, mod_id, review): (String, u64, u64) = store
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT action, mod_id, mod_review_message_id FROM ai_moderation_cases WHERE case_id = ?1",
-                    [case_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .await
-            .expect("case");
-        assert_eq!((action.as_str(), mod_id, review), ("accepted", 777, 999));
 
-        let (attachments, raw, escalated): (String, String, i64) = store
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT attachments_json, ai_raw_json, escalated_with_context
-                       FROM ai_moderation_cases WHERE message_id = 3",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .await
-            .expect("case metadata");
-        assert!(attachments.contains("https://cdn.example/image.png"));
-        assert_eq!(raw, "{\"response_text\":\"raw\"}");
-        assert_eq!(escalated, 1);
+        let row = sqlx::query!(
+            r#"
+            SELECT action, mod_id, mod_review_message_id
+            FROM moderation.ai_moderation_cases
+            WHERE case_id = $1
+            "#,
+            &case_id,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.action.as_deref(), Some("accepted"));
+        assert_eq!(row.mod_id, Some(777));
+        assert_eq!(row.mod_review_message_id, Some(999));
+
+        let row = sqlx::query!(
+            r#"
+            SELECT
+                attachments::text AS "attachments!",
+                ai_raw::text AS "raw!",
+                escalated_with_context
+            FROM moderation.ai_moderation_cases
+            WHERE message_id = $1
+            "#,
+            3_i64,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert!(row.attachments.contains("https://cdn.example/image.png"));
+        assert_eq!(row.raw, r#"{"response_text": "raw"}"#);
+        assert_eq!(row.escalated_with_context, Some(true));
+
+        let duplicate = sqlx::query!(
+            r#"
+            INSERT INTO moderation.ai_moderation_cases
+                (case_id, guild_id, channel_id, message_id, user_id, created_at)
+            VALUES ($1, $2, $3, $4, $5, now())
+            "#,
+            &case_id,
+            1_i64,
+            2_i64,
+            3_i64,
+            100_i64,
+        )
+        .execute(db.pool())
+        .await
+        .expect_err("case_id primary key must reject duplicates");
+        let code = duplicate.as_database_error().and_then(|err| err.code());
+        assert_eq!(code.as_deref(), Some("23505"));
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn fetch_und_deny_mit_grund() {
-        let (_dir, store) = store().await;
-        let case_id = store
-            .insert_case(CaseDraft {
-                guild_id: 1,
-                channel_id: 2,
-                message_id: 3,
-                user_id: 100,
-                user_tag: "Anna".into(),
-                content: "x".into(),
-                category: "scam".into(),
-                confidence: 0.9,
-                reason: "Scam".into(),
-                action: "proposed".into(),
-                attachments: Vec::new(),
-                ai_raw_json: "{}".into(),
-                escalated_with_context: false,
-            })
-            .await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn fetch_und_deny_mit_grund() -> TestResult {
+        let (db, store) = store().await?;
+        let mut draft = draft();
+        draft.content = "x".into();
+        draft.attachments = Vec::new();
+        draft.ai_raw_json = "{}".into();
+        draft.escalated_with_context = false;
+
+        let case_id = store.insert_case(draft).await;
         let case = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(case.action, "proposed");
         assert_eq!(
@@ -390,28 +544,26 @@ mod tests {
         let denied = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(denied.action, "denied");
 
-        let reason: Option<String> = store
-            .db
-            .read({
-                let case_id = case_id.clone();
-                move |conn| {
-                    conn.query_row(
-                        "SELECT mod_deny_reason FROM ai_moderation_cases WHERE case_id = ?1",
-                        [case_id],
-                        |row| row.get(0),
-                    )
-                }
-            })
-            .await
-            .expect("reason");
-        assert_eq!(reason.as_deref(), Some("kein Verstoss"));
+        let row = sqlx::query!(
+            r#"
+            SELECT mod_deny_reason
+            FROM moderation.ai_moderation_cases
+            WHERE case_id = $1
+            "#,
+            &case_id,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.mod_deny_reason.as_deref(), Some("kein Verstoss"));
 
         assert!(store.fetch_case("gibtsnicht").await.is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ragebait_fenster_zaehlt() {
-        let (_dir, store) = store().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn ragebait_fenster_zaehlt() -> TestResult {
+        let (db, store) = store().await?;
         for i in 0..4 {
             let (count, previews) = store
                 .insert_ragebait_hit(1, 100, 1000 + i, 2, &format!("bait {i}"))
@@ -419,14 +571,33 @@ mod tests {
             assert_eq!(count, i as i64 + 1);
             assert_eq!(previews.len() as i64, count);
         }
+
+        let row = sqlx::query!(
+            r#"
+            SELECT
+                COUNT(*) AS "count!",
+                COUNT(DISTINCT id) AS "distinct_count!"
+            FROM moderation.ai_moderation_ragebait_hits
+            WHERE guild_id = $1 AND user_id = $2
+            "#,
+            1_i64,
+            100_i64,
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.count, 4);
+        assert_eq!(row.distinct_count, 4);
+
         // anderer User zählt eigenes Fenster
         let (count, _) = store.insert_ragebait_hit(1, 200, 2000, 2, "x").await;
         assert_eq!(count, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ragebait_fenster_ist_guild_spezifisch() {
-        let (_dir, store) = store().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn ragebait_fenster_ist_guild_spezifisch() -> TestResult {
+        let (_db, store) = store().await?;
         for i in 0..3 {
             let (count, _) = store
                 .insert_ragebait_hit(1, 100, 3000 + i, 2, &format!("g1 bait {i}"))
@@ -437,47 +608,41 @@ mod tests {
         let (count, previews) = store.insert_ragebait_hit(2, 100, 4000, 3, "g2 bait").await;
         assert_eq!(count, 1);
         assert_eq!(previews, vec!["g2 bait".to_string()]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn ragebait_fenster_zaehlt_fensterrand_strikt_nicht_mit() {
-        let (_dir, store) = store().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn ragebait_fenster_zaehlt_fensterrand_strikt_nicht_mit() -> TestResult {
+        let (db, store) = store().await?;
+        let window_minutes = i32::try_from(crate::RAGEBAIT_WINDOW_MINUTES)?;
 
-        let second = chrono::Utc::now().timestamp();
-        while chrono::Utc::now().timestamp() == second {
-            tokio::task::yield_now().await;
-        }
-
-        store
-            .db
-            .write(|conn| {
-                let window = format!("-{} minutes", crate::RAGEBAIT_WINDOW_MINUTES);
-                conn.execute(
-                    "INSERT INTO ai_moderation_ragebait_hits(
-                       guild_id, user_id, message_id, channel_id, content_preview, created_at
-                     ) VALUES(?1,?2,?3,?4,?5,datetime('now', ?6))",
-                    rusqlite::params![1_u64, 100_u64, 4998_u64, 2_u64, "genau rand", window],
-                )?;
-                conn.execute(
-                    "INSERT INTO ai_moderation_ragebait_hits(
-                       guild_id, user_id, message_id, channel_id, content_preview, created_at
-                     ) VALUES(?1,?2,?3,?4,?5,datetime('now', ?6, '+1 second'))",
-                    rusqlite::params![
-                        1_u64,
-                        100_u64,
-                        4999_u64,
-                        2_u64,
-                        "knapp drin",
-                        format!("-{} minutes", crate::RAGEBAIT_WINDOW_MINUTES)
-                    ],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("boundary hits");
+        sqlx::query!(
+            r#"
+            INSERT INTO moderation.ai_moderation_ragebait_hits(
+                id, guild_id, user_id, message_id, channel_id, content_preview, created_at
+            )
+            VALUES
+                ($1, $2, $3, $4, $5, $6, now() - make_interval(mins => $7::int)),
+                ($8, $2, $3, $9, $5, $10, now() - make_interval(mins => $7::int) + interval '1 second')
+            "#,
+            1_i64,
+            1_i64,
+            100_i64,
+            4998_i64,
+            2_i64,
+            "genau rand",
+            window_minutes,
+            2_i64,
+            4999_i64,
+            "knapp drin",
+        )
+        .execute(db.pool())
+        .await?;
 
         let (count, previews) = store.insert_ragebait_hit(1, 100, 5000, 2, "neu").await;
         assert_eq!(count, 2);
         assert_eq!(previews, vec!["knapp drin".to_string(), "neu".to_string()]);
+        Ok(())
     }
 }

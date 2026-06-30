@@ -23,9 +23,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::OnceLock;
 
-use dl_db::Db;
 use regex::Regex;
 use serde_json::Value;
+use sqlx::PgPool;
 
 pub const REVIEW_CHANNEL_ID: u64 = 1374364800817303632;
 pub const MOD_CHANNEL_ID: u64 = 1315684135175716978;
@@ -421,7 +421,7 @@ impl Default for SecurityGuardConfig {
 }
 
 pub struct SecurityGuard {
-    pub db: Db,
+    pub pool: PgPool,
     pub generator: Option<Arc<dyn dl_ai::TextGenerator>>,
     /// Optionaler Vision-Pfad für das Takeover-Bild-Label (Original:
     /// `_finalize_takeover_ai_label` → `_ai_check_image_scam`). Best-effort,
@@ -436,23 +436,29 @@ pub struct SecurityGuard {
 
 impl SecurityGuard {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         generator: Option<Arc<dyn dl_ai::TextGenerator>>,
         vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn GuardPort>,
     ) -> Arc<Self> {
-        Self::new_with_config(db, generator, vision, port, SecurityGuardConfig::default())
+        Self::new_with_config(
+            pool,
+            generator,
+            vision,
+            port,
+            SecurityGuardConfig::default(),
+        )
     }
 
     pub fn new_with_config(
-        db: Db,
+        pool: PgPool,
         generator: Option<Arc<dyn dl_ai::TextGenerator>>,
         vision: Option<Arc<dyn dl_ai::VisionGenerator>>,
         port: Arc<dyn GuardPort>,
         config: SecurityGuardConfig,
     ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             generator,
             vision,
             port,
@@ -463,27 +469,17 @@ impl SecurityGuard {
         })
     }
 
-    pub async fn ensure_schema(&self) -> Result<(), dl_db::DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS security_guard_incidents (
-                        case_id      TEXT PRIMARY KEY,
-                        guild_id     INTEGER NOT NULL,
-                        user_id      INTEGER NOT NULL,
-                        user_tag     TEXT NOT NULL,
-                        action       TEXT NOT NULL,
-                        reason       TEXT NOT NULL,
-                        channel_count   INTEGER DEFAULT 0,
-                        message_count   INTEGER DEFAULT 0,
-                        attachment_count INTEGER DEFAULT 0,
-                        keyword_hit  INTEGER DEFAULT 0,
-                        messages_json TEXT,
-                        created_at   TEXT NOT NULL
-                    )",
-                )
-            })
-            .await
+    pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM moderation.security_guard_incidents
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(())
     }
 
     pub async fn handle_message(self: &Arc<Self>, event: &dl_discord::MessageEvent) {
@@ -1034,36 +1030,70 @@ impl SecurityGuard {
                 })
                 .collect::<Vec<_>>(),
         )
-        .unwrap_or_default();
+        .unwrap_or_else(|_| "[]".to_string());
+        let Some(guild_id) = discord_id_to_i64(incident.guild_id, "guild_id") else {
+            return;
+        };
+        let Some(user_id) = discord_id_to_i64(incident.user_id, "user_id") else {
+            return;
+        };
+        let Some(channel_count) = i64_to_i32(incident.meta[0], "channel_count") else {
+            return;
+        };
+        let Some(message_count) = i64_to_i32(incident.meta[1], "message_count") else {
+            return;
+        };
+        let Some(attachment_count) = i64_to_i32(incident.meta[2], "attachment_count") else {
+            return;
+        };
+        let keyword_hit = incident.meta[3] != 0;
         let incident = incident.clone();
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO security_guard_incidents
-                       (case_id, guild_id, user_id, user_tag, action, reason,
-                        channel_count, message_count, attachment_count, keyword_hit,
-                        messages_json, created_at)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11, datetime('now'))",
-                    rusqlite::params![
-                        incident.case_id,
-                        incident.guild_id,
-                        incident.user_id,
-                        incident.user_tag,
-                        incident.action,
-                        incident.reason,
-                        incident.meta[0],
-                        incident.meta[1],
-                        incident.meta[2],
-                        incident.meta[3],
-                        messages_json,
-                    ],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO moderation.security_guard_incidents(
+                case_id, guild_id, user_id, user_tag, action, reason,
+                channel_count, message_count, attachment_count, keyword_hit,
+                messages, created_at
+            )
+            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::text::jsonb, now())
+            ON CONFLICT (case_id) DO NOTHING
+            "#,
+            incident.case_id,
+            guild_id,
+            user_id,
+            incident.user_tag,
+            incident.action,
+            incident.reason,
+            channel_count,
+            message_count,
+            attachment_count,
+            keyword_hit,
+            messages_json,
+        )
+        .execute(&self.pool)
+        .await;
         if let Err(err) = result {
             tracing::warn!(%err, "SecurityGuard: Incident-Persist fehlgeschlagen");
+        }
+    }
+}
+
+fn discord_id_to_i64(value: u64, field: &'static str) -> Option<i64> {
+    match i64::try_from(value) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, value, "Discord-ID passt nicht in PostgreSQL BIGINT");
+            None
+        }
+    }
+}
+
+fn i64_to_i32(value: i64, field: &'static str) -> Option<i32> {
+    match i32::try_from(value) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, value, "SecurityGuard-Metadatum passt nicht in INTEGER");
+            None
         }
     }
 }
@@ -1090,8 +1120,6 @@ mod tests {
     use std::collections::HashMap;
     use std::io;
     use std::sync::Arc;
-
-    use dl_db::Db;
 
     fn msg(channel: u64, secs_ago: i64, content: &str, images: u32) -> RecentMsg {
         RecentMsg {
@@ -1282,18 +1310,21 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     async fn test_guard_with_config(
         port: Arc<dyn GuardPort>,
         config: SecurityGuardConfig,
-    ) -> (tempfile::TempDir, Arc<SecurityGuard>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("sg.sqlite3")).expect("db");
-        let guard = SecurityGuard::new_with_config(db, None, None, port, config);
-        guard.ensure_schema().await.expect("schema");
-        (dir, guard)
+    ) -> Result<(dl_central_db::TestDb, Arc<SecurityGuard>), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let guard = SecurityGuard::new_with_config(db.pool().clone(), None, None, port, config);
+        guard.ensure_schema().await?;
+        Ok((db, guard))
     }
 
-    async fn test_guard(port: Arc<dyn GuardPort>) -> (tempfile::TempDir, Arc<SecurityGuard>) {
+    #[cfg(feature = "testing")]
+    async fn test_guard(
+        port: Arc<dyn GuardPort>,
+    ) -> Result<(dl_central_db::TestDb, Arc<SecurityGuard>), Box<dyn std::error::Error>> {
         test_guard_with_config(port, enforcing_config()).await
     }
 
@@ -1474,13 +1505,16 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn fremd_invite_routing_own_foreign_unresolved_und_dm_vor_ban() {
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn fremd_invite_routing_own_foreign_unresolved_und_dm_vor_ban(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Utc::now().timestamp();
         let hour = 3600;
 
         let own_port = FakePort::with_resolves(&[("own", Some(1))]);
-        let (_dir, guard) = test_guard(own_port.clone()).await;
+        let (_db, guard) = test_guard(own_port.clone()).await?;
         guard
             .handle_message(&event(
                 10,
@@ -1494,7 +1528,7 @@ mod tests {
         assert_eq!(own_port.calls().await, vec!["resolve:own"]);
 
         let foreign_port = FakePort::with_resolves(&[("foreign", Some(2))]);
-        let (_dir, guard) = test_guard(foreign_port.clone()).await;
+        let (foreign_db, guard) = test_guard(foreign_port.clone()).await?;
         guard
             .handle_message(&event(
                 20,
@@ -1511,8 +1545,25 @@ mod tests {
         assert!(dm_pos < ban_pos);
         assert!(calls.contains(&"delete:21:211".to_string()));
 
+        let row = sqlx::query!(
+            r#"
+            SELECT
+                action AS "action!",
+                keyword_hit AS "keyword_hit!",
+                messages::text AS "messages!"
+            FROM moderation.security_guard_incidents
+            WHERE case_id = $1
+            "#,
+            "sg-20-211",
+        )
+        .fetch_one(foreign_db.pool())
+        .await?;
+        assert_eq!(row.action, "ban");
+        assert!(!row.keyword_hit);
+        assert!(row.messages.contains("discord.gg/foreign"));
+
         let unresolved_port = FakePort::with_resolves(&[("expired", None)]);
-        let (_dir, guard) = test_guard(unresolved_port.clone()).await;
+        let (_db, guard) = test_guard(unresolved_port.clone()).await?;
         guard
             .handle_message(&event(
                 30,
@@ -1525,14 +1576,18 @@ mod tests {
             .await;
         let calls = unresolved_port.calls().await;
         assert_eq!(calls, vec!["resolve:expired"]);
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn takeover_case_setzt_user_cooldown_gegen_mehrfachalerts() {
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn takeover_case_setzt_user_cooldown_gegen_mehrfachalerts(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Utc::now().timestamp();
         let hour = 3600;
         let port = FakePort::with_resolves(&[]);
-        let (_dir, guard) = test_guard(port.clone()).await;
+        let (_db, guard) = test_guard(port.clone()).await?;
 
         guard
             .handle_message(&image_event(
@@ -1577,10 +1632,14 @@ mod tests {
             ))
             .await;
         assert_eq!(port.calls().await, calls_after_first_case);
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test(flavor = "current_thread")]
-    async fn shadow_mode_fuehrt_strafende_side_effects_nicht_aus_enforce_true_schon() {
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn shadow_mode_fuehrt_strafende_side_effects_nicht_aus_enforce_true_schon(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Utc::now().timestamp();
         let hour = 3600;
         let log_capture = LogCapture::default();
@@ -1592,7 +1651,7 @@ mod tests {
 
         let shadow_port = FakePort::with_resolves(&[("foreign", Some(2))]);
         let (_dir, guard) =
-            test_guard_with_config(shadow_port.clone(), SecurityGuardConfig::default()).await;
+            test_guard_with_config(shadow_port.clone(), SecurityGuardConfig::default()).await?;
         let _guard = tracing::subscriber::set_default(subscriber);
         guard
             .handle_message(&event(
@@ -1621,7 +1680,7 @@ mod tests {
         }));
 
         let enforce_port = FakePort::with_resolves(&[("foreign", Some(2))]);
-        let (_dir, guard) = test_guard(enforce_port.clone()).await;
+        let (_db, guard) = test_guard(enforce_port.clone()).await?;
         guard
             .handle_message(&event(
                 61,
@@ -1636,14 +1695,18 @@ mod tests {
         assert!(calls.contains(&"dm".to_string()));
         assert!(calls.contains(&"ban".to_string()));
         assert!(calls.contains(&"delete:62:612".to_string()));
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn staff_cache_miss_fail_closed_ohne_resolve_oder_aktion() {
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn staff_cache_miss_fail_closed_ohne_resolve_oder_aktion(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Utc::now().timestamp();
         let hour = 3600;
         let port = FakePort::with_resolves(&[("foreign", Some(2))]);
-        let (_dir, guard) = test_guard(port.clone()).await;
+        let (_db, guard) = test_guard(port.clone()).await?;
         let mut event = event(
             70,
             71,
@@ -1655,15 +1718,19 @@ mod tests {
         event.author_staff_status_known = false;
         guard.handle_message(&event).await;
         assert!(port.calls().await.is_empty());
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn etablierter_fremd_invite_softwarn_vs_hijack_nach_streuung() {
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn etablierter_fremd_invite_softwarn_vs_hijack_nach_streuung(
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let now = chrono::Utc::now().timestamp();
         let hour = 3600;
 
         let soft_port = FakePort::with_resolves(&[("foreign", Some(2))]);
-        let (_dir, guard) = test_guard(soft_port.clone()).await;
+        let (_db, guard) = test_guard(soft_port.clone()).await?;
         guard
             .handle_message(&event(
                 40,
@@ -1680,7 +1747,7 @@ mod tests {
         assert!(!calls.iter().any(|c| c == "dm" || c.starts_with("timeout")));
 
         let hijack_port = FakePort::with_resolves(&[("foreign", Some(2))]);
-        let (_dir, guard) = test_guard(hijack_port.clone()).await;
+        let (_db, guard) = test_guard(hijack_port.clone()).await?;
         guard
             .handle_message(&event(50, 51, 511, "nur history", now - 800 * hour, None))
             .await;
@@ -1698,6 +1765,7 @@ mod tests {
         assert!(calls.contains(&"dm".to_string()));
         assert!(calls.contains(&format!("timeout:{TIMEOUT_MINUTES}")));
         assert!(calls.iter().any(|c| c == "mod:Hijack"));
+        Ok(())
     }
 
     #[test]
