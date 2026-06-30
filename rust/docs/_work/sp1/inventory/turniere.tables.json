@@ -1,0 +1,2626 @@
+{
+ "project": "Turniere",
+ "db_path": "/home/naniadm/Documents/Deadlock-Turniere/backend/data/tournament.db",
+ "db_tech": "sqlx-sqlite",
+ "tables": [
+  {
+   "name": "_sqlx_migrations",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "version",
+     "type": "BIGINT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "installed_on",
+     "type": "TIMESTAMP",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "success",
+     "type": "BOOLEAN",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "checksum",
+     "type": "BLOB",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "execution_time",
+     "type": "BIGINT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [],
+   "proposed_schema": "OFFEN",
+   "notes": "1:1 ins turnier-Schema: nein (Tooling/Meta); 0 Code-Konsumenten (sqlx-Metadaten); sqlx-intern; kein fachliches Modell; Drop nur, wenn Migrationstooling ersetzt wird (#386)"
+  },
+  {
+   "name": "audit_log",
+   "rows": 181,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "action",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "user_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "details",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.operations_routes",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: user_id -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "bracket_matches",
+   "rows": 25,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "round",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "position",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "bracket_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team1_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "team2_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "winner_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_party_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "party_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_match_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "played_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_duration_s",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_stats",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_match1_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_match2_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_channel_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "mini_group_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_mini_group1_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_mini_group2_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hero_assignments",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "loser_to_match_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "loser_to_slot",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "on_stream",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.draft.routes",
+    "backend.match.auto_lobby",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.match.result_processor",
+    "backend.match.series_manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.mini_groups",
+    "backend.tournament.models",
+    "backend.tournament.operations_routes",
+    "backend.tournament.points",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-core",
+    "turnier-engine",
+    "turnier-match",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "bracket_mini_group_teams",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "mini_group_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "seed_order",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "source_match_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source_mini_group_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.engine",
+    "backend.tournament.mini_groups",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-engine"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "bracket_mini_groups",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "round",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "position",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "advances_to_match_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "advances_to_slot",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.engine",
+    "backend.tournament.mini_groups",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-engine"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "checkins",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "match_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "checked_in_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "turnier-api",
+    "turnier-engine"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  },
+  {
+   "name": "discord_tasks",
+   "rows": 29,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "result_payload",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "error",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.notifications.discord_notifier",
+    "turnier-discord"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "draft_actions",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "session_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sequence_index",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "action_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_slot",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "hero_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "taken_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "taken_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_admin_forced",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.draft.engine",
+    "turnier-draft"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: taken_by -> core.discord_users"
+  },
+  {
+   "name": "draft_sessions",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bracket_match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "current_action_index",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "started_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "started_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "completed_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.draft.engine",
+    "turnier-draft"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: started_by -> core.discord_users"
+  },
+  {
+   "name": "group_matches",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "group_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team1_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team2_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "winner_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "played_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_channel_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "steam_party_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "party_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_match_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_duration_s",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_stats",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "hero_assignments",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.match.auto_lobby",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "group_teams",
+   "rows": 5,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "group_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "wins",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "losses",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "groups",
+   "rows": 2,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "seeding_order",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.match.auto_lobby",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.models",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-core",
+    "turnier-engine",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "match_casters",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "match_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "assigned_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "assigned_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, assigned_by -> core.discord_users"
+  },
+  {
+   "name": "match_games",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bracket_match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "game_number",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_party_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "party_code",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_match_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "winner_team",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "duration_s",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_stats",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "completed_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.match.series_manager",
+    "turnier-api",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite)"
+  },
+  {
+   "name": "match_result_reports",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "match_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reported_by",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "winner_team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "deadlock_match_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "is_no_show",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "no_show_team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "resolved_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "resolved_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.operations_routes",
+    "turnier-api"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: reported_by, resolved_by -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "match_results",
+   "rows": 18,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bracket_match_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "group_match_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "winning_team",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "duration_s",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "player_stats",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.match.manager",
+    "backend.match.result_processor",
+    "backend.tournament.admin_routes",
+    "turnier-api",
+    "turnier-core",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "player_points",
+   "rows": 15,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "total_points",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "tournaments_played",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "matches_played",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "matches_won",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "best_placement",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.points",
+    "turnier-api",
+    "turnier-engine"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  },
+  {
+   "name": "rank_cache",
+   "rows": 25,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_tier",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "subrank",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_score",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "cached_at",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.rank_reader",
+    "backend.tournament.leaderboard_routes",
+    "turnier-api",
+    "turnier-core",
+    "turnier-steam"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: cached_at)"
+  },
+  {
+   "name": "sent_match_reminders",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "match_type",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "match_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "kind",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sent_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.scheduler",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: sent_at)"
+  },
+  {
+   "name": "sent_start_reminders",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "offset_minutes",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sent_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.scheduler",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: sent_at)"
+  },
+  {
+   "name": "sent_tournament_reminders",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "offset_minutes",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "sent_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.scheduler",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: sent_at)"
+  },
+  {
+   "name": "sessions",
+   "rows": 65,
+   "columns": [
+    {
+     "name": "token",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_avatar",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "discord_roles",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.auth.discord_oauth",
+    "backend.auth.middleware",
+    "backend.db",
+    "backend.draft.routes",
+    "backend.tournament.admin_routes",
+    "backend.tournament.consent_routes",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-auth"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, discord_name, discord_avatar, discord_roles -> core.discord_users"
+  },
+  {
+   "name": "team_applications",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.admin_routes",
+    "backend.tournament.routes",
+    "turnier-api"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, discord_name -> core.discord_users"
+  },
+  {
+   "name": "team_invitations",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "signup_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "expires_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.tournament.routes",
+    "turnier-api"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  },
+  {
+   "name": "team_members",
+   "rows": 26,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_score",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "role",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "joined_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.operations_routes",
+    "backend.tournament.points",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-match",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, discord_name -> core.discord_users"
+  },
+  {
+   "name": "teams",
+   "rows": 21,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "name_key",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "captain_discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "recruitment_status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.match.result_processor",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.models",
+    "backend.tournament.operations_routes",
+    "backend.tournament.points",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-automatik",
+    "turnier-core",
+    "turnier-engine",
+    "turnier-match",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: captain_discord_id -> core.discord_users"
+  },
+  {
+   "name": "tournament_casters",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "assigned_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "assigned_by",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.db",
+    "backend.match.manager",
+    "backend.tournament.admin_routes",
+    "turnier-api",
+    "turnier-match"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, assigned_by -> core.discord_users"
+  },
+  {
+   "name": "tournament_checkins",
+   "rows": 23,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "checked_in_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.tournament.admin_routes",
+    "backend.tournament.engine",
+    "backend.tournament.routes",
+    "turnier-api",
+    "turnier-engine"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: checked_in_at)"
+  },
+  {
+   "name": "tournament_dm_optout",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "scope",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik",
+    "turnier-discord"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  },
+  {
+   "name": "tournament_presets",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "category",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "team_size",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "bracket_format",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "series_format",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "final_series_format",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tournament_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "tournament_game_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "match_objective",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "invite_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reminder_offsets",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "start_reminder_offsets",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rules",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "description_template",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "active",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_by",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: created_by -> core.discord_users"
+  },
+  {
+   "name": "tournament_proposal_feedback",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "proposal_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "caster_discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "raw_text",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "applied_change_json",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: caster_discord_id -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "tournament_proposal_votes",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "proposal_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "caster_discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "decision",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: caster_discord_id -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "tournament_proposals",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "preset_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "proposed_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "config_json",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "state",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "proposal_message_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "channel_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "decided_at",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: created_at)"
+  },
+  {
+   "name": "tournament_signals",
+   "rows": 0,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "participants",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "teams",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "no_shows",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "poll_up",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "poll_down",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "poll_message_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "feedback_summary",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "collected_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "turnier-automatik"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Hypertable-Kandidat (Zeit-Spalte: collected_at)"
+  },
+  {
+   "name": "tournament_signups",
+   "rows": 31,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "tournament_id",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "steam_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "rank_score",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "signed_up_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "discord_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invited_by_team_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.tournament.admin_routes",
+    "backend.tournament.consent_routes",
+    "backend.tournament.engine",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id, discord_name -> core.discord_users; Hypertable-Kandidat (Zeit-Spalte: signed_up_at)"
+  },
+  {
+   "name": "tournaments",
+   "rows": 4,
+   "columns": [
+    {
+     "name": "id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "name",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "status",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "description",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "team_size",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "registration_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "registration_end",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "group_phase_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bracket_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "bracket_format",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_by",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "created_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "invite_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "invite_window_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_window_end",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "lobby_settings",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "checkin_start",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tournament_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "series_format",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "exclude_from_leaderboard",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "reminder_offsets",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "tournament_game_mode",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "auto_lobby_enabled",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "is_test",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "rules",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "final_series_format",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "match_objective",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "no_show_grace_minutes",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "start_reminder_offsets",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "scheduled_event_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "source",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "preset_id",
+     "type": "INTEGER",
+     "notnull": 0,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.match.auto_lobby",
+    "backend.match.game_modes",
+    "backend.match.manager",
+    "backend.match.series_manager",
+    "backend.tournament.admin_routes",
+    "backend.tournament.consent_routes",
+    "backend.tournament.engine",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.operations_routes",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-engine",
+    "turnier-match",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: created_by -> core.discord_users"
+  },
+  {
+   "name": "user_consents",
+   "rows": 26,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "consented_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "consent_version",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.tournament.consent_routes",
+    "backend.tournament.routes",
+    "turnier-api"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  },
+  {
+   "name": "user_profiles",
+   "rows": 3,
+   "columns": [
+    {
+     "name": "discord_id",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 1
+    },
+    {
+     "name": "bio",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "invite_auto_accept",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_discord_dm",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_browser",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "updated_at",
+     "type": "TEXT",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "display_name",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "avatar_filename",
+     "type": "TEXT",
+     "notnull": 0,
+     "pk": 0
+    },
+    {
+     "name": "notify_match_start",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_checkin",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_team_invite",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_tournament_news",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    },
+    {
+     "name": "notify_registration_reminder",
+     "type": "INTEGER",
+     "notnull": 1,
+     "pk": 0
+    }
+   ],
+   "consumers": [
+    "backend.admin.test_mode",
+    "backend.db",
+    "backend.notifications.discord_notifier",
+    "backend.tournament.admin_routes",
+    "backend.tournament.consent_routes",
+    "backend.tournament.leaderboard_routes",
+    "backend.tournament.routes",
+    "backend.tournament.scheduler",
+    "turnier-api",
+    "turnier-discord",
+    "turnier-scheduler"
+   ],
+   "proposed_schema": "turnier",
+   "notes": "1:1 ins turnier-Schema: ja (Live-Schema bereits sqlx-sqlite); Core-Join: discord_id -> core.discord_users"
+  }
+ ]
+}

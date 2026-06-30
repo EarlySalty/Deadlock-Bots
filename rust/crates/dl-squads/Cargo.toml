@@ -9,16 +9,17 @@ version = "0.1.0"
 
 [dependencies]
 chrono.workspace = true
-dl-db.workspace = true
-rusqlite.workspace = true
+dl-central-db.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sqlx.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
-rusqlite.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
+
+[features]
+testing = ["dl-central-db/testing"]
 
 [lints]
 workspace = true

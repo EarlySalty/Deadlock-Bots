@@ -91,8 +91,8 @@ impl InteractionHandler for PrivacyHandler {
             }
             Action::Export => match export_user_data(&self.db, uid, now).await {
                 Ok(value) => {
-                    let bytes = serde_json::to_vec_pretty(&value)
-                        .unwrap_or_else(|_| b"{}".to_vec());
+                    let bytes =
+                        serde_json::to_vec_pretty(&value).unwrap_or_else(|_| b"{}".to_vec());
                     BridgeReply {
                         content: Some(
                             "📄 Hier sind deine gespeicherten Daten als JSON-Datei. \

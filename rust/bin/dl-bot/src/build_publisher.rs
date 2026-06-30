@@ -2,8 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use dl_db::{Db, DbError};
-use rusqlite::{OptionalExtension, params};
-use serde_json::{Value, json};
+use rusqlite::{params, OptionalExtension};
+use serde_json::{json, Value};
 
 const STATUS_INFO_CANCELLED_EXCESS: &str =
     "Cancelled: Excluded by 3-build-per-hero rule based on priority/recency.";

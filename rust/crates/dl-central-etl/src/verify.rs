@@ -1,11 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde_json::{Map, Value};
+use sqlx::{PgPool, Row};
 
-use crate::ledger::{ColumnStatus, TableLedger};
+use crate::engine::TableResult;
+use crate::ledger::{ColumnStatus, Ledger, LedgerSet, TableLedger};
 
 pub type RoundTripFields = BTreeMap<String, Value>;
 pub type RoundTripRows = BTreeMap<String, RoundTripFields>;
+pub type SourceTableColumns = BTreeMap<String, Vec<String>>;
+pub type SourceSchemas = BTreeMap<String, SourceTableColumns>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowCountFactor {
@@ -17,6 +21,26 @@ pub struct RowCountFactor {
 pub enum VerifyError {
     #[error("Quellspalte ist weder gemappt noch gedroppt: {column}")]
     UnmappedColumn { column: String },
+    #[error("Ledger-Quelle fehlt im Quellschema: {source_db}")]
+    MissingSourceSchema { source_db: String },
+    #[error("Ledger-Tabelle fehlt im Quellschema: {source_db}.{table}")]
+    MissingSourceTable { source_db: String, table: String },
+    #[error("Quelltabelle ist im Ledger nicht erfasst: {source_db}.{table}")]
+    UnmappedSourceTable { source_db: String, table: String },
+    #[error("Quellspalte ist weder gemappt noch gedroppt: {source_db}.{table}.{column}")]
+    UnmappedSourceColumn {
+        source_db: String,
+        table: String,
+        column: String,
+    },
+    #[error("Ledger-Quelle fehlt: {source_db}")]
+    MissingLedgerSource { source_db: String },
+    #[error("Ledger-Spalte fehlt im Quellschema: {source_db}.{table}.{column}")]
+    UnknownLedgerColumn {
+        source_db: String,
+        table: String,
+        column: String,
+    },
     #[error("gemappte Spalte fehlt im Round-Trip-Sample: {column} in row={row_key}")]
     MappedColumnMissingFromSample { column: String, row_key: String },
     #[error("Row-Count-Mismatch: erwartet {expected}, bekam {actual}")]
@@ -30,6 +54,14 @@ pub enum VerifyError {
         source_value: Option<Value>,
         target_value: Option<Value>,
     },
+    #[error("Total-Reconciliation-Mismatch fuer {target}: erwartet {expected}, bekam {actual}")]
+    TotalReconcileMismatch {
+        target: String,
+        expected: u64,
+        actual: u64,
+    },
+    #[error("Total-Reconciliation-Query fehlgeschlagen fuer {target}: {message}")]
+    TotalReconcileQuery { target: String, message: String },
 }
 
 pub fn check_mapping_completeness(
@@ -42,6 +74,82 @@ pub fn check_mapping_completeness(
                 column: column.clone(),
             });
         }
+    }
+
+    Ok(())
+}
+
+pub fn check_source_mapping_completeness(
+    source: &str,
+    source_tables: &SourceTableColumns,
+    ledger: &Ledger,
+) -> Result<(), VerifyError> {
+    for (table_name, source_columns) in source_tables {
+        let table_ledger =
+            ledger
+                .tables
+                .get(table_name)
+                .ok_or_else(|| VerifyError::UnmappedSourceTable {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                })?;
+
+        for column in source_columns {
+            if table_ledger.column_status(column).is_none() {
+                return Err(VerifyError::UnmappedSourceColumn {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+    }
+
+    for (table_name, table_ledger) in &ledger.tables {
+        let source_columns =
+            source_tables
+                .get(table_name)
+                .ok_or_else(|| VerifyError::MissingSourceTable {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                })?;
+
+        let source_column_set: BTreeSet<&str> = source_columns.iter().map(String::as_str).collect();
+        for column in table_ledger.columns.keys() {
+            if !source_column_set.contains(column.as_str()) {
+                return Err(VerifyError::UnknownLedgerColumn {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn check_ledger_set_mapping_completeness(
+    source_schemas: &SourceSchemas,
+    ledger_set: &LedgerSet,
+) -> Result<(), VerifyError> {
+    for source_name in source_schemas.keys() {
+        if !ledger_set.sources.contains_key(source_name) {
+            return Err(VerifyError::MissingLedgerSource {
+                source_db: source_name.clone(),
+            });
+        }
+    }
+
+    for (source_name, ledger) in &ledger_set.sources {
+        let source_tables =
+            source_schemas
+                .get(source_name)
+                .ok_or_else(|| VerifyError::MissingSourceSchema {
+                    source_db: source_name.clone(),
+                })?;
+
+        check_source_mapping_completeness(source_name, source_tables, ledger)?;
     }
 
     Ok(())
@@ -139,6 +247,49 @@ pub fn sample_round_trip(
     Ok(())
 }
 
+pub async fn reconcile_total(
+    pool: &PgPool,
+    table_results: &[TableResult],
+) -> Result<(), VerifyError> {
+    let mut expected_by_target = BTreeMap::<String, u64>::new();
+    for result in table_results {
+        *expected_by_target.entry(result.target.clone()).or_default() += result.source_rows;
+    }
+
+    for (target, expected) in expected_by_target {
+        let sql = format!(
+            "SELECT COUNT(*)::bigint AS count FROM {}",
+            quote_pg_path(&target)?
+        );
+        let row = sqlx::query(&sql).fetch_one(pool).await.map_err(|source| {
+            VerifyError::TotalReconcileQuery {
+                target: target.clone(),
+                message: source.to_string(),
+            }
+        })?;
+        let actual_i64: i64 =
+            row.try_get("count")
+                .map_err(|source| VerifyError::TotalReconcileQuery {
+                    target: target.clone(),
+                    message: source.to_string(),
+                })?;
+        let actual = u64::try_from(actual_i64).map_err(|_| VerifyError::TotalReconcileQuery {
+            target: target.clone(),
+            message: format!("negative row count {actual_i64}"),
+        })?;
+
+        if expected != actual {
+            return Err(VerifyError::TotalReconcileMismatch {
+                target,
+                expected,
+                actual,
+            });
+        }
+    }
+
+    Ok(())
+}
+
 fn compare_fields(
     key: &str,
     source_fields: &RoundTripFields,
@@ -171,4 +322,31 @@ fn fields_to_value(fields: &RoundTripFields) -> Value {
         map.insert(key.clone(), value.clone());
     }
     Value::Object(map)
+}
+
+fn quote_pg_path(path: &str) -> Result<String, VerifyError> {
+    let mut parts = Vec::new();
+    for part in path.split('.') {
+        parts.push(quote_pg_ident(part)?);
+    }
+
+    if parts.is_empty() {
+        return Err(VerifyError::TotalReconcileQuery {
+            target: path.to_string(),
+            message: "ungueltiger leerer Tabellenpfad".to_string(),
+        });
+    }
+
+    Ok(parts.join("."))
+}
+
+fn quote_pg_ident(identifier: &str) -> Result<String, VerifyError> {
+    if identifier.trim().is_empty() {
+        return Err(VerifyError::TotalReconcileQuery {
+            target: identifier.to_string(),
+            message: "ungueltiger leerer Identifier".to_string(),
+        });
+    }
+
+    Ok(format!("\"{}\"", identifier.replace('"', "\"\"")))
 }

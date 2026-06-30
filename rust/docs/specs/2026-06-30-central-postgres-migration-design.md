@@ -99,7 +99,7 @@ Siehe [[feedback_tests_catch_prod_breakage]].
 
 ## 10. Decomposition / Sequencing
 
-Jedes Sub-Projekt bekommt einen eigenen Plan (writing-plans), implementiert via Codex (gpt-5.5/xhigh), Loop Codex→frischer Codex-Kritiker→Rework, Claude verifiziert extern + committet.
+Jedes Sub-Projekt bekommt einen eigenen Plan (writing-plans), implementiert via Codex (gpt-5.5/xhigh), Loop Codex→frischer Codex-Kritiker→Rework. **Arbeitsteilung (Owner-Vorgabe 2026-06-30): Codex implementiert, verifiziert sich selbst (Gates/Tests selbst ausführen) UND reviewt selbst (frischer Codex-Kritiker). Claude organisiert nur (DAG + `commit`/`push`) und schreibt ausschließlich die user-sichtbaren Texte (UI/UX). Kein Claude-Code, kein Claude-Review, keine Claude-Verifikation.**
 
 - **SP0 — Fundament:** Instanz hochziehen; `core`-Schema + Schema-Layout-Gerüst; kanonischer Migrations-Owner; sqlx-Anbindung + offline-prepare; ETL-/Verifikations-Harness (Ledger, Aggregat-Checks); Test-Harness (Testcontainers, Drift-Gate). Liefert die Schienen für alles Weitere.
 - **SP1 — Deadlock-Bots:** größte DB (46 MB), hier sitzen Coaching-Bot-State + Scrim. Datenschicht sauber neu (sqlx statt dl-db/rusqlite), Schema-Design `core`/`scrim`/`activity`/coaching-bot-state, ETL + Cutover.

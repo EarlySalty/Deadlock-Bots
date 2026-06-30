@@ -1,0 +1,65 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, channel_id, started_at, ended_at,\n               message_count, points, co_participant_ids::text AS \"co_participant_ids?\",\n               had_interaction\n        FROM activity.text_conversation_log\n        WHERE user_id = $1\n        ORDER BY ended_at DESC, id DESC\n        LIMIT $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "ended_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "message_count",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 5,
+        "name": "points",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 6,
+        "name": "co_participant_ids?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "had_interaction",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      null,
+      false
+    ]
+  },
+  "hash": "414f92c730ad1b4865783ef448513b741798b2b44560b0536ed707ec9c3a5632"
+}

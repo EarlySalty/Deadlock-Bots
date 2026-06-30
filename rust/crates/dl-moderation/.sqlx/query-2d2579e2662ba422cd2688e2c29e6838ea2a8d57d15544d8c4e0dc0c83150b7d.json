@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE moderation.ai_moderation_cases\n            SET action = 'denied',\n                mod_id = $1,\n                mod_action_at = now(),\n                mod_deny_reason = $2\n            WHERE case_id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2d2579e2662ba422cd2688e2c29e6838ea2a8d57d15544d8c4e0dc0c83150b7d"
+}

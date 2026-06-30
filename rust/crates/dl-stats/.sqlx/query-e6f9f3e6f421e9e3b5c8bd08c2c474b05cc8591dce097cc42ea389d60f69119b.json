@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH source AS (\n            SELECT started_at AT TIME ZONE 'UTC' AS utc_started,\n                   duration_seconds,\n                   COALESCE(peak_users, 0) AS peak_users\n            FROM activity.voice_session_log\n            WHERE started_at >= $2\n              AND user_id = $3\n        ),\n        grouped AS (\n            SELECT CASE\n                    WHEN $1 = 'hour' THEN to_char(utc_started, 'HH24')\n                    WHEN $1 = 'day' THEN EXTRACT(DOW FROM utc_started)::INT::TEXT\n                    WHEN $1 = 'week' THEN to_char(utc_started, 'YYYY-') ||\n                        lpad(((EXTRACT(DOY FROM utc_started)::INT - 1 -\n                            ((8 - EXTRACT(ISODOW FROM date_trunc('year', utc_started))::INT) % 7) + 7) / 7)::TEXT, 2, '0')\n                    ELSE to_char(utc_started, 'YYYY-MM')\n                   END AS bucket,\n                   duration_seconds,\n                   peak_users\n            FROM source\n        )\n        SELECT bucket AS \"bucket!\",\n               COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"total_seconds!\",\n               COUNT(*) AS \"sessions!\",\n               COALESCE(SUM(peak_users), 0)::BIGINT AS \"sum_peak!\"\n        FROM grouped\n        GROUP BY bucket\n        ORDER BY bucket\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bucket!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sum_peak!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e6f9f3e6f421e9e3b5c8bd08c2c474b05cc8591dce097cc42ea389d60f69119b"
+}

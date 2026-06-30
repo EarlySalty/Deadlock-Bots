@@ -1,11 +1,13 @@
 //! Zeit-Helfer mit Python-datetime-Semantik (public_stats.py).
 //!
-//! Das Original arbeitet durchgehend mit NAIVEN Lokalzeiten
-//! (`datetime.now()`, `fromisoformat`, `isoformat`) — die DB speichert
-//! ISO-Strings ohne Zeitzone. Wir spiegeln das mit `chrono::NaiveDateTime`
-//! in Lokalzeit.
+//! Das Original arbeitet durchgehend mit NAIVEN Zeitwerten
+//! (`datetime.now()`, `fromisoformat`, `isoformat`) — die SQLite-DB speicherte
+//! ISO-Strings ohne Zeitzone. Central-Postgres hält diese Wandzeit als UTC,
+//! deshalb werden Buckets aus `naive_utc()` gebildet.
 
-use chrono::{Datelike, Local, NaiveDate, NaiveDateTime, TimeZone, Timelike};
+#[cfg(test)]
+use chrono::NaiveDate;
+use chrono::{DateTime, Datelike, Local, NaiveDateTime, SecondsFormat, Timelike, Utc};
 
 pub fn now_local() -> NaiveDateTime {
     Local::now().naive_local()
@@ -24,6 +26,7 @@ pub fn isoformat(dt: NaiveDateTime) -> String {
 /// T- oder Leerzeichen-Separator, optionale Sekundenbruchteile, optionalen
 /// Offset (der Offset wird wie in Python NICHT konvertiert, nur getragen —
 /// fürs Bucketing zählt die naive Komponente).
+#[cfg(test)]
 pub fn parse_iso(text: &str) -> Option<NaiveDateTime> {
     let text = text.trim();
     if text.is_empty() {
@@ -53,39 +56,24 @@ pub fn parse_iso(text: &str) -> Option<NaiveDateTime> {
         .and_then(|d| d.and_hms_opt(0, 0, 0))
 }
 
-/// Python `_to_iso`: SQLite-Wert (TEXT/Zahl/NULL) → normalisierter
-/// ISO-String oder null; Unparsebares wird unverändert durchgereicht.
-pub fn to_iso(value: rusqlite::types::Value) -> Option<String> {
-    use rusqlite::types::Value;
-    match value {
-        Value::Null => None,
-        Value::Integer(n) => Some(isoformat(local_from_timestamp(n as f64)?)),
-        Value::Real(f) => Some(isoformat(local_from_timestamp(f)?)),
-        Value::Text(s) => {
-            if s.is_empty() {
-                return None;
-            }
-            match parse_iso(&s) {
-                Some(dt) => Some(isoformat_keeping_offset(&s, dt)),
-                None => Some(s),
-            }
-        }
-        Value::Blob(b) => Some(String::from_utf8_lossy(&b).to_string()),
-    }
+pub fn isoformat_utc(dt: DateTime<Utc>) -> String {
+    let format = if dt.timestamp_subsec_micros() == 0 {
+        SecondsFormat::Secs
+    } else {
+        SecondsFormat::Micros
+    };
+    dt.to_rfc3339_opts(format, true)
 }
 
-/// `datetime.fromtimestamp(x)` — Lokalzeit.
-fn local_from_timestamp(ts: f64) -> Option<NaiveDateTime> {
-    let secs = ts.floor() as i64;
-    let micros = ((ts - secs as f64) * 1_000_000.0).round() as u32;
-    Local
-        .timestamp_opt(secs, micros * 1000)
-        .single()
-        .map(|dt| dt.naive_local())
+pub fn to_iso(value: Option<DateTime<Utc>>) -> Option<String> {
+    value.map(isoformat_utc)
 }
 
-/// Python gibt bei vorhandenem Offset diesen im isoformat wieder aus.
-/// Wir hängen einen im Original-String vorhandenen Offset wieder an.
+pub fn utc_naive(dt: &DateTime<Utc>) -> NaiveDateTime {
+    dt.naive_utc()
+}
+
+#[cfg(test)]
 fn isoformat_keeping_offset(original: &str, naive: NaiveDateTime) -> String {
     let base = isoformat(naive);
     let cleaned = original.trim().replace('Z', "+00:00");
@@ -111,6 +99,18 @@ pub fn hour(dt: &NaiveDateTime) -> usize {
 }
 
 #[cfg(test)]
+pub(crate) fn sqlite_week_label(dt: &NaiveDateTime) -> String {
+    let doy0 = i64::from(dt.ordinal0());
+    let jan1 = dt
+        .date()
+        .with_ordinal(1)
+        .expect("Jahr hat immer einen ersten Tag");
+    let first_monday_doy0 = (7 - i64::from(jan1.weekday().num_days_from_monday())) % 7;
+    let week = (doy0 - first_monday_doy0 + 7) / 7;
+    format!("{}-{week:02}", dt.format("%Y"))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -123,8 +123,10 @@ mod tests {
         let dt = parse_iso("2026-06-10 20:15:30").expect("parse");
         assert_eq!(isoformat(dt), "2026-06-10T20:15:30");
         // Offset wird beim Bucketing ignoriert, bei to_iso aber erhalten
-        let v = rusqlite::types::Value::Text("2026-06-10T20:15:30+00:00".into());
-        assert_eq!(to_iso(v).as_deref(), Some("2026-06-10T20:15:30+00:00"));
+        assert_eq!(
+            isoformat_keeping_offset("2026-06-10T20:15:30+00:00", dt).as_str(),
+            "2026-06-10T20:15:30+00:00"
+        );
     }
 
     #[test]
@@ -135,13 +137,27 @@ mod tests {
     }
 
     #[test]
-    fn to_iso_grenzfaelle() {
-        use rusqlite::types::Value;
-        assert_eq!(to_iso(Value::Null), None);
-        assert_eq!(to_iso(Value::Text(String::new())), None);
+    fn sqlite_woche_montag_basiert_mit_woche_null() {
         assert_eq!(
-            to_iso(Value::Text("kein-datum".into())).as_deref(),
-            Some("kein-datum")
+            sqlite_week_label(&parse_iso("2026-01-04T23:30:00").expect("parse")),
+            "2026-00"
         );
+        assert_eq!(
+            sqlite_week_label(&parse_iso("2026-01-05T00:30:00").expect("parse")),
+            "2026-01"
+        );
+        assert_eq!(
+            sqlite_week_label(&parse_iso("2018-12-31T00:00:00").expect("parse")),
+            "2018-53"
+        );
+    }
+
+    #[test]
+    fn to_iso_grenzfaelle() {
+        assert_eq!(to_iso(None), None);
+        let dt = DateTime::parse_from_rfc3339("2026-06-10T20:15:30+00:00")
+            .expect("parse")
+            .with_timezone(&Utc);
+        assert_eq!(to_iso(Some(dt)).as_deref(), Some("2026-06-10T20:15:30Z"));
     }
 }

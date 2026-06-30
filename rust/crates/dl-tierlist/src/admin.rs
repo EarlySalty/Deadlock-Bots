@@ -8,13 +8,12 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use dl_webcore::dashboard::ValidatedSession;
 use dl_webcore::envelope::{error_message, unauthorized_tierlist};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
 
 use crate::data::admin_hero_payload;
 use crate::refresh::{refresh_once, RefreshError};
 use crate::settings::{normalize_thresholds, read_settings, set_setting, SESSION_COOKIE};
-use crate::util::{coerce_bool, coerce_int, now_ts, parse_unix_or_iso};
+use crate::util::{coerce_bool, coerce_int, i32_from_i64, now_utc, parse_unix_or_iso};
 use crate::SharedApp;
 
 fn cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -76,7 +75,7 @@ pub async fn handle_admin_hero_get(
     let Ok(hero_id) = hero_id.trim().parse::<i64>() else {
         return bad_request("invalid_hero_id", "Ungültige Hero-ID.");
     };
-    match app.db.read(move |c| admin_hero_payload(c, hero_id)).await {
+    match admin_hero_payload(&app.pool, hero_id).await {
         Ok(Some(payload)) => Json(payload).into_response(),
         Ok(None) => error_message(
             StatusCode::NOT_FOUND,
@@ -103,19 +102,19 @@ pub async fn handle_admin_hero_put(
         return bad_request("invalid_json", "Ungültiger JSON-Body.");
     };
 
-    let hero_exists = app
-        .db
-        .read(move |conn| {
-            conn.query_row(
-                "SELECT 1 FROM deadlock_heroes WHERE hero_id = ?1 LIMIT 1",
-                [hero_id],
-                |_| Ok(()),
-            )
-            .optional()
-        })
-        .await;
+    let hero_exists = sqlx::query!(
+        r#"
+        SELECT 1 AS "exists!"
+          FROM tierlist.deadlock_heroes
+         WHERE hero_id = $1
+         LIMIT 1
+        "#,
+        hero_id,
+    )
+    .fetch_optional(&app.pool)
+    .await;
     match hero_exists {
-        Ok(Some(())) => {}
+        Ok(Some(_)) => {}
         Ok(None) => {
             return error_message(
                 StatusCode::NOT_FOUND,
@@ -191,17 +190,21 @@ pub async fn handle_admin_hero_put(
         let Some(raw) = raw.and_then(Value::as_array) else {
             return bad_request("invalid_builds_meta", "builds_meta muss ein Array sein.");
         };
-        let existing: Result<std::collections::HashSet<i64>, _> = app
-            .db
-            .read(move |conn| {
-                let mut stmt =
-                    conn.prepare("SELECT build_id FROM deadlock_hero_builds WHERE hero_id = ?1")?;
-                let rows = stmt.query_map([hero_id], |row| row.get::<_, i64>(0))?;
-                rows.collect()
-            })
-            .await;
-        let existing = match existing {
-            Ok(set) => set,
+        let existing = match sqlx::query!(
+            r#"
+            SELECT build_id
+              FROM tierlist.deadlock_hero_builds
+             WHERE hero_id = $1
+            "#,
+            hero_id,
+        )
+        .fetch_all(&app.pool)
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|row| row.build_id)
+                .collect::<std::collections::HashSet<_>>(),
             Err(err) => return internal(err),
         };
         for (index, item) in raw.iter().enumerate() {
@@ -230,56 +233,79 @@ pub async fn handle_admin_hero_put(
         }
     }
 
-    let write_result = app
-        .db
-        .write(move |conn| {
-            let ts = now_ts();
-            let tx = conn.transaction()?;
-            if has_description {
-                tx.execute(
-                    "INSERT INTO tierlist_hero_meta(hero_id, description, updated_at)
-                     VALUES (?1, ?2, ?3)
-                     ON CONFLICT(hero_id) DO UPDATE SET
-                       description = excluded.description,
-                       updated_at = excluded.updated_at",
-                    (hero_id, &description, ts),
-                )?;
+    let write_result: crate::error::Result<Option<Value>> = async {
+        let ts = now_utc();
+        let mut tx = app.pool.begin().await?;
+        if has_description {
+            sqlx::query!(
+                r#"
+                INSERT INTO tierlist.tierlist_hero_meta (hero_id, description, updated_at)
+                VALUES ($1, $2, $3)
+                ON CONFLICT (hero_id) DO UPDATE
+                   SET description = EXCLUDED.description,
+                       updated_at = EXCLUDED.updated_at
+                "#,
+                hero_id,
+                description,
+                ts,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+        if has_streamers {
+            sqlx::query!(
+                r#"
+                DELETE FROM tierlist.tierlist_streamers
+                 WHERE hero_id = $1
+                "#,
+                hero_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+            for (login, display_name, sort_order, is_active) in &parsed_streamers {
+                let sort_order = i32_from_i64("sort_order", *sort_order)?;
+                sqlx::query!(
+                    r#"
+                    INSERT INTO tierlist.tierlist_streamers
+                        (hero_id, twitch_login, display_name, sort_order, is_active, created_at)
+                    VALUES ($1, $2, $3, $4, $5, $6)
+                    "#,
+                    hero_id,
+                    login,
+                    display_name,
+                    sort_order,
+                    *is_active,
+                    ts,
+                )
+                .execute(&mut *tx)
+                .await?;
             }
-            if has_streamers {
-                tx.execute(
-                    "DELETE FROM tierlist_streamers WHERE hero_id = ?1",
-                    [hero_id],
-                )?;
-                for (login, display_name, sort_order, is_active) in &parsed_streamers {
-                    tx.execute(
-                        "INSERT INTO tierlist_streamers(
-                             hero_id, twitch_login, display_name, sort_order, is_active, created_at
-                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                        (
-                            hero_id,
-                            login,
-                            display_name,
-                            sort_order,
-                            i64::from(*is_active),
-                            ts,
-                        ),
-                    )?;
-                }
+        }
+        if has_builds_meta {
+            for (build_id, sort_order, is_active) in &parsed_builds {
+                let sort_order = i32_from_i64("sort_order", *sort_order)?;
+                sqlx::query!(
+                    r#"
+                    UPDATE tierlist.deadlock_hero_builds
+                       SET sort_order = $1,
+                           is_active = $2,
+                           updated_at = $3
+                     WHERE hero_id = $4 AND build_id = $5
+                    "#,
+                    sort_order,
+                    *is_active,
+                    ts,
+                    hero_id,
+                    *build_id,
+                )
+                .execute(&mut *tx)
+                .await?;
             }
-            if has_builds_meta {
-                for (build_id, sort_order, is_active) in &parsed_builds {
-                    tx.execute(
-                        "UPDATE deadlock_hero_builds
-                            SET sort_order = ?1, is_active = ?2, updated_at = ?3
-                          WHERE hero_id = ?4 AND build_id = ?5",
-                        (sort_order, i64::from(*is_active), ts, hero_id, build_id),
-                    )?;
-                }
-            }
-            tx.commit()?;
-            admin_hero_payload(conn, hero_id)
-        })
-        .await;
+        }
+        tx.commit().await?;
+        admin_hero_payload(&app.pool, hero_id).await
+    }
+    .await;
 
     match write_result {
         Ok(Some(hero)) => Json(json!({ "ok": true, "hero": hero })).into_response(),
@@ -299,7 +325,7 @@ pub async fn handle_admin_settings_get(
     if let Err(resp) = require_admin(&app, &headers).await {
         return resp;
     }
-    match app.db.write(|c| read_settings(c)).await {
+    match read_settings(&app.pool).await {
         Ok(settings) => Json(settings).into_response(),
         Err(err) => internal(err),
     }
@@ -317,7 +343,7 @@ pub async fn handle_admin_settings_put(
         return bad_request("invalid_json", "Ungültiger JSON-Body.");
     };
 
-    let current = match app.db.write(|c| read_settings(c)).await {
+    let current = match read_settings(&app.pool).await {
         Ok(s) => s,
         Err(err) => return internal(err),
     };
@@ -409,15 +435,13 @@ pub async fn handle_admin_settings_put(
     }
 
     if !writes.is_empty() {
-        let result = app
-            .db
-            .write(move |conn| {
-                for (key, value) in &writes {
-                    set_setting(conn, key, value)?;
-                }
-                Ok(())
-            })
-            .await;
+        let result = async {
+            for (key, value) in &writes {
+                set_setting(&app.pool, key, value).await?;
+            }
+            Ok::<_, crate::error::TierlistError>(())
+        }
+        .await;
         if let Err(err) = result {
             return internal(err);
         }

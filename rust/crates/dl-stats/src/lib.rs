@@ -24,8 +24,8 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
-use dl_db::Db;
 use dl_webcore::{DashboardClient, SessionCodec, WebConfig};
+use sqlx::PgPool;
 
 pub const SESSION_COOKIE: &str = "dl_session";
 pub const PRE_AUTH_COOKIE: &str = "dl_pre_auth";
@@ -34,7 +34,7 @@ pub const PRE_AUTH_TTL: i64 = 10 * 60;
 pub const DEFAULT_REDIRECT: &str = "/aktivitaet/";
 
 pub struct StatsApp {
-    pub db: Db,
+    pub pool: PgPool,
     pub codec: SessionCodec,
     pub dashboard: DashboardClient,
     pub cookie_secure: bool,
@@ -46,9 +46,9 @@ pub struct StatsApp {
 pub type SharedApp = Arc<StatsApp>;
 
 impl StatsApp {
-    pub fn new(db: Db, dashboard: DashboardClient, web_cfg: &WebConfig) -> SharedApp {
+    pub fn new(pool: PgPool, dashboard: DashboardClient, web_cfg: &WebConfig) -> SharedApp {
         Arc::new(Self {
-            db,
+            pool,
             codec: SessionCodec::new(web_cfg.session_secret.clone()),
             dashboard,
             cookie_secure: web_cfg.cookie_secure,
@@ -260,21 +260,4 @@ pub(crate) fn parse_positive_int(
         return Err(invalid());
     }
     Ok(value)
-}
-
-/// `_safe_int(value or 0)` für rusqlite-Werte beliebigen Typs.
-pub(crate) fn safe_int(value: &rusqlite::types::Value) -> i64 {
-    use rusqlite::types::Value;
-    match value {
-        Value::Integer(n) => *n,
-        Value::Real(f) => *f as i64,
-        Value::Text(s) => s.trim().parse::<i64>().unwrap_or(0),
-        _ => 0,
-    }
-}
-
-/// "no such table"-Toleranz für optionale Tabellen (wie `_safe_query_*`).
-pub(crate) fn is_missing_table(err: &dl_db::DbError, tables: &[&str]) -> bool {
-    let msg = err.to_string().to_lowercase();
-    msg.contains("no such table") && tables.iter().any(|t| msg.contains(&t.to_lowercase()))
 }

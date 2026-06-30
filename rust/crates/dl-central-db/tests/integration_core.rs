@@ -16,6 +16,8 @@ async fn core_users_join_to_verified_steam_links_by_discord_id() {
     let orphan_discord_id = 44_i64;
     let steam_id64 = 7_656_119_801_234_567_i64;
     let orphan_steam_id64 = 7_656_119_801_234_568_i64;
+    let steam_id = steam_id64.to_string();
+    let orphan_steam_id = orphan_steam_id64.to_string();
 
     sqlx::query!(
         "DELETE FROM core.steam_links WHERE discord_id IN ($1, $2, $3)",
@@ -37,14 +39,15 @@ async fn core_users_join_to_verified_steam_links_by_discord_id() {
     .await
     .expect("clean test users");
 
-    let orphan_insert = sqlx::query!(
+    let orphan_insert = sqlx::query(
         r#"
-        INSERT INTO core.steam_links (discord_id, steam_id64, verified)
-        VALUES ($1, $2, true)
+        INSERT INTO core.steam_links (discord_id, steam_id, steam_id64, verified)
+        VALUES ($1, $2, $3, true)
         "#,
-        orphan_discord_id,
-        orphan_steam_id64,
     )
+    .bind(orphan_discord_id)
+    .bind(&orphan_steam_id)
+    .bind(orphan_steam_id64)
     .execute(&pool)
     .await;
 
@@ -67,48 +70,50 @@ async fn core_users_join_to_verified_steam_links_by_discord_id() {
         .await
         .expect("insert linked user");
 
-    sqlx::query!(
+    sqlx::query(
         r#"
-        INSERT INTO core.steam_links (discord_id, steam_id64, verified)
-        VALUES ($1, $2, true)
+        INSERT INTO core.steam_links (discord_id, steam_id, steam_id64, verified)
+        VALUES ($1, $2, $3, true)
         "#,
-        linked_discord_id,
-        steam_id64,
     )
+    .bind(linked_discord_id)
+    .bind(&steam_id)
+    .bind(steam_id64)
     .execute(&pool)
     .await
     .expect("insert steam link");
 
-    let joined = sqlx::query!(
+    let joined: (Option<String>, String, Option<i64>, bool) = sqlx::query_as(
         r#"
-        SELECT u.username, s.steam_id64, s.verified
+        SELECT u.username, s.steam_id, s.steam_id64, s.verified
         FROM core.users u
         JOIN core.steam_links s ON s.discord_id = u.discord_id
         WHERE u.discord_id = $1
         "#,
-        linked_discord_id,
     )
+    .bind(linked_discord_id)
     .fetch_one(&pool)
     .await
     .expect("joined core user and steam link");
 
-    assert_eq!(joined.username.as_deref(), Some("alice"));
-    assert_eq!(joined.steam_id64, steam_id64);
-    assert!(joined.verified);
+    assert_eq!(joined.0.as_deref(), Some("alice"));
+    assert_eq!(joined.1, steam_id);
+    assert_eq!(joined.2, Some(steam_id64));
+    assert!(joined.3);
 
     upsert_user(&pool, unlinked_discord_id, Some("bob"), Some("Bob"), None)
         .await
         .expect("insert unlinked user");
 
-    let missing_join = sqlx::query!(
+    let missing_join: Option<(Option<String>, String, Option<i64>, bool)> = sqlx::query_as(
         r#"
-        SELECT u.username, s.steam_id64, s.verified
+        SELECT u.username, s.steam_id, s.steam_id64, s.verified
         FROM core.users u
         JOIN core.steam_links s ON s.discord_id = u.discord_id
         WHERE u.discord_id = $1
         "#,
-        unlinked_discord_id,
     )
+    .bind(unlinked_discord_id)
     .fetch_optional(&pool)
     .await
     .expect("join for unlinked user");

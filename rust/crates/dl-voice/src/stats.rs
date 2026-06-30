@@ -27,10 +27,12 @@ pub const VOICE_ADMIN_GRACE_PERIODS_LABEL: &str = "🛡️ Schonzeiten";
 pub const VOICE_ADMIN_ROLE_ID_LABEL: &str = "🎖️ Rollen-ID";
 pub const VOICE_ADMIN_SESSION_TIMEOUT_LABEL: &str = "🔄 Session-Timeout";
 pub const VOICE_ADMIN_MAX_SESSIONS_LABEL: &str = "📊 Max. Sessions";
-pub const VOICE_ADMIN_CONFIG_UPDATED_TEXT: &str = "✅ Einstellung aktualisiert (zentral gespeichert).";
+pub const VOICE_ADMIN_CONFIG_UPDATED_TEXT: &str =
+    "✅ Einstellung aktualisiert (zentral gespeichert).";
 pub const VOICE_ADMIN_CONFIG_INVALID_TEXT: &str = "❌ Ungültige Eingabe. Optionen: grace_duration (60–600), grace_role (Rollen-ID), min_users (2–10), session_timeout (60–3600), max_sessions (10–10000).";
 pub const VOICE_FEEDBACK_TEST_SENT_TEXT: &str = "Feedback-Test verschickt. Bitte DMs prüfen.";
-pub const VOICE_FEEDBACK_TEST_UNAVAILABLE_TEXT: &str = "Voice-Feedback ist aktuell nicht verfügbar.";
+pub const VOICE_FEEDBACK_TEST_UNAVAILABLE_TEXT: &str =
+    "Voice-Feedback ist aktuell nicht verfügbar.";
 
 /// Cache-Zugriffe, die die Befehle über den Gateway-Cache brauchen
 /// (Namensauflösung, Rollencheck, Guild-Name). Implementiert von der

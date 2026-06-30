@@ -1,6 +1,6 @@
 //! Gateway-Cache-Anbindung des Voice-Trackers.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
@@ -48,6 +48,98 @@ fn overwrites_to_json(overwrites: &[PermissionOverwrite]) -> Vec<Value> {
             }))
         })
         .collect()
+}
+
+fn build_connect_batch_payload(
+    adapter: &DiscordAdapter,
+    guild_id: Option<u64>,
+    channel_id: u64,
+    role_changes: &HashMap<u64, Option<bool>>,
+    member_changes: &HashMap<u64, Option<bool>>,
+) -> Result<Vec<Value>, String> {
+    fn push_changed_overwrites(
+        overwrites: &mut Vec<Value>,
+        kind: u8,
+        changes: &HashMap<u64, Option<bool>>,
+    ) {
+        let mut changed: Vec<_> = changes.iter().collect();
+        changed.sort_by_key(|(target_id, _)| **target_id);
+        for (target_id, connect) in changed {
+            let Some(connect) = *connect else {
+                continue;
+            };
+            let (allow_bits, deny_bits) = if connect {
+                (CONNECT_BIT, 0)
+            } else {
+                (0, CONNECT_BIT)
+            };
+            overwrites.push(json!({
+                "id": target_id.to_string(),
+                "type": kind,
+                "allow": allow_bits.to_string(),
+                "deny": deny_bits.to_string(),
+            }));
+        }
+    }
+
+    fn build_from_overwrites(
+        existing: &[PermissionOverwrite],
+        role_changes: &HashMap<u64, Option<bool>>,
+        member_changes: &HashMap<u64, Option<bool>>,
+    ) -> Vec<Value> {
+        let mut overwrites = Vec::new();
+        for ow in existing {
+            let (kind, target_id) = match ow.kind {
+                PermissionOverwriteType::Role(role_id) => (0u8, role_id.get()),
+                PermissionOverwriteType::Member(user_id) => (1u8, user_id.get()),
+                _ => continue,
+            };
+            if (kind == 0 && role_changes.contains_key(&target_id))
+                || (kind == 1 && member_changes.contains_key(&target_id))
+            {
+                continue;
+            }
+            overwrites.push(json!({
+                "id": target_id.to_string(),
+                "type": kind,
+                "allow": ow.allow.bits().to_string(),
+                "deny": ow.deny.bits().to_string(),
+            }));
+        }
+
+        push_changed_overwrites(&mut overwrites, 0, role_changes);
+        push_changed_overwrites(&mut overwrites, 1, member_changes);
+        overwrites
+    }
+
+    let channel_id = ChannelId::new(channel_id);
+    if let Some(guild_id) = guild_id {
+        let Some(guild) = adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Err("Guild nicht im Cache".to_string());
+        };
+        let Some(channel) = guild.channels.get(&channel_id) else {
+            return Err("Channel nicht im Cache".to_string());
+        };
+        return Ok(build_from_overwrites(
+            &channel.permission_overwrites,
+            role_changes,
+            member_changes,
+        ));
+    }
+
+    for guild_id in adapter.cache().guilds() {
+        let Some(guild) = adapter.cache().guild(guild_id) else {
+            continue;
+        };
+        if let Some(channel) = guild.channels.get(&channel_id) {
+            return Ok(build_from_overwrites(
+                &channel.permission_overwrites,
+                role_changes,
+                member_changes,
+            ));
+        }
+    }
+    Err("Channel nicht im Cache".to_string())
 }
 
 fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
@@ -191,53 +283,61 @@ impl LanePort for CacheSnapshot {
         user_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String> {
-        let channel = ChannelId::new(channel_id);
-        let existing = self
-            .adapter
-            .cache()
-            .guilds()
-            .into_iter()
-            .filter_map(|guild_id| self.adapter.cache().guild(guild_id))
-            .find_map(|guild| {
-                let channel = guild.channels.get(&ChannelId::new(channel_id))?;
-                channel
-                    .permission_overwrites
-                    .iter()
-                    .find_map(|ow| match ow.kind {
-                        PermissionOverwriteType::Member(target) if target.get() == user_id => {
-                            Some((ow.allow.bits(), ow.deny.bits()))
-                        }
-                        _ => None,
-                    })
-            })
-            .unwrap_or((0, 0));
-        match merge_connect_overwrite(existing.0, existing.1, connect) {
-            None => self
-                .adapter
-                .http
-                .delete_permission(
-                    channel,
-                    serenity::all::TargetId::new(user_id),
-                    Some("TempVoice: Bann aufgehoben"),
-                )
-                .await
-                .map_err(|e| e.to_string()),
-            Some((allow_bits, deny_bits)) => self
-                .adapter
-                .http
-                .create_permission(
-                    channel,
-                    serenity::all::TargetId::new(user_id),
-                    &json!({
-                        "type": 1,
-                        "allow": allow_bits.to_string(),
-                        "deny": deny_bits.to_string(),
-                    }),
-                    Some("TempVoice: Owner-Bann"),
-                )
-                .await
-                .map_err(|e| e.to_string()),
+        let role_changes = HashMap::new();
+        let member_changes = HashMap::from([(user_id, connect)]);
+        let overwrites = build_connect_batch_payload(
+            &self.adapter,
+            None,
+            channel_id,
+            &role_changes,
+            &member_changes,
+        )?;
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("TempVoice: Member-Batch"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn apply_member_connect_batch(
+        &self,
+        channel_id: u64,
+        denied_user_ids: &std::collections::HashSet<u64>,
+        clear_user_ids: &std::collections::HashSet<u64>,
+    ) -> Result<(), String> {
+        if denied_user_ids.is_empty() && clear_user_ids.is_empty() {
+            return Ok(());
         }
+        let role_changes = HashMap::new();
+        let mut member_changes = HashMap::new();
+        for user_id in clear_user_ids {
+            member_changes.insert(*user_id, None);
+        }
+        for user_id in denied_user_ids {
+            member_changes.insert(*user_id, Some(false));
+        }
+        let overwrites = build_connect_batch_payload(
+            &self.adapter,
+            None,
+            channel_id,
+            &role_changes,
+            &member_changes,
+        )?;
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("TempVoice: Mitglieder-Batch"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn set_role_connect(
@@ -246,40 +346,62 @@ impl LanePort for CacheSnapshot {
         role_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String> {
-        let channel = ChannelId::new(channel_id);
-        match connect {
-            None => self
-                .adapter
-                .http
-                .delete_permission(
-                    channel,
-                    serenity::all::TargetId::new(role_id),
-                    Some("TempVoice: Sprachfilter frei"),
-                )
-                .await
-                .map_err(|e| e.to_string()),
-            Some(allow) => {
-                let (allow_bits, deny_bits) = if allow {
-                    (CONNECT_BIT, 0)
-                } else {
-                    (0, CONNECT_BIT)
-                };
-                self.adapter
-                    .http
-                    .create_permission(
-                        channel,
-                        serenity::all::TargetId::new(role_id),
-                        &json!({
-                            "type": 0,
-                            "allow": allow_bits.to_string(),
-                            "deny": deny_bits.to_string(),
-                        }),
-                        Some("TempVoice: Deutsch-Only"),
-                    )
-                    .await
-                    .map_err(|e| e.to_string())
-            }
+        let role_changes = HashMap::from([(role_id, connect)]);
+        let member_changes = HashMap::new();
+        let overwrites = build_connect_batch_payload(
+            &self.adapter,
+            None,
+            channel_id,
+            &role_changes,
+            &member_changes,
+        )?;
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("TempVoice: Rollen-Batch"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn apply_role_connect_batch(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        allowed_role_ids: &std::collections::HashSet<u64>,
+        clear_role_ids: &std::collections::HashSet<u64>,
+    ) -> Result<(), String> {
+        if allowed_role_ids.is_empty() && clear_role_ids.is_empty() {
+            return Ok(());
         }
+        let mut changes = HashMap::new();
+        for role_id in clear_role_ids {
+            changes.insert(*role_id, None);
+        }
+        for role_id in allowed_role_ids {
+            changes.insert(*role_id, Some(true));
+        }
+        let member_changes = HashMap::new();
+        let overwrites = build_connect_batch_payload(
+            &self.adapter,
+            Some(guild_id),
+            channel_id,
+            &changes,
+            &member_changes,
+        )?;
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("TempVoice: Rangrollen-Batch"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
     }
 
     async fn set_user_limit(

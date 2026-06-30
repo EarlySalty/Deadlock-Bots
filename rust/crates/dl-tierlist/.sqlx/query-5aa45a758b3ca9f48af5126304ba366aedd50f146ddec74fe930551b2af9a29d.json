@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT build_id,\n               build_name,\n               author_name,\n               is_active,\n               sort_order::BIGINT AS \"sort_order!\"\n          FROM tierlist.deadlock_hero_builds\n         WHERE hero_id = $1\n         ORDER BY sort_order ASC, build_id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "build_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "author_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "is_active",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 4,
+        "name": "sort_order!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "5aa45a758b3ca9f48af5126304ba366aedd50f146ddec74fe930551b2af9a29d"
+}

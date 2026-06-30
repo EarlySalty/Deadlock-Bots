@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.streamer_link_intents\n                (discord_id, discord_name, created_at, expires_at, status, linked_login)\n            VALUES ($1, $2, $3, $4, 'pending', NULL)\n            ON CONFLICT (discord_id) DO UPDATE\n            SET discord_name = EXCLUDED.discord_name,\n                created_at = EXCLUDED.created_at,\n                expires_at = EXCLUDED.expires_at,\n                status = 'pending',\n                linked_login = NULL\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6652b9f27f42ce2d003f97cd8400cdfb6571f827c80ed579930f784e88627a32"
+}

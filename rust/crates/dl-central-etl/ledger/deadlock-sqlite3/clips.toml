@@ -1,0 +1,223 @@
+[tables.clip_contest_submissions.columns.contest_id]
+status = "mapped"
+to = "clips.clip_contest_submissions.contest_id"
+
+[tables.clip_contest_submissions.columns.submission_id]
+status = "mapped"
+to = "clips.clip_contest_submissions.submission_id"
+
+[tables.clip_contest_submissions.columns.user_id]
+status = "mapped"
+to = "clips.clip_contest_submissions.user_id"
+
+[tables.clip_contests.columns.id]
+status = "mapped"
+to = "clips.clip_contests.id"
+
+[tables.clip_contests.columns.guild_id]
+status = "mapped"
+to = "clips.clip_contests.guild_id"
+
+[tables.clip_contests.columns.name]
+status = "mapped"
+to = "clips.clip_contests.name"
+
+[tables.clip_contests.columns.start_ts]
+status = "mapped"
+to = "clips.clip_contests.start_at"
+
+[tables.clip_contests.columns.end_ts]
+status = "mapped"
+to = "clips.clip_contests.end_at"
+
+[tables.clip_contests.columns.announce_channel_id]
+status = "mapped"
+to = "clips.clip_contests.announce_channel_id"
+
+[tables.clip_contests.columns.status]
+status = "mapped"
+to = "clips.clip_contests.status"
+
+[tables.clip_contests.columns.video_url]
+status = "mapped"
+to = "clips.clip_contests.video_url"
+
+[tables.clip_contests.columns.winner_user_id]
+status = "mapped"
+to = "clips.clip_contests.winner_user_id"
+
+[tables.clip_contests.columns.created_at]
+status = "mapped"
+to = "clips.clip_contests.created_at"
+
+[tables.clip_fetch_history.columns.id]
+status = "mapped"
+to = "clips.clip_fetch_history.id"
+
+[tables.clip_fetch_history.columns.streamer_login]
+status = "mapped"
+to = "clips.clip_fetch_history.streamer_login"
+
+[tables.clip_fetch_history.columns.fetched_at]
+status = "mapped"
+to = "clips.clip_fetch_history.fetched_at"
+
+[tables.clip_fetch_history.columns.clips_found]
+status = "mapped"
+to = "clips.clip_fetch_history.clips_found"
+
+[tables.clip_fetch_history.columns.clips_new]
+status = "mapped"
+to = "clips.clip_fetch_history.clips_new"
+
+[tables.clip_fetch_history.columns.fetch_duration_ms]
+status = "mapped"
+to = "clips.clip_fetch_history.fetch_duration_ms"
+
+[tables.clip_fetch_history.columns.error]
+status = "mapped"
+to = "clips.clip_fetch_history.error"
+
+[tables.clip_last_hashtags.columns.streamer_login]
+status = "mapped"
+to = "clips.clip_last_hashtags.streamer_login"
+
+[tables.clip_last_hashtags.columns.hashtags]
+status = "mapped"
+to = "clips.clip_last_hashtags.hashtags"
+
+[tables.clip_last_hashtags.columns.last_used_at]
+status = "mapped"
+to = "clips.clip_last_hashtags.last_used_at"
+
+[tables.clip_submissions.columns.id]
+status = "mapped"
+to = "clips.clip_submissions.id"
+
+[tables.clip_submissions.columns.guild_id]
+status = "mapped"
+to = "clips.clip_submissions.guild_id"
+
+[tables.clip_submissions.columns.user_id]
+status = "mapped"
+to = "clips.clip_submissions.user_id"
+
+[tables.clip_submissions.columns.link]
+status = "mapped"
+to = "clips.clip_submissions.link"
+
+[tables.clip_submissions.columns.credit]
+status = "mapped"
+to = "clips.clip_submissions.credit"
+
+[tables.clip_submissions.columns.permission]
+status = "mapped"
+to = "clips.clip_submissions.permission"
+
+[tables.clip_submissions.columns.info]
+status = "mapped"
+to = "clips.clip_submissions.info"
+
+[tables.clip_submissions.columns.created_at]
+status = "mapped"
+to = "clips.clip_submissions.created_at"
+
+[tables.clip_templates_global.columns.id]
+status = "mapped"
+to = "clips.clip_templates_global.id"
+
+[tables.clip_templates_global.columns.template_name]
+status = "mapped"
+to = "clips.clip_templates_global.template_name"
+
+[tables.clip_templates_global.columns.description_template]
+status = "mapped"
+to = "clips.clip_templates_global.description_template"
+
+[tables.clip_templates_global.columns.hashtags]
+status = "mapped"
+to = "clips.clip_templates_global.hashtags"
+
+[tables.clip_templates_global.columns.category]
+status = "mapped"
+to = "clips.clip_templates_global.category"
+
+[tables.clip_templates_global.columns.usage_count]
+status = "mapped"
+to = "clips.clip_templates_global.usage_count"
+
+[tables.clip_templates_global.columns.created_at]
+status = "mapped"
+to = "clips.clip_templates_global.created_at"
+
+[tables.clip_templates_global.columns.created_by]
+status = "mapped"
+to = "clips.clip_templates_global.created_by"
+
+[tables.clip_templates_streamer.columns.id]
+status = "mapped"
+to = "clips.clip_templates_streamer.id"
+
+[tables.clip_templates_streamer.columns.streamer_login]
+status = "mapped"
+to = "clips.clip_templates_streamer.streamer_login"
+
+[tables.clip_templates_streamer.columns.template_name]
+status = "mapped"
+to = "clips.clip_templates_streamer.template_name"
+
+[tables.clip_templates_streamer.columns.description_template]
+status = "mapped"
+to = "clips.clip_templates_streamer.description_template"
+
+[tables.clip_templates_streamer.columns.hashtags]
+status = "mapped"
+to = "clips.clip_templates_streamer.hashtags"
+
+[tables.clip_templates_streamer.columns.is_default]
+status = "mapped"
+to = "clips.clip_templates_streamer.is_default"
+
+[tables.clip_templates_streamer.columns.created_at]
+status = "mapped"
+to = "clips.clip_templates_streamer.created_at"
+
+[tables.clip_templates_streamer.columns.updated_at]
+status = "mapped"
+to = "clips.clip_templates_streamer.updated_at"
+
+[tables.clip_window_submissions.columns.window_id]
+status = "mapped"
+to = "clips.clip_window_submissions.window_id"
+
+[tables.clip_window_submissions.columns.submission_id]
+status = "mapped"
+to = "clips.clip_window_submissions.submission_id"
+
+[tables.clip_window_submissions.columns.user_id]
+status = "mapped"
+to = "clips.clip_window_submissions.user_id"
+
+[tables.clip_windows.columns.id]
+status = "mapped"
+to = "clips.clip_windows.id"
+
+[tables.clip_windows.columns.guild_id]
+status = "mapped"
+to = "clips.clip_windows.guild_id"
+
+[tables.clip_windows.columns.start_ts]
+status = "mapped"
+to = "clips.clip_windows.start_at"
+
+[tables.clip_windows.columns.end_ts]
+status = "mapped"
+to = "clips.clip_windows.end_at"
+
+[tables.clip_windows.columns.status]
+status = "mapped"
+to = "clips.clip_windows.status"
+
+[tables.clip_windows.columns.dump_sent_ts]
+status = "mapped"
+to = "clips.clip_windows.dump_sent_at"

@@ -9,10 +9,9 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use dl_webcore::client_ip::client_ip;
 use dl_webcore::envelope::error_message;
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
 
-use crate::util::now_ts;
+use crate::util::now_utc;
 use crate::SharedApp;
 
 pub const VOTE_RATE_LIMIT: Duration = Duration::from_secs(5);
@@ -73,19 +72,19 @@ pub async fn handle_build_vote(
         );
     }
 
-    let exists = app
-        .db
-        .read(move |conn| {
-            conn.query_row(
-                "SELECT 1 FROM deadlock_hero_builds WHERE build_id = ?1 LIMIT 1",
-                [build_id],
-                |_| Ok(()),
-            )
-            .optional()
-        })
-        .await;
+    let exists = sqlx::query!(
+        r#"
+        SELECT 1 AS "exists!"
+          FROM tierlist.deadlock_hero_builds
+         WHERE build_id = $1
+         LIMIT 1
+        "#,
+        build_id,
+    )
+    .fetch_optional(&app.pool)
+    .await;
     match exists {
-        Ok(Some(())) => {}
+        Ok(Some(_)) => {}
         Ok(None) => {
             return error_message(
                 StatusCode::NOT_FOUND,
@@ -116,34 +115,64 @@ pub async fn handle_build_vote(
     }
 
     let up = vote == "up";
-    let result = app
-        .db
-        .write(move |conn| {
-            let tx = conn.transaction()?;
-            tx.execute(
-                "INSERT INTO tierlist_build_votes(build_id, upvotes, downvotes, updated_at)
-                 VALUES (?1, 0, 0, ?2) ON CONFLICT(build_id) DO NOTHING",
-                (build_id, now_ts()),
-            )?;
-            let column = if up { "upvotes" } else { "downvotes" };
-            tx.execute(
-                &format!(
-                    "UPDATE tierlist_build_votes SET {column} = {column} + 1, updated_at = ?1
-                     WHERE build_id = ?2"
-                ),
-                (now_ts(), build_id),
-            )?;
-            let row = tx
-                .query_row(
-                    "SELECT upvotes, downvotes FROM tierlist_build_votes WHERE build_id = ?1",
-                    [build_id],
-                    |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-                )
-                .optional()?;
-            tx.commit()?;
-            Ok(row.unwrap_or((0, 0)))
-        })
-        .await;
+    let result = async {
+        let mut tx = app.pool.begin().await?;
+        let now = now_utc();
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_build_votes
+                (build_id, upvotes, downvotes, updated_at)
+            VALUES ($1, 0, 0, $2)
+            ON CONFLICT (build_id) DO NOTHING
+            "#,
+            build_id,
+            now,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        if up {
+            sqlx::query!(
+                r#"
+                UPDATE tierlist.tierlist_build_votes
+                   SET upvotes = upvotes + 1,
+                       updated_at = $1
+                 WHERE build_id = $2
+                "#,
+                now,
+                build_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query!(
+                r#"
+                UPDATE tierlist.tierlist_build_votes
+                   SET downvotes = downvotes + 1,
+                       updated_at = $1
+                 WHERE build_id = $2
+                "#,
+                now,
+                build_id,
+            )
+            .execute(&mut *tx)
+            .await?;
+        }
+
+        let row = sqlx::query!(
+            r#"
+            SELECT upvotes, downvotes
+              FROM tierlist.tierlist_build_votes
+             WHERE build_id = $1
+            "#,
+            build_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok::<_, sqlx::Error>(row.map(|r| (r.upvotes, r.downvotes)).unwrap_or((0, 0)))
+    }
+    .await;
 
     match result {
         Ok((upvotes, downvotes)) => Json(json!({

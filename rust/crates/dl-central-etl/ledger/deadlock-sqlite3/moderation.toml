@@ -1,0 +1,155 @@
+[tables.ai_moderation_cases.columns.case_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.case_id"
+
+[tables.ai_moderation_cases.columns.guild_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.guild_id"
+
+[tables.ai_moderation_cases.columns.channel_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.channel_id"
+
+[tables.ai_moderation_cases.columns.message_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.message_id"
+
+[tables.ai_moderation_cases.columns.user_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.user_id"
+
+[tables.ai_moderation_cases.columns.user_tag]
+status = "mapped"
+to = "moderation.ai_moderation_cases.user_tag"
+
+[tables.ai_moderation_cases.columns.original_content]
+status = "mapped"
+to = "moderation.ai_moderation_cases.original_content"
+
+[tables.ai_moderation_cases.columns.attachments_json]
+status = "mapped"
+to = "moderation.ai_moderation_cases.attachments"
+
+[tables.ai_moderation_cases.columns.ai_category]
+status = "mapped"
+to = "moderation.ai_moderation_cases.ai_category"
+
+[tables.ai_moderation_cases.columns.ai_confidence]
+status = "mapped"
+to = "moderation.ai_moderation_cases.ai_confidence"
+
+[tables.ai_moderation_cases.columns.ai_reason]
+status = "mapped"
+to = "moderation.ai_moderation_cases.ai_reason"
+
+[tables.ai_moderation_cases.columns.ai_raw_json]
+status = "mapped"
+to = "moderation.ai_moderation_cases.ai_raw"
+
+[tables.ai_moderation_cases.columns.escalated_with_context]
+status = "mapped"
+to = "moderation.ai_moderation_cases.escalated_with_context"
+
+[tables.ai_moderation_cases.columns.action]
+status = "mapped"
+to = "moderation.ai_moderation_cases.action"
+
+[tables.ai_moderation_cases.columns.mod_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.mod_id"
+
+[tables.ai_moderation_cases.columns.mod_action_at]
+status = "mapped"
+to = "moderation.ai_moderation_cases.mod_action_at"
+
+[tables.ai_moderation_cases.columns.mod_deny_reason]
+status = "mapped"
+to = "moderation.ai_moderation_cases.mod_deny_reason"
+
+[tables.ai_moderation_cases.columns.mod_review_message_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.mod_review_message_id"
+
+[tables.ai_moderation_cases.columns.log_message_id]
+status = "mapped"
+to = "moderation.ai_moderation_cases.log_message_id"
+
+[tables.ai_moderation_cases.columns.created_at]
+status = "mapped"
+to = "moderation.ai_moderation_cases.created_at"
+
+[tables.ai_moderation_ragebait_hits.columns.id]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.id"
+
+[tables.ai_moderation_ragebait_hits.columns.guild_id]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.guild_id"
+
+[tables.ai_moderation_ragebait_hits.columns.user_id]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.user_id"
+
+[tables.ai_moderation_ragebait_hits.columns.message_id]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.message_id"
+
+[tables.ai_moderation_ragebait_hits.columns.channel_id]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.channel_id"
+
+[tables.ai_moderation_ragebait_hits.columns.content_preview]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.content_preview"
+
+[tables.ai_moderation_ragebait_hits.columns.created_at]
+status = "mapped"
+to = "moderation.ai_moderation_ragebait_hits.created_at"
+
+[tables.security_guard_incidents.columns.case_id]
+status = "mapped"
+to = "moderation.security_guard_incidents.case_id"
+
+[tables.security_guard_incidents.columns.guild_id]
+status = "mapped"
+to = "moderation.security_guard_incidents.guild_id"
+
+[tables.security_guard_incidents.columns.user_id]
+status = "mapped"
+to = "moderation.security_guard_incidents.user_id"
+
+[tables.security_guard_incidents.columns.user_tag]
+status = "mapped"
+to = "moderation.security_guard_incidents.user_tag"
+
+[tables.security_guard_incidents.columns.action]
+status = "mapped"
+to = "moderation.security_guard_incidents.action"
+
+[tables.security_guard_incidents.columns.reason]
+status = "mapped"
+to = "moderation.security_guard_incidents.reason"
+
+[tables.security_guard_incidents.columns.channel_count]
+status = "mapped"
+to = "moderation.security_guard_incidents.channel_count"
+
+[tables.security_guard_incidents.columns.message_count]
+status = "mapped"
+to = "moderation.security_guard_incidents.message_count"
+
+[tables.security_guard_incidents.columns.attachment_count]
+status = "mapped"
+to = "moderation.security_guard_incidents.attachment_count"
+
+[tables.security_guard_incidents.columns.keyword_hit]
+status = "mapped"
+to = "moderation.security_guard_incidents.keyword_hit"
+
+[tables.security_guard_incidents.columns.messages_json]
+status = "mapped"
+to = "moderation.security_guard_incidents.messages"
+
+[tables.security_guard_incidents.columns.created_at]
+status = "mapped"
+to = "moderation.security_guard_incidents.created_at"

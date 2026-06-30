@@ -120,7 +120,12 @@ impl InteractionHandler for FeedbackHandler {
                 val("wish"),
                 val("additional"),
             );
-            if let Err(err) = self.hub.port.send_dm_text(FEEDBACK_RECIPIENT_ID, text).await {
+            if let Err(err) = self
+                .hub
+                .port
+                .send_dm_text(FEEDBACK_RECIPIENT_ID, text)
+                .await
+            {
                 tracing::warn!(%err, "Feedback-DM-Versand fehlgeschlagen");
             }
             return BridgeReply::ephemeral_text(
@@ -216,7 +221,10 @@ impl FeedbackHub {
 /// Hinweis zur Treue: Python gated auf `manage_guild`; hier wird `author_is_admin`
 /// (Administrator) genutzt — konsistent mit den anderen Admin-Command-Listenern.
 /// Nicht-Admins werden still ignoriert (kein „fehlende Berechtigung"-Reply).
-pub fn spawn(hub: Arc<FeedbackHub>, dispatcher: &dl_discord::Dispatcher) -> tokio::task::JoinHandle<()> {
+pub fn spawn(
+    hub: Arc<FeedbackHub>,
+    dispatcher: &dl_discord::Dispatcher,
+) -> tokio::task::JoinHandle<()> {
     let mut messages = dispatcher.subscribe_messages();
     tokio::spawn(async move {
         loop {

@@ -1,11 +1,12 @@
 //! Snapshot-Refresh gegen api.deadlock-api.com — Logik wie refresh_once()
 //! im Python-Original inkl. der toleranten Stats-Normalisierung.
 
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sqlx::{PgPool, Postgres, Transaction};
 
+use crate::error::Result as TierlistResult;
 use crate::settings::{read_settings, BUCKETS, SNAPSHOT_RETENTION_PER_BUCKET};
-use crate::util::{coerce_float, coerce_int, now_ts, parse_unix_or_iso, py_round4};
+use crate::util::{coerce_float, coerce_int, now_ts, parse_unix_or_iso, py_round4, unix_to_utc};
 use crate::SharedApp;
 
 #[derive(Debug, thiserror::Error)]
@@ -197,16 +198,26 @@ fn normalize_hero_stats(payload: &Value) -> Vec<HeroStats> {
     by_hero.into_values().collect()
 }
 
-fn allocate_fetched_at(conn: &Connection, bucket: &str, preferred: i64) -> rusqlite::Result<i64> {
+async fn allocate_fetched_at(
+    tx: &mut Transaction<'_, Postgres>,
+    bucket: &str,
+    preferred: i64,
+) -> TierlistResult<i64> {
     let mut fetched_at = preferred;
     loop {
-        let exists: Option<i64> = conn
-            .query_row(
-                "SELECT 1 FROM tierlist_snapshots WHERE bucket = ?1 AND fetched_at = ?2",
-                rusqlite::params![bucket, fetched_at],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let fetched_at_dt = unix_to_utc(fetched_at)?;
+        let exists = sqlx::query!(
+            r#"
+            SELECT 1 AS "exists!"
+              FROM tierlist.tierlist_snapshots
+             WHERE bucket = $1 AND fetched_at = $2
+             LIMIT 1
+            "#,
+            bucket,
+            fetched_at_dt,
+        )
+        .fetch_optional(&mut **tx)
+        .await?;
         if exists.is_none() {
             return Ok(fetched_at);
         }
@@ -214,59 +225,70 @@ fn allocate_fetched_at(conn: &Connection, bucket: &str, preferred: i64) -> rusql
     }
 }
 
-fn prune_snapshots(conn: &Connection, bucket: &str) -> rusqlite::Result<()> {
-    let mut stmt = conn.prepare(
-        "SELECT id FROM tierlist_snapshots WHERE bucket = ?1
-          ORDER BY fetched_at DESC, id DESC LIMIT -1 OFFSET ?2",
-    )?;
-    let stale: Vec<i64> = stmt
-        .query_map(
-            rusqlite::params![bucket, SNAPSHOT_RETENTION_PER_BUCKET],
-            |row| row.get(0),
-        )?
-        .collect::<Result<_, _>>()?;
-    if stale.is_empty() {
-        return Ok(());
-    }
-    let placeholders = stale.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-    conn.execute(
-        &format!("DELETE FROM tierlist_snapshots WHERE id IN ({placeholders})"),
-        rusqlite::params_from_iter(stale),
-    )?;
+async fn prune_snapshots(tx: &mut Transaction<'_, Postgres>, bucket: &str) -> TierlistResult<()> {
+    sqlx::query!(
+        r#"
+        DELETE FROM tierlist.tierlist_snapshots
+         WHERE id IN (
+            SELECT id
+              FROM tierlist.tierlist_snapshots
+             WHERE bucket = $1
+             ORDER BY fetched_at DESC, id DESC
+             OFFSET $2
+         )
+        "#,
+        bucket,
+        SNAPSHOT_RETENTION_PER_BUCKET,
+    )
+    .execute(&mut **tx)
+    .await?;
     Ok(())
 }
 
-fn insert_snapshot_bundle(
-    conn: &Connection,
+async fn insert_snapshot_bundle(
+    tx: &mut Transaction<'_, Postgres>,
     bucket: &str,
     patch_id: &str,
     patch_unix: i64,
     fetched_at: i64,
     stats: &[HeroStats],
-) -> rusqlite::Result<Value> {
-    let snapshot_ts = allocate_fetched_at(conn, bucket, fetched_at)?;
-    conn.execute(
-        "INSERT INTO tierlist_snapshots(bucket, patch_id, patch_unix, fetched_at)
-         VALUES (?1, ?2, ?3, ?4)",
-        rusqlite::params![bucket, patch_id, patch_unix, snapshot_ts],
-    )?;
-    let snapshot_id = conn.last_insert_rowid();
+) -> TierlistResult<Value> {
+    let snapshot_ts = allocate_fetched_at(tx, bucket, fetched_at).await?;
+    let patch_at = unix_to_utc(patch_unix)?;
+    let snapshot_at = unix_to_utc(snapshot_ts)?;
+    let row = sqlx::query!(
+        r#"
+        INSERT INTO tierlist.tierlist_snapshots
+            (bucket, patch_id, patch_at, fetched_at)
+        VALUES ($1, $2, $3, $4)
+        RETURNING id
+        "#,
+        bucket,
+        patch_id,
+        patch_at,
+        snapshot_at,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    let snapshot_id = row.id;
     for s in stats {
-        conn.execute(
-            "INSERT INTO tierlist_snapshot_heroes(
-                 snapshot_id, hero_id, matches, wins, losses, winrate
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                snapshot_id,
-                s.hero_id,
-                s.matches,
-                s.wins,
-                s.losses,
-                s.winrate
-            ],
-        )?;
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_snapshot_heroes
+                (snapshot_id, hero_id, matches, wins, losses, winrate)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            snapshot_id,
+            s.hero_id,
+            s.matches,
+            s.wins,
+            s.losses,
+            s.winrate,
+        )
+        .execute(&mut **tx)
+        .await?;
     }
-    prune_snapshots(conn, bucket)?;
+    prune_snapshots(tx, bucket).await?;
     Ok(json!({
         "snapshot_id": snapshot_id,
         "bucket": bucket,
@@ -275,12 +297,43 @@ fn insert_snapshot_bundle(
     }))
 }
 
+async fn load_active_hero_ids(pool: &PgPool) -> TierlistResult<std::collections::HashSet<i64>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT hero_id
+          FROM tierlist.deadlock_heroes
+         WHERE is_active = TRUE
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows.into_iter().map(|row| row.hero_id).collect())
+}
+
+async fn insert_refresh_results(
+    pool: &PgPool,
+    patch_id: &str,
+    patch_unix: i64,
+    fetched_at: i64,
+    bucket_results: &[(&str, Vec<HeroStats>)],
+) -> TierlistResult<Vec<Value>> {
+    let mut tx = pool.begin().await?;
+    let mut inserted = Vec::new();
+    for (bucket, stats) in bucket_results {
+        inserted.push(
+            insert_snapshot_bundle(&mut tx, bucket, patch_id, patch_unix, fetched_at, stats)
+                .await?,
+        );
+    }
+    tx.commit().await?;
+    Ok(inserted)
+}
+
 pub async fn refresh_once(app: &SharedApp) -> Result<Value, RefreshError> {
     let _guard = app.refresh_lock.lock().await;
 
-    let settings = app
-        .db
-        .write(|c| read_settings(c))
+    let settings = read_settings(&app.pool)
         .await
         .map_err(|e| RefreshError::Fatal(e.to_string()))?;
 
@@ -292,14 +345,7 @@ pub async fn refresh_once(app: &SharedApp) -> Result<Value, RefreshError> {
         .unwrap_or(fetched_patch_unix);
     let fetched_at = now_ts();
 
-    let known: std::collections::HashSet<i64> = app
-        .db
-        .read(|conn| {
-            let mut stmt =
-                conn.prepare("SELECT hero_id FROM deadlock_heroes WHERE is_active = 1")?;
-            let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
-            rows.collect()
-        })
+    let known: std::collections::HashSet<i64> = load_active_hero_ids(&app.pool)
         .await
         .map_err(|e| RefreshError::Fatal(e.to_string()))?;
 
@@ -324,26 +370,15 @@ pub async fn refresh_once(app: &SharedApp) -> Result<Value, RefreshError> {
     }
 
     let patch_id_for_db = patch_id.clone();
-    let inserted = app
-        .db
-        .write(move |conn| {
-            let tx = conn.transaction()?;
-            let mut inserted = Vec::new();
-            for (bucket, stats) in &bucket_results {
-                inserted.push(insert_snapshot_bundle(
-                    &tx,
-                    bucket,
-                    &patch_id_for_db,
-                    patch_unix,
-                    fetched_at,
-                    stats,
-                )?);
-            }
-            tx.commit()?;
-            Ok(inserted)
-        })
-        .await
-        .map_err(|e| RefreshError::Fatal(e.to_string()))?;
+    let inserted = insert_refresh_results(
+        &app.pool,
+        &patch_id_for_db,
+        patch_unix,
+        fetched_at,
+        &bucket_results,
+    )
+    .await
+    .map_err(|e| RefreshError::Fatal(e.to_string()))?;
 
     tracing::info!(%patch_id, patch_unix, buckets = inserted.len(), "Tierlist-Refresh abgeschlossen");
     Ok(json!({
@@ -367,9 +402,7 @@ pub async fn refresh_loop(app: SharedApp) {
                 tracing::error!(%msg, "Tierlist-Refresh fehlgeschlagen");
             }
         }
-        let interval = app
-            .db
-            .write(|c| read_settings(c))
+        let interval = read_settings(&app.pool)
             .await
             .map(|s| s.refresh_interval_seconds)
             .unwrap_or(crate::settings::REFRESH_DEFAULT_SECONDS)

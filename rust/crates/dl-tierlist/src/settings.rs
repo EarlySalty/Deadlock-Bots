@@ -1,11 +1,12 @@
 //! Settings-Verwaltung über die Bestands-Tabelle `tierlist_settings(k, v, updated_at)`.
 //! Semantik exakt wie tierlist_public.py (_ensure_default_settings/_get_settings).
 
-use rusqlite::Connection;
 use serde::Serialize;
 use serde_json::Value;
+use sqlx::PgPool;
 
-use crate::util::{coerce_float, coerce_int, now_ts, parse_unix_or_iso, py_round2};
+use crate::error::Result;
+use crate::util::{coerce_float, coerce_int, now_utc, parse_unix_or_iso, py_round2};
 
 pub const REFRESH_DEFAULT_SECONDS: i64 = 8 * 60 * 60;
 pub const SNAPSHOT_RETENTION_PER_BUCKET: i64 = 30;
@@ -70,28 +71,39 @@ fn default_rows() -> Vec<(&'static str, String)> {
     ]
 }
 
-pub fn ensure_defaults(conn: &Connection) -> rusqlite::Result<()> {
-    let now = now_ts();
+pub async fn ensure_defaults(pool: &PgPool) -> Result<()> {
+    let now = now_utc();
     for (key, value) in default_rows() {
-        conn.execute(
-            "INSERT INTO tierlist_settings(k, v, updated_at) VALUES (?1, ?2, ?3)
-             ON CONFLICT(k) DO NOTHING",
-            (key, value, now),
-        )?;
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_settings (k, v, updated_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (k) DO NOTHING
+            "#,
+            key,
+            value,
+            now,
+        )
+        .execute(pool)
+        .await?;
     }
     Ok(())
 }
 
-pub fn read_settings(conn: &Connection) -> rusqlite::Result<Settings> {
-    ensure_defaults(conn)?;
-    let mut stmt = conn.prepare("SELECT k, v FROM tierlist_settings")?;
+pub async fn read_settings(pool: &PgPool) -> Result<Settings> {
+    ensure_defaults(pool).await?;
+    let rows = sqlx::query!(
+        r#"
+        SELECT k, v
+        FROM tierlist.tierlist_settings
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
     let mut raw = std::collections::HashMap::new();
-    let rows = stmt.query_map([], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
     for row in rows {
-        let (k, v) = row?;
-        raw.insert(k, v);
+        raw.insert(row.k, row.v);
     }
 
     let thresholds = raw
@@ -127,18 +139,28 @@ pub fn read_settings(conn: &Connection) -> rusqlite::Result<Settings> {
     })
 }
 
-pub fn set_setting(conn: &Connection, key: &str, value: &str) -> rusqlite::Result<()> {
-    conn.execute(
-        "INSERT INTO tierlist_settings(k, v, updated_at) VALUES (?1, ?2, ?3)
-         ON CONFLICT(k) DO UPDATE SET v = excluded.v, updated_at = excluded.updated_at",
-        (key, value, now_ts()),
-    )?;
+pub async fn set_setting(pool: &PgPool, key: &str, value: &str) -> Result<()> {
+    let now = now_utc();
+    sqlx::query!(
+        r#"
+        INSERT INTO tierlist.tierlist_settings (k, v, updated_at)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (k) DO UPDATE
+           SET v = EXCLUDED.v,
+               updated_at = EXCLUDED.updated_at
+        "#,
+        key,
+        value,
+        now,
+    )
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
 /// Wie Python `_normalize_thresholds` — inkl. Alias-Schlüssel und
 /// Absteigend-Validierung. Fehlertexte sind Vertrag (gehen 1:1 in die API).
-pub fn normalize_thresholds(payload: &Value) -> Result<Thresholds, String> {
+pub fn normalize_thresholds(payload: &Value) -> std::result::Result<Thresholds, String> {
     let empty = serde_json::Map::new();
     let data = payload.as_object().unwrap_or(&empty);
     let pick = |keys: [&str; 3], default: f64| -> Option<f64> {
@@ -218,5 +240,30 @@ mod tests {
         assert_eq!(tier_for_winrate(45.0, &t), "C");
         assert_eq!(tier_bounds("C", &t), (None, Some(46.0)));
         assert_eq!(tier_bounds("S+", &t), (Some(52.0), None));
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod pg_tests {
+    use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn settings_defaults_and_upsert_roundtrip(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+
+        let defaults = read_settings(pool).await?;
+        assert_eq!(defaults.min_matches, 500);
+        assert_eq!(defaults.refresh_interval_seconds, REFRESH_DEFAULT_SECONDS);
+
+        set_setting(pool, "min_matches", "25").await?;
+        set_setting(pool, "description_text", "Public notes").await?;
+        let updated = read_settings(pool).await?;
+        assert_eq!(updated.min_matches, 25);
+        assert_eq!(updated.description_text, "Public notes");
+
+        Ok(())
     }
 }

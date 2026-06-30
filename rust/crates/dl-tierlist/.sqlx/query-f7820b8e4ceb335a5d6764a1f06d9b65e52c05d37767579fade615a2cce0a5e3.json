@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE tierlist.deadlock_hero_builds\n                       SET sort_order = $1,\n                           is_active = $2,\n                           updated_at = $3\n                     WHERE hero_id = $4 AND build_id = $5\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Bool",
+        "Timestamptz",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f7820b8e4ceb335a5d6764a1f06d9b65e52c05d37767579fade615a2cce0a5e3"
+}

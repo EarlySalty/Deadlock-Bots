@@ -8,7 +8,7 @@
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension};
+use sqlx::PgPool;
 
 pub const RANK_ORDER: [&str; 11] = [
     "initiate",
@@ -42,35 +42,39 @@ pub const RANK_COLORS: [(&str, &str); 11] = [
 /// Query pro Session-Zeile neu (N+1) — der Cache ist verhaltensgleich,
 /// nur ohne die redundanten Roundtrips.
 pub struct RankResolver<'c> {
-    conn: &'c Connection,
+    pool: &'c PgPool,
     cache: HashMap<i64, Option<&'static str>>,
 }
 
 impl<'c> RankResolver<'c> {
-    pub fn new(conn: &'c Connection) -> Self {
+    pub fn new(pool: &'c PgPool) -> Self {
         Self {
-            conn,
+            pool,
             cache: HashMap::new(),
         }
     }
 
     /// `_get_user_rank`: verifizierter Steam-Link, primärer Account zuerst,
     /// Name muss in RANK_ORDER liegen.
-    pub fn rank_of(&mut self, user_id: i64) -> rusqlite::Result<Option<&'static str>> {
+    pub async fn rank_of(&mut self, user_id: i64) -> Result<Option<&'static str>, sqlx::Error> {
         if let Some(cached) = self.cache.get(&user_id) {
             return Ok(*cached);
         }
-        let raw: Option<String> = self
-            .conn
-            .query_row(
-                "SELECT deadlock_rank_name FROM steam_links
-                  WHERE user_id = ?1 AND verified = 1
-                  ORDER BY primary_account DESC, deadlock_rank_updated_at DESC
-                  LIMIT 1",
-                [user_id],
-                |row| row.get(0),
-            )
-            .optional()?;
+        let raw = sqlx::query!(
+            r#"
+            SELECT deadlock_rank_name
+            FROM core.steam_links
+            WHERE discord_id = $1
+              AND verified = TRUE
+              AND deadlock_rank_name IS NOT NULL
+            ORDER BY primary_account DESC, deadlock_rank_updated_at DESC NULLS LAST
+            LIMIT 1
+            "#,
+            user_id,
+        )
+        .fetch_optional(self.pool)
+        .await?
+        .and_then(|row| row.deadlock_rank_name);
         let resolved = raw
             .map(|s| s.to_lowercase())
             .and_then(|name| RANK_ORDER.iter().find(|r| **r == name).copied());

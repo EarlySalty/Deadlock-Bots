@@ -22,7 +22,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde_json::{Map, Value, json};
+use serde_json::{json, Map, Value};
 
 pub use idempotency::{IdempotencyConfig, IdempotencyStore};
 pub use port::{ChannelInfoPort, DiscordPort, PortError};

@@ -458,7 +458,7 @@ impl EventHandler for Handler {
 
 pub struct GatewayClientOptions {
     pub reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
-    pub db: dl_db::Db,
+    pub pool: sqlx::PgPool,
     pub feature_module_count: usize,
     pub command_prefix: String,
 }
@@ -485,7 +485,7 @@ pub async fn build_client(
             adapter,
             dispatcher,
             router,
-            invite_tracker: Arc::new(InviteTracker::with_db(options.db)),
+            invite_tracker: Arc::new(InviteTracker::new(options.pool)),
             reaction_roles: options.reaction_roles,
             feature_module_count: options.feature_module_count,
             command_prefix: options.command_prefix,

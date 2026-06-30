@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT hero_id, winrate\n          FROM tierlist.tierlist_snapshot_heroes\n         WHERE snapshot_id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hero_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "winrate",
+        "type_info": "Float8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "779e48bb8715254a1daf4beb8683d2a888d209f974ebb93757ab7f11ac801ee0"
+}

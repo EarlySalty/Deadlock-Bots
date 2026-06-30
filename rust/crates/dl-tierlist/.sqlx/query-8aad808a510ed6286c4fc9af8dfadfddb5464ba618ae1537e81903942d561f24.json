@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"exists!\"\n              FROM tierlist.tierlist_snapshots\n             WHERE bucket = $1 AND fetched_at = $2\n             LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8aad808a510ed6286c4fc9af8dfadfddb5464ba618ae1537e81903942d561f24"
+}

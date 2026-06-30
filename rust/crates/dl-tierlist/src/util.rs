@@ -1,6 +1,9 @@
 //! Kleine Helfer mit Python-äquivalenter Semantik (tierlist_public.py).
 
+use chrono::{DateTime, Utc};
 use serde_json::Value;
+
+use crate::error::{Result, TierlistError};
 
 /// Rundet auf 2 Nachkommastellen exakt wie Pythons `round()`.
 pub fn py_round2(x: f64) -> f64 {
@@ -17,6 +20,22 @@ pub fn now_ts() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0)
+}
+
+pub fn now_utc() -> DateTime<Utc> {
+    Utc::now()
+}
+
+pub fn unix_to_utc(value: i64) -> Result<DateTime<Utc>> {
+    DateTime::from_timestamp(value, 0).ok_or(TierlistError::TimestampOutOfRange(value))
+}
+
+pub fn i32_from_i64(field: &'static str, value: i64) -> Result<i32> {
+    i32::try_from(value).map_err(|source| TierlistError::IntOutOfRange {
+        field,
+        value,
+        source,
+    })
 }
 
 /// Wie Python `_coerce_int`: None/""/false → default; float wird abgeschnitten;

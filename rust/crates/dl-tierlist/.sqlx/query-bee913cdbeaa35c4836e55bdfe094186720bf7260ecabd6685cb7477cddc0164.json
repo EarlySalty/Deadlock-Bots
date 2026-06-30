@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.tierlist_snapshot_heroes\n                (snapshot_id, hero_id, matches, wins, losses, winrate)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bee913cdbeaa35c4836e55bdfe094186720bf7260ecabd6685cb7477cddc0164"
+}

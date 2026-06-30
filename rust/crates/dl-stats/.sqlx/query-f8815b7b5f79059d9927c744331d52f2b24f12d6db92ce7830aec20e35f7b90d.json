@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT MAX(display_name) AS \"display_name?\",\n               COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"seconds!\",\n               COALESCE(SUM(points), 0)::BIGINT AS \"points!\",\n               COUNT(*) AS \"sessions!\"\n        FROM activity.voice_session_log\n        WHERE started_at >= $1\n          AND user_id = $2\n        GROUP BY user_id\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "points!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sessions!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "f8815b7b5f79059d9927c744331d52f2b24f12d6db92ce7830aec20e35f7b90d"
+}

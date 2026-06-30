@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO core.users (discord_id, username, global_name, avatar)\n        VALUES ($1, $2, $3, $4)\n        ON CONFLICT (discord_id) DO UPDATE\n        SET username = COALESCE(EXCLUDED.username, core.users.username),\n            global_name = COALESCE(EXCLUDED.global_name, core.users.global_name),\n            avatar = COALESCE(EXCLUDED.avatar, core.users.avatar),\n            last_seen = now()\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4c2f148f1db8ac950c93828333bf2fd989735b781228be71bfcbc3453acfc2fc"
+}

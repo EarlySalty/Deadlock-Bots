@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, patch_id, patch_at, fetched_at\n          FROM tierlist.tierlist_snapshots\n         WHERE bucket = $1\n         ORDER BY fetched_at DESC, id DESC\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "patch_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "patch_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "fetched_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "dbb1efa053ac9888f76b205280fdaa92f5b5b7477eb50abf927d99ea9399af19"
+}

@@ -65,12 +65,29 @@ pub trait LanePort: Send + Sync {
         user_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String>;
+    /// Member-Connect gesammelt per Channel-Batch: denied => connect deny,
+    /// cleared => Member-Overwrite entfernen.
+    async fn apply_member_connect_batch(
+        &self,
+        channel_id: u64,
+        denied_user_ids: &HashSet<u64>,
+        clear_user_ids: &HashSet<u64>,
+    ) -> Result<(), String>;
     /// Rollen-Overwrite (Region: English-Only-Rolle deny); None löscht.
     async fn set_role_connect(
         &self,
         channel_id: u64,
         role_id: u64,
         connect: Option<bool>,
+    ) -> Result<(), String>;
+    /// Rollen-Connect gesammelt per Channel-Batch: allowed => connect allow,
+    /// cleared => Rollen-Overwrite entfernen. Keine Deny-Syncs für Rang-Rollen.
+    async fn apply_role_connect_batch(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        allowed_role_ids: &HashSet<u64>,
+        clear_role_ids: &HashSet<u64>,
     ) -> Result<(), String>;
     async fn set_user_limit(&self, channel_id: u64, limit: i64, reason: &str)
         -> Result<(), String>;
@@ -1529,19 +1546,24 @@ impl TempVoiceEngine {
         }
 
         let min_score = logic::rank_score(&min_rank);
+        let mut allowed_role_ids = HashSet::new();
+        let mut clear_role_ids = HashSet::new();
         let roles = self.port.guild_role_names(guild_id).await;
         for (role_id, name) in roles {
             let score = logic::rank_score(&name);
             if score == 0 {
                 continue; // keine Rang-Rolle
             }
-            let deny = min_rank != "unknown" && score < min_score;
-            let connect = if deny { Some(false) } else { None };
-            let _ = self
-                .port
-                .set_role_connect(channel_id, role_id, connect)
-                .await;
+            if min_rank != "unknown" && score >= min_score {
+                allowed_role_ids.insert(role_id);
+            } else {
+                clear_role_ids.insert(role_id);
+            }
         }
+        self.port
+            .apply_role_connect_batch(guild_id, channel_id, &allowed_role_ids, &clear_role_ids)
+            .await
+            .map_err(|err| format!("Rang-Rechte konnten nicht aktualisiert werden: {err}"))?;
 
         {
             let mut state = self.state.lock().await;
@@ -1690,12 +1712,14 @@ impl TempVoiceEngine {
     /// Owner-Bans als Connect-Overwrites auf die Lane legen.
     async fn apply_owner_bans(&self, _guild_id: u64, channel_id: u64, owner_id: u64) {
         let bans = self.store.list_bans(owner_id).await.unwrap_or_default();
-        for banned in bans {
-            let _ = self
-                .port
-                .set_member_connect(channel_id, banned, Some(false))
-                .await;
+        if bans.is_empty() {
+            return;
         }
+        let denied: HashSet<u64> = bans.into_iter().collect();
+        let _ = self
+            .port
+            .apply_member_connect_batch(channel_id, &denied, &HashSet::new())
+            .await;
     }
 
     async fn apply_owner_settings(&self, guild_id: u64, channel_id: u64, owner_id: u64) {
@@ -1716,9 +1740,14 @@ impl TempVoiceEngine {
 
     async fn clear_owner_bans(&self, channel_id: u64, owner_id: u64) {
         let bans = self.store.list_bans(owner_id).await.unwrap_or_default();
-        for banned in bans {
-            let _ = self.port.set_member_connect(channel_id, banned, None).await;
+        if bans.is_empty() {
+            return;
         }
+        let cleared: HashSet<u64> = bans.into_iter().collect();
+        let _ = self
+            .port
+            .apply_member_connect_batch(channel_id, &HashSet::new(), &cleared)
+            .await;
     }
 }
 
@@ -1827,8 +1856,25 @@ mod tests {
         moved: StdMutex<Vec<(u64, u64)>>,
         renamed: StdMutex<Vec<(u64, String)>>,
         overwrites: StdMutex<Vec<(u64, u64, Option<bool>)>>,
+        role_batches: StdMutex<Vec<RoleBatch>>,
+        member_batches: StdMutex<Vec<MemberBatch>>,
         limits: StdMutex<Vec<(u64, i64)>>,
         next_channel_id: StdMutex<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RoleBatch {
+        channel_id: u64,
+        allowed: HashSet<u64>,
+        denied: HashSet<u64>,
+        cleared: HashSet<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct MemberBatch {
+        channel_id: u64,
+        denied: HashSet<u64>,
+        cleared: HashSet<u64>,
     }
 
     #[async_trait::async_trait]
@@ -1902,16 +1948,60 @@ mod tests {
                 .push((channel_id, user_id, connect));
             Ok(())
         }
+        async fn apply_member_connect_batch(
+            &self,
+            channel_id: u64,
+            denied_user_ids: &HashSet<u64>,
+            clear_user_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            self.member_batches.lock().expect("lock").push(MemberBatch {
+                channel_id,
+                denied: denied_user_ids.clone(),
+                cleared: clear_user_ids.clone(),
+            });
+            Ok(())
+        }
         async fn set_role_connect(
             &self,
             channel_id: u64,
             role_id: u64,
             connect: Option<bool>,
         ) -> Result<(), String> {
-            self.overwrites
-                .lock()
-                .expect("lock")
-                .push((channel_id, role_id, connect));
+            let mut allowed = HashSet::new();
+            let mut denied = HashSet::new();
+            let mut cleared = HashSet::new();
+            match connect {
+                Some(true) => {
+                    allowed.insert(role_id);
+                }
+                Some(false) => {
+                    denied.insert(role_id);
+                }
+                None => {
+                    cleared.insert(role_id);
+                }
+            }
+            self.role_batches.lock().expect("lock").push(RoleBatch {
+                channel_id,
+                allowed,
+                denied,
+                cleared,
+            });
+            Ok(())
+        }
+        async fn apply_role_connect_batch(
+            &self,
+            _guild_id: u64,
+            channel_id: u64,
+            allowed_role_ids: &HashSet<u64>,
+            clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            self.role_batches.lock().expect("lock").push(RoleBatch {
+                channel_id,
+                allowed: allowed_role_ids.clone(),
+                denied: HashSet::new(),
+                cleared: clear_role_ids.clone(),
+            });
             Ok(())
         }
         async fn set_user_limit(
@@ -1968,7 +2058,12 @@ mod tests {
             Some(6)
         }
         async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
-            vec![(1, "Phantom".to_string()), (2, "Seeker".to_string())]
+            vec![
+                (1, "Phantom".to_string()),
+                (2, "Seeker".to_string()),
+                (3, "Ascendant".to_string()),
+                (4, "Eternus".to_string()),
+            ]
         }
         async fn set_channel_category(
             &self,
@@ -2219,6 +2314,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn min_rank_setzt_nur_allow_overwrites_fuer_erlaubte_rangrollen() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Lane 1".to_string(),
+                category_id: RANKED_CATEGORY,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        engine.rehydrate().await;
+
+        engine
+            .set_min_rank(1, lane_id, "phantom")
+            .await
+            .expect("min rank");
+
+        assert!(port.overwrites.lock().expect("lock").is_empty());
+        let batches = port.role_batches.lock().expect("lock").clone();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0],
+            RoleBatch {
+                channel_id: lane_id,
+                allowed: HashSet::from([1, 3, 4]),
+                denied: HashSet::new(),
+                cleared: HashSet::from([2]),
+            }
+        );
+    }
+
+    #[tokio::test]
     async fn rank_pref_schlaegt_rollen() {
         let (_dir, engine, port, staging) = setup().await;
         engine
@@ -2344,9 +2477,18 @@ mod tests {
                 channel_id: staging,
             })
             .await;
+        let lane_id = engine.store.all_lanes().await.expect("lanes")[0].channel_id;
         let overwrites = port.overwrites.lock().expect("lock").clone();
-        assert!(overwrites
-            .iter()
-            .any(|(_, user, deny)| *user == 666 && *deny == Some(false)));
+        assert!(overwrites.is_empty());
+        let batches = port.member_batches.lock().expect("lock").clone();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(
+            batches[0],
+            MemberBatch {
+                channel_id: lane_id,
+                denied: HashSet::from([666]),
+                cleared: HashSet::new(),
+            }
+        );
     }
 }

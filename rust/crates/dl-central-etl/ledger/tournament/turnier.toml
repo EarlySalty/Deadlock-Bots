@@ -1,0 +1,1331 @@
+[tables._sqlx_migrations.columns.version]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables._sqlx_migrations.columns.description]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables._sqlx_migrations.columns.installed_on]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables._sqlx_migrations.columns.success]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables._sqlx_migrations.columns.checksum]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables._sqlx_migrations.columns.execution_time]
+status = "dropped"
+reason = "sqlx-Tooling-Bookkeeping, keine Fachdaten"
+
+[tables.audit_log.columns.id]
+status = "mapped"
+to = "turnier.audit_log.id"
+
+[tables.audit_log.columns.action]
+status = "mapped"
+to = "turnier.audit_log.action"
+
+[tables.audit_log.columns.user_id]
+status = "mapped"
+to = "turnier.audit_log.user_id"
+
+[tables.audit_log.columns.details]
+status = "mapped"
+to = "turnier.audit_log.details"
+
+[tables.audit_log.columns.created_at]
+status = "mapped"
+to = "turnier.audit_log.created_at"
+
+[tables.bracket_matches.columns.id]
+status = "mapped"
+to = "turnier.bracket_matches.id"
+
+[tables.bracket_matches.columns.tournament_id]
+status = "mapped"
+to = "turnier.bracket_matches.tournament_id"
+
+[tables.bracket_matches.columns.round]
+status = "mapped"
+to = "turnier.bracket_matches.round"
+
+[tables.bracket_matches.columns.position]
+status = "mapped"
+to = "turnier.bracket_matches.position"
+
+[tables.bracket_matches.columns.bracket_type]
+status = "mapped"
+to = "turnier.bracket_matches.bracket_type"
+
+[tables.bracket_matches.columns.team1_id]
+status = "mapped"
+to = "turnier.bracket_matches.team1_id"
+
+[tables.bracket_matches.columns.team2_id]
+status = "mapped"
+to = "turnier.bracket_matches.team2_id"
+
+[tables.bracket_matches.columns.winner_id]
+status = "mapped"
+to = "turnier.bracket_matches.winner_id"
+
+[tables.bracket_matches.columns.status]
+status = "mapped"
+to = "turnier.bracket_matches.status"
+
+[tables.bracket_matches.columns.steam_party_id]
+status = "mapped"
+to = "turnier.bracket_matches.steam_party_id"
+
+[tables.bracket_matches.columns.party_code]
+status = "mapped"
+to = "turnier.bracket_matches.party_code"
+
+[tables.bracket_matches.columns.deadlock_match_id]
+status = "mapped"
+to = "turnier.bracket_matches.deadlock_match_id"
+
+[tables.bracket_matches.columns.scheduled_at]
+status = "mapped"
+to = "turnier.bracket_matches.scheduled_at"
+
+[tables.bracket_matches.columns.played_at]
+status = "mapped"
+to = "turnier.bracket_matches.played_at"
+
+[tables.bracket_matches.columns.match_duration_s]
+status = "mapped"
+to = "turnier.bracket_matches.match_duration_s"
+
+[tables.bracket_matches.columns.match_stats]
+status = "mapped"
+to = "turnier.bracket_matches.match_stats"
+
+[tables.bracket_matches.columns.source_match1_id]
+status = "mapped"
+to = "turnier.bracket_matches.source_match1_id"
+
+[tables.bracket_matches.columns.source_match2_id]
+status = "mapped"
+to = "turnier.bracket_matches.source_match2_id"
+
+[tables.bracket_matches.columns.discord_channel_id]
+status = "mapped"
+to = "turnier.bracket_matches.discord_channel_id"
+
+[tables.bracket_matches.columns.mini_group_id]
+status = "mapped"
+to = "turnier.bracket_matches.mini_group_id"
+
+[tables.bracket_matches.columns.source_mini_group1_id]
+status = "mapped"
+to = "turnier.bracket_matches.source_mini_group1_id"
+
+[tables.bracket_matches.columns.source_mini_group2_id]
+status = "mapped"
+to = "turnier.bracket_matches.source_mini_group2_id"
+
+[tables.bracket_matches.columns.hero_assignments]
+status = "mapped"
+to = "turnier.bracket_matches.hero_assignments"
+
+[tables.bracket_matches.columns.loser_to_match_id]
+status = "mapped"
+to = "turnier.bracket_matches.loser_to_match_id"
+
+[tables.bracket_matches.columns.loser_to_slot]
+status = "mapped"
+to = "turnier.bracket_matches.loser_to_slot"
+
+[tables.bracket_matches.columns.on_stream]
+status = "mapped"
+to = "turnier.bracket_matches.on_stream"
+
+[tables.bracket_mini_group_teams.columns.id]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.id"
+
+[tables.bracket_mini_group_teams.columns.mini_group_id]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.mini_group_id"
+
+[tables.bracket_mini_group_teams.columns.team_id]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.team_id"
+
+[tables.bracket_mini_group_teams.columns.seed_order]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.seed_order"
+
+[tables.bracket_mini_group_teams.columns.source_match_id]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.source_match_id"
+
+[tables.bracket_mini_group_teams.columns.source_mini_group_id]
+status = "mapped"
+to = "turnier.bracket_mini_group_teams.source_mini_group_id"
+
+[tables.bracket_mini_groups.columns.id]
+status = "mapped"
+to = "turnier.bracket_mini_groups.id"
+
+[tables.bracket_mini_groups.columns.tournament_id]
+status = "mapped"
+to = "turnier.bracket_mini_groups.tournament_id"
+
+[tables.bracket_mini_groups.columns.round]
+status = "mapped"
+to = "turnier.bracket_mini_groups.round"
+
+[tables.bracket_mini_groups.columns.position]
+status = "mapped"
+to = "turnier.bracket_mini_groups.position"
+
+[tables.bracket_mini_groups.columns.advances_to_match_id]
+status = "mapped"
+to = "turnier.bracket_mini_groups.advances_to_match_id"
+
+[tables.bracket_mini_groups.columns.advances_to_slot]
+status = "mapped"
+to = "turnier.bracket_mini_groups.advances_to_slot"
+
+[tables.bracket_mini_groups.columns.created_at]
+status = "mapped"
+to = "turnier.bracket_mini_groups.created_at"
+
+[tables.checkins.columns.id]
+status = "mapped"
+to = "turnier.checkins.id"
+
+[tables.checkins.columns.match_type]
+status = "mapped"
+to = "turnier.checkins.match_type"
+
+[tables.checkins.columns.match_id]
+status = "mapped"
+to = "turnier.checkins.match_id"
+
+[tables.checkins.columns.team_id]
+status = "mapped"
+to = "turnier.checkins.team_id"
+
+[tables.checkins.columns.discord_id]
+status = "mapped"
+to = "turnier.checkins.discord_id"
+
+[tables.checkins.columns.checked_in_at]
+status = "mapped"
+to = "turnier.checkins.checked_in_at"
+
+[tables.discord_tasks.columns.id]
+status = "mapped"
+to = "turnier.discord_tasks.id"
+
+[tables.discord_tasks.columns.type]
+status = "mapped"
+to = "turnier.discord_tasks.type"
+
+[tables.discord_tasks.columns.payload]
+status = "mapped"
+to = "turnier.discord_tasks.payload"
+
+[tables.discord_tasks.columns.status]
+status = "mapped"
+to = "turnier.discord_tasks.status"
+
+[tables.discord_tasks.columns.result_payload]
+status = "mapped"
+to = "turnier.discord_tasks.result_payload"
+
+[tables.discord_tasks.columns.error]
+status = "mapped"
+to = "turnier.discord_tasks.error"
+
+[tables.discord_tasks.columns.created_at]
+status = "mapped"
+to = "turnier.discord_tasks.created_at"
+
+[tables.discord_tasks.columns.updated_at]
+status = "mapped"
+to = "turnier.discord_tasks.updated_at"
+
+[tables.draft_actions.columns.id]
+status = "mapped"
+to = "turnier.draft_actions.id"
+
+[tables.draft_actions.columns.session_id]
+status = "mapped"
+to = "turnier.draft_actions.session_id"
+
+[tables.draft_actions.columns.sequence_index]
+status = "mapped"
+to = "turnier.draft_actions.sequence_index"
+
+[tables.draft_actions.columns.action_type]
+status = "mapped"
+to = "turnier.draft_actions.action_type"
+
+[tables.draft_actions.columns.team_slot]
+status = "mapped"
+to = "turnier.draft_actions.team_slot"
+
+[tables.draft_actions.columns.hero_name]
+status = "mapped"
+to = "turnier.draft_actions.hero_name"
+
+[tables.draft_actions.columns.taken_by]
+status = "mapped"
+to = "turnier.draft_actions.taken_by"
+
+[tables.draft_actions.columns.taken_at]
+status = "mapped"
+to = "turnier.draft_actions.taken_at"
+
+[tables.draft_actions.columns.is_admin_forced]
+status = "mapped"
+to = "turnier.draft_actions.is_admin_forced"
+
+[tables.draft_sessions.columns.id]
+status = "mapped"
+to = "turnier.draft_sessions.id"
+
+[tables.draft_sessions.columns.bracket_match_id]
+status = "mapped"
+to = "turnier.draft_sessions.bracket_match_id"
+
+[tables.draft_sessions.columns.status]
+status = "mapped"
+to = "turnier.draft_sessions.status"
+
+[tables.draft_sessions.columns.current_action_index]
+status = "mapped"
+to = "turnier.draft_sessions.current_action_index"
+
+[tables.draft_sessions.columns.started_by]
+status = "mapped"
+to = "turnier.draft_sessions.started_by"
+
+[tables.draft_sessions.columns.started_at]
+status = "mapped"
+to = "turnier.draft_sessions.started_at"
+
+[tables.draft_sessions.columns.completed_at]
+status = "mapped"
+to = "turnier.draft_sessions.completed_at"
+
+[tables.draft_sessions.columns.created_at]
+status = "mapped"
+to = "turnier.draft_sessions.created_at"
+
+[tables.group_matches.columns.id]
+status = "mapped"
+to = "turnier.group_matches.id"
+
+[tables.group_matches.columns.group_id]
+status = "mapped"
+to = "turnier.group_matches.group_id"
+
+[tables.group_matches.columns.team1_id]
+status = "mapped"
+to = "turnier.group_matches.team1_id"
+
+[tables.group_matches.columns.team2_id]
+status = "mapped"
+to = "turnier.group_matches.team2_id"
+
+[tables.group_matches.columns.winner_id]
+status = "mapped"
+to = "turnier.group_matches.winner_id"
+
+[tables.group_matches.columns.status]
+status = "mapped"
+to = "turnier.group_matches.status"
+
+[tables.group_matches.columns.scheduled_at]
+status = "mapped"
+to = "turnier.group_matches.scheduled_at"
+
+[tables.group_matches.columns.played_at]
+status = "mapped"
+to = "turnier.group_matches.played_at"
+
+[tables.group_matches.columns.discord_channel_id]
+status = "mapped"
+to = "turnier.group_matches.discord_channel_id"
+
+[tables.group_matches.columns.steam_party_id]
+status = "mapped"
+to = "turnier.group_matches.steam_party_id"
+
+[tables.group_matches.columns.party_code]
+status = "mapped"
+to = "turnier.group_matches.party_code"
+
+[tables.group_matches.columns.deadlock_match_id]
+status = "mapped"
+to = "turnier.group_matches.deadlock_match_id"
+
+[tables.group_matches.columns.match_duration_s]
+status = "mapped"
+to = "turnier.group_matches.match_duration_s"
+
+[tables.group_matches.columns.match_stats]
+status = "mapped"
+to = "turnier.group_matches.match_stats"
+
+[tables.group_matches.columns.hero_assignments]
+status = "mapped"
+to = "turnier.group_matches.hero_assignments"
+
+[tables.group_teams.columns.id]
+status = "mapped"
+to = "turnier.group_teams.id"
+
+[tables.group_teams.columns.group_id]
+status = "mapped"
+to = "turnier.group_teams.group_id"
+
+[tables.group_teams.columns.team_id]
+status = "mapped"
+to = "turnier.group_teams.team_id"
+
+[tables.group_teams.columns.wins]
+status = "mapped"
+to = "turnier.group_teams.wins"
+
+[tables.group_teams.columns.losses]
+status = "mapped"
+to = "turnier.group_teams.losses"
+
+[tables.group_teams.columns.points]
+status = "mapped"
+to = "turnier.group_teams.points"
+
+[tables.groups.columns.id]
+status = "mapped"
+to = "turnier.groups.id"
+
+[tables.groups.columns.tournament_id]
+status = "mapped"
+to = "turnier.groups.tournament_id"
+
+[tables.groups.columns.name]
+status = "mapped"
+to = "turnier.groups.name"
+
+[tables.groups.columns.seeding_order]
+status = "mapped"
+to = "turnier.groups.seeding_order"
+
+[tables.match_casters.columns.id]
+status = "mapped"
+to = "turnier.match_casters.id"
+
+[tables.match_casters.columns.match_id]
+status = "mapped"
+to = "turnier.match_casters.match_id"
+
+[tables.match_casters.columns.match_type]
+status = "mapped"
+to = "turnier.match_casters.match_type"
+
+[tables.match_casters.columns.discord_id]
+status = "mapped"
+to = "turnier.match_casters.discord_id"
+
+[tables.match_casters.columns.assigned_at]
+status = "mapped"
+to = "turnier.match_casters.assigned_at"
+
+[tables.match_casters.columns.assigned_by]
+status = "mapped"
+to = "turnier.match_casters.assigned_by"
+
+[tables.match_games.columns.id]
+status = "mapped"
+to = "turnier.match_games.id"
+
+[tables.match_games.columns.bracket_match_id]
+status = "mapped"
+to = "turnier.match_games.bracket_match_id"
+
+[tables.match_games.columns.game_number]
+status = "mapped"
+to = "turnier.match_games.game_number"
+
+[tables.match_games.columns.status]
+status = "mapped"
+to = "turnier.match_games.status"
+
+[tables.match_games.columns.steam_party_id]
+status = "mapped"
+to = "turnier.match_games.steam_party_id"
+
+[tables.match_games.columns.party_code]
+status = "mapped"
+to = "turnier.match_games.party_code"
+
+[tables.match_games.columns.deadlock_match_id]
+status = "mapped"
+to = "turnier.match_games.deadlock_match_id"
+
+[tables.match_games.columns.winner_team]
+status = "mapped"
+to = "turnier.match_games.winner_team"
+
+[tables.match_games.columns.duration_s]
+status = "mapped"
+to = "turnier.match_games.duration_s"
+
+[tables.match_games.columns.match_stats]
+status = "mapped"
+to = "turnier.match_games.match_stats"
+
+[tables.match_games.columns.created_at]
+status = "mapped"
+to = "turnier.match_games.created_at"
+
+[tables.match_games.columns.completed_at]
+status = "mapped"
+to = "turnier.match_games.completed_at"
+
+[tables.match_result_reports.columns.id]
+status = "mapped"
+to = "turnier.match_result_reports.id"
+
+[tables.match_result_reports.columns.match_type]
+status = "mapped"
+to = "turnier.match_result_reports.match_type"
+
+[tables.match_result_reports.columns.match_id]
+status = "mapped"
+to = "turnier.match_result_reports.match_id"
+
+[tables.match_result_reports.columns.tournament_id]
+status = "mapped"
+to = "turnier.match_result_reports.tournament_id"
+
+[tables.match_result_reports.columns.reported_by]
+status = "mapped"
+to = "turnier.match_result_reports.reported_by"
+
+[tables.match_result_reports.columns.winner_team_id]
+status = "mapped"
+to = "turnier.match_result_reports.winner_team_id"
+
+[tables.match_result_reports.columns.deadlock_match_id]
+status = "mapped"
+to = "turnier.match_result_reports.deadlock_match_id"
+
+[tables.match_result_reports.columns.is_no_show]
+status = "mapped"
+to = "turnier.match_result_reports.is_no_show"
+
+[tables.match_result_reports.columns.no_show_team_id]
+status = "mapped"
+to = "turnier.match_result_reports.no_show_team_id"
+
+[tables.match_result_reports.columns.status]
+status = "mapped"
+to = "turnier.match_result_reports.status"
+
+[tables.match_result_reports.columns.created_at]
+status = "mapped"
+to = "turnier.match_result_reports.created_at"
+
+[tables.match_result_reports.columns.resolved_at]
+status = "mapped"
+to = "turnier.match_result_reports.resolved_at"
+
+[tables.match_result_reports.columns.resolved_by]
+status = "mapped"
+to = "turnier.match_result_reports.resolved_by"
+
+[tables.match_results.columns.id]
+status = "mapped"
+to = "turnier.match_results.id"
+
+[tables.match_results.columns.bracket_match_id]
+status = "mapped"
+to = "turnier.match_results.bracket_match_id"
+
+[tables.match_results.columns.group_match_id]
+status = "mapped"
+to = "turnier.match_results.group_match_id"
+
+[tables.match_results.columns.winning_team]
+status = "mapped"
+to = "turnier.match_results.winning_team"
+
+[tables.match_results.columns.duration_s]
+status = "mapped"
+to = "turnier.match_results.duration_s"
+
+[tables.match_results.columns.player_stats]
+status = "mapped"
+to = "turnier.match_results.player_stats"
+
+[tables.match_results.columns.source]
+status = "mapped"
+to = "turnier.match_results.source"
+
+[tables.match_results.columns.created_at]
+status = "mapped"
+to = "turnier.match_results.created_at"
+
+[tables.player_points.columns.discord_id]
+status = "mapped"
+to = "turnier.player_points.discord_id"
+
+[tables.player_points.columns.total_points]
+status = "mapped"
+to = "turnier.player_points.total_points"
+
+[tables.player_points.columns.tournaments_played]
+status = "mapped"
+to = "turnier.player_points.tournaments_played"
+
+[tables.player_points.columns.matches_played]
+status = "mapped"
+to = "turnier.player_points.matches_played"
+
+[tables.player_points.columns.matches_won]
+status = "mapped"
+to = "turnier.player_points.matches_won"
+
+[tables.player_points.columns.best_placement]
+status = "mapped"
+to = "turnier.player_points.best_placement"
+
+[tables.player_points.columns.updated_at]
+status = "mapped"
+to = "turnier.player_points.updated_at"
+
+[tables.rank_cache.columns.discord_id]
+status = "mapped"
+to = "turnier.rank_cache.discord_id"
+
+[tables.rank_cache.columns.source]
+status = "mapped"
+to = "turnier.rank_cache.source"
+
+[tables.rank_cache.columns.steam_id]
+status = "mapped"
+to = "turnier.rank_cache.steam_id"
+
+[tables.rank_cache.columns.rank]
+status = "mapped"
+to = "turnier.rank_cache.rank"
+
+[tables.rank_cache.columns.rank_tier]
+status = "mapped"
+to = "turnier.rank_cache.rank_tier"
+
+[tables.rank_cache.columns.subrank]
+status = "mapped"
+to = "turnier.rank_cache.subrank"
+
+[tables.rank_cache.columns.rank_score]
+status = "mapped"
+to = "turnier.rank_cache.rank_score"
+
+[tables.rank_cache.columns.cached_at]
+status = "mapped"
+to = "turnier.rank_cache.cached_at"
+
+[tables.sent_match_reminders.columns.id]
+status = "mapped"
+to = "turnier.sent_match_reminders.id"
+
+[tables.sent_match_reminders.columns.match_type]
+status = "mapped"
+to = "turnier.sent_match_reminders.match_type"
+
+[tables.sent_match_reminders.columns.match_id]
+status = "mapped"
+to = "turnier.sent_match_reminders.match_id"
+
+[tables.sent_match_reminders.columns.kind]
+status = "mapped"
+to = "turnier.sent_match_reminders.kind"
+
+[tables.sent_match_reminders.columns.sent_at]
+status = "mapped"
+to = "turnier.sent_match_reminders.sent_at"
+
+[tables.sent_start_reminders.columns.id]
+status = "mapped"
+to = "turnier.sent_start_reminders.id"
+
+[tables.sent_start_reminders.columns.tournament_id]
+status = "mapped"
+to = "turnier.sent_start_reminders.tournament_id"
+
+[tables.sent_start_reminders.columns.offset_minutes]
+status = "mapped"
+to = "turnier.sent_start_reminders.offset_minutes"
+
+[tables.sent_start_reminders.columns.sent_at]
+status = "mapped"
+to = "turnier.sent_start_reminders.sent_at"
+
+[tables.sent_tournament_reminders.columns.id]
+status = "mapped"
+to = "turnier.sent_tournament_reminders.id"
+
+[tables.sent_tournament_reminders.columns.tournament_id]
+status = "mapped"
+to = "turnier.sent_tournament_reminders.tournament_id"
+
+[tables.sent_tournament_reminders.columns.offset_minutes]
+status = "mapped"
+to = "turnier.sent_tournament_reminders.offset_minutes"
+
+[tables.sent_tournament_reminders.columns.sent_at]
+status = "mapped"
+to = "turnier.sent_tournament_reminders.sent_at"
+
+[tables.sessions.columns.token]
+status = "mapped"
+to = "turnier.sessions.token"
+
+[tables.sessions.columns.discord_id]
+status = "mapped"
+to = "turnier.sessions.discord_id"
+
+[tables.sessions.columns.discord_name]
+status = "mapped"
+to = "turnier.sessions.discord_name"
+
+[tables.sessions.columns.discord_avatar]
+status = "mapped"
+to = "turnier.sessions.discord_avatar"
+
+[tables.sessions.columns.discord_roles]
+status = "mapped"
+to = "turnier.sessions.discord_roles"
+
+[tables.sessions.columns.expires_at]
+status = "mapped"
+to = "turnier.sessions.expires_at"
+
+[tables.sessions.columns.created_at]
+status = "mapped"
+to = "turnier.sessions.created_at"
+
+[tables.team_applications.columns.id]
+status = "mapped"
+to = "turnier.team_applications.id"
+
+[tables.team_applications.columns.team_id]
+status = "mapped"
+to = "turnier.team_applications.team_id"
+
+[tables.team_applications.columns.discord_id]
+status = "mapped"
+to = "turnier.team_applications.discord_id"
+
+[tables.team_applications.columns.discord_name]
+status = "mapped"
+to = "turnier.team_applications.discord_name"
+
+[tables.team_applications.columns.status]
+status = "mapped"
+to = "turnier.team_applications.status"
+
+[tables.team_applications.columns.created_at]
+status = "mapped"
+to = "turnier.team_applications.created_at"
+
+[tables.team_invitations.columns.id]
+status = "mapped"
+to = "turnier.team_invitations.id"
+
+[tables.team_invitations.columns.tournament_id]
+status = "mapped"
+to = "turnier.team_invitations.tournament_id"
+
+[tables.team_invitations.columns.team_id]
+status = "mapped"
+to = "turnier.team_invitations.team_id"
+
+[tables.team_invitations.columns.discord_id]
+status = "mapped"
+to = "turnier.team_invitations.discord_id"
+
+[tables.team_invitations.columns.signup_id]
+status = "mapped"
+to = "turnier.team_invitations.signup_id"
+
+[tables.team_invitations.columns.status]
+status = "mapped"
+to = "turnier.team_invitations.status"
+
+[tables.team_invitations.columns.created_at]
+status = "mapped"
+to = "turnier.team_invitations.created_at"
+
+[tables.team_invitations.columns.expires_at]
+status = "mapped"
+to = "turnier.team_invitations.expires_at"
+
+[tables.team_members.columns.id]
+status = "mapped"
+to = "turnier.team_members.id"
+
+[tables.team_members.columns.team_id]
+status = "mapped"
+to = "turnier.team_members.team_id"
+
+[tables.team_members.columns.discord_id]
+status = "mapped"
+to = "turnier.team_members.discord_id"
+
+[tables.team_members.columns.discord_name]
+status = "mapped"
+to = "turnier.team_members.discord_name"
+
+[tables.team_members.columns.steam_id]
+status = "mapped"
+to = "turnier.team_members.steam_id"
+
+[tables.team_members.columns.rank]
+status = "mapped"
+to = "turnier.team_members.rank"
+
+[tables.team_members.columns.rank_score]
+status = "mapped"
+to = "turnier.team_members.rank_score"
+
+[tables.team_members.columns.role]
+status = "mapped"
+to = "turnier.team_members.role"
+
+[tables.team_members.columns.joined_at]
+status = "mapped"
+to = "turnier.team_members.joined_at"
+
+[tables.teams.columns.id]
+status = "mapped"
+to = "turnier.teams.id"
+
+[tables.teams.columns.tournament_id]
+status = "mapped"
+to = "turnier.teams.tournament_id"
+
+[tables.teams.columns.name]
+status = "mapped"
+to = "turnier.teams.name"
+
+[tables.teams.columns.name_key]
+status = "mapped"
+to = "turnier.teams.name_key"
+
+[tables.teams.columns.captain_discord_id]
+status = "mapped"
+to = "turnier.teams.captain_discord_id"
+
+[tables.teams.columns.created_at]
+status = "mapped"
+to = "turnier.teams.created_at"
+
+[tables.teams.columns.recruitment_status]
+status = "mapped"
+to = "turnier.teams.recruitment_status"
+
+[tables.tournament_casters.columns.id]
+status = "mapped"
+to = "turnier.tournament_casters.id"
+
+[tables.tournament_casters.columns.tournament_id]
+status = "mapped"
+to = "turnier.tournament_casters.tournament_id"
+
+[tables.tournament_casters.columns.discord_id]
+status = "mapped"
+to = "turnier.tournament_casters.discord_id"
+
+[tables.tournament_casters.columns.assigned_at]
+status = "mapped"
+to = "turnier.tournament_casters.assigned_at"
+
+[tables.tournament_casters.columns.assigned_by]
+status = "mapped"
+to = "turnier.tournament_casters.assigned_by"
+
+[tables.tournament_checkins.columns.id]
+status = "mapped"
+to = "turnier.tournament_checkins.id"
+
+[tables.tournament_checkins.columns.tournament_id]
+status = "mapped"
+to = "turnier.tournament_checkins.tournament_id"
+
+[tables.tournament_checkins.columns.discord_id]
+status = "mapped"
+to = "turnier.tournament_checkins.discord_id"
+
+[tables.tournament_checkins.columns.checked_in_at]
+status = "mapped"
+to = "turnier.tournament_checkins.checked_in_at"
+
+[tables.tournament_dm_optout.columns.id]
+status = "mapped"
+to = "turnier.tournament_dm_optout.id"
+
+[tables.tournament_dm_optout.columns.discord_id]
+status = "mapped"
+to = "turnier.tournament_dm_optout.discord_id"
+
+[tables.tournament_dm_optout.columns.scope]
+status = "mapped"
+to = "turnier.tournament_dm_optout.scope"
+
+[tables.tournament_dm_optout.columns.created_at]
+status = "mapped"
+to = "turnier.tournament_dm_optout.created_at"
+
+[tables.tournament_presets.columns.id]
+status = "mapped"
+to = "turnier.tournament_presets.id"
+
+[tables.tournament_presets.columns.name]
+status = "mapped"
+to = "turnier.tournament_presets.name"
+
+[tables.tournament_presets.columns.category]
+status = "mapped"
+to = "turnier.tournament_presets.category"
+
+[tables.tournament_presets.columns.team_size]
+status = "mapped"
+to = "turnier.tournament_presets.team_size"
+
+[tables.tournament_presets.columns.bracket_format]
+status = "mapped"
+to = "turnier.tournament_presets.bracket_format"
+
+[tables.tournament_presets.columns.series_format]
+status = "mapped"
+to = "turnier.tournament_presets.series_format"
+
+[tables.tournament_presets.columns.final_series_format]
+status = "mapped"
+to = "turnier.tournament_presets.final_series_format"
+
+[tables.tournament_presets.columns.tournament_mode]
+status = "mapped"
+to = "turnier.tournament_presets.tournament_mode"
+
+[tables.tournament_presets.columns.tournament_game_mode]
+status = "mapped"
+to = "turnier.tournament_presets.tournament_game_mode"
+
+[tables.tournament_presets.columns.match_objective]
+status = "mapped"
+to = "turnier.tournament_presets.match_objective"
+
+[tables.tournament_presets.columns.invite_mode]
+status = "mapped"
+to = "turnier.tournament_presets.invite_mode"
+
+[tables.tournament_presets.columns.reminder_offsets]
+status = "mapped"
+to = "turnier.tournament_presets.reminder_offsets"
+
+[tables.tournament_presets.columns.start_reminder_offsets]
+status = "mapped"
+to = "turnier.tournament_presets.start_reminder_offsets"
+
+[tables.tournament_presets.columns.rules]
+status = "mapped"
+to = "turnier.tournament_presets.rules"
+
+[tables.tournament_presets.columns.description_template]
+status = "mapped"
+to = "turnier.tournament_presets.description_template"
+
+[tables.tournament_presets.columns.active]
+status = "mapped"
+to = "turnier.tournament_presets.active"
+
+[tables.tournament_presets.columns.created_by]
+status = "mapped"
+to = "turnier.tournament_presets.created_by"
+
+[tables.tournament_presets.columns.created_at]
+status = "mapped"
+to = "turnier.tournament_presets.created_at"
+
+[tables.tournament_presets.columns.updated_at]
+status = "mapped"
+to = "turnier.tournament_presets.updated_at"
+
+[tables.tournament_proposal_feedback.columns.id]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.id"
+
+[tables.tournament_proposal_feedback.columns.proposal_id]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.proposal_id"
+
+[tables.tournament_proposal_feedback.columns.caster_discord_id]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.caster_discord_id"
+
+[tables.tournament_proposal_feedback.columns.raw_text]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.raw_text"
+
+[tables.tournament_proposal_feedback.columns.applied_change_json]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.applied_change_json"
+
+[tables.tournament_proposal_feedback.columns.created_at]
+status = "mapped"
+to = "turnier.tournament_proposal_feedback.created_at"
+
+[tables.tournament_proposal_votes.columns.id]
+status = "mapped"
+to = "turnier.tournament_proposal_votes.id"
+
+[tables.tournament_proposal_votes.columns.proposal_id]
+status = "mapped"
+to = "turnier.tournament_proposal_votes.proposal_id"
+
+[tables.tournament_proposal_votes.columns.caster_discord_id]
+status = "mapped"
+to = "turnier.tournament_proposal_votes.caster_discord_id"
+
+[tables.tournament_proposal_votes.columns.decision]
+status = "mapped"
+to = "turnier.tournament_proposal_votes.decision"
+
+[tables.tournament_proposal_votes.columns.created_at]
+status = "mapped"
+to = "turnier.tournament_proposal_votes.created_at"
+
+[tables.tournament_proposals.columns.id]
+status = "mapped"
+to = "turnier.tournament_proposals.id"
+
+[tables.tournament_proposals.columns.preset_id]
+status = "mapped"
+to = "turnier.tournament_proposals.preset_id"
+
+[tables.tournament_proposals.columns.source]
+status = "mapped"
+to = "turnier.tournament_proposals.source"
+
+[tables.tournament_proposals.columns.proposed_start]
+status = "mapped"
+to = "turnier.tournament_proposals.proposed_start"
+
+[tables.tournament_proposals.columns.config_json]
+status = "mapped"
+to = "turnier.tournament_proposals.config_json"
+
+[tables.tournament_proposals.columns.state]
+status = "mapped"
+to = "turnier.tournament_proposals.state"
+
+[tables.tournament_proposals.columns.proposal_message_id]
+status = "mapped"
+to = "turnier.tournament_proposals.proposal_message_id"
+
+[tables.tournament_proposals.columns.channel_id]
+status = "mapped"
+to = "turnier.tournament_proposals.channel_id"
+
+[tables.tournament_proposals.columns.tournament_id]
+status = "mapped"
+to = "turnier.tournament_proposals.tournament_id"
+
+[tables.tournament_proposals.columns.decided_at]
+status = "mapped"
+to = "turnier.tournament_proposals.decided_at"
+
+[tables.tournament_proposals.columns.created_at]
+status = "mapped"
+to = "turnier.tournament_proposals.created_at"
+
+[tables.tournament_signals.columns.id]
+status = "mapped"
+to = "turnier.tournament_signals.id"
+
+[tables.tournament_signals.columns.tournament_id]
+status = "mapped"
+to = "turnier.tournament_signals.tournament_id"
+
+[tables.tournament_signals.columns.participants]
+status = "mapped"
+to = "turnier.tournament_signals.participants"
+
+[tables.tournament_signals.columns.teams]
+status = "mapped"
+to = "turnier.tournament_signals.teams"
+
+[tables.tournament_signals.columns.no_shows]
+status = "mapped"
+to = "turnier.tournament_signals.no_shows"
+
+[tables.tournament_signals.columns.poll_up]
+status = "mapped"
+to = "turnier.tournament_signals.poll_up"
+
+[tables.tournament_signals.columns.poll_down]
+status = "mapped"
+to = "turnier.tournament_signals.poll_down"
+
+[tables.tournament_signals.columns.poll_message_id]
+status = "mapped"
+to = "turnier.tournament_signals.poll_message_id"
+
+[tables.tournament_signals.columns.feedback_summary]
+status = "mapped"
+to = "turnier.tournament_signals.feedback_summary"
+
+[tables.tournament_signals.columns.collected_at]
+status = "mapped"
+to = "turnier.tournament_signals.collected_at"
+
+[tables.tournament_signups.columns.id]
+status = "mapped"
+to = "turnier.tournament_signups.id"
+
+[tables.tournament_signups.columns.tournament_id]
+status = "mapped"
+to = "turnier.tournament_signups.tournament_id"
+
+[tables.tournament_signups.columns.discord_id]
+status = "mapped"
+to = "turnier.tournament_signups.discord_id"
+
+[tables.tournament_signups.columns.steam_id]
+status = "mapped"
+to = "turnier.tournament_signups.steam_id"
+
+[tables.tournament_signups.columns.rank]
+status = "mapped"
+to = "turnier.tournament_signups.rank"
+
+[tables.tournament_signups.columns.rank_score]
+status = "mapped"
+to = "turnier.tournament_signups.rank_score"
+
+[tables.tournament_signups.columns.team_id]
+status = "mapped"
+to = "turnier.tournament_signups.team_id"
+
+[tables.tournament_signups.columns.signed_up_at]
+status = "mapped"
+to = "turnier.tournament_signups.signed_up_at"
+
+[tables.tournament_signups.columns.discord_name]
+status = "mapped"
+to = "turnier.tournament_signups.discord_name"
+
+[tables.tournament_signups.columns.invited_by_team_id]
+status = "mapped"
+to = "turnier.tournament_signups.invited_by_team_id"
+
+[tables.tournaments.columns.id]
+status = "mapped"
+to = "turnier.tournaments.id"
+
+[tables.tournaments.columns.name]
+status = "mapped"
+to = "turnier.tournaments.name"
+
+[tables.tournaments.columns.status]
+status = "mapped"
+to = "turnier.tournaments.status"
+
+[tables.tournaments.columns.description]
+status = "mapped"
+to = "turnier.tournaments.description"
+
+[tables.tournaments.columns.team_size]
+status = "mapped"
+to = "turnier.tournaments.team_size"
+
+[tables.tournaments.columns.registration_start]
+status = "mapped"
+to = "turnier.tournaments.registration_start"
+
+[tables.tournaments.columns.registration_end]
+status = "mapped"
+to = "turnier.tournaments.registration_end"
+
+[tables.tournaments.columns.group_phase_start]
+status = "mapped"
+to = "turnier.tournaments.group_phase_start"
+
+[tables.tournaments.columns.bracket_start]
+status = "mapped"
+to = "turnier.tournaments.bracket_start"
+
+[tables.tournaments.columns.bracket_format]
+status = "mapped"
+to = "turnier.tournaments.bracket_format"
+
+[tables.tournaments.columns.created_by]
+status = "mapped"
+to = "turnier.tournaments.created_by"
+
+[tables.tournaments.columns.created_at]
+status = "mapped"
+to = "turnier.tournaments.created_at"
+
+[tables.tournaments.columns.updated_at]
+status = "mapped"
+to = "turnier.tournaments.updated_at"
+
+[tables.tournaments.columns.invite_mode]
+status = "mapped"
+to = "turnier.tournaments.invite_mode"
+
+[tables.tournaments.columns.invite_window_start]
+status = "mapped"
+to = "turnier.tournaments.invite_window_start"
+
+[tables.tournaments.columns.invite_window_end]
+status = "mapped"
+to = "turnier.tournaments.invite_window_end"
+
+[tables.tournaments.columns.lobby_settings]
+status = "mapped"
+to = "turnier.tournaments.lobby_settings"
+
+[tables.tournaments.columns.checkin_start]
+status = "mapped"
+to = "turnier.tournaments.checkin_start"
+
+[tables.tournaments.columns.tournament_mode]
+status = "mapped"
+to = "turnier.tournaments.tournament_mode"
+
+[tables.tournaments.columns.series_format]
+status = "mapped"
+to = "turnier.tournaments.series_format"
+
+[tables.tournaments.columns.exclude_from_leaderboard]
+status = "mapped"
+to = "turnier.tournaments.exclude_from_leaderboard"
+
+[tables.tournaments.columns.reminder_offsets]
+status = "mapped"
+to = "turnier.tournaments.reminder_offsets"
+
+[tables.tournaments.columns.tournament_game_mode]
+status = "mapped"
+to = "turnier.tournaments.tournament_game_mode"
+
+[tables.tournaments.columns.auto_lobby_enabled]
+status = "mapped"
+to = "turnier.tournaments.auto_lobby_enabled"
+
+[tables.tournaments.columns.is_test]
+status = "mapped"
+to = "turnier.tournaments.is_test"
+
+[tables.tournaments.columns.rules]
+status = "mapped"
+to = "turnier.tournaments.rules"
+
+[tables.tournaments.columns.final_series_format]
+status = "mapped"
+to = "turnier.tournaments.final_series_format"
+
+[tables.tournaments.columns.match_objective]
+status = "mapped"
+to = "turnier.tournaments.match_objective"
+
+[tables.tournaments.columns.no_show_grace_minutes]
+status = "mapped"
+to = "turnier.tournaments.no_show_grace_minutes"
+
+[tables.tournaments.columns.start_reminder_offsets]
+status = "mapped"
+to = "turnier.tournaments.start_reminder_offsets"
+
+[tables.tournaments.columns.scheduled_event_id]
+status = "mapped"
+to = "turnier.tournaments.scheduled_event_id"
+
+[tables.tournaments.columns.source]
+status = "mapped"
+to = "turnier.tournaments.source"
+
+[tables.tournaments.columns.preset_id]
+status = "mapped"
+to = "turnier.tournaments.preset_id"
+
+[tables.user_consents.columns.discord_id]
+status = "mapped"
+to = "turnier.user_consents.discord_id"
+
+[tables.user_consents.columns.consented_at]
+status = "mapped"
+to = "turnier.user_consents.consented_at"
+
+[tables.user_consents.columns.consent_version]
+status = "mapped"
+to = "turnier.user_consents.consent_version"
+
+[tables.user_profiles.columns.discord_id]
+status = "mapped"
+to = "turnier.user_profiles.discord_id"
+
+[tables.user_profiles.columns.bio]
+status = "mapped"
+to = "turnier.user_profiles.bio"
+
+[tables.user_profiles.columns.invite_auto_accept]
+status = "mapped"
+to = "turnier.user_profiles.invite_auto_accept"
+
+[tables.user_profiles.columns.notify_discord_dm]
+status = "mapped"
+to = "turnier.user_profiles.notify_discord_dm"
+
+[tables.user_profiles.columns.notify_browser]
+status = "mapped"
+to = "turnier.user_profiles.notify_browser"
+
+[tables.user_profiles.columns.updated_at]
+status = "mapped"
+to = "turnier.user_profiles.updated_at"
+
+[tables.user_profiles.columns.display_name]
+status = "mapped"
+to = "turnier.user_profiles.display_name"
+
+[tables.user_profiles.columns.avatar_filename]
+status = "mapped"
+to = "turnier.user_profiles.avatar_filename"
+
+[tables.user_profiles.columns.notify_match_start]
+status = "mapped"
+to = "turnier.user_profiles.notify_match_start"
+
+[tables.user_profiles.columns.notify_checkin]
+status = "mapped"
+to = "turnier.user_profiles.notify_checkin"
+
+[tables.user_profiles.columns.notify_team_invite]
+status = "mapped"
+to = "turnier.user_profiles.notify_team_invite"
+
+[tables.user_profiles.columns.notify_tournament_news]
+status = "mapped"
+to = "turnier.user_profiles.notify_tournament_news"
+
+[tables.user_profiles.columns.notify_registration_reminder]
+status = "mapped"
+to = "turnier.user_profiles.notify_registration_reminder"

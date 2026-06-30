@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+[features]
+testing = []
+
 [dependencies]
 chrono.workspace = true
 sqlx.workspace = true

@@ -1,14 +1,11 @@
 //! Lese-Queries und Payload-Assemblierung — feldgenau wie tierlist_public.py.
-//!
-//! Alle Funktionen laufen innerhalb einer dl-db-Read-Closure auf einer
-//! Connection (das Python-Original verteilt dieselben Queries auf mehrere
-//! Aufrufe — semantisch identisch, hier nur in einem Rutsch).
 
 use std::collections::HashMap;
 
-use rusqlite::{Connection, OptionalExtension};
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
+use crate::error::Result;
 use crate::settings::{
     tier_bounds, tier_for_winrate, Settings, SNAPSHOT_RETENTION_PER_BUCKET, TIER_ORDER,
 };
@@ -40,34 +37,37 @@ impl HeroEntry {
     }
 }
 
-pub fn hero_catalog(conn: &Connection) -> rusqlite::Result<Vec<HeroEntry>> {
-    let mut stmt = conn.prepare(
-        "SELECT hero_id, name FROM deadlock_heroes WHERE is_active = 1
-         ORDER BY name COLLATE NOCASE ASC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let hero_id: i64 = row.get(0)?;
-        let name: String = row.get(1)?;
-        Ok((hero_id, name))
-    })?;
-    let mut heroes = Vec::new();
-    for row in rows {
-        let (hero_id, name) = row?;
-        let slug = slugify_hero(&name);
-        heroes.push(HeroEntry {
-            hero_id,
-            name,
-            image_url: format!("/heroes/{slug}.png"),
-            slug,
-        });
-    }
+pub async fn hero_catalog(pool: &PgPool) -> Result<Vec<HeroEntry>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT hero_id, name
+        FROM tierlist.deadlock_heroes
+        WHERE is_active = TRUE
+        ORDER BY lower(name) ASC, name ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    let heroes = rows
+        .into_iter()
+        .map(|row| {
+            let slug = slugify_hero(&row.name);
+            HeroEntry {
+                hero_id: row.hero_id,
+                name: row.name,
+                image_url: format!("/heroes/{slug}.png"),
+                slug,
+            }
+        })
+        .collect();
     Ok(heroes)
 }
 
 /// `GET /api/heroes` — Objekt mit str(hero_id) als Schlüssel.
-pub fn heroes_payload(conn: &Connection) -> rusqlite::Result<Value> {
+pub async fn heroes_payload(pool: &PgPool) -> Result<Value> {
     let mut out = Map::new();
-    for hero in hero_catalog(conn)? {
+    for hero in hero_catalog(pool).await? {
         out.insert(
             hero.hero_id.to_string(),
             json!({
@@ -80,28 +80,42 @@ pub fn heroes_payload(conn: &Connection) -> rusqlite::Result<Value> {
     Ok(Value::Object(out))
 }
 
-fn load_descriptions(conn: &Connection) -> rusqlite::Result<HashMap<i64, String>> {
-    let mut stmt = conn.prepare("SELECT hero_id, description FROM tierlist_hero_meta")?;
-    let rows = stmt.query_map([], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-        ))
-    })?;
-    rows.collect()
+async fn load_descriptions(pool: &PgPool) -> Result<HashMap<i64, String>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT hero_id, description
+        FROM tierlist.tierlist_hero_meta
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.hero_id, row.description))
+        .collect())
 }
 
-fn load_builds_by_hero(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<Value>>> {
-    let mut stmt = conn.prepare(
-        "SELECT hb.hero_id, hb.build_id, hb.build_name, hb.author_name, hb.sort_order,
-                COALESCE(v.upvotes, 0) AS upvotes, COALESCE(v.downvotes, 0) AS downvotes
-           FROM deadlock_hero_builds hb
-           LEFT JOIN tierlist_build_votes v ON v.build_id = hb.build_id
-          WHERE hb.is_active = 1
-          ORDER BY hb.hero_id ASC, hb.sort_order ASC, hb.build_id ASC",
-    )?;
+async fn load_builds_by_hero(pool: &PgPool) -> Result<HashMap<i64, Vec<Value>>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT hb.hero_id,
+               hb.build_id,
+               hb.build_name,
+               hb.author_name,
+               hb.sort_order::BIGINT AS "sort_order!",
+               COALESCE(v.upvotes, 0)::BIGINT AS "upvotes!",
+               COALESCE(v.downvotes, 0)::BIGINT AS "downvotes!"
+          FROM tierlist.deadlock_hero_builds hb
+          LEFT JOIN tierlist.tierlist_build_votes v ON v.build_id = hb.build_id
+         WHERE hb.is_active = TRUE
+         ORDER BY hb.hero_id ASC, hb.sort_order ASC, hb.build_id ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
     struct BuildRow {
-        hero_id: i64,
         build_id: i64,
         build_name: String,
         author_name: String,
@@ -109,26 +123,23 @@ fn load_builds_by_hero(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<V
         upvotes: i64,
         downvotes: i64,
     }
-    let rows = stmt.query_map([], |row| {
-        Ok(BuildRow {
-            hero_id: row.get(0)?,
-            build_id: row.get(1)?,
-            build_name: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-            author_name: row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            sort_order: row
-                .get::<_, Option<i64>>(4)?
-                .filter(|v| *v != 0)
-                .unwrap_or(100),
-            upvotes: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
-            downvotes: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-        })
-    })?;
 
     let mut grouped: HashMap<i64, Vec<BuildRow>> = HashMap::new();
     for row in rows {
-        let row = row?;
-        grouped.entry(row.hero_id).or_default().push(row);
+        grouped.entry(row.hero_id).or_default().push(BuildRow {
+            build_id: row.build_id,
+            build_name: row.build_name,
+            author_name: row.author_name,
+            sort_order: if row.sort_order != 0 {
+                row.sort_order
+            } else {
+                100
+            },
+            upvotes: row.upvotes,
+            downvotes: row.downvotes,
+        });
     }
+
     // Sortierung wie Python: (sort_order, -(up-down), -up, build_id)
     let mut out = HashMap::new();
     for (hero_id, mut items) in grouped {
@@ -166,29 +177,30 @@ fn load_builds_by_hero(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<V
     Ok(out)
 }
 
-fn load_streamers_by_hero(conn: &Connection) -> rusqlite::Result<HashMap<i64, Vec<Value>>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, hero_id, twitch_login, display_name, sort_order
-           FROM tierlist_streamers
-          WHERE is_active = 1
-          ORDER BY hero_id ASC, sort_order ASC, id ASC",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        let hero_id: i64 = row.get(1)?;
-        Ok((
-            hero_id,
-            json!({
-                "id": row.get::<_, i64>(0)?,
-                "twitch_login": row.get::<_, String>(2)?,
-                "display_name": row.get::<_, String>(3)?,
-                "sort_order": row.get::<_, Option<i64>>(4)?.filter(|v| *v != 0).unwrap_or(100),
-            }),
-        ))
-    })?;
+async fn load_streamers_by_hero(pool: &PgPool) -> Result<HashMap<i64, Vec<Value>>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id,
+               hero_id,
+               twitch_login,
+               display_name,
+               sort_order::BIGINT AS "sort_order!"
+          FROM tierlist.tierlist_streamers
+         WHERE is_active = TRUE
+         ORDER BY hero_id ASC, sort_order ASC, id ASC
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+
     let mut out: HashMap<i64, Vec<Value>> = HashMap::new();
     for row in rows {
-        let (hero_id, value) = row?;
-        out.entry(hero_id).or_default().push(value);
+        out.entry(row.hero_id).or_default().push(json!({
+            "id": row.id,
+            "twitch_login": row.twitch_login,
+            "display_name": row.display_name,
+            "sort_order": if row.sort_order != 0 { row.sort_order } else { 100 },
+        }));
     }
     Ok(out)
 }
@@ -200,58 +212,74 @@ struct SnapshotMeta {
     fetched_at: i64,
 }
 
-fn latest_snapshot(conn: &Connection, bucket: &str) -> rusqlite::Result<Option<SnapshotMeta>> {
-    conn.query_row(
-        "SELECT id, patch_id, patch_unix, fetched_at FROM tierlist_snapshots
-          WHERE bucket = ?1 ORDER BY fetched_at DESC, id DESC LIMIT 1",
-        [bucket],
-        |row| {
-            Ok(SnapshotMeta {
-                id: row.get(0)?,
-                patch_id: row.get(1)?,
-                patch_unix: row.get(2)?,
-                fetched_at: row.get(3)?,
-            })
-        },
+async fn latest_snapshot(pool: &PgPool, bucket: &str) -> Result<Option<SnapshotMeta>> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, patch_id, patch_at, fetched_at
+          FROM tierlist.tierlist_snapshots
+         WHERE bucket = $1
+         ORDER BY fetched_at DESC, id DESC
+         LIMIT 1
+        "#,
+        bucket,
     )
-    .optional()
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|row| SnapshotMeta {
+        id: row.id,
+        patch_id: row.patch_id,
+        patch_unix: row.patch_at.timestamp(),
+        fetched_at: row.fetched_at.timestamp(),
+    }))
 }
 
-fn previous_snapshot_wr(
-    conn: &Connection,
+async fn previous_snapshot_wr(
+    pool: &PgPool,
     bucket: &str,
     snapshot_id: i64,
-) -> rusqlite::Result<HashMap<i64, f64>> {
-    let prev_id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM tierlist_snapshots
-              WHERE bucket = ?1 AND id != ?2
-              ORDER BY fetched_at DESC, id DESC LIMIT 1",
-            rusqlite::params![bucket, snapshot_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let Some(prev_id) = prev_id else {
+) -> Result<HashMap<i64, f64>> {
+    let prev = sqlx::query!(
+        r#"
+        SELECT id
+          FROM tierlist.tierlist_snapshots
+         WHERE bucket = $1 AND id != $2
+         ORDER BY fetched_at DESC, id DESC
+         LIMIT 1
+        "#,
+        bucket,
+        snapshot_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(prev) = prev else {
         return Ok(HashMap::new());
     };
-    let mut stmt = conn
-        .prepare("SELECT hero_id, winrate FROM tierlist_snapshot_heroes WHERE snapshot_id = ?1")?;
-    let rows = stmt.query_map([prev_id], |row| {
-        Ok((row.get::<_, i64>(0)?, py_round2(row.get::<_, f64>(1)?)))
-    })?;
-    rows.collect()
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT hero_id, winrate
+          FROM tierlist.tierlist_snapshot_heroes
+         WHERE snapshot_id = $1
+        "#,
+        prev.id,
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.hero_id, py_round2(row.winrate)))
+        .collect())
 }
 
 /// `GET /api/tierlist` — kompletter Payload.
-pub fn tierlist_payload(
-    conn: &Connection,
-    bucket: &str,
-    settings: &Settings,
-) -> rusqlite::Result<Value> {
+pub async fn tierlist_payload(pool: &PgPool, bucket: &str, settings: &Settings) -> Result<Value> {
     let thresholds = &settings.thresholds;
     let min_matches = settings.min_matches;
-    let latest = latest_snapshot(conn, bucket)?;
-    let heroes: HashMap<i64, HeroEntry> = hero_catalog(conn)?
+    let latest = latest_snapshot(pool, bucket).await?;
+    let heroes: HashMap<i64, HeroEntry> = hero_catalog(pool)
+        .await?
         .into_iter()
         .map(|h| (h.hero_id, h))
         .collect();
@@ -279,10 +307,10 @@ pub fn tierlist_payload(
         }));
     };
 
-    let descriptions = load_descriptions(conn)?;
-    let builds_by_hero = load_builds_by_hero(conn)?;
-    let streamers_by_hero = load_streamers_by_hero(conn)?;
-    let previous_wr = previous_snapshot_wr(conn, bucket, latest.id)?;
+    let descriptions = load_descriptions(pool).await?;
+    let builds_by_hero = load_builds_by_hero(pool).await?;
+    let streamers_by_hero = load_streamers_by_hero(pool).await?;
+    let previous_wr = previous_snapshot_wr(pool, bucket, latest.id).await?;
 
     struct TierHero {
         entry_json: Value,
@@ -295,52 +323,62 @@ pub fn tierlist_payload(
         .map(|(tier, _)| (*tier, Vec::new()))
         .collect();
 
-    let mut stmt = conn.prepare(
-        "SELECT hero_id, matches, wins, losses, winrate
-           FROM tierlist_snapshot_heroes WHERE snapshot_id = ?1",
-    )?;
-    let rows = stmt.query_map([latest.id], |row| {
-        Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, i64>(1)?,
-            row.get::<_, f64>(4)?,
-        ))
-    })?;
+    let rows = sqlx::query!(
+        r#"
+        SELECT hero_id, matches, winrate
+          FROM tierlist.tierlist_snapshot_heroes
+         WHERE snapshot_id = $1
+        "#,
+        latest.id,
+    )
+    .fetch_all(pool)
+    .await?;
+
     for row in rows {
-        let (hero_id, matches, winrate_raw) = row?;
-        let Some(hero) = heroes.get(&hero_id) else {
+        let Some(hero) = heroes.get(&row.hero_id) else {
             continue;
         };
-        if matches < min_matches {
+        if row.matches < min_matches {
             continue;
         }
-        let winrate = py_round2(winrate_raw);
+        let winrate = py_round2(row.winrate);
         let tier = tier_for_winrate(winrate, thresholds);
         let wr_change = previous_wr
-            .get(&hero_id)
+            .get(&row.hero_id)
             .map(|prior| py_round2(winrate - prior));
         let mut entry = hero.to_json();
-        let obj = entry.as_object_mut().expect("hero json ist Objekt");
-        obj.insert("wr".into(), json!(winrate));
-        obj.insert("wr_change".into(), json!(wr_change));
-        obj.insert("matches".into(), json!(matches));
-        obj.insert("tier".into(), json!(tier));
-        obj.insert(
-            "description".into(),
-            json!(descriptions.get(&hero_id).cloned().unwrap_or_default()),
-        );
-        obj.insert(
-            "builds".into(),
-            Value::Array(builds_by_hero.get(&hero_id).cloned().unwrap_or_default()),
-        );
-        obj.insert(
-            "streamers".into(),
-            Value::Array(streamers_by_hero.get(&hero_id).cloned().unwrap_or_default()),
-        );
+        if let Some(obj) = entry.as_object_mut() {
+            obj.insert("wr".into(), json!(winrate));
+            obj.insert("wr_change".into(), json!(wr_change));
+            obj.insert("matches".into(), json!(row.matches));
+            obj.insert("tier".into(), json!(tier));
+            obj.insert(
+                "description".into(),
+                json!(descriptions.get(&row.hero_id).cloned().unwrap_or_default()),
+            );
+            obj.insert(
+                "builds".into(),
+                Value::Array(
+                    builds_by_hero
+                        .get(&row.hero_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
+            obj.insert(
+                "streamers".into(),
+                Value::Array(
+                    streamers_by_hero
+                        .get(&row.hero_id)
+                        .cloned()
+                        .unwrap_or_default(),
+                ),
+            );
+        }
         tier_groups.entry(tier).or_default().push(TierHero {
             entry_json: entry,
             wr: winrate,
-            matches,
+            matches: row.matches,
             name: hero.name.clone(),
         });
     }
@@ -380,52 +418,49 @@ pub fn tierlist_payload(
 }
 
 /// `GET /api/tierlist/history`.
-pub fn history_payload(
-    conn: &Connection,
-    bucket: &str,
-    settings: &Settings,
-) -> rusqlite::Result<Value> {
+pub async fn history_payload(pool: &PgPool, bucket: &str, settings: &Settings) -> Result<Value> {
     let thresholds = &settings.thresholds;
     let min_matches = settings.min_matches;
-    let known: std::collections::HashSet<i64> =
-        hero_catalog(conn)?.into_iter().map(|h| h.hero_id).collect();
+    let known: std::collections::HashSet<i64> = hero_catalog(pool)
+        .await?
+        .into_iter()
+        .map(|h| h.hero_id)
+        .collect();
 
-    let mut stmt = conn.prepare(
-        "SELECT id, patch_id, fetched_at FROM tierlist_snapshots
-          WHERE bucket = ?1 ORDER BY fetched_at DESC, id DESC LIMIT ?2",
-    )?;
-    let snaps = stmt.query_map(
-        rusqlite::params![bucket, SNAPSHOT_RETENTION_PER_BUCKET],
-        |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
-            ))
-        },
-    )?;
-    let snaps: Vec<_> = snaps.collect::<Result<_, _>>()?;
+    let snaps = sqlx::query!(
+        r#"
+        SELECT id, patch_id, fetched_at
+          FROM tierlist.tierlist_snapshots
+         WHERE bucket = $1
+         ORDER BY fetched_at DESC, id DESC
+         LIMIT $2
+        "#,
+        bucket,
+        SNAPSHOT_RETENTION_PER_BUCKET,
+    )
+    .fetch_all(pool)
+    .await?;
 
-    let mut hero_stmt = conn.prepare(
-        "SELECT hero_id, matches, winrate FROM tierlist_snapshot_heroes WHERE snapshot_id = ?1",
-    )?;
     let mut snapshots = Vec::new();
-    for (snapshot_id, patch_id, fetched_at) in snaps {
-        let rows = hero_stmt.query_map([snapshot_id], |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, f64>(2)?,
-            ))
-        })?;
+    for snap in snaps {
+        let rows = sqlx::query!(
+            r#"
+            SELECT hero_id, matches, winrate
+              FROM tierlist.tierlist_snapshot_heroes
+             WHERE snapshot_id = $1
+            "#,
+            snap.id,
+        )
+        .fetch_all(pool)
+        .await?;
+
         let mut heroes = Vec::new();
         for row in rows {
-            let (hero_id, matches, winrate_raw) = row?;
-            if !known.contains(&hero_id) || matches < min_matches {
+            if !known.contains(&row.hero_id) || row.matches < min_matches {
                 continue;
             }
-            let wr = py_round2(winrate_raw);
-            heroes.push((hero_id, wr));
+            let wr = py_round2(row.winrate);
+            heroes.push((row.hero_id, wr));
         }
         // Python: sort key (-wr, hero_id)
         heroes.sort_by(|a, b| {
@@ -434,9 +469,9 @@ pub fn history_payload(
                 .then(a.0.cmp(&b.0))
         });
         snapshots.push(json!({
-            "snapshot_id": snapshot_id,
-            "fetched_at": fetched_at,
-            "patch_id": patch_id,
+            "snapshot_id": snap.id,
+            "fetched_at": snap.fetched_at.timestamp(),
+            "patch_id": snap.patch_id,
             "heroes": heroes
                 .into_iter()
                 .map(|(hero_id, wr)| json!({
@@ -452,64 +487,279 @@ pub fn history_payload(
 }
 
 /// Admin-Hero-Payload (GET + PUT-Antwort).
-pub fn admin_hero_payload(conn: &Connection, hero_id: i64) -> rusqlite::Result<Option<Value>> {
-    let hero: Option<(i64, String)> = conn
-        .query_row(
-            "SELECT hero_id, name FROM deadlock_heroes WHERE hero_id = ?1",
-            [hero_id],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .optional()?;
-    let Some((hero_id, name)) = hero else {
+pub async fn admin_hero_payload(pool: &PgPool, hero_id: i64) -> Result<Option<Value>> {
+    let hero = sqlx::query!(
+        r#"
+        SELECT hero_id, name
+          FROM tierlist.deadlock_heroes
+         WHERE hero_id = $1
+        "#,
+        hero_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    let Some(hero) = hero else {
         return Ok(None);
     };
-    let description: Option<String> = conn
-        .query_row(
-            "SELECT description FROM tierlist_hero_meta WHERE hero_id = ?1",
-            [hero_id],
-            |row| row.get(0),
-        )
-        .optional()?;
 
-    let mut stmt = conn.prepare(
-        "SELECT build_id, build_name, author_name, is_active, sort_order
-           FROM deadlock_hero_builds WHERE hero_id = ?1
-          ORDER BY sort_order ASC, build_id ASC",
-    )?;
-    let builds: Vec<Value> = stmt
-        .query_map([hero_id], |row| {
-            Ok(json!({
-                "build_id": row.get::<_, i64>(0)?,
-                "build_name": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                "author_name": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                "is_active": row.get::<_, i64>(3)? != 0,
-                "sort_order": row.get::<_, Option<i64>>(4)?.unwrap_or(100),
-            }))
-        })?
-        .collect::<Result<_, _>>()?;
+    let description = sqlx::query!(
+        r#"
+        SELECT description
+          FROM tierlist.tierlist_hero_meta
+         WHERE hero_id = $1
+        "#,
+        hero_id,
+    )
+    .fetch_optional(pool)
+    .await?
+    .map(|row| row.description)
+    .unwrap_or_default();
 
-    let mut stmt = conn.prepare(
-        "SELECT id, twitch_login, display_name, sort_order, is_active
-           FROM tierlist_streamers WHERE hero_id = ?1
-          ORDER BY sort_order ASC, id ASC",
-    )?;
-    let streamers: Vec<Value> = stmt
-        .query_map([hero_id], |row| {
-            Ok(json!({
-                "id": row.get::<_, i64>(0)?,
-                "twitch_login": row.get::<_, String>(1)?,
-                "display_name": row.get::<_, String>(2)?,
-                "sort_order": row.get::<_, Option<i64>>(3)?.unwrap_or(100),
-                "is_active": row.get::<_, i64>(4)? != 0,
-            }))
-        })?
-        .collect::<Result<_, _>>()?;
+    let build_rows = sqlx::query!(
+        r#"
+        SELECT build_id,
+               build_name,
+               author_name,
+               is_active,
+               sort_order::BIGINT AS "sort_order!"
+          FROM tierlist.deadlock_hero_builds
+         WHERE hero_id = $1
+         ORDER BY sort_order ASC, build_id ASC
+        "#,
+        hero_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let builds = build_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "build_id": row.build_id,
+                "build_name": row.build_name,
+                "author_name": row.author_name,
+                "is_active": row.is_active,
+                "sort_order": row.sort_order,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let streamer_rows = sqlx::query!(
+        r#"
+        SELECT id,
+               twitch_login,
+               display_name,
+               sort_order::BIGINT AS "sort_order!",
+               is_active
+          FROM tierlist.tierlist_streamers
+         WHERE hero_id = $1
+         ORDER BY sort_order ASC, id ASC
+        "#,
+        hero_id,
+    )
+    .fetch_all(pool)
+    .await?;
+    let streamers = streamer_rows
+        .into_iter()
+        .map(|row| {
+            json!({
+                "id": row.id,
+                "twitch_login": row.twitch_login,
+                "display_name": row.display_name,
+                "sort_order": row.sort_order,
+                "is_active": row.is_active,
+            })
+        })
+        .collect::<Vec<_>>();
 
     Ok(Some(json!({
-        "hero_id": hero_id,
-        "name": name,
-        "description": description.unwrap_or_default(),
+        "hero_id": hero.hero_id,
+        "name": hero.name,
+        "description": description,
         "builds_meta": builds,
         "streamers": streamers,
     })))
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod pg_tests {
+    use super::*;
+    use crate::settings;
+    use chrono::{DateTime, Utc};
+
+    fn ts(value: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(value)
+            .expect("gueltiger Test-Zeitpunkt")
+            .with_timezone(&Utc)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn tierlist_payload_roundtrip_and_streamer_unique_constraint(
+    ) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.deadlock_heroes (hero_id, name, is_active)
+            VALUES ($1, $2, TRUE)
+            "#,
+            1_i64,
+            "Abrams",
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.deadlock_hero_builds
+                (hero_id, build_id, build_name, author_name, is_active, sort_order)
+            VALUES ($1, $2, $3, $4, TRUE, $5)
+            "#,
+            1_i64,
+            10_001_i64,
+            "Frontline",
+            "Tester",
+            0_i32,
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_build_votes
+                (build_id, upvotes, downvotes, updated_at)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            10_001_i64,
+            3_i64,
+            1_i64,
+            ts("2026-01-01T00:00:00Z"),
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_hero_meta (hero_id, description, updated_at)
+            VALUES ($1, $2, $3)
+            "#,
+            1_i64,
+            "Front hero",
+            ts("2026-01-01T00:00:01Z"),
+        )
+        .execute(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_streamers
+                (hero_id, twitch_login, display_name, sort_order, is_active, created_at)
+            VALUES ($1, $2, $3, $4, TRUE, $5)
+            "#,
+            1_i64,
+            "abrams_main",
+            "Abrams Main",
+            0_i32,
+            ts("2026-01-01T00:00:02Z"),
+        )
+        .execute(pool)
+        .await?;
+
+        let duplicate_streamer = sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_streamers
+                (hero_id, twitch_login, display_name, sort_order, is_active, created_at)
+            VALUES ($1, $2, $3, $4, TRUE, $5)
+            "#,
+            1_i64,
+            "abrams_main",
+            "Duplicate",
+            50_i32,
+            ts("2026-01-01T00:00:03Z"),
+        )
+        .execute(pool)
+        .await;
+        assert!(duplicate_streamer.is_err());
+
+        let previous = sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_snapshots (bucket, patch_id, patch_at, fetched_at)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            "#,
+            "all",
+            "previous",
+            ts("2025-12-31T00:00:00Z"),
+            ts("2026-01-01T00:00:10Z"),
+        )
+        .fetch_one(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_snapshot_heroes
+                (snapshot_id, hero_id, matches, wins, losses, winrate)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            previous.id,
+            1_i64,
+            40_i64,
+            20_i64,
+            20_i64,
+            51.0_f64,
+        )
+        .execute(pool)
+        .await?;
+
+        let latest = sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_snapshots (bucket, patch_id, patch_at, fetched_at)
+            VALUES ($1, $2, $3, $4)
+            RETURNING id
+            "#,
+            "all",
+            "latest",
+            ts("2026-01-01T00:00:00Z"),
+            ts("2026-01-01T00:00:20Z"),
+        )
+        .fetch_one(pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.tierlist_snapshot_heroes
+                (snapshot_id, hero_id, matches, wins, losses, winrate)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            latest.id,
+            1_i64,
+            42_i64,
+            23_i64,
+            19_i64,
+            53.0_f64,
+        )
+        .execute(pool)
+        .await?;
+
+        settings::set_setting(pool, "min_matches", "10").await?;
+        let settings = settings::read_settings(pool).await?;
+        let payload = tierlist_payload(pool, "all", &settings).await?;
+
+        assert_eq!(payload["patch_id"], json!("latest"));
+        assert_eq!(payload["patch_unix"], json!(1767225600_i64));
+        assert_eq!(payload["last_updated"], json!(1767225620_i64));
+        assert_eq!(payload["min_matches"], json!(10_i64));
+        let heroes = payload["tiers"][0]["heroes"].as_array().expect("S+ heroes");
+        assert_eq!(heroes.len(), 1);
+        assert_eq!(heroes[0]["hero_id"], json!(1_i64));
+        assert_eq!(heroes[0]["wr"], json!(53.0));
+        assert_eq!(heroes[0]["wr_change"], json!(2.0));
+        assert_eq!(heroes[0]["description"], json!("Front hero"));
+        assert_eq!(heroes[0]["builds"][0]["sort_order"], json!(100_i64));
+        assert_eq!(heroes[0]["builds"][0]["upvotes"], json!(3_i64));
+        assert_eq!(heroes[0]["streamers"][0]["sort_order"], json!(100_i64));
+
+        Ok(())
+    }
 }

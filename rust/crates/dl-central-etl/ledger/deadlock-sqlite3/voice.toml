@@ -1,0 +1,395 @@
+[tables.deadlock_party_members.columns.party_id]
+status = "mapped"
+to = "voice.deadlock_party_members.party_id"
+
+[tables.deadlock_party_members.columns.steam_id]
+status = "mapped"
+to = "voice.deadlock_party_members.steam_id"
+
+[tables.deadlock_party_members.columns.party_size]
+status = "mapped"
+to = "voice.deadlock_party_members.party_size"
+
+[tables.deadlock_party_members.columns.seen_at]
+status = "mapped"
+to = "voice.deadlock_party_members.seen_at"
+
+[tables.deadlock_subrank_roles.columns.guild_id]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.guild_id"
+
+[tables.deadlock_subrank_roles.columns.rank_value]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.rank_value"
+
+[tables.deadlock_subrank_roles.columns.subrank]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.subrank"
+
+[tables.deadlock_subrank_roles.columns.role_id]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.role_id"
+
+[tables.deadlock_subrank_roles.columns.role_name]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.role_name"
+
+[tables.deadlock_subrank_roles.columns.updated_at]
+status = "mapped"
+to = "voice.deadlock_subrank_roles.updated_at"
+
+[tables.deadlock_voice_watch.columns.steam_id]
+status = "mapped"
+to = "voice.deadlock_voice_watch.steam_id"
+
+[tables.deadlock_voice_watch.columns.guild_id]
+status = "mapped"
+to = "voice.deadlock_voice_watch.guild_id"
+
+[tables.deadlock_voice_watch.columns.channel_id]
+status = "mapped"
+to = "voice.deadlock_voice_watch.channel_id"
+
+[tables.deadlock_voice_watch.columns.updated_at]
+status = "mapped"
+to = "voice.deadlock_voice_watch.updated_at"
+
+[tables.rename_global_state.columns.id]
+status = "mapped"
+to = "voice.rename_global_state.id"
+
+[tables.rename_global_state.columns.last_rename_timestamp]
+status = "mapped"
+to = "voice.rename_global_state.last_rename_timestamp"
+
+[tables.rename_global_state.columns.next_worker_id]
+status = "mapped"
+to = "voice.rename_global_state.next_worker_id"
+
+[tables.rename_requests.columns.id]
+status = "mapped"
+to = "voice.rename_requests.id"
+
+[tables.rename_requests.columns.channel_id]
+status = "mapped"
+to = "voice.rename_requests.channel_id"
+
+[tables.rename_requests.columns.new_name]
+status = "mapped"
+to = "voice.rename_requests.new_name"
+
+[tables.rename_requests.columns.reason]
+status = "mapped"
+to = "voice.rename_requests.reason"
+
+[tables.rename_requests.columns.status]
+status = "mapped"
+to = "voice.rename_requests.status"
+
+[tables.rename_requests.columns.created_at]
+status = "mapped"
+to = "voice.rename_requests.created_at"
+
+[tables.rename_requests.columns.processed_at]
+status = "mapped"
+to = "voice.rename_requests.processed_at"
+
+[tables.rename_requests.columns.retry_count]
+status = "mapped"
+to = "voice.rename_requests.retry_count"
+
+[tables.rename_requests.columns.last_error]
+status = "mapped"
+to = "voice.rename_requests.last_error"
+
+[tables.rename_requests.columns.assigned_worker_id]
+status = "mapped"
+to = "voice.rename_requests.assigned_worker_id"
+
+[tables.router_user_prefs.columns.user_id]
+status = "mapped"
+to = "voice.router_user_prefs.user_id"
+
+[tables.router_user_prefs.columns.mode]
+status = "mapped"
+to = "voice.router_user_prefs.mode"
+
+[tables.router_user_prefs.columns.auto_join]
+status = "mapped"
+to = "voice.router_user_prefs.auto_join"
+
+[tables.router_user_prefs.columns.updated_at]
+status = "mapped"
+to = "voice.router_user_prefs.updated_at"
+
+[tables.tempvoice_bans.columns.owner_id]
+status = "mapped"
+to = "voice.tempvoice_bans.owner_id"
+
+[tables.tempvoice_bans.columns.banned_id]
+status = "mapped"
+to = "voice.tempvoice_bans.banned_id"
+
+[tables.tempvoice_bans.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_bans.created_at"
+
+[tables.tempvoice_interface.columns.guild_id]
+status = "mapped"
+to = "voice.tempvoice_interface.guild_id"
+
+[tables.tempvoice_interface.columns.channel_id]
+status = "mapped"
+to = "voice.tempvoice_interface.channel_id"
+
+[tables.tempvoice_interface.columns.message_id]
+status = "mapped"
+to = "voice.tempvoice_interface.message_id"
+
+[tables.tempvoice_interface.columns.category_id]
+status = "mapped"
+to = "voice.tempvoice_interface.category_id"
+
+[tables.tempvoice_interface.columns.lane_id]
+status = "mapped"
+to = "voice.tempvoice_interface.lane_id"
+
+[tables.tempvoice_interface.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_interface.created_at"
+
+[tables.tempvoice_interface.columns.updated_at]
+status = "mapped"
+to = "voice.tempvoice_interface.updated_at"
+
+[tables.tempvoice_lane_tag_filter.columns.channel_id]
+status = "mapped"
+to = "voice.tempvoice_lane_tag_filter.channel_id"
+
+[tables.tempvoice_lane_tag_filter.columns.min_age_tag]
+status = "mapped"
+to = "voice.tempvoice_lane_tag_filter.min_age_tag"
+
+[tables.tempvoice_lane_tag_filter.columns.required_tone_tag]
+status = "mapped"
+to = "voice.tempvoice_lane_tag_filter.required_tone_tag"
+
+[tables.tempvoice_lane_tag_filter.columns.deny_ragebaiter]
+status = "mapped"
+to = "voice.tempvoice_lane_tag_filter.deny_ragebaiter"
+
+[tables.tempvoice_lane_tag_filter.columns.updated_at]
+status = "mapped"
+to = "voice.tempvoice_lane_tag_filter.updated_at"
+
+[tables.tempvoice_lanes.columns.channel_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.channel_id"
+
+[tables.tempvoice_lanes.columns.guild_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.guild_id"
+
+[tables.tempvoice_lanes.columns.owner_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.owner_id"
+
+[tables.tempvoice_lanes.columns.base_name]
+status = "mapped"
+to = "voice.tempvoice_lanes.base_name"
+
+[tables.tempvoice_lanes.columns.category_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.category_id"
+
+[tables.tempvoice_lanes.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_lanes.created_at"
+
+[tables.tempvoice_lanes.columns.source_staging_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.source_staging_id"
+
+[tables.tempvoice_lanes.columns.initial_owner_id]
+status = "mapped"
+to = "voice.tempvoice_lanes.initial_owner_id"
+
+[tables.tempvoice_lurkers.columns.guild_id]
+status = "mapped"
+to = "voice.tempvoice_lurkers.guild_id"
+
+[tables.tempvoice_lurkers.columns.channel_id]
+status = "mapped"
+to = "voice.tempvoice_lurkers.channel_id"
+
+[tables.tempvoice_lurkers.columns.user_id]
+status = "mapped"
+to = "voice.tempvoice_lurkers.user_id"
+
+[tables.tempvoice_lurkers.columns.original_nick]
+status = "mapped"
+to = "voice.tempvoice_lurkers.original_nick"
+
+[tables.tempvoice_lurkers.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_lurkers.created_at"
+
+[tables.tempvoice_owner_prefs.columns.owner_id]
+status = "mapped"
+to = "voice.tempvoice_owner_prefs.owner_id"
+
+[tables.tempvoice_owner_prefs.columns.region]
+status = "mapped"
+to = "voice.tempvoice_owner_prefs.region"
+
+[tables.tempvoice_owner_prefs.columns.updated_at]
+status = "mapped"
+to = "voice.tempvoice_owner_prefs.updated_at"
+
+[tables.tempvoice_presets.columns.user_id]
+status = "mapped"
+to = "voice.tempvoice_presets.user_id"
+
+[tables.tempvoice_presets.columns.category_id]
+status = "mapped"
+to = "voice.tempvoice_presets.category_id"
+
+[tables.tempvoice_presets.columns.name]
+status = "mapped"
+to = "voice.tempvoice_presets.name"
+
+[tables.tempvoice_presets.columns.base_name]
+status = "mapped"
+to = "voice.tempvoice_presets.base_name"
+
+[tables.tempvoice_presets.columns.limit]
+status = "mapped"
+to = "voice.tempvoice_presets.member_limit"
+
+[tables.tempvoice_presets.columns.min_rank]
+status = "mapped"
+to = "voice.tempvoice_presets.min_rank"
+
+[tables.tempvoice_presets.columns.region]
+status = "mapped"
+to = "voice.tempvoice_presets.region"
+
+[tables.tempvoice_presets.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_presets.created_at"
+
+[tables.tempvoice_presets.columns.updated_at]
+status = "mapped"
+to = "voice.tempvoice_presets.updated_at"
+
+[tables.tempvoice_rank_pref.columns.user_id]
+status = "mapped"
+to = "voice.tempvoice_rank_pref.user_id"
+
+[tables.tempvoice_rank_pref.columns.rank]
+status = "mapped"
+to = "voice.tempvoice_rank_pref.rank"
+
+[tables.tempvoice_rank_pref.columns.subrank]
+status = "mapped"
+to = "voice.tempvoice_rank_pref.subrank"
+
+[tables.tempvoice_rank_pref.columns.updated_at]
+status = "mapped"
+to = "voice.tempvoice_rank_pref.updated_at"
+
+[tables.tempvoice_staging_channels.columns.guild_id]
+status = "mapped"
+to = "voice.tempvoice_staging_channels.guild_id"
+
+[tables.tempvoice_staging_channels.columns.channel_id]
+status = "mapped"
+to = "voice.tempvoice_staging_channels.channel_id"
+
+[tables.tempvoice_staging_channels.columns.created_at]
+status = "mapped"
+to = "voice.tempvoice_staging_channels.created_at"
+
+[tables.voice_channel_anchors.columns.channel_id]
+status = "mapped"
+to = "voice.voice_channel_anchors.channel_id"
+
+[tables.voice_channel_anchors.columns.guild_id]
+status = "mapped"
+to = "voice.voice_channel_anchors.guild_id"
+
+[tables.voice_channel_anchors.columns.user_id]
+status = "mapped"
+to = "voice.voice_channel_anchors.user_id"
+
+[tables.voice_channel_anchors.columns.rank_name]
+status = "mapped"
+to = "voice.voice_channel_anchors.rank_name"
+
+[tables.voice_channel_anchors.columns.rank_value]
+status = "mapped"
+to = "voice.voice_channel_anchors.rank_value"
+
+[tables.voice_channel_anchors.columns.allowed_min]
+status = "mapped"
+to = "voice.voice_channel_anchors.allowed_min"
+
+[tables.voice_channel_anchors.columns.allowed_max]
+status = "mapped"
+to = "voice.voice_channel_anchors.allowed_max"
+
+[tables.voice_channel_anchors.columns.created_at]
+status = "mapped"
+to = "voice.voice_channel_anchors.created_at"
+
+[tables.voice_channel_anchors.columns.updated_at]
+status = "mapped"
+to = "voice.voice_channel_anchors.updated_at"
+
+[tables.voice_channel_anchors.columns.anchor_subrank]
+status = "mapped"
+to = "voice.voice_channel_anchors.anchor_subrank"
+
+[tables.voice_channel_anchors.columns.score_min]
+status = "mapped"
+to = "voice.voice_channel_anchors.score_min"
+
+[tables.voice_channel_anchors.columns.score_max]
+status = "mapped"
+to = "voice.voice_channel_anchors.score_max"
+
+[tables.voice_channel_settings.columns.channel_id]
+status = "mapped"
+to = "voice.voice_channel_settings.channel_id"
+
+[tables.voice_channel_settings.columns.guild_id]
+status = "mapped"
+to = "voice.voice_channel_settings.guild_id"
+
+[tables.voice_channel_settings.columns.enabled]
+status = "mapped"
+to = "voice.voice_channel_settings.enabled"
+
+[tables.voice_channel_settings.columns.created_at]
+status = "mapped"
+to = "voice.voice_channel_settings.created_at"
+
+[tables.voice_channel_settings.columns.updated_at]
+status = "mapped"
+to = "voice.voice_channel_settings.updated_at"
+
+[tables.voice_stats.columns.user_id]
+status = "mapped"
+to = "voice.voice_stats.user_id"
+
+[tables.voice_stats.columns.total_seconds]
+status = "mapped"
+to = "voice.voice_stats.total_seconds"
+
+[tables.voice_stats.columns.last_update]
+status = "mapped"
+to = "voice.voice_stats.last_update"
+
+[tables.voice_stats.columns.total_points]
+status = "mapped"
+to = "voice.voice_stats.total_points"

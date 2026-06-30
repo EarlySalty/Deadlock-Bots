@@ -283,6 +283,22 @@ impl DiscordAdapter {
                 if resp.status_code.as_u16() == 404
         )
     }
+
+    fn is_unknown_member(err: &serenity::Error) -> bool {
+        matches!(
+            err,
+            serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+                if Self::is_unknown_member_response(
+                    resp.status_code.as_u16(),
+                    resp.error.code,
+                    &resp.error.message,
+                )
+        )
+    }
+
+    fn is_unknown_member_response(status_code: u16, discord_code: isize, message: &str) -> bool {
+        discord_code == 10007 || (status_code == 404 && message == "Unknown Member")
+    }
 }
 
 #[async_trait::async_trait]
@@ -461,7 +477,13 @@ impl DiscordPort for DiscordAdapter {
                 Some(reason),
             )
             .await
-            .map_err(|err| PortError::Discord(err.to_string()))
+            .map_err(|err| {
+                if Self::is_unknown_member(&err) {
+                    PortError::MemberNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })
     }
 
     async fn move_voice(
@@ -1000,5 +1022,38 @@ mod tests {
             DiscordAdapter::move_voice_channel_precheck(Some(1), 1),
             Ok(())
         );
+    }
+
+    #[test]
+    fn remove_role_erkennt_unknown_member_als_member_not_found() {
+        assert!(DiscordAdapter::is_unknown_member_response(
+            404,
+            10007,
+            "Unknown Member"
+        ));
+        assert!(DiscordAdapter::is_unknown_member_response(
+            404,
+            -1,
+            "Unknown Member"
+        ));
+    }
+
+    #[test]
+    fn remove_role_mappt_andere_discord_404_nicht_als_member_not_found() {
+        assert!(!DiscordAdapter::is_unknown_member_response(
+            404,
+            10011,
+            "Unknown Role"
+        ));
+        assert!(!DiscordAdapter::is_unknown_member_response(
+            404,
+            10004,
+            "Unknown Guild"
+        ));
+        assert!(!DiscordAdapter::is_unknown_member_response(
+            500,
+            0,
+            "Internal Server Error"
+        ));
     }
 }

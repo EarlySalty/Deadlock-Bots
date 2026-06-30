@@ -1,0 +1,139 @@
+[tables.steam_links.columns.user_id]
+status = "mapped"
+to = "core.steam_links.discord_id"
+
+[tables.steam_links.columns.steam_id]
+status = "mapped"
+to = "core.steam_links.steam_id"
+
+[tables.steam_links.columns.name]
+status = "mapped"
+to = "core.steam_links.steam_display_name"
+
+[tables.steam_links.columns.verified]
+status = "mapped"
+to = "core.steam_links.verified"
+
+[tables.steam_links.columns.primary_account]
+status = "mapped"
+to = "core.steam_links.primary_account"
+
+[tables.steam_links.columns.created_at]
+status = "mapped"
+to = "core.steam_links.linked_at"
+
+[tables.steam_links.columns.updated_at]
+status = "mapped"
+to = "core.steam_links.updated_at"
+
+[tables.steam_links.columns.legacy_ref]
+status = "mapped"
+to = "core.steam_links.legacy_ref"
+
+[tables.steam_links.columns.migrated_at]
+status = "mapped"
+to = "core.steam_links.migrated_at"
+
+[tables.steam_links.columns.deadlock_rank]
+status = "mapped"
+to = "core.steam_links.deadlock_rank"
+
+[tables.steam_links.columns.deadlock_rank_name]
+status = "mapped"
+to = "core.steam_links.deadlock_rank_name"
+
+[tables.steam_links.columns.deadlock_subrank]
+status = "mapped"
+to = "core.steam_links.deadlock_subrank"
+
+[tables.steam_links.columns.deadlock_badge_level]
+status = "mapped"
+to = "core.steam_links.deadlock_badge_level"
+
+[tables.steam_links.columns.deadlock_rank_updated_at]
+status = "mapped"
+to = "core.steam_links.deadlock_rank_updated_at"
+
+[tables.steam_links.columns.is_steam_friend]
+status = "mapped"
+to = "core.steam_links.is_steam_friend"
+
+[tables.user_privacy.columns.user_id]
+status = "mapped"
+to = "core.user_privacy.user_id"
+
+[tables.user_privacy.columns.opted_out]
+status = "mapped"
+to = "core.user_privacy.opted_out"
+
+[tables.user_privacy.columns.deleted_at]
+status = "mapped"
+to = "core.user_privacy.deleted_at"
+
+[tables.user_privacy.columns.reason]
+status = "mapped"
+to = "core.user_privacy.reason"
+
+[tables.user_privacy.columns.updated_at]
+status = "mapped"
+to = "core.user_privacy.updated_at"
+
+[tables.user_data.columns.user_id]
+status = "mapped"
+to = "core.user_data.user_id"
+
+[tables.user_data.columns.custom_interval]
+status = "mapped"
+to = "core.user_data.custom_interval"
+
+[tables.user_data.columns.paused_until]
+status = "mapped"
+to = "core.user_data.paused_until"
+
+[tables.user_data.columns.created_at]
+status = "mapped"
+to = "core.user_data.created_at"
+
+[tables.user_data.columns.updated_at]
+status = "mapped"
+to = "core.user_data.updated_at"
+
+[tables.user_mod_tags.columns.user_id]
+status = "mapped"
+to = "core.user_mod_tags.user_id"
+
+[tables.user_mod_tags.columns.mod_tag]
+status = "mapped"
+to = "core.user_mod_tags.mod_tag"
+
+[tables.user_mod_tags.columns.set_by]
+status = "mapped"
+to = "core.user_mod_tags.set_by"
+
+[tables.user_mod_tags.columns.reason]
+status = "mapped"
+to = "core.user_mod_tags.reason"
+
+[tables.user_mod_tags.columns.set_at]
+status = "mapped"
+to = "core.user_mod_tags.set_at"
+
+[tables.user_mod_tags.columns.expires_at]
+status = "mapped"
+to = "core.user_mod_tags.expires_at"
+
+[tables.user_tags.columns.user_id]
+status = "mapped"
+to = "core.user_tags.user_id"
+
+[tables.user_tags.columns.tag_key]
+status = "mapped"
+to = "core.user_tags.tag_key"
+
+[tables.user_tags.columns.tag_value]
+status = "mapped"
+to = "core.user_tags.tag_value"
+
+[tables.user_tags.columns.set_at]
+status = "mapped"
+to = "core.user_tags.set_at"

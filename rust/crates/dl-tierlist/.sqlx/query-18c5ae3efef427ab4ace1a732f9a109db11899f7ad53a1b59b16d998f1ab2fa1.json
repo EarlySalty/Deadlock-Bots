@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT 1 AS \"exists!\"\n          FROM tierlist.deadlock_heroes\n         WHERE hero_id = $1\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "18c5ae3efef427ab4ace1a732f9a109db11899f7ad53a1b59b16d998f1ab2fa1"
+}

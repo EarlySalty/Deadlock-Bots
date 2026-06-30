@@ -1,11 +1,19 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use dl_central_etl::{
-    check_mapping_completeness, check_row_counts, check_row_counts_with_factor,
-    check_sample_covers_mapped_columns, optional_sqlite_int_to_bool, optional_text_json_to_value,
-    optional_unix_seconds_to_datetime, sample_round_trip, sqlite_int_to_bool, text_json_to_value,
-    unix_seconds_to_datetime, Ledger, LedgerError, RoundTripFields, RoundTripRows, RowCountFactor,
-    SourceError, SourceSqlite, VerifyError,
+    check_ledger_set_mapping_completeness, check_mapping_completeness, check_row_counts,
+    check_row_counts_with_factor, check_sample_covers_mapped_columns, integer_to_text,
+    optional_integer_to_text, optional_real_unix_seconds_to_datetime, optional_sqlite_int_to_bool,
+    optional_sqlite_numeric_to_bool, optional_text_json_to_value, optional_text_to_date,
+    optional_text_to_datetime, optional_unix_seconds_to_datetime, real_unix_seconds_to_datetime,
+    sample_round_trip, sqlite_int_to_bool, sqlite_numeric_to_bool,
+    text_json_or_integer_csv_list_to_value, text_json_to_value, text_to_date, text_to_datetime,
+    unix_seconds_to_datetime, Ledger, LedgerError, LedgerSet, RoundTripFields, RoundTripRows,
+    RowCountFactor, SourceError, SourceSchemas, SourceSqlite, SourceTableColumns, VerifyError,
 };
 use rusqlite::Connection;
 use serde_json::{json, Value};
@@ -29,6 +37,65 @@ fn fields(entries: &[(&str, Value)]) -> RoundTripFields {
     entries
         .iter()
         .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+fn table_columns(entries: &[(&str, &[&str])]) -> SourceTableColumns {
+    entries
+        .iter()
+        .map(|(table, columns)| {
+            (
+                (*table).to_string(),
+                columns.iter().map(|column| (*column).to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("dl-central-etl is under rust/crates")
+        .to_path_buf()
+}
+
+fn inventory_table_columns(path: &Path) -> SourceTableColumns {
+    let contents = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read inventory {}: {err}", path.display()));
+    let value: Value = serde_json::from_str(&contents)
+        .unwrap_or_else(|err| panic!("parse inventory {}: {err}", path.display()));
+    let tables = value
+        .get("tables")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("inventory {} has tables array", path.display()));
+
+    tables
+        .iter()
+        .map(|table| {
+            let name = table
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("inventory {} table has name", path.display()))
+                .to_string();
+            let columns = table
+                .get("columns")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("inventory {} table {name} has columns", path.display()))
+                .iter()
+                .map(|column| {
+                    column
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("inventory {} table {name} column has name", path.display())
+                        })
+                        .to_string()
+                })
+                .collect();
+
+            (name, columns)
+        })
         .collect()
 }
 
@@ -206,6 +273,290 @@ fn complete_fixture_passes_mapping_counts_and_round_trip() {
 }
 
 #[test]
+fn ledger_set_keeps_same_table_names_source_qualified_and_fails_missing_source_column() {
+    let dir = tempfile::tempdir().expect("create temp ledger root");
+    let deadlock_dir = dir.path().join("deadlock-sqlite3");
+    let website_dir = dir.path().join("website");
+    fs::create_dir_all(&deadlock_dir).expect("create deadlock ledger dir");
+    fs::create_dir_all(&website_dir).expect("create website ledger dir");
+
+    fs::write(
+        deadlock_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.bot_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+
+        [tables.coaching_requests.columns.message_id]
+        status = "mapped"
+        to = "coaching.requests.message_id"
+        "#,
+    )
+    .expect("write deadlock ledger");
+    fs::write(
+        website_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.website_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+
+        [tables.coaching_requests.columns.bot_request_id]
+        status = "mapped"
+        to = "coaching.requests.bot_request_id"
+        "#,
+    )
+    .expect("write website ledger");
+
+    let ledger_set = LedgerSet::from_dir(dir.path()).expect("ledger set loads");
+    assert!(ledger_set
+        .source("deadlock-sqlite3")
+        .expect("deadlock source")
+        .table("coaching_requests")
+        .is_some());
+    assert!(ledger_set
+        .source("website")
+        .expect("website source")
+        .table("coaching_requests")
+        .is_some());
+
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            table_columns(&[(
+                "coaching_requests",
+                &["id", "discord_user_id", "message_id"],
+            )]),
+        ),
+        (
+            "website".to_string(),
+            table_columns(&[(
+                "coaching_requests",
+                &["id", "discord_user_id", "bot_request_id"],
+            )]),
+        ),
+    ]);
+
+    check_ledger_set_mapping_completeness(&source_schemas, &ledger_set)
+        .expect("same table name in two source DBs is checked separately");
+
+    fs::write(
+        website_dir.join("coaching.toml"),
+        r#"
+        [tables.coaching_requests.columns.id]
+        status = "mapped"
+        to = "coaching.requests.website_request_id"
+
+        [tables.coaching_requests.columns.discord_user_id]
+        status = "mapped"
+        to = "coaching.requests.discord_user_id"
+        "#,
+    )
+    .expect("remove one website source column from ledger");
+
+    let broken_ledger_set = LedgerSet::from_dir(dir.path()).expect("broken ledger still parses");
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &broken_ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnmappedSourceColumn {
+            source_db: "website".to_string(),
+            table: "coaching_requests".to_string(),
+            column: "bot_request_id".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_unknown_ledger_column_in_existing_source_table() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_presence_watchlist.columns.steam_id]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.steam_id"
+
+                [tables.steam_presence_watchlist.columns.note]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.note"
+
+                [tables.steam_presence_watchlist.columns.__sp1_non_inventory_column__]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.__sp1_non_inventory_column__"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[("steam_presence_watchlist", &["steam_id", "note"])]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnknownLedgerColumn {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "steam_presence_watchlist".to_string(),
+            column: "__sp1_non_inventory_column__".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_missing_expected_ledger_source() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            table_columns(&[("steam_links", &["user_id"])]),
+        ),
+        (
+            "website".to_string(),
+            table_columns(&[("user_profiles", &["discord_id"])]),
+        ),
+    ]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::MissingLedgerSource {
+            source_db: "website".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_source_table_without_ledger_entry() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[
+            ("steam_links", &["user_id"]),
+            ("live_player_state", &["steam_id"]),
+        ]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnmappedSourceTable {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "live_player_state".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_ledger_table_without_inventory_entry() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+
+                [tables.z_ledger_only.columns.id]
+                status = "mapped"
+                to = "core.z_ledger_only.id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[("steam_links", &["user_id"])]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::MissingSourceTable {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "z_ledger_only".to_string(),
+        })
+    );
+}
+
+#[test]
+fn sp1_ledger_fragments_cover_all_inventory_source_columns() {
+    let ledger_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ledger");
+    let ledger_set = LedgerSet::from_dir(ledger_root).expect("T1 ledger directory loads");
+    let inventory_root = workspace_root().join("docs/_work/sp1/inventory");
+
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            inventory_table_columns(&inventory_root.join("deadlock-bots.tables.json")),
+        ),
+        (
+            "tournament".to_string(),
+            inventory_table_columns(&inventory_root.join("turniere.tables.json")),
+        ),
+        (
+            "website".to_string(),
+            inventory_table_columns(&inventory_root.join("website.tables.json")),
+        ),
+    ]);
+
+    check_ledger_set_mapping_completeness(&source_schemas, &ledger_set)
+        .expect("SP1 ledger fragments cover all inventory source columns");
+
+    let physical_tables: usize = source_schemas.values().map(|tables| tables.len()).sum();
+    let unique_table_names: BTreeSet<&str> = source_schemas
+        .values()
+        .flat_map(|tables| tables.keys().map(String::as_str))
+        .collect();
+    println!(
+        "SP1 full completeness: sources={} physical_tables={} unique_table_names={} missing_tables=0 unaccounted_columns=0",
+        source_schemas.len(),
+        physical_tables,
+        unique_table_names.len()
+    );
+}
+
+#[test]
 fn ledger_rejects_typoed_table_root() {
     let result = Ledger::from_toml_str(
         r#"
@@ -374,13 +725,151 @@ fn converters_preserve_types_and_null_semantics() {
         optional_sqlite_int_to_bool(None).expect("null bool is allowed"),
         None
     );
+    assert!(!sqlite_numeric_to_bool(0).expect("numeric 0 converts to false"));
+    assert!(sqlite_numeric_to_bool(1).expect("numeric 1 converts to true"));
+    assert!(matches!(
+        sqlite_numeric_to_bool(3),
+        Err(dl_central_etl::ConvertError::InvalidBoolInteger { value }) if value == 3
+    ));
+    assert_eq!(
+        optional_sqlite_numeric_to_bool(None).expect("null numeric bool is allowed"),
+        None
+    );
+
+    assert_eq!(integer_to_text(1_234_567_890_123), "1234567890123");
+    assert_eq!(optional_integer_to_text(None), None);
+
+    let real_timestamp =
+        real_unix_seconds_to_datetime(1_700_000_000.123_456_7).expect("valid real unix timestamp");
+    assert_eq!(real_timestamp.timestamp(), 1_700_000_000);
+    assert!(
+        real_timestamp
+            .timestamp_subsec_nanos()
+            .abs_diff(123_456_700)
+            <= 100
+    );
+    assert!(matches!(
+        real_unix_seconds_to_datetime(f64::INFINITY),
+        Err(dl_central_etl::ConvertError::InvalidRealUnixTimestamp { seconds })
+            if seconds.is_infinite()
+    ));
+    assert!(matches!(
+        real_unix_seconds_to_datetime(1.0e30),
+        Err(dl_central_etl::ConvertError::InvalidRealUnixTimestamp { seconds })
+            if seconds.to_bits() == 1.0e30_f64.to_bits()
+    ));
+    assert_eq!(
+        optional_real_unix_seconds_to_datetime(None).expect("null real timestamp is allowed"),
+        None
+    );
+
+    let rfc822_offset = text_to_datetime("2025-10-24T16:54:51-0700").expect("RFC822 offset parses");
+    assert_eq!(rfc822_offset.to_rfc3339(), "2025-10-24T23:54:51+00:00");
+    assert_eq!(
+        text_to_datetime("2026-06-30T12:00:00Z")
+            .expect("RFC3339 Z parses")
+            .to_rfc3339(),
+        "2026-06-30T12:00:00+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("2026-06-30T12:00:00+02:30")
+            .expect("RFC3339 offset parses")
+            .to_rfc3339(),
+        "2026-06-30T09:30:00+00:00"
+    );
+    let fractional_naive =
+        text_to_datetime("2026-06-10T16:08:41.709852").expect("fractional naive UTC parses");
+    assert_eq!(fractional_naive.timestamp_subsec_micros(), 709_852);
+    assert_eq!(
+        text_to_datetime("2026-06-10T16:08:41.123456789")
+            .expect("naive nanoseconds parse")
+            .timestamp_subsec_nanos(),
+        123_456_789
+    );
+    assert_eq!(
+        text_to_datetime("2026-06-10 16:08:41.709852+02:30")
+            .expect("fractional offset parses")
+            .to_rfc3339(),
+        "2026-06-10T13:38:41.709852+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("2026-04-15T21:30")
+            .expect("minute precision naive timestamp parses")
+            .to_rfc3339(),
+        "2026-04-15T21:30:00+00:00"
+    );
+    assert_eq!(
+        text_to_datetime("1772833020")
+            .expect("real unix seconds text parses")
+            .timestamp(),
+        1_772_833_020
+    );
+    for invalid in ["26-06-30T12:00:00", "2026063013", "123"] {
+        assert!(matches!(
+            text_to_datetime(invalid),
+            Err(dl_central_etl::ConvertError::InvalidTimestampText { value })
+                if value == invalid
+        ));
+    }
+    assert!(matches!(
+        text_to_datetime("not-a-timestamp"),
+        Err(dl_central_etl::ConvertError::InvalidTimestampText { value })
+            if value == "not-a-timestamp"
+    ));
+    assert_eq!(
+        optional_text_to_datetime(None).expect("null timestamp is allowed"),
+        None
+    );
+
+    assert_eq!(
+        text_to_date("2026-06-30").expect("date parses").to_string(),
+        "2026-06-30"
+    );
+    assert_eq!(
+        text_to_date("2026-06-30T13:45:59Z")
+            .expect("RFC3339 datetime date part parses")
+            .to_string(),
+        "2026-06-30"
+    );
+    assert_eq!(
+        text_to_date("2026-06-30 13:45:59.123")
+            .expect("SQLite datetime date part parses")
+            .to_string(),
+        "2026-06-30"
+    );
+    assert!(matches!(
+        text_to_date("30.06.2026"),
+        Err(dl_central_etl::ConvertError::InvalidDateText { value }) if value == "30.06.2026"
+    ));
+    assert!(matches!(
+        text_to_date("26-06-30"),
+        Err(dl_central_etl::ConvertError::InvalidDateText { value }) if value == "26-06-30"
+    ));
+    assert_eq!(
+        optional_text_to_date(None).expect("null date is allowed"),
+        None
+    );
 
     assert_eq!(
         text_json_to_value(r#"{"roles":["coach"],"active":true}"#).expect("valid json parses"),
         json!({"roles": ["coach"], "active": true})
     );
+    assert_eq!(
+        text_json_or_integer_csv_list_to_value("123, 456")
+            .expect("integer CSV list normalizes losslessly"),
+        json!([123, 456])
+    );
+    assert_eq!(
+        text_json_or_integer_csv_list_to_value("123")
+            .expect("single integer list normalizes to array"),
+        json!([123])
+    );
     assert!(matches!(
         text_json_to_value("{not valid json"),
+        Err(dl_central_etl::ConvertError::Json(_))
+    ));
+    assert!(matches!(
+        text_json_or_integer_csv_list_to_value("123,,456"),
         Err(dl_central_etl::ConvertError::Json(_))
     ));
     assert_eq!(

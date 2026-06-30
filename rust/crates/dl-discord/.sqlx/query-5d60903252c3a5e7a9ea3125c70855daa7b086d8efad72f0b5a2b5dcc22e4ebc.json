@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        DELETE FROM bot.kv_store\n        WHERE ns = $1\n          AND k = $2\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5d60903252c3a5e7a9ea3125c70855daa7b086d8efad72f0b5a2b5dcc22e4ebc"
+}

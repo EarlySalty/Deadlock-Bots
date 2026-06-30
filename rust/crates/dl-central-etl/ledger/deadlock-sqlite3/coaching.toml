@@ -1,0 +1,415 @@
+[tables.coach_applications.columns.id]
+status = "mapped"
+to = "coaching.coach_applications.id"
+
+[tables.coach_applications.columns.discord_user_id]
+status = "mapped"
+to = "coaching.coach_applications.discord_user_id"
+
+[tables.coach_applications.columns.discord_username]
+status = "mapped"
+to = "coaching.coach_applications.discord_username"
+
+[tables.coach_applications.columns.display_name]
+status = "mapped"
+to = "coaching.coach_applications.display_name"
+
+[tables.coach_applications.columns.application_text]
+status = "mapped"
+to = "coaching.coach_applications.application_text"
+
+[tables.coach_applications.columns.experience_text]
+status = "mapped"
+to = "coaching.coach_applications.experience_text"
+
+[tables.coach_applications.columns.rank]
+status = "mapped"
+to = "coaching.coach_applications.rank"
+
+[tables.coach_applications.columns.specialties_json]
+status = "mapped"
+to = "coaching.coach_applications.specialties_json"
+
+[tables.coach_applications.columns.availability_json]
+status = "mapped"
+to = "coaching.coach_applications.availability_json"
+
+[tables.coach_applications.columns.status]
+status = "mapped"
+to = "coaching.coach_applications.status"
+
+[tables.coach_applications.columns.reviewed_by]
+status = "mapped"
+to = "coaching.coach_applications.reviewed_by"
+
+[tables.coach_applications.columns.reviewed_at]
+status = "mapped"
+to = "coaching.coach_applications.reviewed_at"
+
+[tables.coach_applications.columns.created_at]
+status = "mapped"
+to = "coaching.coach_applications.created_at"
+
+[tables.coach_applications.columns.updated_at]
+status = "mapped"
+to = "coaching.coach_applications.updated_at"
+
+[tables.coaches.columns.id]
+status = "mapped"
+to = "coaching.coaches.id"
+
+[tables.coaches.columns.discord_user_id]
+status = "mapped"
+to = "coaching.coaches.discord_user_id"
+
+[tables.coaches.columns.discord_username]
+status = "mapped"
+to = "coaching.coaches.discord_username"
+
+[tables.coaches.columns.display_name]
+status = "mapped"
+to = "coaching.coaches.display_name"
+
+[tables.coaches.columns.avatar_url]
+status = "mapped"
+to = "coaching.coaches.avatar_url"
+
+[tables.coaches.columns.bio]
+status = "mapped"
+to = "coaching.coaches.bio"
+
+[tables.coaches.columns.specialties_json]
+status = "mapped"
+to = "coaching.coaches.specialties_json"
+
+[tables.coaches.columns.availability_json]
+status = "mapped"
+to = "coaching.coaches.availability_json"
+
+[tables.coaches.columns.status]
+status = "mapped"
+to = "coaching.coaches.status"
+
+[tables.coaches.columns.website_coach_id]
+status = "mapped"
+to = "coaching.coaches.website_coach_id"
+
+[tables.coaches.columns.created_at]
+status = "mapped"
+to = "coaching.coaches.created_at"
+
+[tables.coaches.columns.updated_at]
+status = "mapped"
+to = "coaching.coaches.updated_at"
+
+[tables.coaches.columns.avg_rating]
+status = "mapped"
+to = "coaching.coaches.avg_rating"
+
+[tables.coaches.columns.total_reviews]
+status = "mapped"
+to = "coaching.coaches.total_reviews"
+
+[tables.coaches.columns.total_sessions]
+status = "mapped"
+to = "coaching.coaches.total_sessions"
+
+[tables.coaching_bans.columns.discord_user_id]
+status = "mapped"
+to = "coaching.bans.discord_user_id"
+
+[tables.coaching_bans.columns.banned_at]
+status = "mapped"
+to = "coaching.bans.banned_at"
+
+[tables.coaching_bans.columns.expires_at]
+status = "mapped"
+to = "coaching.bans.expires_at"
+
+[tables.coaching_bans.columns.reason]
+status = "mapped"
+to = "coaching.bans.reason"
+
+[tables.coaching_coach_rotation.columns.coach_id]
+status = "mapped"
+to = "coaching.coach_rotation.coach_id"
+
+[tables.coaching_coach_rotation.columns.last_assigned_at]
+status = "mapped"
+to = "coaching.coach_rotation.last_assigned_at"
+
+[tables.coaching_requests.columns.id]
+status = "mapped"
+to = "coaching.requests.bot_request_id"
+
+[tables.coaching_requests.columns.discord_user_id]
+status = "mapped"
+to = "coaching.requests.discord_user_id"
+
+[tables.coaching_requests.columns.discord_username]
+status = "mapped"
+to = "coaching.requests.discord_username"
+
+[tables.coaching_requests.columns.rank]
+status = "mapped"
+to = "coaching.requests.rank"
+
+[tables.coaching_requests.columns.subrank]
+status = "mapped"
+to = "coaching.requests.subrank"
+
+[tables.coaching_requests.columns.hero]
+status = "mapped"
+to = "coaching.requests.hero"
+
+[tables.coaching_requests.columns.games_played]
+status = "mapped"
+to = "coaching.requests.games_played"
+
+[tables.coaching_requests.columns.hours_played]
+status = "mapped"
+to = "coaching.requests.hours_played"
+
+[tables.coaching_requests.columns.availability]
+status = "mapped"
+to = "coaching.requests.availability"
+
+[tables.coaching_requests.columns.current_problems]
+status = "mapped"
+to = "coaching.requests.current_problems"
+
+[tables.coaching_requests.columns.ai_summary]
+status = "mapped"
+to = "coaching.requests.ai_summary"
+
+[tables.coaching_requests.columns.ai_insights_json]
+status = "mapped"
+to = "coaching.requests.ai_insights_json"
+
+[tables.coaching_requests.columns.status]
+status = "mapped"
+to = "coaching.requests.status"
+
+[tables.coaching_requests.columns.message_id]
+status = "mapped"
+to = "coaching.requests.message_id"
+
+[tables.coaching_requests.columns.channel_id]
+status = "mapped"
+to = "coaching.requests.channel_id"
+
+[tables.coaching_requests.columns.role_assigned_at]
+status = "mapped"
+to = "coaching.requests.role_assigned_at"
+
+[tables.coaching_requests.columns.role_expires_at]
+status = "mapped"
+to = "coaching.requests.role_expires_at"
+
+[tables.coaching_requests.columns.role_removed_at]
+status = "mapped"
+to = "coaching.requests.role_removed_at"
+
+[tables.coaching_requests.columns.created_at]
+status = "mapped"
+to = "coaching.requests.created_at"
+
+[tables.coaching_requests.columns.updated_at]
+status = "mapped"
+to = "coaching.requests.updated_at"
+
+[tables.coaching_requests.columns.scheduled_slot]
+status = "mapped"
+to = "coaching.requests.scheduled_slot"
+
+[tables.coaching_requests.columns.assigned_coach_id]
+status = "mapped"
+to = "coaching.requests.assigned_coach_id"
+
+[tables.coaching_requests.columns.reserved_until]
+status = "mapped"
+to = "coaching.requests.reserved_until"
+
+[tables.coaching_requests.columns.website_request_id]
+status = "mapped"
+to = "coaching.requests.website_request_id"
+
+[tables.coaching_requests.columns.coachee_id]
+status = "mapped"
+to = "coaching.requests.coachee_id"
+
+[tables.coaching_sessions.columns.id]
+status = "mapped"
+to = "coaching.sessions.id"
+
+[tables.coaching_sessions.columns.request_id]
+status = "mapped"
+to = "coaching.sessions.bot_request_id"
+
+[tables.coaching_sessions.columns.coach_id]
+status = "mapped"
+to = "coaching.sessions.coach_id"
+
+[tables.coaching_sessions.columns.discord_user_id]
+status = "mapped"
+to = "coaching.sessions.discord_user_id"
+
+[tables.coaching_sessions.columns.discord_username]
+status = "mapped"
+to = "coaching.sessions.discord_username"
+
+[tables.coaching_sessions.columns.discord_channel_id]
+status = "mapped"
+to = "coaching.sessions.discord_channel_id"
+
+[tables.coaching_sessions.columns.discord_thread_id]
+status = "mapped"
+to = "coaching.sessions.discord_thread_id"
+
+[tables.coaching_sessions.columns.status]
+status = "mapped"
+to = "coaching.sessions.status"
+
+[tables.coaching_sessions.columns.role_assigned_at]
+status = "mapped"
+to = "coaching.sessions.role_assigned_at"
+
+[tables.coaching_sessions.columns.role_reminder_at]
+status = "mapped"
+to = "coaching.sessions.role_reminder_at"
+
+[tables.coaching_sessions.columns.role_expires_at]
+status = "mapped"
+to = "coaching.sessions.role_expires_at"
+
+[tables.coaching_sessions.columns.voice_channel_id]
+status = "mapped"
+to = "coaching.sessions.voice_channel_id"
+
+[tables.coaching_sessions.columns.voice_started_at]
+status = "mapped"
+to = "coaching.sessions.voice_started_at"
+
+[tables.coaching_sessions.columns.voice_last_seen_at]
+status = "mapped"
+to = "coaching.sessions.voice_last_seen_at"
+
+[tables.coaching_sessions.columns.survey_sent_at]
+status = "mapped"
+to = "coaching.sessions.survey_sent_at"
+
+[tables.coaching_sessions.columns.scheduled_at]
+status = "mapped"
+to = "coaching.sessions.scheduled_at"
+
+[tables.coaching_sessions.columns.started_at]
+status = "mapped"
+to = "coaching.sessions.started_at"
+
+[tables.coaching_sessions.columns.completed_at]
+status = "mapped"
+to = "coaching.sessions.completed_at"
+
+[tables.coaching_sessions.columns.created_at]
+status = "mapped"
+to = "coaching.sessions.created_at"
+
+[tables.coaching_sessions.columns.reward_role_expires_at]
+status = "mapped"
+to = "coaching.sessions.reward_role_expires_at"
+
+[tables.coaching_sessions.columns.reward_role_removed_at]
+status = "mapped"
+to = "coaching.sessions.reward_role_removed_at"
+
+[tables.coaching_sessions_legacy.columns.user_id]
+status = "mapped"
+to = "coaching.sessions_legacy.user_id"
+
+[tables.coaching_sessions_legacy.columns.thread_id]
+status = "mapped"
+to = "coaching.sessions_legacy.thread_id"
+
+[tables.coaching_sessions_legacy.columns.match_id]
+status = "mapped"
+to = "coaching.sessions_legacy.match_id"
+
+[tables.coaching_sessions_legacy.columns.rank]
+status = "mapped"
+to = "coaching.sessions_legacy.rank"
+
+[tables.coaching_sessions_legacy.columns.subrank]
+status = "mapped"
+to = "coaching.sessions_legacy.subrank"
+
+[tables.coaching_sessions_legacy.columns.hero]
+status = "mapped"
+to = "coaching.sessions_legacy.hero"
+
+[tables.coaching_sessions_legacy.columns.comment]
+status = "mapped"
+to = "coaching.sessions_legacy.comment"
+
+[tables.coaching_sessions_legacy.columns.step]
+status = "mapped"
+to = "coaching.sessions_legacy.step"
+
+[tables.coaching_sessions_legacy.columns.created_at]
+status = "mapped"
+to = "coaching.sessions_legacy.created_at"
+
+[tables.coaching_sessions_legacy.columns.updated_at]
+status = "mapped"
+to = "coaching.sessions_legacy.updated_at"
+
+[tables.coaching_sessions_legacy.columns.is_active]
+status = "mapped"
+to = "coaching.sessions_legacy.is_active"
+
+[tables.coaching_sessions_legacy.columns.voice_channel_id]
+status = "mapped"
+to = "coaching.sessions_legacy.voice_channel_id"
+
+[tables.coaching_sessions_legacy.columns.voice_started_at]
+status = "mapped"
+to = "coaching.sessions_legacy.voice_started_at"
+
+[tables.coaching_sessions_legacy.columns.voice_last_seen_at]
+status = "mapped"
+to = "coaching.sessions_legacy.voice_last_seen_at"
+
+[tables.coaching_sessions_legacy.columns.survey_sent_at]
+status = "mapped"
+to = "coaching.sessions_legacy.survey_sent_at"
+
+[tables.coaching_surveys.columns.id]
+status = "mapped"
+to = "coaching.surveys.id"
+
+[tables.coaching_surveys.columns.session_id]
+status = "mapped"
+to = "coaching.surveys.session_id"
+
+[tables.coaching_surveys.columns.rating]
+status = "mapped"
+to = "coaching.surveys.rating"
+
+[tables.coaching_surveys.columns.feedback_text]
+status = "mapped"
+to = "coaching.surveys.feedback_text"
+
+[tables.coaching_surveys.columns.improved_areas]
+status = "mapped"
+to = "coaching.surveys.improved_areas"
+
+[tables.coaching_surveys.columns.unresolved_items]
+status = "mapped"
+to = "coaching.surveys.unresolved_items"
+
+[tables.coaching_surveys.columns.would_recommend]
+status = "mapped"
+to = "coaching.surveys.would_recommend"
+
+[tables.coaching_surveys.columns.created_at]
+status = "mapped"
+to = "coaching.surveys.created_at"

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE moderation.ai_moderation_cases\n            SET action = $1, mod_id = $2, mod_action_at = now()\n            WHERE case_id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7d057db4eedcff17879e743f2960433bce742988f3cdb2f3ad1f70e599973faf"
+}

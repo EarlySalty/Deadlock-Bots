@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS \"next_id!\"\n        FROM moderation.ai_moderation_ragebait_hits\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "17fb1dc4217940a78c654d2b7a42c44d2dff937ec0cbe2f041ace2d97f7306ea"
+}

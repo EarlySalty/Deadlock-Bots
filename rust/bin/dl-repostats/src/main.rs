@@ -73,16 +73,7 @@ const NOISE_FILES: &[&str] = &[
 
 /// Datei-Endungen, die als generiert/binär/Lock gelten.
 const NOISE_SUFFIXES: &[&str] = &[
-    ".lock",
-    ".min.js",
-    ".min.css",
-    ".map",
-    ".pyc",
-    ".pyo",
-    ".lockb",
-    ".sqlite3",
-    ".sqlite",
-    ".db",
+    ".lock", ".min.js", ".min.css", ".map", ".pyc", ".pyo", ".lockb", ".sqlite3", ".sqlite", ".db",
 ];
 
 /// Menschlich lesbare Ausschlussliste fürs Artefakt/die Anzeige.

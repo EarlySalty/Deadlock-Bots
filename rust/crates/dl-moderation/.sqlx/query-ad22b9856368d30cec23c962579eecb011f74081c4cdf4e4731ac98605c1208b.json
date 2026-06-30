@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.invite_snapshot_cache (guild_id, snapshot_json, updated_at)\n            VALUES ($1, $2::text::jsonb, now())\n            ON CONFLICT (guild_id) DO UPDATE SET\n              snapshot_json = EXCLUDED.snapshot_json,\n              updated_at = EXCLUDED.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad22b9856368d30cec23c962579eecb011f74081c4cdf4e4731ac98605c1208b"
+}

@@ -775,9 +775,8 @@ mod tests {
         let (_d, t) = mk().await;
         // Opt-out ohne Vor-Eintrag → legt Zeile mit opted_out=1 an.
         t.set_opted_out(42, 7).await.unwrap();
-        let (gid, opted): (i64, i64) = t
-            .db
-            .read(|c| {
+        let (gid, opted): (i64, i64) =
+            t.db.read(|c| {
                 c.query_row(
                     "SELECT guild_id, opted_out FROM user_retention_tracking WHERE user_id=42",
                     [],
@@ -790,9 +789,8 @@ mod tests {
 
         // Opt-in → setzt opted_out=0 für den bestehenden Eintrag.
         t.clear_opted_out(42).await.unwrap();
-        let opted: i64 = t
-            .db
-            .read(|c| {
+        let opted: i64 =
+            t.db.read(|c| {
                 c.query_row(
                     "SELECT opted_out FROM user_retention_tracking WHERE user_id=42",
                     [],
@@ -809,9 +807,8 @@ mod tests {
         let (_d, t) = mk().await;
         // Wie das Python-UPDATE: ohne bestehende Zeile passiert nichts.
         t.clear_opted_out(999).await.unwrap();
-        let n: i64 = t
-            .db
-            .read(|c| {
+        let n: i64 =
+            t.db.read(|c| {
                 c.query_row(
                     "SELECT COUNT(*) FROM user_retention_tracking WHERE user_id=999",
                     [],
@@ -830,7 +827,7 @@ mod tests {
         let inactive = now - 20 * 86400; // 20 Tage inaktiv (> 14)
         let recent = now - 2 * 86400; // erst 2 Tage (noch aktiv)
         let recent_msg = now - 5 * 86400; // vor 5 Tagen schon angeschrieben (< 30)
-        // user 1 erfüllt alle Kriterien; 2–7 fallen je an einer Bedingung raus.
+                                          // user 1 erfüllt alle Kriterien; 2–7 fallen je an einer Bedingung raus.
         t.db
             .write(move |c| {
                 c.execute_batch(&format!(
@@ -855,6 +852,10 @@ mod tests {
             .into_iter()
             .map(|(u, _, _)| u)
             .collect();
-        assert_eq!(found, vec![1], "nur der berechtigte User darf übrig bleiben");
+        assert_eq!(
+            found,
+            vec![1],
+            "nur der berechtigte User darf übrig bleiben"
+        );
     }
 }

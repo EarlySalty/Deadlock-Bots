@@ -1,3 +1,43 @@
+## #178 — Bot-Build nutzt die zentrale Moderations-Datenbank
+
+**Ausgangslage:** Der Rust-Bot konnte auf dem aktuellen Branch nicht als Release-Binary gebaut werden, weil zwei Moderations-Bausteine noch die alte lokale Datenbank-Verbindung bekamen. Die Moderation erwartet inzwischen die zentrale Datenbank-Verbindung.
+
+**Was wurde geändert:** Security-Guard und AI-Moderation werden beim Start mit der zentralen Datenbank-Verbindung verdrahtet. Das passt zur bereits umgestellten Moderationsschicht.
+
+**Wie es jetzt läuft:** Der Rust-Bot baut wieder als Release-Binary und kann nach Voice-Änderungen sauber neu deployed werden.
+
+## #177 — Rang-Lanes schreiben Rechte gebündelt
+
+**Ausgangslage:** Beim Mindest-Rang und beim Laden eines Presets wurden Rang-Rollen einzeln angefasst und niedrigere Rollen aktiv gesperrt. Das passte nicht zu den Comp-Lanes, die über erlaubte Rang-Rollen funktionieren: Bei `Phantom+` müssen Phantom, Ascendant und Eternus rein dürfen, nicht die unteren Rollen als Deny-Liste landen.
+
+**Was wurde geändert:** Rang-Rollen werden jetzt gesammelt und in einem Batch auf den Kanal geschrieben. Erlaubte Rang-Rollen bekommen `Verbinden` erlaubt, alle nicht erlaubten Rang-Rollen werden aus den Kanalrechten entfernt statt auf `deny` gesetzt. Auch andere Voice-Overwrite-Änderungen laufen über denselben gebündelten Kanal-Update-Pfad.
+
+**Wie es jetzt läuft:** Ein Preset oder Mindest-Rang wie `Phantom+` öffnet die passenden höheren Rang-Rollen sauber per Allow. Die Deny-Liste wird nicht mehr mit Rang-Rollen vollgeschrieben.
+
+## #176 — `!brain` beantwortet einfache Fragen wieder direkt
+
+**Ausgangslage:** `!brain` behandelte auch kurze Rechen- oder Mechanikfragen wie eine Build-Analyse. Dadurch kamen Antworten mit internen Vertrauenshinweisen, langen Verifikationsabschnitten und zusätzlichem Build-Gelaber, obwohl eigentlich nur ein kurzer Zahlenwert gefragt war.
+
+**Was wurde geändert:** Normale Brain-Fragen bekommen jetzt eigene Antwortregeln: erst die konkrete Antwort, bei Rechnungen nur die kurze Formel plus Ergebnis, keine internen Datenquellen, keine Vertrauens-Legende und keine Build-Tipps ohne Build-Frage. Die ausführlicheren Build-Regeln greifen nur noch bei echten Build-Fragen.
+
+**Wie es jetzt läuft:** Eine Frage wie „ab wie viel Spirit ist der Schaden wieder gleich?" wird knapp beantwortet, statt in eine halbe Faktenprüfung auszuarten. Builds bleiben weiterhin strukturiert, aber ohne sichtbare interne Markierungen.
+
+## #175 — Scam-Guard meldet ehrlich und greift wieder durch
+
+**Ausgangslage:** Der Scam-Guard erkannte Bild-Scam korrekt, lief live aber im Shadow-Modus. Dadurch standen in der Mod-Meldung „Ban failed", „Deleted: 0" und ein Timeout-Button, obwohl keine automatische Aktion ausgeführt wurde. Außerdem konnten schnelle Folgeposts desselben Accounts mehrere fast gleiche Mod-Meldungen auslösen, und bei bildlosen Textvorschauen war nicht klar genug sichtbar, in welchen Kanälen der Scam stand.
+
+**Was wurde geändert:** Der Guard läuft standardmäßig wieder im Durchsetzungsmodus; Shadow muss jetzt bewusst gesetzt werden. Nach einem Fall gibt es einen kurzen User-Cooldown gegen Alert-Spam. Mod-Meldungen zeigen Fundorte mit Kanal und Sprunglink, unterscheiden Shadow sauber von echten Fehlversuchen und zeigen den Timeout-Aufheben-Button nur noch bei echten Timeout-Fällen. Fehler beim Bannen, Timeouten oder Löschen landen mit Discord-Fehler im Log.
+
+**Wie es jetzt läuft:** Neue Treffer werden automatisch ausgeführt statt nur gemeldet. Mods sehen sofort, wo gepostet wurde, ob Löschung wirklich versucht wurde und welche manuelle Aktion noch sinnvoll ist.
+
+## #174 — Rollen-Entzug erkennt fehlende Discord-Mitglieder sauber
+
+**Ausgangslage:** Wenn Steam beim Aufräumen die Verified-Rolle entfernen wollte, Discord den Nutzer aber nicht mehr als Server-Mitglied kannte, meldete der Broker daraus fälschlich einen internen Fehler. Steam retryte deshalb alle paar Stunden, obwohl der Fall eigentlich abgeschlossen war.
+
+**Was wurde geändert:** Der Discord-Adapter erkennt `Unknown Member` beim Rollen-Entzug jetzt als „Mitglied nicht gefunden" und gibt diese Information sauber an den Broker weiter. Der Broker antwortet dadurch mit 404 statt 502.
+
+**Wie es jetzt läuft:** Steam kann solche Cleanup-Einträge bereinigen, statt sie immer wieder gegen den Broker laufen zu lassen. Echte Discord-/Broker-Fehler bleiben weiterhin Fehler.
+
 ## #173 — Coaching-Sperre ist für die Website direkt prüfbar
 
 **Ausgangslage:** Der Bot hatte die No-Show-Sperre bereits als Wahrheit in seiner Datenbank und blockierte gebannte Coaching-Anfragen beim Discord-Spiegeln. Die Website konnte diese Wahrheit am Formular-Eingang aber nicht selbst prüfen, weil ihre Coaching-Daten in einer eigenen Datenbank liegen.

@@ -8,15 +8,16 @@
 //! Twitch-Bot-Seite auftaucht — die zeitliche Nähe ist das Korrelationssignal.
 
 use std::collections::HashSet;
+use std::num::TryFromIntError;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::{Db, DbError};
+use chrono::{DateTime, Utc};
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
-use rusqlite::params;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
 use crate::matcher::{norm_key, similarity};
 use crate::twitch::TwitchApiClient;
@@ -37,6 +38,16 @@ const POLL_INTERVAL: Duration = Duration::from_secs(180);
 /// Absichten (gleicher Boden wie der Matcher).
 const FUZZY_FLOOR: f64 = 0.62;
 
+#[derive(Debug, thiserror::Error)]
+pub enum StreamerIntentError {
+    #[error(transparent)]
+    Sqlx(#[from] sqlx::Error),
+    #[error("Discord-ID {value} passt nicht in PostgreSQL BIGINT")]
+    DiscordIdOutOfRange { value: u64, source: TryFromIntError },
+    #[error("Unix-Zeitstempel ist ausserhalb des chrono-Bereichs: {0}")]
+    TimestampOutOfRange(i64),
+}
+
 /// Eine offene Verknüpfungs-Absicht.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamerIntent {
@@ -48,31 +59,27 @@ pub struct StreamerIntent {
 /// Store über `streamer_link_intents`.
 #[derive(Clone)]
 pub struct StreamerIntents {
-    db: Db,
+    pool: PgPool,
 }
 
 impl StreamerIntents {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    /// Legt die Tabelle an (idempotent).
-    pub async fn ensure_schema(&self) -> Result<(), DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS streamer_link_intents(
-                       discord_id   INTEGER PRIMARY KEY,
-                       discord_name TEXT NOT NULL,
-                       created_at   INTEGER NOT NULL,
-                       expires_at   INTEGER NOT NULL,
-                       status       TEXT NOT NULL DEFAULT 'pending',
-                       linked_login TEXT
-                     );",
-                )?;
-                Ok(())
-            })
-            .await
+    /// Prüft, dass die zentrale Migration die Tabelle bereitgestellt hat.
+    pub async fn ensure_schema(&self) -> Result<(), StreamerIntentError> {
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM bot.streamer_link_intents
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Merkt sich (oder erneuert) die Absicht eines Users, Streamer zu werden.
@@ -82,83 +89,126 @@ impl StreamerIntents {
         discord_id: u64,
         discord_name: String,
         now: i64,
-    ) -> Result<(), DbError> {
-        let expires = now + INTENT_TTL_SECS;
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO streamer_link_intents
-                       (discord_id, discord_name, created_at, expires_at, status, linked_login)
-                     VALUES (?1, ?2, ?3, ?4, 'pending', NULL)
-                     ON CONFLICT(discord_id) DO UPDATE SET
-                       discord_name = excluded.discord_name,
-                       created_at   = excluded.created_at,
-                       expires_at   = excluded.expires_at,
-                       status       = 'pending',
-                       linked_login = NULL",
-                    params![discord_id, discord_name, now, expires],
-                )
-                .map(|_| ())
-            })
-            .await
+    ) -> Result<(), StreamerIntentError> {
+        let discord_id = discord_id_to_i64(discord_id)?;
+        let created_at = utc_from_unix_seconds(now)?;
+        let expires_at = expires_at_from(now)?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO bot.streamer_link_intents
+                (discord_id, discord_name, created_at, expires_at, status, linked_login)
+            VALUES ($1, $2, $3, $4, 'pending', NULL)
+            ON CONFLICT (discord_id) DO UPDATE
+            SET discord_name = EXCLUDED.discord_name,
+                created_at = EXCLUDED.created_at,
+                expires_at = EXCLUDED.expires_at,
+                status = 'pending',
+                linked_login = NULL
+            "#,
+            discord_id,
+            discord_name,
+            created_at,
+            expires_at,
+        )
+        .execute(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Noch offene Absichten im Fenster (jüngste zuerst — wer gerade `/streamer`
     /// gemacht hat, ist am wahrscheinlichsten der, der gerade autorisiert).
     pub async fn pending_intents(&self, now: i64) -> Vec<StreamerIntent> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT discord_id, discord_name, created_at
-                       FROM streamer_link_intents
-                      WHERE status = 'pending' AND expires_at >= ?1
-                      ORDER BY created_at DESC",
-                )?;
-                let rows = stmt.query_map(params![now], |r| {
-                    Ok(StreamerIntent {
-                        discord_id: r.get::<_, i64>(0)? as u64,
-                        discord_name: r.get(1)?,
-                        created_at: r.get(2)?,
+        let Ok(now) = utc_from_unix_seconds(now) else {
+            return Vec::new();
+        };
+
+        let rows = sqlx::query!(
+            r#"
+            SELECT discord_id, discord_name, created_at
+            FROM bot.streamer_link_intents
+            WHERE status = 'pending'
+              AND expires_at >= $1
+            ORDER BY created_at DESC
+            "#,
+            now,
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        match rows {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|row| {
+                    let discord_id = u64::try_from(row.discord_id).ok()?;
+                    Some(StreamerIntent {
+                        discord_id,
+                        discord_name: row.discord_name,
+                        created_at: row.created_at.timestamp(),
                     })
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Markiert eine Absicht als verknüpft (vom Watcher aufgerufen).
     pub async fn mark_linked(&self, discord_id: u64, login: &str) {
+        let Ok(discord_id) = discord_id_to_i64(discord_id) else {
+            return;
+        };
         let login = login.to_string();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE streamer_link_intents
-                        SET status = 'linked', linked_login = ?2
-                      WHERE discord_id = ?1",
-                    params![discord_id, login],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE bot.streamer_link_intents
+            SET status = 'linked',
+                linked_login = $2
+            WHERE discord_id = $1
+            "#,
+            discord_id,
+            login,
+        )
+        .execute(&self.pool)
+        .await;
     }
 
     /// Schließt abgelaufene Absichten (`pending` → `expired`).
     pub async fn expire_old(&self, now: i64) {
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE streamer_link_intents
-                        SET status = 'expired'
-                      WHERE status = 'pending' AND expires_at < ?1",
-                    params![now],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Ok(now) = utc_from_unix_seconds(now) else {
+            return;
+        };
+
+        let _ = sqlx::query!(
+            r#"
+            UPDATE bot.streamer_link_intents
+            SET status = 'expired'
+            WHERE status = 'pending'
+              AND expires_at < $1
+            "#,
+            now,
+        )
+        .execute(&self.pool)
+        .await;
     }
+}
+
+fn discord_id_to_i64(discord_id: u64) -> Result<i64, StreamerIntentError> {
+    i64::try_from(discord_id).map_err(|source| StreamerIntentError::DiscordIdOutOfRange {
+        value: discord_id,
+        source,
+    })
+}
+
+fn utc_from_unix_seconds(value: i64) -> Result<DateTime<Utc>, StreamerIntentError> {
+    DateTime::from_timestamp(value, 0).ok_or(StreamerIntentError::TimestampOutOfRange(value))
+}
+
+fn expires_at_from(now: i64) -> Result<DateTime<Utc>, StreamerIntentError> {
+    let expires = now
+        .checked_add(INTENT_TTL_SECS)
+        .ok_or(StreamerIntentError::TimestampOutOfRange(now))?;
+    utc_from_unix_seconds(expires)
 }
 
 struct StreamerHandler {
@@ -314,60 +364,134 @@ pub fn spawn_watcher(
 mod tests {
     use super::*;
 
-    async fn mk() -> (tempfile::TempDir, StreamerIntents) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("s.sqlite3")).expect("db");
-        let intents = StreamerIntents::new(db);
+    #[cfg(feature = "testing")]
+    async fn mk() -> Result<(dl_central_db::TestDb, StreamerIntents), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let intents = StreamerIntents::new(db.pool().clone());
         intents.ensure_schema().await.expect("schema");
-        (dir, intents)
+        Ok((db, intents))
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn record_und_pending() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn record_und_pending() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         let now = 1_000_000_000;
-        store.record_intent(42, "Alice".into(), now).await.unwrap();
+        store.record_intent(42, "Alice".into(), now).await?;
         let pending = store.pending_intents(now).await;
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].discord_id, 42);
         assert_eq!(pending[0].discord_name, "Alice");
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn abgelaufene_fallen_aus_dem_fenster() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn abgelaufene_fallen_aus_dem_fenster() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         let now = 1_000_000_000;
-        store.record_intent(7, "Bob".into(), now).await.unwrap();
+        store.record_intent(7, "Bob".into(), now).await?;
         // 1 Sekunde nach Ablauf des 1-h-Fensters.
         let later = now + INTENT_TTL_SECS + 1;
         assert!(store.pending_intents(later).await.is_empty());
         store.expire_old(later).await;
         // Auch nach expire_old bleibt sie draußen (jetzt status='expired').
         assert!(store.pending_intents(now).await.is_empty());
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn mark_linked_entfernt_aus_pending() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn mark_linked_entfernt_aus_pending() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         let now = 1_000_000_000;
-        store.record_intent(5, "Cara".into(), now).await.unwrap();
+        store.record_intent(5, "Cara".into(), now).await?;
         store.mark_linked(5, "cara_ttv").await;
         assert!(store.pending_intents(now).await.is_empty());
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn erneuter_aufruf_frischt_fenster_auf() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn erneuter_aufruf_frischt_fenster_auf() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         let first = 1_000_000_000;
-        store.record_intent(9, "Dee".into(), first).await.unwrap();
+        store.record_intent(9, "Dee".into(), first).await?;
         // Kurz vor Ablauf erneut /streamer → Fenster startet neu.
         let again = first + INTENT_TTL_SECS - 10;
-        store.record_intent(9, "Dee".into(), again).await.unwrap();
+        store.record_intent(9, "Dee".into(), again).await?;
         // Zu einem Zeitpunkt, der nur dank Auffrischung noch im Fenster liegt.
         let check = first + INTENT_TTL_SECS + 100;
         let pending = store.pending_intents(check).await;
-        assert_eq!(pending.len(), 1, "Fenster wurde durch den 2. Aufruf erneuert");
+        assert_eq!(
+            pending.len(),
+            1,
+            "Fenster wurde durch den 2. Aufruf erneuert"
+        );
         assert_eq!(pending[0].created_at, again);
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn zu_grosse_discord_id_schreibt_keine_absicht() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, store) = mk().await?;
+        let too_large = i64::MAX as u64 + 1;
+
+        let err = store
+            .record_intent(too_large, "Overflow".into(), 1_000_000_000)
+            .await
+            .expect_err("discord id above PG BIGINT must fail");
+
+        assert!(matches!(
+            err,
+            StreamerIntentError::DiscordIdOutOfRange { value, .. } if value == too_large
+        ));
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM bot.streamer_link_intents
+            "#
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(row.count, 0);
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn pg_constraint_rejects_missing_discord_name() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, _store) = mk().await?;
+        let now = utc_from_unix_seconds(1_000_000_000)?;
+        let expires_at = expires_at_from(1_000_000_000)?;
+
+        let err = sqlx::query!(
+            r#"
+            INSERT INTO bot.streamer_link_intents
+                (discord_id, discord_name, created_at, expires_at)
+            VALUES ($1, $2, $3, $4)
+            "#,
+            1_i64,
+            Option::<&str>::None,
+            now,
+            expires_at,
+        )
+        .execute(db.pool())
+        .await
+        .expect_err("discord_name NOT NULL constraint must reject NULL");
+
+        let code = err.as_database_error().and_then(|db_err| db_err.code());
+        assert_eq!(code.as_deref(), Some("23502"));
+        Ok(())
     }
 
     fn intent(id: u64, name: &str) -> StreamerIntent {
