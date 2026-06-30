@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use serenity::all::{GuildId, Http, InviteCreateEvent, Member};
+use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -31,10 +32,9 @@ struct InviteSnap {
 }
 
 /// Pro-Gilde-Cache der Invite-Stände (`code → Snapshot`).
-#[derive(Default)]
 pub struct InviteTracker {
     by_guild: Mutex<HashMap<u64, HashMap<String, InviteSnap>>>,
-    db: Option<dl_db::Db>,
+    pool: PgPool,
 }
 
 fn should_retry_join_source(has_baseline: bool, kind: &str) -> bool {
@@ -127,14 +127,10 @@ fn classify_snapshots(
 }
 
 impl InviteTracker {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn with_db(db: dl_db::Db) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
             by_guild: Mutex::new(HashMap::new()),
-            db: Some(db),
+            pool,
         }
     }
 
@@ -163,37 +159,37 @@ impl InviteTracker {
     }
 
     async fn load_snapshot_from_db(&self, guild_id: u64) -> Option<HashMap<String, InviteSnap>> {
-        let db = self.db.clone()?;
-        db.read(move |conn| {
-            use rusqlite::OptionalExtension;
-            let raw: Option<String> = conn
-                .query_row(
-                    "SELECT snapshot_json FROM invite_snapshot_cache WHERE guild_id=?1",
-                    [guild_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            let Some(raw) = raw else {
-                return Ok(None);
-            };
-            let value: Value = match serde_json::from_str(&raw) {
-                Ok(value) => value,
-                Err(_) => return Ok(None),
-            };
-            let invites = value
-                .get("invites")
-                .cloned()
-                .and_then(|v| serde_json::from_value::<HashMap<String, InviteSnap>>(v).ok());
-            Ok(invites)
-        })
+        let guild_id = i64::try_from(guild_id).ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT snapshot_json::text AS "snapshot_json!"
+            FROM bot.invite_snapshot_cache
+            WHERE guild_id = $1
+            "#,
+            guild_id,
+        )
+        .fetch_optional(&self.pool)
         .await
-        .ok()
-        .flatten()
+        .ok()?;
+
+        let raw = row?.snapshot_json;
+        let value: Value = match serde_json::from_str(&raw) {
+            Ok(value) => value,
+            Err(_) => return None,
+        };
+        value
+            .get("invites")
+            .cloned()
+            .and_then(|v| serde_json::from_value::<HashMap<String, InviteSnap>>(v).ok())
     }
 
     async fn save_snapshot_to_db(&self, guild_id: u64, snapshot: &HashMap<String, InviteSnap>) {
-        let Some(db) = self.db.clone() else {
-            return;
+        let guild_id = match i64::try_from(guild_id) {
+            Ok(guild_id) => guild_id,
+            Err(err) => {
+                tracing::debug!(%err, guild_id, "Invite-Snapshot-Guild-ID passt nicht in BIGINT");
+                return;
+            }
         };
         let payload = serde_json::json!({
             "invites": snapshot,
@@ -202,19 +198,19 @@ impl InviteTracker {
         let Ok(payload) = serde_json::to_string(&payload) else {
             return;
         };
-        let result = db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO invite_snapshot_cache(guild_id, snapshot_json, updated_at)
-                     VALUES(?1, ?2, datetime('now'))
-                     ON CONFLICT(guild_id) DO UPDATE SET
-                       snapshot_json=excluded.snapshot_json,
-                       updated_at=excluded.updated_at",
-                    rusqlite::params![guild_id, payload],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO bot.invite_snapshot_cache (guild_id, snapshot_json, updated_at)
+            VALUES ($1, $2::text::jsonb, now())
+            ON CONFLICT (guild_id) DO UPDATE SET
+              snapshot_json = EXCLUDED.snapshot_json,
+              updated_at = EXCLUDED.updated_at
+            "#,
+            guild_id,
+            payload,
+        )
+        .execute(&self.pool)
+        .await;
         if let Err(err) = result {
             tracing::debug!(%err, guild_id, "Invite-Snapshot konnte nicht persistiert werden");
         }
@@ -334,25 +330,19 @@ impl InviteTracker {
 mod tests {
     use super::*;
 
-    async fn invite_db() -> (tempfile::TempDir, dl_db::Db) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("invites.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE invite_snapshot_cache(guild_id INTEGER NOT NULL PRIMARY KEY, snapshot_json TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')))",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("ddl");
-        (dir, db)
+    #[cfg(feature = "testing")]
+    async fn invite_db() -> dl_central_db::TestDb {
+        dl_central_db::testing::test_pool()
+            .await
+            .expect("central test db")
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn snapshot_cache_roundtrip_in_db() {
-        let (_dir, db) = invite_db().await;
-        let tracker = InviteTracker::with_db(db);
+        let db = invite_db().await;
+        let tracker = InviteTracker::new(db.pool().clone());
         let mut snapshot = HashMap::new();
         snapshot.insert(
             "abc".to_string(),
@@ -372,6 +362,52 @@ mod tests {
         assert_eq!(restored.get("abc").map(|snap| snap.uses), Some(7));
         tracker.restore_from_db(1).await;
         assert!(tracker.by_guild.lock().await.contains_key(&1));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn snapshot_cache_missing_guild_returns_none_in_db() {
+        let db = invite_db().await;
+        let tracker = InviteTracker::new(db.pool().clone());
+        let missing_guild_id = 9_876_543_210_u64;
+
+        assert!(tracker
+            .load_snapshot_from_db(missing_guild_id)
+            .await
+            .is_none());
+        assert!(!tracker.restore_from_db(missing_guild_id).await);
+        assert!(!tracker
+            .by_guild
+            .lock()
+            .await
+            .contains_key(&missing_guild_id));
+
+        let mut snapshot = HashMap::new();
+        snapshot.insert(
+            "negative-path-jsonb".to_string(),
+            InviteSnap {
+                uses: 1,
+                url: "https://discord.gg/negative-path-jsonb".to_string(),
+                inviter_id: None,
+                inviter_name: String::new(),
+                inviter_bot: false,
+                channel_id: None,
+                channel_name: String::new(),
+            },
+        );
+
+        tracker
+            .save_snapshot_to_db(missing_guild_id, &snapshot)
+            .await;
+        let snapshot_json_type: String = sqlx::query_scalar(
+            "SELECT jsonb_typeof(snapshot_json) FROM bot.invite_snapshot_cache WHERE guild_id = $1",
+        )
+        .bind(i64::try_from(missing_guild_id).expect("test guild id fits bigint"))
+        .fetch_one(db.pool())
+        .await
+        .expect("snapshot_json type");
+        assert_eq!(snapshot_json_type, "object");
     }
 
     #[test]
