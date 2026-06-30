@@ -1,0 +1,19 @@
+[tables.fixture_users.columns.discord_id]
+status = "mapped"
+to = "core.users.discord_id"
+
+[tables.fixture_users.columns.username]
+status = "mapped"
+to = "core.users.username"
+
+[tables.fixture_users.columns.created_at]
+status = "mapped"
+to = "core.users.first_seen"
+
+[tables.fixture_users.columns.is_verified]
+status = "mapped"
+to = "core.steam_links.verified"
+
+[tables.fixture_users.columns.raw_json]
+status = "mapped"
+to = "core.users.raw"
