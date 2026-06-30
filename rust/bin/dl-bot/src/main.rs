@@ -441,7 +441,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         "SecurityGuard Enforcement-Modus gelesen (SECURITY_GUARD_ENFORCE)"
     );
     let security_guard = dl_moderation::guard::SecurityGuard::new_with_config(
-        db.clone(),
+        central_pool.clone(),
         guard_client
             .clone()
             .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
@@ -653,7 +653,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .clone()
             .map(|c| c as Arc<dyn dl_ai::VisionGenerator>);
         let moderator = dl_moderation::AiModerator::new(
-            db.clone(),
+            central_pool.clone(),
             client as Arc<dyn dl_ai::TextGenerator>,
             vision,
             Arc::new(modglue::ModGlue {

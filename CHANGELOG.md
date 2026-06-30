@@ -1,3 +1,11 @@
+## #176 — Bot-Build nutzt die zentrale Moderations-Datenbank
+
+**Ausgangslage:** Der Rust-Bot konnte auf dem aktuellen Branch nicht als Release-Binary gebaut werden, weil zwei Moderations-Bausteine noch die alte lokale Datenbank-Verbindung bekamen. Die Moderation erwartet inzwischen die zentrale Datenbank-Verbindung.
+
+**Was wurde geändert:** Security-Guard und AI-Moderation werden beim Start mit der zentralen Datenbank-Verbindung verdrahtet. Das passt zur bereits umgestellten Moderationsschicht.
+
+**Wie es jetzt läuft:** Der Rust-Bot baut wieder als Release-Binary und kann nach Voice-Änderungen sauber neu deployed werden.
+
 ## #175 — Rang-Lanes schreiben Rechte gebündelt
 
 **Ausgangslage:** Beim Mindest-Rang und beim Laden eines Presets wurden Rang-Rollen einzeln angefasst und niedrigere Rollen aktiv gesperrt. Das passte nicht zu den Comp-Lanes, die über erlaubte Rang-Rollen funktionieren: Bei `Phantom+` müssen Phantom, Ascendant und Eternus rein dürfen, nicht die unteren Rollen als Deny-Liste landen.
