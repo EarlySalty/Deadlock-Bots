@@ -1,0 +1,491 @@
+[tables.member_events.columns.id]
+status = "mapped"
+to = "activity.member_events.id"
+
+[tables.member_events.columns.user_id]
+status = "mapped"
+to = "activity.member_events.user_id"
+
+[tables.member_events.columns.guild_id]
+status = "mapped"
+to = "activity.member_events.guild_id"
+
+[tables.member_events.columns.event_type]
+status = "mapped"
+to = "activity.member_events.event_type"
+
+[tables.member_events.columns.timestamp]
+status = "mapped"
+to = "activity.member_events.occurred_at"
+
+[tables.member_events.columns.display_name]
+status = "mapped"
+to = "activity.member_events.display_name"
+
+[tables.member_events.columns.account_created_at]
+status = "mapped"
+to = "activity.member_events.account_created_at"
+
+[tables.member_events.columns.join_position]
+status = "mapped"
+to = "activity.member_events.join_position"
+
+[tables.member_events.columns.metadata]
+status = "mapped"
+to = "activity.member_events.metadata"
+
+[tables.member_leave_surveys.columns.id]
+status = "mapped"
+to = "activity.member_leave_surveys.id"
+
+[tables.member_leave_surveys.columns.user_id]
+status = "mapped"
+to = "activity.member_leave_surveys.user_id"
+
+[tables.member_leave_surveys.columns.guild_id]
+status = "mapped"
+to = "activity.member_leave_surveys.guild_id"
+
+[tables.member_leave_surveys.columns.left_at]
+status = "mapped"
+to = "activity.member_leave_surveys.left_at"
+
+[tables.member_leave_surveys.columns.display_name]
+status = "mapped"
+to = "activity.member_leave_surveys.display_name"
+
+[tables.member_leave_surveys.columns.user_bucket]
+status = "mapped"
+to = "activity.member_leave_surveys.user_bucket"
+
+[tables.member_leave_surveys.columns.days_on_server]
+status = "mapped"
+to = "activity.member_leave_surveys.days_on_server"
+
+[tables.member_leave_surveys.columns.survey_token]
+status = "mapped"
+to = "activity.member_leave_surveys.survey_token"
+
+[tables.member_leave_surveys.columns.dm_status]
+status = "mapped"
+to = "activity.member_leave_surveys.dm_status"
+
+[tables.member_leave_surveys.columns.reason_code]
+status = "mapped"
+to = "activity.member_leave_surveys.reason_code"
+
+[tables.member_leave_surveys.columns.follow_up_question]
+status = "mapped"
+to = "activity.member_leave_surveys.follow_up_question"
+
+[tables.member_leave_surveys.columns.follow_up_text]
+status = "mapped"
+to = "activity.member_leave_surveys.follow_up_text"
+
+[tables.member_leave_surveys.columns.extra_text]
+status = "mapped"
+to = "activity.member_leave_surveys.extra_text"
+
+[tables.member_leave_surveys.columns.responded_at]
+status = "mapped"
+to = "activity.member_leave_surveys.responded_at"
+
+[tables.member_leave_surveys.columns.web_submitted_at]
+status = "mapped"
+to = "activity.member_leave_surveys.web_submitted_at"
+
+[tables.member_leave_surveys.columns.web_payload]
+status = "mapped"
+to = "activity.member_leave_surveys.web_payload"
+
+[tables.member_leave_surveys.columns.created_at]
+status = "mapped"
+to = "activity.member_leave_surveys.created_at"
+
+[tables.message_activity.columns.user_id]
+status = "mapped"
+to = "activity.message_activity.user_id"
+
+[tables.message_activity.columns.guild_id]
+status = "mapped"
+to = "activity.message_activity.guild_id"
+
+[tables.message_activity.columns.channel_id]
+status = "mapped"
+to = "activity.message_activity.channel_id"
+
+[tables.message_activity.columns.message_count]
+status = "mapped"
+to = "activity.message_activity.message_count"
+
+[tables.message_activity.columns.last_message_at]
+status = "mapped"
+to = "activity.message_activity.last_message_at"
+
+[tables.message_activity.columns.first_message_at]
+status = "mapped"
+to = "activity.message_activity.first_message_at"
+
+[tables.text_conversation_log.columns.id]
+status = "mapped"
+to = "activity.text_conversation_log.id"
+
+[tables.text_conversation_log.columns.user_id]
+status = "mapped"
+to = "activity.text_conversation_log.user_id"
+
+[tables.text_conversation_log.columns.guild_id]
+status = "mapped"
+to = "activity.text_conversation_log.guild_id"
+
+[tables.text_conversation_log.columns.channel_id]
+status = "mapped"
+to = "activity.text_conversation_log.channel_id"
+
+[tables.text_conversation_log.columns.started_at]
+status = "mapped"
+to = "activity.text_conversation_log.started_at"
+
+[tables.text_conversation_log.columns.ended_at]
+status = "mapped"
+to = "activity.text_conversation_log.ended_at"
+
+[tables.text_conversation_log.columns.message_count]
+status = "mapped"
+to = "activity.text_conversation_log.message_count"
+
+[tables.text_conversation_log.columns.points]
+status = "mapped"
+to = "activity.text_conversation_log.points"
+
+[tables.text_conversation_log.columns.co_participant_ids]
+status = "mapped"
+to = "activity.text_conversation_log.co_participant_ids"
+
+[tables.text_conversation_log.columns.had_interaction]
+status = "mapped"
+to = "activity.text_conversation_log.had_interaction"
+
+[tables.text_stats.columns.user_id]
+status = "mapped"
+to = "activity.text_stats.user_id"
+
+[tables.text_stats.columns.total_messages]
+status = "mapped"
+to = "activity.text_stats.total_messages"
+
+[tables.text_stats.columns.total_points]
+status = "mapped"
+to = "activity.text_stats.total_points"
+
+[tables.text_stats.columns.last_update]
+status = "mapped"
+to = "activity.text_stats.last_update"
+
+[tables.user_activity_patterns.columns.user_id]
+status = "mapped"
+to = "activity.user_activity_patterns.user_id"
+
+[tables.user_activity_patterns.columns.typical_hours]
+status = "mapped"
+to = "activity.user_activity_patterns.typical_hours"
+
+[tables.user_activity_patterns.columns.typical_days]
+status = "mapped"
+to = "activity.user_activity_patterns.typical_days"
+
+[tables.user_activity_patterns.columns.activity_score_2w]
+status = "mapped"
+to = "activity.user_activity_patterns.activity_score_2w"
+
+[tables.user_activity_patterns.columns.sessions_count_2w]
+status = "mapped"
+to = "activity.user_activity_patterns.sessions_count_2w"
+
+[tables.user_activity_patterns.columns.total_minutes_2w]
+status = "mapped"
+to = "activity.user_activity_patterns.total_minutes_2w"
+
+[tables.user_activity_patterns.columns.last_active_at]
+status = "mapped"
+to = "activity.user_activity_patterns.last_active_at"
+
+[tables.user_activity_patterns.columns.last_analyzed_at]
+status = "mapped"
+to = "activity.user_activity_patterns.last_analyzed_at"
+
+[tables.user_activity_patterns.columns.last_pinged_at]
+status = "mapped"
+to = "activity.user_activity_patterns.last_pinged_at"
+
+[tables.user_activity_patterns.columns.ping_count_30d]
+status = "mapped"
+to = "activity.user_activity_patterns.ping_count_30d"
+
+[tables.user_co_players.columns.user_id]
+status = "mapped"
+to = "activity.user_co_players.user_id"
+
+[tables.user_co_players.columns.co_player_id]
+status = "mapped"
+to = "activity.user_co_players.co_player_id"
+
+[tables.user_co_players.columns.sessions_together]
+status = "mapped"
+to = "activity.user_co_players.sessions_together"
+
+[tables.user_co_players.columns.total_minutes_together]
+status = "mapped"
+to = "activity.user_co_players.total_minutes_together"
+
+[tables.user_co_players.columns.last_played_together]
+status = "mapped"
+to = "activity.user_co_players.last_played_together"
+
+[tables.user_co_players.columns.user_display_name]
+status = "mapped"
+to = "activity.user_co_players.user_display_name"
+
+[tables.user_co_players.columns.co_player_display_name]
+status = "mapped"
+to = "activity.user_co_players.co_player_display_name"
+
+[tables.user_retention_messages.columns.id]
+status = "mapped"
+to = "activity.user_retention_messages.id"
+
+[tables.user_retention_messages.columns.user_id]
+status = "mapped"
+to = "activity.user_retention_messages.user_id"
+
+[tables.user_retention_messages.columns.guild_id]
+status = "mapped"
+to = "activity.user_retention_messages.guild_id"
+
+[tables.user_retention_messages.columns.message_type]
+status = "mapped"
+to = "activity.user_retention_messages.message_type"
+
+[tables.user_retention_messages.columns.sent_at]
+status = "mapped"
+to = "activity.user_retention_messages.sent_at"
+
+[tables.user_retention_messages.columns.delivery_status]
+status = "mapped"
+to = "activity.user_retention_messages.delivery_status"
+
+[tables.user_retention_messages.columns.error_message]
+status = "mapped"
+to = "activity.user_retention_messages.error_message"
+
+[tables.user_retention_tracking.columns.user_id]
+status = "mapped"
+to = "activity.user_retention_tracking.user_id"
+
+[tables.user_retention_tracking.columns.guild_id]
+status = "mapped"
+to = "activity.user_retention_tracking.guild_id"
+
+[tables.user_retention_tracking.columns.first_seen_at]
+status = "mapped"
+to = "activity.user_retention_tracking.first_seen_at"
+
+[tables.user_retention_tracking.columns.last_active_at]
+status = "mapped"
+to = "activity.user_retention_tracking.last_active_at"
+
+[tables.user_retention_tracking.columns.total_active_days]
+status = "mapped"
+to = "activity.user_retention_tracking.total_active_days"
+
+[tables.user_retention_tracking.columns.avg_weekly_sessions]
+status = "mapped"
+to = "activity.user_retention_tracking.avg_weekly_sessions"
+
+[tables.user_retention_tracking.columns.last_miss_you_sent_at]
+status = "mapped"
+to = "activity.user_retention_tracking.last_miss_you_sent_at"
+
+[tables.user_retention_tracking.columns.miss_you_count]
+status = "mapped"
+to = "activity.user_retention_tracking.miss_you_count"
+
+[tables.user_retention_tracking.columns.opted_out]
+status = "mapped"
+to = "activity.user_retention_tracking.opted_out"
+
+[tables.user_retention_tracking.columns.updated_at]
+status = "mapped"
+to = "activity.user_retention_tracking.updated_at"
+
+[tables.voice_feedback_requests.columns.id]
+status = "mapped"
+to = "activity.voice_feedback_requests.id"
+
+[tables.voice_feedback_requests.columns.user_id]
+status = "mapped"
+to = "activity.voice_feedback_requests.user_id"
+
+[tables.voice_feedback_requests.columns.guild_id]
+status = "mapped"
+to = "activity.voice_feedback_requests.guild_id"
+
+[tables.voice_feedback_requests.columns.channel_id]
+status = "mapped"
+to = "activity.voice_feedback_requests.channel_id"
+
+[tables.voice_feedback_requests.columns.channel_name]
+status = "mapped"
+to = "activity.voice_feedback_requests.channel_name"
+
+[tables.voice_feedback_requests.columns.co_player_names]
+status = "mapped"
+to = "activity.voice_feedback_requests.co_player_names"
+
+[tables.voice_feedback_requests.columns.duration_seconds]
+status = "mapped"
+to = "activity.voice_feedback_requests.duration_seconds"
+
+[tables.voice_feedback_requests.columns.request_type]
+status = "mapped"
+to = "activity.voice_feedback_requests.request_type"
+
+[tables.voice_feedback_requests.columns.status]
+status = "mapped"
+to = "activity.voice_feedback_requests.status"
+
+[tables.voice_feedback_requests.columns.error_message]
+status = "mapped"
+to = "activity.voice_feedback_requests.error_message"
+
+[tables.voice_feedback_requests.columns.prompt_message_id]
+status = "mapped"
+to = "activity.voice_feedback_requests.prompt_message_id"
+
+[tables.voice_feedback_requests.columns.sent_at_ts]
+status = "mapped"
+to = "activity.voice_feedback_requests.sent_at"
+
+[tables.voice_feedback_responses.columns.id]
+status = "mapped"
+to = "activity.voice_feedback_responses.id"
+
+[tables.voice_feedback_responses.columns.request_id]
+status = "mapped"
+to = "activity.voice_feedback_responses.request_id"
+
+[tables.voice_feedback_responses.columns.user_id]
+status = "mapped"
+to = "activity.voice_feedback_responses.user_id"
+
+[tables.voice_feedback_responses.columns.message_id]
+status = "mapped"
+to = "activity.voice_feedback_responses.message_id"
+
+[tables.voice_feedback_responses.columns.content]
+status = "mapped"
+to = "activity.voice_feedback_responses.content"
+
+[tables.voice_feedback_responses.columns.received_at_ts]
+status = "mapped"
+to = "activity.voice_feedback_responses.received_at"
+
+[tables.voice_session_log.columns.id]
+status = "mapped"
+to = "activity.voice_session_log.id"
+
+[tables.voice_session_log.columns.user_id]
+status = "mapped"
+to = "activity.voice_session_log.user_id"
+
+[tables.voice_session_log.columns.guild_id]
+status = "mapped"
+to = "activity.voice_session_log.guild_id"
+
+[tables.voice_session_log.columns.channel_id]
+status = "mapped"
+to = "activity.voice_session_log.channel_id"
+
+[tables.voice_session_log.columns.channel_name]
+status = "mapped"
+to = "activity.voice_session_log.channel_name"
+
+[tables.voice_session_log.columns.started_at]
+status = "mapped"
+to = "activity.voice_session_log.started_at"
+
+[tables.voice_session_log.columns.ended_at]
+status = "mapped"
+to = "activity.voice_session_log.ended_at"
+
+[tables.voice_session_log.columns.duration_seconds]
+status = "mapped"
+to = "activity.voice_session_log.duration_seconds"
+
+[tables.voice_session_log.columns.points]
+status = "mapped"
+to = "activity.voice_session_log.points"
+
+[tables.voice_session_log.columns.peak_users]
+status = "mapped"
+to = "activity.voice_session_log.peak_users"
+
+[tables.voice_session_log.columns.user_counts_json]
+status = "mapped"
+to = "activity.voice_session_log.user_counts"
+
+[tables.voice_session_log.columns.display_name]
+status = "mapped"
+to = "activity.voice_session_log.display_name"
+
+[tables.voice_session_log.columns.co_player_ids]
+status = "mapped"
+to = "activity.voice_session_log.co_player_ids"
+
+[tables.live_player_state.columns.steam_id]
+status = "mapped"
+to = "activity.live_player_state.steam_id"
+
+[tables.live_player_state.columns.last_gameid]
+status = "mapped"
+to = "activity.live_player_state.last_gameid"
+
+[tables.live_player_state.columns.last_server_id]
+status = "mapped"
+to = "activity.live_player_state.last_server_id"
+
+[tables.live_player_state.columns.last_seen_ts]
+status = "mapped"
+to = "activity.live_player_state.last_seen_at"
+
+[tables.live_player_state.columns.in_deadlock_now]
+status = "mapped"
+to = "activity.live_player_state.in_deadlock_now"
+
+[tables.live_player_state.columns.in_match_now_strict]
+status = "mapped"
+to = "activity.live_player_state.in_match_now_strict"
+
+[tables.live_player_state.columns.deadlock_stage]
+status = "mapped"
+to = "activity.live_player_state.deadlock_stage"
+
+[tables.live_player_state.columns.deadlock_minutes]
+status = "mapped"
+to = "activity.live_player_state.deadlock_minutes"
+
+[tables.live_player_state.columns.deadlock_localized]
+status = "mapped"
+to = "activity.live_player_state.deadlock_localized"
+
+[tables.live_player_state.columns.deadlock_hero]
+status = "mapped"
+to = "activity.live_player_state.deadlock_hero"
+
+[tables.live_player_state.columns.deadlock_party_hint]
+status = "mapped"
+to = "activity.live_player_state.deadlock_party_hint"
+
+[tables.live_player_state.columns.deadlock_updated_at]
+status = "mapped"
+to = "activity.live_player_state.deadlock_updated_at"

@@ -1,0 +1,379 @@
+[tables.deadlock_heroes.columns.id]
+status = "mapped"
+to = "tierlist.deadlock_heroes.id"
+
+[tables.deadlock_heroes.columns.hero_id]
+status = "mapped"
+to = "tierlist.deadlock_heroes.hero_id"
+
+[tables.deadlock_heroes.columns.name]
+status = "mapped"
+to = "tierlist.deadlock_heroes.name"
+
+[tables.deadlock_heroes.columns.origin_build_id]
+status = "mapped"
+to = "tierlist.deadlock_heroes.origin_build_id"
+
+[tables.deadlock_heroes.columns.is_active]
+status = "mapped"
+to = "tierlist.deadlock_heroes.is_active"
+
+[tables.deadlock_heroes.columns.created_at]
+status = "mapped"
+to = "tierlist.deadlock_heroes.created_at"
+
+[tables.deadlock_heroes.columns.updated_at]
+status = "mapped"
+to = "tierlist.deadlock_heroes.updated_at"
+
+[tables.deadlock_heroes.columns.target_build_name_override]
+status = "mapped"
+to = "tierlist.deadlock_heroes.target_build_name_override"
+
+[tables.deadlock_hero_builds.columns.id]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.id"
+
+[tables.deadlock_hero_builds.columns.hero_id]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.hero_id"
+
+[tables.deadlock_hero_builds.columns.build_id]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.build_id"
+
+[tables.deadlock_hero_builds.columns.build_name]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.build_name"
+
+[tables.deadlock_hero_builds.columns.author_name]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.author_name"
+
+[tables.deadlock_hero_builds.columns.is_active]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.is_active"
+
+[tables.deadlock_hero_builds.columns.sort_order]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.sort_order"
+
+[tables.deadlock_hero_builds.columns.created_at]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.created_at"
+
+[tables.deadlock_hero_builds.columns.updated_at]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.updated_at"
+
+[tables.deadlock_hero_builds.columns.sync_status]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.sync_status"
+
+[tables.deadlock_hero_builds.columns.sync_message]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.sync_message"
+
+[tables.deadlock_hero_builds.columns.last_checked_at]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.last_checked_at"
+
+[tables.deadlock_hero_builds.columns.last_synced_at]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.last_synced_at"
+
+[tables.deadlock_hero_builds.columns.last_alerted_at]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.last_alerted_at"
+
+[tables.deadlock_hero_builds.columns.source_version]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.source_version"
+
+[tables.deadlock_hero_builds.columns.source_last_updated_ts]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.source_last_updated_at"
+
+[tables.deadlock_hero_builds.columns.clone_build_id]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.clone_build_id"
+
+[tables.deadlock_hero_builds.columns.clone_version]
+status = "mapped"
+to = "tierlist.deadlock_hero_builds.clone_version"
+
+[tables.hero_build_sources.columns.hero_build_id]
+status = "mapped"
+to = "tierlist.hero_build_sources.hero_build_id"
+
+[tables.hero_build_sources.columns.origin_build_id]
+status = "mapped"
+to = "tierlist.hero_build_sources.origin_build_id"
+
+[tables.hero_build_sources.columns.author_account_id]
+status = "mapped"
+to = "tierlist.hero_build_sources.author_account_id"
+
+[tables.hero_build_sources.columns.hero_id]
+status = "mapped"
+to = "tierlist.hero_build_sources.hero_id"
+
+[tables.hero_build_sources.columns.language]
+status = "mapped"
+to = "tierlist.hero_build_sources.language"
+
+[tables.hero_build_sources.columns.version]
+status = "mapped"
+to = "tierlist.hero_build_sources.version"
+
+[tables.hero_build_sources.columns.name]
+status = "mapped"
+to = "tierlist.hero_build_sources.name"
+
+[tables.hero_build_sources.columns.description]
+status = "mapped"
+to = "tierlist.hero_build_sources.description"
+
+[tables.hero_build_sources.columns.tags_json]
+status = "mapped"
+to = "tierlist.hero_build_sources.tags"
+
+[tables.hero_build_sources.columns.details_json]
+status = "mapped"
+to = "tierlist.hero_build_sources.details"
+
+[tables.hero_build_sources.columns.publish_ts]
+status = "mapped"
+to = "tierlist.hero_build_sources.published_at"
+
+[tables.hero_build_sources.columns.last_updated_ts]
+status = "mapped"
+to = "tierlist.hero_build_sources.last_updated_at"
+
+[tables.hero_build_sources.columns.fetched_at]
+status = "mapped"
+to = "tierlist.hero_build_sources.fetched_at"
+
+[tables.hero_build_sources.columns.last_seen_at]
+status = "mapped"
+to = "tierlist.hero_build_sources.last_seen_at"
+
+[tables.hero_build_clones.columns.id]
+status = "mapped"
+to = "tierlist.hero_build_clones.id"
+
+[tables.hero_build_clones.columns.origin_hero_build_id]
+status = "mapped"
+to = "tierlist.hero_build_clones.origin_hero_build_id"
+
+[tables.hero_build_clones.columns.origin_build_id]
+status = "mapped"
+to = "tierlist.hero_build_clones.origin_build_id"
+
+[tables.hero_build_clones.columns.hero_id]
+status = "mapped"
+to = "tierlist.hero_build_clones.hero_id"
+
+[tables.hero_build_clones.columns.author_account_id]
+status = "mapped"
+to = "tierlist.hero_build_clones.author_account_id"
+
+[tables.hero_build_clones.columns.source_language]
+status = "mapped"
+to = "tierlist.hero_build_clones.source_language"
+
+[tables.hero_build_clones.columns.source_version]
+status = "mapped"
+to = "tierlist.hero_build_clones.source_version"
+
+[tables.hero_build_clones.columns.source_last_updated_ts]
+status = "mapped"
+to = "tierlist.hero_build_clones.source_last_updated_at"
+
+[tables.hero_build_clones.columns.target_language]
+status = "mapped"
+to = "tierlist.hero_build_clones.target_language"
+
+[tables.hero_build_clones.columns.target_name]
+status = "mapped"
+to = "tierlist.hero_build_clones.target_name"
+
+[tables.hero_build_clones.columns.target_description]
+status = "mapped"
+to = "tierlist.hero_build_clones.target_description"
+
+[tables.hero_build_clones.columns.status]
+status = "mapped"
+to = "tierlist.hero_build_clones.status"
+
+[tables.hero_build_clones.columns.status_info]
+status = "mapped"
+to = "tierlist.hero_build_clones.status_info"
+
+[tables.hero_build_clones.columns.uploaded_build_id]
+status = "mapped"
+to = "tierlist.hero_build_clones.uploaded_build_id"
+
+[tables.hero_build_clones.columns.uploaded_version]
+status = "mapped"
+to = "tierlist.hero_build_clones.uploaded_version"
+
+[tables.hero_build_clones.columns.created_at]
+status = "mapped"
+to = "tierlist.hero_build_clones.created_at"
+
+[tables.hero_build_clones.columns.updated_at]
+status = "mapped"
+to = "tierlist.hero_build_clones.updated_at"
+
+[tables.hero_build_clones.columns.last_attempt_at]
+status = "mapped"
+to = "tierlist.hero_build_clones.last_attempt_at"
+
+[tables.hero_build_clones.columns.attempts]
+status = "mapped"
+to = "tierlist.hero_build_clones.attempts"
+
+[tables.tierlist_settings.columns.k]
+status = "mapped"
+to = "tierlist.tierlist_settings.k"
+
+[tables.tierlist_settings.columns.v]
+status = "mapped"
+to = "tierlist.tierlist_settings.v"
+
+[tables.tierlist_settings.columns.updated_at]
+status = "mapped"
+to = "tierlist.tierlist_settings.updated_at"
+
+[tables.tierlist_hero_meta.columns.hero_id]
+status = "mapped"
+to = "tierlist.tierlist_hero_meta.hero_id"
+
+[tables.tierlist_hero_meta.columns.description]
+status = "mapped"
+to = "tierlist.tierlist_hero_meta.description"
+
+[tables.tierlist_hero_meta.columns.updated_at]
+status = "mapped"
+to = "tierlist.tierlist_hero_meta.updated_at"
+
+[tables.tierlist_streamers.columns.id]
+status = "mapped"
+to = "tierlist.tierlist_streamers.id"
+
+[tables.tierlist_streamers.columns.hero_id]
+status = "mapped"
+to = "tierlist.tierlist_streamers.hero_id"
+
+[tables.tierlist_streamers.columns.twitch_login]
+status = "mapped"
+to = "tierlist.tierlist_streamers.twitch_login"
+
+[tables.tierlist_streamers.columns.display_name]
+status = "mapped"
+to = "tierlist.tierlist_streamers.display_name"
+
+[tables.tierlist_streamers.columns.sort_order]
+status = "mapped"
+to = "tierlist.tierlist_streamers.sort_order"
+
+[tables.tierlist_streamers.columns.is_active]
+status = "mapped"
+to = "tierlist.tierlist_streamers.is_active"
+
+[tables.tierlist_streamers.columns.created_at]
+status = "mapped"
+to = "tierlist.tierlist_streamers.created_at"
+
+[tables.tierlist_snapshots.columns.id]
+status = "mapped"
+to = "tierlist.tierlist_snapshots.id"
+
+[tables.tierlist_snapshots.columns.bucket]
+status = "mapped"
+to = "tierlist.tierlist_snapshots.bucket"
+
+[tables.tierlist_snapshots.columns.patch_id]
+status = "mapped"
+to = "tierlist.tierlist_snapshots.patch_id"
+
+[tables.tierlist_snapshots.columns.patch_unix]
+status = "mapped"
+to = "tierlist.tierlist_snapshots.patch_at"
+
+[tables.tierlist_snapshots.columns.fetched_at]
+status = "mapped"
+to = "tierlist.tierlist_snapshots.fetched_at"
+
+[tables.tierlist_snapshot_heroes.columns.snapshot_id]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.snapshot_id"
+
+[tables.tierlist_snapshot_heroes.columns.hero_id]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.hero_id"
+
+[tables.tierlist_snapshot_heroes.columns.matches]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.matches"
+
+[tables.tierlist_snapshot_heroes.columns.wins]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.wins"
+
+[tables.tierlist_snapshot_heroes.columns.losses]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.losses"
+
+[tables.tierlist_snapshot_heroes.columns.winrate]
+status = "mapped"
+to = "tierlist.tierlist_snapshot_heroes.winrate"
+
+[tables.tierlist_build_votes.columns.build_id]
+status = "mapped"
+to = "tierlist.tierlist_build_votes.build_id"
+
+[tables.tierlist_build_votes.columns.upvotes]
+status = "mapped"
+to = "tierlist.tierlist_build_votes.upvotes"
+
+[tables.tierlist_build_votes.columns.downvotes]
+status = "mapped"
+to = "tierlist.tierlist_build_votes.downvotes"
+
+[tables.tierlist_build_votes.columns.updated_at]
+status = "mapped"
+to = "tierlist.tierlist_build_votes.updated_at"
+
+[tables.watched_build_authors.columns.author_account_id]
+status = "mapped"
+to = "tierlist.watched_build_authors.author_account_id"
+
+[tables.watched_build_authors.columns.notes]
+status = "mapped"
+to = "tierlist.watched_build_authors.notes"
+
+[tables.watched_build_authors.columns.is_active]
+status = "mapped"
+to = "tierlist.watched_build_authors.is_active"
+
+[tables.watched_build_authors.columns.last_checked_at]
+status = "mapped"
+to = "tierlist.watched_build_authors.last_checked_at"
+
+[tables.watched_build_authors.columns.created_at]
+status = "mapped"
+to = "tierlist.watched_build_authors.created_at"
+
+[tables.watched_build_authors.columns.priority]
+status = "mapped"
+to = "tierlist.watched_build_authors.priority"
+
+[tables.watched_build_authors.columns.last_checked_status]
+status = "mapped"
+to = "tierlist.watched_build_authors.last_checked_status"
+
+[tables.watched_build_authors.columns.last_checked_message]
+status = "mapped"
+to = "tierlist.watched_build_authors.last_checked_message"

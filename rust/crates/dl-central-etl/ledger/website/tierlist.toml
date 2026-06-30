@@ -1,0 +1,183 @@
+[tables.meta_builds.columns.id]
+status = "mapped"
+to = "tierlist.meta_builds.id"
+
+[tables.meta_builds.columns.hero_id]
+status = "mapped"
+to = "tierlist.meta_builds.hero_id"
+
+[tables.meta_builds.columns.name]
+status = "mapped"
+to = "tierlist.meta_builds.name"
+
+[tables.meta_builds.columns.author_id]
+status = "mapped"
+to = "tierlist.meta_builds.author_id"
+
+[tables.meta_builds.columns.author_name]
+status = "mapped"
+to = "tierlist.meta_builds.author_name"
+
+[tables.meta_builds.columns.description]
+status = "mapped"
+to = "tierlist.meta_builds.description"
+
+[tables.meta_builds.columns.ability_order_json]
+status = "mapped"
+to = "tierlist.meta_builds.ability_order"
+
+[tables.meta_builds.columns.items_json]
+status = "mapped"
+to = "tierlist.meta_builds.items"
+
+[tables.meta_builds.columns.upvotes]
+status = "mapped"
+to = "tierlist.meta_builds.upvotes"
+
+[tables.meta_builds.columns.downvotes]
+status = "mapped"
+to = "tierlist.meta_builds.downvotes"
+
+[tables.meta_builds.columns.status]
+status = "mapped"
+to = "tierlist.meta_builds.status"
+
+[tables.meta_builds.columns.created_at]
+status = "mapped"
+to = "tierlist.meta_builds.created_at"
+
+[tables.meta_heroes.columns.id]
+status = "mapped"
+to = "tierlist.meta_heroes.id"
+
+[tables.meta_heroes.columns.name]
+status = "mapped"
+to = "tierlist.meta_heroes.name"
+
+[tables.meta_heroes.columns.tier]
+status = "mapped"
+to = "tierlist.meta_heroes.tier"
+
+[tables.meta_heroes.columns.role]
+status = "mapped"
+to = "tierlist.meta_heroes.role"
+
+[tables.meta_heroes.columns.image_url]
+status = "mapped"
+to = "tierlist.meta_heroes.image_url"
+
+[tables.meta_heroes.columns.abilities_json]
+status = "mapped"
+to = "tierlist.meta_heroes.abilities"
+
+[tables.meta_heroes.columns.stats_json]
+status = "mapped"
+to = "tierlist.meta_heroes.stats"
+
+[tables.meta_heroes.columns.created_at]
+status = "mapped"
+to = "tierlist.meta_heroes.created_at"
+
+[tables.meta_heroes.columns.updated_at]
+status = "mapped"
+to = "tierlist.meta_heroes.updated_at"
+
+[tables.meta_items.columns.id]
+status = "mapped"
+to = "tierlist.meta_items.id"
+
+[tables.meta_items.columns.name]
+status = "mapped"
+to = "tierlist.meta_items.name"
+
+[tables.meta_items.columns.type]
+status = "mapped"
+to = "tierlist.meta_items.type"
+
+[tables.meta_items.columns.stats_json]
+status = "mapped"
+to = "tierlist.meta_items.stats"
+
+[tables.meta_items.columns.image_url]
+status = "mapped"
+to = "tierlist.meta_items.image_url"
+
+[tables.meta_tier_history.columns.id]
+status = "mapped"
+to = "tierlist.meta_tier_history.id"
+
+[tables.meta_tier_history.columns.hero_id]
+status = "mapped"
+to = "tierlist.meta_tier_history.hero_id"
+
+[tables.meta_tier_history.columns.hero_name]
+status = "mapped"
+to = "tierlist.meta_tier_history.hero_name"
+
+[tables.meta_tier_history.columns.old_tier]
+status = "mapped"
+to = "tierlist.meta_tier_history.old_tier"
+
+[tables.meta_tier_history.columns.new_tier]
+status = "mapped"
+to = "tierlist.meta_tier_history.new_tier"
+
+[tables.meta_tier_history.columns.changed_by]
+status = "mapped"
+to = "tierlist.meta_tier_history.changed_by"
+
+[tables.meta_tier_history.columns.changed_at]
+status = "mapped"
+to = "tierlist.meta_tier_history.changed_at"
+
+[tables.meta_tier_lists.columns.id]
+status = "mapped"
+to = "tierlist.meta_tier_lists.id"
+
+[tables.meta_tier_lists.columns.name]
+status = "mapped"
+to = "tierlist.meta_tier_lists.name"
+
+[tables.meta_tier_lists.columns.owner_id]
+status = "mapped"
+to = "tierlist.meta_tier_lists.owner_id"
+
+[tables.meta_tier_lists.columns.is_public]
+status = "mapped"
+to = "tierlist.meta_tier_lists.is_public"
+
+[tables.meta_tier_lists.columns.secret_code]
+status = "mapped"
+to = "tierlist.meta_tier_lists.secret_code"
+
+[tables.meta_tier_lists.columns.tiers_json]
+status = "mapped"
+to = "tierlist.meta_tier_lists.tiers"
+
+[tables.meta_tier_lists.columns.forked_from]
+status = "mapped"
+to = "tierlist.meta_tier_lists.forked_from"
+
+[tables.meta_tier_lists.columns.created_at]
+status = "mapped"
+to = "tierlist.meta_tier_lists.created_at"
+
+[tables.meta_votes.columns.id]
+status = "mapped"
+to = "tierlist.meta_votes.id"
+
+[tables.meta_votes.columns.user_id]
+status = "mapped"
+to = "tierlist.meta_votes.user_id"
+
+[tables.meta_votes.columns.build_id]
+status = "mapped"
+to = "tierlist.meta_votes.build_id"
+
+[tables.meta_votes.columns.vote_type]
+status = "mapped"
+to = "tierlist.meta_votes.vote_type"
+
+[tables.meta_votes.columns.created_at]
+status = "mapped"
+to = "tierlist.meta_votes.created_at"

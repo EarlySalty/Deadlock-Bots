@@ -1,0 +1,43 @@
+[tables.changelog_posts.columns.id]
+status = "mapped"
+to = "patchnotes.changelog_posts.id"
+
+[tables.changelog_posts.columns.title]
+status = "mapped"
+to = "patchnotes.changelog_posts.title"
+
+[tables.changelog_posts.columns.url]
+status = "mapped"
+to = "patchnotes.changelog_posts.url"
+
+[tables.changelog_posts.columns.posted_at]
+status = "mapped"
+to = "patchnotes.changelog_posts.posted_at"
+
+[tables.changelog_posts.columns.raw_content]
+status = "mapped"
+to = "patchnotes.changelog_posts.raw_content"
+
+[tables.changelog_posts.columns.translated_content]
+status = "mapped"
+to = "patchnotes.changelog_posts.translated_content"
+
+[tables.deadlock_changelogs.columns.id]
+status = "mapped"
+to = "patchnotes.deadlock_changelogs.id"
+
+[tables.deadlock_changelogs.columns.title]
+status = "mapped"
+to = "patchnotes.deadlock_changelogs.title"
+
+[tables.deadlock_changelogs.columns.url]
+status = "mapped"
+to = "patchnotes.deadlock_changelogs.url"
+
+[tables.deadlock_changelogs.columns.posted_at]
+status = "mapped"
+to = "patchnotes.deadlock_changelogs.posted_at"
+
+[tables.deadlock_changelogs.columns.content]
+status = "mapped"
+to = "patchnotes.deadlock_changelogs.content"

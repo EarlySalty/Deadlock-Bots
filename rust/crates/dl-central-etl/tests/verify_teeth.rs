@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs,
+    path::{Path, PathBuf},
+};
 
 use dl_central_etl::{
     check_ledger_set_mapping_completeness, check_mapping_completeness, check_row_counts,
@@ -41,6 +45,53 @@ fn table_columns(entries: &[(&str, &[&str])]) -> SourceTableColumns {
                 (*table).to_string(),
                 columns.iter().map(|column| (*column).to_string()).collect(),
             )
+        })
+        .collect()
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(Path::parent)
+        .expect("dl-central-etl is under rust/crates")
+        .to_path_buf()
+}
+
+fn inventory_table_columns(path: &Path) -> SourceTableColumns {
+    let contents = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("read inventory {}: {err}", path.display()));
+    let value: Value = serde_json::from_str(&contents)
+        .unwrap_or_else(|err| panic!("parse inventory {}: {err}", path.display()));
+    let tables = value
+        .get("tables")
+        .and_then(Value::as_array)
+        .unwrap_or_else(|| panic!("inventory {} has tables array", path.display()));
+
+    tables
+        .iter()
+        .map(|table| {
+            let name = table
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or_else(|| panic!("inventory {} table has name", path.display()))
+                .to_string();
+            let columns = table
+                .get("columns")
+                .and_then(Value::as_array)
+                .unwrap_or_else(|| panic!("inventory {} table {name} has columns", path.display()))
+                .iter()
+                .map(|column| {
+                    column
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_else(|| {
+                            panic!("inventory {} table {name} column has name", path.display())
+                        })
+                        .to_string()
+                })
+                .collect();
+
+            (name, columns)
         })
         .collect()
 }
@@ -321,58 +372,185 @@ fn ledger_set_keeps_same_table_names_source_qualified_and_fails_missing_source_c
 }
 
 #[test]
-fn t1_ledger_fragments_cover_core_source_columns() {
+fn ledger_set_rejects_unknown_ledger_column_in_existing_source_table() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_presence_watchlist.columns.steam_id]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.steam_id"
+
+                [tables.steam_presence_watchlist.columns.note]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.note"
+
+                [tables.steam_presence_watchlist.columns.__sp1_non_inventory_column__]
+                status = "mapped"
+                to = "steam.steam_presence_watchlist.__sp1_non_inventory_column__"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[("steam_presence_watchlist", &["steam_id", "note"])]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnknownLedgerColumn {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "steam_presence_watchlist".to_string(),
+            column: "__sp1_non_inventory_column__".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_missing_expected_ledger_source() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([
+        (
+            "deadlock-sqlite3".to_string(),
+            table_columns(&[("steam_links", &["user_id"])]),
+        ),
+        (
+            "website".to_string(),
+            table_columns(&[("user_profiles", &["discord_id"])]),
+        ),
+    ]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::MissingLedgerSource {
+            source_db: "website".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_source_table_without_ledger_entry() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[
+            ("steam_links", &["user_id"]),
+            ("live_player_state", &["steam_id"]),
+        ]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::UnmappedSourceTable {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "live_player_state".to_string(),
+        })
+    );
+}
+
+#[test]
+fn ledger_set_rejects_ledger_table_without_inventory_entry() {
+    let ledger_set = LedgerSet {
+        sources: BTreeMap::from([(
+            "deadlock-sqlite3".to_string(),
+            Ledger::from_toml_str(
+                r#"
+                [tables.steam_links.columns.user_id]
+                status = "mapped"
+                to = "core.steam_links.discord_id"
+
+                [tables.z_ledger_only.columns.id]
+                status = "mapped"
+                to = "core.z_ledger_only.id"
+                "#,
+            )
+            .expect("fixture ledger parses"),
+        )]),
+    };
+    let source_schemas = SourceSchemas::from([(
+        "deadlock-sqlite3".to_string(),
+        table_columns(&[("steam_links", &["user_id"])]),
+    )]);
+
+    let result = check_ledger_set_mapping_completeness(&source_schemas, &ledger_set);
+
+    assert_eq!(
+        result,
+        Err(VerifyError::MissingSourceTable {
+            source_db: "deadlock-sqlite3".to_string(),
+            table: "z_ledger_only".to_string(),
+        })
+    );
+}
+
+#[test]
+fn sp1_ledger_fragments_cover_all_inventory_source_columns() {
     let ledger_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("ledger");
     let ledger_set = LedgerSet::from_dir(ledger_root).expect("T1 ledger directory loads");
+    let inventory_root = workspace_root().join("docs/_work/sp1/inventory");
 
     let source_schemas = SourceSchemas::from([
         (
             "deadlock-sqlite3".to_string(),
-            table_columns(&[
-                (
-                    "steam_links",
-                    &[
-                        "user_id",
-                        "steam_id",
-                        "name",
-                        "verified",
-                        "primary_account",
-                        "created_at",
-                        "updated_at",
-                        "legacy_ref",
-                        "migrated_at",
-                        "deadlock_rank",
-                        "deadlock_rank_name",
-                        "deadlock_subrank",
-                        "deadlock_badge_level",
-                        "deadlock_rank_updated_at",
-                        "is_steam_friend",
-                    ],
-                ),
-                (
-                    "user_privacy",
-                    &["user_id", "opted_out", "deleted_at", "reason", "updated_at"],
-                ),
-            ]),
+            inventory_table_columns(&inventory_root.join("deadlock-bots.tables.json")),
+        ),
+        (
+            "tournament".to_string(),
+            inventory_table_columns(&inventory_root.join("turniere.tables.json")),
         ),
         (
             "website".to_string(),
-            table_columns(&[(
-                "meta_users",
-                &[
-                    "id",
-                    "username",
-                    "display_name",
-                    "avatar_url",
-                    "role",
-                    "created_at",
-                ],
-            )]),
+            inventory_table_columns(&inventory_root.join("website.tables.json")),
         ),
     ]);
 
     check_ledger_set_mapping_completeness(&source_schemas, &ledger_set)
-        .expect("T1 core ledger fragments cover all source columns");
+        .expect("SP1 ledger fragments cover all inventory source columns");
+
+    let physical_tables: usize = source_schemas.values().map(|tables| tables.len()).sum();
+    let unique_table_names: BTreeSet<&str> = source_schemas
+        .values()
+        .flat_map(|tables| tables.keys().map(String::as_str))
+        .collect();
+    println!(
+        "SP1 full completeness: sources={} physical_tables={} unique_table_names={} missing_tables=0 unaccounted_columns=0",
+        source_schemas.len(),
+        physical_tables,
+        unique_table_names.len()
+    );
 }
 
 #[test]

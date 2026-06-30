@@ -1,0 +1,663 @@
+[tables.changelog_entries.columns.id]
+status = "mapped"
+to = "bot.changelog_entries.id"
+
+[tables.changelog_entries.columns.post_id]
+status = "mapped"
+to = "bot.changelog_entries.post_id"
+
+[tables.changelog_entries.columns.section]
+status = "mapped"
+to = "bot.changelog_entries.section"
+
+[tables.changelog_entries.columns.subject]
+status = "mapped"
+to = "bot.changelog_entries.subject"
+
+[tables.changelog_entries.columns.subject_type]
+status = "mapped"
+to = "bot.changelog_entries.subject_type"
+
+[tables.changelog_entries.columns.change_text]
+status = "mapped"
+to = "bot.changelog_entries.change_text"
+
+[tables.claimed_threads.columns.thread_id]
+status = "mapped"
+to = "bot.claimed_threads.thread_id"
+
+[tables.claimed_threads.columns.assigned_user_id]
+status = "mapped"
+to = "bot.claimed_threads.assigned_user_id"
+
+[tables.claimed_threads.columns.claimed_by_id]
+status = "mapped"
+to = "bot.claimed_threads.claimed_by_id"
+
+[tables.claimed_threads.columns.created_at]
+status = "mapped"
+to = "bot.claimed_threads.created_at"
+
+[tables.customgames_tournament_signups.columns.guild_id]
+status = "mapped"
+to = "bot.customgames_tournament_signups.guild_id"
+
+[tables.customgames_tournament_signups.columns.user_id]
+status = "mapped"
+to = "bot.customgames_tournament_signups.user_id"
+
+[tables.customgames_tournament_signups.columns.registration_mode]
+status = "mapped"
+to = "bot.customgames_tournament_signups.registration_mode"
+
+[tables.customgames_tournament_signups.columns.rank]
+status = "mapped"
+to = "bot.customgames_tournament_signups.rank"
+
+[tables.customgames_tournament_signups.columns.rank_value]
+status = "mapped"
+to = "bot.customgames_tournament_signups.rank_value"
+
+[tables.customgames_tournament_signups.columns.team_id]
+status = "mapped"
+to = "bot.customgames_tournament_signups.team_id"
+
+[tables.customgames_tournament_signups.columns.assigned_by_admin]
+status = "mapped"
+to = "bot.customgames_tournament_signups.assigned_by_admin"
+
+[tables.customgames_tournament_signups.columns.created_at]
+status = "mapped"
+to = "bot.customgames_tournament_signups.created_at"
+
+[tables.customgames_tournament_signups.columns.updated_at]
+status = "mapped"
+to = "bot.customgames_tournament_signups.updated_at"
+
+[tables.customgames_tournament_signups.columns.rank_subvalue]
+status = "mapped"
+to = "bot.customgames_tournament_signups.rank_subvalue"
+
+[tables.customgames_tournament_signups.columns.display_name]
+status = "mapped"
+to = "bot.customgames_tournament_signups.display_name"
+
+[tables.customgames_tournament_teams.columns.id]
+status = "mapped"
+to = "bot.customgames_tournament_teams.id"
+
+[tables.customgames_tournament_teams.columns.guild_id]
+status = "mapped"
+to = "bot.customgames_tournament_teams.guild_id"
+
+[tables.customgames_tournament_teams.columns.name]
+status = "mapped"
+to = "bot.customgames_tournament_teams.name"
+
+[tables.customgames_tournament_teams.columns.name_key]
+status = "mapped"
+to = "bot.customgames_tournament_teams.name_key"
+
+[tables.customgames_tournament_teams.columns.created_by]
+status = "mapped"
+to = "bot.customgames_tournament_teams.created_by"
+
+[tables.customgames_tournament_teams.columns.created_at]
+status = "mapped"
+to = "bot.customgames_tournament_teams.created_at"
+
+[tables.discord_invite_codes.columns.guild_id]
+status = "mapped"
+to = "bot.discord_invite_codes.guild_id"
+
+[tables.discord_invite_codes.columns.invite_code]
+status = "mapped"
+to = "bot.discord_invite_codes.invite_code"
+
+[tables.discord_invite_codes.columns.created_at]
+status = "mapped"
+to = "bot.discord_invite_codes.created_at"
+
+[tables.discord_invite_codes.columns.last_seen_at]
+status = "mapped"
+to = "bot.discord_invite_codes.last_seen_at"
+
+[tables.dm_response_tracking.columns.user_id]
+status = "mapped"
+to = "bot.dm_response_tracking.user_id"
+
+[tables.dm_response_tracking.columns.last_dm_sent]
+status = "mapped"
+to = "bot.dm_response_tracking.last_dm_sent"
+
+[tables.dm_response_tracking.columns.response_count]
+status = "mapped"
+to = "bot.dm_response_tracking.response_count"
+
+[tables.dm_response_tracking.columns.last_response]
+status = "mapped"
+to = "bot.dm_response_tracking.last_response"
+
+[tables.dm_response_tracking.columns.status]
+status = "mapped"
+to = "bot.dm_response_tracking.status"
+
+[tables.faq_chat_messages.columns.id]
+status = "mapped"
+to = "bot.faq_chat_messages.id"
+
+[tables.faq_chat_messages.columns.session_id]
+status = "mapped"
+to = "bot.faq_chat_messages.session_id"
+
+[tables.faq_chat_messages.columns.role]
+status = "mapped"
+to = "bot.faq_chat_messages.role"
+
+[tables.faq_chat_messages.columns.content]
+status = "mapped"
+to = "bot.faq_chat_messages.content"
+
+[tables.faq_chat_messages.columns.created_at]
+status = "mapped"
+to = "bot.faq_chat_messages.created_at"
+
+[tables.faq_chat_sessions.columns.session_id]
+status = "mapped"
+to = "bot.faq_chat_sessions.session_id"
+
+[tables.faq_chat_sessions.columns.user_id]
+status = "mapped"
+to = "bot.faq_chat_sessions.user_id"
+
+[tables.faq_chat_sessions.columns.user_name]
+status = "mapped"
+to = "bot.faq_chat_sessions.user_name"
+
+[tables.faq_chat_sessions.columns.channel_id]
+status = "mapped"
+to = "bot.faq_chat_sessions.channel_id"
+
+[tables.faq_chat_sessions.columns.guild_id]
+status = "mapped"
+to = "bot.faq_chat_sessions.guild_id"
+
+[tables.faq_chat_sessions.columns.created_at]
+status = "mapped"
+to = "bot.faq_chat_sessions.created_at"
+
+[tables.faq_chat_sessions.columns.expires_at]
+status = "mapped"
+to = "bot.faq_chat_sessions.expires_at"
+
+[tables.faq_chat_sessions.columns.status]
+status = "mapped"
+to = "bot.faq_chat_sessions.status"
+
+[tables.faq_chat_sessions.columns.last_activity_at]
+status = "mapped"
+to = "bot.faq_chat_sessions.last_activity_at"
+
+[tables.invite_snapshot_cache.columns.guild_id]
+status = "mapped"
+to = "bot.invite_snapshot_cache.guild_id"
+
+[tables.invite_snapshot_cache.columns.snapshot_json]
+status = "mapped"
+to = "bot.invite_snapshot_cache.snapshot_json"
+
+[tables.invite_snapshot_cache.columns.updated_at]
+status = "mapped"
+to = "bot.invite_snapshot_cache.updated_at"
+
+[tables.issue_reports.columns.id]
+status = "mapped"
+to = "bot.issue_reports.id"
+
+[tables.issue_reports.columns.user_id]
+status = "mapped"
+to = "bot.issue_reports.user_id"
+
+[tables.issue_reports.columns.guild_id]
+status = "mapped"
+to = "bot.issue_reports.guild_id"
+
+[tables.issue_reports.columns.channel_id]
+status = "mapped"
+to = "bot.issue_reports.channel_id"
+
+[tables.issue_reports.columns.message_id]
+status = "mapped"
+to = "bot.issue_reports.message_id"
+
+[tables.issue_reports.columns.category]
+status = "mapped"
+to = "bot.issue_reports.category"
+
+[tables.issue_reports.columns.title]
+status = "mapped"
+to = "bot.issue_reports.title"
+
+[tables.issue_reports.columns.description]
+status = "mapped"
+to = "bot.issue_reports.description"
+
+[tables.issue_reports.columns.status]
+status = "mapped"
+to = "bot.issue_reports.status"
+
+[tables.issue_reports.columns.ai_response]
+status = "mapped"
+to = "bot.issue_reports.ai_response"
+
+[tables.issue_reports.columns.ai_model]
+status = "mapped"
+to = "bot.issue_reports.ai_model"
+
+[tables.issue_reports.columns.ai_error]
+status = "mapped"
+to = "bot.issue_reports.ai_error"
+
+[tables.issue_reports.columns.created_at]
+status = "mapped"
+to = "bot.issue_reports.created_at"
+
+[tables.issue_reports.columns.updated_at]
+status = "mapped"
+to = "bot.issue_reports.updated_at"
+
+[tables.issue_reports.columns.answered_at]
+status = "mapped"
+to = "bot.issue_reports.answered_at"
+
+[tables.kv_store.columns.ns]
+status = "mapped"
+to = "bot.kv_store.ns"
+
+[tables.kv_store.columns.k]
+status = "mapped"
+to = "bot.kv_store.k"
+
+[tables.kv_store.columns.v]
+status = "mapped"
+to = "bot.kv_store.v"
+
+[tables.notification_log.columns.id]
+status = "mapped"
+to = "bot.notification_log.id"
+
+[tables.notification_log.columns.user_id]
+status = "mapped"
+to = "bot.notification_log.user_id"
+
+[tables.notification_log.columns.rank]
+status = "mapped"
+to = "bot.notification_log.rank"
+
+[tables.notification_log.columns.notification_time]
+status = "mapped"
+to = "bot.notification_log.notification_time"
+
+[tables.notification_log.columns.count]
+status = "mapped"
+to = "bot.notification_log.count"
+
+[tables.notification_queue.columns.id]
+status = "mapped"
+to = "bot.notification_queue.id"
+
+[tables.notification_queue.columns.user_id]
+status = "mapped"
+to = "bot.notification_queue.user_id"
+
+[tables.notification_queue.columns.guild_id]
+status = "mapped"
+to = "bot.notification_queue.guild_id"
+
+[tables.notification_queue.columns.rank]
+status = "mapped"
+to = "bot.notification_queue.rank"
+
+[tables.notification_queue.columns.queue_date]
+status = "mapped"
+to = "bot.notification_queue.queue_date"
+
+[tables.notification_queue.columns.added_at]
+status = "mapped"
+to = "bot.notification_queue.added_at"
+
+[tables.notification_queue.columns.processed]
+status = "mapped"
+to = "bot.notification_queue.processed"
+
+[tables.oauth_states.columns.state]
+status = "mapped"
+to = "bot.oauth_states.state"
+
+[tables.oauth_states.columns.provider]
+status = "mapped"
+to = "bot.oauth_states.provider"
+
+[tables.oauth_states.columns.flow_type]
+status = "mapped"
+to = "bot.oauth_states.flow_type"
+
+[tables.oauth_states.columns.requesting_service]
+status = "mapped"
+to = "bot.oauth_states.requesting_service"
+
+[tables.oauth_states.columns.redirect_after]
+status = "mapped"
+to = "bot.oauth_states.redirect_after"
+
+[tables.oauth_states.columns.created_at]
+status = "mapped"
+to = "bot.oauth_states.created_at"
+
+[tables.oauth_states.columns.expires_at]
+status = "mapped"
+to = "bot.oauth_states.expires_at"
+
+[tables.oauth_states.columns.used]
+status = "mapped"
+to = "bot.oauth_states.used"
+
+[tables.oauth_states.columns.metadata]
+status = "mapped"
+to = "bot.oauth_states.metadata"
+
+[tables.onboarding_pending_verify.columns.user_id]
+status = "mapped"
+to = "bot.onboarding_pending_verify.user_id"
+
+[tables.onboarding_pending_verify.columns.channel_id]
+status = "mapped"
+to = "bot.onboarding_pending_verify.channel_id"
+
+[tables.onboarding_pending_verify.columns.updated_at]
+status = "mapped"
+to = "bot.onboarding_pending_verify.updated_at"
+
+[tables.persistent_views.columns.message_id]
+status = "mapped"
+to = "bot.persistent_views.message_id"
+
+[tables.persistent_views.columns.channel_id]
+status = "mapped"
+to = "bot.persistent_views.channel_id"
+
+[tables.persistent_views.columns.guild_id]
+status = "mapped"
+to = "bot.persistent_views.guild_id"
+
+[tables.persistent_views.columns.view_type]
+status = "mapped"
+to = "bot.persistent_views.view_type"
+
+[tables.persistent_views.columns.user_id]
+status = "mapped"
+to = "bot.persistent_views.user_id"
+
+[tables.persistent_views.columns.created_at]
+status = "mapped"
+to = "bot.persistent_views.created_at"
+
+[tables.reaction_role_dm_log.columns.mapping_id]
+status = "mapped"
+to = "bot.reaction_role_dm_log.mapping_id"
+
+[tables.reaction_role_dm_log.columns.user_id]
+status = "mapped"
+to = "bot.reaction_role_dm_log.user_id"
+
+[tables.reaction_role_dm_log.columns.sent_at]
+status = "mapped"
+to = "bot.reaction_role_dm_log.sent_at"
+
+[tables.reaction_role_mappings.columns.id]
+status = "mapped"
+to = "bot.reaction_role_mappings.id"
+
+[tables.reaction_role_mappings.columns.guild_id]
+status = "mapped"
+to = "bot.reaction_role_mappings.guild_id"
+
+[tables.reaction_role_mappings.columns.source_channel_id]
+status = "mapped"
+to = "bot.reaction_role_mappings.source_channel_id"
+
+[tables.reaction_role_mappings.columns.message_id]
+status = "mapped"
+to = "bot.reaction_role_mappings.message_id"
+
+[tables.reaction_role_mappings.columns.emoji]
+status = "mapped"
+to = "bot.reaction_role_mappings.emoji"
+
+[tables.reaction_role_mappings.columns.role_id]
+status = "mapped"
+to = "bot.reaction_role_mappings.role_id"
+
+[tables.reaction_role_mappings.columns.dm_enabled]
+status = "mapped"
+to = "bot.reaction_role_mappings.dm_enabled"
+
+[tables.reaction_role_mappings.columns.dm_text]
+status = "mapped"
+to = "bot.reaction_role_mappings.dm_text"
+
+[tables.reaction_role_mappings.columns.remove_on_unreact]
+status = "mapped"
+to = "bot.reaction_role_mappings.remove_on_unreact"
+
+[tables.reaction_role_mappings.columns.backfill_pending]
+status = "mapped"
+to = "bot.reaction_role_mappings.backfill_pending"
+
+[tables.reaction_role_mappings.columns.active]
+status = "mapped"
+to = "bot.reaction_role_mappings.active"
+
+[tables.reaction_role_mappings.columns.created_at]
+status = "mapped"
+to = "bot.reaction_role_mappings.created_at"
+
+[tables.reaction_role_mappings.columns.updated_at]
+status = "mapped"
+to = "bot.reaction_role_mappings.updated_at"
+
+[tables.schema_version.columns.version]
+status = "mapped"
+to = "bot.schema_version.version"
+
+[tables.server_faq_logs.columns.id]
+status = "mapped"
+to = "bot.server_faq_logs.id"
+
+[tables.server_faq_logs.columns.created_at]
+status = "mapped"
+to = "bot.server_faq_logs.created_at"
+
+[tables.server_faq_logs.columns.guild_id]
+status = "mapped"
+to = "bot.server_faq_logs.guild_id"
+
+[tables.server_faq_logs.columns.channel_id]
+status = "mapped"
+to = "bot.server_faq_logs.channel_id"
+
+[tables.server_faq_logs.columns.user_id]
+status = "mapped"
+to = "bot.server_faq_logs.user_id"
+
+[tables.server_faq_logs.columns.question]
+status = "mapped"
+to = "bot.server_faq_logs.question"
+
+[tables.server_faq_logs.columns.answer]
+status = "mapped"
+to = "bot.server_faq_logs.answer"
+
+[tables.server_faq_logs.columns.model]
+status = "mapped"
+to = "bot.server_faq_logs.model"
+
+[tables.server_faq_logs.columns.metadata]
+status = "mapped"
+to = "bot.server_faq_logs.metadata"
+
+[tables.standalone_bot_state.columns.bot]
+status = "mapped"
+to = "bot.standalone_bot_state.bot"
+
+[tables.standalone_bot_state.columns.heartbeat]
+status = "mapped"
+to = "bot.standalone_bot_state.heartbeat"
+
+[tables.standalone_bot_state.columns.payload]
+status = "mapped"
+to = "bot.standalone_bot_state.payload"
+
+[tables.standalone_bot_state.columns.updated_at]
+status = "mapped"
+to = "bot.standalone_bot_state.updated_at"
+
+[tables.standalone_commands.columns.id]
+status = "mapped"
+to = "bot.standalone_commands.id"
+
+[tables.standalone_commands.columns.bot]
+status = "mapped"
+to = "bot.standalone_commands.bot"
+
+[tables.standalone_commands.columns.command]
+status = "mapped"
+to = "bot.standalone_commands.command"
+
+[tables.standalone_commands.columns.payload]
+status = "mapped"
+to = "bot.standalone_commands.payload"
+
+[tables.standalone_commands.columns.status]
+status = "mapped"
+to = "bot.standalone_commands.status"
+
+[tables.standalone_commands.columns.result]
+status = "mapped"
+to = "bot.standalone_commands.result"
+
+[tables.standalone_commands.columns.error]
+status = "mapped"
+to = "bot.standalone_commands.error"
+
+[tables.standalone_commands.columns.created_at]
+status = "mapped"
+to = "bot.standalone_commands.created_at"
+
+[tables.standalone_commands.columns.started_at]
+status = "mapped"
+to = "bot.standalone_commands.started_at"
+
+[tables.standalone_commands.columns.finished_at]
+status = "mapped"
+to = "bot.standalone_commands.finished_at"
+
+[tables.streamer_link_intents.columns.discord_id]
+status = "mapped"
+to = "bot.streamer_link_intents.discord_id"
+
+[tables.streamer_link_intents.columns.discord_name]
+status = "mapped"
+to = "bot.streamer_link_intents.discord_name"
+
+[tables.streamer_link_intents.columns.created_at]
+status = "mapped"
+to = "bot.streamer_link_intents.created_at"
+
+[tables.streamer_link_intents.columns.expires_at]
+status = "mapped"
+to = "bot.streamer_link_intents.expires_at"
+
+[tables.streamer_link_intents.columns.status]
+status = "mapped"
+to = "bot.streamer_link_intents.status"
+
+[tables.streamer_link_intents.columns.linked_login]
+status = "mapped"
+to = "bot.streamer_link_intents.linked_login"
+
+[tables.tournament_periods.columns.id]
+status = "mapped"
+to = "bot.tournament_periods.id"
+
+[tables.tournament_periods.columns.guild_id]
+status = "mapped"
+to = "bot.tournament_periods.guild_id"
+
+[tables.tournament_periods.columns.name]
+status = "mapped"
+to = "bot.tournament_periods.name"
+
+[tables.tournament_periods.columns.registration_start]
+status = "mapped"
+to = "bot.tournament_periods.registration_start"
+
+[tables.tournament_periods.columns.registration_end]
+status = "mapped"
+to = "bot.tournament_periods.registration_end"
+
+[tables.tournament_periods.columns.is_active]
+status = "mapped"
+to = "bot.tournament_periods.is_active"
+
+[tables.tournament_periods.columns.team_size]
+status = "mapped"
+to = "bot.tournament_periods.team_size"
+
+[tables.tournament_periods.columns.created_by]
+status = "mapped"
+to = "bot.tournament_periods.created_by"
+
+[tables.tournament_periods.columns.created_at]
+status = "mapped"
+to = "bot.tournament_periods.created_at"
+
+[tables.turnier_auth_tokens.columns.token]
+status = "mapped"
+to = "bot.turnier_auth_tokens.token"
+
+[tables.turnier_auth_tokens.columns.user_id]
+status = "mapped"
+to = "bot.turnier_auth_tokens.user_id"
+
+[tables.turnier_auth_tokens.columns.display_name]
+status = "mapped"
+to = "bot.turnier_auth_tokens.display_name"
+
+[tables.turnier_auth_tokens.columns.expires_at]
+status = "mapped"
+to = "bot.turnier_auth_tokens.expires_at"
+
+[tables.twitch_streamer_invites.columns.streamer_login]
+status = "mapped"
+to = "bot.twitch_streamer_invites.streamer_login"
+
+[tables.twitch_streamer_invites.columns.guild_id]
+status = "mapped"
+to = "bot.twitch_streamer_invites.guild_id"
+
+[tables.twitch_streamer_invites.columns.invite_code]
+status = "mapped"
+to = "bot.twitch_streamer_invites.invite_code"
+
+[tables.twitch_streamer_invites.columns.invite_url]
+status = "mapped"
+to = "bot.twitch_streamer_invites.invite_url"
+
+[tables.twitch_streamer_invites.columns.created_at]
+status = "mapped"
+to = "bot.twitch_streamer_invites.created_at"
+
+[tables.twitch_streamer_invites.columns.last_sent_at]
+status = "mapped"
+to = "bot.twitch_streamer_invites.last_sent_at"

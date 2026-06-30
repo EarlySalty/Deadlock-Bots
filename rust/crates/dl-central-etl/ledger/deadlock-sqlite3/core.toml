@@ -77,3 +77,63 @@ to = "core.user_privacy.reason"
 [tables.user_privacy.columns.updated_at]
 status = "mapped"
 to = "core.user_privacy.updated_at"
+
+[tables.user_data.columns.user_id]
+status = "mapped"
+to = "core.user_data.user_id"
+
+[tables.user_data.columns.custom_interval]
+status = "mapped"
+to = "core.user_data.custom_interval"
+
+[tables.user_data.columns.paused_until]
+status = "mapped"
+to = "core.user_data.paused_until"
+
+[tables.user_data.columns.created_at]
+status = "mapped"
+to = "core.user_data.created_at"
+
+[tables.user_data.columns.updated_at]
+status = "mapped"
+to = "core.user_data.updated_at"
+
+[tables.user_mod_tags.columns.user_id]
+status = "mapped"
+to = "core.user_mod_tags.user_id"
+
+[tables.user_mod_tags.columns.mod_tag]
+status = "mapped"
+to = "core.user_mod_tags.mod_tag"
+
+[tables.user_mod_tags.columns.set_by]
+status = "mapped"
+to = "core.user_mod_tags.set_by"
+
+[tables.user_mod_tags.columns.reason]
+status = "mapped"
+to = "core.user_mod_tags.reason"
+
+[tables.user_mod_tags.columns.set_at]
+status = "mapped"
+to = "core.user_mod_tags.set_at"
+
+[tables.user_mod_tags.columns.expires_at]
+status = "mapped"
+to = "core.user_mod_tags.expires_at"
+
+[tables.user_tags.columns.user_id]
+status = "mapped"
+to = "core.user_tags.user_id"
+
+[tables.user_tags.columns.tag_key]
+status = "mapped"
+to = "core.user_tags.tag_key"
+
+[tables.user_tags.columns.tag_value]
+status = "mapped"
+to = "core.user_tags.tag_value"
+
+[tables.user_tags.columns.set_at]
+status = "mapped"
+to = "core.user_tags.set_at"

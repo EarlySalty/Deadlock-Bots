@@ -1,0 +1,43 @@
+[tables.meta_announcements.columns.id]
+status = "mapped"
+to = "content.meta_announcements.id"
+
+[tables.meta_announcements.columns.message]
+status = "mapped"
+to = "content.meta_announcements.message"
+
+[tables.meta_announcements.columns.is_active]
+status = "mapped"
+to = "content.meta_announcements.is_active"
+
+[tables.meta_announcements.columns.created_at]
+status = "mapped"
+to = "content.meta_announcements.created_at"
+
+[tables.meta_reports.columns.id]
+status = "mapped"
+to = "content.meta_reports.id"
+
+[tables.meta_reports.columns.build_id]
+status = "mapped"
+to = "content.meta_reports.build_id"
+
+[tables.meta_reports.columns.reporter_id]
+status = "mapped"
+to = "content.meta_reports.reporter_id"
+
+[tables.meta_reports.columns.reporter_name]
+status = "mapped"
+to = "content.meta_reports.reporter_name"
+
+[tables.meta_reports.columns.reason]
+status = "mapped"
+to = "content.meta_reports.reason"
+
+[tables.meta_reports.columns.status]
+status = "mapped"
+to = "content.meta_reports.status"
+
+[tables.meta_reports.columns.created_at]
+status = "mapped"
+to = "content.meta_reports.created_at"

@@ -67,33 +67,39 @@ async fn scalar_i64(pool: &PgPool, sql: &'static str) -> i64 {
         .expect("fetch scalar i64")
 }
 
-async fn table_columns(pool: &PgPool, table: &str) -> Vec<String> {
+async fn table_columns_in_schema(pool: &PgPool, schema: &str, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT column_name
            FROM information_schema.columns
-          WHERE table_schema = 'core'
-            AND table_name = $1
+          WHERE table_schema = $1
+            AND table_name = $2
           ORDER BY ordinal_position",
     )
+    .bind(schema)
     .bind(table)
     .fetch_all(pool)
     .await
-    .unwrap_or_else(|err| panic!("columns for core.{table}: {err}"))
+    .unwrap_or_else(|err| panic!("columns for {schema}.{table}: {err}"))
 }
 
-async fn column(pool: &PgPool, table: &str, name: &str) -> ColumnInfo {
+async fn table_columns(pool: &PgPool, table: &str) -> Vec<String> {
+    table_columns_in_schema(pool, "core", table).await
+}
+
+async fn column_in_schema(pool: &PgPool, schema: &str, table: &str, name: &str) -> ColumnInfo {
     let (data_type, udt_name, is_nullable, column_default) = sqlx::query_as(
         "SELECT data_type, udt_name, is_nullable, column_default
            FROM information_schema.columns
-          WHERE table_schema = 'core'
-            AND table_name = $1
-            AND column_name = $2",
+          WHERE table_schema = $1
+            AND table_name = $2
+            AND column_name = $3",
     )
+    .bind(schema)
     .bind(table)
     .bind(name)
     .fetch_one(pool)
     .await
-    .unwrap_or_else(|err| panic!("column core.{table}.{name}: {err}"));
+    .unwrap_or_else(|err| panic!("column {schema}.{table}.{name}: {err}"));
 
     ColumnInfo {
         data_type,
@@ -103,8 +109,10 @@ async fn column(pool: &PgPool, table: &str, name: &str) -> ColumnInfo {
     }
 }
 
-async fn assert_column(
+#[allow(clippy::too_many_arguments)]
+async fn assert_column_in_schema(
     pool: &PgPool,
+    schema: &str,
     table: &str,
     name: &str,
     data_type: &str,
@@ -120,13 +128,35 @@ async fn assert_column(
     };
 
     assert_eq!(
-        column(pool, table, name).await,
+        column_in_schema(pool, schema, table, name).await,
         expected,
-        "contract for core.{table}.{name}"
+        "contract for {schema}.{table}.{name}"
     );
 }
 
-async fn primary_key_columns(pool: &PgPool, table: &str) -> Vec<String> {
+async fn assert_column(
+    pool: &PgPool,
+    table: &str,
+    name: &str,
+    data_type: &str,
+    udt_name: &str,
+    is_nullable: &str,
+    column_default: Option<&str>,
+) {
+    assert_column_in_schema(
+        pool,
+        "core",
+        table,
+        name,
+        data_type,
+        udt_name,
+        is_nullable,
+        column_default,
+    )
+    .await;
+}
+
+async fn primary_key_columns_in_schema(pool: &PgPool, schema: &str, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT a.attname
            FROM pg_index i
@@ -134,15 +164,20 @@ async fn primary_key_columns(pool: &PgPool, table: &str) -> Vec<String> {
            JOIN pg_namespace n ON n.oid = t.relnamespace
            JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
            JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
-          WHERE n.nspname = 'core'
-            AND t.relname = $1
+          WHERE n.nspname = $1
+            AND t.relname = $2
             AND i.indisprimary
           ORDER BY k.ord",
     )
+    .bind(schema)
     .bind(table)
     .fetch_all(pool)
     .await
-    .unwrap_or_else(|err| panic!("primary key columns for core.{table}: {err}"))
+    .unwrap_or_else(|err| panic!("primary key columns for {schema}.{table}: {err}"))
+}
+
+async fn primary_key_columns(pool: &PgPool, table: &str) -> Vec<String> {
+    primary_key_columns_in_schema(pool, "core", table).await
 }
 
 async fn exact_steam_id64_btree_index_count(pool: &PgPool) -> i64 {
@@ -304,15 +339,17 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version IN (1, 2)
+          WHERE version BETWEEN 1 AND 11
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 2);
+    assert_eq!(migration_count_after_first, 11);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
         migration_row_signature(&pool, 2, "sp1 schemas and core").await;
+    let migration_11_signature_after_first =
+        migration_row_signature(&pool, 11, "barrier orphans and cross fks").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -320,11 +357,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version IN (1, 2)
+          WHERE version BETWEEN 1 AND 11
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 2);
+    assert_eq!(migration_count_after_second, 11);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -334,6 +371,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2, "sp1 schemas and core").await,
         migration_2_signature_after_first,
         "second migrator run must be a no-op for migration version 2"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 11, "barrier orphans and cross fks").await,
+        migration_11_signature_after_first,
+        "second migrator run must be a no-op for migration version 11"
     );
 
     let schema_count = scalar_i64(
@@ -715,6 +757,238 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "timestamptz",
         "YES",
         Some("now()"),
+    )
+    .await;
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "live_player_state").await,
+        vec![
+            "steam_id",
+            "last_gameid",
+            "last_server_id",
+            "last_seen_at",
+            "in_deadlock_now",
+            "in_match_now_strict",
+            "deadlock_stage",
+            "deadlock_minutes",
+            "deadlock_localized",
+            "deadlock_hero",
+            "deadlock_party_hint",
+            "deadlock_updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "activity", "live_player_state").await,
+        vec!["steam_id"]
+    );
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "steam_id",
+        "text",
+        "text",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "last_seen_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "in_deadlock_now",
+        "boolean",
+        "bool",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "in_match_now_strict",
+        "boolean",
+        "bool",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "deadlock_minutes",
+        "integer",
+        "int4",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "live_player_state",
+        "deadlock_updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "user_data").await,
+        vec![
+            "user_id",
+            "custom_interval",
+            "paused_until",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "user_data").await,
+        vec!["user_id"]
+    );
+    assert_column(&pool, "user_data", "user_id", "bigint", "int8", "NO", None).await;
+    assert_column(
+        &pool,
+        "user_data",
+        "custom_interval",
+        "integer",
+        "int4",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_data",
+        "paused_until",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_data",
+        "created_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_data",
+        "updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "user_mod_tags").await,
+        vec![
+            "user_id",
+            "mod_tag",
+            "set_by",
+            "reason",
+            "set_at",
+            "expires_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "user_mod_tags").await,
+        vec!["user_id", "mod_tag"]
+    );
+    assert_column(
+        &pool,
+        "user_mod_tags",
+        "user_id",
+        "bigint",
+        "int8",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_mod_tags",
+        "mod_tag",
+        "text",
+        "text",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_mod_tags",
+        "set_by",
+        "bigint",
+        "int8",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_mod_tags",
+        "set_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "user_mod_tags",
+        "expires_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "user_tags").await,
+        vec!["user_id", "tag_key", "tag_value", "set_at"]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "user_tags").await,
+        vec!["user_id", "tag_key"]
+    );
+    assert_column(&pool, "user_tags", "user_id", "bigint", "int8", "NO", None).await;
+    assert_column(&pool, "user_tags", "tag_key", "text", "text", "NO", None).await;
+    assert_column(&pool, "user_tags", "tag_value", "text", "text", "NO", None).await;
+    assert_column(
+        &pool,
+        "user_tags",
+        "set_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "YES",
+        None,
     )
     .await;
 

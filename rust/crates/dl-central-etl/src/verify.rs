@@ -23,8 +23,18 @@ pub enum VerifyError {
     MissingSourceSchema { source_db: String },
     #[error("Ledger-Tabelle fehlt im Quellschema: {source_db}.{table}")]
     MissingSourceTable { source_db: String, table: String },
+    #[error("Quelltabelle ist im Ledger nicht erfasst: {source_db}.{table}")]
+    UnmappedSourceTable { source_db: String, table: String },
     #[error("Quellspalte ist weder gemappt noch gedroppt: {source_db}.{table}.{column}")]
     UnmappedSourceColumn {
+        source_db: String,
+        table: String,
+        column: String,
+    },
+    #[error("Ledger-Quelle fehlt: {source_db}")]
+    MissingLedgerSource { source_db: String },
+    #[error("Ledger-Spalte fehlt im Quellschema: {source_db}.{table}.{column}")]
+    UnknownLedgerColumn {
         source_db: String,
         table: String,
         column: String,
@@ -64,11 +74,12 @@ pub fn check_source_mapping_completeness(
     source_tables: &SourceTableColumns,
     ledger: &Ledger,
 ) -> Result<(), VerifyError> {
-    for (table_name, table_ledger) in &ledger.tables {
-        let source_columns =
-            source_tables
+    for (table_name, source_columns) in source_tables {
+        let table_ledger =
+            ledger
+                .tables
                 .get(table_name)
-                .ok_or_else(|| VerifyError::MissingSourceTable {
+                .ok_or_else(|| VerifyError::UnmappedSourceTable {
                     source_db: source.to_string(),
                     table: table_name.clone(),
                 })?;
@@ -84,6 +95,27 @@ pub fn check_source_mapping_completeness(
         }
     }
 
+    for (table_name, table_ledger) in &ledger.tables {
+        let source_columns =
+            source_tables
+                .get(table_name)
+                .ok_or_else(|| VerifyError::MissingSourceTable {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                })?;
+
+        let source_column_set: BTreeSet<&str> = source_columns.iter().map(String::as_str).collect();
+        for column in table_ledger.columns.keys() {
+            if !source_column_set.contains(column.as_str()) {
+                return Err(VerifyError::UnknownLedgerColumn {
+                    source_db: source.to_string(),
+                    table: table_name.clone(),
+                    column: column.clone(),
+                });
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -91,6 +123,14 @@ pub fn check_ledger_set_mapping_completeness(
     source_schemas: &SourceSchemas,
     ledger_set: &LedgerSet,
 ) -> Result<(), VerifyError> {
+    for source_name in source_schemas.keys() {
+        if !ledger_set.sources.contains_key(source_name) {
+            return Err(VerifyError::MissingLedgerSource {
+                source_db: source_name.clone(),
+            });
+        }
+    }
+
     for (source_name, ledger) in &ledger_set.sources {
         let source_tables =
             source_schemas

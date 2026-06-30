@@ -1,0 +1,119 @@
+[tables.scrim_match.columns.id]
+status = "mapped"
+to = "scrim.matches.id"
+
+[tables.scrim_match.columns.team_a_id]
+status = "mapped"
+to = "scrim.matches.team_a_id"
+
+[tables.scrim_match.columns.team_b_id]
+status = "mapped"
+to = "scrim.matches.team_b_id"
+
+[tables.scrim_match.columns.when_text]
+status = "mapped"
+to = "scrim.matches.when_text"
+
+[tables.scrim_match.columns.scheduled_at]
+status = "mapped"
+to = "scrim.matches.scheduled_at"
+
+[tables.scrim_match.columns.status]
+status = "mapped"
+to = "scrim.matches.status"
+
+[tables.scrim_match.columns.created_at]
+status = "mapped"
+to = "scrim.matches.created_at"
+
+[tables.scrim_participant.columns.id]
+status = "mapped"
+to = "scrim.participants.id"
+
+[tables.scrim_participant.columns.discord_id]
+status = "mapped"
+to = "scrim.participants.discord_id"
+
+[tables.scrim_participant.columns.display_name]
+status = "mapped"
+to = "scrim.participants.display_name"
+
+[tables.scrim_participant.columns.rank]
+status = "mapped"
+to = "scrim.participants.rank"
+
+[tables.scrim_participant.columns.rank_source]
+status = "mapped"
+to = "scrim.participants.rank_source"
+
+[tables.scrim_participant.columns.rank_verified]
+status = "mapped"
+to = "scrim.participants.rank_verified"
+
+[tables.scrim_participant.columns.roles]
+status = "mapped"
+to = "scrim.participants.roles"
+
+[tables.scrim_participant.columns.availability]
+status = "mapped"
+to = "scrim.participants.availability"
+
+[tables.scrim_participant.columns.status]
+status = "mapped"
+to = "scrim.participants.status"
+
+[tables.scrim_participant.columns.source]
+status = "mapped"
+to = "scrim.participants.source"
+
+[tables.scrim_participant.columns.created_at]
+status = "mapped"
+to = "scrim.participants.created_at"
+
+[tables.scrim_participant.columns.updated_at]
+status = "mapped"
+to = "scrim.participants.updated_at"
+
+[tables.scrim_team.columns.id]
+status = "mapped"
+to = "scrim.teams.id"
+
+[tables.scrim_team.columns.name]
+status = "mapped"
+to = "scrim.teams.name"
+
+[tables.scrim_team.columns.coach]
+status = "mapped"
+to = "scrim.teams.coach"
+
+[tables.scrim_team.columns.discord_role_id]
+status = "mapped"
+to = "scrim.teams.discord_role_id"
+
+[tables.scrim_team.columns.discord_channel_id]
+status = "mapped"
+to = "scrim.teams.discord_channel_id"
+
+[tables.scrim_team.columns.created_at]
+status = "mapped"
+to = "scrim.teams.created_at"
+
+[tables.scrim_team_member.columns.team_id]
+status = "mapped"
+to = "scrim.team_members.team_id"
+
+[tables.scrim_team_member.columns.participant_id]
+status = "mapped"
+to = "scrim.team_members.participant_id"
+
+[tables.scrim_team_member.columns.role]
+status = "mapped"
+to = "scrim.team_members.role"
+
+[tables.scrim_team_member.columns.is_captain]
+status = "mapped"
+to = "scrim.team_members.is_captain"
+
+[tables.scrim_team_member.columns.is_bench]
+status = "mapped"
+to = "scrim.team_members.is_bench"

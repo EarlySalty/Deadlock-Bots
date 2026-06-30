@@ -1,0 +1,19 @@
+[tables.meta_patch_notes.columns.id]
+status = "mapped"
+to = "patchnotes.meta_patch_notes.id"
+
+[tables.meta_patch_notes.columns.title]
+status = "mapped"
+to = "patchnotes.meta_patch_notes.title"
+
+[tables.meta_patch_notes.columns.content]
+status = "mapped"
+to = "patchnotes.meta_patch_notes.content"
+
+[tables.meta_patch_notes.columns.version]
+status = "mapped"
+to = "patchnotes.meta_patch_notes.version"
+
+[tables.meta_patch_notes.columns.created_at]
+status = "mapped"
+to = "patchnotes.meta_patch_notes.created_at"

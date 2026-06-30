@@ -1,0 +1,236 @@
+[tables.beta_invite_audit.columns]
+id = { status = "mapped", to = "steam.beta_invite_audit.id" }
+guild_id = { status = "mapped", to = "steam.beta_invite_audit.guild_id" }
+discord_id = { status = "mapped", to = "steam.beta_invite_audit.discord_id" }
+discord_name = { status = "mapped", to = "steam.beta_invite_audit.discord_name" }
+steam_id64 = { status = "mapped", to = "steam.beta_invite_audit.steam_id64" }
+steam_profile = { status = "mapped", to = "steam.beta_invite_audit.steam_profile" }
+invited_at = { status = "mapped", to = "steam.beta_invite_audit.invited_at" }
+
+[tables.beta_invite_auto_failure_alerts.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_auto_failure_alerts.discord_id" }
+last_alert_at = { status = "mapped", to = "steam.beta_invite_auto_failure_alerts.last_alert_at" }
+last_error = { status = "mapped", to = "steam.beta_invite_auto_failure_alerts.last_error" }
+
+[tables.beta_invite_friendship_auto_poll.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.discord_id" }
+invite_record_id = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.invite_record_id" }
+guild_id = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.guild_id" }
+channel_id = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.channel_id" }
+steam_id64 = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.steam_id64" }
+active = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.active" }
+started_at = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.started_at" }
+next_check_at = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.next_check_at" }
+attempts_completed = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.attempts_completed" }
+max_attempts = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.max_attempts" }
+last_checked_at = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.last_checked_at" }
+finished_at = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.finished_at" }
+last_error = { status = "mapped", to = "steam.beta_invite_friendship_auto_poll.last_error" }
+
+[tables.beta_invite_intent.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_intent.discord_id" }
+intent = { status = "mapped", to = "steam.beta_invite_intent.intent" }
+decided_at = { status = "mapped", to = "steam.beta_invite_intent.decided_at" }
+locked = { status = "mapped", to = "steam.beta_invite_intent.locked" }
+
+[tables.beta_invite_panel_clicks.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_panel_clicks.discord_id" }
+click_count = { status = "mapped", to = "steam.beta_invite_panel_clicks.click_count" }
+first_clicked_at = { status = "mapped", to = "steam.beta_invite_panel_clicks.first_clicked_at" }
+last_clicked_at = { status = "mapped", to = "steam.beta_invite_panel_clicks.last_clicked_at" }
+
+[tables.beta_invite_pending_payments.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_pending_payments.discord_id" }
+discord_name = { status = "mapped", to = "steam.beta_invite_pending_payments.discord_name" }
+created_at = { status = "mapped", to = "steam.beta_invite_pending_payments.created_at" }
+token = { status = "mapped", to = "steam.beta_invite_pending_payments.token" }
+paid_at = { status = "mapped", to = "steam.beta_invite_pending_payments.paid_at" }
+consumed_at = { status = "mapped", to = "steam.beta_invite_pending_payments.consumed_at" }
+
+[tables.beta_invite_supporter_role_grants.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.discord_id" }
+role_id = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.role_id" }
+granted_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.granted_at" }
+expires_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.expires_at" }
+last_payment_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.last_payment_at" }
+last_applied_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.last_applied_at" }
+revoked_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.revoked_at" }
+created_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.created_at" }
+updated_at = { status = "mapped", to = "steam.beta_invite_supporter_role_grants.updated_at" }
+
+[tables.beta_invite_tickets.columns]
+discord_id = { status = "mapped", to = "steam.beta_invite_tickets.discord_id" }
+guild_id = { status = "mapped", to = "steam.beta_invite_tickets.guild_id" }
+channel_id = { status = "mapped", to = "steam.beta_invite_tickets.channel_id" }
+status = { status = "mapped", to = "steam.beta_invite_tickets.status" }
+created_at = { status = "mapped", to = "steam.beta_invite_tickets.created_at" }
+updated_at = { status = "mapped", to = "steam.beta_invite_tickets.updated_at" }
+closed_at = { status = "mapped", to = "steam.beta_invite_tickets.closed_at" }
+
+[tables.steam_beta_invites.columns]
+id = { status = "mapped", to = "steam.steam_beta_invites.id" }
+discord_id = { status = "mapped", to = "steam.steam_beta_invites.discord_id" }
+steam_id64 = { status = "mapped", to = "steam.steam_beta_invites.steam_id64" }
+account_id = { status = "mapped", to = "steam.steam_beta_invites.account_id" }
+status = { status = "mapped", to = "steam.steam_beta_invites.status" }
+last_error = { status = "mapped", to = "steam.steam_beta_invites.last_error" }
+friend_requested_at = { status = "mapped", to = "steam.steam_beta_invites.friend_requested_at" }
+friend_confirmed_at = { status = "mapped", to = "steam.steam_beta_invites.friend_confirmed_at" }
+invite_sent_at = { status = "mapped", to = "steam.steam_beta_invites.invite_sent_at" }
+last_notified_at = { status = "mapped", to = "steam.steam_beta_invites.last_notified_at" }
+created_at = { status = "mapped", to = "steam.steam_beta_invites.created_at" }
+updated_at = { status = "mapped", to = "steam.steam_beta_invites.updated_at" }
+scheduled_invite_at = { status = "mapped", to = "steam.steam_beta_invites.scheduled_invite_at" }
+dispatch_attempts = { status = "mapped", to = "steam.steam_beta_invites.dispatch_attempts" }
+
+[tables.steam_cleanup_poll_state.columns]
+user_id = { status = "mapped", to = "steam.steam_cleanup_poll_state.user_id" }
+last_polled_at = { status = "mapped", to = "steam.steam_cleanup_poll_state.last_polled_at" }
+last_result = { status = "mapped", to = "steam.steam_cleanup_poll_state.last_result" }
+last_error = { status = "mapped", to = "steam.steam_cleanup_poll_state.last_error" }
+updated_at = { status = "mapped", to = "steam.steam_cleanup_poll_state.updated_at" }
+miss_count = { status = "mapped", to = "steam.steam_cleanup_poll_state.miss_count" }
+
+[tables.steam_flow_throttle.columns]
+key = { status = "mapped", to = "steam.steam_flow_throttle.key" }
+last_run = { status = "mapped", to = "steam.steam_flow_throttle.last_run" }
+
+[tables.steam_friend_check_cache.columns]
+steam_id = { status = "mapped", to = "steam.steam_friend_check_cache.steam_id" }
+friend = { status = "mapped", to = "steam.steam_friend_check_cache.friend" }
+checked_at = { status = "mapped", to = "steam.steam_friend_check_cache.checked_at" }
+
+[tables.steam_friend_requests.columns]
+steam_id = { status = "mapped", to = "steam.steam_friend_requests.steam_id" }
+status = { status = "mapped", to = "steam.steam_friend_requests.status" }
+requested_at = { status = "mapped", to = "steam.steam_friend_requests.requested_at" }
+last_attempt = { status = "mapped", to = "steam.steam_friend_requests.last_attempt" }
+attempts = { status = "mapped", to = "steam.steam_friend_requests.attempts" }
+error = { status = "mapped", to = "steam.steam_friend_requests.error" }
+
+[tables.steam_friendship_miss_tracker.columns]
+steam_id = { status = "mapped", to = "steam.steam_friendship_miss_tracker.steam_id" }
+user_id = { status = "mapped", to = "steam.steam_friendship_miss_tracker.user_id" }
+miss_count = { status = "mapped", to = "steam.steam_friendship_miss_tracker.miss_count" }
+last_polled_at = { status = "mapped", to = "steam.steam_friendship_miss_tracker.last_polled_at" }
+last_seen_friend_at = { status = "mapped", to = "steam.steam_friendship_miss_tracker.last_seen_friend_at" }
+last_miss_at = { status = "mapped", to = "steam.steam_friendship_miss_tracker.last_miss_at" }
+last_action_at = { status = "mapped", to = "steam.steam_friendship_miss_tracker.last_action_at" }
+updated_at = { status = "mapped", to = "steam.steam_friendship_miss_tracker.updated_at" }
+
+[tables.steam_launch_tokens.columns]
+token = { status = "mapped", to = "steam.steam_launch_tokens.token" }
+user_id = { status = "mapped", to = "steam.steam_launch_tokens.user_id" }
+created_at = { status = "mapped", to = "steam.steam_launch_tokens.created_at" }
+expires_at = { status = "mapped", to = "steam.steam_launch_tokens.expires_at" }
+consumed_at = { status = "mapped", to = "steam.steam_launch_tokens.consumed_at" }
+
+[tables.steam_links_archive.columns]
+user_id = { status = "mapped", to = "steam.steam_links_archive.user_id" }
+steam_id = { status = "mapped", to = "steam.steam_links_archive.steam_id" }
+name = { status = "mapped", to = "steam.steam_links_archive.name" }
+verified = { status = "mapped", to = "steam.steam_links_archive.verified" }
+primary_account = { status = "mapped", to = "steam.steam_links_archive.primary_account" }
+deadlock_rank = { status = "mapped", to = "steam.steam_links_archive.deadlock_rank" }
+deadlock_rank_name = { status = "mapped", to = "steam.steam_links_archive.deadlock_rank_name" }
+deadlock_subrank = { status = "mapped", to = "steam.steam_links_archive.deadlock_subrank" }
+deadlock_badge_level = { status = "mapped", to = "steam.steam_links_archive.deadlock_badge_level" }
+deadlock_rank_updated_at = { status = "mapped", to = "steam.steam_links_archive.deadlock_rank_updated_at" }
+created_at = { status = "mapped", to = "steam.steam_links_archive.created_at" }
+updated_at = { status = "mapped", to = "steam.steam_links_archive.updated_at" }
+left_at = { status = "mapped", to = "steam.steam_links_archive.left_at" }
+guild_id = { status = "mapped", to = "steam.steam_links_archive.guild_id" }
+leave_reason = { status = "mapped", to = "steam.steam_links_archive.leave_reason" }
+display_name = { status = "mapped", to = "steam.steam_links_archive.display_name" }
+
+[tables.steam_links_leave_archive.columns]
+user_id = { status = "mapped", to = "steam.steam_links_leave_archive.user_id" }
+steam_id = { status = "mapped", to = "steam.steam_links_leave_archive.steam_id" }
+name = { status = "mapped", to = "steam.steam_links_leave_archive.name" }
+verified = { status = "mapped", to = "steam.steam_links_leave_archive.verified" }
+primary_account = { status = "mapped", to = "steam.steam_links_leave_archive.primary_account" }
+deadlock_rank = { status = "mapped", to = "steam.steam_links_leave_archive.deadlock_rank" }
+deadlock_rank_name = { status = "mapped", to = "steam.steam_links_leave_archive.deadlock_rank_name" }
+deadlock_subrank = { status = "mapped", to = "steam.steam_links_leave_archive.deadlock_subrank" }
+deadlock_badge_level = { status = "mapped", to = "steam.steam_links_leave_archive.deadlock_badge_level" }
+deadlock_rank_updated_at = { status = "mapped", to = "steam.steam_links_leave_archive.deadlock_rank_updated_at" }
+created_at = { status = "mapped", to = "steam.steam_links_leave_archive.created_at" }
+updated_at = { status = "mapped", to = "steam.steam_links_leave_archive.updated_at" }
+left_at = { status = "mapped", to = "steam.steam_links_leave_archive.left_at" }
+guild_id = { status = "mapped", to = "steam.steam_links_leave_archive.guild_id" }
+leave_reason = { status = "mapped", to = "steam.steam_links_leave_archive.leave_reason" }
+display_name = { status = "mapped", to = "steam.steam_links_leave_archive.display_name" }
+
+[tables.steam_nudge_state.columns]
+user_id = { status = "mapped", to = "steam.steam_nudge_state.user_id" }
+notified_at = { status = "mapped", to = "steam.steam_nudge_state.notified_at" }
+opt_out = { status = "mapped", to = "steam.steam_nudge_state.opt_out" }
+first_seen = { status = "mapped", to = "steam.steam_nudge_state.first_seen" }
+message_id = { status = "mapped", to = "steam.steam_nudge_state.message_id" }
+channel_id = { status = "mapped", to = "steam.steam_nudge_state.channel_id" }
+view_version = { status = "mapped", to = "steam.steam_nudge_state.view_version" }
+
+[tables.steam_presence_watchlist.columns]
+steam_id = { status = "mapped", to = "steam.steam_presence_watchlist.steam_id" }
+note = { status = "mapped", to = "steam.steam_presence_watchlist.note" }
+added_at = { status = "mapped", to = "steam.steam_presence_watchlist.added_at" }
+
+[tables.steam_quick_invites.columns]
+token = { status = "mapped", to = "steam.steam_quick_invites.token" }
+invite_link = { status = "mapped", to = "steam.steam_quick_invites.invite_link" }
+invite_limit = { status = "mapped", to = "steam.steam_quick_invites.invite_limit" }
+invite_duration = { status = "mapped", to = "steam.steam_quick_invites.invite_duration" }
+created_at = { status = "mapped", to = "steam.steam_quick_invites.created_at" }
+expires_at = { status = "mapped", to = "steam.steam_quick_invites.expires_at" }
+status = { status = "mapped", to = "steam.steam_quick_invites.status" }
+reserved_by = { status = "mapped", to = "steam.steam_quick_invites.reserved_by" }
+reserved_at = { status = "mapped", to = "steam.steam_quick_invites.reserved_at" }
+last_seen = { status = "mapped", to = "steam.steam_quick_invites.last_seen" }
+
+[tables.steam_rank_assignments.columns]
+user_id = { status = "mapped", to = "steam.steam_rank_assignments.user_id" }
+guild_id = { status = "mapped", to = "steam.steam_rank_assignments.guild_id" }
+role_id = { status = "mapped", to = "steam.steam_rank_assignments.role_id" }
+
+[tables.steam_rank_history.columns]
+user_id = { status = "mapped", to = "steam.steam_rank_history.user_id" }
+badge_level = { status = "mapped", to = "steam.steam_rank_history.badge_level" }
+rank_name = { status = "mapped", to = "steam.steam_rank_history.rank_name" }
+captured_at = { status = "mapped", to = "steam.steam_rank_history.captured_at" }
+
+[tables.steam_rich_presence.columns]
+steam_id = { status = "mapped", to = "steam.steam_rich_presence.steam_id" }
+app_id = { status = "mapped", to = "steam.steam_rich_presence.app_id" }
+status = { status = "mapped", to = "steam.steam_rich_presence.status" }
+status_text = { status = "mapped", to = "steam.steam_rich_presence.status_text" }
+display = { status = "mapped", to = "steam.steam_rich_presence.display" }
+player_group = { status = "mapped", to = "steam.steam_rich_presence.player_group" }
+player_group_size = { status = "mapped", to = "steam.steam_rich_presence.player_group_size" }
+connect = { status = "mapped", to = "steam.steam_rich_presence.connect" }
+mode = { status = "mapped", to = "steam.steam_rich_presence.mode" }
+map = { status = "mapped", to = "steam.steam_rich_presence.map" }
+party_size = { status = "mapped", to = "steam.steam_rich_presence.party_size" }
+raw_json = { status = "mapped", to = "steam.steam_rich_presence.raw_json" }
+last_update = { status = "mapped", to = "steam.steam_rich_presence.last_update" }
+updated_at = { status = "mapped", to = "steam.steam_rich_presence.updated_at" }
+
+[tables.steam_role_cleanup_pending.columns]
+user_id = { status = "mapped", to = "steam.steam_role_cleanup_pending.user_id" }
+reason = { status = "mapped", to = "steam.steam_role_cleanup_pending.reason" }
+attempts = { status = "mapped", to = "steam.steam_role_cleanup_pending.attempts" }
+last_error = { status = "mapped", to = "steam.steam_role_cleanup_pending.last_error" }
+created_at = { status = "mapped", to = "steam.steam_role_cleanup_pending.created_at" }
+updated_at = { status = "mapped", to = "steam.steam_role_cleanup_pending.updated_at" }
+
+[tables.steam_tasks.columns]
+id = { status = "mapped", to = "steam.steam_tasks.id" }
+type = { status = "mapped", to = "steam.steam_tasks.type" }
+payload = { status = "mapped", to = "steam.steam_tasks.payload" }
+status = { status = "mapped", to = "steam.steam_tasks.status" }
+result = { status = "mapped", to = "steam.steam_tasks.result" }
+error = { status = "mapped", to = "steam.steam_tasks.error" }
+created_at = { status = "mapped", to = "steam.steam_tasks.created_at" }
+updated_at = { status = "mapped", to = "steam.steam_tasks.updated_at" }
+started_at = { status = "mapped", to = "steam.steam_tasks.started_at" }
+finished_at = { status = "mapped", to = "steam.steam_tasks.finished_at" }
+attempts = { status = "mapped", to = "steam.steam_tasks.attempts" }
