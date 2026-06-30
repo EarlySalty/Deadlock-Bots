@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-> **Für ausführende Worker (Codex):** Jedes Ticket = exakter Scope + Dateien + Gate + Definition of Done. **Codex implementiert; Claude orchestriert, verifiziert extern, committet.** **WORKFLOW.md NIE anfassen.** User-sichtbare deutsche Texte = nur `"Platzhalter"` + Datei:Zeile melden, Claude finalisiert. Dieser Plan ist **read-only Inventarisierung** — er ändert KEINE Produktions-Schemas, migriert KEINE Daten, schaltet KEINEN Dienst um.
+> **Für ausführende Worker (Codex):** Jedes Ticket = exakter Scope + Dateien + Gate + Definition of Done. **Codex implementiert, verifiziert sich SELBST (führt Gates/Tests selbst aus) und reviewt SELBST (frischer Codex-Kritiker → Rework). Claude organisiert nur den DAG, committet/pusht als Orchestrator und schreibt ausschließlich die user-sichtbaren Texte (UI/UX, deutsche Copy).** **WORKFLOW.md NIE anfassen.** User-sichtbare deutsche Texte = nur `"Platzhalter"` + Datei:Zeile melden, Claude finalisiert. Dieser Plan ist **read-only Inventarisierung** — er ändert KEINE Produktions-Schemas, migriert KEINE Daten, schaltet KEINEN Dienst um.
 
 **Goal:** Ein konsolidiertes, gegen die lebenden DBs verifiziertes Daten-Landschaft-Dokument über alle 5 In-Scope-Projekte erzeugen (jede Tabelle × Spalten × Konsumenten × Zugriffsmuster + Vorschlag Ziel-Schema), als belastbare Eingabe für den Schema-Entwurf (SP1 Phase 1).
 
@@ -20,8 +20,24 @@ Wörtlich aus der freigegebenen Eltern-Spec `rust/docs/specs/2026-06-30-central-
 4. **Behalten:** `changelog_entries`, `steam_rank_history` dauerhaft (Issue #385).
 5. **Quelle wird nie zerstört.** Inventarisierung öffnet jede DB **read-only**; kein Schreibzugriff, kein Snapshot-Bedarf in Phase 0.
 6. **Secrets nur via Infisical**, nie Klartext in Code/Log/Chat. Phase 0 braucht keine DSN (keine Postgres-Verbindung).
-7. **Delegation:** Implementierung an Codex (gpt-5.5/xhigh); read-only Analyse. Claude verifiziert extern + committet.
+7. **Delegation (verbindlich, Owner-Vorgabe 2026-06-30):** ALLES geht an Codex (gpt-5.5/xhigh) — Implementierung, **Selbst-Verifikation** (Codex führt Gates/Tests selbst aus) UND **Review** (frischer Codex-Kritiker, Loop Codex→Kritiker→Rework). Claude **organisiert nur** (DAG, Dispatch, `git commit`/`push` als Orchestrator) und schreibt **ausschließlich** die user-sichtbaren Texte (UI/UX, deutsche Copy). **Kein Claude-Implementierungscode, kein Claude-Review, keine Claude-Verifikation.**
 8. **Cross-SP-Eigentum festhalten** (Issue #387): `coaching_requests` Bot↔Website, `steam_links` DL-Bot↔Steam-Bot — in der Konsolidierung benennen.
+
+---
+
+## Arbeitsmethode (verbindlich — gilt für ALLE Tasks dieses Plans)
+
+Owner-Vorgabe 2026-06-30: **Alles wird an Codex delegiert. Codex verifiziert und reviewt sich selbst. Claude organisiert nur und schreibt ausschließlich die Texte (UI/UX).**
+
+| Rolle | Wer | Tut |
+|---|---|---|
+| Implementierung | **Codex** | Skripte, Inventare, Schema, ETL, Rewrite — der gesamte Code/Artefakt. |
+| Selbst-Verifikation | **Codex** | Führt die Gates/Tests des Tickets SELBST aus, bis grün (z. B. `sp1_inventory_gate.py`). |
+| Review | **Codex** | Frischer Codex-Kritiker prüft die Arbeit (Loop Codex→Kritiker→Rework), nicht Claude. |
+| Orchestrierung | **Claude** | DAG/Sequencing, Worker-Dispatch, `git commit`/`push`, Statusrelais. |
+| User-sichtbare Texte | **Claude** | UI/UX-Strings, deutsche Copy, Embeds, Fehlertexte. Codex setzt dort nur `"Platzhalter"` + Datei:Zeile. |
+
+Claude schreibt **keinen** Implementierungscode, macht **kein** inhaltliches Review und führt **keine** eigene Verifikation aus — diese drei sind Codex-Pflicht. Der `git commit`/`push` bleibt beim Orchestrator (Claude prüft dabei nur die `changed_files`-Liste auf Plausibilität, kein Code-Review).
 
 ---
 
@@ -176,7 +192,7 @@ python3 rust/scripts/sp1_inventory_gate.py --db data/deadlock.sqlite3 --inventor
 ```
 Expected: `GATE PASS (Deadlock-Bots): 124 Tabellen, Spalten vollständig abgedeckt`; `EXIT=0`.
 
-- [ ] **Step 3: Stichproben-Review (Claude extern)** — 5 Tabellen quer (1 Schwergewicht `voice_session_log`, 1 tote `steam_launch_tokens`, 1 Cross-SP `steam_links`, 1 coaching `coaching_requests`, 1 scrim `scrim_match`): `proposed_schema` + `consumers` plausibel? Hypertable-Notiz vorhanden?
+- [ ] **Step 3: Stichproben-Review (frischer Codex-Kritiker)** — 5 Tabellen quer (1 Schwergewicht `voice_session_log`, 1 tote `steam_launch_tokens`, 1 Cross-SP `steam_links`, 1 coaching `coaching_requests`, 1 scrim `scrim_match`): `proposed_schema` + `consumers` plausibel? Hypertable-Notiz vorhanden? (Codex prüft, nicht Claude.)
 
 - [ ] **Step 4: Commit**
 
@@ -309,14 +325,14 @@ git commit -m "docs(sp1): Inventar Patchnotes (Persistenz-Befund)"
 - Consumes: die 5 Projekt-Inventare aus Task 2–6 (alle gate-grün).
 - Produces: das eine konsolidierte Doc, das Phase 1 (Schema-Design) als Eingabe nutzt.
 
-**Inhalt (Claude synthetisiert aus den Inventaren; Codex-Kritiker prüft Vollständigkeit):**
+**Inhalt (Codex-Worker synthetisiert aus den Inventaren; frischer Codex-Kritiker prüft Vollständigkeit; Claude finalisiert nur user-sichtbare Prosa):**
 1. **Tabelle×Projekt×Schema-Matrix:** jede Quell-Tabelle aller Projekte, ihr Projekt, `proposed_schema`, Row-Count, Konsumenten-Crates, tot-Flag.
 2. **Cross-Projekt-Überschneidungen / Zentralisierungs-Kandidaten:** gleichnamige oder semantisch gleiche Tabellen über Projekte (mind. `steam_links`, Identitäts-/User-Tabellen, `coaching_requests`); Vorschlag, was in `core` zentralisiert wird vs. domänen-lokal bleibt.
 3. **#387-Stakes explizit:** (a) kanonische `coaching_requests`-Form, die Bot (`id INTEGER`+Rollen/Voice/Reward) UND Website (`id TEXT`+Plattform) verlustfrei vereint; (b) `core.steam_links` als einzige Wahrheit für DL-Bot (SP1) und Steam-Bot (SP3).
 4. **Schema-Zuordnungs-Lücken:** Tabellen mit `proposed_schema: OFFEN` (z. B. TempVoice/Tierlist/Bot-State-Catch-all, die in Eltern-Spec §5.2 keinen expliziten Namespace haben) als Entscheidungsliste für Phase 1.
 5. **Verweise:** Issues #385/#386/#387; Eltern-Spec §5.2/§7.
 
-- [ ] **Step 1: Doc schreiben** (Claude; Codex-Kritiker-Pass auf Vollständigkeit gegen die 5 JSON-Inventare).
+- [ ] **Step 1: Doc schreiben** (Codex-Worker; danach frischer Codex-Kritiker-Pass auf Vollständigkeit gegen die 5 JSON-Inventare. Claude schreibt nur etwaige user-sichtbare Prosa-Abschnitte final).
 
 - [ ] **Step 2: Vollständigkeits-Gate (Konsolidierung deckt alle inventarisierten Tabellen ab)**
 
@@ -359,6 +375,6 @@ git commit -m "docs(sp1): Daten-Landschaft konsolidiert (5 Projekte, Zentralisie
 - **Placeholder-Scan:** Gate-Code vollständig; keine „TBD". Worker-Briefings nennen exakte Pfade + Felder. ✓
 - **Typ-Konsistenz:** JSON-Schema in Task 1 definiert; Tasks 2–6 referenzieren genau dieses; Gate prüft genau `name`+`columns[].name`. ✓
 
-## Execution Handoff (nach Freigabe)
+## Execution Handoff
 
-Task 2–6 laufen **parallel** (ein Codex-Worker pro Projekt, read-only). Task 1 zuerst (Gate steht), Task 7 zuletzt (Barrier). Reihenfolge: T1 → (T2‖T3‖T4‖T5‖T6) → T7.
+Reine Codex-Ausführung (siehe Arbeitsmethode): T1 Gate zuerst, dann **5 parallele Codex-Worker** für die Inventare (je Projekt, read-only, Selbst-Gate), T7 Konsolidierung als Barrier, danach **ein frischer Codex-Kritiker** über das gesamte Phase-0-Ergebnis (Gate-Zähne, alle Inventare gate-grün, Konsolidierungs-Vollständigkeit). Worker committen NICHT — Claude committet/pusht als Orchestrator nach grünem Kritiker. Reihenfolge: T1 → (T2‖T3‖T4‖T5‖T6) → T7 → Codex-Kritiker → Orchestrator-Commit.
