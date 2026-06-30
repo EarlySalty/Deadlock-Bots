@@ -75,7 +75,8 @@ pub const AI_ONBOARDING_QUICK_FEEDBACK_BUTTON_LABEL: &str = "Feedback";
 pub const AI_ONBOARDING_QUICK_RULES_BUTTON_LABEL: &str = "Regelwerk";
 pub const AI_ONBOARDING_MODAL_TITLE: &str = "Kurz zu dir";
 pub const AI_ONBOARDING_MODAL_INTERESTS_LABEL: &str = "Was reizt dich an Deadlock?";
-pub const AI_ONBOARDING_MODAL_INTERESTS_PLACEHOLDER: &str = "z. B. Ranked, Custom Games, Community, Builds";
+pub const AI_ONBOARDING_MODAL_INTERESTS_PLACEHOLDER: &str =
+    "z. B. Ranked, Custom Games, Community, Builds";
 pub const AI_ONBOARDING_MODAL_EXPECTATIONS_LABEL: &str = "Was erhoffst du dir vom Server?";
 pub const AI_ONBOARDING_MODAL_EXPECTATIONS_PLACEHOLDER: &str = "z. B. Mitspieler, Tipps, Turniere";
 pub const AI_ONBOARDING_MODAL_STYLE_LABEL: &str = "Wie spielst du am liebsten?";

@@ -54,7 +54,12 @@ fn tone_label(value: Option<&str>) -> &str {
 }
 
 /// Baut ein String-Select (Action-Row) mit dem aktuell gesetzten Wert als Default.
-fn select(key: &str, placeholder: &str, opts: &[(&str, &str, Option<&str>)], current: Option<&str>) -> Value {
+fn select(
+    key: &str,
+    placeholder: &str,
+    opts: &[(&str, &str, Option<&str>)],
+    current: Option<&str>,
+) -> Value {
     let options: Vec<Value> = opts
         .iter()
         .map(|(label, value, desc)| {
@@ -107,7 +112,11 @@ fn render(tags: &HashMap<String, String>, status: Option<&str>, update: bool) ->
     let age_select = select(
         "age",
         "Alter auswählen",
-        &[("Nicht gesetzt", UNSET, None), ("25+", "25+", None), ("U25", "u25", None)],
+        &[
+            ("Nicht gesetzt", UNSET, None),
+            ("25+", "25+", None),
+            ("U25", "u25", None),
+        ],
         age,
     );
     let tone_select = select(
@@ -115,8 +124,16 @@ fn render(tags: &HashMap<String, String>, status: Option<&str>, update: bool) ->
         "Tonfall auswählen",
         &[
             ("Nicht gesetzt", UNSET, None),
-            ("Banter-OK", "banter_ok", Some("Hier darf es mal ruppiger werden.")),
-            ("Ragebaiter-Free", "ragebaiter_free", Some("Hier bitte ohne gezielte Provokationen.")),
+            (
+                "Banter-OK",
+                "banter_ok",
+                Some("Hier darf es mal ruppiger werden."),
+            ),
+            (
+                "Ragebaiter-Free",
+                "ragebaiter_free",
+                Some("Hier bitte ohne gezielte Provokationen."),
+            ),
         ],
         tone,
     );
@@ -157,7 +174,11 @@ impl InteractionHandler for TagsHandler {
                 } else {
                     "tone"
                 };
-                let selected = interaction.values.first().map(String::as_str).unwrap_or(UNSET);
+                let selected = interaction
+                    .values
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(UNSET);
                 if selected == UNSET {
                     let _ = self.service.clear_user_tag(uid, key).await;
                 } else {
@@ -241,7 +262,10 @@ impl InteractionHandler for ModTagHandler {
                     .get("reason")
                     .and_then(Value::as_str)
                     .map(str::to_string);
-                let expires_in_days = interaction.options.get("expires_in_days").and_then(Value::as_i64);
+                let expires_in_days = interaction
+                    .options
+                    .get("expires_in_days")
+                    .and_then(Value::as_i64);
                 if let Some(days) = expires_in_days {
                     if days <= 0 {
                         return BridgeReply::ephemeral_text(
@@ -251,8 +275,8 @@ impl InteractionHandler for ModTagHandler {
                 }
                 // expires_in_days → festes Datum; sonst greift in add_mod_tag die
                 // Default-Laufzeit (ragebaiter: 14 Tage).
-                let expires_at = expires_in_days
-                    .map(|d| chrono::Utc::now() + chrono::Duration::days(d));
+                let expires_at =
+                    expires_in_days.map(|d| chrono::Utc::now() + chrono::Duration::days(d));
                 match self
                     .service
                     .add_mod_tag(target, tag, interaction.user_id, reason, expires_at)
@@ -261,9 +285,7 @@ impl InteractionHandler for ModTagHandler {
                     Ok(()) => BridgeReply::ephemeral_text(format!(
                         "Mod-Tag `{tag}` wurde für <@{target}> gesetzt."
                     )),
-                    Err(_) => BridgeReply::ephemeral_text(format!(
-                        "Unbekanntes Mod-Tag `{tag}`."
-                    )),
+                    Err(_) => BridgeReply::ephemeral_text(format!("Unbekanntes Mod-Tag `{tag}`.")),
                 }
             }
             ModAction::Remove => {
@@ -463,7 +485,12 @@ mod tests {
         assert_eq!(age_label(Some("u25")), "U25");
         assert_eq!(tone_label(Some("banter_ok")), "Banter-OK");
         // Default-Markierung: aktueller Wert ist default, sonst nicht.
-        let sel = select("age", "x", &[("Nicht gesetzt", UNSET, None), ("25+", "25+", None)], Some("25+"));
+        let sel = select(
+            "age",
+            "x",
+            &[("Nicht gesetzt", UNSET, None), ("25+", "25+", None)],
+            Some("25+"),
+        );
         let opts = sel["components"][0]["options"].as_array().unwrap();
         assert_eq!(opts[0]["default"], json!(false)); // UNSET
         assert_eq!(opts[1]["default"], json!(true)); // 25+

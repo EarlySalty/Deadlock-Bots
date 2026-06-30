@@ -1376,21 +1376,21 @@ impl LfgResponder {
         } else {
             "Unbekannt".to_string()
         };
-	        self.port
-	            .post_embed(
-	                channel_id,
-	                json!({
-	                    "title": LFGROUTE_TITLE_PLACEHOLDER,
-	                    "color": 0xE67E22,
-	                    "fields": [
-	                        {
-	                            "name": LFG_DLOG_PREFIX_DECISION,
-	                            "value": Self::route_debug_value(target, &rank_display, &route, &lanes),
-	                            "inline": false
-	                        }
-	                    ],
-	                }),
-	            )
+        self.port
+            .post_embed(
+                channel_id,
+                json!({
+                    "title": LFGROUTE_TITLE_PLACEHOLDER,
+                    "color": 0xE67E22,
+                    "fields": [
+                        {
+                            "name": LFG_DLOG_PREFIX_DECISION,
+                            "value": Self::route_debug_value(target, &rank_display, &route, &lanes),
+                            "inline": false
+                        }
+                    ],
+                }),
+            )
             .await;
     }
 

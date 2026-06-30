@@ -203,12 +203,8 @@ impl TextSessions {
         let final_points = session.final_points();
         let mut co: Vec<u64> = session.co_participants.iter().copied().collect();
         co.sort_unstable();
-        let co_ids: Option<String> = (!co.is_empty()).then(|| {
-            co.iter()
-                .map(u64::to_string)
-                .collect::<Vec<_>>()
-                .join(",")
-        });
+        let co_ids: Option<String> =
+            (!co.is_empty()).then(|| co.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
         let started = fmt_ts(session.started_at);
         let ended = fmt_ts(session.last_message_at);
         let guild_id = session.guild_id;
@@ -334,7 +330,11 @@ mod tests {
     async fn log_count(store: &TextSessions) -> i64 {
         store
             .db
-            .read(|conn| conn.query_row("SELECT COUNT(*) FROM text_conversation_log", [], |r| r.get(0)))
+            .read(|conn| {
+                conn.query_row("SELECT COUNT(*) FROM text_conversation_log", [], |r| {
+                    r.get(0)
+                })
+            })
             .await
             .unwrap()
     }
@@ -388,7 +388,11 @@ mod tests {
         store
             .on_message(1, 10, 100, false, 1000 + SESSION_WINDOW_SECS + 1)
             .await;
-        assert_eq!(stats(&store, 1).await, (1, 2), "nur die erste Session ist geflusht");
+        assert_eq!(
+            stats(&store, 1).await,
+            (1, 2),
+            "nur die erste Session ist geflusht"
+        );
         store.flush_all().await;
         assert_eq!(stats(&store, 1).await, (2, 4), "beide Sessions summiert");
         assert_eq!(log_count(&store).await, 2);

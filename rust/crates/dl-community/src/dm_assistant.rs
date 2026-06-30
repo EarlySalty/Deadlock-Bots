@@ -303,13 +303,17 @@ mod tests {
         // Erster Aufruf ok.
         assert!(check_cooldown(&mut stamps, 0.0).is_none());
         // Sofort nochmal (< 10 s Abstand) → Hinweis.
-        assert!(check_cooldown(&mut stamps, 2.0).unwrap().contains("Sekunden"));
+        assert!(check_cooldown(&mut stamps, 2.0)
+            .unwrap()
+            .contains("Sekunden"));
         // Nach 11 s wieder ok (2. Aufruf gezählt).
         assert!(check_cooldown(&mut stamps, 11.0).is_none());
         // Nach weiteren 11 s der 3. Aufruf ok.
         assert!(check_cooldown(&mut stamps, 22.0).is_none());
         // 4. Aufruf im 60-s-Fenster → zu oft.
-        assert!(check_cooldown(&mut stamps, 33.0).unwrap().contains("zu oft"));
+        assert!(check_cooldown(&mut stamps, 33.0)
+            .unwrap()
+            .contains("zu oft"));
     }
 
     #[test]
@@ -322,7 +326,9 @@ mod tests {
 
     #[test]
     fn parse_json_und_fallback() {
-        let p = parse_ai_response("Vorspann {\"intent\": \"Steam\", \"message\": \" Hi \", \"action\": true} Nachspann");
+        let p = parse_ai_response(
+            "Vorspann {\"intent\": \"Steam\", \"message\": \" Hi \", \"action\": true} Nachspann",
+        );
         assert_eq!(p.intent, "steam");
         assert_eq!(p.message, "Hi");
         assert!(p.action);
@@ -380,7 +386,9 @@ mod tests {
     }
 
     fn port() -> Arc<MockPort> {
-        Arc::new(MockPort { sent: Mutex::new(Vec::new()) })
+        Arc::new(MockPort {
+            sent: Mutex::new(Vec::new()),
+        })
     }
 
     #[tokio::test]
@@ -406,7 +414,10 @@ mod tests {
         assert_eq!(sent.len(), 1);
         // Fallback-Embed + Buttons.
         assert!(sent[0].contains_key("components"));
-        assert!(sent[0]["embeds"][0]["title"].as_str().unwrap().contains("Community Bot"));
+        assert!(sent[0]["embeds"][0]["title"]
+            .as_str()
+            .unwrap()
+            .contains("Community Bot"));
     }
 
     #[tokio::test]

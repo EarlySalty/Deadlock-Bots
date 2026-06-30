@@ -367,7 +367,12 @@ fn extract_builds(payload: &Value) -> Result<Option<Vec<BuildRow>>, Response> {
 
 /// `_apply_deadlock_build_snapshot`: Builds upserten, dann nicht übermittelte
 /// build_ids des Helden löschen (Replace-Semantik; leere Liste → alle löschen).
-fn apply_snapshot(conn: &Connection, hero_id: i64, builds: &[BuildRow], ts: i64) -> rusqlite::Result<()> {
+fn apply_snapshot(
+    conn: &Connection,
+    hero_id: i64,
+    builds: &[BuildRow],
+    ts: i64,
+) -> rusqlite::Result<()> {
     for b in builds {
         conn.execute(
             "INSERT INTO deadlock_hero_builds (
@@ -548,9 +553,17 @@ pub async fn deadlock_upsert_hero(
         None
     };
 
-    let has_target = has2(&payload, "target_build_name_override", "targetBuildNameOverride");
+    let has_target = has2(
+        &payload,
+        "target_build_name_override",
+        "targetBuildNameOverride",
+    );
     let target_override = match normalize_target_name(
-        get2(&payload, "target_build_name_override", "targetBuildNameOverride"),
+        get2(
+            &payload,
+            "target_build_name_override",
+            "targetBuildNameOverride",
+        ),
         "target_build_name_override",
     ) {
         Ok(s) => s,
@@ -612,7 +625,15 @@ pub async fn deadlock_upsert_hero(
                     target_build_name_override = excluded.target_build_name_override,
                     is_active = excluded.is_active,
                     updated_at = excluded.updated_at",
-                params![hero_id, name_c, origin_build_id, target, is_active as i64, ts, ts],
+                params![
+                    hero_id,
+                    name_c,
+                    origin_build_id,
+                    target,
+                    is_active as i64,
+                    ts,
+                    ts
+                ],
             )?;
 
             if let Some(b) = &builds {
@@ -746,9 +767,18 @@ mod tests {
     #[test]
     fn coerce_bool_varianten() {
         assert_eq!(coerce_req_bool(None, true, "f").ok(), Some(true));
-        assert_eq!(coerce_req_bool(Some(&json!(false)), true, "f").ok(), Some(false));
-        assert_eq!(coerce_req_bool(Some(&json!(1)), false, "f").ok(), Some(true));
-        assert_eq!(coerce_req_bool(Some(&json!("no")), true, "f").ok(), Some(false));
+        assert_eq!(
+            coerce_req_bool(Some(&json!(false)), true, "f").ok(),
+            Some(false)
+        );
+        assert_eq!(
+            coerce_req_bool(Some(&json!(1)), false, "f").ok(),
+            Some(true)
+        );
+        assert_eq!(
+            coerce_req_bool(Some(&json!("no")), true, "f").ok(),
+            Some(false)
+        );
         assert!(coerce_req_bool(Some(&json!(2)), false, "f").is_err());
         assert!(coerce_req_bool(Some(&json!("maybe")), false, "f").is_err());
     }
@@ -765,7 +795,7 @@ mod tests {
         assert_eq!(ok.author_name, "Nani");
         assert!(ok.is_active); // default true
         assert_eq!(ok.sort_order, 100); // default
-        // fehlende author_name -> Fehler
+                                        // fehlende author_name -> Fehler
         assert!(parse_build_row(&json!({"build_id": 1, "build_name": "x"}), 1).is_err());
         // fehlende build_id -> Fehler
         assert!(parse_build_row(&json!({"build_name": "x", "author_name": "y"}), 1).is_err());
@@ -777,7 +807,9 @@ mod tests {
         assert!(extract_builds(&json!({"hero_id": 1})).unwrap().is_none());
         // null -> leere Liste
         assert_eq!(
-            extract_builds(&json!({"builds": Value::Null})).unwrap().map(|v| v.len()),
+            extract_builds(&json!({"builds": Value::Null}))
+                .unwrap()
+                .map(|v| v.len()),
             Some(0)
         );
         // Duplikat-build_id -> Fehler

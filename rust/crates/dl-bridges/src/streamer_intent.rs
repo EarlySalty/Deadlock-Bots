@@ -366,7 +366,11 @@ mod tests {
         // Zu einem Zeitpunkt, der nur dank Auffrischung noch im Fenster liegt.
         let check = first + INTENT_TTL_SECS + 100;
         let pending = store.pending_intents(check).await;
-        assert_eq!(pending.len(), 1, "Fenster wurde durch den 2. Aufruf erneuert");
+        assert_eq!(
+            pending.len(),
+            1,
+            "Fenster wurde durch den 2. Aufruf erneuert"
+        );
         assert_eq!(pending[0].created_at, again);
     }
 

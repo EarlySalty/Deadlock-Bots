@@ -478,9 +478,6 @@ mod tests {
 
         let (count, previews) = store.insert_ragebait_hit(1, 100, 5000, 2, "neu").await;
         assert_eq!(count, 2);
-        assert_eq!(
-            previews,
-            vec!["knapp drin".to_string(), "neu".to_string()]
-        );
+        assert_eq!(previews, vec!["knapp drin".to_string(), "neu".to_string()]);
     }
 }
