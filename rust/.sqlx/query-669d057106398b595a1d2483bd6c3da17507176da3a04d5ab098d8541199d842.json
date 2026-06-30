@@ -1,0 +1,80 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT display_name, survey_token, user_bucket, reason_code,\n                   follow_up_question, follow_up_text, extra_text,\n                   EXTRACT(EPOCH FROM web_submitted_at)::BIGINT AS \"web_submitted_at?\",\n                   web_payload::text AS \"web_payload?\",\n                   EXTRACT(EPOCH FROM left_at)::BIGINT AS \"left_at!\",\n                   EXTRACT(EPOCH FROM responded_at)::BIGINT AS \"responded_at?\"\n              FROM activity.member_leave_surveys\n             WHERE responded_at IS NOT NULL OR web_submitted_at IS NOT NULL\n             ORDER BY COALESCE(web_submitted_at, responded_at) DESC, id DESC\n             LIMIT 30\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "survey_token",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "user_bucket",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "reason_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "follow_up_question",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "follow_up_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "extra_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "web_submitted_at?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "web_payload?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "left_at!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 10,
+        "name": "responded_at?",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "669d057106398b595a1d2483bd6c3da17507176da3a04d5ab098d8541199d842"
+}

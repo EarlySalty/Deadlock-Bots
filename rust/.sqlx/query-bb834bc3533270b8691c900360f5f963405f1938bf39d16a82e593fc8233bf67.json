@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE coaching.requests\n               SET assigned_coach_id = NULL,\n                   reserved_until = NULL,\n                   updated_at = $1\n             WHERE bot_request_id = $2 AND status = 'analyzed'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bb834bc3533270b8691c900360f5f963405f1938bf39d16a82e593fc8233bf67"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) + 1 AS \"rank!\"\n            FROM activity.text_stats\n            WHERE total_points > $1\n               OR (total_points = $1 AND total_messages > $2)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rank!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "2d2bc5a3d8241101cc754d3dde0e76af3c3f13e92306d23e4ae93aef5e36d0ef"
+}

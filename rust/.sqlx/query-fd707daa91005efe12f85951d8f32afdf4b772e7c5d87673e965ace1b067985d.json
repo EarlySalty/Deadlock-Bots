@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT upvotes, downvotes\n              FROM tierlist.tierlist_build_votes\n             WHERE build_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "upvotes",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "downvotes",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "fd707daa91005efe12f85951d8f32afdf4b772e7c5d87673e965ace1b067985d"
+}

@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT DISTINCT discord_id\n            FROM core.steam_links\n            WHERE steam_id IS NOT NULL\n              AND steam_id != ''\n              AND verified = TRUE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "4b289ce2ea4b2000b20a3fa4bee4c2620bee8a17466ad6e1befb371bfbf74b8f"
+}

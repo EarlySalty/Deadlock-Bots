@@ -5,7 +5,6 @@
 resolver = "2"
 members = [
     "crates/dl-core",
-    "crates/dl-db",
     "crates/dl-webcore",
     "crates/dl-stats",
     "crates/dl-tierlist",
@@ -47,9 +46,7 @@ anyhow = "1"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-# SQLite — bewusst rusqlite wie im Steam-Bot-Rewrite: greift dort bereits
-# erfolgreich auf exakt dieselbe data/deadlock.sqlite3 zu (WAL, Koexistenz
-# mit dem laufenden Python-Prozess ist bewiesen).
+# SQLite — nur noch dl-central-etl liest Quell-SQLite-Snapshots.
 rusqlite = { version = "0.32", features = ["bundled"] }
 # Postgres — zentrale DB, Migrationen und compile-checked Queries.
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio", "tls-rustls", "macros", "migrate", "chrono"] }
@@ -87,7 +84,6 @@ tempfile = "3"
 
 # Interne Crates
 dl-core = { path = "crates/dl-core" }
-dl-db = { path = "crates/dl-db" }
 dl-webcore = { path = "crates/dl-webcore" }
 dl-stats = { path = "crates/dl-stats" }
 dl-tierlist = { path = "crates/dl-tierlist" }

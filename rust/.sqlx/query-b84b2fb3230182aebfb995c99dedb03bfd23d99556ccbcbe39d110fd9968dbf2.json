@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT payload::text AS \"payload?\"\n          FROM bot.standalone_bot_state\n         WHERE bot = 'steam'\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "payload?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b84b2fb3230182aebfb995c99dedb03bfd23d99556ccbcbe39d110fd9968dbf2"
+}

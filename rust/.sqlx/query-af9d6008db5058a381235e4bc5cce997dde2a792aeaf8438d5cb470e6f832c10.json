@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"tracked_users!\",\n                   COALESCE(SUM(total_seconds), 0)::BIGINT AS \"total_seconds!\",\n                   COALESCE(SUM(total_points), 0)::BIGINT AS \"total_points!\",\n                   to_char(MAX(last_update) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_update?\"\n              FROM voice.voice_stats\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "tracked_users!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_points!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_update?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "af9d6008db5058a381235e4bc5cce997dde2a792aeaf8438d5cb470e6f832c10"
+}

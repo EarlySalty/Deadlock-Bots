@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT guild_id, channel_id, message_id, category_id, lane_id\n              FROM voice.tempvoice_interface\n             WHERE lane_id IS NOT NULL\n             ORDER BY lane_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "category_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "lane_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "8ab774e700b537f69ff97d8f49fcc69375da5a848f2107140bc537880d2367df"
+}

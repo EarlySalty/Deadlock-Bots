@@ -18,6 +18,7 @@ use dl_community::onboarding::OnboardingThreadError;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{ChannelId, GuildId, RoleId, UserId};
+use sqlx::PgPool;
 
 pub const ONBOARD_COMPLETE_ROLE_ID: u64 = 1304216250649415771;
 pub const MAIN_GUILD_ID: u64 = 1289721245281292288;
@@ -182,7 +183,7 @@ pub struct WizardGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
     pub steam: Arc<dl_bridges::steam::SteamBotClient>,
-    pub db: dl_db::Db,
+    pub pool: PgPool,
 }
 
 const DISCORD_TRANSIENT_RETRY_DELAYS: [Duration; 2] =
@@ -364,35 +365,38 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
         let Ok(user_id_sql) = i64::try_from(user_id) else {
             return false;
         };
-        self.db
-            .read(move |conn| {
-                use rusqlite::OptionalExtension;
-                conn.query_row(
-                    "SELECT 1 FROM steam_links
-                     WHERE user_id=?1 AND verified=1 AND is_steam_friend=1
-                     LIMIT 1",
-                    rusqlite::params![user_id_sql],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-                .map(|row| row.is_some())
-            })
-            .await
-            .unwrap_or(false)
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "exists!"
+              FROM core.steam_links
+             WHERE discord_id = $1
+               AND verified = TRUE
+               AND is_steam_friend = TRUE
+             LIMIT 1
+            "#,
+            user_id_sql,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.is_some())
+        .unwrap_or(false)
     }
 
     async fn claim_screening_auto_start(&self, user_id: u64) -> bool {
         let key = user_id.to_string();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO kv_store(ns, k, v) VALUES(?1, ?2, 'claimed')",
-                    rusqlite::params![dl_community::onboarding::AUTO_ONBOARDING_CLAIM_NS, key],
-                )
-                .map(|affected| affected > 0)
-            })
-            .await
-            .unwrap_or(false)
+        sqlx::query!(
+            r#"
+            INSERT INTO bot.kv_store(ns, k, v)
+            VALUES($1, $2, 'claimed')
+            ON CONFLICT (ns, k) DO NOTHING
+            "#,
+            dl_community::onboarding::AUTO_ONBOARDING_CLAIM_NS,
+            key,
+        )
+        .execute(&self.pool)
+        .await
+        .map(|result| result.rows_affected() > 0)
+        .unwrap_or(false)
     }
 
     async fn member_display_name(&self, guild_id: u64, user_id: u64) -> String {
@@ -418,47 +422,50 @@ impl dl_community::onboarding::OnboardingPort for WizardGlue {
     }
 
     async fn register_pending_verify(&self, user_id: u64, channel_id: u64) {
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS onboarding_pending_verify(
-                       user_id INTEGER PRIMARY KEY, channel_id INTEGER NOT NULL,
-                       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP);",
-                )?;
-                conn.execute(
-                    "INSERT INTO onboarding_pending_verify(user_id, channel_id) VALUES(?1, ?2)
-                     ON CONFLICT(user_id) DO UPDATE SET channel_id=excluded.channel_id,
-                       updated_at=CURRENT_TIMESTAMP",
-                    rusqlite::params![user_id, channel_id],
-                )?;
-                Ok(())
-            })
-            .await;
+        let (Ok(user_id), Ok(channel_id)) = (i64::try_from(user_id), i64::try_from(channel_id))
+        else {
+            tracing::warn!(
+                user_id,
+                channel_id,
+                "Onboarding: Pending-Verify-ID zu gross"
+            );
+            return;
+        };
+        if let Err(err) = sqlx::query!(
+            r#"
+            INSERT INTO bot.onboarding_pending_verify(user_id, channel_id, updated_at)
+            VALUES($1, $2, now())
+            ON CONFLICT(user_id) DO UPDATE
+               SET channel_id = EXCLUDED.channel_id,
+                   updated_at = now()
+            "#,
+            user_id,
+            channel_id,
+        )
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, user_id, channel_id, "Onboarding: Pending-Verify konnte nicht gespeichert werden");
+        }
     }
 
     async fn pop_pending_verify(&self, user_id: u64) -> Option<u64> {
-        self.db
-            .write(move |conn| {
-                use rusqlite::OptionalExtension;
-                let channel: Option<i64> = conn
-                    .query_row(
-                        "SELECT channel_id FROM onboarding_pending_verify WHERE user_id=?1",
-                        rusqlite::params![user_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?;
-                if channel.is_some() {
-                    conn.execute(
-                        "DELETE FROM onboarding_pending_verify WHERE user_id=?1",
-                        rusqlite::params![user_id],
-                    )?;
-                }
-                Ok(channel.map(|c| c as u64))
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = i64::try_from(user_id) else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            DELETE FROM bot.onboarding_pending_verify
+             WHERE user_id = $1
+             RETURNING channel_id
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|row| u64::try_from(row.channel_id).ok())
     }
 
     async fn send_text(&self, channel_id: u64, content: String) {

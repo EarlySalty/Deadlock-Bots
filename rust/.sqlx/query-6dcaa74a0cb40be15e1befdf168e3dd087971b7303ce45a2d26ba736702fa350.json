@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.user_retention_messages(\n                id, user_id, guild_id, message_type, sent_at, delivery_status, error_message\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6dcaa74a0cb40be15e1befdf168e3dd087971b7303ce45a2d26ba736702fa350"
+}

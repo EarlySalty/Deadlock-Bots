@@ -1,0 +1,35 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH source AS (\n            SELECT started_at AT TIME ZONE 'UTC' AS utc_started,\n                   duration_seconds\n            FROM activity.voice_session_log\n            WHERE started_at >= $2\n        ),\n        grouped AS (\n            SELECT CASE\n                    WHEN $1 = 'hour' THEN to_char(utc_started, 'HH24')\n                    WHEN $1 = 'day' THEN EXTRACT(DOW FROM utc_started)::INT::TEXT\n                    WHEN $1 = 'week' THEN to_char(utc_started, 'YYYY-') ||\n                        lpad(((EXTRACT(DOY FROM utc_started)::INT - 1 -\n                            ((8 - EXTRACT(ISODOW FROM date_trunc('year', utc_started))::INT) % 7) + 7) / 7)::TEXT, 2, '0')\n                    ELSE to_char(utc_started, 'YYYY-MM')\n                   END AS bucket,\n                   duration_seconds\n            FROM source\n        )\n        SELECT bucket AS \"bucket!\",\n               COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"total_seconds!\",\n               COUNT(*) AS \"sessions!\"\n        FROM grouped\n        GROUP BY bucket\n        ORDER BY bucket\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bucket!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sessions!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "b8b80cc3affb6b890009f551154c1adb49c3cbbf604b01dccba216e0c9cc363e"
+}

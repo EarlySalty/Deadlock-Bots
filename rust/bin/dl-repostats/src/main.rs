@@ -326,9 +326,15 @@ mod tests {
         assert_eq!(agg.total_del, 3); // 2 + 1
         assert_eq!(agg.total_files, 3); // main.rs, lib.rs, logo.png (Cargo.lock raus)
 
-        let d14 = agg.days.get("2026-06-14").unwrap();
+        let d14 = agg
+            .days
+            .get("2026-06-14")
+            .expect("2026-06-14 day aggregate");
         assert_eq!((d14.c, d14.a, d14.r, d14.f), (1, 10, 2, 1));
-        let d13 = agg.days.get("2026-06-13").unwrap();
+        let d13 = agg
+            .days
+            .get("2026-06-13")
+            .expect("2026-06-13 day aggregate");
         assert_eq!((d13.c, d13.a, d13.r, d13.f), (1, 5, 1, 2));
 
         let out = agg.into_out("Demo", "/tmp/demo");

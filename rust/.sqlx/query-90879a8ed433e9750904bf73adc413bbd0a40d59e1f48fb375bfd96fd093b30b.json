@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE tierlist.tierlist_build_votes\n                   SET upvotes = upvotes + 1,\n                       updated_at = $1\n                 WHERE build_id = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "90879a8ed433e9750904bf73adc413bbd0a40d59e1f48fb375bfd96fd093b30b"
+}

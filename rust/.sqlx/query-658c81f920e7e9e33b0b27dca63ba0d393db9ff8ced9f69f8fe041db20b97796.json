@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT discord_thread_id\n                  FROM coaching.sessions\n                 WHERE bot_request_id = $1\n                   AND status IN ('active', 'waiting_survey')\n                 ORDER BY created_at DESC\n                 LIMIT 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_thread_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "658c81f920e7e9e33b0b27dca63ba0d393db9ff8ced9f69f8fe041db20b97796"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT banned_id\n              FROM voice.tempvoice_bans\n             WHERE owner_id = $1\n             ORDER BY banned_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "banned_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "97308d20d30fdfcde7d6b5e5fe2e3ec548e5b4abdf79ee3a4b03a6236961ae5e"
+}

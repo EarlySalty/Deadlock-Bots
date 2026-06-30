@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO activity.user_co_players(\n                    user_id, co_player_id, sessions_together, total_minutes_together,\n                    last_played_together, user_display_name, co_player_display_name\n                )\n                VALUES($1, $2, 1, $3, now(), $4, $5)\n                ON CONFLICT(user_id, co_player_id) DO UPDATE SET\n                    sessions_together = COALESCE(activity.user_co_players.sessions_together, 0) + 1,\n                    total_minutes_together =\n                        COALESCE(activity.user_co_players.total_minutes_together, 0)\n                        + EXCLUDED.total_minutes_together,\n                    last_played_together = now(),\n                    user_display_name =\n                        COALESCE(EXCLUDED.user_display_name, activity.user_co_players.user_display_name),\n                    co_player_display_name =\n                        COALESCE(EXCLUDED.co_player_display_name, activity.user_co_players.co_player_display_name)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "306848904cb614760c80a7825867a2f111cd65460b2c1a72f3db7d3d666f5473"
+}

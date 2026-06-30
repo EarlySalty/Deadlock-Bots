@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT streamer_login, invite_code, invite_url,\n               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"created_at?\",\n               to_char(last_sent_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_sent_at?\"\n          FROM bot.twitch_streamer_invites\n         WHERE ($1::BIGINT IS NULL OR guild_id = $1)\n         ORDER BY streamer_login\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "streamer_login",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "invite_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "invite_url",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "created_at?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_sent_at?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      null,
+      null
+    ]
+  },
+  "hash": "3ae18ccc29a1d369dac325e3ac32e05a57a02aff429ca502eadd9f7cf6dbd8a9"
+}

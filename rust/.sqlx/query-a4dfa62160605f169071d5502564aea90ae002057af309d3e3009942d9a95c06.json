@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT display_name, user_bucket, reason_code,\n               web_submitted_at IS NOT NULL AS \"already_submitted!\"\n          FROM activity.member_leave_surveys\n         WHERE survey_token = $1\n           AND created_at >= $2\n         ORDER BY id\n         LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "user_bucket",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "reason_code",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "already_submitted!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "a4dfa62160605f169071d5502564aea90ae002057af309d3e3009942d9a95c06"
+}

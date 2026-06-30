@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH ranked_clones AS (\n                SELECT\n                    hbc.origin_hero_build_id,\n                    hbc.hero_id,\n                    hbc.target_language,\n                    hbc.target_name,\n                    hbc.target_description,\n                    hbc.attempts,\n                    hbc.created_at,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY hbc.hero_id\n                        ORDER BY COALESCE(wba.priority, 0) ASC,\n                                 hbs.published_at DESC NULLS LAST,\n                                 hbc.created_at ASC\n                    ) AS rn\n                FROM tierlist.hero_build_clones hbc\n                INNER JOIN tierlist.hero_build_sources hbs\n                        ON hbc.origin_hero_build_id = hbs.hero_build_id\n                LEFT JOIN tierlist.watched_build_authors wba\n                       ON hbs.author_account_id = wba.author_account_id\n                WHERE hbc.status = 'pending'\n                  AND hbc.attempts < $1\n            )\n            SELECT origin_hero_build_id, hero_id, target_language,\n                   target_name, target_description, attempts\n              FROM ranked_clones\n             WHERE rn <= 3\n             ORDER BY created_at ASC\n             LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "origin_hero_build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "hero_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "target_language",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "target_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "target_description",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "attempts",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "3efd5d072e0c35419cb1e4a38c6798ad038740ee3bb6efd6255b731c0a0543af"
+}

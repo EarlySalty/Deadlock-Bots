@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"total!\"\n            FROM activity.voice_session_log\n            WHERE guild_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4d543fcc7378f33b1dbc0ad8699399dd1f2bf81c6ded01f402ccd0a838bf0917"
+}

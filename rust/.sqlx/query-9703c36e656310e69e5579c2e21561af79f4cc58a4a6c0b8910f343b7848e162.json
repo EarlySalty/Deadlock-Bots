@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE activity.user_activity_patterns\n            SET last_pinged_at = now(),\n                ping_count_30d = COALESCE(ping_count_30d, 0) + 1\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9703c36e656310e69e5579c2e21561af79f4cc58a4a6c0b8910f343b7848e162"
+}

@@ -609,6 +609,8 @@ pub fn spawn(router: Arc<LaneRouter>, dispatcher: &Dispatcher) -> tokio::task::J
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock, clippy::type_complexity)]
+
     use super::*;
     use serde_json::Map;
     use std::collections::{HashMap, HashSet};

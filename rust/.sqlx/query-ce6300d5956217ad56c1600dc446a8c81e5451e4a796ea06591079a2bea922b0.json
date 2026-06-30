@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT k, v\n        FROM tierlist.tierlist_settings\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "k",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "v",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ce6300d5956217ad56c1600dc446a8c81e5451e4a796ea06591079a2bea922b0"
+}

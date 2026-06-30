@@ -1,0 +1,68 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,\n                   dm_enabled, dm_text, remove_on_unreact\n              FROM bot.reaction_role_mappings\n             WHERE backfill_pending = TRUE AND active = TRUE\n             ORDER BY id ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "emoji",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "role_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "dm_enabled",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "dm_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "remove_on_unreact",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "36da111342d6ee969c75488ee488ec66637538cb6347016f2721d140699e5e2c"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE activity.member_leave_surveys\n                   SET reason_code = $1\n                 WHERE id = $2 AND user_id = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c4574eea1baa3ec7be5c68d7cf222da3f8e8e847f00f703e8243c08140e07293"
+}

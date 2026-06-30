@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.user_activity_patterns(\n                user_id, typical_hours, typical_days, activity_score_2w,\n                sessions_count_2w, total_minutes_2w, last_active_at, last_analyzed_at\n            )\n            VALUES($1, $2::text::jsonb, $3::text::jsonb, $4, $5, $6, $7, now())\n            ON CONFLICT(user_id) DO UPDATE SET\n                typical_hours = EXCLUDED.typical_hours,\n                typical_days = EXCLUDED.typical_days,\n                activity_score_2w = EXCLUDED.activity_score_2w,\n                sessions_count_2w = EXCLUDED.sessions_count_2w,\n                total_minutes_2w = EXCLUDED.total_minutes_2w,\n                last_active_at = EXCLUDED.last_active_at,\n                last_analyzed_at = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Int4",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "833673af97c1262a6a2fa1a5aecd4b4b6372eead6221273ab13f8f2eceff9d21"
+}

@@ -1,0 +1,39 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id,\n                   guild_id,\n                   FLOOR(EXTRACT(EPOCH FROM ($1 - last_active_at)) / 86400)::BIGINT AS \"days_inactive!\"\n              FROM activity.user_retention_tracking\n             WHERE avg_weekly_sessions >= $2\n               AND total_active_days >= $3\n               AND last_active_at < $4\n               AND opted_out = FALSE\n               AND miss_you_count < $5\n               AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at < $6)\n             ORDER BY 3 DESC\n             LIMIT 50\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "days_inactive!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Float8",
+        "Int4",
+        "Timestamptz",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "5e304b02e263810a49c65d956d2ec4b089dcd91baad86e99f2a8c9b1952a01b5"
+}

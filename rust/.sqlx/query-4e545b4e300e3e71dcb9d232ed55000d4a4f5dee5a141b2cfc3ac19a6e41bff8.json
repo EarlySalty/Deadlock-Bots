@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            WITH ranked_pending_clones AS (\n                SELECT\n                    hbc.id,\n                    ROW_NUMBER() OVER (\n                        PARTITION BY hbc.hero_id\n                        ORDER BY COALESCE(wba.priority, 0) ASC,\n                                 hbs.published_at DESC NULLS LAST,\n                                 hbc.created_at ASC\n                    ) AS rn\n                FROM tierlist.hero_build_clones hbc\n                INNER JOIN tierlist.hero_build_sources hbs\n                        ON hbc.origin_hero_build_id = hbs.hero_build_id\n                LEFT JOIN tierlist.watched_build_authors wba\n                       ON hbs.author_account_id = wba.author_account_id\n                WHERE hbc.status = 'pending'\n                  AND hbc.attempts < $1\n            )\n            UPDATE tierlist.hero_build_clones hbc\n               SET status = 'cancelled',\n                   status_info = $2,\n                   updated_at = $3\n              FROM ranked_pending_clones ranked\n             WHERE hbc.id = ranked.id\n               AND ranked.rn > 3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4e545b4e300e3e71dcb9d232ed55000d4a4f5dee5a141b2cfc3ac19a6e41bff8"
+}

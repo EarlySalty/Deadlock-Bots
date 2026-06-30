@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO voice.voice_channel_settings (\n                    channel_id, guild_id, enabled, updated_at\n                )\n                VALUES ($1, $2, $3, NOW())\n                ON CONFLICT (channel_id) DO UPDATE SET\n                    enabled = EXCLUDED.enabled,\n                    updated_at = NOW()\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "61dbe4e3c05c876ab53c19c0f0c179910ea03a26dfca7e57679856f02e09723a"
+}

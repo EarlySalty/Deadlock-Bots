@@ -445,6 +445,8 @@ async fn next_rename_request_id(tx: &mut Transaction<'_, Postgres>) -> Result<i6
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     async fn mk() -> (dl_central_db::TestDb, RenameQueue) {

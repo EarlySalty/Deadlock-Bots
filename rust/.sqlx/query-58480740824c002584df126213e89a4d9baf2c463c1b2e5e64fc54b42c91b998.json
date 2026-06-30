@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT ON (user_id)\n               user_id,\n               display_name AS \"display_name!\"\n        FROM activity.member_events\n        WHERE user_id = ANY($1)\n          AND display_name IS NOT NULL\n          AND BTRIM(display_name) <> ''\n        ORDER BY user_id, occurred_at DESC NULLS LAST, id DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "display_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "58480740824c002584df126213e89a4d9baf2c463c1b2e5e64fc54b42c91b998"
+}

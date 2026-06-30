@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"exists!\"\n            FROM activity.member_events\n            WHERE user_id = $1\n              AND guild_id = $2\n              AND event_type = 'join'\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "caade568f95ca25c5e077582fbdf9581c9446ed7d1df30632fe6aa5587c2571c"
+}

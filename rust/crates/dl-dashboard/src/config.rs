@@ -7,6 +7,8 @@
 //! setzt. Werte werden über eine Lookup-Funktion bezogen, damit Tests die
 //! Umgebung nicht anfassen müssen.
 
+#![allow(clippy::items_after_test_module)]
+
 /// Discord-Server-Owner mit Voll-Zugriff (DEFAULT_DASHBOARD_OWNER_USER_ID).
 pub const DEFAULT_OWNER_USER_ID: u64 = 662995601738170389;
 /// Moderator-Rolle → Voll-Zugriff (DEFAULT_DASHBOARD_MODERATOR_ROLE_ID).

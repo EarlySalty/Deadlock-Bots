@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT co_player_id\n            FROM activity.user_co_players\n            WHERE user_id = $1\n              AND sessions_together >= 2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "co_player_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "199ef8ea755dc43e692eb9e2f14c86690ddd625828e60cf526ce1896586ba210"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE activity.voice_feedback_requests\n               SET status = $1,\n                   prompt_message_id = $2\n             WHERE id = $3\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "aacccf4e868e83f50fd537de97641c037965c9ecf129830c9ddcf3e995836619"
+}

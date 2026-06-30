@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE activity.user_retention_tracking\n                       SET last_miss_you_sent_at = $1,\n                           miss_you_count = miss_you_count + 1,\n                           updated_at = $1\n                     WHERE user_id = $2\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "32a3cb057735ddb32b8e3bdac56258aae7dd31f2f735b7d5584ac280b8cafdfc"
+}

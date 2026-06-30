@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT hb.hero_id,\n               hb.build_id,\n               hb.build_name,\n               hb.author_name,\n               hb.sort_order::BIGINT AS \"sort_order!\",\n               COALESCE(v.upvotes, 0)::BIGINT AS \"upvotes!\",\n               COALESCE(v.downvotes, 0)::BIGINT AS \"downvotes!\"\n          FROM tierlist.deadlock_hero_builds hb\n          LEFT JOIN tierlist.tierlist_build_votes v ON v.build_id = hb.build_id\n         WHERE hb.is_active = TRUE\n         ORDER BY hb.hero_id ASC, hb.sort_order ASC, hb.build_id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hero_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "build_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "author_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "sort_order!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "upvotes!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "downvotes!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "aa6c52925d5861699651a57a118df615ea0eb9664b5be585c54d02e86a03807c"
+}

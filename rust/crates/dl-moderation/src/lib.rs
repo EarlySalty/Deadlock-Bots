@@ -1020,6 +1020,8 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    #![allow(dead_code)]
+
     use super::*;
     use tokio::sync::Mutex;
 

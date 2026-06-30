@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT bot_request_id AS \"bot_request_id!: i32\"\n              FROM coaching.requests\n             WHERE status = 'pending'\n               AND current_problems IS NOT NULL\n               AND current_problems != ''\n               AND (ai_summary IS NULL OR ai_summary = '')\n             ORDER BY created_at ASC\n             LIMIT 5\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bot_request_id!: i32",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "4ed4c4857b2dcc556cb3851cb45191e5bd8bac6bb8615f0aa3319d4584c0f6a1"
+}

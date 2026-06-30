@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"exists!\"\n              FROM core.steam_links\n             WHERE discord_id = $1\n               AND verified = TRUE\n               AND is_steam_friend = TRUE\n             LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "35fcf25d3c605318b8a55f64efe7db6dbfa0149fdc9bd1de9d47e02578535d40"
+}

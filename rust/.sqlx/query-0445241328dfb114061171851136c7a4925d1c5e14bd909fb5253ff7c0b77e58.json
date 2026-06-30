@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                DELETE FROM voice.deadlock_voice_watch\n                 WHERE NOT (steam_id = ANY($1))\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0445241328dfb114061171851136c7a4925d1c5e14bd909fb5253ff7c0b77e58"
+}

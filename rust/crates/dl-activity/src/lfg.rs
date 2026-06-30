@@ -1941,7 +1941,7 @@ mod tests {
     fn staging_fallback_prueft_existenz_und_bietet_echte_lanes_an() {
         let empty_casual = lane(501, LaneLabel::Casual, 0, 8, 0.0, 0);
         assert_eq!(
-            resolve_staging_channel("Casual", &[empty_casual.clone()]),
+            resolve_staging_channel("Casual", std::slice::from_ref(&empty_casual)),
             None
         );
         let fields = build_staging_suggestion_fields("Casual", &[empty_casual]);
@@ -1955,7 +1955,7 @@ mod tests {
 
         let new_player = lane(NEW_PLAYER_LANE_ID + 1, LaneLabel::NewPlayer, 2, 6, 2.0, 0);
         assert_eq!(
-            resolve_staging_channel("New Player", &[new_player.clone()]),
+            resolve_staging_channel("New Player", std::slice::from_ref(&new_player)),
             Some(new_player.channel_id)
         );
     }

@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO scrim.team_members(\n            team_id, participant_id, role, is_captain, is_bench\n        )\n        VALUES($1, $2, $3, $4, $5)\n        ON CONFLICT(team_id, participant_id) DO UPDATE SET\n            role = excluded.role,\n            is_captain = excluded.is_captain,\n            is_bench = excluded.is_bench\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4",
+        "Text",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1dde8ab589c3e63edf92b3e776a7bf8467649bda495fb85fb418cb98c9ba3c04"
+}

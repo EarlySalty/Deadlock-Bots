@@ -1,3 +1,5 @@
+#![cfg(feature = "testing")]
+
 use dl_central_db::{kv, testing::test_pool};
 
 #[tokio::test]

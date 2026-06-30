@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, total_seconds, total_points\n              FROM voice.voice_stats\n             ORDER BY total_points DESC, total_seconds DESC\n             LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_seconds",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_points",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "2c03d7291277dd207feaee963953a615f3ca8ed16b52800d2d2da6a92f8df1cc"
+}

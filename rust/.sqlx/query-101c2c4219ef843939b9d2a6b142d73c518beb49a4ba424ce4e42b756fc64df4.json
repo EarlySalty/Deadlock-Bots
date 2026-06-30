@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT bot_request_id AS \"bot_request_id!: i32\", discord_user_id\n              FROM coaching.requests\n             WHERE role_removed_at IS NULL\n               AND role_expires_at IS NOT NULL\n               AND role_expires_at < $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "bot_request_id!: i32",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_user_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "101c2c4219ef843939b9d2a6b142d73c518beb49a4ba424ce4e42b756fc64df4"
+}

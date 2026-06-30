@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT state, provider, flow_type, requesting_service, redirect_after,\n                   created_at, expires_at, used AS \"used!\", metadata::text AS \"metadata?\"\n              FROM bot.oauth_states\n             WHERE state = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "state",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "provider",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "flow_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "requesting_service",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "redirect_after",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "expires_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 7,
+        "name": "used!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 8,
+        "name": "metadata?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "f219a115a49bc657da9e969d5b12a4eae2480bde8c6ea3d25d93890b9ea3c1fe"
+}

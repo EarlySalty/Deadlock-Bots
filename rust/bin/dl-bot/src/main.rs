@@ -233,28 +233,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let _web_cfg = WebConfig::from_env();
-    let db = dl_db::Db::open(&cfg.db_path)
-        .with_context(|| format!("gemeinsame DB öffnen: {}", cfg.db_path.display()))?;
-    // Komplettes Schema idempotent sicherstellen (Rust-Pendant zu init_schema):
-    // ein Owner, der beim Start alle Tabellen/Indizes anlegt, falls sie fehlen.
-    db.bootstrap_schema()
-        .await
-        .context("Schema-Bootstrap (db-schema.sql einspielen)")?;
-    let tables: i64 = db
-        .read(|c| {
-            c.query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table'",
-                [],
-                |row| row.get(0),
-            )
-        })
-        .await
-        .context("DB-Smoke-Check")?;
-    tracing::info!(db = %cfg.db_path.display(), tabellen = tables, "DB-Vertrag ok");
     let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
     let central_pool = dl_central_db::connect_pool(&central_dsn)
         .await
         .context("zentrale DB verbinden")?;
+    tracing::info!("Zentrale DB verbunden");
 
     // Discord-Adapter (REST sofort, Cache erst mit Gateway)
     let Some(discord_token) = env("DISCORD_TOKEN") else {
@@ -270,7 +253,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
-        Arc::new(db.clone()),
+        central_pool.clone(),
         Arc::new(modglue::ReactionRoleGlue {
             adapter: adapter.clone(),
         }),
@@ -351,7 +334,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
     let nudge = dl_voice::nudge::VoiceNudge::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(dl_voice::glue::NudgeGlue {
             adapter: adapter.clone(),
             steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
@@ -367,7 +350,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     });
     let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
         dl_voice::tempvoice::TempVoiceConfig::production(),
-        dl_voice::tempvoice::TempVoiceStore::new(db.clone()),
+        dl_voice::tempvoice::TempVoiceStore::new(central_pool.clone()),
         cache_snapshot.clone(),
     );
     dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
@@ -378,7 +361,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Aktivitäts-Analyzer (5) — auch Co-Spieler-Quelle für den Router
     let activity = dl_activity::analyzer::ActivityAnalyzer::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(dl_activity::glue::CacheVoiceGroups {
             adapter: adapter.clone(),
         }),
@@ -389,17 +372,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter: adapter.clone(),
     });
     let lane_router = dl_voice::router::LaneRouter::new(
-        db.clone(),
+        central_pool.clone(),
         router_glue.clone(),
         tempvoice.clone(),
         Some(activity.clone()),
     );
     dl_voice::router::register(&mut router, lane_router.clone());
-    let router_interface = dl_voice::router::RouterInterface::new(db.clone(), router_glue);
+    let router_interface =
+        dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue);
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(dl_voice::glue::FeedbackGlue {
             adapter: adapter.clone(),
         }),
@@ -407,7 +391,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
 
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
-    let tag_service = dl_community::tags::TagService::new(db.clone());
+    let tag_service = dl_community::tags::TagService::new(central_pool.clone());
     // /meine-tags-Selbstverwaltung (Slash + Select/Reset-Komponenten).
     dl_community::tags_ui::register(&mut router, tag_service.clone());
 
@@ -461,7 +445,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter: adapter.clone(),
             tags: tag_service.clone(),
             steam: steam_client.clone(),
-            db: db.clone(),
+            pool: central_pool.clone(),
         }));
     // Verifikations-Abschluss: RoleEvent::Gained(Verified) → Abschluss-Nachricht.
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
@@ -480,7 +464,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .filter(|tokens| *tokens > 0)
         .unwrap_or(dl_community::ai_onboarding::AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS);
     let ai_onboarding = dl_community::ai_onboarding::AiOnboarding::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(onboardglue::AiOnboardingGlue {
             adapter: adapter.clone(),
         }),
@@ -504,7 +488,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::ai_onboarding::register(&mut router, ai_onboarding);
 
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
-    dl_community::privacy_ui::register(&mut router, db.clone());
+    dl_community::privacy_ui::register(&mut router, central_pool.clone());
 
     // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
     // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
@@ -567,7 +551,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let coaching_website =
         dl_community::coaching::WebsiteClient::from_env(|k| std::env::var(k).ok());
     let coaching_requests = dl_community::coaching_requests::CoachingRequests::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(modglue::CoachingReqGlue {
             adapter: adapter.clone(),
         }),
@@ -589,7 +573,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .map(|client| client as Arc<dyn dl_ai::TextGenerator>);
     let faq_tool_ai = faq_ai.map(|client| client as Arc<dyn dl_ai::ToolTextGenerator>);
     let faq = dl_community::faq::FaqChat::new_with_ticket_support(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
@@ -609,13 +593,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         port: Arc::new(modglue::FeedbackGlue {
             adapter: adapter.clone(),
         }),
-        db: db.clone(),
+        pool: central_pool.clone(),
     });
     dl_community::feedback_hub::register(&mut router, feedback_hub.clone());
 
     // Clip-Einsendungen (6) — Button/Modal brauchen den Router, Loops gateway-gated
     let clips = dl_community::clips::ClipSubmission::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(modglue::ClipGlue {
             adapter: adapter.clone(),
         }),
@@ -624,7 +608,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Leave-Survey (6) — Select/Modal brauchen den Router, Trigger ist gateway-gated
     let leave_survey = dl_community::leave_survey::LeaveSurvey::new(
-        db.clone(),
+        central_pool.clone(),
         Arc::new(modglue::SurveyGlue {
             adapter: adapter.clone(),
         }),
@@ -638,7 +622,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(modglue::RetentionGlue {
             adapter: adapter.clone(),
         });
-    dl_community::retention::register(&mut router, db.clone(), retention_port.clone());
+    dl_community::retention::register(&mut router, central_pool.clone(), retention_port.clone());
 
     // Onboarding-Buttons (7): Regelbestätigung + Steam-Login + DM-Hinweise
     onboardglue::register(
@@ -768,9 +752,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Channel-Umbenennung. init() VOR den Voice-Subscribern, damit deren
         // Rename-Wuensche eingereiht statt direkt ausgefuehrt werden; EIN Worker
         // drainiert FIFO mit >=360s Abstand pro Channel.
-        dl_voice::rename_queue::init(db.clone());
+        dl_voice::rename_queue::init(central_pool.clone());
         dl_voice::rename_queue::spawn_worker(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(dl_voice::glue::RenameExecGlue {
                 adapter: adapter.clone(),
             }),
@@ -778,13 +762,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Voice-Session-Tracker (4a): Subscriber + Wartungs-Loops
         let voice_tracker =
-            dl_voice::tracker::VoiceTracker::new(db.clone(), cache_snapshot.clone());
+            dl_voice::tracker::VoiceTracker::new(central_pool.clone(), cache_snapshot.clone());
         voice_tracker.set_feedback(voice_feedback.clone()).await;
         // Voice-Statistik-Befehle (!vstats, !vleaderboard/!vlb/!voicetop):
         // teilen sich den Tracker (Live-Session-Zuschlag) + Cache (Namen,
         // Rollen, Guild-Name). Bewusst ohne Admin-Gate (jeder darf abfragen).
         let voice_stats = dl_voice::stats::VoiceStatsCommands::new(
-            db.clone(),
+            central_pool.clone(),
             voice_tracker.clone(),
             cache_snapshot.clone(),
             Some(voice_feedback.clone()),
@@ -807,7 +791,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Rank-Voice-Manager (4c): Anker + Rang-Rechte auf Comp-Lanes
         let rank_manager = dl_voice::rank::RankVoiceManager::new(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(dl_voice::glue::RankGlue {
                 adapter: adapter.clone(),
             }),
@@ -842,7 +826,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Player-Finder (5): portiert, aber per Flag deaktiviert (Redesign geplant)
         if dl_activity::player_finder::enabled(|k| std::env::var(k).ok()) {
-            let _finder = dl_activity::player_finder::PlayerFinder::new(db.clone());
+            let _finder = dl_activity::player_finder::PlayerFinder::new(central_pool.clone());
             tracing::warn!(
                 "PLAYER_FINDER_ENABLED=1 gesetzt — Kern portiert, Message-Flow folgt mit dem Redesign"
             );
@@ -852,7 +836,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Website-Invites (5): permanente Codes je Unterseite sicherstellen
         let website_invites = dl_community::invites::WebsiteInvites {
-            store: dl_community::invites::InviteStore { db: db.clone() },
+            store: dl_community::invites::InviteStore {
+                pool: central_pool.clone(),
+            },
             port: Arc::new(modglue::InviteGlue {
                 adapter: adapter.clone(),
             }),
@@ -895,19 +881,21 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)
         dl_activity::analyzer::spawn(activity.clone());
-        dl_activity::analyzer::spawn_member_events(db.clone(), &dispatcher);
+        dl_activity::analyzer::spawn_member_events(central_pool.clone(), &dispatcher);
         // Der Task wartet intern auf READY + Cache-Guilds und retryt leere
         // Member-Snapshots, statt nach einem fixen Startup-Fenster aufzugeben.
         dl_activity::analyzer::spawn_member_backfill(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(modglue::ActivityBackfillGlue {
                 adapter: adapter.clone(),
             }),
         );
-        dl_activity::analyzer::spawn_message_activity(db.clone(), &dispatcher);
+        dl_activity::analyzer::spawn_message_activity(central_pool.clone(), &dispatcher);
         // Text-Gamification (5): Konversations-Punkte → text_stats (speist das
         // öffentliche Text-Leaderboard) + 60-s-Flush-Loop.
-        let text_sessions = Arc::new(dl_activity::text_stats::TextSessions::new(db.clone()));
+        let text_sessions = Arc::new(dl_activity::text_stats::TextSessions::new(
+            central_pool.clone(),
+        ));
         if let Err(err) = text_sessions.ensure_schema().await {
             tracing::warn!(%err, "text_stats-Schema konnte nicht angelegt werden");
         }
@@ -916,7 +904,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // !useranalysis/!ua/!analyze, !myactivity, !tleaderboard/!tlb/!texttop,
         // !messagestats/!msgstats, !serverstats (nur Letzteres admin-gegated).
         let activity_stats = dl_activity::stats_cmd::ActivityStatsCommands::new(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(dl_activity::glue::StatsNames {
                 adapter: adapter.clone(),
             }),
@@ -925,12 +913,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Build-Publisher (#23): DB-only Queue-Steuerlogik fuer BUILD_PUBLISH.
         // Gateway-gated, damit dormant Rust-Starts nicht parallel zum Python-Cog
         // dieselbe steam_tasks-Queue befuellen.
-        let _build_publisher_tasks = build_publisher::spawn(db.clone());
+        let _build_publisher_tasks = build_publisher::spawn(central_pool.clone());
         // Retention-Tracking (Daten-Layer): Voice-Join → user_retention_tracking
         // + 30-min avg_weekly_sessions-Sync (Quelle der Leave-Survey-Einstufung)
         // + stündlicher Miss-You-Check (Embed-DM an inaktive Stamm-User).
         dl_community::retention::spawn(
-            dl_community::retention::RetentionTracker::new(db.clone()),
+            dl_community::retention::RetentionTracker::new(central_pool.clone()),
             retention_port.clone(),
             &dispatcher,
         );
@@ -956,7 +944,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // LFG-Lobby-Finder (5): Antworten im Suche-Kanal
         let lfg_responder = dl_activity::lfg::LfgResponder::new(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(modglue::LfgGlue {
                 adapter: adapter.clone(),
             }),
@@ -974,7 +962,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Voice-Status-Worker (4c): LiveMatch-Suffixe an Lane-Namen
         let status_worker = dl_voice::status::VoiceStatusWorker::new(
-            db.clone(),
+            central_pool.clone(),
             Arc::new(dl_voice::glue::StatusGlue {
                 adapter: adapter.clone(),
                 tempvoice: Some(tempvoice.clone()),

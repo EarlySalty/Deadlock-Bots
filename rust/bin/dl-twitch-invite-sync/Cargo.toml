@@ -3,12 +3,16 @@ name = "dl-twitch-invite-sync"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+testing = ["dl-central-db/testing"]
+
 [dependencies]
-dl-db.workspace = true
+dl-central-db.workspace = true
 dl-activity.workspace = true
 tokio.workspace = true
 reqwest.workspace = true
-rusqlite.workspace = true
+sqlx.workspace = true
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

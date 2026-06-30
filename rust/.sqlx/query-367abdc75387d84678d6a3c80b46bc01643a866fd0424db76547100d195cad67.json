@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.streamer_link_intents\n            SET status = 'linked',\n                linked_login = $2\n            WHERE discord_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "367abdc75387d84678d6a3c80b46bc01643a866fd0424db76547100d195cad67"
+}

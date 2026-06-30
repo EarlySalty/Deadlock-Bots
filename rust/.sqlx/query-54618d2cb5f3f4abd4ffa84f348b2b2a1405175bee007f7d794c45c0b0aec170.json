@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.tempvoice_interface\n             WHERE guild_id = $1\n               AND message_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "54618d2cb5f3f4abd4ffa84f348b2b2a1405175bee007f7d794c45c0b0aec170"
+}

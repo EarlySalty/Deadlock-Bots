@@ -869,6 +869,8 @@ pub fn spawn_dm_responses(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::sync::Mutex as StdMutex;
 

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE activity.member_events\n                   SET metadata = $1::text::jsonb\n                 WHERE id = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "dd20c80d9d429f3206a054c3a8982505caa00bc0793eecee6351de768fb8c93e"
+}

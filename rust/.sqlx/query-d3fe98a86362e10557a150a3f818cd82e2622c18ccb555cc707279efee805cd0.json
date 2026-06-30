@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.voice_stats (user_id, total_seconds, total_points, last_update)\n            VALUES ($1, $2, $3, NOW())\n            ON CONFLICT (user_id) DO UPDATE SET\n                total_seconds = voice_stats.total_seconds + EXCLUDED.total_seconds,\n                total_points = voice_stats.total_points + EXCLUDED.total_points,\n                last_update = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d3fe98a86362e10557a150a3f818cd82e2622c18ccb555cc707279efee805cd0"
+}
