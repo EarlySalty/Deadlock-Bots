@@ -386,12 +386,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "dl-db",
+ "dl-central-db",
  "dl-discord",
- "rusqlite",
  "serde_json",
  "serenity",
- "tempfile",
+ "sqlx",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]

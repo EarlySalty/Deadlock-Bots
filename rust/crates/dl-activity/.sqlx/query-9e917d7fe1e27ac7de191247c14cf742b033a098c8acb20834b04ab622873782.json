@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT event_type AS \"event_type!\",\n                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"timestamp?\",\n                   to_char(account_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"account_created_at?\",\n                   join_position\n            FROM activity.member_events\n            WHERE user_id = $1\n              AND guild_id = $2\n            ORDER BY occurred_at ASC NULLS FIRST, id ASC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "timestamp?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "account_created_at?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "join_position",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "9e917d7fe1e27ac7de191247c14cf742b033a098c8acb20834b04ab622873782"
+}

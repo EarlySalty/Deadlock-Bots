@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id,\n                   COALESCE(message_count, 0)::BIGINT AS \"message_count!\"\n            FROM activity.message_activity\n            WHERE guild_id = $1\n            ORDER BY COALESCE(message_count, 0) DESC\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "message_count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "f6f89fd5d3b81e6387225c43b93b4d53ab66dd323a76d4306b3633b895044000"
+}

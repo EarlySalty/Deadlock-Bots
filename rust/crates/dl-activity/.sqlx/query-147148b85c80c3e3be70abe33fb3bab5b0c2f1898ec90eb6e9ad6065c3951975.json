@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT co_player_id,\n                   COALESCE(sessions_together, 0)::INT AS \"sessions_together!\"\n            FROM activity.user_co_players\n            WHERE user_id = $1\n            ORDER BY COALESCE(sessions_together, 0) DESC,\n                     COALESCE(total_minutes_together, 0) DESC\n            LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "co_player_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "sessions_together!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "147148b85c80c3e3be70abe33fb3bab5b0c2f1898ec90eb6e9ad6065c3951975"
+}

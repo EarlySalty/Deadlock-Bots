@@ -14,7 +14,9 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::Db;
+use sqlx::PgPool;
+
+use crate::db::{discord_id_to_i64, i64_to_u64};
 
 pub const LFG_CHANNEL_ID: u64 = 1376335502919335936;
 pub const ACTIVITY_LOOKBACK_DAYS: i64 = 14;
@@ -90,52 +92,52 @@ pub fn status_sort_key(status: &str) -> u8 {
 // ── Daten-Zugriffe ─────────────────────────────────────────────────────────
 
 pub struct FinderStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl FinderStore {
     /// Verifizierte Steam-Link-User.
     pub async fn verified_user_ids(&self) -> Vec<u64> {
-        self.db
-            .read(|conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT DISTINCT user_id FROM steam_links
-                      WHERE steam_id IS NOT NULL AND steam_id != '' AND verified = 1",
-                )?;
-                let rows = stmt.query_map([], |row| row.get(0))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default()
+        let rows = sqlx::query!(
+            r#"
+            SELECT DISTINCT discord_id
+            FROM core.steam_links
+            WHERE steam_id IS NOT NULL
+              AND steam_id != ''
+              AND verified = TRUE
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        rows.unwrap_or_default()
+            .into_iter()
+            .filter_map(|row| i64_to_u64(row.discord_id, "discord_id"))
+            .collect()
     }
 
     /// (typical_hours, typical_days) — None wenn kein Muster existiert.
     pub async fn activity_pattern(&self, user_id: u64) -> Option<(Vec<i64>, Vec<i64>)> {
-        use rusqlite::OptionalExtension;
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT typical_hours, typical_days FROM user_activity_patterns
-                      WHERE user_id = ?1",
-                    [user_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, Option<String>>(0)?,
-                            row.get::<_, Option<String>>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .map(|(hours, days)| {
-                (
-                    parse_json_list(hours.as_deref()),
-                    parse_json_list(days.as_deref()),
-                )
-            })
+        let user_id = discord_id_to_i64(user_id, "user_id").ok()?;
+        sqlx::query!(
+            r#"
+            SELECT typical_hours::text AS "typical_hours?",
+                   typical_days::text AS "typical_days?"
+            FROM activity.user_activity_patterns
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| {
+            (
+                parse_json_list(row.typical_hours.as_deref()),
+                parse_json_list(row.typical_days.as_deref()),
+            )
+        })
     }
 
     /// Voice-Aktivität in den Kategorie-Kanälen innerhalb von 14 Tagen?
@@ -143,64 +145,72 @@ impl FinderStore {
         if channel_ids.is_empty() {
             return false;
         }
-        let cutoff = (chrono::Utc::now() - chrono::Duration::days(ACTIVITY_LOOKBACK_DAYS))
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let channels_json = serde_json::to_string(&channel_ids).unwrap_or_default();
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM voice_session_log
-                      WHERE started_at >= ?1 AND user_id = ?2
-                        AND channel_id IN (SELECT CAST(value AS INTEGER) FROM json_each(?3))",
-                    rusqlite::params![cutoff, user_id, channels_json],
-                    |row| row.get::<_, i64>(0),
-                )
-            })
-            .await
-            .map(|count| count > 0)
-            .unwrap_or(false)
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return false;
+        };
+        let channel_ids: Vec<i64> = channel_ids
+            .into_iter()
+            .filter_map(|id| discord_id_to_i64(id, "channel_id").ok())
+            .collect();
+        if channel_ids.is_empty() {
+            return false;
+        }
+        let cutoff = chrono::Utc::now() - chrono::Duration::days(ACTIVITY_LOOKBACK_DAYS);
+        sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM activity.voice_session_log
+            WHERE started_at >= $1
+              AND user_id = $2
+              AND channel_id = ANY($3)
+            "#,
+            cutoff,
+            user_id,
+            &channel_ids[..],
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map(|row| row.count > 0)
+        .unwrap_or(false)
     }
 
     /// Frische Steam-Presence je Discord-User: (stage, minutes).
     pub async fn steam_presence(&self) -> std::collections::HashMap<u64, (String, Option<i64>)> {
-        let now = chrono::Utc::now().timestamp();
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT l.user_id, p.deadlock_stage, p.deadlock_minutes,
-                            COALESCE(p.deadlock_updated_at, p.last_seen_ts) AS fresh
-                       FROM steam_links l
-                       JOIN live_player_state p ON p.steam_id = l.steam_id
-                      WHERE l.verified = 1",
-                )?;
-                let rows = stmt.query_map([], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?,
-                        row.get::<_, Option<i64>>(3)?,
-                    ))
-                })?;
-                let mut map = std::collections::HashMap::new();
-                for row in rows {
-                    let (user_id, stage, minutes, fresh) = row?;
-                    let Some(stage) = stage.filter(|s| !s.is_empty()) else {
-                        continue;
-                    };
-                    if fresh
-                        .map(|f| now - f > PRESENCE_STALE_SECONDS)
-                        .unwrap_or(true)
-                    {
-                        continue;
-                    }
-                    map.insert(user_id, (stage, minutes));
-                }
-                Ok(map)
-            })
-            .await
-            .unwrap_or_default()
+        let now = chrono::Utc::now();
+        let rows = sqlx::query!(
+            r#"
+            SELECT l.discord_id,
+                   p.deadlock_stage,
+                   p.deadlock_minutes,
+                   COALESCE(p.deadlock_updated_at, p.last_seen_at) AS "fresh?"
+            FROM core.steam_links l
+            JOIN activity.live_player_state p ON p.steam_id = l.steam_id
+            WHERE l.verified = TRUE
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await;
+
+        let mut map = std::collections::HashMap::new();
+        for row in rows.unwrap_or_default() {
+            let Some(user_id) = i64_to_u64(row.discord_id, "discord_id") else {
+                continue;
+            };
+            let Some(stage) = row.deadlock_stage.filter(|s| !s.is_empty()) else {
+                continue;
+            };
+            if row
+                .fresh
+                .map(|fresh| {
+                    now.signed_duration_since(fresh).num_seconds() > PRESENCE_STALE_SECONDS
+                })
+                .unwrap_or(true)
+            {
+                continue;
+            }
+            map.insert(user_id, (stage, row.deadlock_minutes.map(i64::from)));
+        }
+        map
     }
 }
 
@@ -233,9 +243,9 @@ pub struct PlayerFinder {
 }
 
 impl PlayerFinder {
-    pub fn new(db: Db) -> Arc<Self> {
+    pub fn new(pool: PgPool) -> Arc<Self> {
         Arc::new(Self {
-            store: FinderStore { db },
+            store: FinderStore { pool },
             cooldown: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
     }

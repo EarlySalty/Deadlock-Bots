@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT typical_hours::text AS \"typical_hours?\",\n                   typical_days::text AS \"typical_days?\"\n            FROM activity.user_activity_patterns\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "typical_hours?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "typical_days?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "fada63f8e1022912fa75dbe2a45983b442a4b7ca25dd99742e5e8dad73dea3bf"
+}

@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT opted_out AS \"opted_out!\"\n        FROM core.user_privacy\n        WHERE user_id = $1\n          AND opted_out = TRUE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "opted_out!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "bace2806ea36cc7b4c48a6504f650f9672c6fc24add523b6f73f517da4a9bcd3"
+}

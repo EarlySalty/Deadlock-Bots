@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id,\n                   started_at,\n                   duration_seconds AS \"duration_seconds!\"\n            FROM activity.voice_session_log\n            WHERE started_at >= $1\n            ORDER BY user_id, started_at\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 2,
+        "name": "duration_seconds!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "65007de6dff2a25df46cbd65301b5d21d1368a703cf6e0023511cf59efd532d7"
+}

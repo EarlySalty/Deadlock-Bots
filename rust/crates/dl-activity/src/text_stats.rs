@@ -15,8 +15,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dl_db::{Db, DbError};
-use rusqlite::params;
+use sqlx::PgPool;
+
+use crate::db::{
+    discord_id_to_i64, i64_to_i32, next_text_conversation_id, utc_from_unix_seconds,
+    ActivityDbResult,
+};
 
 /// Idle-Fenster: eine Session wird nach so vielen Sekunden ohne neue Nachricht
 /// abgeschlossen (Python `TEXT_SESSION_WINDOW_SECONDS`).
@@ -60,45 +64,41 @@ impl Session {
 }
 
 pub struct TextSessions {
-    db: Db,
+    pool: PgPool,
     open: Mutex<HashMap<(u64, u64), Session>>,
 }
 
 impl TextSessions {
-    pub fn new(db: Db) -> Self {
+    pub fn new(pool: PgPool) -> Self {
         Self {
-            db,
+            pool,
             open: Mutex::new(HashMap::new()),
         }
     }
 
-    /// Legt die Tabellen an (idempotent), Schema wie `service/db.py:1000/1007`.
-    pub async fn ensure_schema(&self) -> Result<(), DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS text_stats(
-                       user_id        INTEGER PRIMARY KEY,
-                       total_messages INTEGER NOT NULL DEFAULT 0,
-                       total_points   INTEGER NOT NULL DEFAULT 0,
-                       last_update    DATETIME DEFAULT CURRENT_TIMESTAMP
-                     );
-                     CREATE TABLE IF NOT EXISTS text_conversation_log(
-                       id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-                       user_id            INTEGER NOT NULL,
-                       guild_id           INTEGER,
-                       channel_id         INTEGER,
-                       started_at         DATETIME NOT NULL,
-                       ended_at           DATETIME NOT NULL,
-                       message_count      INTEGER NOT NULL DEFAULT 0,
-                       points             INTEGER NOT NULL DEFAULT 0,
-                       co_participant_ids TEXT,
-                       had_interaction    INTEGER NOT NULL DEFAULT 0
-                     );",
-                )?;
-                Ok(())
-            })
-            .await
+    /// Prüft, dass die zentrale Migration die Tabellen bereitgestellt hat.
+    pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM activity.text_stats
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            SELECT 1 AS "ok!"
+            FROM activity.text_conversation_log
+            LIMIT 0
+            "#
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(())
     }
 
     /// Verarbeitet eine Nachricht: flusht zuerst abgelaufene Sessions, dann
@@ -179,78 +179,101 @@ impl TextSessions {
 
     /// Privacy-Opt-out wie der message_activity-Writer (fail-open bei Fehler).
     async fn is_opted_out(&self, user_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                use rusqlite::OptionalExtension;
-                Ok(conn
-                    .query_row(
-                        "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
-                        [user_id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .optional()?
-                    .filter(|v| *v != 0)
-                    .is_some())
-            })
-            .await
-            .unwrap_or(false)
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return false;
+        };
+        sqlx::query!(
+            r#"
+            SELECT opted_out AS "opted_out!"
+            FROM core.user_privacy
+            WHERE user_id = $1
+              AND opted_out = TRUE
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.is_some())
+        .unwrap_or(false)
     }
 
     async fn write_session(&self, user_id: u64, channel_id: u64, session: &Session) {
         if session.message_count <= 0 {
             return;
         }
+        let result = self.write_session_inner(user_id, channel_id, session).await;
+        if let Err(err) = result {
+            tracing::warn!(%err, user_id, channel_id, "Text-Session konnte nicht persistiert werden");
+        }
+    }
+
+    async fn write_session_inner(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        session: &Session,
+    ) -> ActivityDbResult<()> {
         let final_points = session.final_points();
         let mut co: Vec<u64> = session.co_participants.iter().copied().collect();
         co.sort_unstable();
-        let co_ids: Option<String> =
-            (!co.is_empty()).then(|| co.iter().map(u64::to_string).collect::<Vec<_>>().join(","));
-        let started = fmt_ts(session.started_at);
-        let ended = fmt_ts(session.last_message_at);
-        let guild_id = session.guild_id;
+        let co_ids_json = if co.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_string(&co).unwrap_or_else(|_| "[]".to_string()))
+        };
+        let user_id = discord_id_to_i64(user_id, "user_id")?;
+        let guild_id = discord_id_to_i64(session.guild_id, "guild_id")?;
+        let channel_id = discord_id_to_i64(channel_id, "channel_id")?;
+        let started = utc_from_unix_seconds(session.started_at)?;
+        let ended = utc_from_unix_seconds(session.last_message_at)?;
+        let message_count_i32 = i64_to_i32(session.message_count, "message_count")?;
+        let final_points_i32 = i64_to_i32(final_points, "points")?;
         let message_count = session.message_count;
-        let had_interaction = i64::from(session.had_interaction);
+        let had_interaction = session.had_interaction;
 
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO text_conversation_log(
-                       user_id, guild_id, channel_id, started_at, ended_at,
-                       message_count, points, co_participant_ids, had_interaction)
-                     VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
-                    params![
-                        user_id,
-                        guild_id,
-                        channel_id,
-                        started,
-                        ended,
-                        message_count,
-                        final_points,
-                        co_ids,
-                        had_interaction
-                    ],
-                )?;
-                conn.execute(
-                    "INSERT INTO text_stats(user_id, total_messages, total_points, last_update)
-                     VALUES(?1, ?2, ?3, CURRENT_TIMESTAMP)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       total_messages = text_stats.total_messages + excluded.total_messages,
-                       total_points   = text_stats.total_points + excluded.total_points,
-                       last_update    = CURRENT_TIMESTAMP",
-                    params![user_id, message_count, final_points],
-                )?;
-                Ok(())
-            })
-            .await;
+        let mut tx = self.pool.begin().await?;
+        let id = next_text_conversation_id(&mut tx).await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.text_conversation_log(
+                id, user_id, guild_id, channel_id, started_at, ended_at,
+                message_count, points, co_participant_ids, had_interaction
+            )
+            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb, $10)
+            "#,
+            id,
+            user_id,
+            guild_id,
+            channel_id,
+            started,
+            ended,
+            message_count_i32,
+            final_points_i32,
+            co_ids_json,
+            had_interaction,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.text_stats(user_id, total_messages, total_points, last_update)
+            VALUES($1, $2, $3, now())
+            ON CONFLICT(user_id) DO UPDATE SET
+                total_messages = activity.text_stats.total_messages + EXCLUDED.total_messages,
+                total_points = activity.text_stats.total_points + EXCLUDED.total_points,
+                last_update = now()
+            "#,
+            user_id,
+            message_count,
+            final_points,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        tx.commit().await?;
+        Ok(())
     }
-}
-
-/// Unix-Sekunden → `YYYY-MM-DD HH:MM:SS` (UTC), wie Python `_text_session_ts`.
-fn fmt_ts(ts: i64) -> String {
-    chrono::DateTime::from_timestamp(ts, 0)
-        .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string())
-        .unwrap_or_default()
 }
 
 /// Subscriber auf den Nachrichten-Strom + 60-s-Flush-Loop (Python:
@@ -300,109 +323,196 @@ pub fn spawn_text_stats(
     vec![on_msg, flush]
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
 
-    async fn mk() -> (tempfile::TempDir, TextSessions) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        let store = TextSessions::new(db);
+    async fn mk() -> Result<(dl_central_db::TestDb, TextSessions), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let store = TextSessions::new(db.pool().clone());
         store.ensure_schema().await.expect("schema");
-        (dir, store)
+        Ok((db, store))
     }
 
-    async fn stats(store: &TextSessions, user_id: u64) -> (i64, i64) {
-        store
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT total_messages, total_points FROM text_stats WHERE user_id=?1",
-                    params![user_id],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-                .or(Ok((0, 0)))
-            })
-            .await
-            .unwrap()
+    async fn stats(
+        store: &TextSessions,
+        user_id: u64,
+    ) -> Result<(i64, i64), Box<dyn std::error::Error>> {
+        let user_id = discord_id_to_i64(user_id, "user_id")?;
+        let row = sqlx::query!(
+            r#"
+            SELECT total_messages AS "total_messages!",
+                   total_points AS "total_points!"
+            FROM activity.text_stats
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&store.pool)
+        .await?;
+        Ok(row
+            .map(|row| (row.total_messages, row.total_points))
+            .unwrap_or((0, 0)))
     }
 
-    async fn log_count(store: &TextSessions) -> i64 {
-        store
-            .db
-            .read(|conn| {
-                conn.query_row("SELECT COUNT(*) FROM text_conversation_log", [], |r| {
-                    r.get(0)
-                })
-            })
-            .await
-            .unwrap()
+    async fn log_count(store: &TextSessions) -> Result<i64, Box<dyn std::error::Error>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM activity.text_conversation_log
+            "#
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        Ok(row.count)
     }
 
     #[tokio::test]
-    async fn einzelne_nachricht_zwei_punkte() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn einzelne_nachricht_zwei_punkte() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         store.on_message(1, 10, 100, false, 1000).await;
         store.flush_all().await;
         // round(2*sqrt(1)) = 2, keine Interaktion.
-        assert_eq!(stats(&store, 1).await, (1, 2));
-        assert_eq!(log_count(&store).await, 1);
+        assert_eq!(stats(&store, 1).await?, (1, 2));
+        assert_eq!(log_count(&store).await?, 1);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn reply_gibt_bonuspunkt() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn reply_gibt_bonuspunkt() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         store.on_message(1, 10, 100, true, 1000).await;
         store.flush_all().await;
         // 2*sqrt(1) + 1 = 3, einmaliger Reply-Bonus.
-        assert_eq!(stats(&store, 1).await, (1, 3));
+        assert_eq!(stats(&store, 1).await?, (1, 3));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn interaktion_gibt_50_prozent_bonus() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn interaktion_gibt_50_prozent_bonus() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         // Zwei User im selben Channel → beide had_interaction.
         store.on_message(1, 10, 100, false, 1000).await;
         store.on_message(2, 10, 100, false, 1001).await;
         store.flush_all().await;
         // beide: round(2 * 1.5) = 3
-        assert_eq!(stats(&store, 1).await, (1, 3));
-        assert_eq!(stats(&store, 2).await, (1, 3));
+        assert_eq!(stats(&store, 1).await?, (1, 3));
+        assert_eq!(stats(&store, 2).await?, (1, 3));
+        let row = sqlx::query!(
+            r#"
+            SELECT co_participant_ids::text AS "co_participant_ids?"
+            FROM activity.text_conversation_log
+            WHERE user_id = $1
+            "#,
+            1_i64,
+        )
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(row.co_participant_ids.as_deref(), Some("[2]"));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn getrennte_channel_keine_interaktion() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn co_participant_ids_snowflakes_bleiben_json_integer(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
+        let user_id = 9_223_372_036_854_775_000_u64;
+        let expected_co_participants = vec![
+            9_223_372_036_854_775_001_u64,
+            9_223_372_036_854_775_002_u64,
+            9_223_372_036_854_775_003_u64,
+        ];
+
+        store.on_message(user_id, 10, 100, false, 1000).await;
+        for (offset, co_participant) in expected_co_participants.iter().copied().enumerate() {
+            store
+                .on_message(co_participant, 10, 100, false, 1001 + offset as i64)
+                .await;
+        }
+        store.flush_all().await;
+
+        let user_id = discord_id_to_i64(user_id, "user_id")?;
+        let row = sqlx::query!(
+            r#"
+            SELECT co_participant_ids::text AS "co_participant_ids!"
+            FROM activity.text_conversation_log
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_one(&store.pool)
+        .await?;
+
+        let values: Vec<serde_json::Value> = serde_json::from_str(&row.co_participant_ids)?;
+        let actual_co_participants = values
+            .iter()
+            .map(|value| match value {
+                serde_json::Value::Number(number) => number
+                    .as_u64()
+                    .ok_or_else(|| format!("co_participant_id is not a u64 integer: {number}")),
+                other => Err(format!("co_participant_id is not a JSON number: {other}")),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        assert_eq!(actual_co_participants, expected_co_participants);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn getrennte_channel_keine_interaktion() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         store.on_message(1, 10, 100, false, 1000).await;
         store.on_message(2, 20, 100, false, 1001).await;
         store.flush_all().await;
-        assert_eq!(stats(&store, 1).await, (1, 2));
-        assert_eq!(stats(&store, 2).await, (1, 2));
+        assert_eq!(stats(&store, 1).await?, (1, 2));
+        assert_eq!(stats(&store, 2).await?, (1, 2));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn idle_flusht_und_startet_neu() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn idle_flusht_und_startet_neu() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         store.on_message(1, 10, 100, false, 1000).await;
         // 1 s nach Fensterablauf → erste Session wird geflusht, neue beginnt.
         store
             .on_message(1, 10, 100, false, 1000 + SESSION_WINDOW_SECS + 1)
             .await;
         assert_eq!(
-            stats(&store, 1).await,
+            stats(&store, 1).await?,
             (1, 2),
             "nur die erste Session ist geflusht"
         );
         store.flush_all().await;
-        assert_eq!(stats(&store, 1).await, (2, 4), "beide Sessions summiert");
-        assert_eq!(log_count(&store).await, 2);
+        assert_eq!(stats(&store, 1).await?, (2, 4), "beide Sessions summiert");
+        assert_eq!(log_count(&store).await?, 2);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn leere_session_wird_nicht_geschrieben() {
-        let (_d, store) = mk().await;
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn leere_session_wird_nicht_geschrieben() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
         // Ohne on_message gibt es keine Session; flush_all schreibt nichts.
         store.flush_all().await;
-        assert_eq!(log_count(&store).await, 0);
+        assert_eq!(log_count(&store).await?, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn zu_grosse_discord_id_schreibt_nichts() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, store) = mk().await?;
+        store
+            .on_message(i64::MAX as u64 + 1, 10, 100, false, 1000)
+            .await;
+        store.flush_all().await;
+        assert_eq!(log_count(&store).await?, 0);
+        Ok(())
     }
 }

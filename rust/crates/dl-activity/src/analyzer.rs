@@ -16,8 +16,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Datelike, NaiveDateTime, Timelike, Utc};
-use dl_db::Db;
+use chrono::{DateTime, Datelike, NaiveDateTime, Timelike, Utc};
+use sqlx::PgPool;
+
+use crate::db::{
+    discord_id_to_i64, i64_to_i32, i64_to_u64, lock_member_events, next_member_event_id_in_tx,
+    validate_json_text, ActivityDbResult,
+};
 
 pub const ANALYZE_INTERVAL: Duration = Duration::from_secs(6 * 3600);
 pub const CO_PLAYER_INTERVAL: Duration = Duration::from_secs(600);
@@ -89,7 +94,7 @@ pub trait VoiceGroups: Send + Sync {
 }
 
 pub struct ActivityAnalyzer {
-    pub db: Db,
+    pub pool: PgPool,
     pub voice: Arc<dyn VoiceGroups>,
 }
 
@@ -112,43 +117,37 @@ pub trait MemberBackfillPort: Send + Sync {
 }
 
 impl ActivityAnalyzer {
-    pub fn new(db: Db, voice: Arc<dyn VoiceGroups>) -> Arc<Self> {
-        Arc::new(Self { db, voice })
+    pub fn new(pool: PgPool, voice: Arc<dyn VoiceGroups>) -> Arc<Self> {
+        Arc::new(Self { pool, voice })
     }
 
     /// 6-h-Lauf: Muster aller aktiven User der letzten 14 Tage.
     pub async fn analyze_all(&self) -> usize {
-        let cutoff = (Utc::now() - chrono::Duration::days(WINDOW_DAYS))
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let sessions: Vec<(u64, Option<String>, i64)> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, started_at, duration_seconds
-                       FROM voice_session_log
-                      WHERE started_at >= ?1
-                      ORDER BY user_id, started_at",
-                )?;
-                let rows = stmt.query_map([cutoff], |row| {
-                    Ok((
-                        row.get::<_, u64>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    ))
-                })?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
+        let cutoff = Utc::now() - chrono::Duration::days(WINDOW_DAYS);
+        let sessions = sqlx::query!(
+            r#"
+            SELECT user_id,
+                   started_at,
+                   duration_seconds AS "duration_seconds!"
+            FROM activity.voice_session_log
+            WHERE started_at >= $1
+            ORDER BY user_id, started_at
+            "#,
+            cutoff,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
 
         let mut grouped: HashMap<u64, Vec<(Option<NaiveDateTime>, i64)>> = HashMap::new();
-        for (user_id, started_at, duration) in sessions {
-            let parsed = started_at
-                .as_deref()
-                .and_then(|s| NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S").ok());
-            grouped.entry(user_id).or_default().push((parsed, duration));
+        for row in sessions {
+            let Some(user_id) = i64_to_u64(row.user_id, "user_id") else {
+                continue;
+            };
+            grouped
+                .entry(user_id)
+                .or_default()
+                .push((Some(row.started_at.naive_utc()), row.duration_seconds));
         }
 
         let analyzed = grouped.len();
@@ -161,44 +160,55 @@ impl ActivityAnalyzer {
     }
 
     async fn persist_pattern(&self, user_id: u64, pattern: &ActivityPattern) {
-        let typical_hours = serde_json::to_string(&pattern.typical_hours).unwrap_or_default();
-        let typical_days = serde_json::to_string(&pattern.typical_days).unwrap_or_default();
-        let last_active = pattern
-            .last_active
-            .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-        let (sessions_count, total_minutes) = (pattern.sessions_count, pattern.total_minutes);
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO user_activity_patterns(
-                       user_id, typical_hours, typical_days, activity_score_2w,
-                       sessions_count_2w, total_minutes_2w, last_active_at, last_analyzed_at
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,CURRENT_TIMESTAMP)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       typical_hours = excluded.typical_hours,
-                       typical_days = excluded.typical_days,
-                       activity_score_2w = excluded.activity_score_2w,
-                       sessions_count_2w = excluded.sessions_count_2w,
-                       total_minutes_2w = excluded.total_minutes_2w,
-                       last_active_at = excluded.last_active_at,
-                       last_analyzed_at = CURRENT_TIMESTAMP",
-                    rusqlite::params![
-                        user_id,
-                        typical_hours,
-                        typical_days,
-                        sessions_count,
-                        sessions_count,
-                        total_minutes,
-                        last_active,
-                    ],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let result = self.persist_pattern_inner(user_id, pattern).await;
         if let Err(err) = result {
             tracing::warn!(%err, user_id, "Pattern-Persist fehlgeschlagen");
         }
+    }
+
+    async fn persist_pattern_inner(
+        &self,
+        user_id: u64,
+        pattern: &ActivityPattern,
+    ) -> ActivityDbResult<()> {
+        let user_id = discord_id_to_i64(user_id, "user_id")?;
+        let typical_hours =
+            serde_json::to_string(&pattern.typical_hours).unwrap_or_else(|_| "[]".to_string());
+        let typical_days =
+            serde_json::to_string(&pattern.typical_days).unwrap_or_else(|_| "[]".to_string());
+        let last_active = pattern
+            .last_active
+            .map(|dt| DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        let sessions_count = i64_to_i32(pattern.sessions_count, "sessions_count_2w")?;
+        let total_minutes = i64_to_i32(pattern.total_minutes, "total_minutes_2w")?;
+
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.user_activity_patterns(
+                user_id, typical_hours, typical_days, activity_score_2w,
+                sessions_count_2w, total_minutes_2w, last_active_at, last_analyzed_at
+            )
+            VALUES($1, $2::text::jsonb, $3::text::jsonb, $4, $5, $6, $7, now())
+            ON CONFLICT(user_id) DO UPDATE SET
+                typical_hours = EXCLUDED.typical_hours,
+                typical_days = EXCLUDED.typical_days,
+                activity_score_2w = EXCLUDED.activity_score_2w,
+                sessions_count_2w = EXCLUDED.sessions_count_2w,
+                total_minutes_2w = EXCLUDED.total_minutes_2w,
+                last_active_at = EXCLUDED.last_active_at,
+                last_analyzed_at = now()
+            "#,
+            user_id,
+            typical_hours,
+            typical_days,
+            sessions_count,
+            sessions_count,
+            total_minutes,
+            last_active,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// 10-min-Lauf: aktuelle Voice-Paarungen → user_co_players (+1/+10 min).
@@ -226,49 +236,79 @@ impl ActivityAnalyzer {
             (user_id, co_id, user_name.to_string(), co_name.to_string()),
             (co_id, user_id, co_name.to_string(), user_name.to_string()),
         ];
-        let result = self
-            .db
-            .write(move |conn| {
-                for (uid, co_uid, uid_name, co_name) in &pairs {
-                    conn.execute(
-                        "INSERT INTO user_co_players(
-                           user_id, co_player_id, sessions_together, total_minutes_together,
-                           last_played_together, user_display_name, co_player_display_name
-                         ) VALUES(?1, ?2, 1, ?3, CURRENT_TIMESTAMP, ?4, ?5)
-                         ON CONFLICT(user_id, co_player_id) DO UPDATE SET
-                           sessions_together = sessions_together + 1,
-                           total_minutes_together = total_minutes_together + excluded.total_minutes_together,
-                           last_played_together = CURRENT_TIMESTAMP,
-                           user_display_name = COALESCE(excluded.user_display_name, user_display_name),
-                           co_player_display_name = COALESCE(excluded.co_player_display_name, co_player_display_name)",
-                        rusqlite::params![uid, co_uid, CO_PLAYER_MINUTES_PER_TICK, uid_name, co_name],
-                    )?;
-                }
-                Ok(())
-            })
-            .await;
+        let result = self.record_pairs_inner(&pairs).await;
         if let Err(err) = result {
             tracing::warn!(%err, user_id, co_id, "Co-Player-Persist fehlgeschlagen");
         }
     }
 
+    async fn record_pairs_inner(
+        &self,
+        pairs: &[(u64, u64, String, String)],
+    ) -> ActivityDbResult<()> {
+        let minutes = i64_to_i32(CO_PLAYER_MINUTES_PER_TICK, "total_minutes_together")?;
+        for (uid, co_uid, uid_name, co_name) in pairs {
+            let uid = discord_id_to_i64(*uid, "user_id")?;
+            let co_uid = discord_id_to_i64(*co_uid, "co_player_id")?;
+            sqlx::query!(
+                r#"
+                INSERT INTO activity.user_co_players(
+                    user_id, co_player_id, sessions_together, total_minutes_together,
+                    last_played_together, user_display_name, co_player_display_name
+                )
+                VALUES($1, $2, 1, $3, now(), $4, $5)
+                ON CONFLICT(user_id, co_player_id) DO UPDATE SET
+                    sessions_together = COALESCE(activity.user_co_players.sessions_together, 0) + 1,
+                    total_minutes_together =
+                        COALESCE(activity.user_co_players.total_minutes_together, 0)
+                        + EXCLUDED.total_minutes_together,
+                    last_played_together = now(),
+                    user_display_name =
+                        COALESCE(EXCLUDED.user_display_name, activity.user_co_players.user_display_name),
+                    co_player_display_name =
+                        COALESCE(EXCLUDED.co_player_display_name, activity.user_co_players.co_player_display_name)
+                "#,
+                uid,
+                co_uid,
+                minutes,
+                uid_name,
+                co_name,
+            )
+            .execute(&self.pool)
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Top-Mitspieler (für LFG/Empfehlungen).
     pub async fn top_co_players(&self, user_id: u64, limit: i64) -> Vec<(u64, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT co_player_id, sessions_together FROM user_co_players
-                      WHERE user_id = ?1
-                      ORDER BY sessions_together DESC, total_minutes_together DESC
-                      LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![user_id, limit], |row| {
-                    Ok((row.get(0)?, row.get(1)?))
-                })?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT co_player_id,
+                   COALESCE(sessions_together, 0)::INT AS "sessions_together!"
+            FROM activity.user_co_players
+            WHERE user_id = $1
+            ORDER BY COALESCE(sessions_together, 0) DESC,
+                     COALESCE(total_minutes_together, 0) DESC
+            LIMIT $2
+            "#,
+            user_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| {
+                    i64_to_u64(row.co_player_id, "co_player_id")
+                        .map(|id| (id, i64::from(row.sessions_together)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 }
 
@@ -283,76 +323,61 @@ const WEBSITE_SLUGS: [&str; 6] = [
     "guides",
 ];
 
-fn table_exists(conn: &rusqlite::Connection, name: &str) -> rusqlite::Result<bool> {
-    use rusqlite::OptionalExtension;
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-            [name],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
 /// Lädt die Lookups für `classify`: `invite_code → streamer_login` (aus
 /// `twitch_streamer_invites`) und `invite_code → website-slug` (aus dem
-/// `website_invites`-KV). Beide tabellen-existenz-geschützt.
-async fn load_lookups(db: &Db) -> (HashMap<String, String>, HashMap<String, String>) {
-    db.read(|conn| {
-        let mut twitch = HashMap::new();
-        if table_exists(conn, "twitch_streamer_invites")? {
-            let mut s =
-                conn.prepare("SELECT streamer_login, invite_code FROM twitch_streamer_invites")?;
-            let mut rows = s.query([])?;
-            while let Some(r) = rows.next()? {
-                let login = r
-                    .get::<_, Option<String>>(0)?
-                    .unwrap_or_default()
-                    .trim()
-                    .to_lowercase();
-                let code = r
-                    .get::<_, Option<String>>(1)?
-                    .unwrap_or_default()
-                    .trim()
-                    .to_lowercase();
-                if !login.is_empty() && !code.is_empty() {
-                    twitch.entry(code).or_insert(login);
-                }
-            }
-        }
-        let mut website = HashMap::new();
-        if table_exists(conn, "kv_store")? {
-            let mut s = conn.prepare("SELECT k, v FROM kv_store WHERE ns='website_invites'")?;
-            let mut rows = s.query([])?;
-            while let Some(r) = rows.next()? {
-                let k: String = r.get(0)?;
-                let v: Option<String> = r.get(1)?;
-                let slug = if k == "main" {
-                    "landing".to_string()
-                } else {
-                    k.trim().to_lowercase()
-                };
-                if !WEBSITE_SLUGS.contains(&slug.as_str()) {
-                    continue;
-                }
-                if let Some(code) = v
-                    .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                    .and_then(|p| {
-                        p.get("code")
-                            .and_then(|c| c.as_str())
-                            .map(|c| c.trim().to_string())
-                    })
-                    .filter(|c| !c.is_empty())
-                {
-                    website.entry(code.to_lowercase()).or_insert(slug);
-                }
-            }
-        }
-        Ok((twitch, website))
-    })
+/// `website_invites`-KV).
+async fn load_lookups(pool: &PgPool) -> (HashMap<String, String>, HashMap<String, String>) {
+    let mut twitch = HashMap::new();
+    let twitch_rows = sqlx::query!(
+        r#"
+        SELECT streamer_login, invite_code
+        FROM bot.twitch_streamer_invites
+        "#
+    )
+    .fetch_all(pool)
     .await
-    .unwrap_or_default()
+    .unwrap_or_default();
+    for row in twitch_rows {
+        let login = row.streamer_login.trim().to_lowercase();
+        let code = row.invite_code.unwrap_or_default().trim().to_lowercase();
+        if !login.is_empty() && !code.is_empty() {
+            twitch.entry(code).or_insert(login);
+        }
+    }
+
+    let mut website = HashMap::new();
+    let website_rows = sqlx::query!(
+        r#"
+        SELECT k, v
+        FROM bot.kv_store
+        WHERE ns = 'website_invites'
+        "#
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    for row in website_rows {
+        let slug = if row.k == "main" {
+            "landing".to_string()
+        } else {
+            row.k.trim().to_lowercase()
+        };
+        if !WEBSITE_SLUGS.contains(&slug.as_str()) {
+            continue;
+        }
+        if let Some(code) = serde_json::from_str::<serde_json::Value>(&row.v)
+            .ok()
+            .and_then(|p| {
+                p.get("code")
+                    .and_then(|c| c.as_str())
+                    .map(|c| c.trim().to_string())
+            })
+            .filter(|c| !c.is_empty())
+        {
+            website.entry(code.to_lowercase()).or_insert(slug);
+        }
+    }
+    (twitch, website)
 }
 
 /// Verfeinert die rohen Join-Metadaten über `classify` (Twitch-/Website-
@@ -390,7 +415,7 @@ fn apply_classify(
 /// die volle Beitrittsquellen-Klassifikation (Invite-Snapshot-Diff aus dem
 /// Gateway → `classify`-Verfeinerung). Bots und Privacy-Opt-out übersprungen.
 pub fn spawn_member_events(
-    db: dl_db::Db,
+    pool: PgPool,
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_members();
@@ -398,7 +423,7 @@ pub fn spawn_member_events(
         loop {
             match events.recv().await {
                 Ok(event) => {
-                    if let Err(err) = handle_member_event(&db, event).await {
+                    if let Err(err) = handle_member_event(&pool, event).await {
                         tracing::warn!(%err, "member_events-Insert fehlgeschlagen");
                     }
                 }
@@ -410,9 +435,9 @@ pub fn spawn_member_events(
 }
 
 async fn handle_member_event(
-    db: &Db,
+    pool: &PgPool,
     event: dl_discord::MemberEvent,
-) -> Result<(), dl_db::DbError> {
+) -> ActivityDbResult<()> {
     use dl_discord::MemberEvent as M;
     match event {
         M::Join {
@@ -427,40 +452,29 @@ async fn handle_member_event(
             if is_bot {
                 return Ok(());
             }
-            let (tw, web) = load_lookups(db).await;
+            let (tw, web) = load_lookups(pool).await;
             let refined = apply_classify(metadata, &tw, &web);
             let meta_str = serde_json::to_string(&refined).unwrap_or_else(|_| "{}".to_string());
-            let created = chrono::DateTime::from_timestamp(account_created_at, 0)
-                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S").to_string());
-            db.write(move |conn| {
-                use rusqlite::OptionalExtension;
-                let opted: Option<i64> = conn
-                    .query_row(
-                        "SELECT opted_out FROM user_privacy WHERE user_id=?1",
-                        [user_id],
-                        |r| r.get(0),
-                    )
-                    .optional()?
-                    .filter(|v| *v != 0);
-                if opted.is_some() {
-                    return Ok(());
-                }
-                conn.execute(
-                    "INSERT INTO member_events(user_id, guild_id, event_type, display_name,
-                       account_created_at, join_position, metadata)
-                     VALUES(?1, ?2, 'join', ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        user_id,
-                        guild_id,
-                        display_name,
-                        created,
-                        join_position,
-                        meta_str
-                    ],
-                )
-                .map(|_| ())
-            })
+            let created = DateTime::from_timestamp(account_created_at, 0);
+            let join_position = join_position
+                .map(|value| i64_to_i32(value, "join_position"))
+                .transpose()?;
+            insert_member_event(
+                pool,
+                MemberEventInsert {
+                    guild_id,
+                    user_id,
+                    event_type: "join".to_string(),
+                    display_name: Some(display_name),
+                    occurred_at: Some(Utc::now()),
+                    account_created_at: created,
+                    join_position,
+                    metadata_json: Some(meta_str),
+                    skip_if_join_exists: false,
+                },
+            )
             .await
+            .map(|_| ())
         }
         M::Remove {
             guild_id,
@@ -471,7 +485,7 @@ async fn handle_member_event(
             if is_bot {
                 return Ok(());
             }
-            insert_simple_event(db, guild_id, user_id, "leave", Some(display_name)).await
+            insert_simple_event(pool, guild_id, user_id, "leave", Some(display_name)).await
         }
         M::Ban {
             guild_id,
@@ -482,7 +496,7 @@ async fn handle_member_event(
             if is_bot {
                 return Ok(());
             }
-            insert_simple_event(db, guild_id, user_id, "ban", Some(display_name)).await
+            insert_simple_event(pool, guild_id, user_id, "ban", Some(display_name)).await
         }
         M::Unban {
             guild_id,
@@ -493,114 +507,241 @@ async fn handle_member_event(
             if is_bot {
                 return Ok(());
             }
-            insert_simple_event(db, guild_id, user_id, "unban", Some(display_name)).await
+            insert_simple_event(pool, guild_id, user_id, "unban", Some(display_name)).await
         }
         M::ScreeningCompleted { .. } => Ok(()),
     }
 }
 
 async fn insert_simple_event(
-    db: &Db,
+    pool: &PgPool,
     guild_id: u64,
     user_id: u64,
     event_type: &str,
     display_name: Option<String>,
-) -> Result<(), dl_db::DbError> {
-    let event_type = event_type.to_string();
-    db.write(move |conn| {
-        use rusqlite::OptionalExtension;
-        let opted: Option<i64> = conn
-            .query_row(
-                "SELECT opted_out FROM user_privacy WHERE user_id=?1",
-                [user_id],
-                |r| r.get(0),
-            )
-            .optional()?
-            .filter(|v| *v != 0);
-        if opted.is_some() {
-            return Ok(());
-        }
-        conn.execute(
-            "INSERT INTO member_events(user_id, guild_id, event_type, display_name)
-             VALUES(?1, ?2, ?3, ?4)",
-            rusqlite::params![user_id, guild_id, event_type, display_name],
-        )
-        .map(|_| ())
-    })
+) -> ActivityDbResult<()> {
+    insert_member_event(
+        pool,
+        MemberEventInsert {
+            guild_id,
+            user_id,
+            event_type: event_type.to_string(),
+            display_name,
+            occurred_at: Some(Utc::now()),
+            account_created_at: None,
+            join_position: None,
+            metadata_json: None,
+            skip_if_join_exists: false,
+        },
+    )
     .await
+    .map(|_| ())
+}
+
+struct MemberEventInsert {
+    guild_id: u64,
+    user_id: u64,
+    event_type: String,
+    display_name: Option<String>,
+    occurred_at: Option<DateTime<Utc>>,
+    account_created_at: Option<DateTime<Utc>>,
+    join_position: Option<i32>,
+    metadata_json: Option<String>,
+    skip_if_join_exists: bool,
+}
+
+async fn insert_member_event(pool: &PgPool, event: MemberEventInsert) -> ActivityDbResult<bool> {
+    let user_id = discord_id_to_i64(event.user_id, "user_id")?;
+    let guild_id = discord_id_to_i64(event.guild_id, "guild_id")?;
+    let metadata_json = event
+        .metadata_json
+        .map(|raw| validate_json_text(raw, "metadata", "{}"))
+        .transpose()?;
+
+    let mut tx = pool.begin().await?;
+    lock_member_events(&mut tx).await?;
+
+    let opted_out = sqlx::query!(
+        r#"
+        SELECT opted_out AS "opted_out!"
+        FROM core.user_privacy
+        WHERE user_id = $1
+          AND opted_out = TRUE
+        "#,
+        user_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if opted_out.is_some() {
+        tx.commit().await?;
+        return Ok(false);
+    }
+
+    if event.skip_if_join_exists {
+        let exists = sqlx::query!(
+            r#"
+            SELECT 1 AS "exists!"
+            FROM activity.member_events
+            WHERE user_id = $1
+              AND guild_id = $2
+              AND event_type = 'join'
+            LIMIT 1
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        if exists.is_some() {
+            tx.commit().await?;
+            return Ok(false);
+        }
+    }
+
+    let id = next_member_event_id_in_tx(&mut tx).await?;
+    sqlx::query!(
+        r#"
+        INSERT INTO activity.member_events(
+            id, user_id, guild_id, event_type, occurred_at, display_name,
+            account_created_at, join_position, metadata
+        )
+        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb)
+        "#,
+        id,
+        user_id,
+        guild_id,
+        event.event_type,
+        event.occurred_at,
+        event.display_name,
+        event.account_created_at,
+        event.join_position,
+        metadata_json,
+    )
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(true)
+}
+
+async fn record_message_activity(
+    pool: &PgPool,
+    user_id: u64,
+    guild_id: u64,
+    channel_id: u64,
+) -> ActivityDbResult<()> {
+    let user_id = discord_id_to_i64(user_id, "user_id")?;
+    let guild_id = discord_id_to_i64(guild_id, "guild_id")?;
+    let channel_id = discord_id_to_i64(channel_id, "channel_id")?;
+
+    let opted_out = sqlx::query!(
+        r#"
+        SELECT opted_out AS "opted_out!"
+        FROM core.user_privacy
+        WHERE user_id = $1
+          AND opted_out = TRUE
+        "#,
+        user_id,
+    )
+    .fetch_optional(pool)
+    .await?;
+    if opted_out.is_some() {
+        return Ok(());
+    }
+
+    sqlx::query!(
+        r#"
+        INSERT INTO activity.message_activity(
+            user_id, guild_id, channel_id, message_count, last_message_at, first_message_at
+        )
+        VALUES($1, $2, $3, 1, now(), now())
+        ON CONFLICT(user_id, guild_id) DO UPDATE SET
+            message_count = COALESCE(activity.message_activity.message_count, 0) + 1,
+            last_message_at = now(),
+            channel_id = EXCLUDED.channel_id
+        "#,
+        user_id,
+        guild_id,
+        channel_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+fn parse_optional_utc(raw: Option<&str>) -> Option<DateTime<Utc>> {
+    let raw = raw?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
+        return Some(dt.with_timezone(&Utc));
+    }
+    for fmt in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%dT%H:%M",
+    ] {
+        if let Ok(dt) = NaiveDateTime::parse_from_str(raw, fmt) {
+            return Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc));
+        }
+    }
+    tracing::warn!(
+        raw,
+        "member_events-Backfill-Zeitstempel konnte nicht geparst werden"
+    );
+    None
 }
 
 pub async fn backfill_member_joins(
-    db: &Db,
+    pool: &PgPool,
     members: Vec<BackfillMember>,
-) -> Result<usize, dl_db::DbError> {
-    db.write(move |conn| {
-        use rusqlite::OptionalExtension;
-        let mut inserted = 0usize;
-        for member in members {
-            if member.is_bot {
-                continue;
-            }
-            let opted: Option<i64> = conn
-                .query_row(
-                    "SELECT opted_out FROM user_privacy WHERE user_id=?1",
-                    [member.user_id],
-                    |r| r.get(0),
-                )
-                .optional()?
-                .filter(|v| *v != 0);
-            if opted.is_some() {
-                continue;
-            }
-            let exists: Option<i64> = conn
-                .query_row(
-                    "SELECT 1 FROM member_events
-                     WHERE user_id=?1 AND guild_id=?2 AND event_type='join'
-                     LIMIT 1",
-                    rusqlite::params![member.user_id, member.guild_id],
-                    |r| r.get(0),
-                )
-                .optional()?;
-            if exists.is_some() {
-                continue;
-            }
-            let metadata = serde_json::json!({
-                "join_source_bucket": "unknown",
-                "join_source_kind": "backfilled",
-                "join_source_label": BACKFILL_JOIN_SOURCE_LABEL_PLACEHOLDER,
-                "join_source_confidence": "none",
-                "backfilled": true,
-            });
-            let metadata = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
-            let changed = conn.execute(
-                "INSERT OR IGNORE INTO member_events(
-                   user_id, guild_id, event_type, timestamp, display_name, account_created_at, metadata
-                 ) VALUES(?1, ?2, 'join', ?3, ?4, ?5, ?6)",
-                rusqlite::params![
-                    member.user_id,
-                    member.guild_id,
-                    member.joined_at,
-                    member.display_name,
-                    member.account_created_at,
-                    metadata,
-                ],
-            )?;
-            inserted += changed;
+) -> ActivityDbResult<usize> {
+    let mut inserted = 0usize;
+    for member in members {
+        if member.is_bot {
+            continue;
         }
-        Ok(inserted)
-    })
-    .await
+        let metadata = serde_json::json!({
+            "join_source_bucket": "unknown",
+            "join_source_kind": "backfilled",
+            "join_source_label": BACKFILL_JOIN_SOURCE_LABEL_PLACEHOLDER,
+            "join_source_confidence": "none",
+            "backfilled": true,
+        });
+        let metadata = serde_json::to_string(&metadata).unwrap_or_else(|_| "{}".to_string());
+        let changed = insert_member_event(
+            pool,
+            MemberEventInsert {
+                guild_id: member.guild_id,
+                user_id: member.user_id,
+                event_type: "join".to_string(),
+                display_name: Some(member.display_name),
+                occurred_at: parse_optional_utc(member.joined_at.as_deref()),
+                account_created_at: parse_optional_utc(member.account_created_at.as_deref()),
+                join_position: None,
+                metadata_json: Some(metadata),
+                skip_if_join_exists: true,
+            },
+        )
+        .await?;
+        if changed {
+            inserted += 1;
+        }
+    }
+    Ok(inserted)
 }
 
 pub fn spawn_member_backfill(
-    db: dl_db::Db,
+    pool: PgPool,
     port: Arc<dyn MemberBackfillPort>,
 ) -> tokio::task::JoinHandle<()> {
-    spawn_member_backfill_with_delays(db, port, Duration::ZERO, MEMBER_BACKFILL_RETRY_INTERVAL)
+    spawn_member_backfill_with_delays(pool, port, Duration::ZERO, MEMBER_BACKFILL_RETRY_INTERVAL)
 }
 
 pub fn spawn_member_backfill_with_delays(
-    db: dl_db::Db,
+    pool: PgPool,
     port: Arc<dyn MemberBackfillPort>,
     initial_delay: Duration,
     retry_delay: Duration,
@@ -621,7 +762,7 @@ pub fn spawn_member_backfill_with_delays(
                 tokio::time::sleep(retry_delay).await;
                 continue;
             }
-            match backfill_member_joins(&db, members).await {
+            match backfill_member_joins(&pool, members).await {
                 Ok(inserted) => {
                     tracing::info!(inserted, "member_events Startup-Backfill abgeschlossen")
                 }
@@ -636,7 +777,7 @@ pub fn spawn_member_backfill_with_delays(
 /// on_message-Tracker des Originals; Privacy-Opt-out wird respektiert).
 /// Grundlage u. a. für die Leave-Survey-Einstufung (Bucket A/B/C).
 pub fn spawn_message_activity(
-    db: dl_db::Db,
+    pool: PgPool,
     dispatcher: &dl_discord::Dispatcher,
 ) -> tokio::task::JoinHandle<()> {
     let mut messages = dispatcher.subscribe_messages();
@@ -648,34 +789,8 @@ pub fn spawn_message_activity(
                         continue;
                     };
                     let (user_id, channel_id) = (event.author_id, event.channel_id);
-                    let result = db
-                        .write(move |conn| {
-                            use rusqlite::OptionalExtension;
-                            let opted_out: Option<i64> = conn
-                                .query_row(
-                                    "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
-                                    [user_id],
-                                    |row| row.get(0),
-                                )
-                                .optional()?
-                                .filter(|v| *v != 0);
-                            if opted_out.is_some() {
-                                return Ok(());
-                            }
-                            conn.execute(
-                                "INSERT INTO message_activity(
-                                   user_id, guild_id, channel_id, message_count,
-                                   last_message_at, first_message_at
-                                 ) VALUES (?1, ?2, ?3, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                                 ON CONFLICT(user_id, guild_id) DO UPDATE SET
-                                   message_count = message_count + 1,
-                                   last_message_at = CURRENT_TIMESTAMP,
-                                   channel_id = excluded.channel_id",
-                                rusqlite::params![user_id, guild_id, channel_id],
-                            )
-                            .map(|_| ())
-                        })
-                        .await;
+                    let result =
+                        record_message_activity(&pool, user_id, guild_id, channel_id).await;
                     if let Err(err) = result {
                         tracing::warn!(%err, "message_activity-Upsert fehlgeschlagen");
                     }
@@ -708,6 +823,7 @@ pub fn spawn(analyzer: Arc<ActivityAnalyzer>) -> Vec<tokio::task::JoinHandle<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "testing")]
     use std::sync::Mutex as StdMutex;
 
     fn dt(s: &str) -> Option<NaiveDateTime> {
@@ -716,7 +832,6 @@ mod tests {
 
     #[test]
     fn muster_wie_python() {
-        // Referenzwerte aus CPython: [18, 21, 20] / [0, 1, 2] / 6 / 240
         let sessions = vec![
             (dt("2026-06-01 18:30:00"), 3600),
             (dt("2026-06-01 20:10:00"), 1800),
@@ -733,10 +848,12 @@ mod tests {
         assert_eq!(pattern.last_active, dt("2026-06-08 21:30:00"));
     }
 
+    #[cfg(feature = "testing")]
     struct MockVoice {
         groups: StdMutex<Vec<Vec<(u64, String)>>>,
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl VoiceGroups for MockVoice {
         async fn channel_groups(&self) -> Vec<Vec<(u64, String)>> {
@@ -744,42 +861,62 @@ mod tests {
         }
     }
 
-    const DDLS: [&str; 3] = [
-        "CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT)",
-        "CREATE TABLE user_activity_patterns(user_id INTEGER PRIMARY KEY, typical_hours TEXT, typical_days TEXT, activity_score_2w INTEGER DEFAULT 0, sessions_count_2w INTEGER DEFAULT 0, total_minutes_2w INTEGER DEFAULT 0, last_active_at DATETIME, last_analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP, last_pinged_at DATETIME, ping_count_30d INTEGER DEFAULT 0)",
-        "CREATE TABLE user_co_players(user_id INTEGER NOT NULL, co_player_id INTEGER NOT NULL, sessions_together INTEGER DEFAULT 1, total_minutes_together INTEGER DEFAULT 0, last_played_together DATETIME DEFAULT CURRENT_TIMESTAMP, user_display_name TEXT, co_player_display_name TEXT, PRIMARY KEY(user_id, co_player_id))",
-    ];
-
-    async fn setup() -> (tempfile::TempDir, Arc<ActivityAnalyzer>, Arc<MockVoice>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+    #[cfg(feature = "testing")]
+    async fn setup() -> Result<
+        (dl_central_db::TestDb, Arc<ActivityAnalyzer>, Arc<MockVoice>),
+        Box<dyn std::error::Error>,
+    > {
+        let db = dl_central_db::testing::test_pool().await?;
         let voice = Arc::new(MockVoice {
             groups: StdMutex::new(Vec::new()),
         });
-        (dir, ActivityAnalyzer::new(db, voice.clone()), voice)
+        let analyzer = ActivityAnalyzer::new(db.pool().clone(), voice.clone());
+        Ok((db, analyzer, voice))
+    }
+
+    #[cfg(feature = "testing")]
+    async fn member_event_count(
+        pool: &PgPool,
+        user_id: i64,
+        event_type: &str,
+    ) -> Result<i64, sqlx::Error> {
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM activity.member_events
+            WHERE user_id = $1
+              AND event_type = $2
+            "#,
+            user_id,
+            event_type,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.count)
     }
 
     #[tokio::test]
-    async fn member_writer_klassifiziert_und_gated() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("m.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute_batch(
-                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
-                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);
-                 CREATE TABLE twitch_streamer_invites(streamer_login TEXT, invite_code TEXT);
-                 INSERT INTO twitch_streamer_invites VALUES('coolstreamer','ABC123');
-                 INSERT INTO user_privacy(user_id, opted_out) VALUES(999, 1);",
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn member_writer_klassifiziert_und_gated() -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query!(
+            r#"
+            INSERT INTO bot.twitch_streamer_invites(streamer_login, guild_id, invite_code)
+            VALUES('coolstreamer', 1, 'ABC123')
+            "#
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out)
+            VALUES(999, TRUE)
+            "#
+        )
+        .execute(pool)
+        .await?;
 
         let join = |uid: u64, is_bot: bool| dl_discord::MemberEvent::Join {
             guild_id: 1,
@@ -795,11 +932,11 @@ mod tests {
             }),
         };
 
-        handle_member_event(&db, join(10, false)).await.unwrap(); // Twitch-Invite
-        handle_member_event(&db, join(999, false)).await.unwrap(); // opt-out
-        handle_member_event(&db, join(11, true)).await.unwrap(); // Bot
+        handle_member_event(pool, join(10, false)).await?;
+        handle_member_event(pool, join(999, false)).await?;
+        handle_member_event(pool, join(11, true)).await?;
         handle_member_event(
-            &db,
+            pool,
             dl_discord::MemberEvent::Ban {
                 guild_id: 1,
                 user_id: 12,
@@ -807,124 +944,129 @@ mod tests {
                 is_bot: false,
             },
         )
-        .await
-        .unwrap();
+        .await?;
 
-        let (bucket, cnt_opt, cnt_bot, ban_type): (String, i64, i64, String) = db
-            .read(|c| {
-                Ok((
-                    c.query_row(
-                        "SELECT json_extract(metadata,'$.join_source_bucket') FROM member_events WHERE user_id=10",
-                        [],
-                        |r| r.get(0),
-                    )?,
-                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=999", [], |r| r.get(0))?,
-                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=11", [], |r| r.get(0))?,
-                    c.query_row("SELECT event_type FROM member_events WHERE user_id=12", [], |r| r.get(0))?,
-                ))
-            })
-            .await
-            .unwrap();
-        assert_eq!(bucket, "twitch", "Twitch-Override beim Schreiben angewandt");
-        assert_eq!(cnt_opt, 0, "Opt-out-User wird nicht geschrieben");
-        assert_eq!(cnt_bot, 0, "Bot wird nicht geschrieben");
+        let bucket = sqlx::query!(
+            r#"
+            SELECT metadata->>'join_source_bucket' AS "bucket!"
+            FROM activity.member_events
+            WHERE user_id = 10
+            "#
+        )
+        .fetch_one(pool)
+        .await?
+        .bucket;
+        let ban_type = sqlx::query!(
+            r#"
+            SELECT event_type AS "event_type!"
+            FROM activity.member_events
+            WHERE user_id = 12
+            "#
+        )
+        .fetch_one(pool)
+        .await?
+        .event_type;
+
+        assert_eq!(bucket, "twitch");
+        assert_eq!(member_event_count(pool, 999, "join").await?, 0);
+        assert_eq!(member_event_count(pool, 11, "join").await?, 0);
         assert_eq!(ban_type, "ban");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn analyze_schreibt_patterns() {
-        let (_dir, analyzer, _voice) = setup().await;
-        let recent = (Utc::now() - chrono::Duration::days(2))
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        analyzer
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_session_log(user_id, started_at, ended_at, duration_seconds)
-                     VALUES(100, ?1, ?1, 1800)",
-                    [recent],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("seed");
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn analyze_schreibt_patterns() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, analyzer, _voice) = setup().await?;
+        let recent = Utc::now() - chrono::Duration::days(2);
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_session_log(
+                id, user_id, started_at, ended_at, duration_seconds, points
+            )
+            VALUES(1, 100, $1, $1, 1800, 0)
+            "#,
+            recent,
+        )
+        .execute(&analyzer.pool)
+        .await?;
+
         assert_eq!(analyzer.analyze_all().await, 1);
-        let (count, minutes): (i64, i64) = analyzer
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT sessions_count_2w, total_minutes_2w FROM user_activity_patterns WHERE user_id = 100",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .await
-            .expect("pattern");
-        assert_eq!((count, minutes), (1, 30));
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(sessions_count_2w, 0)::INT AS "sessions_count!",
+                   COALESCE(total_minutes_2w, 0)::INT AS "total_minutes!"
+            FROM activity.user_activity_patterns
+            WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&analyzer.pool)
+        .await?;
+        assert_eq!((row.sessions_count, row.total_minutes), (1, 30));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn co_player_tracking_bidirektional() {
-        let (_dir, analyzer, voice) = setup().await;
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn co_player_tracking_bidirektional() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, analyzer, voice) = setup().await?;
         *voice.groups.lock().expect("lock") =
             vec![vec![(100, "Anna".to_string()), (200, "Ben".to_string())]];
         analyzer.track_co_players().await;
-        analyzer.track_co_players().await; // zweiter Tick akkumuliert
+        analyzer.track_co_players().await;
 
-        let (sessions, minutes, name): (i64, i64, String) = analyzer
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT sessions_together, total_minutes_together, co_player_display_name
-                       FROM user_co_players WHERE user_id = 100 AND co_player_id = 200",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .await
-            .expect("row");
-        assert_eq!((sessions, minutes), (2, 20));
-        assert_eq!(name, "Ben");
-        // Gegenrichtung existiert ebenfalls
-        let top = analyzer.top_co_players(200, 5).await;
-        assert_eq!(top, vec![(100, 2)]);
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(sessions_together, 0)::INT AS "sessions!",
+                   COALESCE(total_minutes_together, 0)::INT AS "minutes!",
+                   co_player_display_name AS "name!"
+            FROM activity.user_co_players
+            WHERE user_id = 100
+              AND co_player_id = 200
+            "#
+        )
+        .fetch_one(&analyzer.pool)
+        .await?;
+        assert_eq!((row.sessions, row.minutes), (2, 20));
+        assert_eq!(row.name, "Ben");
+        assert_eq!(analyzer.top_co_players(200, 5).await, vec![(100, 2)]);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn top_co_players_nutzt_minuten_als_tiebreak() {
-        let (_dir, analyzer, _voice) = setup().await;
-        analyzer
-            .db
-            .write(|conn| {
-                conn.execute_batch(
-                    "INSERT INTO user_co_players(user_id, co_player_id, sessions_together, total_minutes_together)
-                     VALUES(1, 10, 3, 30), (1, 20, 3, 90), (1, 30, 2, 200);",
-                )
-            })
-            .await
-            .expect("seed");
-
-        let top = analyzer.top_co_players(1, 3).await;
-        assert_eq!(top, vec![(20, 3), (10, 3), (30, 2)]);
-    }
-
-    #[tokio::test]
-    async fn leave_event_speichert_display_name_und_skippt_bots() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("leave.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute_batch(
-                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
-                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);",
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn top_co_players_nutzt_minuten_als_tiebreak() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, analyzer, _voice) = setup().await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.user_co_players(
+                user_id, co_player_id, sessions_together, total_minutes_together
             )
-        })
-        .await
-        .expect("ddl");
+            VALUES(1, 10, 3, 30), (1, 20, 3, 90), (1, 30, 2, 200)
+            "#
+        )
+        .execute(&analyzer.pool)
+        .await?;
 
+        assert_eq!(
+            analyzer.top_co_players(1, 3).await,
+            vec![(20, 3), (10, 3), (30, 2)]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn leave_event_speichert_display_name_und_skippt_bots(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
         handle_member_event(
-            &db,
+            pool,
             dl_discord::MemberEvent::Remove {
                 guild_id: 1,
                 user_id: 42,
@@ -932,10 +1074,9 @@ mod tests {
                 is_bot: false,
             },
         )
-        .await
-        .expect("leave");
+        .await?;
         handle_member_event(
-            &db,
+            pool,
             dl_discord::MemberEvent::Remove {
                 guild_id: 1,
                 user_id: 99,
@@ -943,43 +1084,50 @@ mod tests {
                 is_bot: true,
             },
         )
-        .await
-        .expect("bot leave");
+        .await?;
 
-        let (name, bot_count): (String, i64) = db
-            .read(|c| {
-                Ok((
-                    c.query_row(
-                        "SELECT display_name FROM member_events WHERE user_id=42 AND event_type='leave'",
-                        [],
-                        |r| r.get(0),
-                    )?,
-                    c.query_row("SELECT COUNT(*) FROM member_events WHERE user_id=99", [], |r| r.get(0))?,
-                ))
-            })
-            .await
-            .expect("rows");
+        let name = sqlx::query!(
+            r#"
+            SELECT display_name AS "display_name!"
+            FROM activity.member_events
+            WHERE user_id = 42
+              AND event_type = 'leave'
+            "#
+        )
+        .fetch_one(pool)
+        .await?
+        .display_name;
         assert_eq!(name, "Gehender User");
-        assert_eq!(bot_count, 0);
+        assert_eq!(member_event_count(pool, 99, "leave").await?, 0);
+        Ok(())
     }
 
     #[tokio::test]
-    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("backfill.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute_batch(
-                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT, UNIQUE(user_id, guild_id, event_type));
-                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);
-                 INSERT INTO member_events(user_id, guild_id, event_type, display_name) VALUES(10, 1, 'join', 'Schon da');
-                 INSERT INTO user_privacy(user_id, opted_out) VALUES(12, 1);",
-            )
-        })
-        .await
-        .expect("ddl");
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn startup_backfill_legt_join_events_fuer_anwesende_member_an(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.member_events(id, user_id, guild_id, event_type, display_name)
+            VALUES(1, 10, 1, 'join', 'Schon da')
+            "#
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out)
+            VALUES(12, TRUE)
+            "#
+        )
+        .execute(pool)
+        .await?;
 
         let inserted = backfill_member_joins(
-            &db,
+            pool,
             vec![
                 BackfillMember {
                     guild_id: 1,
@@ -1015,28 +1163,32 @@ mod tests {
                 },
             ],
         )
-        .await
-        .expect("backfill");
+        .await?;
 
         assert_eq!(inserted, 1);
-        let row: (String, String) = db
-            .read(|c| {
-                c.query_row(
-                    "SELECT display_name, json_extract(metadata, '$.join_source_kind') FROM member_events WHERE user_id=11",
-                    [],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
-                )
-            })
-            .await
-            .expect("row");
-        assert_eq!(row, ("Neu im Cache".to_string(), "backfilled".to_string()));
+        assert_eq!(member_event_count(pool, 10, "join").await?, 1);
+        let row = sqlx::query!(
+            r#"
+            SELECT display_name AS "display_name!",
+                   metadata->>'join_source_kind' AS "join_source_kind!"
+            FROM activity.member_events
+            WHERE user_id = 11
+            "#
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.display_name, "Neu im Cache");
+        assert_eq!(row.join_source_kind, "backfilled");
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     struct SequencedBackfillPort {
         calls: std::sync::atomic::AtomicUsize,
         member: BackfillMember,
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl MemberBackfillPort for SequencedBackfillPort {
         async fn current_members(&self) -> Vec<BackfillMember> {
@@ -1050,17 +1202,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("backfill-retry.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute_batch(
-                "CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT, UNIQUE(user_id, guild_id, event_type));
-                 CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER DEFAULT 0);",
-            )
-        })
-        .await
-        .expect("ddl");
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn startup_backfill_retryt_bis_cache_member_vorhanden_sind(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool().clone();
         let port = Arc::new(SequencedBackfillPort {
             calls: std::sync::atomic::AtomicUsize::new(0),
             member: BackfillMember {
@@ -1074,43 +1221,53 @@ mod tests {
         });
 
         let task = spawn_member_backfill_with_delays(
-            db.clone(),
+            pool.clone(),
             port.clone(),
             Duration::ZERO,
             Duration::from_millis(5),
         );
         for _ in 0..40 {
-            let count = db
-                .read(|c| {
-                    c.query_row(
-                        "SELECT COUNT(*) FROM member_events WHERE user_id=55 AND event_type='join'",
-                        [],
-                        |r| r.get::<_, i64>(0),
-                    )
-                })
-                .await
-                .unwrap_or(0);
-            if count == 1 {
+            if member_event_count(&pool, 55, "join").await? == 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
         task.abort();
 
-        let count = db
-            .read(|c| {
-                c.query_row(
-                    "SELECT COUNT(*) FROM member_events WHERE user_id=55 AND event_type='join'",
-                    [],
-                    |r| r.get::<_, i64>(0),
-                )
-            })
-            .await
-            .expect("count");
-        assert_eq!(count, 1);
+        assert_eq!(member_event_count(&pool, 55, "join").await?, 1);
         assert!(
             port.calls.load(std::sync::atomic::Ordering::SeqCst) >= 2,
             "Backfill muss nach leerem Cache erneut pollen"
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn message_activity_respektiert_optout() -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy(user_id, opted_out)
+            VALUES(77, TRUE)
+            "#
+        )
+        .execute(pool)
+        .await?;
+
+        record_message_activity(pool, 77, 1, 9).await?;
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+            FROM activity.message_activity
+            WHERE user_id = 77
+            "#
+        )
+        .fetch_one(pool)
+        .await?;
+        assert_eq!(row.count, 0);
+        Ok(())
     }
 }

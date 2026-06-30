@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.text_conversation_log(\n                id, user_id, guild_id, channel_id, started_at, ended_at,\n                message_count, points, co_participant_ids, had_interaction\n            )\n            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb, $10)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4",
+        "Int4",
+        "Text",
+        "Bool"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "07b1848d612e94f20c6abd7add348f439e7ff4563e1c69b100d9131fb72d0f16"
+}

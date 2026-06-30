@@ -1,0 +1,41 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(message_count, 0)::BIGINT AS \"count!\",\n                   to_char(last_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last?\",\n                   to_char(first_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"first?\",\n                   channel_id\n            FROM activity.message_activity\n            WHERE user_id = $1\n              AND guild_id = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "last?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "first?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "01bd17a39c738c4524bafe477e8435a37293ebbe8eb773e622c436f857c20131"
+}

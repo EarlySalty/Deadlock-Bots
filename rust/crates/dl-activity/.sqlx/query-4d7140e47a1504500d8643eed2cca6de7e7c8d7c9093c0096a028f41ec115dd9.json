@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"ok!\"\n            FROM activity.text_conversation_log\n            LIMIT 0\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "4d7140e47a1504500d8643eed2cca6de7e7c8d7c9093c0096a028f41ec115dd9"
+}

@@ -1303,15 +1303,15 @@ pub trait LfgPort: Send + Sync {
 }
 
 pub struct LfgResponder {
-    pub db: dl_db::Db,
+    pub pool: sqlx::PgPool,
     pub port: std::sync::Arc<dyn LfgPort>,
     cooldown: tokio::sync::Mutex<std::collections::HashMap<u64, std::time::Instant>>,
 }
 
 impl LfgResponder {
-    pub fn new(db: dl_db::Db, port: std::sync::Arc<dyn LfgPort>) -> std::sync::Arc<Self> {
+    pub fn new(pool: sqlx::PgPool, port: std::sync::Arc<dyn LfgPort>) -> std::sync::Arc<Self> {
         std::sync::Arc::new(Self {
-            db,
+            pool,
             port,
             cooldown: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
@@ -1319,17 +1319,25 @@ impl LfgResponder {
 
     /// Bekannte Mitspieler (≥ 2 gemeinsame Sessions, wie das Original).
     async fn co_player_ids(&self, user_id: u64) -> Vec<u64> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT co_player_id FROM user_co_players
-                      WHERE user_id = ?1 AND sessions_together >= 2",
-                )?;
-                let rows = stmt.query_map([user_id], |row| row.get(0))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default()
+        let Ok(user_id) = crate::db::discord_id_to_i64(user_id, "user_id") else {
+            return Vec::new();
+        };
+        let rows = sqlx::query!(
+            r#"
+            SELECT co_player_id
+            FROM activity.user_co_players
+            WHERE user_id = $1
+              AND sessions_together >= 2
+            "#,
+            user_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+
+        rows.into_iter()
+            .filter_map(|row| crate::db::i64_to_u64(row.co_player_id, "co_player_id"))
+            .collect()
     }
 
     async fn handle_lfgtest(&self, guild_id: u64, channel_id: u64) {
@@ -1953,18 +1961,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_postet_decision_log_embed() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("lfg.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE user_co_players(user_id INTEGER, co_player_id INTEGER, sessions_together INTEGER)",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("ddl");
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn lfg_postet_decision_log_embed() -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
         let port = std::sync::Arc::new(MockLfgPort::new(vec![lane(
             1,
             LaneLabel::Casual,
@@ -1973,7 +1973,7 @@ mod tests {
             4.0,
             0,
         )]));
-        let responder = LfgResponder::new(db, port.clone());
+        let responder = LfgResponder::new(db.pool().clone(), port.clone());
 
         responder
             .handle_message(1, LFG_CHANNEL_ID, 42, "lfg", false)
@@ -2006,21 +2006,15 @@ mod tests {
         assert!(description.contains(&format!(
             "{LFG_DLOG_ICON_DURATION} {LFG_DLOG_PREFIX_DURATION}:"
         )));
+        Ok(())
     }
 
     #[tokio::test]
-    async fn lfg_debug_commands_sind_admin_only_und_rendern_daten() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("lfg-debug.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute(
-                "CREATE TABLE user_co_players(user_id INTEGER, co_player_id INTEGER, sessions_together INTEGER)",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("ddl");
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn lfg_debug_commands_sind_admin_only_und_rendern_daten(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
         let port = std::sync::Arc::new(MockLfgPort::new(vec![lane(
             987_654_321,
             LaneLabel::Casual,
@@ -2029,7 +2023,7 @@ mod tests {
             3.5,
             0,
         )]));
-        let responder = LfgResponder::new(db, port.clone());
+        let responder = LfgResponder::new(db.pool().clone(), port.clone());
 
         responder
             .handle_message(1, 555, 42, "!lfgtest", false)
@@ -2071,14 +2065,17 @@ mod tests {
         assert!(value.contains(&format!(
             "{LFG_DLOG_ICON_DECISION} {LFG_DLOG_PREFIX_DECISION}:"
         )));
+        Ok(())
     }
 
+    #[cfg(feature = "testing")]
     struct MockLfgPort {
         lanes: Vec<LaneInfo>,
         embeds: std::sync::Mutex<Vec<(u64, serde_json::Value)>>,
         texts: std::sync::Mutex<Vec<(u64, String)>>,
     }
 
+    #[cfg(feature = "testing")]
     impl MockLfgPort {
         fn new(lanes: Vec<LaneInfo>) -> Self {
             Self {
@@ -2089,6 +2086,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl LfgPort for MockLfgPort {
         async fn scan_lanes(&self, _guild_id: u64, _co_player_ids: &[u64]) -> Vec<LaneInfo> {
