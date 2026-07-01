@@ -339,17 +339,19 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 11
+          WHERE version BETWEEN 1 AND 12
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 11);
+    assert_eq!(migration_count_after_first, 12);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
         migration_row_signature(&pool, 2, "sp1 schemas and core").await;
     let migration_11_signature_after_first =
         migration_row_signature(&pool, 11, "barrier orphans and cross fks").await;
+    let migration_12_signature_after_first =
+        migration_row_signature(&pool, 12, "patchnotes identity sequences").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -357,11 +359,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 11
+          WHERE version BETWEEN 1 AND 12
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 11);
+    assert_eq!(migration_count_after_second, 12);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -376,6 +378,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 11, "barrier orphans and cross fks").await,
         migration_11_signature_after_first,
         "second migrator run must be a no-op for migration version 11"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 12, "patchnotes identity sequences").await,
+        migration_12_signature_after_first,
+        "second migrator run must be a no-op for migration version 12"
     );
 
     let schema_count = scalar_i64(
