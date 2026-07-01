@@ -2,6 +2,7 @@ pub mod convert;
 pub mod engine;
 pub mod ledger;
 pub mod plan;
+pub mod reconciliation_manifest;
 pub mod snapshot;
 pub mod source;
 pub mod target;

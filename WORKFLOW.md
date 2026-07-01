@@ -1,3 +1,36 @@
+# T0 Reconciliation Baseline-Tooling (2026-07-01)
+
+## Ziel
+Nur Ticket T0 aus `rust/docs/plans/2026-07-01-central-db-final-reconciliation.md`: Live-ETL-Snapshot rekonstruieren und read-only Manifest-Tooling fuer Snapshot-Hashes/mtimes sowie Ledger-Tabellenklassifikation bauen. Kein Postgres-/SQLite-Schreibzugriff, kein Commit/Push.
+
+## Fortschritt
+- Branch/Arbeitsbaum geprueft; bestehende uncommitted `WORKFLOW.md`-Aenderung bleibt erhalten.
+- Snapshot-Artefakte gefunden: `data/central-etl-snapshots/p4-final-20260701-032848` mit Dateien um `2026-07-01 03:28:49 +0200`, direkt vor bekanntem Live-Start `2026-07-01 03:29:38 +0200`.
+- Journald- und Shell-History-Pruefung lieferten keine eindeutigen `dl-central-sync`-Runner-Zeilen; Dateisystem-Artefakt wird als beste rekonstruierbare Baseline verwendet, konservativer Plan-Cutoff bleibt Fallback.
+- Tooling umgesetzt: `dl-central-etl` hat nun das read-only Binary `dl-reconciliation-manifest` plus Manifest-Modul. Es liest nur die 11 T0-Ledger-Fragmente und Snapshot-Dateien, erzeugt SHA256/mtime-Metadaten und klassifiziert Tabellen als `clock_present`, `append_only`, `no_clock` oder `queue_state`.
+- Baseline-Manifest erzeugt: `rust/docs/_work/sp1/reconciliation/2026-07-01-t0-baseline-manifest.json`. Ausgewaehlter Cutoff ist `2026-07-01T01:28:48Z` (`2026-07-01 03:28:48 +0200`) aus `p4-final-20260701-032848`; Snapshot-Dateifenster `2026-07-01T01:28:49.480754435Z` bis `2026-07-01T01:28:49.504754299Z`.
+- Manifest-Zahlen: 3 Snapshot-Dateien, 11 Ledger-Fragmente, 103 Tabellen; Klassen: 43 append-only, 27 Uhr vorhanden, 9 ohne Uhr, 24 Queue/State.
+- Verifikation gruen: `cargo test -p dl-central-etl`; `cargo clippy -p dl-central-etl --all-targets -- -D warnings`; `cargo fmt --check -p dl-central-etl`; `git diff --check`; Manifest-Scan ohne `DEADLOCK_CENTRAL_DSN`/Postgres-URL.
+
+## Offen
+- T1-Empfehlung: Zeitfilter nur als Vorfilter verwenden; `no_clock` und `queue_state` vor Apply mit expliziten Tabellenpolicies behandeln. Kein T1-Code in diesem Schritt implementiert.
+
+# Central DB Final Reconciliation Plan (2026-07-01)
+
+## Ziel
+Nur Doku-Plan fuer sichere Delta-Reconciliation und koordinierten finalen Cutover von Steam-Bot, Patchnotes und Website-Backend nach SP1. Kein DB-Zugriff, keine Live-Aenderung, kein Push. Wegen widerspruechlicher Vorgaben wird nicht committed; Aenderungen bleiben fuer Claude-Review uncommitted.
+
+## Fortschritt
+- Bestehende SP0/SP1-Doku gelesen: zentrale Architektur, Ledger-Format, data-landscape, SP1 Phase 1/2/3 sowie Migrations- und ETL-Historie.
+- Git-Historie seit 2026-06-30 geprueft: P2-ETL-Abschluss `3da3a01` am 2026-06-30 12:27:05 +0200; P3-Barriere `99c556f` am 2026-07-01 01:58:48 +0200; Live-Sync-Runner `641d469` am 2026-07-01 03:03:38 +0200; Merge `e7d2ab8` am 2026-07-01 03:23:04 +0200; Live-Start laut Auftrag 2026-07-01 03:29:38.
+- Ziel-DDL/Ledger fuer `core.steam_links`, `core.users`, `steam.*`, `coaching.*`, `patchnotes.*` und `bot.kv_store` gesichtet.
+- Statische Cross-Repo-Pruefung: Steam-Units zeigen auf geteilte SQLite via `DEADLOCK_DB_PATH`; Patchnotes schreibt `changelog_posts`, `deadlock_changelogs`, `kv_store(ns='patchnotes_bot')`; Website-Backend nutzt eigene `aiosqlite`-DB `builds/backend/deadlock.db`.
+- Plan-Datei angelegt: `rust/docs/plans/2026-07-01-central-db-final-reconciliation.md`.
+- Verifikation: `git diff --check` sauber; Secret-Scan der neuen Plan-Datei ohne DSN/Secret-Werte.
+
+## Offen
+- Claude-Review; kein Commit durch diesen Worker wegen verbindlicher Worker-Regel.
+
 # Deadlock-Bots Enforcement-Gaps (2026-06-30)
 
 ## Ziel

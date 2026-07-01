@@ -1,0 +1,2118 @@
+{
+  "generated_at": "2026-07-01T02:17:35.712672061Z",
+  "mode": "read_only_manifest_no_db_connections",
+  "cutoff": {
+    "selected_cutoff": "2026-07-01T01:28:48.000000000Z",
+    "selected_cutoff_unix_nanos": 1782869328000000000,
+    "source": "auto_selected_snapshot_dir",
+    "confidence": "filesystem_snapshot_manifested_no_runner_log",
+    "fallback_cutoff": "2026-06-30T10:27:05Z",
+    "fallback_cutoff_display": "2026-06-30 12:27:05 +0200",
+    "known_live_start_display": "2026-07-01 03:29:38 +0200",
+    "selected_snapshot_dir": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848",
+    "snapshot_window_start": "2026-07-01T01:28:49.480754435Z",
+    "snapshot_window_end": "2026-07-01T01:28:49.504754299Z",
+    "evidence": [
+      "Snapshot-Dateien mit SHA256 und mtime manifestiert",
+      "Ausgewaehltes Verzeichnis: /home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848 (3 Dateien)",
+      "Snapshot-Start aus Verzeichnisname rekonstruiert: 2026-07-01T01:28:48.000000000Z",
+      "Runner-Log nicht vorausgesetzt; ohne Snapshot-Artefakt waere Plan-Fallback aktiv"
+    ]
+  },
+  "snapshots": [
+    {
+      "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023900",
+      "selected": false,
+      "directory_timestamp": "2026-07-01T00:39:00.000000000Z",
+      "directory_timestamp_unix_nanos": 1782866340000000000,
+      "file_count": 3,
+      "window_start": "2026-07-01T00:39:01.115948327Z",
+      "window_end": "2026-07-01T00:39:01.140948128Z",
+      "files": [
+        {
+          "source_db": "deadlock-sqlite3",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023900/deadlock-sqlite3.sqlite3",
+          "size_bytes": 43032576,
+          "mtime": "2026-07-01T00:39:01.115948327Z",
+          "mtime_unix_nanos": 1782866341115948327,
+          "sha256": "bb93b050fc0cee811de254d27e1f0bd87f97a611d0775f7477d72c588d72e550"
+        },
+        {
+          "source_db": "tournament",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023900/tournament.sqlite3",
+          "size_bytes": 380928,
+          "mtime": "2026-07-01T00:39:01.140948128Z",
+          "mtime_unix_nanos": 1782866341140948128,
+          "sha256": "0c131a15c592ef29489c99162cccf3bcc5ea1825e94843f2c9388bea5834e21c"
+        },
+        {
+          "source_db": "website",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023900/website.sqlite3",
+          "size_bytes": 262144,
+          "mtime": "2026-07-01T00:39:01.136948160Z",
+          "mtime_unix_nanos": 1782866341136948160,
+          "sha256": "78914ec6965e8ce7f8173297a83e59898dccb0531a1e6fc5805403ea63a86ede"
+        }
+      ]
+    },
+    {
+      "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023924",
+      "selected": false,
+      "directory_timestamp": "2026-07-01T00:39:24.000000000Z",
+      "directory_timestamp_unix_nanos": 1782866364000000000,
+      "file_count": 3,
+      "window_start": "2026-07-01T00:46:45.086552114Z",
+      "window_end": "2026-07-01T00:46:45.109551956Z",
+      "files": [
+        {
+          "source_db": "deadlock-sqlite3",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023924/deadlock-sqlite3.sqlite3",
+          "size_bytes": 43032576,
+          "mtime": "2026-07-01T00:46:45.086552114Z",
+          "mtime_unix_nanos": 1782866805086552114,
+          "sha256": "4ff13c3dacd9da3b706c9b8cff614594df3f078cd86267cffb6e8f9ad4b8a67c"
+        },
+        {
+          "source_db": "tournament",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023924/tournament.sqlite3",
+          "size_bytes": 380928,
+          "mtime": "2026-07-01T00:46:45.109551956Z",
+          "mtime_unix_nanos": 1782866805109551956,
+          "sha256": "0c131a15c592ef29489c99162cccf3bcc5ea1825e94843f2c9388bea5834e21c"
+        },
+        {
+          "source_db": "website",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-20260701-023924/website.sqlite3",
+          "size_bytes": 262144,
+          "mtime": "2026-07-01T00:46:45.104551990Z",
+          "mtime_unix_nanos": 1782866805104551990,
+          "sha256": "bf8c656038ed188411ee2b429dec9715f8f790eaed70084529ac623eab150865"
+        }
+      ]
+    },
+    {
+      "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848",
+      "selected": true,
+      "directory_timestamp": "2026-07-01T01:28:48.000000000Z",
+      "directory_timestamp_unix_nanos": 1782869328000000000,
+      "file_count": 3,
+      "window_start": "2026-07-01T01:28:49.480754435Z",
+      "window_end": "2026-07-01T01:28:49.504754299Z",
+      "files": [
+        {
+          "source_db": "deadlock-sqlite3",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848/deadlock-sqlite3.sqlite3",
+          "size_bytes": 43053056,
+          "mtime": "2026-07-01T01:28:49.480754435Z",
+          "mtime_unix_nanos": 1782869329480754435,
+          "sha256": "a7aba961281d96e67e9cfa28c38ee8fdabefef814036265c4affb7c048998e7a"
+        },
+        {
+          "source_db": "tournament",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848/tournament.sqlite3",
+          "size_bytes": 380928,
+          "mtime": "2026-07-01T01:28:49.504754299Z",
+          "mtime_unix_nanos": 1782869329504754299,
+          "sha256": "0c131a15c592ef29489c99162cccf3bcc5ea1825e94843f2c9388bea5834e21c"
+        },
+        {
+          "source_db": "website",
+          "path": "/home/naniadm/Documents/Deadlock-Bots/data/central-etl-snapshots/p4-final-20260701-032848/website.sqlite3",
+          "size_bytes": 262144,
+          "mtime": "2026-07-01T01:28:49.499754327Z",
+          "mtime_unix_nanos": 1782869329499754327,
+          "sha256": "edfeb6b120e6ed9d026a8af8d5c461e53fdaaf12c1f9b6253f3a7eadf633859e"
+        }
+      ]
+    }
+  ],
+  "ledger_files": [
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/core.toml",
+      "table_count": 5
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/steam.toml",
+      "table_count": 25
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/bot.toml",
+      "table_count": 26
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "patchnotes.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/patchnotes.toml",
+      "table_count": 2
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/tierlist.toml",
+      "table_count": 11
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/deadlock-sqlite3/activity.toml",
+      "table_count": 13
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/website/coaching.toml",
+      "table_count": 11
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/website/tierlist.toml",
+      "table_count": 6
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "content.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/website/content.toml",
+      "table_count": 2
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "patchnotes.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/website/patchnotes.toml",
+      "table_count": 1
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "core.toml",
+      "path": "/home/naniadm/Documents/Deadlock-Bots/rust/crates/dl-central-etl/ledger/website/core.toml",
+      "table_count": 1
+    }
+  ],
+  "tables": [
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "live_player_state",
+      "target_tables": [
+        "activity.live_player_state"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:_state",
+      "mapped_columns": 12,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "deadlock_updated_at",
+        "last_seen_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:_state"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "member_events",
+      "target_tables": [
+        "activity.member_events"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "member_leave_surveys",
+      "target_tables": [
+        "activity.member_leave_surveys"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 17,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "message_activity",
+      "target_tables": [
+        "activity.message_activity"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "text_conversation_log",
+      "target_tables": [
+        "activity.text_conversation_log"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:log",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "text_stats",
+      "target_tables": [
+        "activity.text_stats"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_update",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_update"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "user_activity_patterns",
+      "target_tables": [
+        "activity.user_activity_patterns"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "user_co_players",
+      "target_tables": [
+        "activity.user_co_players"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "user_retention_messages",
+      "target_tables": [
+        "activity.user_retention_messages"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:messages",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:messages"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "user_retention_tracking",
+      "target_tables": [
+        "activity.user_retention_tracking"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "voice_feedback_requests",
+      "target_tables": [
+        "activity.voice_feedback_requests"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id",
+      "mapped_columns": 12,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "voice_feedback_responses",
+      "target_tables": [
+        "activity.voice_feedback_responses"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, column:message_id",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "column:message_id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "activity.toml",
+      "source_table": "voice_session_log",
+      "target_tables": [
+        "activity.voice_session_log"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:log",
+      "mapped_columns": 13,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "changelog_entries",
+      "target_tables": [
+        "bot.changelog_entries"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:changelog, table:entries, table:log",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:changelog",
+        "table:entries",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "claimed_threads",
+      "target_tables": [
+        "bot.claimed_threads"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "customgames_tournament_signups",
+      "target_tables": [
+        "bot.customgames_tournament_signups"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 11,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "customgames_tournament_teams",
+      "target_tables": [
+        "bot.customgames_tournament_teams"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "discord_invite_codes",
+      "target_tables": [
+        "bot.discord_invite_codes"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_seen_at",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_seen_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "dm_response_tracking",
+      "target_tables": [
+        "bot.dm_response_tracking"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "faq_chat_messages",
+      "target_tables": [
+        "bot.faq_chat_messages"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id, table:messages",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "table:messages"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "faq_chat_sessions",
+      "target_tables": [
+        "bot.faq_chat_sessions"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "invite_snapshot_cache",
+      "target_tables": [
+        "bot.invite_snapshot_cache"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:cache",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:cache"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "issue_reports",
+      "target_tables": [
+        "bot.issue_reports"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 15,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "column:message_id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "kv_store",
+      "target_tables": [
+        "bot.kv_store"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "notification_log",
+      "target_tables": [
+        "bot.notification_log"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:log",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "notification_queue",
+      "target_tables": [
+        "bot.notification_queue"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:queue",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id"
+      ],
+      "queue_state_indicators": [
+        "table:queue"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "oauth_states",
+      "target_tables": [
+        "bot.oauth_states"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:_state",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "table:_state"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "onboarding_pending_verify",
+      "target_tables": [
+        "bot.onboarding_pending_verify"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:pending",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:pending"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "persistent_views",
+      "target_tables": [
+        "bot.persistent_views"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:message_id",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:message_id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "reaction_role_dm_log",
+      "target_tables": [
+        "bot.reaction_role_dm_log"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: table:log",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "reaction_role_mappings",
+      "target_tables": [
+        "bot.reaction_role_mappings"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 13,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "column:message_id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "schema_version",
+      "target_tables": [
+        "bot.schema_version"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 1,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "server_faq_logs",
+      "target_tables": [
+        "bot.server_faq_logs"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id, table:log",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "standalone_bot_state",
+      "target_tables": [
+        "bot.standalone_bot_state"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:_state",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:_state"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "standalone_commands",
+      "target_tables": [
+        "bot.standalone_commands"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "streamer_link_intents",
+      "target_tables": [
+        "bot.streamer_link_intents"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "tournament_periods",
+      "target_tables": [
+        "bot.tournament_periods"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "turnier_auth_tokens",
+      "target_tables": [
+        "bot.turnier_auth_tokens"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "bot.toml",
+      "source_table": "twitch_streamer_invites",
+      "target_tables": [
+        "bot.twitch_streamer_invites"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "source_table": "steam_links",
+      "target_tables": [
+        "core.steam_links"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: deadlock_rank_updated_at, updated_at",
+      "mapped_columns": 15,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "deadlock_rank_updated_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "source_table": "user_data",
+      "target_tables": [
+        "core.user_data"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "source_table": "user_mod_tags",
+      "target_tables": [
+        "core.user_mod_tags"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:set_at",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:set_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "source_table": "user_privacy",
+      "target_tables": [
+        "core.user_privacy"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "core.toml",
+      "source_table": "user_tags",
+      "target_tables": [
+        "core.user_tags"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:set_at",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:set_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "patchnotes.toml",
+      "source_table": "changelog_posts",
+      "target_tables": [
+        "patchnotes.changelog_posts"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, column:posted_at, column:url, table:changelog, table:log, table:posts",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "column:posted_at",
+        "column:url",
+        "table:changelog",
+        "table:log",
+        "table:posts"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "patchnotes.toml",
+      "source_table": "deadlock_changelogs",
+      "target_tables": [
+        "patchnotes.deadlock_changelogs"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, column:posted_at, column:url, table:changelog, table:log",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "column:posted_at",
+        "column:url",
+        "table:changelog",
+        "table:log"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_audit",
+      "target_tables": [
+        "steam.beta_invite_audit"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, column:invited_at, table:audit",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "column:invited_at",
+        "table:audit"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_auto_failure_alerts",
+      "target_tables": [
+        "steam.beta_invite_auto_failure_alerts"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:beta_invite_auto_failure_alerts",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:beta_invite_auto_failure_alerts"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_friendship_auto_poll",
+      "target_tables": [
+        "steam.beta_invite_friendship_auto_poll"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:attempts_completed, column:next_check_at, table:beta_invite_friendship_auto_poll",
+      "mapped_columns": 13,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_checked_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "column:attempts_completed",
+        "column:next_check_at",
+        "table:beta_invite_friendship_auto_poll"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_intent",
+      "target_tables": [
+        "steam.beta_invite_intent"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:locked, table:beta_invite_intent",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:decided_at"
+      ],
+      "queue_state_indicators": [
+        "column:locked",
+        "table:beta_invite_intent"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_panel_clicks",
+      "target_tables": [
+        "steam.beta_invite_panel_clicks"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:first_clicked_at",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:first_clicked_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_pending_payments",
+      "target_tables": [
+        "steam.beta_invite_pending_payments"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:pending",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "table:pending"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_supporter_role_grants",
+      "target_tables": [
+        "steam.beta_invite_supporter_role_grants"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_applied_at, last_payment_at, updated_at",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_applied_at",
+        "last_payment_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:granted_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "beta_invite_tickets",
+      "target_tables": [
+        "steam.beta_invite_tickets"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:beta_invite_tickets",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "table:beta_invite_tickets"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_beta_invites",
+      "target_tables": [
+        "steam.steam_beta_invites"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:dispatch_attempts, table:steam_beta_invites",
+      "mapped_columns": 14,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": [
+        "column:dispatch_attempts",
+        "table:steam_beta_invites"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_cleanup_poll_state",
+      "target_tables": [
+        "steam.steam_cleanup_poll_state"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:_state, table:poll_state",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_polled_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:_state",
+        "table:poll_state"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_flow_throttle",
+      "target_tables": [
+        "steam.steam_flow_throttle"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:throttle",
+      "mapped_columns": 2,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:throttle"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_friend_check_cache",
+      "target_tables": [
+        "steam.steam_friend_check_cache"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:cache",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:cache"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_friend_requests",
+      "target_tables": [
+        "steam.steam_friend_requests"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:attempts, table:friend_requests",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:requested_at"
+      ],
+      "queue_state_indicators": [
+        "column:attempts",
+        "table:friend_requests"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_friendship_miss_tracker",
+      "target_tables": [
+        "steam.steam_friendship_miss_tracker"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:miss_tracker",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_action_at",
+        "last_miss_at",
+        "last_polled_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:miss_tracker"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_launch_tokens",
+      "target_tables": [
+        "steam.steam_launch_tokens"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_links_archive",
+      "target_tables": [
+        "steam.steam_links_archive"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: deadlock_rank_updated_at, updated_at",
+      "mapped_columns": 16,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "deadlock_rank_updated_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "table:archive"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_links_leave_archive",
+      "target_tables": [
+        "steam.steam_links_leave_archive"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: deadlock_rank_updated_at, updated_at",
+      "mapped_columns": 16,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "deadlock_rank_updated_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "table:archive"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_nudge_state",
+      "target_tables": [
+        "steam.steam_nudge_state"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:_state",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:message_id"
+      ],
+      "queue_state_indicators": [
+        "table:_state"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_presence_watchlist",
+      "target_tables": [
+        "steam.steam_presence_watchlist"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:watch, table:watchlist",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": [
+        "table:watch",
+        "table:watchlist"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_quick_invites",
+      "target_tables": [
+        "steam.steam_quick_invites"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:reserved_at",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_seen"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "column:reserved_at"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_rank_assignments",
+      "target_tables": [
+        "steam.steam_rank_assignments"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_rank_history",
+      "target_tables": [
+        "steam.steam_rank_history"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:captured_at, table:history",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:captured_at",
+        "table:history"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_rich_presence",
+      "target_tables": [
+        "steam.steam_rich_presence"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_update, updated_at",
+      "mapped_columns": 14,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_update",
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_role_cleanup_pending",
+      "target_tables": [
+        "steam.steam_role_cleanup_pending"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:attempts, table:pending, table:role_cleanup",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "column:attempts",
+        "table:pending",
+        "table:role_cleanup"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "steam.toml",
+      "source_table": "steam_tasks",
+      "target_tables": [
+        "steam.steam_tasks"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:attempts, table:steam_tasks",
+      "mapped_columns": 11,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": [
+        "column:attempts",
+        "table:steam_tasks"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "deadlock_hero_builds",
+      "target_tables": [
+        "tierlist.deadlock_hero_builds"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_checked_at, source_last_updated_at, updated_at",
+      "mapped_columns": 18,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_checked_at",
+        "source_last_updated_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "deadlock_heroes",
+      "target_tables": [
+        "tierlist.deadlock_heroes"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "hero_build_clones",
+      "target_tables": [
+        "tierlist.hero_build_clones"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: column:attempts",
+      "mapped_columns": 19,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "source_last_updated_at",
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": [
+        "column:attempts"
+      ]
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "hero_build_sources",
+      "target_tables": [
+        "tierlist.hero_build_sources"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: last_seen_at, last_updated_at",
+      "mapped_columns": 14,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_seen_at",
+        "last_updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_build_votes",
+      "target_tables": [
+        "tierlist.tierlist_build_votes"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_hero_meta",
+      "target_tables": [
+        "tierlist.tierlist_hero_meta"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_settings",
+      "target_tables": [
+        "tierlist.tierlist_settings"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 3,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_snapshot_heroes",
+      "target_tables": [
+        "tierlist.tierlist_snapshot_heroes"
+      ],
+      "classification": "no_clock",
+      "classification_reason": "Keine Aenderungsuhr und keine Append-only-Identitaet aus Ledger-Spalten ableitbar",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_snapshots",
+      "target_tables": [
+        "tierlist.tierlist_snapshots"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "tierlist_streamers",
+      "target_tables": [
+        "tierlist.tierlist_streamers"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "deadlock-sqlite3",
+      "ledger_file": "tierlist.toml",
+      "source_table": "watched_build_authors",
+      "target_tables": [
+        "tierlist.watched_build_authors"
+      ],
+      "classification": "queue_state",
+      "classification_reason": "Queue-/State-Heuristik getroffen: table:watch",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "last_checked_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at"
+      ],
+      "queue_state_indicators": [
+        "table:watch"
+      ]
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coach_applications",
+      "target_tables": [
+        "coaching.coach_applications"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 14,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coach_reviews",
+      "target_tables": [
+        "coaching.coach_reviews"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id, table:reviews",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "table:reviews"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coachees",
+      "target_tables": [
+        "coaching.coachees"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 10,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaches",
+      "target_tables": [
+        "coaching.coaches"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 15,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_appointments",
+      "target_tables": [
+        "coaching.appointments"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 13,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "column:scheduled_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_goals",
+      "target_tables": [
+        "coaching.goals"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 12,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_milestones",
+      "target_tables": [
+        "coaching.milestones"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_requests",
+      "target_tables": [
+        "coaching.requests"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 21,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_sessions",
+      "target_tables": [
+        "coaching.sessions"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id, column:scheduled_at",
+      "mapped_columns": 13,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id",
+        "column:scheduled_at"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "coaching_surveys",
+      "target_tables": [
+        "coaching.surveys"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "coaching.toml",
+      "source_table": "session_notes",
+      "target_tables": [
+        "coaching.session_notes"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "content.toml",
+      "source_table": "meta_announcements",
+      "target_tables": [
+        "content.meta_announcements"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 4,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "content.toml",
+      "source_table": "meta_reports",
+      "target_tables": [
+        "content.meta_reports"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "core.toml",
+      "source_table": "meta_users",
+      "target_tables": [
+        "core.meta_users"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 6,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "patchnotes.toml",
+      "source_table": "meta_patch_notes",
+      "target_tables": [
+        "patchnotes.meta_patch_notes"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_builds",
+      "target_tables": [
+        "tierlist.meta_builds"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 12,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_heroes",
+      "target_tables": [
+        "tierlist.meta_heroes"
+      ],
+      "classification": "clock_present",
+      "classification_reason": "Aenderungsuhr vorhanden: updated_at",
+      "mapped_columns": 9,
+      "dropped_columns": 0,
+      "clock_columns": [
+        "updated_at"
+      ],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_items",
+      "target_tables": [
+        "tierlist.meta_items"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_tier_history",
+      "target_tables": [
+        "tierlist.meta_tier_history"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:id, table:history",
+      "mapped_columns": 7,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:id",
+        "table:history"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_tier_lists",
+      "target_tables": [
+        "tierlist.meta_tier_lists"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 8,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    },
+    {
+      "source_db": "website",
+      "ledger_file": "tierlist.toml",
+      "source_table": "meta_votes",
+      "target_tables": [
+        "tierlist.meta_votes"
+      ],
+      "classification": "append_only",
+      "classification_reason": "Append-only-Heuristik getroffen: column:created_at, column:id",
+      "mapped_columns": 5,
+      "dropped_columns": 0,
+      "clock_columns": [],
+      "append_identity_columns": [
+        "column:created_at",
+        "column:id"
+      ],
+      "queue_state_indicators": []
+    }
+  ],
+  "next_ticket_recommendations": [
+    "T1 sollte Zeitfilter nur als Vorfilter verwenden; Entscheidung bleibt Hash-/Target-Vergleich.",
+    "Tabellen mit classification=no_clock oder queue_state brauchen vor Apply eine explizite Tabellenpolicy."
+  ]
+}

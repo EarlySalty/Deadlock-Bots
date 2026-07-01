@@ -508,6 +508,7 @@ name = "dl-central-etl"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
