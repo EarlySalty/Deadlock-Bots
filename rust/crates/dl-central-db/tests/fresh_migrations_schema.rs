@@ -339,17 +339,19 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 11
+          WHERE version BETWEEN 1 AND 12
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 11);
+    assert_eq!(migration_count_after_first, 12);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
         migration_row_signature(&pool, 2, "sp1 schemas and core").await;
     let migration_11_signature_after_first =
         migration_row_signature(&pool, 11, "barrier orphans and cross fks").await;
+    let migration_12_signature_after_first =
+        migration_row_signature(&pool, 12, "brain knowledge timeline").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -357,11 +359,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 11
+          WHERE version BETWEEN 1 AND 12
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 11);
+    assert_eq!(migration_count_after_second, 12);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -376,6 +378,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 11, "barrier orphans and cross fks").await,
         migration_11_signature_after_first,
         "second migrator run must be a no-op for migration version 11"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 12, "brain knowledge timeline").await,
+        migration_12_signature_after_first,
+        "second migrator run must be a no-op for migration version 12"
     );
 
     let schema_count = scalar_i64(
@@ -395,11 +402,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'moderation',
               'bot',
               'clips',
-              'content'
+              'content',
+              'brain'
           )",
     )
     .await;
-    assert_eq!(schema_count, 13);
+    assert_eq!(schema_count, 14);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -407,6 +415,90 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(timescaledb_count, 1);
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "brain", "knowledge_events").await,
+        vec![
+            "id",
+            "event_hash",
+            "event_source",
+            "source_table",
+            "source_legacy_id",
+            "source_document_id",
+            "snapshot_id",
+            "patch_event_id",
+            "forum_claim_id",
+            "entity_type",
+            "entity_name",
+            "subject",
+            "event_type",
+            "validity_status",
+            "currentness",
+            "trust_tier",
+            "source_url",
+            "occurred_at",
+            "observed_at",
+            "effective_from",
+            "effective_to",
+            "raw_text",
+            "normalized_text",
+            "evidence_quote",
+            "old_value",
+            "new_value",
+            "confidence",
+            "safety_labels",
+            "source_references",
+            "payload",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "brain", "knowledge_events").await,
+        vec!["id"]
+    );
+    assert_column_in_schema(
+        &pool,
+        "brain",
+        "knowledge_events",
+        "payload",
+        "jsonb",
+        "jsonb",
+        "NO",
+        Some("'{}'::jsonb"),
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "brain",
+        "knowledge_events",
+        "currentness",
+        "text",
+        "text",
+        "NO",
+        None,
+    )
+    .await;
+    assert_eq!(
+        table_columns_in_schema(&pool, "brain", "current_entity_state").await,
+        vec![
+            "id",
+            "entity_type",
+            "entity_name",
+            "state_kind",
+            "winning_event_id",
+            "winning_snapshot_id",
+            "source",
+            "source_priority",
+            "valid_from",
+            "observed_at",
+            "content_hash",
+            "payload",
+            "metadata",
+            "updated_at",
+        ]
+    );
 
     assert_eq!(
         table_columns(&pool, "users").await,

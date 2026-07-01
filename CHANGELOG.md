@@ -1,3 +1,11 @@
+## #181 — Brain bekommt einen zentralen Postgres-Bereich
+
+**Ausgangslage:** Das Deadlock-Brain sammelte Patch-, Forum- und Wissensdaten noch in einer eigenen SQLite-Datenbank. Für eine echte Historie mit Timeline, alten Patchständen, Reworks und aktuellem Gewinnerstand ist das als zentrale Wissensquelle zu schwach.
+
+**Was wurde geändert:** Die zentrale Datenbank bekommt ein eigenes `brain`-Schema für Quellen, Snapshots, Entitäten, Patch-Events, Forum-Claims, vereinheitlichte Wissens-Events und den aktuellen Entitätszustand. Historische Daten können damit erhalten bleiben, während aktuelle Quellen sauber darüber priorisiert werden.
+
+**Wie es jetzt läuft:** Postgres ist vorbereitet, Brain-Daten als Zeitlinie aufzunehmen: alte Werte bleiben nachvollziehbar, neue Werte können als Current-State gewinnen, und entfernte oder überarbeitete Heroes, Items und Fähigkeiten müssen nicht mehr verloren gehen.
+
 ## #180 — Dashboard prüft Coaching-Sperren wieder in der zentralen Datenbank
 
 **Ausgangslage:** Nach dem Merge auf die zentrale Datenbank hing die interne Dashboard-Abfrage für Coaching-Sperren noch an der alten lokalen Datenbank-Logik. Dadurch brach der Release-Build des Web-Dienstes.
