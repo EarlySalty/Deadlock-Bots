@@ -46,6 +46,7 @@ fi
 CENTRAL_TEST_DSN="postgres://${USER}:${PASS}@127.0.0.1:${PORT}/${DB}"
 export CENTRAL_TEST_DSN
 export DEADLOCK_CENTRAL_DSN="$CENTRAL_TEST_DSN"
+export TURNIER_TEST_DB_CONFIRM="throwaway-only"
 export SQLX_OFFLINE=true
 
 if ! command -v pg_isready >/dev/null 2>&1; then
