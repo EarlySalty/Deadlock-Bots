@@ -529,6 +529,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-central-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dl-central-db",
+ "dl-central-etl",
+ "tokio",
+]
+
+[[package]]
 name = "dl-changelog"
 version = "0.1.0"
 dependencies = [

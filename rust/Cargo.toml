@@ -27,6 +27,7 @@ members = [
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",
     "bin/dl-central-migrate",
+    "bin/dl-central-sync",
 ]
 
 [workspace.package]
