@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.oauth_states\n               SET metadata = $1::text::jsonb\n             WHERE state = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "060458b03a2a05245ae5b616e589ab777f9fb1a3eaa5d34bd00fa83176058ab4"
+}

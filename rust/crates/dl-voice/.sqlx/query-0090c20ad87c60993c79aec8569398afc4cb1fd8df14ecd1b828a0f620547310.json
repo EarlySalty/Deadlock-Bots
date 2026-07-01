@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_feedback_requests (id, user_id, status, sent_at)\n            VALUES (21, 100, 'responded', $1), (22, 200, 'sent', $2)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0090c20ad87c60993c79aec8569398afc4cb1fd8df14ecd1b828a0f620547310"
+}

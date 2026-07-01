@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM activity.voice_feedback_responses\n             WHERE request_id IN (\n                SELECT id\n                  FROM activity.voice_feedback_requests\n                 WHERE user_id = $1\n             )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7ee768c6c3e17e3adcbfd31aa01b52848cb3c04619d2ebfff36319e710907d49"
+}

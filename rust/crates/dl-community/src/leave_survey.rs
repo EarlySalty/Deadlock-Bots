@@ -11,11 +11,12 @@
 
 use std::sync::Arc;
 
-use dl_db::Db;
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
+
+use crate::db::{advisory_lock, i64_to_i32, u64_to_i64};
 
 pub const LOGS_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SURVEY_BASE_URL: &str = "https://deutsche-deadlock-community.de/survey";
@@ -26,6 +27,7 @@ pub const BUCKET_B_MIN_DAYS: i64 = 14;
 pub const BUCKET_B_MIN_WEEKLY_SESSIONS: f64 = 0.5;
 pub const BUCKET_B_MIN_MESSAGES: i64 = 30;
 pub const BUCKET_B_MIN_VOICE_SECONDS: i64 = 3600;
+const MEMBER_LEAVE_SURVEYS_ID_LOCK: i64 = 0x4451_0008_0010_0001;
 
 pub fn reason_options(bucket: &str) -> &'static [(&'static str, &'static str)] {
     match bucket {
@@ -134,62 +136,67 @@ pub trait SurveyPort: Send + Sync {
 }
 
 pub struct LeaveSurvey {
-    pub db: Db,
+    pub pool: PgPool,
     pub port: Arc<dyn SurveyPort>,
     pub guild_name: String,
 }
 
 impl LeaveSurvey {
-    pub fn new(db: Db, port: Arc<dyn SurveyPort>, guild_name: impl Into<String>) -> Arc<Self> {
+    pub fn new(
+        pool: PgPool,
+        port: Arc<dyn SurveyPort>,
+        guild_name: impl Into<String>,
+    ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             port,
             guild_name: guild_name.into(),
         })
     }
 
     pub async fn on_member_remove(self: &Arc<Self>, guild_id: u64, user_id: u64) {
+        let (Ok(guild_id_i64), Ok(user_id_i64)) = (
+            u64_to_i64(guild_id, "guild_id"),
+            u64_to_i64(user_id, "user_id"),
+        ) else {
+            return;
+        };
         // Opt-out + frischer Ban (15 s) + Survey-Sperre (30 Tage)
-        let skip: bool = self
-            .db
-            .read(move |conn| {
-                let opted_out: Option<i64> = conn
-                    .query_row(
-                        "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
-                        [user_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .flatten_into();
-                if opted_out.unwrap_or(0) != 0 {
-                    return Ok(true);
-                }
-                let recent_ban: Option<i64> = conn
-                    .query_row(
-                        "SELECT 1 FROM member_events
-                          WHERE user_id = ?1 AND guild_id = ?2 AND event_type = 'ban'
-                            AND timestamp >= datetime('now', '-15 seconds') LIMIT 1",
-                        rusqlite::params![user_id, guild_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if recent_ban.is_some() {
-                    return Ok(true);
-                }
-                let min_created =
-                    chrono::Utc::now().timestamp() - MIN_DAYS_BETWEEN_SURVEYS * 24 * 3600;
-                let recent_survey: Option<i64> = conn
-                    .query_row(
-                        "SELECT 1 FROM member_leave_surveys
-                          WHERE user_id = ?1 AND strftime('%s', created_at) >= ?2 LIMIT 1",
-                        rusqlite::params![user_id, min_created.to_string()],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                Ok(recent_survey.is_some())
-            })
-            .await
-            .unwrap_or(true);
+        let opted_out = crate::privacy::is_opted_out(&self.pool, user_id_i64).await;
+        let recent_ban = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM activity.member_events
+                 WHERE user_id = $1
+                   AND guild_id = $2
+                   AND event_type = 'ban'
+                   AND occurred_at >= now() - INTERVAL '15 seconds'
+            ) AS "exists!"
+            "#,
+            user_id_i64,
+            guild_id_i64,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(true);
+        let min_created = chrono::Utc::now() - chrono::Duration::days(MIN_DAYS_BETWEEN_SURVEYS);
+        let recent_survey = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM activity.member_leave_surveys
+                 WHERE user_id = $1
+                   AND created_at >= $2
+            ) AS "exists!"
+            "#,
+            user_id_i64,
+            min_created,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(true);
+        let skip = opted_out || recent_ban || recent_survey;
         if skip {
             return;
         }
@@ -206,30 +213,16 @@ impl LeaveSurvey {
             .await
             .unwrap_or_else(|| format!("User {user_id}"));
 
-        let (token_clone, display_clone, bucket_owned) =
-            (token.clone(), display.clone(), bucket.to_string());
-        let survey_id: Option<i64> = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO member_leave_surveys(
-                       user_id, guild_id, left_at, display_name, user_bucket,
-                       days_on_server, survey_token, dm_status
-                     ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, 'failed')",
-                    rusqlite::params![
-                        user_id,
-                        guild_id,
-                        chrono::Utc::now().timestamp(),
-                        display_clone,
-                        bucket_owned,
-                        days,
-                        token_clone,
-                    ],
-                )?;
-                Ok(Some(conn.last_insert_rowid()))
-            })
-            .await
-            .unwrap_or(None);
+        let survey_id = self
+            .insert_survey(
+                user_id_i64,
+                guild_id_i64,
+                display.clone(),
+                bucket.to_string(),
+                days,
+                token.clone(),
+            )
+            .await;
         let Some(survey_id) = survey_id else { return };
 
         let description = bucket_description(bucket, &display);
@@ -253,17 +246,17 @@ impl LeaveSurvey {
         }]}]);
 
         let status = self.port.send_survey_dm(user_id, embed, components).await;
-        let status_clone = status.clone();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE member_leave_surveys SET dm_status = ?1 WHERE id = ?2",
-                    rusqlite::params![status_clone, survey_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE activity.member_leave_surveys
+               SET dm_status = $1
+             WHERE id = $2
+            "#,
+            status.clone(),
+            survey_id,
+        )
+        .execute(&self.pool)
+        .await;
         self.port
             .post_log(format!(
                 "👋 Leave-Survey für <@{user_id}> (Bucket {bucket}, {days} Tage, DM: {status})"
@@ -271,55 +264,147 @@ impl LeaveSurvey {
             .await;
     }
 
-    async fn classify_user(&self, guild_id: u64, user_id: u64) -> (i64, &'static str) {
-        let stats = self
-            .db
-            .read(move |conn| {
-                let join_ts: Option<i64> = conn
-                    .query_row(
-                        "SELECT MIN(strftime('%s', timestamp)) FROM member_events
-                          WHERE user_id = ?1 AND guild_id = ?2 AND event_type = 'join'",
-                        rusqlite::params![user_id, guild_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
-                    .optional()?
-                    .flatten()
-                    .and_then(|s| s.parse().ok());
-                let voice_sessions: i64 = conn.query_row(
-                    "SELECT COUNT(*) FROM voice_session_log WHERE user_id = ?1",
-                    [user_id],
-                    |row| row.get(0),
-                )?;
-                let message_count: i64 = conn
-                    .query_row(
-                        "SELECT message_count FROM message_activity
-                          WHERE user_id = ?1 AND guild_id = ?2",
-                        rusqlite::params![user_id, guild_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(0);
-                let avg_weekly: f64 = conn
-                    .query_row(
-                        "SELECT avg_weekly_sessions FROM user_retention_tracking WHERE user_id = ?1",
-                        [user_id],
-                        |row| row.get::<_, Option<f64>>(0),
-                    )
-                    .optional()?
-                    .flatten()
-                    .unwrap_or(0.0);
-                let voice_seconds: i64 = conn
-                    .query_row(
-                        "SELECT total_seconds FROM voice_stats WHERE user_id = ?1",
-                        [user_id],
-                        |row| row.get(0),
-                    )
-                    .optional()?
-                    .unwrap_or(0);
-                Ok((join_ts, voice_sessions, message_count, avg_weekly, voice_seconds))
-            })
+    async fn insert_survey(
+        &self,
+        user_id: i64,
+        guild_id: i64,
+        display_name: String,
+        user_bucket: String,
+        days_on_server: i64,
+        survey_token: String,
+    ) -> Option<i64> {
+        let days_on_server = i64_to_i32(days_on_server, "days_on_server").ok()?;
+        let mut tx = self.pool.begin().await.ok()?;
+        advisory_lock(&mut tx, MEMBER_LEAVE_SURVEYS_ID_LOCK)
             .await
-            .unwrap_or((None, 0, 0, 0.0, 0));
+            .ok()?;
+        let duplicate = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM activity.member_leave_surveys WHERE survey_token = $1
+            ) AS "exists!"
+            "#,
+            survey_token,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .ok()?;
+        if duplicate {
+            return None;
+        }
+        let next_id = sqlx::query_scalar!(
+            r#"
+            SELECT COALESCE(MAX(id), 0) + 1 AS "next_id!: i64"
+              FROM activity.member_leave_surveys
+            "#
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .ok()?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.member_leave_surveys(
+                id, user_id, guild_id, left_at, display_name, user_bucket,
+                days_on_server, survey_token, dm_status, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'failed', $4)
+            "#,
+            next_id,
+            user_id,
+            guild_id,
+            chrono::Utc::now(),
+            display_name,
+            user_bucket,
+            days_on_server,
+            survey_token,
+        )
+        .execute(&mut *tx)
+        .await
+        .ok()?;
+        tx.commit().await.ok()?;
+        Some(next_id)
+    }
+
+    async fn classify_user(&self, guild_id: u64, user_id: u64) -> (i64, &'static str) {
+        let (Ok(guild_id), Ok(user_id)) = (
+            u64_to_i64(guild_id, "guild_id"),
+            u64_to_i64(user_id, "user_id"),
+        ) else {
+            return (0, "C");
+        };
+        let join_at = sqlx::query_scalar!(
+            r#"
+            SELECT MIN(occurred_at) AS "join_at?"
+              FROM activity.member_events
+             WHERE user_id = $1 AND guild_id = $2 AND event_type = 'join'
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        let voice_sessions = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.voice_session_log
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0);
+        let message_count = sqlx::query_scalar!(
+            r#"
+            SELECT message_count
+              FROM activity.message_activity
+             WHERE user_id = $1 AND guild_id = $2
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .unwrap_or(0);
+        let avg_weekly = sqlx::query_scalar!(
+            r#"
+            SELECT avg_weekly_sessions
+              FROM activity.user_retention_tracking
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .flatten()
+        .unwrap_or(0.0);
+        let voice_seconds = sqlx::query_scalar!(
+            r#"
+            SELECT total_seconds
+              FROM voice.voice_stats
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(0);
+        let stats = (
+            join_at.map(|dt| dt.timestamp()),
+            voice_sessions,
+            message_count,
+            avg_weekly,
+            voice_seconds,
+        );
         let (join_ts, voice_sessions, message_count, avg_weekly, voice_seconds) = stats;
         let days = join_ts
             .map(|ts| ((chrono::Utc::now().timestamp() - ts) / 86400).max(0))
@@ -337,16 +422,6 @@ impl LeaveSurvey {
     }
 }
 
-/// Hilfs-Trait: Option<Option<T>> → Option<T> (rusqlite-Komfort).
-trait FlattenInto<T> {
-    fn flatten_into(self) -> Option<T>;
-}
-impl<T> FlattenInto<T> for Option<T> {
-    fn flatten_into(self) -> Option<T> {
-        self
-    }
-}
-
 // ── Interaction-Handler ────────────────────────────────────────────────────
 
 struct SurveyHandler {
@@ -361,41 +436,42 @@ impl InteractionHandler for SurveyHandler {
             let Some(reason_code) = interaction.values.first().cloned() else {
                 return BridgeReply::ephemeral_text("Keine Auswahl.");
             };
-            let user_id = interaction.user_id;
-            let survey_id: Option<i64> = self
-                .survey
-                .db
-                .read(move |conn| {
-                    conn.query_row(
-                        "SELECT id FROM member_leave_surveys
-                          WHERE user_id = ?1 AND responded_at IS NULL
-                          ORDER BY id DESC LIMIT 1",
-                        [user_id],
-                        |row| row.get(0),
-                    )
-                    .optional()
-                })
-                .await
-                .ok()
-                .flatten();
+            let Ok(user_id) = u64_to_i64(interaction.user_id, "interaction.user_id") else {
+                return BridgeReply::ephemeral_text(
+                    "Diese Discord-ID kann nicht verarbeitet werden.",
+                );
+            };
+            let survey_id = sqlx::query_scalar!(
+                r#"
+                SELECT id
+                  FROM activity.member_leave_surveys
+                 WHERE user_id = $1 AND responded_at IS NULL
+                 ORDER BY id DESC
+                 LIMIT 1
+                "#,
+                user_id,
+            )
+            .fetch_optional(&self.survey.pool)
+            .await
+            .ok()
+            .flatten();
             let Some(survey_id) = survey_id else {
                 return BridgeReply::ephemeral_text(
                     "Zu dieser Auswahl wurde kein offener Survey gefunden.",
                 );
             };
-            let reason_clone = reason_code.clone();
-            let _ = self
-                .survey
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE member_leave_surveys SET reason_code = ?1
-                          WHERE id = ?2 AND user_id = ?3",
-                        rusqlite::params![reason_clone, survey_id, user_id],
-                    )
-                    .map(|_| ())
-                })
-                .await;
+            let _ = sqlx::query!(
+                r#"
+                UPDATE activity.member_leave_surveys
+                   SET reason_code = $1
+                 WHERE id = $2 AND user_id = $3
+                "#,
+                &reason_code,
+                survey_id,
+                user_id,
+            )
+            .execute(&self.survey.pool)
+            .await;
             let question = follow_up_question(&reason_code);
             return BridgeReply {
                 modal: Some(ModalSpec {
@@ -441,35 +517,33 @@ impl InteractionHandler for SurveyHandler {
         };
         let follow_up = get_field("follow_up");
         let extra = get_field("extra");
-        let user_id = interaction.user_id;
-        let (follow_clone, extra_clone) = (follow_up.clone(), extra.clone());
-        let _ = self
-            .survey
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE member_leave_surveys
-                        SET follow_up_question = ?1, follow_up_text = ?2,
-                            extra_text = ?3, responded_at = ?4
-                      WHERE id = ?5 AND user_id = ?6",
-                    rusqlite::params![
-                        question,
-                        follow_clone,
-                        extra_clone,
-                        chrono::Utc::now().timestamp(),
-                        survey_id,
-                        user_id
-                    ],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let Ok(user_id) = u64_to_i64(interaction.user_id, "interaction.user_id") else {
+            return BridgeReply::ephemeral_text("Diese Discord-ID kann nicht verarbeitet werden.");
+        };
+        let _ = sqlx::query!(
+            r#"
+            UPDATE activity.member_leave_surveys
+               SET follow_up_question = $1,
+                   follow_up_text = $2,
+                   extra_text = $3,
+                   responded_at = $4
+             WHERE id = $5 AND user_id = $6
+            "#,
+            question,
+            follow_up,
+            extra,
+            chrono::Utc::now(),
+            survey_id,
+            user_id,
+        )
+        .execute(&self.survey.pool)
+        .await;
         self.survey
             .port
             .post_log(format!(
                 "📝 Leave-Survey-Antwort von <@{user_id}> (Survey {survey_id}, Grund {reason_code}):\n{}\n{}",
-                follow_up.unwrap_or_else(|| "—".to_string()),
-                extra.unwrap_or_else(|| "—".to_string()),
+                get_field("follow_up").unwrap_or_else(|| "—".to_string()),
+                get_field("extra").unwrap_or_else(|| "—".to_string()),
             ))
             .await;
         BridgeReply::ephemeral_text("Danke für dein ehrliches Feedback.")
@@ -542,5 +616,70 @@ mod tests {
         assert_eq!(reason_options("A").len(), 6);
         assert_eq!(reason_options("B").len(), 7);
         assert_eq!(reason_options("C").len(), 6);
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod pg_tests {
+    use super::*;
+    use dl_central_db::testing::test_pool;
+    use std::sync::Arc;
+
+    struct MockSurveyPort;
+
+    #[async_trait::async_trait]
+    impl SurveyPort for MockSurveyPort {
+        async fn send_survey_dm(&self, _user_id: u64, _embed: Value, _components: Value) -> String {
+            "sent".to_string()
+        }
+
+        async fn post_log(&self, _text: String) {}
+
+        async fn display_name(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            Some("Tester".to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn insert_survey_blockiert_doppelten_survey_token() {
+        let db = test_pool().await.expect("test_pool");
+        let survey = LeaveSurvey::new(db.pool().clone(), Arc::new(MockSurveyPort), "Test Guild");
+
+        let token = "leave-survey-dupe-token".to_string();
+        let first = survey
+            .insert_survey(
+                7001,
+                1,
+                "Tester One".to_string(),
+                "A".to_string(),
+                1,
+                token.clone(),
+            )
+            .await;
+        let second = survey
+            .insert_survey(
+                7002,
+                1,
+                "Tester Two".to_string(),
+                "B".to_string(),
+                14,
+                token.clone(),
+            )
+            .await;
+
+        assert_eq!(first, Some(1));
+        assert_eq!(second, None);
+        let rows = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.member_leave_surveys
+             WHERE survey_token = $1
+            "#,
+            token,
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("survey token row count");
+        assert_eq!(rows, 1);
     }
 }

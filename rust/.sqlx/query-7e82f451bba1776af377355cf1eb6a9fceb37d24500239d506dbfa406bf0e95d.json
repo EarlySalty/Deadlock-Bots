@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.tempvoice_interface\n             WHERE lane_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e82f451bba1776af377355cf1eb6a9fceb37d24500239d506dbfa406bf0e95d"
+}

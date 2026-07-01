@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO coaching.coach_rotation(coach_id, last_assigned_at)\n                VALUES ($1, $2)\n                ON CONFLICT(coach_id) DO UPDATE SET\n                  last_assigned_at = excluded.last_assigned_at\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a929205edb46ed68a9d6385c72bff97cfabdbabf6aaabb173f54f3e403c01cb4"
+}

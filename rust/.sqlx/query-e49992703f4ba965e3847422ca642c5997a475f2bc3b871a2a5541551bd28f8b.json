@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, guild_id, channel_id, COALESCE(message_count, 0)::BIGINT AS \"message_count!\",\n                   to_char(last_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_message_at?\",\n                   to_char(first_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"first_message_at?\"\n              FROM activity.message_activity\n             WHERE ($1::BIGINT IS NULL OR guild_id = $1)\n             ORDER BY message_count DESC\n             LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "message_count!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_message_at?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "first_message_at?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "e49992703f4ba965e3847422ca642c5997a475f2bc3b871a2a5541551bd28f8b"
+}

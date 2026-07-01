@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE tierlist.hero_build_clones hbc\n               SET status = 'pending',\n                   status_info = $1,\n                   attempts = CASE WHEN attempts > 0 THEN attempts - 1 ELSE 0 END,\n                   updated_at = $2\n             WHERE status = 'processing'\n               AND last_attempt_at < $3\n               AND last_attempt_at IS NOT NULL\n               AND NOT EXISTS (\n                   SELECT 1\n                     FROM steam.steam_tasks t\n                    WHERE t.type = 'BUILD_PUBLISH'\n                      AND t.payload ? 'origin_hero_build_id'\n                      AND t.payload->>'origin_hero_build_id' ~ '^-?[0-9]+$'\n                      AND (t.payload->>'origin_hero_build_id')::BIGINT = hbc.origin_hero_build_id\n                      AND t.status IN ('DONE', 'FAILED')\n               )\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "423e462e35643bb6466375af1f9f5b52a3ac8f762f32d474cb34c4a1df0e5ed9"
+}

@@ -1,6 +1,7 @@
 use std::{
     ops::Deref,
     str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -12,6 +13,7 @@ use sqlx::{
 use crate::CentralDbError;
 
 const TEST_DSN_ENV_VARS: [&str; 3] = ["CENTRAL_TEST_DSN", "DATABASE_URL", "DEADLOCK_CENTRAL_DSN"];
+static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct TestDb {
     pool: Option<PgPool>,
@@ -163,8 +165,14 @@ fn unique_db_name() -> String {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |duration| duration.as_nanos());
+    let counter = TEST_DB_COUNTER.fetch_add(1, Ordering::Relaxed);
 
-    format!("dlcentral_test_{}_{}", std::process::id(), nanos)
+    format!(
+        "dlcentral_test_{}_{}_{}",
+        std::process::id(),
+        nanos,
+        counter
+    )
 }
 
 async fn create_database(pool: &PgPool, db_name: &str) -> Result<(), CentralDbError> {

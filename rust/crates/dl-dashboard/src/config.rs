@@ -7,6 +7,8 @@
 //! setzt. Werte werden über eine Lookup-Funktion bezogen, damit Tests die
 //! Umgebung nicht anfassen müssen.
 
+#![allow(clippy::items_after_test_module)]
+
 /// Discord-Server-Owner mit Voll-Zugriff (DEFAULT_DASHBOARD_OWNER_USER_ID).
 pub const DEFAULT_OWNER_USER_ID: u64 = 662995601738170389;
 /// Moderator-Rolle → Voll-Zugriff (DEFAULT_DASHBOARD_MODERATOR_ROLE_ID).
@@ -60,6 +62,9 @@ pub struct DashboardConfig {
     pub discord_api_base: String,
     /// Basis-URL des Master-Brokers (Member-Access-Lookup für den Login).
     pub broker_base: String,
+    /// Lokales Datenverzeichnis fuer Datei-Artefakte neben der frueheren
+    /// SQLite-DB (`repo/data`).
+    pub data_dir: PathBuf,
     /// Tokens für die turnier-/allgemeinen internen Routen
     /// (initiate/consume/authorize-url/session).
     pub turnier_tokens: Vec<String>,
@@ -101,6 +106,7 @@ impl DashboardConfig {
             &listen_base_url,
             get("MASTER_DASHBOARD_ALLOWED_ORIGINS").as_deref(),
         );
+        let data_dir = resolve_data_dir(&get);
 
         Self {
             discord_client_id: get("DISCORD_OAUTH_CLIENT_ID"),
@@ -132,6 +138,7 @@ impl DashboardConfig {
                 .unwrap_or_else(|| DISCORD_API_BASE.to_string()),
             broker_base: get("MASTER_BROKER_BASE_URL")
                 .unwrap_or_else(|| DEFAULT_BROKER_BASE.to_string()),
+            data_dir,
             turnier_tokens,
             twitch_tokens,
         }
@@ -231,6 +238,18 @@ fn build_allowed_origins(
     origins
 }
 
+fn resolve_data_dir(get: &impl Fn(&str) -> Option<String>) -> PathBuf {
+    if let Some(dir) = get("DEADLOCK_DB_DIR") {
+        return PathBuf::from(dir);
+    }
+    if let Some(path) = get("DEADLOCK_DB_PATH") {
+        if let Some(parent) = PathBuf::from(path).parent() {
+            return parent.to_path_buf();
+        }
+    }
+    PathBuf::from("data")
+}
+
 fn parse_id_list(raw: &str) -> Vec<u64> {
     raw.split(&[',', ' '][..])
         .filter_map(|s| s.trim().parse::<u64>().ok())
@@ -324,3 +343,4 @@ mod tests {
         assert!(cfg.allowed_origins.contains(&"https://b.de".to_string()));
     }
 }
+use std::path::PathBuf;

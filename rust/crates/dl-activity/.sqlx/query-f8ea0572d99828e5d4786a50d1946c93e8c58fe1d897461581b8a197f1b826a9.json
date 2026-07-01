@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.text_stats(user_id, total_messages, total_points, last_update)\n            VALUES($1, $2, $3, now())\n            ON CONFLICT(user_id) DO UPDATE SET\n                total_messages = activity.text_stats.total_messages + EXCLUDED.total_messages,\n                total_points = activity.text_stats.total_points + EXCLUDED.total_points,\n                last_update = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "f8ea0572d99828e5d4786a50d1946c93e8c58fe1d897461581b8a197f1b826a9"
+}

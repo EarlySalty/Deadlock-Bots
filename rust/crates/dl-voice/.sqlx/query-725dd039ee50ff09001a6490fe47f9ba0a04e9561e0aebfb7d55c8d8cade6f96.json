@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_lurkers (\n                guild_id, channel_id, user_id, original_nick\n            )\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT (channel_id, user_id) DO UPDATE SET\n                original_nick = EXCLUDED.original_nick\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "725dd039ee50ff09001a6490fe47f9ba0a04e9561e0aebfb7d55c8d8cade6f96"
+}

@@ -1,0 +1,36 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT event_type AS \"event_type!\",\n                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"timestamp?\",\n                   display_name\n            FROM activity.member_events\n            WHERE user_id = $1\n              AND guild_id = $2\n            ORDER BY occurred_at DESC NULLS LAST, id DESC\n            LIMIT CASE WHEN $3::BIGINT < 0 THEN NULL ELSE $3::BIGINT END\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "timestamp?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true
+    ]
+  },
+  "hash": "224f05e65057c5ff116f10022240d5e7a2d9f6377e6d2dc58e1fdccc24e388d5"
+}

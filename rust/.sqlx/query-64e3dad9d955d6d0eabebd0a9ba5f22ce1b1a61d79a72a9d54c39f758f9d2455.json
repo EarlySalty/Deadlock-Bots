@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"range_seconds!\",\n               COALESCE(SUM(points), 0)::BIGINT AS \"range_points!\",\n               COUNT(*) AS \"range_sessions!\",\n               COALESCE(SUM(COALESCE(peak_users, 0)), 0)::BIGINT AS \"sum_peak!\",\n               COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS \"active_days!\",\n               MAX(ended_at) AS \"range_last?\"\n        FROM activity.voice_session_log\n        WHERE started_at >= $1\n          AND user_id = $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "range_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "range_points!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "range_sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sum_peak!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "active_days!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "range_last?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "64e3dad9d955d6d0eabebd0a9ba5f22ce1b1a61d79a72a9d54c39f758f9d2455"
+}

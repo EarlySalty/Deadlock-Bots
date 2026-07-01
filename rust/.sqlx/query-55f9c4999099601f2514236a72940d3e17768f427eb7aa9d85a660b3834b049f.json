@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                                INSERT INTO coaching.requests(\n                                    request_uid, bot_request_id, discord_user_id,\n                                    discord_username, rank, subrank, hero, availability,\n                                    scheduled_slot, games_played, hours_played,\n                                    current_problems, status, created_at, updated_at\n                                )\n                                VALUES ($1, $2, $3, $4, $5, '', $6, $7, $7, $8, '',\n                                        $9, 'pending', $10, $10)\n                                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int4",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "55f9c4999099601f2514236a72940d3e17768f427eb7aa9d85a660b3834b049f"
+}

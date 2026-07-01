@@ -14,8 +14,10 @@ async fn main() -> anyhow::Result<()> {
 
     let cfg = dl_core::Config::from_env().context("Konfiguration laden")?;
     let web_cfg = WebConfig::from_env();
-    let db = dl_db::Db::open(&cfg.db_path)
-        .with_context(|| format!("gemeinsame DB öffnen: {}", cfg.db_path.display()))?;
+    let central_dsn = dl_central_db::dsn_from_env().context("zentrale DB-DSN laden")?;
+    let central_pool = dl_central_db::connect_pool(&central_dsn)
+        .await
+        .context("zentrale DB verbinden")?;
 
     let dashboard = DashboardClient::new(
         web_cfg.dashboard_base.clone(),
@@ -25,7 +27,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Tierlist :8771
     let tierlist = dl_tierlist::TierlistApp::new(
-        db.clone(),
+        central_pool.clone(),
         dashboard.clone(),
         dl_tierlist::DEADLOCK_API_BASE,
     );
@@ -49,7 +51,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // Public-Stats :8768
-    let stats = dl_stats::StatsApp::new(db.clone(), dashboard.clone(), &web_cfg);
+    let stats = dl_stats::StatsApp::new(central_pool.clone(), dashboard.clone(), &web_cfg);
     let stats_addr = format!("{}:{}", web_cfg.stats_host, cfg.ports.public_stats);
     let stats_listener = tokio::net::TcpListener::bind(&stats_addr)
         .await
@@ -61,7 +63,9 @@ async fn main() -> anyhow::Result<()> {
     // delegieren ihre Anmeldung hierher. Die internen Routen sind loopback-only,
     // daher mit Connect-Info binden (Peer-Adresse).
     let dashboard_cfg = dl_dashboard::DashboardConfig::from_env();
-    let dashboard = dl_dashboard::DashboardApp::from_config(dashboard_cfg, db.clone());
+    let dashboard = dl_dashboard::DashboardApp::from_config(dashboard_cfg, central_pool.clone())
+        .await
+        .context("Dashboard-App initialisieren")?;
     let dashboard_host =
         std::env::var("DASHBOARD_HOST").unwrap_or_else(|_| "127.0.0.1".to_string());
     let dashboard_addr = format!("{dashboard_host}:{}", cfg.ports.dashboard);

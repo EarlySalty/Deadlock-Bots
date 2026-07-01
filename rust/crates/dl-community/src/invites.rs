@@ -9,8 +9,9 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use dl_db::Db;
+use dl_central_db::kv;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
 pub const KV_NAMESPACE: &str = "website_invites";
 pub const KV_KEY_MAIN: &str = "main";
@@ -103,7 +104,7 @@ pub fn format_bucket_lines(buckets: &HashMap<String, u64>, total: u64) -> Vec<St
 // ── Store ──────────────────────────────────────────────────────────────────
 
 pub struct InviteStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl InviteStore {
@@ -119,7 +120,10 @@ impl InviteStore {
     }
 
     async fn load_raw(&self, key: &str) -> Option<Value> {
-        let raw = self.db.kv_get(KV_NAMESPACE, key).await.ok().flatten()?;
+        let raw = kv::get(&self.pool, KV_NAMESPACE, key)
+            .await
+            .ok()
+            .flatten()?;
         let data: Value = serde_json::from_str(&raw).ok()?;
         let code = data
             .get("code")
@@ -136,12 +140,9 @@ impl InviteStore {
             "created_at": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S").to_string(),
         }))
         .unwrap_or_default();
-        let _ = self
-            .db
-            .kv_set(KV_NAMESPACE, slug.to_string(), payload.clone())
-            .await;
+        let _ = kv::set(&self.pool, KV_NAMESPACE, slug, &payload).await;
         if slug == "landing" {
-            let _ = self.db.kv_set(KV_NAMESPACE, KV_KEY_MAIN, payload).await;
+            let _ = kv::set(&self.pool, KV_NAMESPACE, KV_KEY_MAIN, &payload).await;
         }
     }
 
@@ -165,23 +166,23 @@ impl InviteStore {
         guild_id: Option<u64>,
     ) -> (HashMap<String, u64>, u64) {
         let days = days.clamp(1, 365);
-        let since = (chrono::Utc::now() - chrono::Duration::days(days))
-            .naive_utc()
-            .format("%Y-%m-%d %H:%M:%S")
-            .to_string();
-        let rows: Vec<Option<String>> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT metadata FROM member_events
-                      WHERE event_type = 'join' AND timestamp >= ?1
-                        AND (?2 IS NULL OR guild_id = ?2)",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![since, guild_id], |row| row.get(0))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
+        let since = chrono::Utc::now() - chrono::Duration::days(days);
+        let guild_id = guild_id.and_then(|id| i64::try_from(id).ok());
+        let rows: Vec<Option<String>> = sqlx::query!(
+            r#"
+            SELECT metadata::text AS metadata
+              FROM activity.member_events
+             WHERE event_type = 'join'
+               AND occurred_at >= $1
+               AND ($2::bigint IS NULL OR guild_id = $2)
+            "#,
+            since,
+            guild_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(|row| row.metadata).collect())
+        .unwrap_or_default();
         let website_codes = self.website_code_map().await;
         let mut buckets: HashMap<String, u64> = HashMap::new();
         let total = rows.len() as u64;
@@ -314,20 +315,15 @@ mod tests {
         assert!(lines[0].contains("Website: Landing"));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn kv_vertrag_mit_landing_spiegel() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        db.write(|c| {
-            c.execute(
-                "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-                [],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("ddl");
-        let store = InviteStore { db };
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = InviteStore {
+            pool: db.pool().clone(),
+        };
         store.save_invite("landing", "xYz", 42).await;
         // Landing wird auf main gespiegelt
         let main = store.invite_for_subpage("landing").await.expect("landing");

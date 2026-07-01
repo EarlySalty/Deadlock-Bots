@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE voice.rename_requests\n               SET status = 'PENDING',\n                   retry_count = COALESCE(retry_count, 0) + 1,\n                   created_at = NOW(),\n                   processed_at = NULL,\n                   assigned_worker_id = 0,\n                   last_error = $2\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "fe71b0579cbb2c79ed43cd3e059d838750d7c8ca1e96a82efb25b46ac50b979a"
+}

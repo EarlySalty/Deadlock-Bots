@@ -1,0 +1,53 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS \"total_seconds!\",\n                       COALESCE(SUM(points), 0)::BIGINT AS \"total_points!\",\n                       COUNT(*) AS \"sessions!\",\n                       COALESCE(SUM(COALESCE(peak_users, 0)), 0)::BIGINT AS \"sum_peak!\",\n                       COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS \"active_days!\",\n                       to_char(MAX(ended_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_session?\"\n                  FROM activity.voice_session_log\n                 WHERE started_at >= $1\n                   AND user_id = $2\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_seconds!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_points!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "sum_peak!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "active_days!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_session?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "6e0471356019bcf32e1c7ad2cad23764440284db97b06c97f1238be65f84db6e"
+}

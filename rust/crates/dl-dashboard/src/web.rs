@@ -12,6 +12,7 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use axum::body::{Body, Bytes};
@@ -22,10 +23,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
 
 use crate::auth::{self, InternalReject};
 use crate::authority::{decide_access, BrokerMemberLookup, MemberLookup};
 use crate::config::{AccessLevel, DashboardConfig};
+use crate::db::DashboardDbError;
 use crate::names::{BrokerNameResolver, NameResolver};
 use crate::oauth::{extract_steam_connection_ids, DiscordUser, OAuthClient};
 use crate::oauth_state::{NewOAuthState, OAuthStateStore};
@@ -49,7 +52,8 @@ pub struct DashboardApp {
 
 struct Inner {
     cfg: DashboardConfig,
-    db: dl_db::Db,
+    pool: PgPool,
+    data_dir: PathBuf,
     oauth: OAuthClient,
     states: OAuthStateStore,
     sessions: SessionStore,
@@ -72,24 +76,26 @@ struct LoginState {
 impl DashboardApp {
     /// Baut die App mit explizitem Mitglieds-Lookup und Namens-Resolver
     /// (für Tests).
-    pub fn new(
+    pub async fn new(
         cfg: DashboardConfig,
-        db: dl_db::Db,
+        pool: PgPool,
         lookup: Arc<dyn MemberLookup>,
         names: Arc<dyn NameResolver>,
-    ) -> Self {
+    ) -> Result<Self, DashboardDbError> {
         let oauth = OAuthClient::new(
             cfg.discord_client_id.clone(),
             cfg.discord_client_secret.clone(),
             cfg.discord_api_base.clone(),
         );
-        let states = OAuthStateStore::new(db.clone(), cfg.oauth_state_ttl_secs);
-        let sessions = SessionStore::persistent(db.path(), cfg.session_ttl_secs, now_unix_f64())
-            .expect("persistenter Admin-Session-Store muss verfügbar sein");
-        Self {
+        let states = OAuthStateStore::new(pool.clone(), cfg.oauth_state_ttl_secs);
+        let sessions =
+            SessionStore::persistent(pool.clone(), cfg.session_ttl_secs, now_unix_f64()).await?;
+        let data_dir = cfg.data_dir.clone();
+        Ok(Self {
             inner: Arc::new(Inner {
                 cfg,
-                db,
+                pool,
+                data_dir,
                 oauth,
                 states,
                 sessions,
@@ -99,23 +105,31 @@ impl DashboardApp {
                 rate: Mutex::new(HashMap::new()),
                 guild_stats_cache: Mutex::new(None),
             }),
-        }
+        })
     }
 
     /// Produktions-Konstruktor: Lookup und Namensauflösung gehen über den
     /// Master-Broker.
-    pub fn from_config(cfg: DashboardConfig, db: dl_db::Db) -> Self {
+    pub async fn from_config(cfg: DashboardConfig, pool: PgPool) -> Result<Self, DashboardDbError> {
         let lookup = Arc::new(BrokerMemberLookup::new(cfg.broker_base.clone()));
         let names = Arc::new(BrokerNameResolver::new(cfg.broker_base.clone()));
-        Self::new(cfg, db, lookup, names)
+        Self::new(cfg, pool, lookup, names).await
     }
 
     fn cfg(&self) -> &DashboardConfig {
         &self.inner.cfg
     }
 
-    pub(crate) fn db(&self) -> &dl_db::Db {
-        &self.inner.db
+    pub(crate) fn pool(&self) -> &PgPool {
+        &self.inner.pool
+    }
+
+    pub(crate) fn data_dir(&self) -> &Path {
+        &self.inner.data_dir
+    }
+
+    pub(crate) fn repo_root(&self) -> Option<&Path> {
+        self.data_dir().parent()
     }
 
     pub(crate) fn names(&self) -> &Arc<dyn NameResolver> {
@@ -150,14 +164,14 @@ impl DashboardApp {
 
     /// Auth-Gate für lesende `/api`-Routen: ohne erzwungene Auth offen, sonst
     /// gültige Session nötig (wie `_check_auth` ohne CSRF/Full-Access).
-    pub(crate) fn guard_read(&self, headers: &HeaderMap) -> Result<(), Response> {
+    pub(crate) async fn guard_read(&self, headers: &HeaderMap) -> Result<(), Response> {
         if self.cfg().auth_misconfigured() {
             return Err(auth_misconfigured_response());
         }
         if !self.cfg().auth_enforced() {
             return Ok(());
         }
-        if self.session_from_headers(headers).is_some() {
+        if self.session_from_headers(headers).await?.is_some() {
             Ok(())
         } else {
             Err(err_text(401, "Authentication required"))
@@ -166,11 +180,11 @@ impl DashboardApp {
 
     /// Gate für Routen mit `required=True, require_full_access=True`: immer
     /// erzwungen, gültige Session mit Voll-Zugriff nötig (401/403 wie Original).
-    pub(crate) fn guard_full(&self, headers: &HeaderMap) -> Result<(), Response> {
+    pub(crate) async fn guard_full(&self, headers: &HeaderMap) -> Result<(), Response> {
         if self.cfg().auth_misconfigured() {
             return Err(auth_misconfigured_response());
         }
-        match self.session_from_headers(headers) {
+        match self.session_from_headers(headers).await? {
             Some(session) if session.has_full_access() => Ok(()),
             Some(_) => Err(err_text(403, "Full dashboard access required")),
             None => Err(err_text(401, "Authentication required")),
@@ -181,7 +195,7 @@ impl DashboardApp {
     /// Prüfung + CSRF-Token, dann ggf. Voll-Zugriff. Reihenfolge/Status wie
     /// `_check_auth` (401 Session, 403 Origin/CSRF/Full). Gibt die Session
     /// für das Audit-Log zurück.
-    pub(crate) fn guard_mutate(
+    pub(crate) async fn guard_mutate(
         &self,
         headers: &HeaderMap,
         require_full: bool,
@@ -189,7 +203,7 @@ impl DashboardApp {
         if self.cfg().auth_misconfigured() {
             return Err(auth_misconfigured_response());
         }
-        let Some(session) = self.session_from_headers(headers) else {
+        let Some(session) = self.session_from_headers(headers).await? else {
             return Err(err_text(401, "Authentication required"));
         };
         if !self.allowed_origin(headers) {
@@ -237,13 +251,24 @@ impl DashboardApp {
     }
 
     /// Liest die aktuelle Session aus dem Cookie und verlängert sie gleitend.
-    fn session_from_headers(&self, headers: &HeaderMap) -> Option<crate::session::Session> {
+    async fn session_from_headers(
+        &self,
+        headers: &HeaderMap,
+    ) -> Result<Option<crate::session::Session>, Response> {
         if self.cfg().auth_misconfigured() || !self.cfg().auth_enforced() {
-            return None;
+            return Ok(None);
         }
-        read_cookies(headers, SESSION_COOKIE)
-            .into_iter()
-            .find_map(|session_id| self.inner.sessions.touch(&session_id, now_unix_f64()))
+        for session_id in read_cookies(headers, SESSION_COOKIE) {
+            match self.inner.sessions.touch(&session_id, now_unix_f64()).await {
+                Ok(Some(session)) => return Ok(Some(session)),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
+                    return Err(err_text(500, "Session persistence failed"));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -416,7 +441,7 @@ fn html_escape_attr(s: &str) -> String {
 /// `repo/`). Kein Caching — wie das Original; fehlt die Datei, gibt der
 /// aufrufende Handler 500.
 async fn load_static_html(app: &DashboardApp, name: &str) -> Option<String> {
-    let repo_root = app.db().path().parent()?.parent()?;
+    let repo_root = app.repo_root()?;
     tokio::fs::read_to_string(repo_root.join("service/static").join(name))
         .await
         .ok()
@@ -444,7 +469,10 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
     if app.cfg().auth_misconfigured() {
         return auth_misconfigured_response();
     }
-    let session = app.session_from_headers(&headers);
+    let session = match app.session_from_headers(&headers).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
     if app.cfg().auth_enforced() && session.is_none() {
         return redirect("/auth/discord/login?next=%2Fadmin", None);
     }
@@ -469,8 +497,8 @@ async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Respons
             "mode": "none",
         }));
     }
-    match app.session_from_headers(&headers) {
-        Some(session) => ok_json(json!({
+    match app.session_from_headers(&headers).await {
+        Ok(Some(session)) => ok_json(json!({
             "enabled": true,
             "authenticated": true,
             "mode": "discord",
@@ -481,7 +509,8 @@ async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Respons
             },
             "csrf_token": session.csrf_token,
         })),
-        None => err_text(401, "Authentication required"),
+        Ok(None) => err_text(401, "Authentication required"),
+        Err(resp) => resp,
     }
 }
 
@@ -712,16 +741,27 @@ async fn own_login_complete(
         );
     };
 
-    let session_id = app.inner.sessions.create(
-        NewSession {
-            user_id,
-            username: user.username.clone(),
-            display_name: user.display_name(),
-            reason: outcome.reason.to_string(),
-            access_level: level,
-        },
-        now,
-    );
+    let session_id = match app
+        .inner
+        .sessions
+        .create(
+            NewSession {
+                user_id,
+                username: user.username.clone(),
+                display_name: user.display_name(),
+                reason: outcome.reason.to_string(),
+                access_level: level,
+            },
+            now,
+        )
+        .await
+    {
+        Ok(session_id) => session_id,
+        Err(error) => {
+            tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
+            return err_text(500, "Session persistence failed");
+        }
+    };
     let cookie = build_session_cookie(
         &session_id,
         app.cfg().session_ttl_secs,
@@ -736,7 +776,10 @@ async fn own_login_complete(
 
 async fn logout(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
     for session_id in read_cookies(&headers, SESSION_COOKIE) {
-        app.inner.sessions.remove(&session_id);
+        if let Err(error) = app.inner.sessions.remove(&session_id).await {
+            tracing::warn!(%error, "Persistierte Admin-Session konnte nicht gelöscht werden");
+            return err_text(500, "Session persistence failed");
+        }
     }
     let target = if app.cfg().auth_enforced() {
         ADMIN_LOGIN_URL
@@ -1079,15 +1122,19 @@ async fn validate_session(
     if !app.cfg().discord_oauth_configured() {
         return ok_json(json!({ "valid": false }));
     }
-    match app.inner.sessions.touch(&session_id, now_unix_f64()) {
-        Some(session) => ok_json(json!({
+    match app.inner.sessions.touch(&session_id, now_unix_f64()).await {
+        Ok(Some(session)) => ok_json(json!({
             "valid": true,
             "user_id": session.user_id.to_string(),
             "username": session.username,
             "display_name": session.display_name,
             "expires_at": session.expires_at,
         })),
-        None => ok_json(json!({ "valid": false })),
+        Ok(None) => ok_json(json!({ "valid": false })),
+        Err(error) => {
+            tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
+            err_json(500, "session_persistence_failed")
+        }
     }
 }
 
@@ -1117,19 +1164,30 @@ async fn import_session(
         .and_then(Value::as_f64)
         .filter(|v| *v > 0.0)
         .unwrap_or(now + app.cfg().session_ttl_secs as f64);
-    app.inner.sessions.import(
-        &session_id,
-        NewSession {
-            user_id,
-            username,
-            display_name,
-            reason: "twitch_dashboard_import".to_string(),
-            access_level: AccessLevel::Full,
-        },
-        Some(expires_at),
-        now,
-    );
-    ok_json(json!({ "ok": true }))
+    match app
+        .inner
+        .sessions
+        .import(
+            &session_id,
+            NewSession {
+                user_id,
+                username,
+                display_name,
+                reason: "twitch_dashboard_import".to_string(),
+                access_level: AccessLevel::Full,
+            },
+            Some(expires_at),
+            now,
+        )
+        .await
+    {
+        Ok(true) => ok_json(json!({ "ok": true })),
+        Ok(false) => err_json(400, "missing_session_id_or_user_id"),
+        Err(error) => {
+            tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
+            err_json(500, "session_persistence_failed")
+        }
+    }
 }
 
 // ── Interne Routen: Coaching ────────────────────────────────────────────────
@@ -1497,17 +1555,10 @@ fn prune_login_states(states: &mut HashMap<String, LoginState>, now: f64) {
     states.retain(|_, s| now - s.created_at < OWN_LOGIN_STATE_TTL);
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
     use tower::ServiceExt;
-
-    const KV_DDL: &str = "CREATE TABLE kv_store(
-              ns TEXT NOT NULL,
-              k  TEXT NOT NULL,
-              v  TEXT NOT NULL,
-              PRIMARY KEY(ns, k)
-            )";
 
     struct NoMemberLookup;
 
@@ -1531,19 +1582,31 @@ mod tests {
         }
     }
 
-    async fn test_app(cfg: DashboardConfig) -> (tempfile::TempDir, DashboardApp) {
+    async fn test_app(
+        cfg: DashboardConfig,
+    ) -> (tempfile::TempDir, dl_central_db::TestDb, DashboardApp) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db = dl_db::Db::open_creating(dir.path().join("dashboard.sqlite3")).expect("db");
-        db.write(|conn| conn.execute(KV_DDL, []).map(|_| ()))
+        let db = dl_central_db::testing::test_pool()
             .await
-            .expect("kv_store");
-        let app = DashboardApp::new(cfg, db, Arc::new(NoMemberLookup), Arc::new(NoNameResolver));
-        (dir, app)
+            .expect("test_pool");
+        let mut cfg = cfg;
+        cfg.data_dir = dir.path().to_path_buf();
+        let app = DashboardApp::new(
+            cfg,
+            db.pool().clone(),
+            Arc::new(NoMemberLookup),
+            Arc::new(NoNameResolver),
+        )
+        .await
+        .expect("app");
+        (dir, db, app)
     }
 
-    async fn test_router(cfg: DashboardConfig) -> (tempfile::TempDir, Router) {
-        let (dir, app) = test_app(cfg).await;
-        (dir, router(app))
+    async fn test_router(
+        cfg: DashboardConfig,
+    ) -> (tempfile::TempDir, dl_central_db::TestDb, Router) {
+        let (dir, db, app) = test_app(cfg).await;
+        (dir, db, router(app))
     }
 
     fn headers_with(name: &str, value: &str) -> HeaderMap {
@@ -1583,7 +1646,7 @@ mod tests {
     #[tokio::test]
     async fn misconfigured_auth_liefert_503_statt_dashboard() {
         let cfg = DashboardConfig::from_lookup(|_| None);
-        let (_dir, app) = test_router(cfg).await;
+        let (_dir, _db, app) = test_router(cfg).await;
 
         let response = app
             .oneshot(
@@ -1605,7 +1668,7 @@ mod tests {
     #[tokio::test]
     async fn security_headers_stehen_auf_jeder_antwort() {
         let cfg = DashboardConfig::from_lookup(|_| None);
-        let (_dir, app) = test_router(cfg).await;
+        let (_dir, _db, app) = test_router(cfg).await;
 
         let response = app
             .oneshot(
@@ -1778,21 +1841,26 @@ mod tests {
             "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
             _ => None,
         });
-        let (_dir, app) = test_app(cfg).await;
-        let session_id = app.inner.sessions.create(
-            NewSession {
-                user_id: 42,
-                username: "nani".to_string(),
-                display_name: "Nani".to_string(),
-                reason: "turnier_only".to_string(),
-                access_level: AccessLevel::TurnierOnly,
-            },
-            now_unix_f64(),
-        );
+        let (_dir, _db, app) = test_app(cfg).await;
+        let session_id = app
+            .inner
+            .sessions
+            .create(
+                NewSession {
+                    user_id: 42,
+                    username: "nani".to_string(),
+                    display_name: "Nani".to_string(),
+                    reason: "turnier_only".to_string(),
+                    access_level: AccessLevel::TurnierOnly,
+                },
+                now_unix_f64(),
+            )
+            .await
+            .expect("create");
         let headers = headers_with("cookie", &format!("{SESSION_COOKIE}={session_id}"));
 
-        assert!(app.guard_read(&headers).is_ok());
-        assert!(app.guard_full(&headers).is_err());
+        assert!(app.guard_read(&headers).await.is_ok());
+        assert!(app.guard_full(&headers).await.is_err());
     }
 
     #[test]

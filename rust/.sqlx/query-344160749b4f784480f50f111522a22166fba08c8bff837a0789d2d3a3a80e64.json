@@ -1,0 +1,70 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT steam_id, deadlock_stage, deadlock_minutes, deadlock_localized,\n                   deadlock_updated_at, last_seen_at, in_match_now_strict,\n                   last_server_id, deadlock_party_hint\n              FROM activity.live_player_state\n             WHERE steam_id = ANY($1)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "steam_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "deadlock_stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "deadlock_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "deadlock_localized",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "deadlock_updated_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 5,
+        "name": "last_seen_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 6,
+        "name": "in_match_now_strict",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "last_server_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "deadlock_party_hint",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "344160749b4f784480f50f111522a22166fba08c8bff837a0789d2d3a3a80e64"
+}

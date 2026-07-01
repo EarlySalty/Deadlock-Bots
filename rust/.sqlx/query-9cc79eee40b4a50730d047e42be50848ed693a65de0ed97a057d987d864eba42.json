@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\"\n              FROM activity.member_events\n             WHERE event_type = 'leave'\n               AND occurred_at >= $2\n               AND ($1::BIGINT IS NULL OR guild_id = $1)\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9cc79eee40b4a50730d047e42be50848ed693a65de0ed97a057d987d864eba42"
+}

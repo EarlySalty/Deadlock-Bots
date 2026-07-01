@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.kv_store(ns, k, v)\n            VALUES($1, $2, 'claimed')\n            ON CONFLICT (ns, k) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "843c9b040d3df18410c5338e211fa9a5863775d8fabe3071ff8d88aa860a94a7"
+}

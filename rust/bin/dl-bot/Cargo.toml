@@ -16,8 +16,7 @@ reqwest.workspace = true
 dl-core.workspace = true
 dl-community.workspace = true
 dl-central-db.workspace = true
-dl-db.workspace = true
-rusqlite.workspace = true
+sqlx.workspace = true
 dl-bridges.workspace = true
 dl-activity.workspace = true
 dl-ai.workspace = true
@@ -38,4 +37,5 @@ tracing.workspace = true
 workspace = true
 
 [dev-dependencies]
+dl-central-db = { workspace = true, features = ["testing"] }
 tempfile.workspace = true

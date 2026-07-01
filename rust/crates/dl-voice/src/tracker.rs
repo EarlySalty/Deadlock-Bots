@@ -18,11 +18,15 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{NaiveDateTime, Utc};
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::{Dispatcher, VoiceEvent};
 use serde_json::{json, Value};
+use sqlx::{PgPool, Postgres, Transaction};
+
+use crate::db::{i64_to_i32, naive_utc, u64_to_i64, VoiceDbResult};
 
 pub const KV_NAMESPACE: &str = "voice_cfg";
+const VOICE_SESSION_LOG_ID_LOCK_KEY: i64 = -7_010_010_001;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TrackerConfig {
@@ -152,7 +156,7 @@ struct TrackerState {
 }
 
 pub struct VoiceTracker {
-    db: Db,
+    pool: PgPool,
     snapshot: Arc<dyn VoiceSnapshot>,
     state: tokio::sync::Mutex<TrackerState>,
     /// Feedback-DM-System (None = aus, wie Original mit VOICE_FEEDBACK_ENABLED=0).
@@ -160,9 +164,9 @@ pub struct VoiceTracker {
 }
 
 impl VoiceTracker {
-    pub fn new(db: Db, snapshot: Arc<dyn VoiceSnapshot>) -> Arc<Self> {
+    pub fn new(pool: PgPool, snapshot: Arc<dyn VoiceSnapshot>) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             snapshot,
             state: tokio::sync::Mutex::new(TrackerState::default()),
             feedback: tokio::sync::RwLock::new(None),
@@ -183,19 +187,12 @@ impl VoiceTracker {
             }
         }
         let defaults = TrackerConfig::default();
-        let stored = self
-            .db
-            .kv_get(KV_NAMESPACE, guild_id.to_string())
-            .await
-            .ok()
-            .flatten();
+        let key = guild_id.to_string();
+        let stored = kv::get(&self.pool, KV_NAMESPACE, &key).await.ok().flatten();
         let cfg = match stored {
             Some(raw) => TrackerConfig::from_json(&raw, &defaults),
             None => {
-                let _ = self
-                    .db
-                    .kv_set(KV_NAMESPACE, guild_id.to_string(), defaults.to_json())
-                    .await;
+                let _ = self.store_config_value(guild_id, defaults.to_json()).await;
                 defaults
             }
         };
@@ -211,16 +208,22 @@ impl VoiceTracker {
         &self,
         guild_id: u64,
         config: TrackerConfig,
-    ) -> Result<(), dl_db::KvError> {
-        self.db
-            .kv_set(KV_NAMESPACE, guild_id.to_string(), config.to_json())
-            .await?;
+    ) -> Result<(), dl_central_db::CentralDbError> {
+        self.store_config_value(guild_id, config.to_json()).await?;
         self.state
             .lock()
             .await
             .config_cache
             .insert(guild_id, config);
         Ok(())
+    }
+
+    async fn store_config_value(
+        &self,
+        guild_id: u64,
+        value: String,
+    ) -> Result<(), dl_central_db::CentralDbError> {
+        kv::set(&self.pool, KV_NAMESPACE, &guild_id.to_string(), &value).await
     }
 
     pub async fn active_session_count(&self) -> usize {
@@ -251,21 +254,22 @@ impl VoiceTracker {
     }
 
     async fn is_opted_out(&self, user_id: u64) -> bool {
-        self.db
-            .read(move |conn| {
-                use rusqlite::OptionalExtension;
-                conn.query_row(
-                    "SELECT opted_out FROM user_privacy WHERE user_id = ?1",
-                    [user_id],
-                    |row| row.get::<_, i64>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .map(|v| v != 0)
-            .unwrap_or(false)
+        let Ok(user_id) = u64_to_i64("user_privacy.user_id", user_id) else {
+            return false;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT opted_out
+              FROM core.user_privacy
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or(false)
     }
 
     /// Zentraler Event-Einstieg (Subscriber des Voice-Dispatchers).
@@ -484,27 +488,8 @@ impl VoiceTracker {
         }
         // Erste Session? (VOR dem Insert prüfen, wie das Original)
         let check_user = session.user_id;
-        let was_first_session = self
-            .db
-            .read(move |conn| {
-                use rusqlite::OptionalExtension;
-                conn.query_row(
-                    "SELECT 1 FROM voice_stats WHERE user_id = ?1
-                     UNION ALL
-                     SELECT 1 FROM voice_session_log WHERE user_id = ?1
-                     LIMIT 1",
-                    [check_user],
-                    |_| Ok(()),
-                )
-                .optional()
-            })
-            .await
-            .map(|found| found.is_none())
-            .unwrap_or(false);
+        let was_first_session = self.was_first_session(check_user).await.unwrap_or(false);
         let points = calculate_points(seconds, session.peak_users.max(1));
-        let started_iso = session.start_time.format("%Y-%m-%d %H:%M:%S").to_string();
-        let ended_iso = end_time.format("%Y-%m-%d %H:%M:%S").to_string();
-        let user_counts_json = serde_json::to_string(&session.user_counts).unwrap_or_default();
         // Feedback-Daten VOR dem Move in den Write-Closure sichern
         let feedback_data = (
             session.guild_id,
@@ -513,48 +498,12 @@ impl VoiceTracker {
             session.channel_name.clone(),
             session.co_player_ids.iter().copied().collect::<Vec<_>>(),
         );
-        let co_player_ids_json =
-            serde_json::to_string(&session.co_player_ids.iter().collect::<Vec<_>>())
-                .unwrap_or_default();
 
         let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_stats(user_id, total_seconds, total_points, last_update)
-                     VALUES(?1, ?2, ?3, CURRENT_TIMESTAMP)
-                     ON CONFLICT(user_id) DO UPDATE SET
-                       total_seconds = total_seconds + excluded.total_seconds,
-                       total_points  = total_points  + excluded.total_points,
-                       last_update   = CURRENT_TIMESTAMP",
-                    rusqlite::params![session.user_id, seconds, points],
-                )?;
-                conn.execute(
-                    "INSERT INTO voice_session_log(
-                       user_id, display_name, guild_id, channel_id, channel_name,
-                       started_at, ended_at, duration_seconds, points, peak_users,
-                       user_counts_json, co_player_ids
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-                    rusqlite::params![
-                        session.user_id,
-                        session.display_name,
-                        session.guild_id,
-                        session.channel_id,
-                        session.channel_name,
-                        started_iso,
-                        ended_iso,
-                        seconds,
-                        points,
-                        session.peak_users,
-                        user_counts_json,
-                        co_player_ids_json,
-                    ],
-                )?;
-                Ok(())
-            })
+            .persist_finalized_session(session, end_time, seconds, points)
             .await;
         if let Err(err) = result {
-            tracing::error!(%err, user_id = session.user_id, "Voice-Session-Persistierung fehlgeschlagen");
+            tracing::error!(%err, user_id = check_user, "Voice-Session-Persistierung fehlgeschlagen");
         }
         if let Some(feedback) = self.feedback.read().await.clone() {
             let (guild_id, user_id, channel_id, channel_name, co_player_ids) = feedback_data;
@@ -635,6 +584,119 @@ impl VoiceTracker {
             session.last_update = now;
         }
     }
+
+    async fn was_first_session(&self, user_id: u64) -> VoiceDbResult<bool> {
+        let user_id = u64_to_i64("voice_stats.user_id", user_id)?;
+        let exists = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM voice.voice_stats WHERE user_id = $1
+                UNION ALL
+                SELECT 1 FROM activity.voice_session_log WHERE user_id = $1
+                LIMIT 1
+            ) AS "exists!"
+            "#,
+            user_id,
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(!exists)
+    }
+
+    async fn persist_finalized_session(
+        &self,
+        session: Session,
+        end_time: NaiveDateTime,
+        seconds: i64,
+        points: i64,
+    ) -> VoiceDbResult<()> {
+        let user_id = u64_to_i64("voice_stats.user_id", session.user_id)?;
+        let guild_id = u64_to_i64("voice_session_log.guild_id", session.guild_id)?;
+        let channel_id = u64_to_i64("voice_session_log.channel_id", session.channel_id)?;
+        let points_i32 = i64_to_i32("voice_session_log.points", points)?;
+        let peak_users = i64_to_i32("voice_session_log.peak_users", session.peak_users)?;
+        let started_at = naive_utc(session.start_time);
+        let ended_at = naive_utc(end_time);
+        let user_counts_json = serde_json::to_string(&session.user_counts)?;
+        let co_player_ids: Vec<u64> = session.co_player_ids.iter().copied().collect();
+        let co_player_ids_json = serde_json::to_string(&co_player_ids)?;
+
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO voice.voice_stats (user_id, total_seconds, total_points, last_update)
+            VALUES ($1, $2, $3, NOW())
+            ON CONFLICT (user_id) DO UPDATE SET
+                total_seconds = voice_stats.total_seconds + EXCLUDED.total_seconds,
+                total_points = voice_stats.total_points + EXCLUDED.total_points,
+                last_update = NOW()
+            "#,
+            user_id,
+            seconds,
+            points,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+        lock_voice_session_ids(&mut tx).await?;
+        let id = next_voice_session_log_id(&mut tx).await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_session_log (
+                id, user_id, display_name, guild_id, channel_id, channel_name,
+                started_at, ended_at, duration_seconds, points, peak_users,
+                user_counts, co_player_ids
+            )
+            VALUES (
+                $1, $2, $3, $4, $5, $6,
+                $7, $8, $9, $10, $11,
+                $12::text::jsonb, $13::text::jsonb
+            )
+            "#,
+            id,
+            user_id,
+            session.display_name,
+            guild_id,
+            channel_id,
+            session.channel_name,
+            started_at,
+            ended_at,
+            seconds,
+            points_i32,
+            peak_users,
+            user_counts_json,
+            co_player_ids_json,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+}
+
+async fn lock_voice_session_ids(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        SELECT 1 AS "locked!"
+          FROM pg_advisory_xact_lock($1)
+        "#,
+        VOICE_SESSION_LOG_ID_LOCK_KEY,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn next_voice_session_log_id(tx: &mut Transaction<'_, Postgres>) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS "next_id!"
+          FROM activity.voice_session_log
+        "#
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.next_id)
 }
 
 /// Subscriber + Wartungs-Loops starten.
@@ -741,27 +803,16 @@ mod tests {
         }
     }
 
-    const DDLS: [&str; 4] = [
-        "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-        "CREATE TABLE user_privacy(user_id INTEGER PRIMARY KEY, opted_out INTEGER NOT NULL DEFAULT 0, deleted_at INTEGER, reason TEXT, updated_at INTEGER)",
-        "CREATE TABLE voice_stats(user_id INTEGER PRIMARY KEY, total_seconds INTEGER NOT NULL DEFAULT 0, last_update DATETIME DEFAULT CURRENT_TIMESTAMP, total_points INTEGER NOT NULL DEFAULT 0)",
-        "CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT)",
-    ];
-
-    async fn setup() -> (tempfile::TempDir, Arc<VoiceTracker>, Arc<MockSnapshot>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("test.sqlite3")).expect("db");
-        for ddl in DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+    async fn setup() -> (dl_central_db::TestDb, Arc<VoiceTracker>, Arc<MockSnapshot>) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let snapshot = Arc::new(MockSnapshot {
             states: StdMutex::new(HashMap::new()),
             names: StdMutex::new(HashMap::new()),
         });
-        let tracker = VoiceTracker::new(db, snapshot.clone());
-        (dir, tracker, snapshot)
+        let tracker = VoiceTracker::new(db.pool().clone(), snapshot.clone());
+        (db, tracker, snapshot)
     }
 
     #[tokio::test]
@@ -819,34 +870,35 @@ mod tests {
             .await;
         assert_eq!(tracker.active_sessions().await, 1);
 
-        let (seconds, points, co_players, channel_name): (i64, i64, String, String) = tracker
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT duration_seconds, points, co_player_ids, channel_name
-                     FROM voice_session_log WHERE user_id = 100",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-            })
-            .await
-            .expect("log row");
+        let row = sqlx::query!(
+            r#"
+            SELECT duration_seconds, points,
+                   co_player_ids::text AS "co_player_ids!",
+                   channel_name AS "channel_name!"
+              FROM activity.voice_session_log
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("log row");
+        let seconds = row.duration_seconds;
+        let points = i64::from(row.points);
         assert!(seconds >= 600);
         assert_eq!(points, calculate_points(seconds, 2));
-        assert_eq!(co_players, "[200]");
-        assert_eq!(channel_name, "Lobby 1");
+        assert_eq!(row.co_player_ids, "[200]");
+        assert_eq!(row.channel_name, "Lobby 1");
 
-        let total: i64 = tracker
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT total_seconds FROM voice_stats WHERE user_id = 100",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("stats row");
+        let total = sqlx::query_scalar!(
+            r#"
+            SELECT total_seconds
+              FROM voice.voice_stats
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("stats row");
         assert_eq!(total, seconds);
     }
 
@@ -946,17 +998,15 @@ mod tests {
     #[tokio::test]
     async fn opt_out_wird_nie_getrackt() {
         let (_dir, tracker, snapshot) = setup().await;
-        tracker
-            .db
-            .write(|c| {
-                c.execute(
-                    "INSERT INTO user_privacy(user_id, opted_out) VALUES(100, 1)",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("optout");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy (user_id, opted_out)
+            VALUES (100, TRUE)
+            "#
+        )
+        .execute(&tracker.pool)
+        .await
+        .expect("optout");
         snapshot
             .states
             .lock()
@@ -978,25 +1028,22 @@ mod tests {
         let (_dir, tracker, _snapshot) = setup().await;
         let cfg = tracker.config(1).await;
         assert_eq!(cfg, TrackerConfig::default());
-        let raw = tracker
-            .db
-            .kv_get(KV_NAMESPACE, "1")
+        let raw = dl_central_db::kv::get(&tracker.pool, KV_NAMESPACE, "1")
             .await
             .expect("kv")
             .expect("persistiert");
         assert!(raw.contains("\"min_users_for_tracking\":2"));
 
         // Überschreiben + Cache invalidieren prüfen (frischer Tracker)
-        tracker
-            .db
-            .kv_set(
-                KV_NAMESPACE,
-                "1",
-                json!({"min_users_for_tracking": 3}).to_string(),
-            )
-            .await
-            .expect("set");
-        let fresh = VoiceTracker::new(tracker.db.clone(), tracker.snapshot.clone());
+        dl_central_db::kv::set(
+            &tracker.pool,
+            KV_NAMESPACE,
+            "1",
+            &json!({"min_users_for_tracking": 3}).to_string(),
+        )
+        .await
+        .expect("set");
+        let fresh = VoiceTracker::new(tracker.pool.clone(), tracker.snapshot.clone());
         let cfg = fresh.config(1).await;
         assert_eq!(cfg.min_users_for_tracking, 3);
         assert_eq!(cfg.grace_period_duration, 180); // Default bleibt
@@ -1027,11 +1074,15 @@ mod tests {
         }
         tracker.cleanup_stale_sessions().await;
         assert_eq!(tracker.active_sessions().await, 0);
-        let rows: i64 = tracker
-            .db
-            .read(|c| c.query_row("SELECT COUNT(*) FROM voice_session_log", [], |r| r.get(0)))
-            .await
-            .expect("count");
+        let rows = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.voice_session_log
+            "#
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("count");
         assert_eq!(rows, 2);
     }
 }

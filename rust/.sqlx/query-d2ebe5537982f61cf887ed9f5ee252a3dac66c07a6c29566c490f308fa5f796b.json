@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO activity.member_events(\n            id, user_id, guild_id, event_type, occurred_at, display_name,\n            account_created_at, join_position, metadata\n        )\n        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9::text::jsonb)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Timestamptz",
+        "Int4",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d2ebe5537982f61cf887ed9f5ee252a3dac66c07a6c29566c490f308fa5f796b"
+}

@@ -10,12 +10,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::TimeZone;
-use dl_db::Db;
+use chrono::{TimeZone, Utc};
 use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
-use rusqlite::OptionalExtension;
 use serde_json::json;
+use sqlx::PgPool;
+
+use crate::db::{i64_to_u64, u64_to_i64, unix_from_utc, utc_from_unix};
 
 pub const SUBMIT_CHANNEL_ID: u64 = 1425215762460835931;
 pub const SEND_TO_USER_ID: u64 = 388772056717590539;
@@ -137,46 +138,20 @@ pub fn dump_text(
 // ── Store ──────────────────────────────────────────────────────────────────
 
 pub struct ClipStore {
-    pub db: Db,
+    pub pool: PgPool,
 }
 
 impl ClipStore {
-    /// Tabellen wie `init_schema` (das Original legt sie selbst per
-    /// CREATE IF NOT EXISTS an — darf Rust laut Vertragsregel auch).
-    pub async fn ensure_schema(&self) -> Result<(), dl_db::DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS clip_submissions(
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        guild_id INTEGER NOT NULL,
-                        user_id INTEGER NOT NULL,
-                        link TEXT NOT NULL,
-                        credit TEXT NOT NULL,
-                        permission TEXT NOT NULL,
-                        info TEXT,
-                        created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                    );
-                    CREATE TABLE IF NOT EXISTS clip_windows(
-                        id INTEGER PRIMARY KEY AUTOINCREMENT,
-                        guild_id INTEGER NOT NULL,
-                        start_ts INTEGER NOT NULL,
-                        end_ts   INTEGER NOT NULL,
-                        status TEXT NOT NULL DEFAULT 'running',
-                        dump_sent_ts INTEGER,
-                        UNIQUE(guild_id, start_ts, end_ts)
-                    );
-                    CREATE TABLE IF NOT EXISTS clip_window_submissions(
-                        window_id INTEGER NOT NULL,
-                        submission_id INTEGER NOT NULL,
-                        user_id INTEGER NOT NULL,
-                        PRIMARY KEY(window_id, submission_id)
-                    );
-                    CREATE INDEX IF NOT EXISTS idx_clip_windows_guild ON clip_windows(guild_id);
-                    CREATE INDEX IF NOT EXISTS idx_clip_submissions_guild ON clip_submissions(guild_id);",
-                )
-            })
-            .await
+    /// Schema gehört zentral `0008_clips.sql`; der Hook bleibt als Start-Guard.
+    pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
+        sqlx::query!(
+            r#"
+            SELECT to_regclass('clips.clip_submissions') IS NOT NULL AS "exists!"
+            "#
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map(|_| ())
     }
 
     /// Aktuelles Wochenfenster anlegen/holen → (id, start_ts, end_ts, status, dump_sent_ts).
@@ -185,31 +160,44 @@ impl ClipStore {
         guild_id: u64,
     ) -> Option<(i64, i64, i64, String, Option<i64>)> {
         let (start_ts, end_ts) = compute_week_window(chrono::Utc::now());
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT OR IGNORE INTO clip_windows(guild_id, start_ts, end_ts, status)
-                     VALUES (?1, ?2, ?3, 'running')",
-                    rusqlite::params![guild_id, start_ts, end_ts],
-                )?;
-                conn.query_row(
-                    "SELECT id, start_ts, end_ts, status, dump_sent_ts FROM clip_windows
-                      WHERE guild_id = ?1 AND start_ts = ?2 AND end_ts = ?3 LIMIT 1",
-                    rusqlite::params![guild_id, start_ts, end_ts],
-                    |row| {
-                        Ok(Some((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        )))
-                    },
-                )
-            })
-            .await
-            .ok()
-            .flatten()
+        let guild_id = u64_to_i64(guild_id, "guild_id").ok()?;
+        let start_at = utc_from_unix(start_ts).ok()?;
+        let end_at = utc_from_unix(end_ts).ok()?;
+        sqlx::query!(
+            r#"
+            INSERT INTO clips.clip_windows(guild_id, start_at, end_at, status)
+            VALUES ($1, $2, $3, 'running')
+            ON CONFLICT(guild_id, start_at, end_at) DO NOTHING
+            "#,
+            guild_id,
+            start_at,
+            end_at,
+        )
+        .execute(&self.pool)
+        .await
+        .ok()?;
+
+        let row = sqlx::query!(
+            r#"
+            SELECT id, start_at, end_at, status, dump_sent_at
+              FROM clips.clip_windows
+             WHERE guild_id = $1 AND start_at = $2 AND end_at = $3
+             LIMIT 1
+            "#,
+            guild_id,
+            start_at,
+            end_at,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        Some((
+            row.id,
+            unix_from_utc(row.start_at),
+            unix_from_utc(row.end_at),
+            row.status,
+            row.dump_sent_at.map(unix_from_utc),
+        ))
     }
 
     /// Einsendung speichern + laufendem Fenster zuordnen.
@@ -227,112 +215,158 @@ impl ClipStore {
         let running_window_id = window
             .filter(|(_, start, end, _, _)| *start <= now_ts && now_ts <= *end)
             .map(|(id, _, _, _, _)| id);
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO clip_submissions(guild_id, user_id, link, credit, permission, info)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![guild_id, user_id, link, credit, permission, info],
-                )?;
-                let submission_id = conn.last_insert_rowid();
-                if let Some(window_id) = running_window_id {
-                    conn.execute(
-                        "INSERT OR IGNORE INTO clip_window_submissions(window_id, submission_id, user_id)
-                         VALUES (?1, ?2, ?3)",
-                        rusqlite::params![window_id, submission_id, user_id],
-                    )?;
-                }
-                Ok(Some(submission_id))
-            })
-            .await
-            .ok()
-            .flatten()
+        let guild_id = u64_to_i64(guild_id, "guild_id").ok()?;
+        let user_id_i64 = u64_to_i64(user_id, "user_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO clips.clip_submissions(guild_id, user_id, link, credit, permission, info)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            RETURNING id
+            "#,
+            guild_id,
+            user_id_i64,
+            link,
+            credit,
+            permission,
+            info,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()?;
+        if let Some(window_id) = running_window_id {
+            let _ = sqlx::query!(
+                r#"
+                INSERT INTO clips.clip_window_submissions(window_id, submission_id, user_id)
+                VALUES ($1, $2, $3)
+                ON CONFLICT(window_id, submission_id) DO NOTHING
+                "#,
+                window_id,
+                row.id,
+                user_id_i64,
+            )
+            .execute(&self.pool)
+            .await;
+        }
+        Some(row.id)
     }
 
     pub async fn dump_rows(&self, guild_id: u64, start_ts: i64, end_ts: i64) -> Vec<DumpRow> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, user_id, link, credit, permission, info, created_at
-                       FROM clip_submissions
-                      WHERE guild_id = ?1
-                        AND strftime('%s', created_at) BETWEEN ?2 AND ?3
-                      ORDER BY datetime(created_at) ASC",
-                )?;
-                let rows = stmt.query_map(
-                    rusqlite::params![guild_id, start_ts.to_string(), end_ts.to_string()],
-                    |row| {
-                        Ok(DumpRow {
-                            id: row.get(0)?,
-                            user_id: row.get(1)?,
-                            link: row.get(2)?,
-                            credit: row.get(3)?,
-                            permission: row.get(4)?,
-                            info: row.get::<_, Option<String>>(5)?.unwrap_or_default(),
-                            created_at: row.get(6)?,
-                        })
-                    },
-                )?;
-                rows.collect()
+        let Ok(guild_id) = u64_to_i64(guild_id, "guild_id") else {
+            return Vec::new();
+        };
+        let Ok(start_at) = utc_from_unix(start_ts) else {
+            return Vec::new();
+        };
+        let Ok(end_at) = utc_from_unix(end_ts) else {
+            return Vec::new();
+        };
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, user_id, link, credit, permission, info, created_at
+              FROM clips.clip_submissions
+             WHERE guild_id = $1
+               AND created_at >= $2
+               AND created_at <= $3
+             ORDER BY created_at ASC
+            "#,
+            guild_id,
+            start_at,
+            end_at,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                let user_id = i64_to_u64(row.user_id, "user_id")?;
+                Some(DumpRow {
+                    id: row.id,
+                    user_id,
+                    link: row.link,
+                    credit: row.credit,
+                    permission: row.permission,
+                    info: row.info.unwrap_or_default(),
+                    created_at: row
+                        .created_at
+                        .map(|dt| dt.naive_utc().format("%Y-%m-%d %H:%M:%S").to_string())
+                        .unwrap_or_default(),
+                })
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     pub async fn mark_dumped(&self, window_id: i64) {
-        let now_ts = chrono::Utc::now().timestamp();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE clip_windows SET status = 'dumped', dump_sent_ts = ?1 WHERE id = ?2",
-                    rusqlite::params![now_ts, window_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE clips.clip_windows
+               SET status = 'dumped', dump_sent_at = $1
+             WHERE id = $2
+            "#,
+            Utc::now(),
+            window_id,
+        )
+        .execute(&self.pool)
+        .await;
     }
 
-    /// Interface-Message aus persistent_views (Spalten sind TEXT!).
+    /// Interface-Message aus bot.persistent_views.
     pub async fn interface_message(&self, guild_id: u64) -> Option<(u64, u64)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT channel_id, message_id FROM persistent_views
-                      WHERE guild_id = ?1 AND view_type = ?2
-                      ORDER BY created_at DESC LIMIT 1",
-                    rusqlite::params![guild_id.to_string(), VIEW_TYPE],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .and_then(|(channel, message)| Some((channel.parse().ok()?, message.parse().ok()?)))
+        let guild_id = u64_to_i64(guild_id, "guild_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT channel_id, message_id
+              FROM bot.persistent_views
+             WHERE guild_id = $1 AND view_type = $2
+             ORDER BY created_at DESC
+             LIMIT 1
+            "#,
+            guild_id,
+            VIEW_TYPE,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        Some((
+            i64_to_u64(row.channel_id, "channel_id")?,
+            i64_to_u64(row.message_id, "message_id")?,
+        ))
     }
 
     pub async fn save_interface_message(&self, guild_id: u64, channel_id: u64, message_id: u64) {
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM persistent_views WHERE guild_id = ?1 AND view_type = ?2",
-                    rusqlite::params![guild_id.to_string(), VIEW_TYPE],
-                )?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO persistent_views(message_id, channel_id, guild_id, view_type)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![
-                        message_id.to_string(),
-                        channel_id.to_string(),
-                        guild_id.to_string(),
-                        VIEW_TYPE
-                    ],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let (Ok(guild_id), Ok(channel_id), Ok(message_id)) = (
+            u64_to_i64(guild_id, "guild_id"),
+            u64_to_i64(channel_id, "channel_id"),
+            u64_to_i64(message_id, "message_id"),
+        ) else {
+            return;
+        };
+        let _ = sqlx::query!(
+            r#"
+            DELETE FROM bot.persistent_views
+             WHERE guild_id = $1 AND view_type = $2
+            "#,
+            guild_id,
+            VIEW_TYPE,
+        )
+        .execute(&self.pool)
+        .await;
+        let _ = sqlx::query!(
+            r#"
+            INSERT INTO bot.persistent_views(message_id, channel_id, guild_id, view_type)
+            VALUES ($1, $2, $3, $4)
+            ON CONFLICT(message_id) DO UPDATE SET
+              channel_id = excluded.channel_id,
+              guild_id = excluded.guild_id,
+              view_type = excluded.view_type,
+              created_at = now()
+            "#,
+            message_id,
+            channel_id,
+            guild_id,
+            VIEW_TYPE,
+        )
+        .execute(&self.pool)
+        .await;
     }
 }
 
@@ -367,9 +401,9 @@ pub struct ClipSubmission {
 }
 
 impl ClipSubmission {
-    pub fn new(db: Db, port: Arc<dyn ClipPort>) -> Arc<Self> {
+    pub fn new(pool: PgPool, port: Arc<dyn ClipPort>) -> Arc<Self> {
         Arc::new(Self {
-            store: ClipStore { db },
+            store: ClipStore { pool },
             port,
             cooldown: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         })
@@ -644,11 +678,15 @@ mod tests {
         assert!(text.contains("7 | 42 | 2026-06-08 18:00:00 | @Nani | https://x | owner_or_permission | Zeile1 Zeile2"));
     }
 
+    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn fenster_und_einsendung() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        let store = ClipStore { db };
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ClipStore {
+            pool: db.pool().clone(),
+        };
         store.ensure_schema().await.expect("schema");
         let (id1, start, end, status, dumped) = store.ensure_window(1).await.expect("window");
         assert_eq!(status, "running");

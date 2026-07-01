@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(MAX(bot_request_id), 0) + 1 AS \"next_id!: i32\"\n              FROM coaching.requests\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!: i32",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0ca26235be6ac68f11d9456e8f0ea333f8a036c694360e4e2265aa63429e5b0b"
+}

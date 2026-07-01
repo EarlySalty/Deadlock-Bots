@@ -9,11 +9,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use dl_db::Db;
 use dl_discord::{ChannelSender, Dispatcher};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
 
+use crate::db::{i64_to_u64, u64_to_i64};
 use crate::feedback::VoiceFeedback;
 use crate::tracker::{calculate_points, VoiceTracker};
 
@@ -102,7 +102,9 @@ impl RateLimiter {
 
     fn check(&self, user_id: u64) -> Result<(), i64> {
         let now = Instant::now();
-        let mut map = self.hits.lock().expect("rate-limit mutex");
+        let Ok(mut map) = self.hits.lock() else {
+            return Ok(());
+        };
         let dq = map.entry(user_id).or_default();
         while let Some(&front) = dq.front() {
             if now.duration_since(front) >= self.window {
@@ -112,7 +114,9 @@ impl RateLimiter {
             }
         }
         if dq.len() >= self.max {
-            let oldest = *dq.front().expect("queue not empty");
+            let Some(oldest) = dq.front().copied() else {
+                return Ok(());
+            };
             // Wie Python `int(window - elapsed)`: Differenz als Float bilden und
             // erst das Ergebnis zur Null hin abschneiden (nicht elapsed vorrunden).
             let remaining = self.window.as_secs_f64() - now.duration_since(oldest).as_secs_f64();
@@ -148,78 +152,93 @@ impl StatsReply {
 /// dafür; das öffentliche Web-Leaderboard liegt im nicht importierbaren
 /// dl-stats-HTTP-Handler).
 struct VoiceStatsStore {
-    db: Db,
+    pool: PgPool,
 }
 
 impl VoiceStatsStore {
-    fn new(db: Db) -> Self {
-        Self { db }
+    fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     /// `(total_seconds, total_points)`; Default `(0, 0)` ohne Datensatz.
     async fn totals(&self, user_id: u64) -> (i64, i64) {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT total_seconds, total_points FROM voice_stats WHERE user_id = ?1",
-                    [user_id],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or((0, 0))
+        let Ok(user_id) = u64_to_i64("voice_stats.user_id", user_id) else {
+            return (0, 0);
+        };
+        sqlx::query!(
+            r#"
+            SELECT total_seconds, total_points
+              FROM voice.voice_stats
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.total_seconds, row.total_points))
+        .unwrap_or((0, 0))
     }
 
     /// Top-`limit` nach Punkten DESC, Sekunden DESC: `(user_id, secs, points)`.
     async fn top(&self, limit: i64) -> Vec<(u64, i64, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, total_seconds, total_points FROM voice_stats \
-                     ORDER BY total_points DESC, total_seconds DESC LIMIT ?1",
-                )?;
-                let rows = stmt.query_map([limit], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)? as u64,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
+        let rows = match sqlx::query!(
+            r#"
+            SELECT user_id, total_seconds, total_points
+              FROM voice.voice_stats
+             ORDER BY total_points DESC, total_seconds DESC
+             LIMIT $1
+            "#,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        {
+            Ok(rows) => rows,
+            Err(err) => {
+                tracing::warn!(%err, "VoiceStats: Leaderboard konnte nicht geladen werden");
+                return Vec::new();
+            }
+        };
+        rows.into_iter()
+            .filter_map(|row| {
+                let user_id = i64_to_u64("voice_stats.user_id", row.user_id).ok()?;
+                Some((user_id, row.total_seconds, row.total_points))
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Footer-Platzierung: `None` ohne Datensatz, sonst `(rank, points)` mit
     /// identischem Tiebreak wie das Leaderboard (Punkte, dann Sekunden).
     async fn rank(&self, user_id: u64) -> Option<(i64, i64)> {
-        self.db
-            .read(move |conn| {
-                let row: Option<(i64, i64)> = conn
-                    .query_row(
-                        "SELECT total_points, total_seconds FROM voice_stats WHERE user_id = ?1",
-                        [user_id],
-                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                    )
-                    .optional()?;
-                let Some((points, seconds)) = row else {
-                    return Ok(None);
-                };
-                let rank: i64 = conn.query_row(
-                    "SELECT COUNT(*) + 1 FROM voice_stats \
-                     WHERE total_points > ?1 OR (total_points = ?1 AND total_seconds > ?2)",
-                    rusqlite::params![points, seconds],
-                    |r| r.get(0),
-                )?;
-                Ok(Some((rank, points)))
-            })
-            .await
-            .ok()
-            .flatten()
+        let user_id = u64_to_i64("voice_stats.user_id", user_id).ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT total_points, total_seconds
+              FROM voice.voice_stats
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+        let rank = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) + 1 AS "rank!"
+              FROM voice.voice_stats
+             WHERE total_points > $1
+                OR (total_points = $1 AND total_seconds > $2)
+            "#,
+            row.total_points,
+            row.total_seconds,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()?;
+        Some((rank, row.total_points))
     }
 }
 
@@ -234,13 +253,13 @@ pub struct VoiceStatsCommands {
 
 impl VoiceStatsCommands {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         tracker: Arc<VoiceTracker>,
         port: Arc<dyn StatsPort>,
         feedback: Option<Arc<VoiceFeedback>>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            store: VoiceStatsStore::new(db),
+            store: VoiceStatsStore::new(pool),
             tracker,
             feedback,
             port,
@@ -644,36 +663,29 @@ mod tests {
         }
     }
 
-    const ADMIN_DDLS: [&str; 5] = [
-        "CREATE TABLE kv_store(ns TEXT NOT NULL, k TEXT NOT NULL, v TEXT NOT NULL, PRIMARY KEY(ns, k))",
-        "CREATE TABLE voice_stats(user_id INTEGER PRIMARY KEY, total_seconds INTEGER NOT NULL DEFAULT 0, total_points INTEGER NOT NULL DEFAULT 0)",
-        "CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME, ended_at DATETIME, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT)",
-        "CREATE TABLE voice_feedback_requests(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, co_player_names TEXT, duration_seconds INTEGER, request_type TEXT DEFAULT 'first', status TEXT, error_message TEXT, prompt_message_id INTEGER, sent_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
-        "CREATE TABLE voice_feedback_responses(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, user_id INTEGER NOT NULL, message_id INTEGER, content TEXT, received_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
-    ];
-
     async fn admin_setup() -> (
-        tempfile::TempDir,
+        dl_central_db::TestDb,
         Arc<VoiceStatsCommands>,
         Arc<crate::tracker::VoiceTracker>,
         Arc<MockFeedbackPort>,
     ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in ADMIN_DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
-        let tracker = crate::tracker::VoiceTracker::new(db.clone(), Arc::new(MockSnapshot));
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let tracker = crate::tracker::VoiceTracker::new(pool.clone(), Arc::new(MockSnapshot));
         let feedback_port = Arc::new(MockFeedbackPort {
             dms: StdMutex::new(Vec::new()),
             forwards: StdMutex::new(Vec::new()),
         });
-        let feedback = crate::feedback::VoiceFeedback::new(db.clone(), feedback_port.clone());
-        let commands =
-            VoiceStatsCommands::new(db, tracker.clone(), Arc::new(MockStatsPort), Some(feedback));
-        (dir, commands, tracker, feedback_port)
+        let feedback = crate::feedback::VoiceFeedback::new(pool.clone(), feedback_port.clone());
+        let commands = VoiceStatsCommands::new(
+            pool,
+            tracker.clone(),
+            Arc::new(MockStatsPort),
+            Some(feedback),
+        );
+        (db, commands, tracker, feedback_port)
     }
 
     #[tokio::test]

@@ -295,6 +295,8 @@ pub fn spawn_dm_assistant(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]

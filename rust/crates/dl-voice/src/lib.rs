@@ -10,6 +10,7 @@
 //!   in 4b/4c.
 
 pub mod adaptive;
+mod db;
 pub mod feedback;
 pub mod glue;
 pub mod nudge;

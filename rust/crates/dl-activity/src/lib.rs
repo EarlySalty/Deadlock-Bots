@@ -5,9 +5,12 @@
 //! - LFG, player_finder (Flag aus) und Retention folgen.
 
 pub mod analyzer;
+mod db;
 pub mod glue;
 pub mod join_source;
 pub mod lfg;
 pub mod player_finder;
 pub mod stats_cmd;
 pub mod text_stats;
+
+pub use db::{ActivityDbError, ActivityDbResult};

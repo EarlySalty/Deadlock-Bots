@@ -1,0 +1,59 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id, co_player_id,\n                   COALESCE(sessions_together, 0)::BIGINT AS \"sessions!\",\n                   COALESCE(total_minutes_together, 0)::BIGINT AS \"minutes!\",\n                   to_char(last_played_together AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_played?\",\n                   user_display_name, co_player_display_name\n              FROM activity.user_co_players\n             WHERE COALESCE(sessions_together, 0) >= $1\n             ORDER BY sessions_together DESC NULLS LAST,\n                      total_minutes_together DESC NULLS LAST,\n                      last_played_together DESC NULLS LAST\n             LIMIT $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "co_player_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "minutes!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "last_played?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "user_display_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "co_player_display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      null,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "33b472991cb77a2c8462aec6c3949f352ed227aab8b5f2a1965e6ab529de153b"
+}

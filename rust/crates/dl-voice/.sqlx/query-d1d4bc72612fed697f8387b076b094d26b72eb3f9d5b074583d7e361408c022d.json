@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_feedback_requests (\n                id, user_id, guild_id, channel_id, channel_name, co_player_names,\n                duration_seconds, request_type, status, sent_at\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d1d4bc72612fed697f8387b076b094d26b72eb3f9d5b074583d7e361408c022d"
+}

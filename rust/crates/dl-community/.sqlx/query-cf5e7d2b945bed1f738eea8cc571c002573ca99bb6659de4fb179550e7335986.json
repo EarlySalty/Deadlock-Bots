@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.persistent_views(message_id, channel_id, guild_id, view_type)\n            VALUES ($1, $2, $3, $4)\n            ON CONFLICT(message_id) DO UPDATE SET\n              channel_id = excluded.channel_id,\n              guild_id = excluded.guild_id,\n              view_type = excluded.view_type,\n              created_at = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cf5e7d2b945bed1f738eea8cc571c002573ca99bb6659de4fb179550e7335986"
+}

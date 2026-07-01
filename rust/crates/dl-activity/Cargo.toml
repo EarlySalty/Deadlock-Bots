@@ -10,16 +10,17 @@ version = "0.1.0"
 [dependencies]
 async-trait.workspace = true
 chrono.workspace = true
-dl-db.workspace = true
+dl-central-db.workspace = true
 dl-discord.workspace = true
-rusqlite.workspace = true
 serde_json.workspace = true
 serenity.workspace = true
+sqlx.workspace = true
+thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
-[dev-dependencies]
-tempfile.workspace = true
+[features]
+testing = ["dl-central-db/testing"]
 
 [lints]
 workspace = true

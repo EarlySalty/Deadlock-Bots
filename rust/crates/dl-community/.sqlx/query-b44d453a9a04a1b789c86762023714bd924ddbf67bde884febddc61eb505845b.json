@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE clips.clip_windows\n               SET status = 'dumped', dump_sent_at = $1\n             WHERE id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b44d453a9a04a1b789c86762023714bd924ddbf67bde884febddc61eb505845b"
+}

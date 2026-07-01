@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT duration_seconds, points,\n                   co_player_ids::text AS \"co_player_ids!\",\n                   channel_name AS \"channel_name!\"\n              FROM activity.voice_session_log\n             WHERE user_id = 100\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "duration_seconds",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "points",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "co_player_ids!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "channel_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      true
+    ]
+  },
+  "hash": "100d1cefac9c9f669ea3abb021f47998432d2fa059052350253a86c37f6cae83"
+}

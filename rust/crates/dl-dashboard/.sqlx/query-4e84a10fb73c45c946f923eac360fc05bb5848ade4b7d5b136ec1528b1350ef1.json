@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.deadlock_heroes (\n                    hero_id, name, origin_build_id, target_build_name_override,\n                    is_active, created_at, updated_at\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $6)\n                 ON CONFLICT(hero_id) DO UPDATE SET\n                    name = EXCLUDED.name,\n                    origin_build_id = EXCLUDED.origin_build_id,\n                    target_build_name_override = EXCLUDED.target_build_name_override,\n                    is_active = EXCLUDED.is_active,\n                    updated_at = EXCLUDED.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Text",
+        "Bool",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4e84a10fb73c45c946f923eac360fc05bb5848ade4b7d5b136ec1528b1350ef1"
+}

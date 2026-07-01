@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT event_type, COUNT(*) AS \"count!\"\n              FROM activity.member_events\n             WHERE ($1::BIGINT IS NULL OR guild_id = $1)\n             GROUP BY event_type\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null
+    ]
+  },
+  "hash": "c153a6d75eb46416d9d6ccdc34eb5c91cc1f45214c40994c236fa735d7d18186"
+}

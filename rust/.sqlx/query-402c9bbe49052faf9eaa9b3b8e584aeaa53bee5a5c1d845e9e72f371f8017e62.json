@@ -1,0 +1,50 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.origin_hero_build_id,\n                   c.target_language,\n                   t.status AS task_status,\n                   t.result::text AS \"result?\",\n                   t.error,\n                   t.id AS task_id\n              FROM tierlist.hero_build_clones c\n              INNER JOIN steam.steam_tasks t\n                      ON t.type = 'BUILD_PUBLISH'\n                     AND t.payload ? 'origin_hero_build_id'\n                     AND t.payload->>'origin_hero_build_id' ~ '^-?[0-9]+$'\n                     AND (t.payload->>'origin_hero_build_id')::BIGINT = c.origin_hero_build_id\n             WHERE c.status = 'processing'\n               AND t.status IN ('DONE', 'FAILED')\n             ORDER BY t.finished_at DESC NULLS LAST, t.id DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "origin_hero_build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "target_language",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "task_status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "result?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "error",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "task_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null,
+      true,
+      false
+    ]
+  },
+  "hash": "402c9bbe49052faf9eaa9b3b8e584aeaa53bee5a5c1d845e9e72f371f8017e62"
+}

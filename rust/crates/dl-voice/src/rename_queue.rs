@@ -15,17 +15,19 @@ use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use dl_db::{Db, DbError};
 use dl_discord::DiscordAdapter;
-use rusqlite::{params, OptionalExtension};
 use serde_json::json;
 use serenity::all::ChannelId;
+use sqlx::{PgPool, Postgres, Transaction};
 use std::fmt;
+
+use crate::db::{i64_to_u64, u64_to_i64, VoiceDbResult};
 
 const QUEUE_CHECK_INTERVAL: Duration = Duration::from_secs(1);
 const ERROR_BACKOFF: Duration = Duration::from_secs(10);
 const RENAME_THROTTLE: Duration = Duration::from_secs(360);
-const MAX_RETRIES: i64 = 5;
+const MAX_RETRIES: i32 = 5;
+const RENAME_REQUEST_ID_LOCK_KEY: i64 = -7_010_030_001;
 
 static QUEUE: OnceLock<RenameQueue> = OnceLock::new();
 
@@ -35,8 +37,8 @@ fn worker_id() -> i64 {
 
 /// Initialisiert die Prozess-globale Queue (idempotent). Einmalig beim Start,
 /// bevor die Voice-Subscriber laufen.
-pub fn init(db: Db) {
-    let _ = QUEUE.get_or_init(|| RenameQueue { db });
+pub fn init(pool: PgPool) {
+    let _ = QUEUE.get_or_init(|| RenameQueue { pool });
 }
 
 fn global() -> Option<&'static RenameQueue> {
@@ -72,37 +74,17 @@ pub async fn enqueue_or_direct(
 /// Die Queue — hält nur den DB-Handle.
 #[derive(Clone)]
 pub struct RenameQueue {
-    db: Db,
+    pool: PgPool,
 }
 
 impl RenameQueue {
-    pub fn new(db: Db) -> Self {
-        Self { db }
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
-    /// Legt die Queue-Tabelle an (idempotent). Schema wie `rename_manager.py`.
-    pub async fn ensure_schema(&self) -> Result<(), DbError> {
-        self.db
-            .write(|conn| {
-                conn.execute_batch(
-                    "CREATE TABLE IF NOT EXISTS rename_requests (
-                       id INTEGER PRIMARY KEY AUTOINCREMENT,
-                       channel_id INTEGER NOT NULL,
-                       new_name TEXT NOT NULL,
-                       reason TEXT,
-                       status TEXT NOT NULL DEFAULT 'PENDING',
-                       created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                       processed_at TIMESTAMP,
-                       retry_count INTEGER DEFAULT 0,
-                       last_error TEXT,
-                       assigned_worker_id INTEGER DEFAULT 0
-                     );
-                     CREATE INDEX IF NOT EXISTS idx_rename_requests_status_created
-                       ON rename_requests(status, created_at, id);",
-                )?;
-                Ok(())
-            })
-            .await
+    /// Zentrale Migrationen besitzen das DDL; App-seitiges Bootstrap ist no-op.
+    pub async fn ensure_schema(&self) -> VoiceDbResult<()> {
+        Ok(())
     }
 
     /// Reiht eine Umbenennung ein — last-wins pro Channel (vorhandene PENDING-
@@ -112,29 +94,42 @@ impl RenameQueue {
         channel_id: u64,
         new_name: &str,
         reason: &str,
-    ) -> Result<(), DbError> {
+    ) -> VoiceDbResult<()> {
         let name = new_name.trim().to_string();
         if name.is_empty() {
             return Ok(());
         }
         let reason = reason.to_string();
-        let cid = channel_id as i64;
-        self.db
-            .write(move |conn| {
-                let tx = conn.transaction()?;
-                tx.execute(
-                    "DELETE FROM rename_requests WHERE channel_id=?1 AND status='PENDING'",
-                    params![cid],
-                )?;
-                tx.execute(
-                    "INSERT INTO rename_requests(channel_id, new_name, reason, status)
-                     VALUES (?1, ?2, ?3, 'PENDING')",
-                    params![cid, name, reason],
-                )?;
-                tx.commit()?;
-                Ok(())
-            })
-            .await
+        let channel_id = u64_to_i64("rename_requests.channel_id", channel_id)?;
+        let mut tx = self.pool.begin().await?;
+        lock_rename_request_ids(&mut tx).await?;
+        let id = next_rename_request_id(&mut tx).await?;
+        sqlx::query!(
+            r#"
+            DELETE FROM voice.rename_requests
+             WHERE channel_id = $1
+               AND status = 'PENDING'
+            "#,
+            channel_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO voice.rename_requests (
+                id, channel_id, new_name, reason, status, retry_count, assigned_worker_id
+            )
+            VALUES ($1, $2, $3, $4, 'PENDING', 0, 0)
+            "#,
+            id,
+            channel_id,
+            name,
+            reason,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 }
 
@@ -199,33 +194,34 @@ struct Claimed {
     channel_id: u64,
     new_name: String,
     reason: String,
-    retry_count: i64,
+    retry_count: i32,
 }
 
 /// Startet den Rename-Worker (genau EINER pro Prozess).
-pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
+pub fn spawn_worker(pool: PgPool, exec: Arc<dyn RenameExec>) {
     tokio::spawn(async move {
-        let q = RenameQueue { db };
+        let q = RenameQueue { pool };
         if let Err(e) = q.ensure_schema().await {
             tracing::error!(%e, "rename-worker: Schema fehlgeschlagen");
             return;
         }
         // Crash-Recovery: hängende PROCESSING-Zeilen zurück auf PENDING.
-        let _ = q
-            .db
-            .write(|conn| {
-                conn.execute(
-                    "UPDATE rename_requests SET status='PENDING', assigned_worker_id=0, processed_at=NULL WHERE status='PROCESSING'",
-                    [],
-                )?;
-                Ok(())
-            })
-            .await;
+        let _ = sqlx::query!(
+            r#"
+            UPDATE voice.rename_requests
+               SET status = 'PENDING',
+                   assigned_worker_id = 0,
+                   processed_at = NULL
+             WHERE status = 'PROCESSING'
+            "#
+        )
+        .execute(&q.pool)
+        .await;
 
         let mut last_attempt: HashMap<u64, Instant> = HashMap::new();
         loop {
             tokio::time::sleep(QUEUE_CHECK_INTERVAL).await;
-            let claimed = match claim_next(&q.db).await {
+            let claimed = match claim_next(&q.pool).await {
                 Ok(Some(c)) => c,
                 Ok(None) => continue,
                 Err(e) => {
@@ -243,7 +239,7 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
                         "Channel throttle active ({:.1}s remaining)",
                         (RENAME_THROTTLE - elapsed).as_secs_f64()
                     );
-                    let _ = set_pending(&q.db, claimed.id, Some(&last_error), false).await;
+                    let _ = set_pending(&q.pool, claimed.id, Some(&last_error), false).await;
                     let remaining = (RENAME_THROTTLE - elapsed)
                         .min(Duration::from_secs(5))
                         .max(Duration::from_millis(500));
@@ -254,11 +250,11 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
 
             match exec.current_name(claimed.channel_id).await {
                 None => {
-                    let _ = set_failed(&q.db, claimed.id, "Channel nicht gefunden").await;
+                    let _ = set_failed(&q.pool, claimed.id, "Channel nicht gefunden").await;
                     continue;
                 }
                 Some(cur) if cur == claimed.new_name => {
-                    let _ = set_done(&q.db, claimed.id).await;
+                    let _ = set_done(&q.pool, claimed.id).await;
                     continue;
                 }
                 Some(_) => {}
@@ -270,18 +266,18 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
             {
                 Ok(()) => {
                     last_attempt.insert(claimed.channel_id, Instant::now());
-                    let _ = set_done(&q.db, claimed.id).await;
+                    let _ = set_done(&q.pool, claimed.id).await;
                 }
                 Err(e) => {
                     let err_text = e.to_string();
                     if let Some(retry_after) = e.retry_after_seconds() {
                         last_attempt.insert(claimed.channel_id, Instant::now());
-                        let _ = set_pending(&q.db, claimed.id, Some(&err_text), true).await;
+                        let _ = set_pending(&q.pool, claimed.id, Some(&err_text), true).await;
                         tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.0))).await;
                     } else if claimed.retry_count + 1 >= MAX_RETRIES {
-                        let _ = set_failed(&q.db, claimed.id, &err_text).await;
+                        let _ = set_failed(&q.pool, claimed.id, &err_text).await;
                     } else {
-                        let _ = set_pending(&q.db, claimed.id, Some(&err_text), true).await;
+                        let _ = set_pending(&q.pool, claimed.id, Some(&err_text), true).await;
                     }
                 }
             }
@@ -289,134 +285,177 @@ pub fn spawn_worker(db: Db, exec: Arc<dyn RenameExec>) {
     });
 }
 
-async fn claim_next(db: &Db) -> Result<Option<Claimed>, DbError> {
-    db.write(|conn| {
-        let tx = conn.transaction()?;
-        let row = tx
-            .query_row(
-                "SELECT id, channel_id, new_name, reason, retry_count FROM rename_requests
-                 WHERE status='PENDING' ORDER BY created_at ASC, id ASC LIMIT 1",
-                [],
-                |r| {
-                    Ok((
-                        r.get::<_, i64>(0)?,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, String>(2)?,
-                        r.get::<_, Option<String>>(3)?,
-                        r.get::<_, i64>(4)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((id, channel_id, new_name, reason, retry_count)) = row else {
-            tx.commit()?;
-            return Ok(None);
-        };
-        let updated = tx.execute(
-            "UPDATE rename_requests
-                SET status='PROCESSING',
-                    assigned_worker_id=?2,
-                    processed_at=CURRENT_TIMESTAMP
-             WHERE id=?1 AND status='PENDING'",
-            params![id, worker_id()],
-        )?;
-        tx.commit()?;
-        if updated == 1 {
-            Ok(Some(Claimed {
-                id,
-                channel_id: channel_id as u64,
-                new_name,
-                reason: reason.unwrap_or_default(),
-                retry_count,
-            }))
-        } else {
-            Ok(None)
-        }
-    })
-    .await
+async fn claim_next(pool: &PgPool) -> VoiceDbResult<Option<Claimed>> {
+    let mut tx = pool.begin().await?;
+    let row = sqlx::query!(
+        r#"
+        SELECT id,
+               channel_id,
+               new_name,
+               reason,
+               COALESCE(retry_count, 0) AS "retry_count!"
+          FROM voice.rename_requests
+         WHERE status = 'PENDING'
+         ORDER BY created_at ASC, id ASC
+         LIMIT 1
+         FOR UPDATE SKIP LOCKED
+        "#
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some(row) = row else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let updated = sqlx::query!(
+        r#"
+        UPDATE voice.rename_requests
+           SET status = 'PROCESSING',
+               assigned_worker_id = $2,
+               processed_at = NOW()
+         WHERE id = $1
+           AND status = 'PENDING'
+        "#,
+        row.id,
+        worker_id(),
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    if updated.rows_affected() == 1 {
+        Ok(Some(Claimed {
+            id: row.id,
+            channel_id: i64_to_u64("rename_requests.channel_id", row.channel_id)?,
+            new_name: row.new_name,
+            reason: row.reason.unwrap_or_default(),
+            retry_count: row.retry_count,
+        }))
+    } else {
+        Ok(None)
+    }
 }
 
 async fn set_pending(
-    db: &Db,
+    pool: &PgPool,
     id: i64,
     last_error: Option<&str>,
     increment_retry: bool,
-) -> Result<(), DbError> {
+) -> VoiceDbResult<()> {
     let last_error = last_error.map(|err| err.chars().take(1000).collect::<String>());
-    db.write(move |conn| {
-        if increment_retry {
-            // Retry → ans Ende der FIFO-Queue (created_at neu).
-            conn.execute(
-                "UPDATE rename_requests
-                    SET status='PENDING',
-                        retry_count=retry_count+1,
-                        created_at=CURRENT_TIMESTAMP,
-                        processed_at=NULL,
-                        assigned_worker_id=0,
-                        last_error=?2
-                  WHERE id=?1",
-                params![id, last_error],
-            )?;
-        } else {
-            conn.execute(
-                "UPDATE rename_requests
-                    SET status='PENDING',
-                        created_at=CURRENT_TIMESTAMP,
-                        processed_at=NULL,
-                        assigned_worker_id=0,
-                        last_error=?2
-                  WHERE id=?1",
-                params![id, last_error],
-            )?;
-        }
-        Ok(())
-    })
-    .await
+    if increment_retry {
+        // Retry → ans Ende der FIFO-Queue (created_at neu).
+        sqlx::query!(
+            r#"
+            UPDATE voice.rename_requests
+               SET status = 'PENDING',
+                   retry_count = COALESCE(retry_count, 0) + 1,
+                   created_at = NOW(),
+                   processed_at = NULL,
+                   assigned_worker_id = 0,
+                   last_error = $2
+             WHERE id = $1
+            "#,
+            id,
+            last_error,
+        )
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query!(
+            r#"
+            UPDATE voice.rename_requests
+               SET status = 'PENDING',
+                   created_at = NOW(),
+                   processed_at = NULL,
+                   assigned_worker_id = 0,
+                   last_error = $2
+             WHERE id = $1
+            "#,
+            id,
+            last_error,
+        )
+        .execute(pool)
+        .await?;
+    }
+    Ok(())
 }
 
-async fn set_done(db: &Db, id: i64) -> Result<(), DbError> {
-    db.write(move |conn| {
-        conn.execute(
-            "UPDATE rename_requests
-                SET status='DONE',
-                    processed_at=CURRENT_TIMESTAMP,
-                    assigned_worker_id=?2,
-                    last_error=NULL
-              WHERE id=?1",
-            params![id, worker_id()],
-        )?;
-        Ok(())
-    })
-    .await
+async fn set_done(pool: &PgPool, id: i64) -> VoiceDbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE voice.rename_requests
+           SET status = 'DONE',
+               processed_at = NOW(),
+               assigned_worker_id = $2,
+               last_error = NULL
+         WHERE id = $1
+        "#,
+        id,
+        worker_id(),
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
 }
 
-async fn set_failed(db: &Db, id: i64, err: &str) -> Result<(), DbError> {
+async fn set_failed(pool: &PgPool, id: i64, err: &str) -> VoiceDbResult<()> {
     let err: String = err.chars().take(1000).collect();
-    db.write(move |conn| {
-        conn.execute(
-            "UPDATE rename_requests
-                SET status='FAILED',
-                    processed_at=CURRENT_TIMESTAMP,
-                    assigned_worker_id=?3,
-                    last_error=?2
-              WHERE id=?1",
-            params![id, err, worker_id()],
-        )?;
-        Ok(())
-    })
-    .await
+    sqlx::query!(
+        r#"
+        UPDATE voice.rename_requests
+           SET status = 'FAILED',
+               processed_at = NOW(),
+               assigned_worker_id = $3,
+               last_error = $2
+         WHERE id = $1
+        "#,
+        id,
+        err,
+        worker_id(),
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn lock_rename_request_ids(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        SELECT 1 AS "locked!"
+          FROM pg_advisory_xact_lock($1)
+        "#,
+        RENAME_REQUEST_ID_LOCK_KEY,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn next_rename_request_id(tx: &mut Transaction<'_, Postgres>) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT COALESCE(MAX(id), 0) + 1 AS "id!"
+          FROM voice.rename_requests
+        "#
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.id)
 }
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
-    async fn mk() -> (tempfile::TempDir, RenameQueue) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        let q = RenameQueue::new(db);
+    async fn mk() -> (dl_central_db::TestDb, RenameQueue) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let q = RenameQueue::new(db.pool().clone());
         q.ensure_schema().await.expect("schema");
-        (dir, q)
+        (db, q)
     }
 
     #[tokio::test]
@@ -425,24 +464,28 @@ mod tests {
         q.enqueue(100, "alt", "r").await.unwrap();
         q.enqueue(100, "neu", "r").await.unwrap();
         q.enqueue(200, "other", "r").await.unwrap();
-        let (cnt, name): (i64, String) = q
-            .db
-            .read(|c| {
-                Ok((
-                    c.query_row(
-                        "SELECT COUNT(*) FROM rename_requests WHERE channel_id=100 AND status='PENDING'",
-                        [],
-                        |r| r.get(0),
-                    )?,
-                    c.query_row(
-                        "SELECT new_name FROM rename_requests WHERE channel_id=100 AND status='PENDING'",
-                        [],
-                        |r| r.get(0),
-                    )?,
-                ))
-            })
-            .await
-            .unwrap();
+        let cnt = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM voice.rename_requests
+             WHERE channel_id = 100
+               AND status = 'PENDING'
+            "#
+        )
+        .fetch_one(&q.pool)
+        .await
+        .unwrap();
+        let name = sqlx::query_scalar!(
+            r#"
+            SELECT new_name
+              FROM voice.rename_requests
+             WHERE channel_id = 100
+               AND status = 'PENDING'
+            "#
+        )
+        .fetch_one(&q.pool)
+        .await
+        .unwrap();
         assert_eq!(cnt, 1, "nur eine PENDING-Zeile pro Channel");
         assert_eq!(name, "neu", "letzter Wunsch gewinnt");
     }
@@ -451,10 +494,10 @@ mod tests {
     async fn enqueue_ignoriert_leeren_namen() {
         let (_d, q) = mk().await;
         q.enqueue(1, "   ", "r").await.unwrap();
-        let n: i64 =
-            q.db.read(|c| c.query_row("SELECT COUNT(*) FROM rename_requests", [], |r| r.get(0)))
-                .await
-                .unwrap();
+        let n = sqlx::query_scalar!(r#"SELECT COUNT(*) AS "count!" FROM voice.rename_requests"#)
+            .fetch_one(&q.pool)
+            .await
+            .unwrap();
         assert_eq!(n, 0);
     }
 
@@ -464,65 +507,69 @@ mod tests {
         q.enqueue(10, "a", "r").await.unwrap();
         q.enqueue(20, "b", "r").await.unwrap();
 
-        let first = claim_next(&q.db).await.unwrap().expect("claim1");
+        let first = claim_next(&q.pool).await.unwrap().expect("claim1");
         assert_eq!(first.channel_id, 10, "FIFO: ältester zuerst");
-        let assigned: i64 =
-            q.db.read({
-                let id = first.id;
-                move |c| {
-                    c.query_row(
-                        "SELECT assigned_worker_id FROM rename_requests WHERE id=?1",
-                        params![id],
-                        |r| r.get(0),
-                    )
-                }
-            })
-            .await
-            .unwrap();
+        let assigned = sqlx::query_scalar!(
+            r#"
+            SELECT assigned_worker_id AS "assigned_worker_id!"
+              FROM voice.rename_requests
+             WHERE id = $1
+            "#,
+            first.id,
+        )
+        .fetch_one(&q.pool)
+        .await
+        .unwrap();
         assert_ne!(assigned, 0, "Claim setzt wie Python eine Worker-ID");
-        let second = claim_next(&q.db).await.unwrap().expect("claim2");
+        let second = claim_next(&q.pool).await.unwrap().expect("claim2");
         assert_eq!(second.channel_id, 20);
         assert!(
-            claim_next(&q.db).await.unwrap().is_none(),
+            claim_next(&q.pool).await.unwrap().is_none(),
             "keine PENDING mehr"
         );
 
         let fid = first.id;
-        set_done(&q.db, fid).await.unwrap();
-        let (status, done_worker, done_error): (String, i64, Option<String>) =
-            q.db.read(move |c| {
-                c.query_row(
-                    "SELECT status, assigned_worker_id, last_error FROM rename_requests WHERE id=?1",
-                    params![fid],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                )
-            })
-            .await
-            .unwrap();
-        assert_eq!(status, "DONE");
-        assert_ne!(done_worker, 0);
-        assert_eq!(done_error, None);
+        set_done(&q.pool, fid).await.unwrap();
+        let done = sqlx::query!(
+            r#"
+            SELECT status,
+                   assigned_worker_id AS "assigned_worker_id!",
+                   last_error
+              FROM voice.rename_requests
+             WHERE id = $1
+            "#,
+            fid,
+        )
+        .fetch_one(&q.pool)
+        .await
+        .unwrap();
+        assert_eq!(done.status, "DONE");
+        assert_ne!(done.assigned_worker_id, 0);
+        assert_eq!(done.last_error, None);
 
         // Retry erhöht retry_count und setzt zurück auf PENDING.
         let sid = second.id;
-        set_pending(&q.db, sid, Some("HTTP 500: nope"), true)
+        set_pending(&q.pool, sid, Some("HTTP 500: nope"), true)
             .await
             .unwrap();
-        let (st, rc, pending_worker, pending_error): (String, i64, i64, Option<String>) =
-            q.db.read(move |c| {
-                c.query_row(
-                    "SELECT status, retry_count, assigned_worker_id, last_error
-                       FROM rename_requests WHERE id=?1",
-                    params![sid],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                )
-            })
-            .await
-            .unwrap();
-        assert_eq!(st, "PENDING");
-        assert_eq!(rc, 1);
-        assert_eq!(pending_worker, 0);
-        assert_eq!(pending_error.as_deref(), Some("HTTP 500: nope"));
+        let pending = sqlx::query!(
+            r#"
+            SELECT status,
+                   COALESCE(retry_count, 0) AS "retry_count!",
+                   assigned_worker_id AS "assigned_worker_id!",
+                   last_error
+              FROM voice.rename_requests
+             WHERE id = $1
+            "#,
+            sid,
+        )
+        .fetch_one(&q.pool)
+        .await
+        .unwrap();
+        assert_eq!(pending.status, "PENDING");
+        assert_eq!(pending.retry_count, 1);
+        assert_eq!(pending.assigned_worker_id, 0);
+        assert_eq!(pending.last_error.as_deref(), Some("HTTP 500: nope"));
     }
 
     #[test]

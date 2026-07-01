@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.oauth_states\n               SET used = TRUE\n             WHERE state = $1\n               AND used IS NOT TRUE\n               AND expires_at > $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "68155f28af3855b3225f40f44a18aa5860e2343eb6bf6d07c3a4d398d3da585e"
+}

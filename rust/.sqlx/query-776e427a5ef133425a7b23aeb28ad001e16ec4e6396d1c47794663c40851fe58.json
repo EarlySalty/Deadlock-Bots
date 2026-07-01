@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.rename_requests\n             WHERE channel_id = $1\n               AND status = 'PENDING'\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "776e427a5ef133425a7b23aeb28ad001e16ec4e6396d1c47794663c40851fe58"
+}

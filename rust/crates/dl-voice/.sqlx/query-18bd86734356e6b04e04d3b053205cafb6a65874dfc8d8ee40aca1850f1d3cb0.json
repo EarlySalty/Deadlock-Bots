@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT status,\n                   assigned_worker_id AS \"assigned_worker_id!\",\n                   last_error\n              FROM voice.rename_requests\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "assigned_worker_id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "18bd86734356e6b04e04d3b053205cafb6a65874dfc8d8ee40aca1850f1d3cb0"
+}

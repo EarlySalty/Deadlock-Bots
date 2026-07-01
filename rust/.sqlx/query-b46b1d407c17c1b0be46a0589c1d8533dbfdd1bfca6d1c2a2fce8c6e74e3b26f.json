@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE scrim.participants\n           SET status = $1,\n               updated_at = $2\n         WHERE id = $3\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b46b1d407c17c1b0be46a0589c1d8533dbfdd1bfca6d1c2a2fce8c6e74e3b26f"
+}

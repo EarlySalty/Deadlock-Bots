@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT discord_id, steam_id\n              FROM core.steam_links\n             WHERE discord_id = ANY($1)\n               AND steam_id != ''\n             ORDER BY primary_account DESC, verified DESC, updated_at DESC\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "steam_id",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8Array"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "ed0ad6411d1673b80ae3e28d3b6de9965e117ea68d5c442fb5c058506d49c956"
+}

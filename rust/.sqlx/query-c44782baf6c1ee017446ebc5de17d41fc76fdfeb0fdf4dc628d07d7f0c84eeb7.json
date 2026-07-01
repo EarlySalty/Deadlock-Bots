@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.rename_requests (\n                id, channel_id, new_name, reason, status, retry_count, assigned_worker_id\n            )\n            VALUES ($1, $2, $3, $4, 'PENDING', 0, 0)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c44782baf6c1ee017446ebc5de17d41fc76fdfeb0fdf4dc628d07d7f0c84eeb7"
+}

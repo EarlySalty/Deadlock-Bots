@@ -19,12 +19,16 @@
 use std::sync::Arc;
 
 use dl_ai::{GenerateRequest, TextGenerator};
-use dl_db::Db;
+use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
-use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
+use sqlx::PgPool;
+
+use crate::db::{
+    advisory_lock, i64_to_i32, pg_i64_to_u64, u64_to_i64, unix_from_utc, utc_from_unix,
+};
 
 pub const COACHING_PANEL_CHANNEL_ID: u64 = 1494373349944459355;
 pub const COACH_ROLE_ID: u64 = 1494372744286965941;
@@ -48,6 +52,7 @@ pub const COACHING_WEBSITE_BUTTON_LABEL: &str = "Coaching-Anfrage starten";
 pub const COACHING_WEBSITE_OPEN_BUTTON_LABEL: &str = "Auf der Website öffnen";
 const PANEL_KV_NS: &str = "coaching";
 const PANEL_KV_KEY: &str = "panel_message_id";
+const COACHING_REQUESTS_ID_LOCK: i64 = 0x4451_0008_0004_0002;
 
 pub const COACHING_ANALYSIS_SYSTEM: &str = r#"Du bist ein Deadlock Coaching Koordinator.
 
@@ -521,7 +526,7 @@ pub trait CoachingPort: Send + Sync {
 }
 
 pub struct CoachingRequests {
-    pub db: Db,
+    pub pool: PgPool,
     pub port: Arc<dyn CoachingPort>,
     pub ai: Option<Arc<dyn TextGenerator>>,
     pub guild_id: u64,
@@ -533,14 +538,14 @@ pub struct CoachingRequests {
 
 impl CoachingRequests {
     pub fn new(
-        db: Db,
+        pool: PgPool,
         port: Arc<dyn CoachingPort>,
         ai: Option<Arc<dyn TextGenerator>>,
         guild_id: u64,
         website: Option<Arc<dyn crate::coaching::CoachingWebsiteSyncClient>>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            db,
+            pool,
             port,
             ai,
             guild_id,
@@ -570,10 +575,13 @@ impl CoachingRequests {
 
         match self.port.post_panel(COACHING_PANEL_CHANNEL_ID, body).await {
             Ok(message_id) => {
-                if let Err(err) = self
-                    .db
-                    .kv_set(PANEL_KV_NS, PANEL_KV_KEY, message_id.to_string())
-                    .await
+                if let Err(err) = kv::set(
+                    &self.pool,
+                    PANEL_KV_NS,
+                    PANEL_KV_KEY,
+                    &message_id.to_string(),
+                )
+                .await
                 {
                     tracing::warn!(%err, "Coaching-Panel-ID konnte nicht gespeichert werden");
                 }
@@ -583,8 +591,7 @@ impl CoachingRequests {
     }
 
     async fn panel_message_id(&self) -> Option<u64> {
-        self.db
-            .kv_get(PANEL_KV_NS, PANEL_KV_KEY)
+        kv::get(&self.pool, PANEL_KV_NS, PANEL_KV_KEY)
             .await
             .ok()
             .flatten()
@@ -600,44 +607,60 @@ impl CoachingRequests {
         let Some(client) = self.website.clone() else {
             return;
         };
-        let db = self.db.clone();
+        let pool = self.pool.clone();
         tokio::spawn(async move {
             let request_id = opts.request_id;
+            let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") else {
+                tracing::warn!(
+                    request_id,
+                    "Coaching-Mirror: request_id passt nicht in INTEGER"
+                );
+                return;
+            };
             // Volle Zeile lesen — wie `db.query_one("SELECT * ...")` in Python.
-            let row: Option<MirrorRow> = db
-                .read(move |conn| {
-                    conn.query_row(
-                        "SELECT id, website_request_id, discord_user_id, COALESCE(discord_username,''),
-                                rank, subrank, hero, games_played, hours_played,
-                                availability, current_problems, COALESCE(ai_summary,''),
-                                status, assigned_coach_id, reserved_until
-                           FROM coaching_requests WHERE id = ?1",
-                        [request_id],
-                        |r| {
-                            Ok(MirrorRow {
-                                id: r.get(0)?,
-                                website_request_id: r.get::<_, Option<String>>(1)?,
-                                discord_user_id: r.get(2)?,
-                                discord_username: r.get(3)?,
-                                rank: r.get(4)?,
-                                subrank: r.get(5)?,
-                                hero: r.get::<_, Option<String>>(6)?,
-                                games_played: r.get::<_, Option<String>>(7)?,
-                                hours_played: r.get::<_, Option<String>>(8)?,
-                                availability: r.get::<_, Option<String>>(9)?,
-                                current_problems: r.get::<_, Option<String>>(10)?,
-                                ai_summary: r.get(11)?,
-                                status: r.get(12)?,
-                                assigned_coach_id: r.get::<_, Option<String>>(13)?,
-                                reserved_until: r.get::<_, Option<i64>>(14)?,
-                            })
-                        },
-                    )
-                    .optional()
-                })
-                .await
-                .ok()
-                .flatten();
+            let row = sqlx::query!(
+                r#"
+                SELECT bot_request_id AS "id!: i32",
+                       website_request_id,
+                       discord_user_id,
+                       COALESCE(discord_username, '') AS "discord_username!",
+                       rank,
+                       subrank,
+                       hero,
+                       games_played,
+                       hours_played,
+                       availability,
+                       current_problems,
+                       COALESCE(ai_summary, '') AS "ai_summary!",
+                       COALESCE(status, '') AS "status!",
+                       assigned_coach_id,
+                       reserved_until
+                  FROM coaching.requests
+                 WHERE bot_request_id = $1
+                "#,
+                request_id_i32,
+            )
+            .fetch_optional(&pool)
+            .await
+            .ok()
+            .flatten()
+            .map(|r| MirrorRow {
+                id: i64::from(r.id),
+                website_request_id: r.website_request_id,
+                discord_user_id: r.discord_user_id,
+                discord_username: r.discord_username,
+                rank: r.rank,
+                subrank: r.subrank,
+                hero: r.hero,
+                games_played: r.games_played,
+                hours_played: r.hours_played,
+                availability: r.availability,
+                current_problems: r.current_problems,
+                ai_summary: r.ai_summary,
+                status: r.status,
+                assigned_coach_id: r.assigned_coach_id,
+                reserved_until: r.reserved_until.map(unix_from_utc),
+            });
             let Some(row) = row else {
                 tracing::debug!(
                     request_id,
@@ -701,50 +724,58 @@ impl CoachingRequests {
         Option<u64>,
         Option<i64>,
     )> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT id, discord_user_id, COALESCE(discord_username,''), rank,
-                            COALESCE(subrank,''), COALESCE(hero,''),
-                            COALESCE(games_played,''), COALESCE(hours_played,''),
-                            COALESCE(NULLIF(scheduled_slot,''), availability, ''),
-                            COALESCE(current_problems,''), COALESCE(ai_summary,''),
-                            status, assigned_coach_id,
-                            reserved_until, message_id, role_expires_at
-                       FROM coaching_requests WHERE id = ?1",
-                    [request_id],
-                    |row| {
-                        let rank: String = row.get(3)?;
-                        let subrank: String = row.get(4)?;
-                        let games_played: String = row.get(6)?;
-                        let hours_played: String = row.get(7)?;
-                        Ok(Some((
-                            RequestData {
-                                id: row.get(0)?,
-                                user_id: row.get(1)?,
-                                username: row.get(2)?,
-                                rank: combine_rank(&rank, &subrank),
-                                hero: row.get(5)?,
-                                games_played: combine_games_hours(&games_played, &hours_played),
-                                scheduled_slot: row.get(8)?,
-                                current_problems: row.get(9)?,
-                                ai_summary: row.get(10)?,
-                            },
-                            row.get::<_, String>(11)?,
-                            row.get::<_, Option<String>>(12)?
-                                .and_then(|raw| raw.parse::<u64>().ok()),
-                            row.get::<_, Option<i64>>(13)?,
-                            row.get::<_, Option<u64>>(14)?,
-                            row.get::<_, Option<i64>>(15)?,
-                        )))
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .flatten()
+        let request_id_i32 = i64_to_i32(request_id, "request_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT bot_request_id AS "id!: i32",
+                   discord_user_id,
+                   COALESCE(discord_username, '') AS "discord_username!",
+                   rank,
+                   COALESCE(subrank, '') AS "subrank!",
+                   COALESCE(hero, '') AS "hero!",
+                   COALESCE(games_played, '') AS "games_played!",
+                   COALESCE(hours_played, '') AS "hours_played!",
+                   COALESCE(NULLIF(scheduled_slot, ''), availability, '') AS "scheduled_slot!",
+                   COALESCE(current_problems, '') AS "current_problems!",
+                   COALESCE(ai_summary, '') AS "ai_summary!",
+                   COALESCE(status, '') AS "status!",
+                   assigned_coach_id,
+                   reserved_until,
+                   message_id,
+                   role_expires_at
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+            request_id_i32,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()??;
+        let user_id = pg_i64_to_u64(row.discord_user_id, "discord_user_id").ok()?;
+        let message_id = row
+            .message_id
+            .and_then(|value| pg_i64_to_u64(value, "message_id").ok());
+        let rank = combine_rank(&row.rank, &row.subrank);
+        let games_played = combine_games_hours(&row.games_played, &row.hours_played);
+        Some((
+            RequestData {
+                id: i64::from(row.id),
+                user_id,
+                username: row.discord_username,
+                rank,
+                hero: row.hero,
+                games_played,
+                scheduled_slot: row.scheduled_slot,
+                current_problems: row.current_problems,
+                ai_summary: row.ai_summary,
+            },
+            row.status,
+            row.assigned_coach_id
+                .and_then(|raw| raw.parse::<u64>().ok()),
+            row.reserved_until.map(unix_from_utc),
+            message_id,
+            row.role_expires_at.map(unix_from_utc),
+        ))
     }
 
     /// AI-Analyse (Prompt wie _analyze_with_ai); "" = INVALID_REQUEST.
@@ -793,26 +824,26 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     async fn auto_assign_stats(&self) -> Vec<(u64, i64)> {
         let mut coach_ids = self.port.coach_member_ids(self.guild_id).await;
         coach_ids.retain(|id| !AUTO_ASSIGN_OPTOUT_IDS.contains(id));
-        self.db
-            .read(move |conn| {
-                let mut result = Vec::new();
-                for id in coach_ids {
-                    let coach_id = id.to_string();
-                    let last_assigned_at: i64 = conn
-                        .query_row(
-                            "SELECT COALESCE(last_assigned_at, 0)
-                               FROM coaching_coach_rotation WHERE coach_id = ?1",
-                            [coach_id],
-                            |row| row.get(0),
-                        )
-                        .optional()?
-                        .unwrap_or(0);
-                    result.push((id, last_assigned_at));
-                }
-                Ok(result)
-            })
+        let mut result = Vec::new();
+        for id in coach_ids {
+            let coach_id = id.to_string();
+            let last_assigned_at = sqlx::query_scalar!(
+                r#"
+                SELECT last_assigned_at
+                  FROM coaching.coach_rotation
+                 WHERE coach_id = $1
+                "#,
+                coach_id,
+            )
+            .fetch_optional(&self.pool)
             .await
-            .unwrap_or_default()
+            .ok()
+            .flatten()
+            .map(unix_from_utc)
+            .unwrap_or(0);
+            result.push((id, last_assigned_at));
+        }
+        result
     }
 
     async fn post_request_to_channel(
@@ -849,35 +880,53 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .await?;
         let request_id = request.id;
         let assigned_coach_id = assigned.map(|coach| coach.to_string());
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE coaching_requests SET message_id=?1, channel_id=?2,
-                            ai_summary=?3, status='analyzed', assigned_coach_id=?4,
-                            reserved_until=?5, updated_at=?6 WHERE id=?7",
-                    rusqlite::params![
-                        message_id,
-                        REQUEST_CHANNEL_ID,
-                        ai_summary,
-                        assigned_coach_id,
-                        reserved_until,
-                        chrono::Utc::now().timestamp(),
-                        request_id
-                    ],
-                )?;
-                if let (Some(coach), Some(last_assigned_at)) = (assigned, reserved_until) {
-                    conn.execute(
-                        "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
-                         VALUES (?1, ?2)
-                         ON CONFLICT(coach_id) DO UPDATE SET
-                           last_assigned_at = excluded.last_assigned_at",
-                        rusqlite::params![coach.to_string(), last_assigned_at],
-                    )?;
-                }
-                Ok(())
-            })
+        let request_id_i32 = i64_to_i32(request_id, "request_id").map_err(|err| err.to_string())?;
+        let message_id_i64 = u64_to_i64(message_id, "message_id").map_err(|err| err.to_string())?;
+        let channel_id_i64 =
+            u64_to_i64(REQUEST_CHANNEL_ID, "REQUEST_CHANNEL_ID").map_err(|err| err.to_string())?;
+        let reserved_until_dt = reserved_until
+            .map(utc_from_unix)
+            .transpose()
+            .map_err(|err| err.to_string())?;
+        let updated_at = chrono::Utc::now();
+        sqlx::query!(
+            r#"
+            UPDATE coaching.requests
+               SET message_id = $1,
+                   channel_id = $2,
+                   ai_summary = $3,
+                   status = 'analyzed',
+                   assigned_coach_id = $4,
+                   reserved_until = $5,
+                   updated_at = $6
+             WHERE bot_request_id = $7
+            "#,
+            message_id_i64,
+            channel_id_i64,
+            ai_summary,
+            assigned_coach_id,
+            reserved_until_dt,
+            updated_at,
+            request_id_i32,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        if let Some(coach) = assigned {
+            sqlx::query!(
+                r#"
+                INSERT INTO coaching.coach_rotation(coach_id, last_assigned_at)
+                VALUES ($1, $2)
+                ON CONFLICT(coach_id) DO UPDATE SET
+                  last_assigned_at = excluded.last_assigned_at
+                "#,
+                coach.to_string(),
+                updated_at,
+            )
+            .execute(&self.pool)
             .await
             .map_err(|err| err.to_string())?;
+        }
         // Website-Mirror (Python `_post_request_to_channel`:852) — mit
         // dem Display-Namen des reservierten Coaches, falls einer
         // zugewiesen wurde.
@@ -921,101 +970,148 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         let availability = data.availability.clone();
         let scheduled_slot = data.availability.clone();
         let current_problems = data.current_problems.clone();
-        let now = chrono::Utc::now().timestamp();
-        self.db
-            .write(move |conn| {
-                let active_ban: Option<i64> = conn
-                    .query_row(
-                        "SELECT expires_at
-                           FROM coaching_bans
-                          WHERE discord_user_id = ?1 AND expires_at > ?2
-                          LIMIT 1",
-                        rusqlite::params![discord_user_id, now],
-                        |row| row.get(0),
-                    )
-                    .optional()?;
-                if active_ban.is_some() {
-                    return Ok(Err(
-                        "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen.".to_string(),
-                    ));
-                }
-
-                let existing: Option<(i64, Option<i64>)> = conn
-                    .query_row(
-                        "SELECT id, message_id
-                           FROM coaching_requests
-                          WHERE website_request_id = ?1",
-                        [&website_request_id],
-                        |row| Ok((row.get(0)?, row.get(1)?)),
-                    )
-                    .optional()?;
-                if let Some((local_request_id, message_id)) = existing {
-                    conn.execute(
-                        "UPDATE coaching_requests SET
-                           coachee_id=?1,
-                           discord_user_id=?2,
-                           discord_username=?3,
-                           rank=?4,
-                           subrank=?5,
-                           hero=?6,
-                           games_played=?7,
-                           hours_played=?8,
-                           availability=?9,
-                           scheduled_slot=?10,
-                           current_problems=?11,
-                           updated_at=?12
-                         WHERE id=?13",
-                        rusqlite::params![
-                            coachee_id,
-                            discord_user_id,
-                            discord_username,
-                            rank,
-                            subrank,
-                            hero,
-                            games_played,
-                            hours_played,
-                            availability,
-                            scheduled_slot,
-                            current_problems,
-                            now,
-                            local_request_id,
-                        ],
-                    )?;
-                    return Ok(Ok(RequestCreatedUpsert {
-                        local_request_id,
-                        already_posted: message_id.is_some(),
-                    }));
-                }
-
-                conn.execute(
-                    "INSERT INTO coaching_requests (
-                       website_request_id, coachee_id, discord_user_id, discord_username,
-                       rank, subrank, hero, games_played, hours_played, availability,
-                       scheduled_slot, current_problems, ai_summary, status, created_at, updated_at
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, '', 'pending', ?13, ?13)",
-                    rusqlite::params![
-                        website_request_id,
-                        coachee_id,
-                        discord_user_id,
-                        discord_username,
-                        rank,
-                        subrank,
-                        hero,
-                        games_played,
-                        hours_played,
-                        availability,
-                        scheduled_slot,
-                        current_problems,
-                        now,
-                    ],
-                )?;
-                Ok(Ok(RequestCreatedUpsert {
-                    local_request_id: conn.last_insert_rowid(),
-                    already_posted: false,
-                }))
-            })
+        let preferred_coach_id = data.preferred_coach_id.clone();
+        let discord_user_id =
+            u64_to_i64(discord_user_id, "discord_user_id").map_err(|err| err.to_string())?;
+        let active_ban = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+            r#"
+            SELECT expires_at
+              FROM coaching.bans
+             WHERE discord_user_id = $1 AND expires_at > now()
+             LIMIT 1
+            "#,
+        )
+        .bind(discord_user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        if active_ban.is_some() {
+            return Err(
+                "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen."
+                    .to_string(),
+            );
+        }
+        let now = chrono::Utc::now();
+        let mut tx = self.pool.begin().await.map_err(|err| err.to_string())?;
+        advisory_lock(&mut tx, COACHING_REQUESTS_ID_LOCK)
             .await
-            .map_err(|err| err.to_string())?
+            .map_err(|err| err.to_string())?;
+        let existing = sqlx::query!(
+            r#"
+            SELECT bot_request_id AS "bot_request_id?: i32", message_id
+              FROM coaching.requests
+             WHERE website_request_id = $1
+            "#,
+            website_request_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?;
+        if let Some(existing) = existing {
+            let local_request_id = if let Some(local_request_id) = existing.bot_request_id {
+                local_request_id
+            } else {
+                sqlx::query_scalar!(
+                    r#"
+                    SELECT COALESCE(MAX(bot_request_id), 0) + 1 AS "next_id!: i32"
+                      FROM coaching.requests
+                    "#
+                )
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|err| err.to_string())?
+            };
+            sqlx::query!(
+                r#"
+                UPDATE coaching.requests
+                   SET bot_request_id = $1,
+                       coachee_id = $2,
+                       discord_user_id = $3,
+                       discord_username = $4,
+                       rank = $5,
+                       subrank = $6,
+                       hero = $7,
+                       games_played = $8,
+                       hours_played = $9,
+                       availability = $10,
+                       scheduled_slot = $11,
+                       current_problems = $12,
+                       preferred_coach_id = $13,
+                       updated_at = $14
+                 WHERE website_request_id = $15
+                "#,
+                local_request_id,
+                coachee_id,
+                discord_user_id,
+                discord_username,
+                rank,
+                subrank,
+                hero,
+                games_played,
+                hours_played,
+                availability,
+                scheduled_slot,
+                current_problems,
+                preferred_coach_id,
+                now,
+                website_request_id,
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(|err| err.to_string())?;
+            tx.commit().await.map_err(|err| err.to_string())?;
+            return Ok(RequestCreatedUpsert {
+                local_request_id: i64::from(local_request_id),
+                already_posted: existing.message_id.is_some(),
+            });
+        }
+
+        let next_id = sqlx::query_scalar!(
+            r#"
+            SELECT COALESCE(MAX(bot_request_id), 0) + 1 AS "next_id!: i32"
+              FROM coaching.requests
+            "#
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?;
+        let request_uid = format!("website:{website_request_id}");
+        sqlx::query!(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, coachee_id,
+                discord_user_id, discord_username, rank, subrank, hero, games_played,
+                hours_played, availability, scheduled_slot, current_problems,
+                preferred_coach_id, ai_summary, status, created_at, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+                    $11, $12, $13, $14, $15, '', 'pending', $16, $16)
+            "#,
+            request_uid,
+            next_id,
+            website_request_id,
+            coachee_id,
+            discord_user_id,
+            discord_username,
+            rank,
+            subrank,
+            hero,
+            games_played,
+            hours_played,
+            availability,
+            scheduled_slot,
+            current_problems,
+            preferred_coach_id,
+            now,
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(|err| err.to_string())?;
+        tx.commit().await.map_err(|err| err.to_string())?;
+        Ok(RequestCreatedUpsert {
+            local_request_id: i64::from(next_id),
+            already_posted: false,
+        })
     }
 
     pub async fn post_request_created_notification(&self, item: &Value) -> Result<(), String> {
@@ -1041,18 +1137,23 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
 
     /// Reservierung aufheben + Nachricht aktualisieren (wie _open_request_to_all).
     pub async fn open_request_to_all(&self, request_id: i64, reason: &str) {
-        let now_ts = chrono::Utc::now().timestamp();
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE coaching_requests SET assigned_coach_id=NULL, reserved_until=NULL,
-                            updated_at=?1 WHERE id=?2 AND status='analyzed'",
-                    rusqlite::params![now_ts, request_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let now = chrono::Utc::now();
+        let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") else {
+            return;
+        };
+        let _ = sqlx::query!(
+            r#"
+            UPDATE coaching.requests
+               SET assigned_coach_id = NULL,
+                   reserved_until = NULL,
+                   updated_at = $1
+             WHERE bot_request_id = $2 AND status = 'analyzed'
+            "#,
+            now,
+            request_id_i32,
+        )
+        .execute(&self.pool)
+        .await;
         let Some((request, status, _, _, message_id, _)) = self.load_request(request_id).await
         else {
             return;
@@ -1069,7 +1170,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             "📥 Anfrage von <@{}> – {prefix}jetzt für alle Coaches offen",
             request.user_id
         );
-        let embed = build_request_embed_for_existing_request(&request, None, None, now_ts);
+        let embed = build_request_embed_for_existing_request(&request, None, None, now.timestamp());
         self.port
             .edit_request_message(
                 REQUEST_CHANNEL_ID,
@@ -1090,51 +1191,57 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
 
     /// Analyse-Loop (wie _analyze_pending_requests, Claim via rowcount).
     pub async fn analyze_pending(&self) {
-        let rows: Vec<i64> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM coaching_requests
-                      WHERE status='pending' AND current_problems IS NOT NULL
-                        AND current_problems != ''
-                        AND (ai_summary IS NULL OR ai_summary = '')
-                      ORDER BY created_at ASC LIMIT 5",
-                )?;
-                let rows = stmt.query_map([], |row| row.get(0))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
+        let rows = sqlx::query_scalar!(
+            r#"
+            SELECT bot_request_id AS "bot_request_id!: i32"
+              FROM coaching.requests
+             WHERE status = 'pending'
+               AND current_problems IS NOT NULL
+               AND current_problems != ''
+               AND (ai_summary IS NULL OR ai_summary = '')
+             ORDER BY created_at ASC
+             LIMIT 5
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
         for request_id in rows {
-            let claimed: usize = self
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE coaching_requests SET status='analyzing', updated_at=?1
-                          WHERE id=?2 AND status='pending'",
-                        rusqlite::params![chrono::Utc::now().timestamp(), request_id],
-                    )
-                })
-                .await
-                .unwrap_or(0);
+            let request_id_i64 = i64::from(request_id);
+            let claimed = sqlx::query!(
+                r#"
+                UPDATE coaching.requests
+                   SET status = 'analyzing',
+                       updated_at = $1
+                 WHERE bot_request_id = $2 AND status = 'pending'
+                "#,
+                chrono::Utc::now(),
+                request_id,
+            )
+            .execute(&self.pool)
+            .await
+            .map(|result| result.rows_affected())
+            .unwrap_or(0);
             if claimed == 0 {
                 continue;
             }
-            let Some((mut request, ..)) = self.load_request(request_id).await else {
+            let Some((mut request, ..)) = self.load_request(request_id_i64).await else {
                 continue;
             };
             let summary = self.analyze(&request).await;
             if summary.is_empty() {
-                let _ = self
-                    .db
-                    .write(move |conn| {
-                        conn.execute(
-                            "UPDATE coaching_requests SET status='invalid', updated_at=?1 WHERE id=?2",
-                            rusqlite::params![chrono::Utc::now().timestamp(), request_id],
-                        )
-                        .map(|_| ())
-                    })
-                    .await;
+                let _ = sqlx::query!(
+                    r#"
+                    UPDATE coaching.requests
+                       SET status = 'invalid',
+                           updated_at = $1
+                     WHERE bot_request_id = $2
+                    "#,
+                    chrono::Utc::now(),
+                    request_id,
+                )
+                .execute(&self.pool)
+                .await;
                 continue;
             }
             self.post_request(&mut request, summary).await;
@@ -1143,22 +1250,23 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
 
     /// Abgelaufene Reservierungen öffnen (60-s-Loop).
     pub async fn expire_reservations(&self) {
-        let now_ts = chrono::Utc::now().timestamp();
-        let expired: Vec<i64> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id FROM coaching_requests
-                      WHERE status='analyzed' AND assigned_coach_id IS NOT NULL
-                        AND reserved_until IS NOT NULL AND reserved_until < ?1",
-                )?;
-                let rows = stmt.query_map([now_ts], |row| row.get(0))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
+        let expired = sqlx::query_scalar!(
+            r#"
+            SELECT bot_request_id AS "bot_request_id!: i32"
+              FROM coaching.requests
+             WHERE status = 'analyzed'
+               AND assigned_coach_id IS NOT NULL
+               AND reserved_until IS NOT NULL
+               AND reserved_until < $1
+            "#,
+            chrono::Utc::now(),
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
         for request_id in expired {
-            self.open_request_to_all(request_id, "expired").await;
+            self.open_request_to_all(i64::from(request_id), "expired")
+                .await;
         }
     }
 
@@ -1166,23 +1274,26 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     /// aktive Rolle nach 48 h (`coaching_requests.role_expires_at`), Reward-
     /// Rolle nach 5 Tagen (`coaching_sessions.reward_role_expires_at`).
     pub async fn expire_roles(&self) {
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now();
         let guild_id = self.guild_id;
 
-        let active: Vec<(i64, u64)> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, discord_user_id FROM coaching_requests
-                      WHERE role_removed_at IS NULL AND role_expires_at IS NOT NULL
-                        AND role_expires_at < ?1",
-                )?;
-                let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
-        for (req_id, user_id) in active {
+        let active = sqlx::query!(
+            r#"
+            SELECT bot_request_id AS "bot_request_id!: i32", discord_user_id
+              FROM coaching.requests
+             WHERE role_removed_at IS NULL
+               AND role_expires_at IS NOT NULL
+               AND role_expires_at < $1
+            "#,
+            now,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for row in active {
+            let Some(user_id) = pg_i64_to_u64(row.discord_user_id, "discord_user_id").ok() else {
+                continue;
+            };
             self.remove_role_if_present(
                 guild_id,
                 user_id,
@@ -1190,32 +1301,35 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 "Coaching-Rolle abgelaufen (48h)",
             )
             .await;
-            let _ = self
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE coaching_requests SET role_removed_at=?1, updated_at=?1 WHERE id=?2",
-                        rusqlite::params![now, req_id],
-                    )
-                    .map(|_| ())
-                })
-                .await;
-            let thread: Option<u64> = self
-                .db
-                .read(move |conn| {
-                    conn.query_row(
-                        "SELECT discord_thread_id FROM coaching_sessions
-                          WHERE request_id=?1 AND status IN ('active','waiting_survey')
-                          ORDER BY created_at DESC LIMIT 1",
-                        [req_id],
-                        |r| r.get::<_, Option<u64>>(0),
-                    )
-                    .optional()
-                    .map(|o| o.flatten())
-                })
-                .await
-                .ok()
-                .flatten();
+            let _ = sqlx::query!(
+                r#"
+                UPDATE coaching.requests
+                   SET role_removed_at = $1,
+                       updated_at = $1
+                 WHERE bot_request_id = $2
+                "#,
+                now,
+                row.bot_request_id,
+            )
+            .execute(&self.pool)
+            .await;
+            let thread = sqlx::query_scalar!(
+                r#"
+                SELECT discord_thread_id
+                  FROM coaching.sessions
+                 WHERE bot_request_id = $1
+                   AND status IN ('active', 'waiting_survey')
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                "#,
+                row.bot_request_id,
+            )
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+            .and_then(|id| pg_i64_to_u64(id, "discord_thread_id").ok());
             if let Some(tid) = thread {
                 self.port
                     .send_channel_text(
@@ -1227,20 +1341,26 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             }
         }
 
-        let reward: Vec<(i64, u64)> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, discord_user_id FROM coaching_sessions
-                      WHERE reward_role_removed_at IS NULL AND reward_role_expires_at IS NOT NULL
-                        AND reward_role_expires_at < ?1",
-                )?;
-                let rows = stmt.query_map([now], |r| Ok((r.get(0)?, r.get(1)?)))?;
-                rows.collect()
-            })
-            .await
-            .unwrap_or_default();
-        for (sess_id, user_id) in reward {
+        let reward = sqlx::query!(
+            r#"
+            SELECT id, discord_user_id
+              FROM coaching.sessions
+             WHERE reward_role_removed_at IS NULL
+               AND reward_role_expires_at IS NOT NULL
+               AND reward_role_expires_at < $1
+            "#,
+            now,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        for row in reward {
+            let Some(user_id_i64) = row.discord_user_id else {
+                continue;
+            };
+            let Some(user_id) = pg_i64_to_u64(user_id_i64, "discord_user_id").ok() else {
+                continue;
+            };
             self.remove_role_if_present(
                 guild_id,
                 user_id,
@@ -1248,16 +1368,17 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 "Coaching Reward-Rolle abgelaufen (5 Tage)",
             )
             .await;
-            let _ = self
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE coaching_sessions SET reward_role_removed_at=?1 WHERE id=?2",
-                        rusqlite::params![now, sess_id],
-                    )
-                    .map(|_| ())
-                })
-                .await;
+            let _ = sqlx::query!(
+                r#"
+                UPDATE coaching.sessions
+                   SET reward_role_removed_at = $1
+                 WHERE id = $2
+                "#,
+                now,
+                row.id,
+            )
+            .execute(&self.pool)
+            .await;
         }
     }
 
@@ -1284,50 +1405,37 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
     }
 
     async fn load_survey_sessions(&self, member: Option<u64>) -> Vec<SurveySession> {
-        self.db
-            .read(move |conn| {
-                let map = |row: &rusqlite::Row| {
-                    Ok(SurveySession {
-                        id: row.get(0)?,
-                        coach_id: row
-                            .get::<_, Option<String>>(1)?
-                            .and_then(|s| s.parse::<u64>().ok()),
-                        user_id: row.get::<_, i64>(2)? as u64,
-                        voice_started_at: row.get(3)?,
-                        request_id: row.get(4)?,
-                    })
-                };
-                let mut out = Vec::new();
-                match member {
-                    Some(mid) => {
-                        let mut stmt = conn.prepare(
-                            "SELECT id, coach_id, discord_user_id, voice_started_at, request_id
-                               FROM coaching_sessions
-                              WHERE status='active' AND survey_sent_at IS NULL
-                                AND (discord_user_id=?1 OR coach_id=?2)",
-                        )?;
-                        let rows =
-                            stmt.query_map(rusqlite::params![mid as i64, mid.to_string()], map)?;
-                        for r in rows {
-                            out.push(r?);
-                        }
-                    }
-                    None => {
-                        let mut stmt = conn.prepare(
-                            "SELECT id, coach_id, discord_user_id, voice_started_at, request_id
-                               FROM coaching_sessions
-                              WHERE status='active' AND survey_sent_at IS NULL",
-                        )?;
-                        let rows = stmt.query_map([], map)?;
-                        for r in rows {
-                            out.push(r?);
-                        }
-                    }
-                }
-                Ok(out)
+        let member_i64 = member.and_then(|value| u64_to_i64(value, "member_id").ok());
+        let member_text = member.map(|value| value.to_string());
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, coach_id, discord_user_id, voice_started_at, bot_request_id
+              FROM coaching.sessions
+             WHERE status = 'active'
+               AND survey_sent_at IS NULL
+               AND (
+                    $1::bigint IS NULL
+                    OR discord_user_id = $1
+                    OR coach_id = $2
+               )
+            "#,
+            member_i64,
+            member_text,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .unwrap_or_default();
+        rows.into_iter()
+            .filter_map(|row| {
+                Some(SurveySession {
+                    id: row.id,
+                    coach_id: row.coach_id.and_then(|s| s.parse::<u64>().ok()),
+                    user_id: pg_i64_to_u64(row.discord_user_id?, "discord_user_id").ok()?,
+                    voice_started_at: row.voice_started_at.map(unix_from_utc),
+                    request_id: i64::from(row.bot_request_id?),
+                })
             })
-            .await
-            .unwrap_or_default()
+            .collect()
     }
 
     /// Kern-Logik (Python `_process_session_voice_state`): sitzen User und Coach
@@ -1351,26 +1459,27 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .port
             .member_voice_channel_in_category(guild, coach_id, COACHING_VOICE_CATEGORY_ID)
             .await;
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now();
 
         // Beide noch im selben Coaching-VC → Voice-Tracking aktualisieren.
         if user_vc.is_some() && user_vc == coach_vc {
-            let vc = user_vc.unwrap_or_default() as i64;
-            let id = session.id.clone();
-            let _ = self
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE coaching_sessions
-                            SET voice_channel_id=?1,
-                                voice_started_at=COALESCE(voice_started_at, ?2),
-                                voice_last_seen_at=?2
-                          WHERE id=?3",
-                        rusqlite::params![vc, now, id],
-                    )
-                    .map(|_| ())
-                })
-                .await;
+            let Ok(vc) = u64_to_i64(user_vc.unwrap_or_default(), "voice_channel_id") else {
+                return;
+            };
+            let _ = sqlx::query!(
+                r#"
+                UPDATE coaching.sessions
+                   SET voice_channel_id = $1,
+                       voice_started_at = COALESCE(voice_started_at, $2),
+                       voice_last_seen_at = $2
+                 WHERE id = $3
+                "#,
+                vc,
+                now,
+                session.id,
+            )
+            .execute(&self.pool)
+            .await;
             return;
         }
 
@@ -1402,21 +1511,25 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         // Voice-Session beendet → atomar abschließen. Der WHERE-Filter macht den
         // Claim wettlaufsicher: Poll und Voice-Listener können dieselbe Session
         // gleichzeitig sehen, aber nur einer trifft `status='active'`.
-        let reward_expiry = now + REWARD_ROLE_DURATION_SECS;
-        let id = session.id.clone();
-        let claimed = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE coaching_sessions
-                        SET status='completed', completed_at=?1, survey_sent_at=?1,
-                            reward_role_expires_at=?2, voice_last_seen_at=?1
-                      WHERE id=?3 AND status='active' AND survey_sent_at IS NULL",
-                    rusqlite::params![now, reward_expiry, id],
-                )
-            })
-            .await
-            .unwrap_or(0);
+        let reward_expiry = now + chrono::Duration::seconds(REWARD_ROLE_DURATION_SECS);
+        let claimed = sqlx::query!(
+            r#"
+            UPDATE coaching.sessions
+               SET status = 'completed',
+                   completed_at = $1,
+                   survey_sent_at = $1,
+                   reward_role_expires_at = $2,
+                   voice_last_seen_at = $1
+             WHERE id = $3 AND status = 'active' AND survey_sent_at IS NULL
+            "#,
+            now,
+            reward_expiry,
+            session.id,
+        )
+        .execute(&self.pool)
+        .await
+        .map(|result| result.rows_affected())
+        .unwrap_or(0);
         if claimed == 0 {
             return;
         }
@@ -1449,18 +1562,21 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         }
 
         let rid = session.request_id;
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE coaching_requests
-                        SET status='completed', role_removed_at=?1, updated_at=?1
-                      WHERE id=?2",
-                    rusqlite::params![now, rid],
-                )
-                .map(|_| ())
-            })
+        if let Ok(rid_i32) = i64_to_i32(rid, "request_id") {
+            let _ = sqlx::query!(
+                r#"
+                UPDATE coaching.requests
+                   SET status = 'completed',
+                       role_removed_at = $1,
+                       updated_at = $1
+                 WHERE bot_request_id = $2
+                "#,
+                now,
+                rid_i32,
+            )
+            .execute(&self.pool)
             .await;
+        }
         // Website-Mirror (Python `coaching_survey.py`:311): Session als
         // 'completed' spiegeln, inkl. bot_session_id.
         self.mirror_to_website(MirrorOpts {
@@ -1561,20 +1677,24 @@ impl InteractionHandler for CoachingHandler {
 
         // /coaching-status — Status der letzten Anfrage (reiner Read).
         if interaction.command == "coaching-status" {
-            let user_id = interaction.user_id;
-            let status: Option<String> =
-                c.db.read(move |conn| {
-                    conn.query_row(
-                        "SELECT status FROM coaching_requests
-                          WHERE discord_user_id = ?1 ORDER BY created_at DESC LIMIT 1",
-                        rusqlite::params![user_id],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .optional()
-                })
+            let status = match u64_to_i64(interaction.user_id, "interaction.user_id") {
+                Ok(user_id) => sqlx::query_scalar!(
+                    r#"
+                    SELECT status
+                      FROM coaching.requests
+                     WHERE discord_user_id = $1
+                     ORDER BY created_at DESC
+                     LIMIT 1
+                    "#,
+                    user_id,
+                )
+                .fetch_optional(&c.pool)
                 .await
                 .ok()
-                .flatten();
+                .flatten()
+                .flatten(),
+                Err(_) => None,
+            };
             let msg = match status.as_deref() {
                 None => "Du hast keine Coaching-Anfrage gestellt.".to_string(),
                 Some("pending") => {
@@ -1635,28 +1755,51 @@ impl InteractionHandler for CoachingHandler {
                 .unwrap_or("")
                 .trim()
                 .to_string();
-            let _ =
-                c.db.write(move |conn| {
-                    conn.execute(
-                        "INSERT INTO coaching_requests (
-                           discord_user_id, discord_username, rank, subrank, hero,
-                           availability, scheduled_slot, games_played, hours_played,
-                           current_problems, status, created_at, updated_at
-                         ) VALUES (?1, ?2, ?3, '', ?4, ?5, ?5, ?6, '', ?7, 'pending', ?8, ?8)",
-                        rusqlite::params![
-                            user_id,
-                            username,
-                            rank,
-                            hero,
-                            availability,
-                            games_hours,
-                            problems,
-                            chrono::Utc::now().timestamp()
-                        ],
-                    )
-                    .map(|_| ())
-                })
-                .await;
+            if let Ok(user_id_i64) = u64_to_i64(user_id, "user_id") {
+                if let Ok(mut tx) = c.pool.begin().await {
+                    if advisory_lock(&mut tx, COACHING_REQUESTS_ID_LOCK)
+                        .await
+                        .is_ok()
+                    {
+                        if let Ok(next_id) = sqlx::query_scalar!(
+                            r#"
+                            SELECT COALESCE(MAX(bot_request_id), 0) + 1 AS "next_id!: i32"
+                              FROM coaching.requests
+                            "#
+                        )
+                        .fetch_one(&mut *tx)
+                        .await
+                        {
+                            let request_uid = format!("bot:{next_id}");
+                            let _ = sqlx::query!(
+                                r#"
+                                INSERT INTO coaching.requests(
+                                    request_uid, bot_request_id, discord_user_id,
+                                    discord_username, rank, subrank, hero, availability,
+                                    scheduled_slot, games_played, hours_played,
+                                    current_problems, status, created_at, updated_at
+                                )
+                                VALUES ($1, $2, $3, $4, $5, '', $6, $7, $7, $8, '',
+                                        $9, 'pending', $10, $10)
+                                "#,
+                                request_uid,
+                                next_id,
+                                user_id_i64,
+                                username,
+                                rank,
+                                hero,
+                                availability,
+                                games_hours,
+                                problems,
+                                chrono::Utc::now(),
+                            )
+                            .execute(&mut *tx)
+                            .await;
+                            let _ = tx.commit().await;
+                        }
+                    }
+                }
+            }
             return BridgeReply::ephemeral_text(
                 "✅ Deine Coaching-Anfrage wurde gespeichert. Die AI analysiert sie jetzt und postet sie automatisch im Coaching-Channel.",
             );
@@ -1702,49 +1845,77 @@ impl InteractionHandler for CoachingHandler {
                 .port
                 .member_display_name(interaction.guild_id, interaction.user_id)
                 .await;
-            let (sid, cid, uid, uname) = (
-                session_id.clone(),
-                interaction.user_id.to_string(),
-                request.user_id,
-                request.username.clone(),
-            );
-            let channel_id = interaction.channel_id;
+            let request_id_i32 = match i64_to_i32(request_id, "request_id") {
+                Ok(value) => value,
+                Err(_) => return BridgeReply::ephemeral_text("❌ Request-ID ungültig."),
+            };
+            let uid = match u64_to_i64(request.user_id, "request.user_id") {
+                Ok(value) => value,
+                Err(_) => return BridgeReply::ephemeral_text("❌ User-ID ungültig."),
+            };
+            let channel_id = match u64_to_i64(interaction.channel_id, "interaction.channel_id") {
+                Ok(value) => value,
+                Err(_) => return BridgeReply::ephemeral_text("❌ Channel-ID ungültig."),
+            };
+            let assigned_at = chrono::Utc::now();
+            let expires_at_dt = match utc_from_unix(expires_at) {
+                Ok(value) => value,
+                Err(_) => return BridgeReply::ephemeral_text("❌ Ablaufzeit ungültig."),
+            };
+            let coach_id = interaction.user_id.to_string();
             let is_owner_claim = is_owner;
-            let claimed = match c
-                .db
-                .write(move |conn| {
-                    let tx = conn.transaction()?;
-                    let claimed = tx.execute(
-                        "UPDATE coaching_requests
-                            SET status='matched', updated_at=?1
-                          WHERE id=?2
-                            AND status='analyzed'
-                            AND (
-                              ?3 != 0
-                              OR assigned_coach_id IS NULL
-                              OR assigned_coach_id = ?4
-                              OR reserved_until IS NULL
-                              OR reserved_until <= ?1
-                            )",
-                        rusqlite::params![now_ts, request_id, is_owner_claim as i64, cid],
-                    )?;
-                    if claimed == 0 {
-                        tx.rollback()?;
-                        return Ok(false);
-                    }
-                    tx.execute(
-                        "INSERT INTO coaching_sessions (id, request_id, coach_id, discord_user_id,
-                           discord_username, discord_channel_id, status,
-                           role_assigned_at, role_expires_at, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'active', ?7, ?8, ?7)",
-                        rusqlite::params![
-                            sid, request_id, cid, uid, uname, channel_id, now_ts, expires_at
-                        ],
-                    )?;
-                    tx.commit()?;
-                    Ok(true)
-                })
-                .await
+            let claimed = match async {
+                let mut tx = c.pool.begin().await?;
+                let updated = sqlx::query(
+                    r#"
+                    UPDATE coaching.requests
+                       SET status = 'matched',
+                           updated_at = $1
+                     WHERE bot_request_id = $2
+                       AND status = 'analyzed'
+                       AND (
+                         $3
+                         OR assigned_coach_id IS NULL
+                         OR assigned_coach_id = $4
+                         OR reserved_until IS NULL
+                         OR reserved_until <= $1
+                       )
+                    "#,
+                )
+                .bind(assigned_at)
+                .bind(request_id_i32)
+                .bind(is_owner_claim)
+                .bind(&coach_id)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+                if updated == 0 {
+                    tx.rollback().await?;
+                    return Ok::<bool, sqlx::Error>(false);
+                }
+                sqlx::query(
+                    r#"
+                    INSERT INTO coaching.sessions(
+                        id, bot_request_id, coach_id, discord_user_id, discord_username,
+                        discord_channel_id, status, role_assigned_at, role_expires_at, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, 'active', $7, $8, $7)
+                    "#,
+                )
+                .bind(&session_id)
+                .bind(request_id_i32)
+                .bind(&coach_id)
+                .bind(uid)
+                .bind(request.username.clone())
+                .bind(channel_id)
+                .bind(assigned_at)
+                .bind(expires_at_dt)
+                .execute(&mut *tx)
+                .await?;
+                tx.commit().await?;
+                Ok(true)
+            }
+            .await
             {
                 Ok(claimed) => claimed,
                 Err(err) => {
@@ -1857,25 +2028,25 @@ impl InteractionHandler for CoachingHandler {
                 Some((sid, aid)) if aid.parse::<u64>().is_ok() => sid.to_string(),
                 _ => rest.to_string(),
             };
-            let sid = session_id.clone();
-            let session: Option<(Option<u64>, i64, u64)> =
-                c.db.read(move |conn| {
-                    conn.query_row(
-                        "SELECT coach_id, request_id, discord_user_id
-                           FROM coaching_sessions WHERE id = ?1",
-                        [sid],
-                        |row| {
-                            let coach_id = row
-                                .get::<_, Option<String>>(0)?
-                                .and_then(|raw| raw.parse::<u64>().ok());
-                            Ok((coach_id, row.get(1)?, row.get(2)?))
-                        },
-                    )
-                    .optional()
-                })
-                .await
-                .ok()
-                .flatten();
+            let session = sqlx::query!(
+                r#"
+                SELECT coach_id, bot_request_id, discord_user_id
+                  FROM coaching.sessions
+                 WHERE id = $1
+                "#,
+                session_id,
+            )
+            .fetch_optional(&c.pool)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|row| {
+                Some((
+                    row.coach_id.and_then(|raw| raw.parse::<u64>().ok()),
+                    i64::from(row.bot_request_id?),
+                    pg_i64_to_u64(row.discord_user_id?, "discord_user_id").ok()?,
+                ))
+            });
             let Some((coach_id, request_id, author_id)) = session else {
                 return BridgeReply::ephemeral_text("❌ Session nicht gefunden.");
             };
@@ -1888,35 +2059,52 @@ impl InteractionHandler for CoachingHandler {
                     "❌ Nur der zugewiesene Coach oder ein Admin kann abbrechen.",
                 );
             }
-            let ban_expiry = now_ts + 7 * 24 * 3600;
-            let sid2 = session_id.clone();
-            let _ = c
-                .db
-                .write(move |conn| {
-                    conn.execute(
-                        "UPDATE coaching_sessions SET status='cancelled', completed_at=?1 WHERE id=?2",
-                        rusqlite::params![now_ts, sid2],
-                    )?;
-                    conn.execute(
-                        "UPDATE coaching_requests SET status='cancelled', updated_at=?1 WHERE id=?2",
-                        rusqlite::params![now_ts, request_id],
-                    )?;
-                    conn.execute(
-                        "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
-                         VALUES (?1, ?2, ?3, ?4)
-                         ON CONFLICT(discord_user_id) DO UPDATE SET
-                           banned_at=excluded.banned_at, expires_at=excluded.expires_at,
-                           reason=excluded.reason",
-                        rusqlite::params![
-                            author_id,
-                            now_ts,
-                            ban_expiry,
-                            "User hat sich nicht gemeldet / Abbruch durch Coach"
-                        ],
-                    )
-                    .map(|_| ())
-                })
+            let now_dt = chrono::Utc::now();
+            let ban_expiry = now_dt + chrono::Duration::days(7);
+            let _ = sqlx::query!(
+                r#"
+                UPDATE coaching.sessions
+                   SET status = 'cancelled',
+                       completed_at = $1
+                 WHERE id = $2
+                "#,
+                now_dt,
+                session_id,
+            )
+            .execute(&c.pool)
+            .await;
+            if let Ok(request_id_i32) = i64_to_i32(request_id, "request_id") {
+                let _ = sqlx::query!(
+                    r#"
+                    UPDATE coaching.requests
+                       SET status = 'cancelled',
+                           updated_at = $1
+                     WHERE bot_request_id = $2
+                    "#,
+                    now_dt,
+                    request_id_i32,
+                )
+                .execute(&c.pool)
                 .await;
+            }
+            if let Ok(author_id_i64) = u64_to_i64(author_id, "author_id") {
+                let _ = sqlx::query!(
+                    r#"
+                    INSERT INTO coaching.bans(discord_user_id, banned_at, expires_at, reason)
+                    VALUES ($1, $2, $3, $4)
+                    ON CONFLICT(discord_user_id) DO UPDATE SET
+                      banned_at = excluded.banned_at,
+                      expires_at = excluded.expires_at,
+                      reason = excluded.reason
+                    "#,
+                    author_id_i64,
+                    now_dt,
+                    ban_expiry,
+                    "User hat sich nicht gemeldet / Abbruch durch Coach",
+                )
+                .execute(&c.pool)
+                .await;
+            }
             c.remove_role_if_present(
                 interaction.guild_id,
                 author_id,
@@ -1928,13 +2116,10 @@ impl InteractionHandler for CoachingHandler {
                 .port
                 .member_display_name(interaction.guild_id, interaction.user_id)
                 .await;
-            let expiry_text = chrono::DateTime::from_timestamp(ban_expiry, 0)
-                .map(|dt| {
-                    dt.with_timezone(&chrono::Local)
-                        .format("%d.%m.%Y %H:%M")
-                        .to_string()
-                })
-                .unwrap_or_else(|| ban_expiry.to_string());
+            let expiry_text = ban_expiry
+                .with_timezone(&chrono::Local)
+                .format("%d.%m.%Y %H:%M")
+                .to_string();
             c.port
                 .send_dm(
                     author_id,
@@ -2062,9 +2247,39 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::OptionalExtension;
-    use std::collections::{HashMap, HashSet};
-    use std::sync::Mutex;
+
+    #[test]
+    fn combine_rank_und_games_hours_bleiben_python_kompatibel() {
+        assert_eq!(combine_rank("Phantom", "III"), "Phantom III");
+        assert_eq!(combine_rank("Phantom III", "III"), "Phantom III");
+        assert_eq!(combine_rank("", "IV"), "IV");
+        assert_eq!(combine_games_hours("120 games", "300h"), "120 games / 300h");
+        assert_eq!(combine_games_hours("", "300h"), "300h");
+    }
+
+    #[test]
+    fn survey_dm_text_entspricht_python_verbatim() {
+        let embed = survey_embed("CoachName", 1);
+        assert_eq!(embed["title"], "🎮 Coaching abgeschlossen!");
+        assert_eq!(
+            embed["description"],
+            "Deine Coaching-Session mit **CoachName** ist beendet. Wir hoffen, es hat dir geholfen!"
+        );
+        assert_eq!(embed["fields"][0]["name"], "⭐ Gib uns Feedback");
+        assert_eq!(
+            embed["fields"][0]["value"],
+            "Du hast nun für **5 Tage** Zugriff auf unseren Feedback-Kanal. Bitte teile deine Erfahrungen dort mit uns:\n\n👉 [**HIER FEEDBACK ABGEBEN**](https://discord.com/channels/1/1494756126644895885)\n\nDein Feedback hilft uns die Qualität der Coaches sicherzustellen!"
+        );
+        assert_eq!(embed["fields"][0]["inline"], false);
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod pg_tests {
+    use super::*;
+    use dl_central_db::testing::{test_pool, TestDb};
+    use serde_json::json;
+    use std::sync::{Arc, Mutex};
 
     #[derive(Debug, Clone)]
     struct RequestMessageCall {
@@ -2074,46 +2289,17 @@ mod tests {
         components: Value,
     }
 
-    struct RequestCreatedDbRow {
-        status: String,
-        message_id: Option<i64>,
-        channel_id: Option<i64>,
-        assigned_coach_id: Option<String>,
-        website_request_id: Option<String>,
-        coachee_id: Option<String>,
-    }
-
     #[derive(Default)]
     struct MockCoachingPort {
         coach_ids: Mutex<Vec<u64>>,
-        role_ids: Mutex<HashMap<u64, Vec<u64>>>,
-        admins: Mutex<HashSet<u64>>,
-        names: Mutex<HashMap<u64, String>>,
-        display_name_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
-        voices: Mutex<HashMap<u64, u64>>,
+        request_messages: Mutex<Vec<RequestMessageCall>>,
+        role_ids: Mutex<Vec<(u64, Vec<u64>)>>,
+        channel_texts: Mutex<Vec<(u64, String)>>,
         dm_texts: Mutex<Vec<(u64, String)>>,
         dm_embeds: Mutex<Vec<(u64, Value)>>,
-        channel_texts: Mutex<Vec<(u64, String)>>,
         added_roles: Mutex<Vec<(u64, u64, u64, String)>>,
         removed_roles: Mutex<Vec<(u64, u64, u64, String)>>,
-        request_messages: Mutex<Vec<RequestMessageCall>>,
-        request_message_error: Mutex<Option<String>>,
-    }
-
-    #[derive(Default)]
-    struct MockWebsiteSync {
-        payloads: Mutex<Vec<Value>>,
-    }
-
-    #[async_trait::async_trait]
-    impl crate::coaching::CoachingWebsiteSyncClient for MockWebsiteSync {
-        async fn sync_coaching(&self, payload: &Value) -> bool {
-            self.payloads
-                .lock()
-                .expect("payloads lock")
-                .push(payload.clone());
-            true
-        }
+        display_name_barrier: Mutex<Option<Arc<tokio::sync::Barrier>>>,
     }
 
     #[async_trait::async_trait]
@@ -2123,7 +2309,7 @@ mod tests {
             _channel_id: u64,
             _body: Map<String, Value>,
         ) -> Result<u64, String> {
-            Ok(1)
+            Ok(42)
         }
 
         async fn edit_panel(
@@ -2143,8 +2329,8 @@ mod tests {
             self.role_ids
                 .lock()
                 .expect("role_ids lock")
-                .get(&user_id)
-                .cloned()
+                .iter()
+                .find_map(|(id, roles)| (*id == user_id).then(|| roles.clone()))
                 .unwrap_or_default()
         }
 
@@ -2157,16 +2343,11 @@ mod tests {
             if let Some(barrier) = barrier {
                 barrier.wait().await;
             }
-            self.names
-                .lock()
-                .expect("names lock")
-                .get(&user_id)
-                .cloned()
-                .unwrap_or_else(|| format!("User {user_id}"))
+            format!("Coach {user_id}")
         }
 
-        async fn member_is_admin(&self, _guild_id: u64, user_id: u64) -> bool {
-            self.admins.lock().expect("admins lock").contains(&user_id)
+        async fn member_is_admin(&self, _guild_id: u64, _user_id: u64) -> bool {
+            false
         }
 
         async fn send_request_message(
@@ -2176,24 +2357,15 @@ mod tests {
             embed: Value,
             components: Value,
         ) -> Result<u64, String> {
-            if let Some(err) = self
-                .request_message_error
-                .lock()
-                .expect("request_message_error lock")
-                .clone()
-            {
-                return Err(err);
-            }
-            self.request_messages
-                .lock()
-                .expect("request_messages lock")
-                .push(RequestMessageCall {
-                    channel_id,
-                    content: content.to_string(),
-                    embed,
-                    components,
-                });
-            Ok(77)
+            let mut messages = self.request_messages.lock().expect("request_messages lock");
+            let message_id = 9000 + u64::try_from(messages.len()).expect("message count fits u64");
+            messages.push(RequestMessageCall {
+                channel_id,
+                content: content.to_string(),
+                embed,
+                components,
+            });
+            Ok(message_id)
         }
 
         async fn edit_request_message(
@@ -2240,14 +2412,10 @@ mod tests {
         async fn member_voice_channel_in_category(
             &self,
             _guild_id: u64,
-            user_id: u64,
+            _user_id: u64,
             _category_id: u64,
         ) -> Option<u64> {
-            self.voices
-                .lock()
-                .expect("voices lock")
-                .get(&user_id)
-                .copied()
+            None
         }
 
         async fn send_dm_embed(&self, user_id: u64, embed: Value) -> bool {
@@ -2259,341 +2427,85 @@ mod tests {
         }
     }
 
-    async fn test_coaching() -> (
-        tempfile::TempDir,
-        Db,
-        Arc<MockCoachingPort>,
-        Arc<CoachingRequests>,
-    ) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("coaching.sqlite3")).expect("db");
-        db.bootstrap_schema().await.expect("schema");
+    async fn test_coaching() -> (TestDb, Arc<MockCoachingPort>, Arc<CoachingRequests>) {
+        let db = test_pool().await.expect("test pool");
         let port = Arc::new(MockCoachingPort::default());
-        let coaching = CoachingRequests::new(db.clone(), port.clone(), None, 1, None);
-        (dir, db, port, coaching)
+        port.coach_ids
+            .lock()
+            .expect("coach_ids lock")
+            .extend([AUTO_ASSIGN_OPTOUT_IDS[0], 12345]);
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((12345, vec![COACH_ROLE_ID]));
+        let coaching = CoachingRequests::new(db.pool().clone(), port.clone(), None, 1, None);
+        (db, port, coaching)
     }
 
-    async fn insert_request(db: &Db, request_id: i64, user_id: u64, status: &str) {
-        let status = status.to_string();
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO coaching_requests (
-                    id, discord_user_id, discord_username, rank, subrank,
-                    status, created_at, updated_at
-                 ) VALUES (?1, ?2, 'Player', 'Archon 3', '', ?3, 100, 100)",
-                rusqlite::params![request_id, user_id, status],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("request insert");
-    }
-
-    async fn insert_active_session(
-        db: &Db,
-        session_id: &str,
-        request_id: i64,
-        coach_id: u64,
-        user_id: u64,
-        voice_started_at: Option<i64>,
-    ) {
-        let session_id = session_id.to_string();
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO coaching_sessions (
-                    id, request_id, coach_id, discord_user_id, discord_username,
-                    discord_channel_id, status, voice_started_at, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 'Player', 500, 'active', ?5, 100)",
-                rusqlite::params![
-                    session_id,
-                    request_id,
-                    coach_id.to_string(),
-                    user_id,
-                    voice_started_at
-                ],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("session insert");
-    }
-
-    fn request_data(request_id: i64, user_id: u64) -> RequestData {
-        RequestData {
-            id: request_id,
-            user_id,
-            username: format!("Player {user_id}"),
-            rank: "Archon 3".into(),
-            hero: "Haze".into(),
-            games_played: "300 / 150".into(),
-            scheduled_slot: "Montag 18:00".into(),
-            current_problems: "Lane-Phase".into(),
-            ai_summary: String::new(),
+    fn notification(website_request_id: &str, user_id: u64) -> RequestCreatedNotification {
+        RequestCreatedNotification {
+            website_request_id: website_request_id.to_string(),
+            coachee_id: format!("coachee-{website_request_id}"),
+            discord_user_id: user_id,
+            discord_username: format!("Player{user_id}"),
+            rank: "Phantom".to_string(),
+            subrank: "III".to_string(),
+            hero: Some("Ivy".to_string()),
+            games_played: Some("120 games".to_string()),
+            hours_played: Some("300h".to_string()),
+            availability: Some("abends".to_string()),
+            current_problems: Some("Laning und Map Movement".to_string()),
+            preferred_coach_id: Some("coach-web-1".to_string()),
         }
     }
 
-    fn request_created_item(request_id: &str, user_id: u64) -> Value {
+    fn request_created_item(website_request_id: &str, user_id: u64) -> Value {
         json!({
             "type": "request_created",
-            "request_id": request_id,
-            "coachee_id": format!("coachee-{request_id}"),
+            "request_id": website_request_id,
+            "coachee_id": format!("coachee-{website_request_id}"),
             "discord_user_id": user_id.to_string(),
-            "discord_username": "WebsiteUser",
-            "rank": "Archon",
-            "subrank": "3",
-            "hero": "Vindicta",
-            "games_played": "120",
-            "hours_played": "80",
-            "availability": "Montag 18:00",
-            "current_problems": "Lane-Phase",
+            "discord_username": format!("Player{user_id}"),
+            "rank": "Phantom",
+            "subrank": "III",
+            "hero": "Ivy",
+            "games_played": "120 games",
+            "hours_played": "300h",
+            "availability": "abends",
+            "current_problems": "Laning und Map Movement",
         })
     }
 
-    async fn insert_no_show_ban(db: &Db, user_id: u64, expires_at: i64) {
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
-                 VALUES (?1, ?2, ?3, 'test')",
-                rusqlite::params![user_id, expires_at - 60, expires_at],
-            )
-            .map(|_| ())
-        })
+    async fn insert_no_show_ban(
+        db: &TestDb,
+        user_id: u64,
+        expires_at: chrono::DateTime<chrono::Utc>,
+    ) {
+        let user_id = u64_to_i64(user_id, "user_id").expect("user id fits bigint");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.bans(discord_user_id, banned_at, expires_at, reason)
+            VALUES ($1, $2, $3, 'test')
+            "#,
+        )
+        .bind(user_id)
+        .bind(expires_at - chrono::Duration::minutes(1))
+        .bind(expires_at)
+        .execute(db.pool())
         .await
         .expect("ban insert");
     }
 
-    async fn rotation_last_assigned_at(db: &Db, coach_id: u64) -> i64 {
-        let coach_id = coach_id.to_string();
-        db.read(move |conn| {
-            conn.query_row(
-                "SELECT last_assigned_at FROM coaching_coach_rotation WHERE coach_id = ?1",
-                [coach_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(|value| value.unwrap_or(0))
-        })
-        .await
-        .expect("rotation lookup")
-    }
-
-    async fn request_assigned_coach(db: &Db, request_id: i64) -> Option<String> {
-        db.read(move |conn| {
-            conn.query_row(
-                "SELECT assigned_coach_id FROM coaching_requests WHERE id = ?1",
-                [request_id],
-                |row| row.get(0),
-            )
-            .optional()
-            .map(|value| value.flatten())
-        })
-        .await
-        .expect("request lookup")
-    }
-
-    #[test]
-    fn faire_rotation() {
-        // am längsten nicht zugewiesen gewinnt
-        let coaches = vec![(1u64, 100i64), (2, 50), (3, 150)];
-        assert_eq!(pick_fair_coach(&coaches), Some(2));
-        assert_eq!(pick_fair_coach(&[]), None);
-        // Gleichstand → kleinste ID
-        let tie = vec![(9u64, 0i64), (4, 0)];
-        assert_eq!(pick_fair_coach(&tie), Some(4));
-    }
-
-    #[tokio::test]
-    async fn round_robin_rotation_bleibt_nach_freigabe_dauerhaft() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        let coach_a = 10;
-        let coach_b = 20;
-        let coach_c = 30;
-        port.coach_ids
-            .lock()
-            .expect("coach_ids lock")
-            .extend([coach_a, coach_b, coach_c]);
-
-        insert_request(&db, 1, 100, "pending").await;
-        let mut request = request_data(1, 100);
-        coaching
-            .post_request(&mut request, "Analyse A".to_string())
-            .await;
-        assert_eq!(request_assigned_coach(&db, 1).await.as_deref(), Some("10"));
-        coaching.open_request_to_all(1, "manual").await;
-        assert_eq!(request_assigned_coach(&db, 1).await, None);
-
-        let first_stamp = rotation_last_assigned_at(&db, coach_a).await;
-        assert!(first_stamp > 0);
-        let stats_after_release = coaching.auto_assign_stats().await;
-        assert_eq!(
-            stats_after_release,
-            vec![(coach_a, first_stamp), (coach_b, 0), (coach_c, 0)]
-        );
-        assert_eq!(pick_fair_coach(&stats_after_release), Some(coach_b));
-
-        insert_request(&db, 2, 101, "pending").await;
-        let mut request = request_data(2, 101);
-        coaching
-            .post_request(&mut request, "Analyse B".to_string())
-            .await;
-        assert_eq!(request_assigned_coach(&db, 2).await.as_deref(), Some("20"));
-        assert_eq!(
-            pick_fair_coach(&coaching.auto_assign_stats().await),
-            Some(coach_c)
-        );
-
-        insert_request(&db, 3, 102, "pending").await;
-        let mut request = request_data(3, 102);
-        coaching
-            .post_request(&mut request, "Analyse C".to_string())
-            .await;
-        assert_eq!(request_assigned_coach(&db, 3).await.as_deref(), Some("30"));
-        assert_eq!(
-            pick_fair_coach(&coaching.auto_assign_stats().await),
-            Some(coach_a)
-        );
-    }
-
-    #[tokio::test]
-    async fn auto_assign_optout_wird_nicht_gepickt_claim_bleibt_erlaubt() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        let optout = AUTO_ASSIGN_OPTOUT_IDS[0];
-        let regular = 333;
-        port.coach_ids
-            .lock()
-            .expect("coach_ids lock")
-            .extend([optout, regular]);
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO coaching_coach_rotation (coach_id, last_assigned_at)
-                 VALUES (?1, 0), (?2, 999)",
-                rusqlite::params![optout.to_string(), regular.to_string()],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("rotation seed");
-
-        let stats = coaching.auto_assign_stats().await;
-        assert_eq!(stats, vec![(regular, 999)]);
-        assert_eq!(pick_fair_coach(&stats), Some(regular));
-
-        insert_request(&db, 10, 110, "pending").await;
-        let mut request = request_data(10, 110);
-        coaching
-            .post_request(&mut request, "Analyse Regular".to_string())
-            .await;
-        assert_eq!(
-            request_assigned_coach(&db, 10).await.as_deref(),
-            Some("333")
-        );
-
-        insert_request(&db, 11, 111, "analyzed").await;
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(optout, vec![COACH_ROLE_ID]);
-        let handler = CoachingHandler { coaching };
-
-        let reply = handler
-            .handle(BridgeInteraction {
-                custom_id: "coach_claim_11".to_string(),
-                user_id: optout,
-                guild_id: 1,
-                channel_id: 500,
-                ..BridgeInteraction::default()
-            })
-            .await;
-
-        assert_eq!(
-            reply.content.as_deref(),
-            Some("✅ Session mit Player gestartet!")
-        );
-        let claimed_coach: String = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT coach_id FROM coaching_sessions WHERE request_id = 11",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("claimed session");
-        assert_eq!(claimed_coach, optout.to_string());
-    }
-
-    #[test]
-    fn texte_und_kappung() {
-        assert_eq!(
-            normalize_inline("  viel    raum  ", "N/A", 256),
-            "viel raum"
-        );
-        assert_eq!(normalize_inline("", "N/A", 256), "N/A");
-        let long = "x".repeat(300);
-        assert_eq!(normalize_inline(&long, "N/A", 256).chars().count(), 256);
-        assert_eq!(format_ai_summary(""), "Keine Analyse verfügbar.");
-        let sid = new_session_id();
-        assert_eq!(sid.len(), 36);
-        assert_eq!(sid.chars().filter(|c| *c == '-').count(), 4);
-        assert_eq!(sid.chars().nth(14), Some('4')); // uuid4-Version
-    }
-
-    #[test]
-    fn embed_und_buttons() {
-        let request = RequestData {
-            id: 7,
-            user_id: 42,
-            username: "Nani".into(),
-            rank: "Archon 3".into(),
-            hero: "Haze".into(),
-            games_played: "300 / 150".into(),
-            scheduled_slot: "Montag 18:00".into(),
-            current_problems: "Lane-Phase".into(),
-            ai_summary: "Fokus: Last-Hits".into(),
-        };
-        let embed = build_request_embed(&request, Some(99), Some(1000), 500);
-        let fields = embed["fields"].as_array().expect("fields");
-        assert_eq!(fields.len(), 7); // 6 + Reservierung
-        assert!(fields[6]["value"].as_str().expect("v").contains("<@99>"));
-        // abgelaufene Reservierung → kein Feld
-        let embed = build_request_embed(&request, Some(99), Some(1000), 2000);
-        assert_eq!(embed["fields"].as_array().expect("fields").len(), 6);
-        let claim = claim_components(7, 42);
-        assert_eq!(claim[0]["components"][0]["custom_id"], "coach_claim_7");
-        assert_eq!(claim[0]["components"][1]["custom_id"], "coach_release_7_42");
-        let cancel = cancel_components("abc-def", 42);
-        assert_eq!(
-            cancel[0]["components"][0]["custom_id"],
-            "coach_cancel_abc-def_42"
-        );
-
-        let embed = build_request_embed_no_ai(&request, None, None, 500);
-        let fields = embed["fields"].as_array().expect("fields");
-        assert_eq!(fields.len(), 6);
-        assert_eq!(fields[0]["name"], "Spieler");
-        assert_eq!(fields[0]["value"], "<@42>");
-        assert!(!fields
-            .iter()
-            .any(|field| field["name"].as_str() == Some("🤖 AI Analyse")));
-
-        let claim = claim_components_with_website_link(7, 42, "coachee-abc");
-        let buttons = claim[0]["components"].as_array().expect("buttons");
-        assert_eq!(buttons.len(), 3);
-        assert_eq!(buttons[0]["custom_id"], "coach_claim_7");
-        assert_eq!(buttons[1]["custom_id"], "coach_release_7_42");
-        assert_eq!(buttons[2]["style"], 5);
-        assert_eq!(buttons[2]["label"], COACHING_WEBSITE_OPEN_BUTTON_LABEL);
-        assert_eq!(
-            buttons[2]["url"],
-            "https://deutsche-deadlock-community.de/coaching/coachees/coachee-abc"
-        );
-    }
-
     #[tokio::test]
     async fn request_created_notification_lehnt_aktiven_no_show_ban_ab() {
-        let (_dir, db, port, coaching) = test_coaching().await;
+        let (db, port, coaching) = test_coaching().await;
         let user_id = 4242;
-        insert_no_show_ban(&db, user_id, chrono::Utc::now().timestamp() + 3600).await;
+        insert_no_show_ban(
+            &db,
+            user_id,
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .await;
 
         let err = coaching
             .post_request_created_notification(&request_created_item("banned-50", user_id))
@@ -2604,16 +2516,14 @@ mod tests {
             err,
             "Du bist aktuell für Coaching-Anfragen gesperrt und kannst derzeit keine neue Anfrage stellen."
         );
-        let request_count: i64 = db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM coaching_requests WHERE discord_user_id=?1",
-                    [user_id],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("request count");
+        let user_id = u64_to_i64(user_id, "user_id").expect("user id fits bigint");
+        let request_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM coaching.requests WHERE discord_user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("request count");
         assert_eq!(request_count, 0);
         assert!(port
             .request_messages
@@ -2623,540 +2533,308 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_created_notification_postet_no_ai_embed_mit_claim_und_link() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        port.coach_ids.lock().expect("coach_ids lock").push(10);
-        let item = json!({
-            "type": "request_created",
-            "request_id": "50",
-            "coachee_id": "coachee-50",
-            "discord_user_id": "4242",
-            "discord_username": "WebsiteUser",
-            "rank": "Archon",
-            "subrank": "3",
-            "hero": "Vindicta",
-            "games_played": "120",
-            "hours_played": "80",
-            "availability": "Montag 18:00",
-            "current_problems": "Lane-Phase",
-            "preferred_coach_id": "10",
+    async fn request_created_emuliert_bot_id_und_rundet_website_spalten() {
+        let (db, _port, coaching) = test_coaching().await;
+        let first = notification("web-1", 777);
+        let second = notification("web-2", 778);
+
+        let upsert_1 = coaching
+            .upsert_request_created_notification(&first)
+            .await
+            .expect("first upsert");
+        let upsert_2 = coaching
+            .upsert_request_created_notification(&second)
+            .await
+            .expect("second upsert");
+
+        assert_eq!(upsert_1.local_request_id, 1);
+        assert_eq!(upsert_2.local_request_id, 2);
+        assert!(!upsert_1.already_posted);
+        assert!(!upsert_2.already_posted);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT request_uid,
+                   bot_request_id AS "bot_request_id!: i32",
+                   website_request_id,
+                   discord_user_id,
+                   rank,
+                   subrank,
+                   hero,
+                   games_played,
+                   hours_played,
+                   availability,
+                   current_problems,
+                   preferred_coach_id,
+                   COALESCE(status, '') AS "status!"
+              FROM coaching.requests
+             WHERE website_request_id = 'web-1'
+            "#
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request row");
+
+        assert_eq!(row.request_uid, "website:web-1");
+        assert_eq!(row.bot_request_id, 1);
+        assert_eq!(row.discord_user_id, 777);
+        assert_eq!(row.rank, "Phantom");
+        assert_eq!(row.subrank, "III");
+        assert_eq!(row.hero.as_deref(), Some("Ivy"));
+        assert_eq!(row.games_played.as_deref(), Some("120 games"));
+        assert_eq!(row.hours_played.as_deref(), Some("300h"));
+        assert_eq!(row.availability.as_deref(), Some("abends"));
+        assert_eq!(
+            row.current_problems.as_deref(),
+            Some("Laning und Map Movement")
+        );
+        assert_eq!(row.preferred_coach_id.as_deref(), Some("coach-web-1"));
+        assert_eq!(row.status, "pending");
+
+        let insights = json!({
+            "lane": "mid",
+            "focus": ["positioning", "tempo"],
+            "score": 7
         });
+        sqlx::query!(
+            r#"
+            UPDATE coaching.requests
+               SET ai_insights_json = $1::text::jsonb
+             WHERE bot_request_id = $2
+            "#,
+            insights.to_string(),
+            row.bot_request_id,
+        )
+        .execute(db.pool())
+        .await
+        .expect("write jsonb insights");
+        let json_row = sqlx::query!(
+            r#"
+            SELECT ai_insights_json AS "ai_insights_json!: serde_json::Value"
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+            row.bot_request_id,
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("read jsonb insights");
+        assert_eq!(json_row.ai_insights_json, insights);
+    }
+
+    #[tokio::test]
+    async fn request_created_duplikat_nutzt_bestehende_id_und_already_posted() {
+        let (db, _port, coaching) = test_coaching().await;
+        let mut item = notification("web-dupe", 800);
+        let inserted = coaching
+            .upsert_request_created_notification(&item)
+            .await
+            .expect("insert");
+        let message_id = 55_i64;
+        sqlx::query!(
+            r#"
+            UPDATE coaching.requests
+               SET message_id = $1
+             WHERE bot_request_id = $2
+            "#,
+            message_id,
+            i32::try_from(inserted.local_request_id).expect("request id fits i32"),
+        )
+        .execute(db.pool())
+        .await
+        .expect("mark posted");
+
+        item.discord_username = "UpdatedName".to_string();
+        let updated = coaching
+            .upsert_request_created_notification(&item)
+            .await
+            .expect("update");
+        assert_eq!(updated.local_request_id, inserted.local_request_id);
+        assert!(updated.already_posted);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!",
+                   MAX(discord_username) AS "discord_username?"
+              FROM coaching.requests
+             WHERE website_request_id = 'web-dupe'
+            "#
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("dupe row count");
+        assert_eq!(row.count, 1);
+        assert_eq!(row.discord_username.as_deref(), Some("UpdatedName"));
+    }
+
+    #[tokio::test]
+    async fn request_created_vergibt_bot_id_fuer_website_union_zeile() {
+        let (db, _port, coaching) = test_coaching().await;
+        sqlx::query!(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, website_request_id, discord_user_id, discord_username,
+                rank, subrank, status, created_at, updated_at
+            )
+            VALUES ('website-union:seed', 'web-union', 801, 'WebsiteOnly',
+                    'Phantom', 'III', 'pending', now(), now())
+            "#
+        )
+        .execute(db.pool())
+        .await
+        .expect("seed website row");
+
+        let item = notification("web-union", 801);
+        let upsert = coaching
+            .upsert_request_created_notification(&item)
+            .await
+            .expect("upsert website union row");
+        assert_eq!(upsert.local_request_id, 1);
+        assert!(!upsert.already_posted);
+
+        let row = sqlx::query!(
+            r#"
+            SELECT COUNT(*) AS "count!",
+                   MIN(bot_request_id) AS "bot_request_id?",
+                   MAX(discord_username) AS "discord_username?"
+              FROM coaching.requests
+             WHERE website_request_id = 'web-union'
+            "#
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("website union row");
+        assert_eq!(row.count, 1);
+        assert_eq!(row.bot_request_id, Some(1));
+        assert_eq!(row.discord_username.as_deref(), Some("Player801"));
+
+        let duplicate_bot_id = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+            i32::try_from(upsert.local_request_id).expect("request id fits i32"),
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("bot id count");
+        assert_eq!(duplicate_bot_id, 1);
+    }
+
+    #[tokio::test]
+    async fn post_request_to_channel_schreibt_rotation_und_post_status() {
+        let (db, port, coaching) = test_coaching().await;
+        let data = notification("web-post", 900);
+        let upsert = coaching
+            .upsert_request_created_notification(&data)
+            .await
+            .expect("upsert");
+        let mut request = data.request_data(upsert.local_request_id);
 
         coaching
-            .post_request_created_notification(&item)
+            .post_request_to_channel(
+                &mut request,
+                "**Analyse:** Map Movement".to_string(),
+                true,
+                json!([{ "type": 1, "components": [] }]),
+            )
             .await
-            .expect("notification post");
+            .expect("post request");
 
-        let call = {
-            let calls = port.request_messages.lock().expect("request_messages lock");
-            assert_eq!(calls.len(), 1);
-            calls[0].clone()
-        };
-        assert_eq!(call.channel_id, REQUEST_CHANNEL_ID);
-        assert!(call.content.contains("<@4242>"));
-        assert!(port.dm_texts.lock().expect("dm_texts lock").is_empty());
+        let messages = port.request_messages.lock().expect("request_messages lock");
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].channel_id, REQUEST_CHANNEL_ID);
+        assert!(messages[0].content.contains("reserviert"));
+        assert_eq!(messages[0].embed["title"], "🎮 Neue Coaching-Anfrage");
+        assert_eq!(messages[0].components[0]["type"], 1);
+        drop(messages);
 
-        let fields = call.embed["fields"].as_array().expect("fields");
-        assert!(fields
-            .iter()
-            .any(|field| field["name"] == "Spieler" && field["value"] == "<@4242>"));
-        assert!(fields
-            .iter()
-            .any(|field| field["name"] == "Rang" && field["value"] == "Archon 3"));
-        assert!(fields
-            .iter()
-            .any(|field| { field["name"] == "Games / Stunden" && field["value"] == "120 / 80" }));
-        assert!(!fields
-            .iter()
-            .any(|field| field["name"].as_str() == Some("🤖 AI Analyse")));
-
-        let local_id: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT id FROM coaching_requests WHERE website_request_id='50'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("local id");
-
-        let buttons = call.components[0]["components"]
-            .as_array()
-            .expect("buttons");
-        assert_eq!(buttons[0]["custom_id"], format!("coach_claim_{local_id}"));
+        let row = sqlx::query!(
+            r#"
+            SELECT message_id,
+                   channel_id,
+                   COALESCE(status, '') AS "status!",
+                   assigned_coach_id,
+                   ai_summary,
+                   reserved_until
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+            i32::try_from(upsert.local_request_id).expect("request id fits i32"),
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("posted row");
+        assert_eq!(row.message_id, Some(9000));
         assert_eq!(
-            buttons[1]["custom_id"],
-            format!("coach_release_{local_id}_4242")
+            row.channel_id,
+            Some(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id"))
         );
-        assert_eq!(buttons[2]["style"], 5);
-        assert_eq!(
-            buttons[2]["url"],
-            "https://deutsche-deadlock-community.de/coaching/coachees/coachee-50"
-        );
-
-        let row: RequestCreatedDbRow = db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT status, message_id, channel_id, assigned_coach_id,
-                            website_request_id, coachee_id
-                       FROM coaching_requests WHERE id=?1",
-                    [local_id],
-                    |row| {
-                        Ok(RequestCreatedDbRow {
-                            status: row.get(0)?,
-                            message_id: row.get(1)?,
-                            channel_id: row.get(2)?,
-                            assigned_coach_id: row.get(3)?,
-                            website_request_id: row.get(4)?,
-                            coachee_id: row.get(5)?,
-                        })
-                    },
-                )
-            })
-            .await
-            .expect("request row");
         assert_eq!(row.status, "analyzed");
-        assert_eq!(row.message_id, Some(77));
-        assert_eq!(row.channel_id, Some(REQUEST_CHANNEL_ID as i64));
-        assert_eq!(row.assigned_coach_id.as_deref(), Some("10"));
-        assert_eq!(row.website_request_id.as_deref(), Some("50"));
-        assert_eq!(row.coachee_id.as_deref(), Some("coachee-50"));
-    }
-
-    #[tokio::test]
-    async fn request_created_token_id_mappt_lokal_und_claim_sync_spiegelt_website_id() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("coaching.sqlite3")).expect("db");
-        db.bootstrap_schema().await.expect("schema");
-        let port = Arc::new(MockCoachingPort::default());
-        let website = Arc::new(MockWebsiteSync::default());
-        let website_client: Arc<dyn crate::coaching::CoachingWebsiteSyncClient> = website.clone();
-        let coaching =
-            CoachingRequests::new(db.clone(), port.clone(), None, 1, Some(website_client));
-        let item = json!({
-            "type": "request_created",
-            "request_id": "AbC-12_xy",
-            "coachee_id": "coachee-token",
-            "discord_user_id": "4242",
-            "discord_username": "WebsiteUser",
-            "rank": "Archon",
-            "subrank": "3",
-            "hero": "Vindicta",
-            "games_played": "120",
-            "hours_played": "80",
-            "availability": "Montag 18:00",
-            "current_problems": "Lane-Phase",
-        });
-
-        coaching
-            .post_request_created_notification(&item)
-            .await
-            .expect("notification post");
-
-        let local_id: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT id
-                       FROM coaching_requests
-                      WHERE website_request_id='AbC-12_xy'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("local id");
-        assert!(local_id > 0);
-
-        {
-            let calls = port.request_messages.lock().expect("request_messages lock");
-            assert_eq!(calls.len(), 1);
-            let buttons = calls[0].components[0]["components"]
-                .as_array()
-                .expect("buttons");
-            assert_eq!(buttons[0]["custom_id"], format!("coach_claim_{local_id}"));
-            assert_eq!(
-                buttons[1]["custom_id"],
-                format!("coach_release_{local_id}_4242")
-            );
-        }
-
-        let row: (Option<String>, Option<String>, String, Option<i64>) = db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT website_request_id, coachee_id, status, message_id
-                       FROM coaching_requests
-                      WHERE id=?1",
-                    [local_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-                )
-            })
-            .await
-            .expect("request row");
-        assert_eq!(row.0.as_deref(), Some("AbC-12_xy"));
-        assert_eq!(row.1.as_deref(), Some("coachee-token"));
-        assert_eq!(row.2, "analyzed");
-        assert_eq!(row.3, Some(77));
-
-        coaching
-            .post_request_created_notification(&item)
-            .await
-            .expect("redelivery post");
+        assert_eq!(row.assigned_coach_id.as_deref(), Some("12345"));
         assert_eq!(
-            port.request_messages
-                .lock()
-                .expect("request_messages lock")
-                .len(),
-            1
+            row.ai_summary,
+            Some("**Analyse:** Map Movement".to_string())
         );
-        let count: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*)
-                       FROM coaching_requests
-                      WHERE website_request_id='AbC-12_xy'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
+        assert!(row.reserved_until.is_some());
+
+        let rotation = sqlx::query!(
+            r#"
+            SELECT coach_id, last_assigned_at
+              FROM coaching.coach_rotation
+             WHERE coach_id = '12345'
+            "#
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("rotation row");
+        assert_eq!(rotation.coach_id, "12345");
+        assert!(rotation.last_assigned_at <= chrono::Utc::now());
+    }
+
+    #[tokio::test]
+    async fn ensure_panel_speichert_message_id_in_kv_store() {
+        let (db, _port, coaching) = test_coaching().await;
+
+        coaching.ensure_panel().await;
+
+        let value = dl_central_db::kv::get(db.pool(), PANEL_KV_NS, PANEL_KV_KEY)
             .await
-            .expect("request count");
-        assert_eq!(count, 1);
-
-        let coach_id = 900;
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(coach_id, vec![COACH_ROLE_ID]);
-        port.names
-            .lock()
-            .expect("names lock")
-            .insert(coach_id, "Coach 900".to_string());
-        let handler = CoachingHandler {
-            coaching: coaching.clone(),
-        };
-        let reply = handler
-            .handle(BridgeInteraction {
-                custom_id: format!("coach_claim_{local_id}"),
-                user_id: coach_id,
-                guild_id: 1,
-                channel_id: 500,
-                ..BridgeInteraction::default()
-            })
-            .await;
-        assert_eq!(
-            reply.content.as_deref(),
-            Some("✅ Session mit WebsiteUser gestartet!")
-        );
-
-        let mut active_payload = None;
-        for _ in 0..20 {
-            active_payload = website
-                .payloads
-                .lock()
-                .expect("payloads lock")
-                .iter()
-                .rev()
-                .find(|payload| payload["session_status"] == "active")
-                .cloned();
-            if active_payload.is_some() {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let active_payload = active_payload.expect("active sync payload");
-        assert_eq!(active_payload["bot_request_id"], json!(local_id));
-        assert_eq!(active_payload["website_request_id"], json!("AbC-12_xy"));
-        assert_eq!(active_payload["coach_discord_id"], json!(coach_id));
-        assert_eq!(active_payload["session_status"], json!("active"));
-    }
-
-    #[test]
-    fn panel_verweist_auf_website() {
-        let embed = build_panel_embed();
-        assert_eq!(embed["title"], "🎮  Deadlock Coaching");
-        let description = embed["description"].as_str().unwrap_or_default();
-        assert!(description
-            .contains("Die Kommunikation findet **ausschließlich** im Coaching-Chat statt."));
-        assert!(description.contains(
-            "Bitte sende **keine** Freundschaftsanfragen (FAs) oder DMs an die Coaches."
-        ));
-        assert!(description.ends_with(COACHING_WEBSITE_CTA_TEXT));
-        assert_eq!(embed["fields"][0]["name"], "📋 Ablauf");
-        assert_eq!(
-            embed["fields"][0]["value"],
-            "1. Formular ausfüllen\n2. Du bekommst die Coaching-Rolle\n3. Ein Coach meldet sich bei dir"
-        );
-        assert_eq!(embed["fields"][1]["name"], "❓ Fragen nach dem Coaching?");
-        assert_eq!(
-            embed["fields"][1]["value"],
-            "Hau sie einfach in <#1426220702054355077> raus statt per DM an deinen Coach. Dann sehen alle die Antwort und andere mit dem gleichen Thema lesen direkt mit."
-        );
-
-        let components = panel_components();
-        let button = &components[0]["components"][0];
-        assert_eq!(button["style"], 5);
-        assert_eq!(button["label"], COACHING_WEBSITE_BUTTON_LABEL);
-        assert_eq!(button["url"], COACHING_WEBSITE_URL);
-    }
-
-    #[tokio::test]
-    async fn router_registriert_legacy_coach_button_prefixe() {
-        let (_dir, _db, _port, coaching) = test_coaching().await;
-        let mut router = InteractionRouter::new();
-        register(&mut router, coaching);
-
-        for custom_id in [
-            "coach_claim_7",
-            "coach_release_7",
-            "coach_release_7_42",
-            "coach_cancel_6d9b1b22-5561-4ce4-850d-aa04d6123a87",
-            "coach_cancel_6d9b1b22-5561-4ce4-850d-aa04d6123a87_42",
-        ] {
-            assert!(
-                router.resolve_component(custom_id).is_some(),
-                "{custom_id} muss geroutet werden"
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn legacy_cancel_ohne_author_id_nutzt_session_user_id() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "matched").await;
-        insert_active_session(&db, "legacy-session", 1, 200, 100, Some(123)).await;
-        port.names
-            .lock()
-            .expect("names lock")
-            .insert(200, "CoachName".to_string());
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
-        let handler = CoachingHandler { coaching };
-
-        let reply = handler
-            .handle(BridgeInteraction {
-                custom_id: "coach_cancel_legacy-session".to_string(),
-                user_id: 200,
-                guild_id: 1,
-                channel_id: 500,
-                ..BridgeInteraction::default()
-            })
-            .await;
-
-        assert_eq!(
-            reply.content.as_deref(),
-            Some("✅ Coaching erfolgreich abgebrochen und User für 7 Tage gesperrt.")
-        );
-        let banned_user: u64 = db
-            .read(|conn| {
-                conn.query_row("SELECT discord_user_id FROM coaching_bans", [], |row| {
-                    row.get(0)
-                })
-            })
-            .await
-            .expect("ban row");
-        assert_eq!(banned_user, 100);
-        assert!(port
-            .removed_roles
-            .lock()
-            .expect("removed_roles lock")
-            .iter()
-            .any(|(_, user_id, role_id, _)| {
-                *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
-            }));
-        assert!(port
-            .dm_texts
-            .lock()
-            .expect("dm_texts lock")
-            .iter()
-            .any(|(user_id, text)| {
-                *user_id == 100
-                    && text
-                        .contains("Du wurdest für **7 Tage** für neue Coaching-Anfragen gesperrt.")
-            }));
-    }
-
-    #[tokio::test]
-    async fn survey_poll_beendet_nicht_wenn_voice_cache_unbekannt_ist() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "matched").await;
-        insert_active_session(&db, "unknown-cache-session", 1, 200, 100, Some(123)).await;
-
-        coaching.scan_survey_sessions().await;
-
-        let status: String = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT status FROM coaching_sessions WHERE id='unknown-cache-session'",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("session row");
-        assert_eq!(status, "active");
-        assert!(port
-            .added_roles
-            .lock()
-            .expect("added_roles lock")
-            .is_empty());
-        assert!(port
-            .removed_roles
-            .lock()
-            .expect("removed_roles lock")
-            .is_empty());
-        assert!(port.dm_embeds.lock().expect("dm_embeds lock").is_empty());
-    }
-
-    #[tokio::test]
-    async fn survey_scan_beendet_sicher_abgelaufene_voice_session_nur_einmal() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "matched").await;
-        insert_active_session(&db, "survey-session", 1, 200, 100, Some(123)).await;
-        port.names
-            .lock()
-            .expect("names lock")
-            .insert(200, "CoachName".to_string());
-        port.voices.lock().expect("voices lock").insert(200, 900);
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
-
-        coaching.scan_survey_sessions().await;
-        coaching.scan_survey_sessions().await;
-
-        let session: (String, Option<i64>, Option<i64>) = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT status, survey_sent_at, reward_role_expires_at
-                       FROM coaching_sessions WHERE id='survey-session'",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .await
-            .expect("session row");
-        assert_eq!(session.0, "completed");
-        assert!(session.1.is_some());
-        assert!(session.2.is_some());
-        let request_status: String = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT status FROM coaching_requests WHERE id=1",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("request row");
-        assert_eq!(request_status, "completed");
-        assert!(port
-            .removed_roles
-            .lock()
-            .expect("removed_roles lock")
-            .iter()
-            .any(|(_, user_id, role_id, _)| {
-                *user_id == 100 && *role_id == COACHING_ACTIVE_ROLE_ID
-            }));
-        assert!(port
-            .added_roles
-            .lock()
-            .expect("added_roles lock")
-            .iter()
-            .any(|(_, user_id, role_id, _)| {
-                *user_id == 100 && *role_id == COACHING_REWARD_ROLE_ID
-            }));
-        let embeds = port.dm_embeds.lock().expect("dm_embeds lock");
-        assert_eq!(embeds.len(), 1);
-        assert_eq!(embeds[0].0, 100);
-        assert_eq!(embeds[0].1["title"], "🎮 Coaching abgeschlossen!");
-        assert!(embeds[0].1["description"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("**CoachName**"));
-    }
-
-    #[tokio::test]
-    async fn survey_rollen_werden_nur_bei_bedarf_geaendert() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "matched").await;
-        insert_active_session(&db, "role-idempotent-session", 1, 200, 100, Some(123)).await;
-        port.voices.lock().expect("voices lock").insert(200, 900);
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(100, vec![COACHING_REWARD_ROLE_ID]);
-
-        coaching.scan_survey_sessions().await;
-
-        assert!(port
-            .added_roles
-            .lock()
-            .expect("added_roles lock")
-            .is_empty());
-        assert!(port
-            .removed_roles
-            .lock()
-            .expect("removed_roles lock")
-            .is_empty());
-        assert_eq!(port.dm_embeds.lock().expect("dm_embeds lock").len(), 1);
-    }
-
-    #[tokio::test]
-    async fn claim_vergibt_active_rolle_nicht_doppelt() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "analyzed").await;
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(200, vec![COACH_ROLE_ID]);
-        port.role_ids
-            .lock()
-            .expect("role_ids lock")
-            .insert(100, vec![COACHING_ACTIVE_ROLE_ID]);
-        port.names
-            .lock()
-            .expect("names lock")
-            .insert(200, "CoachName".to_string());
-        let handler = CoachingHandler { coaching };
-
-        let reply = handler
-            .handle(BridgeInteraction {
-                custom_id: "coach_claim_1".to_string(),
-                user_id: 200,
-                guild_id: 1,
-                channel_id: 500,
-                ..BridgeInteraction::default()
-            })
-            .await;
-
-        assert_eq!(
-            reply.content.as_deref(),
-            Some("✅ Session mit Player gestartet!")
-        );
-        assert!(port
-            .added_roles
-            .lock()
-            .expect("added_roles lock")
-            .is_empty());
+            .expect("kv get");
+        assert_eq!(value.as_deref(), Some("42"));
     }
 
     #[tokio::test]
     async fn parallele_claims_lassen_nur_einen_coach_gewinnen() {
-        let (_dir, db, port, coaching) = test_coaching().await;
-        insert_request(&db, 1, 100, "analyzed").await;
+        let (db, port, coaching) = test_coaching().await;
+        let data = notification("race-1", 100);
+        let upsert = coaching
+            .upsert_request_created_notification(&data)
+            .await
+            .expect("upsert");
+        let request_id = i32::try_from(upsert.local_request_id).expect("request id fits i32");
+        sqlx::query(
+            r#"
+            UPDATE coaching.requests
+               SET status = 'analyzed',
+                   message_id = $1,
+                   channel_id = $2,
+                   updated_at = now()
+             WHERE bot_request_id = $3
+            "#,
+        )
+        .bind(77_i64)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .bind(request_id)
+        .execute(db.pool())
+        .await
+        .expect("mark request analyzed");
         for coach_id in [200, 201] {
             port.role_ids
                 .lock()
                 .expect("role_ids lock")
-                .insert(coach_id, vec![COACH_ROLE_ID]);
-            port.names
-                .lock()
-                .expect("names lock")
-                .insert(coach_id, format!("Coach {coach_id}"));
+                .push((coach_id, vec![COACH_ROLE_ID]));
         }
         port.display_name_barrier
             .lock()
@@ -3170,14 +2848,14 @@ mod tests {
 
         let (reply_a, reply_b) = tokio::join!(
             handler_a.handle(BridgeInteraction {
-                custom_id: "coach_claim_1".to_string(),
+                custom_id: format!("coach_claim_{request_id}"),
                 user_id: 200,
                 guild_id: 1,
                 channel_id: 500,
                 ..BridgeInteraction::default()
             }),
             handler_b.handle(BridgeInteraction {
-                custom_id: "coach_claim_1".to_string(),
+                custom_id: format!("coach_claim_{request_id}"),
                 user_id: 201,
                 guild_id: 1,
                 channel_id: 500,
@@ -3206,45 +2884,21 @@ mod tests {
             1
         );
 
-        let session_count: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM coaching_sessions WHERE request_id=1",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .expect("session count");
+        let session_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM coaching.sessions WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("session count");
         assert_eq!(session_count, 1);
-    }
-
-    #[test]
-    fn survey_dm_text_entspricht_python_verbatim() {
-        let embed = survey_embed("CoachName", 1);
-        assert_eq!(embed["title"], "🎮 Coaching abgeschlossen!");
-        assert_eq!(
-            embed["description"],
-            "Deine Coaching-Session mit **CoachName** ist beendet. Wir hoffen, es hat dir geholfen!"
-        );
-        assert_eq!(embed["fields"][0]["name"], "⭐ Gib uns Feedback");
-        assert_eq!(
-            embed["fields"][0]["value"],
-            "Du hast nun für **5 Tage** Zugriff auf unseren Feedback-Kanal. Bitte teile deine Erfahrungen dort mit uns:\n\n👉 [**HIER FEEDBACK ABGEBEN**](https://discord.com/channels/1/1494756126644895885)\n\nDein Feedback hilft uns die Qualität der Coaches sicherzustellen!"
-        );
-        assert_eq!(embed["fields"][0]["inline"], false);
-    }
-
-    #[tokio::test]
-    async fn spawn_startet_survey_poll_und_voice_listener() {
-        let (_dir, _db, _port, coaching) = test_coaching().await;
-        let dispatcher = dl_discord::Dispatcher::new();
-
-        let handles = spawn(coaching, &dispatcher);
-
-        assert_eq!(handles.len(), 2);
-        for handle in handles {
-            handle.abort();
-        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = $1",
+        )
+        .bind(request_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(status, "matched");
     }
 }

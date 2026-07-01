@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT min_age_tag, required_tone_tag,\n                   COALESCE(deny_ragebaiter, FALSE) AS \"deny_ragebaiter!\"\n              FROM voice.tempvoice_lane_tag_filter\n             WHERE channel_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "min_age_tag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "required_tone_tag",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "deny_ragebaiter!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "c315009e1f779878f34a0b3512f08aa735cd16752c22390abde4226dd10addf5"
+}

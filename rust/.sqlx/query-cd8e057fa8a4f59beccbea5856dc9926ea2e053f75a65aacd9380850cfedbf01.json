@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT id\n                  FROM activity.member_leave_surveys\n                 WHERE user_id = $1 AND responded_at IS NULL\n                 ORDER BY id DESC\n                 LIMIT 1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "cd8e057fa8a4f59beccbea5856dc9926ea2e053f75a65aacd9380850cfedbf01"
+}

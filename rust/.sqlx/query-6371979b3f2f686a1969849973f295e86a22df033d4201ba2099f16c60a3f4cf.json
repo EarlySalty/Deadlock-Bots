@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    UPDATE coaching.requests\n                       SET status = 'cancelled',\n                           updated_at = $1\n                     WHERE bot_request_id = $2\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6371979b3f2f686a1969849973f295e86a22df033d4201ba2099f16c60a3f4cf"
+}

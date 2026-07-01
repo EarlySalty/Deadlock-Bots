@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE coaching.sessions\n                   SET reward_role_removed_at = $1\n                 WHERE id = $2\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "c000c6ce3c28369dd66d5bc20efd2eca8de3192edd178a625c384647ccd6621d"
+}

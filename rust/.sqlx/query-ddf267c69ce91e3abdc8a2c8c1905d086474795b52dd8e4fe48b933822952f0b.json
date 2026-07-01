@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.tierlist_build_votes\n                (build_id, upvotes, downvotes, updated_at)\n            VALUES ($1, 0, 0, $2)\n            ON CONFLICT (build_id) DO NOTHING\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ddf267c69ce91e3abdc8a2c8c1905d086474795b52dd8e4fe48b933822952f0b"
+}

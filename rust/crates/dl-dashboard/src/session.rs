@@ -7,13 +7,13 @@
 //! Bei jedem Zugriff verlängert sich die Gültigkeit (gleitende TTL).
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use sqlx::PgPool;
 
 use crate::config::AccessLevel;
+use crate::db::DashboardDbResult;
 use crate::token;
 
 const SESSION_KV_NAMESPACE: &str = "dl_dashboard_admin_session";
@@ -54,7 +54,7 @@ pub struct NewSession {
 pub struct SessionStore {
     inner: Arc<Mutex<HashMap<String, Session>>>,
     ttl_secs: f64,
-    db_path: Option<PathBuf>,
+    pool: Option<PgPool>,
 }
 
 impl SessionStore {
@@ -62,17 +62,16 @@ impl SessionStore {
         Self {
             inner: Arc::new(Mutex::new(HashMap::new())),
             ttl_secs: ttl_secs.max(1) as f64,
-            db_path: None,
+            pool: None,
         }
     }
 
-    pub fn persistent(db_path: &Path, ttl_secs: i64, now: f64) -> rusqlite::Result<Self> {
-        let db_path = db_path.to_path_buf();
-        let sessions = load_persisted_sessions(&db_path, now)?;
+    pub async fn persistent(pool: PgPool, ttl_secs: i64, now: f64) -> DashboardDbResult<Self> {
+        let sessions = load_persisted_sessions(&pool, now).await?;
         Ok(Self {
             inner: Arc::new(Mutex::new(sessions)),
             ttl_secs: ttl_secs.max(1) as f64,
-            db_path: Some(db_path),
+            pool: Some(pool),
         })
     }
 
@@ -85,7 +84,7 @@ impl SessionStore {
     }
 
     /// Legt eine neue Session an und liefert ihre opake ID.
-    pub fn create(&self, new: NewSession, now: f64) -> String {
+    pub async fn create(&self, new: NewSession, now: f64) -> DashboardDbResult<String> {
         let session_id = token::session_token();
         let session = Session {
             user_id: new.user_id,
@@ -98,30 +97,29 @@ impl SessionStore {
             last_seen_at: now,
             expires_at: now + self.ttl_secs,
         };
-        let mut map = self.guard();
-        prune_expired(&mut map, now);
-        map.insert(session_id.clone(), session.clone());
-        drop(map);
-        self.persist(&session_id, &session);
-        session_id
+        {
+            let mut map = self.guard();
+            prune_expired(&mut map, now);
+        }
+        self.persist(&session_id, &session).await?;
+        self.guard().insert(session_id.clone(), session);
+        Ok(session_id)
     }
 
     /// Importiert eine extern erzeugte Session (Twitch-Dashboard-SSO). Eine
     /// bereits vergebene ID wird überschrieben (Upsert, wie im Original).
     /// `false` nur bei leerer ID.
-    pub fn import(
+    pub async fn import(
         &self,
         session_id: &str,
         new: NewSession,
         expires_at: Option<f64>,
         now: f64,
-    ) -> bool {
+    ) -> DashboardDbResult<bool> {
         let session_id = session_id.trim();
         if session_id.is_empty() {
-            return false;
+            return Ok(false);
         }
-        let mut map = self.guard();
-        prune_expired(&mut map, now);
         let session = Session {
             user_id: new.user_id,
             username: new.username,
@@ -133,61 +131,62 @@ impl SessionStore {
             last_seen_at: now,
             expires_at: expires_at.unwrap_or(now + self.ttl_secs),
         };
-        map.insert(session_id.to_string(), session.clone());
-        drop(map);
-        self.persist(session_id, &session);
-        true
+        {
+            let mut map = self.guard();
+            prune_expired(&mut map, now);
+        }
+        self.persist(session_id, &session).await?;
+        self.guard().insert(session_id.to_string(), session);
+        Ok(true)
     }
 
     /// Schlägt eine Session nach, verlängert sie gleitend und liefert eine
     /// Kopie. `None`, wenn unbekannt oder abgelaufen.
-    pub fn touch(&self, session_id: &str, now: f64) -> Option<Session> {
+    pub async fn touch(&self, session_id: &str, now: f64) -> DashboardDbResult<Option<Session>> {
         let session_id = session_id.trim();
         if session_id.is_empty() {
-            return None;
+            return Ok(None);
         }
-        let mut map = self.guard();
-        prune_expired(&mut map, now);
-        let session = map.get_mut(session_id)?;
-        if session.expires_at <= now {
-            map.remove(session_id);
-            return None;
-        }
-        session.expires_at = now + self.ttl_secs;
-        session.last_seen_at = now;
-        let result = session.clone();
-        drop(map);
-        self.persist(session_id, &result);
-        Some(result)
+        let result = {
+            let mut map = self.guard();
+            prune_expired(&mut map, now);
+            let Some(session) = map.get_mut(session_id) else {
+                return Ok(None);
+            };
+            if session.expires_at <= now {
+                map.remove(session_id);
+                return Ok(None);
+            }
+            session.expires_at = now + self.ttl_secs;
+            session.last_seen_at = now;
+            session.clone()
+        };
+        self.persist(session_id, &result).await?;
+        Ok(Some(result))
     }
 
     /// Entfernt eine Session (Logout).
-    pub fn remove(&self, session_id: &str) {
+    pub async fn remove(&self, session_id: &str) -> DashboardDbResult<()> {
         let session_id = session_id.trim();
         if !session_id.is_empty() {
-            {
-                self.guard().remove(session_id);
-            }
-            self.delete_persisted(session_id);
+            self.delete_persisted(session_id).await?;
+            self.guard().remove(session_id);
         }
+        Ok(())
     }
 
-    fn persist(&self, session_id: &str, session: &Session) {
-        let Some(path) = self.db_path.as_deref() else {
-            return;
+    async fn persist(&self, session_id: &str, session: &Session) -> DashboardDbResult<()> {
+        if let Some(pool) = self.pool.as_ref() {
+            persist_session(pool, session_id, session).await?;
         };
-        if let Err(error) = persist_session(path, session_id, session) {
-            tracing::error!(%error, "Admin-Session konnte nicht persistiert werden");
-        }
+        Ok(())
     }
 
-    fn delete_persisted(&self, session_id: &str) {
-        let Some(path) = self.db_path.as_deref() else {
-            return;
+    async fn delete_persisted(&self, session_id: &str) -> DashboardDbResult<()> {
+        if let Some(pool) = self.pool.as_ref() {
+            delete_persisted_session(pool, session_id).await?;
         };
-        if let Err(error) = delete_persisted_session(path, session_id) {
-            tracing::warn!(%error, "Persistierte Admin-Session konnte nicht gelöscht werden");
-        }
+        Ok(())
     }
 
     #[cfg(test)]
@@ -246,48 +245,45 @@ impl PersistedSession {
     }
 }
 
-fn open_connection(path: &Path) -> rusqlite::Result<Connection> {
-    let connection = Connection::open(path)?;
-    connection.busy_timeout(std::time::Duration::from_secs(5))?;
-    Ok(connection)
-}
-
-fn persist_session(path: &Path, session_id: &str, session: &Session) -> rusqlite::Result<()> {
-    let payload = serde_json::to_string(&PersistedSession::from(session))
-        .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
-    open_connection(path)?.execute(
-        "INSERT INTO kv_store(ns, k, v) VALUES(?1, ?2, ?3)
-         ON CONFLICT(ns, k) DO UPDATE SET v = excluded.v",
-        params![SESSION_KV_NAMESPACE, session_id, payload],
-    )?;
+async fn persist_session(
+    pool: &PgPool,
+    session_id: &str,
+    session: &Session,
+) -> DashboardDbResult<()> {
+    let payload = serde_json::to_string(&PersistedSession::from(session))?;
+    dl_central_db::kv::set(pool, SESSION_KV_NAMESPACE, session_id, &payload).await?;
     Ok(())
 }
 
-fn delete_persisted_session(path: &Path, session_id: &str) -> rusqlite::Result<()> {
-    open_connection(path)?.execute(
-        "DELETE FROM kv_store WHERE ns = ?1 AND k = ?2",
-        params![SESSION_KV_NAMESPACE, session_id],
-    )?;
+async fn delete_persisted_session(pool: &PgPool, session_id: &str) -> DashboardDbResult<()> {
+    dl_central_db::kv::delete(pool, SESSION_KV_NAMESPACE, session_id).await?;
     Ok(())
 }
 
-fn load_persisted_sessions(path: &Path, now: f64) -> rusqlite::Result<HashMap<String, Session>> {
-    let connection = open_connection(path)?;
-    let mut statement = connection.prepare("SELECT k, v FROM kv_store WHERE ns = ?1")?;
-    let rows = statement.query_map([SESSION_KV_NAMESPACE], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-    })?;
+async fn load_persisted_sessions(
+    pool: &PgPool,
+    now: f64,
+) -> DashboardDbResult<HashMap<String, Session>> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT k, v
+          FROM bot.kv_store
+         WHERE ns = $1
+        "#,
+        SESSION_KV_NAMESPACE,
+    )
+    .fetch_all(pool)
+    .await?;
     let mut sessions = HashMap::new();
     for row in rows {
-        let (session_id, payload) = row?;
-        let Ok(persisted) = serde_json::from_str::<PersistedSession>(&payload) else {
+        let Ok(persisted) = serde_json::from_str::<PersistedSession>(&row.v) else {
             continue;
         };
         let Some(session) = persisted.into_session() else {
             continue;
         };
         if session.expires_at > now {
-            sessions.insert(session_id, session);
+            sessions.insert(row.k, session);
         }
     }
     Ok(sessions)
@@ -311,12 +307,19 @@ mod tests {
         }
     }
 
-    #[test]
-    fn create_und_touch_mit_gleitender_ttl() {
+    #[tokio::test]
+    async fn create_und_touch_mit_gleitender_ttl() {
         let store = SessionStore::new(100);
-        let id = store.create(login("owner_override", AccessLevel::Full), 1000.0);
+        let id = store
+            .create(login("owner_override", AccessLevel::Full), 1000.0)
+            .await
+            .expect("create");
 
-        let s = store.touch(&id, 1050.0).expect("gültig");
+        let s = store
+            .touch(&id, 1050.0)
+            .await
+            .expect("touch")
+            .expect("gültig");
         assert_eq!(s.user_id, 42);
         assert!(s.has_full_access());
         assert!(!s.csrf_token.is_empty());
@@ -325,76 +328,103 @@ mod tests {
         assert_eq!(s.last_seen_at, 1050.0);
     }
 
-    #[test]
-    fn abgelaufene_session_verschwindet() {
+    #[tokio::test]
+    async fn abgelaufene_session_verschwindet() {
         let store = SessionStore::new(100);
-        let id = store.create(login("owner_override", AccessLevel::Full), 1000.0);
+        let id = store
+            .create(login("owner_override", AccessLevel::Full), 1000.0)
+            .await
+            .expect("create");
         // now nach Ablauf.
-        assert!(store.touch(&id, 2000.0).is_none());
+        assert!(store.touch(&id, 2000.0).await.expect("touch").is_none());
         assert_eq!(store.len(), 0);
     }
 
-    #[test]
-    fn logout_entfernt() {
+    #[tokio::test]
+    async fn logout_entfernt() {
         let store = SessionStore::new(100);
-        let id = store.create(login("owner_override", AccessLevel::Full), 1000.0);
-        store.remove(&id);
-        assert!(store.touch(&id, 1000.0).is_none());
+        let id = store
+            .create(login("owner_override", AccessLevel::Full), 1000.0)
+            .await
+            .expect("create");
+        store.remove(&id).await.expect("remove");
+        assert!(store.touch(&id, 1000.0).await.expect("touch").is_none());
     }
 
-    #[test]
-    fn import_upsert_und_leere_id() {
+    #[tokio::test]
+    async fn import_upsert_und_leere_id() {
         let store = SessionStore::new(100);
-        let ok = store.import(
-            "ext-id",
-            login("twitch_dashboard_import", AccessLevel::Full),
-            Some(9999.0),
-            1000.0,
-        );
+        let ok = store
+            .import(
+                "ext-id",
+                login("twitch_dashboard_import", AccessLevel::Full),
+                Some(9999.0),
+                1000.0,
+            )
+            .await
+            .expect("import");
         assert!(ok);
         // Leere ID → abgelehnt.
-        assert!(!store.import(
-            "  ",
-            login("twitch_dashboard_import", AccessLevel::Full),
-            None,
-            1000.0
-        ));
+        assert!(!store
+            .import(
+                "  ",
+                login("twitch_dashboard_import", AccessLevel::Full),
+                None,
+                1000.0
+            )
+            .await
+            .expect("import"));
         // Gleiche ID erneut → Upsert (überschreibt, wie im Original).
-        assert!(store.import(
-            "ext-id",
-            login("twitch_dashboard_import", AccessLevel::Full),
-            None,
-            1000.0
-        ));
-        let s = store.touch("ext-id", 1000.0).expect("gültig");
+        assert!(store
+            .import(
+                "ext-id",
+                login("twitch_dashboard_import", AccessLevel::Full),
+                None,
+                1000.0
+            )
+            .await
+            .expect("import"));
+        let s = store
+            .touch("ext-id", 1000.0)
+            .await
+            .expect("touch")
+            .expect("gültig");
         assert_eq!(s.expires_at, 1100.0); // touch schiebt auf now+ttl
     }
 
-    #[test]
-    fn persistente_session_ueberlebt_store_neustart() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let path = dir.path().join("sessions.sqlite3");
-        let connection = Connection::open(&path).expect("db");
-        connection
-            .execute(
-                "CREATE TABLE kv_store(
-                    ns TEXT NOT NULL,
-                    k TEXT NOT NULL,
-                    v TEXT NOT NULL,
-                    PRIMARY KEY(ns, k)
-                )",
-                [],
-            )
-            .expect("schema");
-        drop(connection);
-
-        let first = SessionStore::persistent(&path, 1209600, 1000.0).expect("store");
-        let id = first.create(login("owner_override", AccessLevel::Full), 1000.0);
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn persistente_session_ueberlebt_store_neustart() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let first = SessionStore::persistent(db.pool().clone(), 1209600, 1000.0)
+            .await
+            .expect("store");
+        let id = first
+            .create(login("owner_override", AccessLevel::Full), 1000.0)
+            .await
+            .expect("create");
+        assert!(dl_central_db::kv::get(db.pool(), SESSION_KV_NAMESPACE, &id)
+            .await
+            .expect("kv get")
+            .is_some());
         drop(first);
 
-        let restarted = SessionStore::persistent(&path, 1209600, 1001.0).expect("restart");
-        let session = restarted.touch(&id, 1001.0).expect("persistiert");
+        let restarted = SessionStore::persistent(db.pool().clone(), 1209600, 1001.0)
+            .await
+            .expect("restart");
+        let session = restarted
+            .touch(&id, 1001.0)
+            .await
+            .expect("touch")
+            .expect("persistiert");
         assert_eq!(session.user_id, 42);
         assert!(session.has_full_access());
+        restarted.remove(&id).await.expect("remove");
+        assert!(dl_central_db::kv::get(db.pool(), SESSION_KV_NAMESPACE, &id)
+            .await
+            .expect("kv get")
+            .is_none());
     }
 }

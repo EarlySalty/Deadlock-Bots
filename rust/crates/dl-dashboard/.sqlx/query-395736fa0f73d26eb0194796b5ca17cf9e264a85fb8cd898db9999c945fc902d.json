@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.oauth_states(\n                state, provider, flow_type, requesting_service,\n                redirect_after, created_at, expires_at, used, metadata\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8::text::jsonb)\n            ON CONFLICT(state) DO UPDATE SET\n                provider = EXCLUDED.provider,\n                flow_type = EXCLUDED.flow_type,\n                requesting_service = EXCLUDED.requesting_service,\n                redirect_after = EXCLUDED.redirect_after,\n                created_at = EXCLUDED.created_at,\n                expires_at = EXCLUDED.expires_at,\n                used = FALSE,\n                metadata = EXCLUDED.metadata\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "395736fa0f73d26eb0194796b5ca17cf9e264a85fb8cd898db9999c945fc902d"
+}

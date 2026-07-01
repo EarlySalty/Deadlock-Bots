@@ -12,10 +12,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use chrono::{Datelike, NaiveDateTime, Timelike};
-use dl_db::Db;
 use dl_discord::{ChannelSender, Dispatcher};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::PgPool;
+
+use crate::db::{discord_id_to_i64, i64_to_u64, ActivityDbResult};
 
 const DAY_NAMES: [&str; 7] = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
 pub const SMARTPING_PING_MESSAGE_PLACEHOLDER: &str =
@@ -176,234 +177,310 @@ struct PingPatternRow {
 /// Handgeschriebene Reads gegen die geteilten SQLite-Tabellen — es gibt keine
 /// importierbare API dafür (die Leaderboard-SQL liegt nur im dl-stats-Handler).
 struct ActivityStatsStore {
-    db: Db,
+    pool: PgPool,
 }
 
 impl ActivityStatsStore {
-    fn new(db: Db) -> Self {
-        Self { db }
+    fn new(pool: PgPool) -> Self {
+        Self { pool }
     }
 
     async fn member_history(&self, user_id: u64, guild_id: u64) -> Vec<MemberEventRow> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT event_type, timestamp, account_created_at, join_position \
-                     FROM member_events WHERE user_id = ?1 AND guild_id = ?2 \
-                     ORDER BY timestamp ASC",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![user_id, guild_id], |r| {
-                    Ok(MemberEventRow {
-                        event_type: r.get(0)?,
-                        timestamp: r.get(1)?,
-                        account_created_at: r.get(2)?,
-                        join_position: r.get(3)?,
-                    })
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        let (Ok(user_id), Ok(guild_id)) = (
+            discord_id_to_i64(user_id, "user_id"),
+            discord_id_to_i64(guild_id, "guild_id"),
+        ) else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT event_type AS "event_type!",
+                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "timestamp?",
+                   to_char(account_created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "account_created_at?",
+                   join_position
+            FROM activity.member_events
+            WHERE user_id = $1
+              AND guild_id = $2
+            ORDER BY occurred_at ASC NULLS FIRST, id ASC
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| MemberEventRow {
+                    event_type: row.event_type,
+                    timestamp: row.timestamp,
+                    account_created_at: row.account_created_at,
+                    join_position: row.join_position.map(i64::from),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     async fn voice_totals(&self, user_id: u64) -> (i64, i64) {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT total_seconds, total_points FROM voice_stats WHERE user_id = ?1",
-                    [user_id],
-                    |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or((0, 0))
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return (0, 0);
+        };
+        sqlx::query!(
+            r#"
+            SELECT total_seconds AS "total_seconds!",
+                   total_points AS "total_points!"
+            FROM voice.voice_stats
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.total_seconds, row.total_points))
+        .unwrap_or((0, 0))
     }
 
     /// Neueste Session: `(channel_name, duration_seconds)`.
     async fn last_voice_session(&self, user_id: u64, guild_id: u64) -> Option<(String, i64)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT channel_name, duration_seconds FROM voice_session_log \
-                     WHERE user_id = ?1 AND guild_id = ?2 ORDER BY ended_at DESC LIMIT 1",
-                    rusqlite::params![user_id, guild_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                            r.get::<_, i64>(1)?,
-                        ))
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let (Ok(user_id), Ok(guild_id)) = (
+            discord_id_to_i64(user_id, "user_id"),
+            discord_id_to_i64(guild_id, "guild_id"),
+        ) else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT COALESCE(channel_name, '') AS "channel_name!",
+                   duration_seconds AS "duration_seconds!"
+            FROM activity.voice_session_log
+            WHERE user_id = $1
+              AND guild_id = $2
+            ORDER BY ended_at DESC
+            LIMIT 1
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.channel_name, row.duration_seconds))
     }
 
     async fn display_name_from_db(&self, user_id: u64) -> Option<String> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT name FROM (
-                       SELECT user_display_name AS name, last_played_together AS ts
-                         FROM user_co_players
-                        WHERE user_id = ?1 AND user_display_name IS NOT NULL
-                       UNION ALL
-                       SELECT co_player_display_name AS name, last_played_together AS ts
-                         FROM user_co_players
-                        WHERE co_player_id = ?1 AND co_player_display_name IS NOT NULL
-                       UNION ALL
-                       SELECT display_name AS name, ended_at AS ts
-                         FROM voice_session_log
-                        WHERE user_id = ?1 AND display_name IS NOT NULL
-                     )
-                     WHERE name IS NOT NULL AND name != ''
-                     ORDER BY ts DESC
-                     LIMIT 1",
-                    [user_id],
-                    |r| r.get::<_, String>(0),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT name AS "name!"
+            FROM (
+                SELECT user_display_name AS name, last_played_together AS ts
+                FROM activity.user_co_players
+                WHERE user_id = $1
+                  AND user_display_name IS NOT NULL
+                UNION ALL
+                SELECT co_player_display_name AS name, last_played_together AS ts
+                FROM activity.user_co_players
+                WHERE co_player_id = $1
+                  AND co_player_display_name IS NOT NULL
+                UNION ALL
+                SELECT display_name AS name, ended_at AS ts
+                FROM activity.voice_session_log
+                WHERE user_id = $1
+                  AND display_name IS NOT NULL
+            ) names
+            WHERE name IS NOT NULL
+              AND name != ''
+            ORDER BY ts DESC NULLS LAST
+            LIMIT 1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| row.name)
     }
 
     async fn message_activity(&self, user_id: u64, guild_id: u64) -> Option<MsgRow> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT message_count, last_message_at, first_message_at, channel_id \
-                     FROM message_activity WHERE user_id = ?1 AND guild_id = ?2",
-                    rusqlite::params![user_id, guild_id],
-                    |r| {
-                        Ok(MsgRow {
-                            count: r.get(0)?,
-                            last: r.get(1)?,
-                            first: r.get(2)?,
-                            channel_id: r.get(3)?,
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let (Ok(user_id), Ok(guild_id)) = (
+            discord_id_to_i64(user_id, "user_id"),
+            discord_id_to_i64(guild_id, "guild_id"),
+        ) else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT COALESCE(message_count, 0)::BIGINT AS "count!",
+                   to_char(last_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last?",
+                   to_char(first_message_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "first?",
+                   channel_id
+            FROM activity.message_activity
+            WHERE user_id = $1
+              AND guild_id = $2
+            "#,
+            user_id,
+            guild_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| MsgRow {
+            count: row.count,
+            last: row.last,
+            first: row.first,
+            channel_id: row.channel_id,
+        })
     }
 
     async fn co_players(&self, user_id: u64, limit: i64) -> Vec<(u64, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT co_player_id, sessions_together FROM user_co_players \
-                     WHERE user_id = ?1 \
-                     ORDER BY sessions_together DESC, total_minutes_together DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![user_id, limit], |r| {
-                    Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT co_player_id,
+                   COALESCE(sessions_together, 0)::INT AS "sessions_together!"
+            FROM activity.user_co_players
+            WHERE user_id = $1
+            ORDER BY COALESCE(sessions_together, 0) DESC,
+                     COALESCE(total_minutes_together, 0) DESC
+            LIMIT $2
+            "#,
+            user_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| {
+                    i64_to_u64(row.co_player_id, "co_player_id")
+                        .map(|id| (id, i64::from(row.sessions_together)))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     /// `(typical_hours_json, typical_days_json, activity_score_2w)`.
     async fn pattern_basic(&self, user_id: u64) -> Option<(Option<String>, Option<String>, i64)> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT typical_hours, typical_days, activity_score_2w \
-                     FROM user_activity_patterns WHERE user_id = ?1",
-                    [user_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, i64>(2)?)),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT typical_hours::text AS "hours?",
+                   typical_days::text AS "days?",
+                   COALESCE(activity_score_2w, 0)::INT AS "score!"
+            FROM activity.user_activity_patterns
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| (row.hours, row.days, i64::from(row.score)))
     }
 
     async fn pattern_full(&self, user_id: u64) -> Option<PatternFull> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT typical_hours, typical_days, activity_score_2w, sessions_count_2w, \
-                     total_minutes_2w, last_active_at, ping_count_30d, last_pinged_at \
-                     FROM user_activity_patterns WHERE user_id = ?1",
-                    [user_id],
-                    |r| {
-                        Ok(PatternFull {
-                            hours: r.get(0)?,
-                            days: r.get(1)?,
-                            score: r.get::<_, i64>(2)?,
-                            // Spalte 3 (sessions_count_2w) wird nicht angezeigt.
-                            total_minutes: r.get::<_, i64>(4)?,
-                            last_active: r.get(5)?,
-                            ping_count: r.get::<_, i64>(6)?,
-                            last_pinged: r.get(7)?,
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT typical_hours::text AS "hours?",
+                   typical_days::text AS "days?",
+                   COALESCE(activity_score_2w, 0)::INT AS "score!",
+                   COALESCE(total_minutes_2w, 0)::INT AS "total_minutes!",
+                   to_char(last_active_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_active?",
+                   COALESCE(ping_count_30d, 0)::INT AS "ping_count!",
+                   to_char(last_pinged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_pinged?"
+            FROM activity.user_activity_patterns
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| PatternFull {
+            hours: row.hours,
+            days: row.days,
+            score: i64::from(row.score),
+            total_minutes: i64::from(row.total_minutes),
+            last_active: row.last_active,
+            ping_count: i64::from(row.ping_count),
+            last_pinged: row.last_pinged,
+        })
     }
 
     /// Top-`limit` Text: `(user_id, total_messages, total_points)`.
     async fn text_top(&self, limit: i64) -> Vec<(u64, i64, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, total_messages, total_points FROM text_stats \
-                     ORDER BY total_points DESC, total_messages DESC LIMIT ?1",
-                )?;
-                let rows = stmt.query_map([limit], |r| {
-                    Ok((
-                        r.get::<_, i64>(0)? as u64,
-                        r.get::<_, i64>(1)?,
-                        r.get::<_, i64>(2)?,
-                    ))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        sqlx::query!(
+            r#"
+            SELECT user_id,
+                   total_messages AS "total_messages!",
+                   total_points AS "total_points!"
+            FROM activity.text_stats
+            ORDER BY total_points DESC, total_messages DESC
+            LIMIT $1
+            "#,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| {
+                    i64_to_u64(row.user_id, "user_id")
+                        .map(|id| (id, row.total_messages, row.total_points))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     async fn text_rank(&self, user_id: u64) -> Option<(i64, i64)> {
-        self.db
-            .read(move |conn| {
-                let row: Option<(i64, i64)> = conn
-                    .query_row(
-                        "SELECT total_points, total_messages FROM text_stats WHERE user_id = ?1",
-                        [user_id],
-                        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-                    )
-                    .optional()?;
-                let Some((points, messages)) = row else {
-                    return Ok(None);
-                };
-                let rank: i64 = conn.query_row(
-                    "SELECT COUNT(*) + 1 FROM text_stats \
-                     WHERE total_points > ?1 OR (total_points = ?1 AND total_messages > ?2)",
-                    rusqlite::params![points, messages],
-                    |r| r.get(0),
-                )?;
-                Ok(Some((rank, points)))
-            })
-            .await
-            .ok()
-            .flatten()
+        let user_id = discord_id_to_i64(user_id, "user_id").ok()?;
+        let row = sqlx::query!(
+            r#"
+            SELECT total_points AS "points!",
+                   total_messages AS "messages!"
+            FROM activity.text_stats
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()?;
+
+        let rank = sqlx::query!(
+            r#"
+            SELECT COUNT(*) + 1 AS "rank!"
+            FROM activity.text_stats
+            WHERE total_points > $1
+               OR (total_points = $1 AND total_messages > $2)
+            "#,
+            row.points,
+            row.messages,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .ok()?
+        .rank;
+        Some((rank, row.points))
     }
 
     /// Letzte Events eines Users (neueste zuerst): `(event_type, timestamp)`.
@@ -416,100 +493,172 @@ impl ActivityStatsStore {
         guild_id: u64,
         limit: i64,
     ) -> Vec<(String, Option<String>)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT event_type, timestamp, display_name FROM member_events \
-                     WHERE user_id = ?1 AND guild_id = ?2 ORDER BY timestamp DESC LIMIT ?3",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![user_id, guild_id, limit], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        let (Ok(user_id), Ok(guild_id)) = (
+            discord_id_to_i64(user_id, "user_id"),
+            discord_id_to_i64(guild_id, "guild_id"),
+        ) else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT event_type AS "event_type!",
+                   to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "timestamp?",
+                   display_name
+            FROM activity.member_events
+            WHERE user_id = $1
+              AND guild_id = $2
+            ORDER BY occurred_at DESC NULLS LAST, id DESC
+            LIMIT CASE WHEN $3::BIGINT < 0 THEN NULL ELSE $3::BIGINT END
+            "#,
+            user_id,
+            guild_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| {
+                    let _ = row.display_name;
+                    (row.event_type, row.timestamp)
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
     async fn ping_pattern(&self, user_id: u64) -> Option<PingPatternRow> {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT typical_hours, typical_days, activity_score_2w, \
-                     last_pinged_at, ping_count_30d \
-                     FROM user_activity_patterns WHERE user_id = ?1",
-                    [user_id],
-                    |r| {
-                        Ok(PingPatternRow {
-                            hours: r.get(0)?,
-                            days: r.get(1)?,
-                            score: r.get::<_, i64>(2)?,
-                            last_pinged: r.get(3)?,
-                            ping_count: r.get::<_, i64>(4)?,
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
+        let Ok(user_id) = discord_id_to_i64(user_id, "user_id") else {
+            return None;
+        };
+        sqlx::query!(
+            r#"
+            SELECT typical_hours::text AS "hours?",
+                   typical_days::text AS "days?",
+                   COALESCE(activity_score_2w, 0)::INT AS "score!",
+                   to_char(last_pinged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "last_pinged?",
+                   COALESCE(ping_count_30d, 0)::INT AS "ping_count!"
+            FROM activity.user_activity_patterns
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten()
+        .map(|row| PingPatternRow {
+            hours: row.hours,
+            days: row.days,
+            score: i64::from(row.score),
+            last_pinged: row.last_pinged,
+            ping_count: i64::from(row.ping_count),
+        })
     }
 
-    async fn record_ping(&self, user_id: u64) -> Result<(), dl_db::DbError> {
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE user_activity_patterns
-                     SET last_pinged_at = CURRENT_TIMESTAMP,
-                         ping_count_30d = COALESCE(ping_count_30d, 0) + 1
-                     WHERE user_id = ?1",
-                    [user_id],
-                )
-                .map(|_| ())
-            })
-            .await
+    async fn record_ping(&self, user_id: u64) -> ActivityDbResult<()> {
+        let user_id = discord_id_to_i64(user_id, "user_id")?;
+        sqlx::query!(
+            r#"
+            UPDATE activity.user_activity_patterns
+            SET last_pinged_at = now(),
+                ping_count_30d = COALESCE(ping_count_30d, 0) + 1
+            WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     async fn server_event_counts(&self, guild_id: u64) -> Vec<(String, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT event_type, COUNT(*) c FROM member_events WHERE guild_id = ?1 \
-                     GROUP BY event_type ORDER BY c DESC",
-                )?;
-                let rows = stmt.query_map([guild_id], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        let Ok(guild_id) = discord_id_to_i64(guild_id, "guild_id") else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT event_type AS "event_type!",
+                   COUNT(*) AS "count!"
+            FROM activity.member_events
+            WHERE guild_id = $1
+            GROUP BY event_type
+            ORDER BY COUNT(*) DESC
+            "#,
+            guild_id,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|row| (row.event_type, row.count))
+                .collect()
+        })
+        .unwrap_or_default()
     }
 
-    async fn server_sum(&self, sql: &'static str, guild_id: u64) -> i64 {
-        self.db
-            .read(move |conn| conn.query_row(sql, [guild_id], |r| r.get::<_, Option<i64>>(0)))
-            .await
-            .ok()
-            .flatten()
-            .unwrap_or(0)
+    async fn server_total_messages(&self, guild_id: u64) -> i64 {
+        let Ok(guild_id) = discord_id_to_i64(guild_id, "guild_id") else {
+            return 0;
+        };
+        sqlx::query!(
+            r#"
+            SELECT COALESCE(SUM(message_count), 0)::BIGINT AS "total!"
+            FROM activity.message_activity
+            WHERE guild_id = $1
+            "#,
+            guild_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map(|row| row.total)
+        .unwrap_or(0)
+    }
+
+    async fn server_total_voice(&self, guild_id: u64) -> i64 {
+        let Ok(guild_id) = discord_id_to_i64(guild_id, "guild_id") else {
+            return 0;
+        };
+        sqlx::query!(
+            r#"
+            SELECT COALESCE(SUM(duration_seconds), 0)::BIGINT AS "total!"
+            FROM activity.voice_session_log
+            WHERE guild_id = $1
+            "#,
+            guild_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map(|row| row.total)
+        .unwrap_or(0)
     }
 
     async fn server_top_users(&self, guild_id: u64, limit: i64) -> Vec<(u64, i64)> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT user_id, message_count FROM message_activity WHERE guild_id = ?1 \
-                     ORDER BY message_count DESC LIMIT ?2",
-                )?;
-                let rows = stmt.query_map(rusqlite::params![guild_id, limit], |r| {
-                    Ok((r.get::<_, i64>(0)? as u64, r.get::<_, i64>(1)?))
-                })?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
-            })
-            .await
-            .unwrap_or_default()
+        let Ok(guild_id) = discord_id_to_i64(guild_id, "guild_id") else {
+            return Vec::new();
+        };
+        sqlx::query!(
+            r#"
+            SELECT user_id,
+                   COALESCE(message_count, 0)::BIGINT AS "message_count!"
+            FROM activity.message_activity
+            WHERE guild_id = $1
+            ORDER BY COALESCE(message_count, 0) DESC
+            LIMIT $2
+            "#,
+            guild_id,
+            limit,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .filter_map(|row| {
+                    i64_to_u64(row.user_id, "user_id").map(|id| (id, row.message_count))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
     }
 }
 
@@ -554,9 +703,9 @@ pub struct ActivityStatsCommands {
 }
 
 impl ActivityStatsCommands {
-    pub fn new(db: Db, port: Arc<dyn NamePort>) -> Arc<Self> {
+    pub fn new(pool: PgPool, port: Arc<dyn NamePort>) -> Arc<Self> {
         Arc::new(Self {
-            store: ActivityStatsStore::new(db),
+            store: ActivityStatsStore::new(pool),
             port,
         })
     }
@@ -1071,13 +1220,7 @@ impl ActivityStatsCommands {
             fields.push(json!({ "name": "📋 Member Events", "value": v, "inline": true }));
         }
 
-        let total_messages = self
-            .store
-            .server_sum(
-                "SELECT SUM(message_count) FROM message_activity WHERE guild_id = ?1",
-                guild_id,
-            )
-            .await;
+        let total_messages = self.store.server_total_messages(guild_id).await;
         if total_messages != 0 {
             fields.push(json!({
                 "name": "💬 Nachrichten (gesamt)",
@@ -1086,13 +1229,7 @@ impl ActivityStatsCommands {
             }));
         }
 
-        let total_voice = self
-            .store
-            .server_sum(
-                "SELECT SUM(duration_seconds) FROM voice_session_log WHERE guild_id = ?1",
-                guild_id,
-            )
-            .await;
+        let total_voice = self.store.server_total_voice(guild_id).await;
         if total_voice != 0 {
             fields.push(json!({
                 "name": "🎙️ Voice-Zeit (gesamt)",
@@ -1177,7 +1314,9 @@ pub fn spawn_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "testing")]
     use std::sync::atomic::{AtomicUsize, Ordering};
+    #[cfg(feature = "testing")]
     use std::sync::Mutex as StdMutex;
 
     #[test]
@@ -1224,10 +1363,12 @@ mod tests {
         assert_eq!(parse_json_ints(&Some("kaputt".into())), Vec::<i64>::new());
     }
 
+    #[cfg(feature = "testing")]
     struct MockNames {
         names: StdMutex<HashMap<u64, String>>,
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl NamePort for MockNames {
         async fn resolve_names(&self, user_ids: &[u64]) -> HashMap<u64, String> {
@@ -1243,37 +1384,31 @@ mod tests {
         }
     }
 
-    async fn stats_test_db() -> (tempfile::TempDir, Db) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("stats.sqlite3")).expect("db");
-        db.write(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE user_activity_patterns(user_id INTEGER PRIMARY KEY, typical_hours TEXT, typical_days TEXT, activity_score_2w INTEGER DEFAULT 0, sessions_count_2w INTEGER DEFAULT 0, total_minutes_2w INTEGER DEFAULT 0, last_active_at DATETIME, last_analyzed_at DATETIME DEFAULT CURRENT_TIMESTAMP, last_pinged_at DATETIME, ping_count_30d INTEGER DEFAULT 0);
-                 CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, started_at DATETIME NOT NULL, ended_at DATETIME NOT NULL, duration_seconds INTEGER NOT NULL DEFAULT 0, points INTEGER NOT NULL DEFAULT 0, peak_users INTEGER, user_counts_json TEXT, display_name TEXT, co_player_ids TEXT);
-                 CREATE TABLE user_co_players(user_id INTEGER NOT NULL, co_player_id INTEGER NOT NULL, sessions_together INTEGER DEFAULT 1, total_minutes_together INTEGER DEFAULT 0, last_played_together DATETIME DEFAULT CURRENT_TIMESTAMP, user_display_name TEXT, co_player_display_name TEXT, PRIMARY KEY(user_id, co_player_id));
-                 CREATE TABLE member_events(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, event_type TEXT NOT NULL, timestamp DATETIME DEFAULT CURRENT_TIMESTAMP, display_name TEXT, account_created_at DATETIME, join_position INTEGER, metadata TEXT);
-                 CREATE TABLE message_activity(user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL, channel_id INTEGER, message_count INTEGER DEFAULT 0, last_message_at DATETIME, first_message_at DATETIME, PRIMARY KEY(user_id, guild_id));",
-            )
-        })
-        .await
-        .expect("ddl");
-        (dir, db)
+    #[cfg(feature = "testing")]
+    async fn stats_test_db() -> Result<(dl_central_db::TestDb, PgPool), Box<dyn std::error::Error>>
+    {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool().clone();
+        Ok((db, pool))
     }
 
-    fn commands(db: Db) -> Arc<ActivityStatsCommands> {
+    #[cfg(feature = "testing")]
+    fn commands(pool: PgPool) -> Arc<ActivityStatsCommands> {
         ActivityStatsCommands::new(
-            db,
+            pool,
             Arc::new(MockNames {
                 names: StdMutex::new(HashMap::new()),
             }),
         )
     }
 
+    #[cfg(feature = "testing")]
     struct MockChannelSender {
         fail: bool,
         sends: AtomicUsize,
     }
 
+    #[cfg(feature = "testing")]
     impl MockChannelSender {
         fn new(fail: bool) -> Self {
             Self {
@@ -1283,6 +1418,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl ChannelSender for MockChannelSender {
         async fn send_to_channel(
@@ -1300,6 +1436,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "testing")]
     fn message_event(content: &str) -> dl_discord::MessageEvent {
         dl_discord::MessageEvent {
             guild_id: Some(1),
@@ -1327,109 +1464,112 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn useranalysis_letzte_voice_session_ist_guild_scoped() {
-        let (_dir, db) = stats_test_db().await;
-        db.write(|conn| {
-            conn.execute_batch(
-                "INSERT INTO voice_session_log(user_id, guild_id, channel_name, started_at, ended_at, duration_seconds)
-                 VALUES
-                 (42, 2, 'Falsche Guild', '2026-01-01 10:00:00', '2026-01-01 11:00:00', 3600),
-                 (42, 1, 'Richtige Guild', '2026-01-01 09:00:00', '2026-01-01 09:30:00', 1800);",
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn useranalysis_letzte_voice_session_ist_guild_scoped(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, pool) = stats_test_db().await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_session_log(
+                id, user_id, guild_id, channel_name, started_at, ended_at,
+                duration_seconds, points
             )
-        })
-        .await
-        .expect("seed");
+            VALUES
+                ($1, 42, 2, 'Falsche Guild', $2, $3, 3600, 0),
+                ($4, 42, 1, 'Richtige Guild', $5, $6, 1800, 0)
+            "#,
+            1_i64,
+            test_dt("2026-01-01 10:00:00"),
+            test_dt("2026-01-01 11:00:00"),
+            2_i64,
+            test_dt("2026-01-01 09:00:00"),
+            test_dt("2026-01-01 09:30:00"),
+        )
+        .execute(&pool)
+        .await?;
 
-        let store = ActivityStatsStore::new(db);
+        let store = ActivityStatsStore::new(pool);
         assert_eq!(
             store.last_voice_session(42, 1).await,
             Some(("Richtige Guild".to_string(), 1800))
         );
+        Ok(())
     }
 
     #[tokio::test]
-    async fn namensfallback_nutzt_db_wenn_cache_leer_ist() {
-        let (_dir, db) = stats_test_db().await;
-        db.write(|conn| {
-            conn.execute(
-                "INSERT INTO user_co_players(user_id, co_player_id, sessions_together, total_minutes_together, user_display_name, co_player_display_name, last_played_together)
-                 VALUES(42, 77, 1, 10, 'DB Name', 'Andere', '2026-01-01 10:00:00')",
-                [],
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn namensfallback_nutzt_db_wenn_cache_leer_ist() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_db, pool) = stats_test_db().await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.user_co_players(
+                user_id, co_player_id, sessions_together, total_minutes_together,
+                user_display_name, co_player_display_name, last_played_together
             )
-            .map(|_| ())
-        })
-        .await
-        .expect("seed");
+            VALUES(42, 77, 1, 10, 'DB Name', 'Andere', $1)
+            "#,
+            test_dt("2026-01-01 10:00:00"),
+        )
+        .execute(&pool)
+        .await?;
 
-        assert_eq!(commands(db).resolve_one(42).await, "DB Name");
+        assert_eq!(commands(pool).resolve_one(42).await, "DB Name");
+        Ok(())
     }
 
     #[tokio::test]
-    async fn serverstats_erlaubt_manage_guild_ohne_admin() {
-        let (_dir, db) = stats_test_db().await;
-        let reply = commands(db)
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn serverstats_erlaubt_manage_guild_ohne_admin() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (_db, pool) = stats_test_db().await?;
+        let reply = commands(pool)
             .reply_for("!serverstats", 1, 42, false, false, true)
             .await;
         assert!(reply.is_some());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn smartping_baut_reply_ohne_vorzeitig_zu_zaehlen() {
-        let (_dir, db) = stats_test_db().await;
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn smartping_baut_reply_ohne_vorzeitig_zu_zaehlen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, pool) = stats_test_db().await?;
         let now = chrono::Utc::now().naive_utc();
         let hour = now.hour();
         let day = now.weekday().num_days_from_monday();
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO user_activity_patterns(user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d)
-                 VALUES(?1, ?2, ?3, 5, 0)",
-                rusqlite::params![42_u64, format!("[{hour}]"), format!("[{day}]")],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("seed");
+        seed_ping_pattern(&pool, hour, day).await?;
 
-        let reply = commands(db.clone())
+        let reply = commands(pool.clone())
             .reply_for("!smartping <@42>", 1, 99, false, true, false)
             .await
             .expect("reply");
         let expected = format!("<@42> {SMARTPING_PING_MESSAGE_PLACEHOLDER}");
         assert_eq!(reply.content.as_deref(), Some(expected.as_str()));
-        let (count, last): (i64, Option<String>) = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT ping_count_30d, last_pinged_at FROM user_activity_patterns WHERE user_id=42",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .await
-            .expect("row");
-        assert_eq!(count, 0);
-        assert!(last.is_none());
+        let row = ping_row(&pool).await?;
+        assert_eq!(row.0, 0);
+        assert!(row.1.is_none());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn smartping_sendfehler_verbraucht_rate_limit_nicht() {
-        let (_dir, db) = stats_test_db().await;
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn smartping_sendfehler_verbraucht_rate_limit_nicht(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, pool) = stats_test_db().await?;
         let now = chrono::Utc::now().naive_utc();
         let hour = now.hour();
         let day = now.weekday().num_days_from_monday();
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO user_activity_patterns(user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d)
-                 VALUES(?1, ?2, ?3, 5, 0)",
-                rusqlite::params![42_u64, format!("[{hour}]"), format!("[{day}]")],
-            )
-            .map(|_| ())
-        })
-        .await
-        .expect("seed");
+        seed_ping_pattern(&pool, hour, day).await?;
 
         let dispatcher = Dispatcher::new();
         let sender = Arc::new(MockChannelSender::new(true));
-        let task = spawn_command(commands(db.clone()), &dispatcher, sender.clone());
+        let task = spawn_command(commands(pool.clone()), &dispatcher, sender.clone());
         dispatcher.publish_message(message_event("!smartping <@42>"));
         for _ in 0..20 {
             if sender.sends.load(Ordering::SeqCst) > 0 {
@@ -1439,18 +1579,58 @@ mod tests {
         }
         task.abort();
 
-        let (count, last): (i64, Option<String>) = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT ping_count_30d, last_pinged_at FROM user_activity_patterns WHERE user_id=42",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .await
-            .expect("row");
+        let (count, last) = ping_row(&pool).await?;
         assert_eq!(sender.sends.load(Ordering::SeqCst), 1);
         assert_eq!(count, 0);
         assert!(last.is_none());
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn test_dt(raw: &str) -> chrono::DateTime<chrono::Utc> {
+        NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+            .expect("test timestamp")
+            .and_utc()
+    }
+
+    #[cfg(feature = "testing")]
+    async fn seed_ping_pattern(
+        pool: &PgPool,
+        hour: u32,
+        day: u32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let hours = format!("[{hour}]");
+        let days = format!("[{day}]");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.user_activity_patterns(
+                user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d
+            )
+            VALUES($1, $2::text::jsonb, $3::text::jsonb, 5, 0)
+            "#,
+            42_i64,
+            hours,
+            days,
+        )
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    async fn ping_row(
+        pool: &PgPool,
+    ) -> Result<(i64, Option<chrono::DateTime<chrono::Utc>>), Box<dyn std::error::Error>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(ping_count_30d, 0)::INT AS "ping_count!",
+                   last_pinged_at
+            FROM activity.user_activity_patterns
+            WHERE user_id = 42
+            "#
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok((i64::from(row.ping_count), row.last_pinged_at))
     }
 }

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE activity.user_retention_tracking\n               SET opted_out = FALSE,\n                   updated_at = $1\n             WHERE user_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "089c2e47c595adb8d6afc2543654a67cddf46b9da3445c5a56d31229f64f2e24"
+}

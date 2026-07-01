@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(r.status, '') AS \"status!\",\n                   a.message_id AS \"message_id!\",\n                   COALESCE(a.content, '') AS \"content!\"\n              FROM activity.voice_feedback_requests r\n              JOIN activity.voice_feedback_responses a ON a.request_id = r.id\n             WHERE r.user_id = 100\n             ORDER BY a.id\n             LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "message_id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "content!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      true,
+      null
+    ]
+  },
+  "hash": "395bd157fe17cbc532be95299c1ee8e8402d1cddd7aeaf90d25ea90cb9cc2533"
+}

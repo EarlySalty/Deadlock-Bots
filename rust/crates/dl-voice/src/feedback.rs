@@ -9,13 +9,14 @@
 
 use std::sync::Arc;
 
-use dl_db::Db;
 use dl_discord::interactions::{ChannelSender, ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, MessageEvent,
 };
-use rusqlite::OptionalExtension;
 use serde_json::{json, Value};
+use sqlx::{PgPool, Postgres, Transaction};
+
+use crate::db::{u64_to_i64, VoiceDbError, VoiceDbResult};
 
 pub const MIN_SECONDS: i64 = 300;
 pub const MAX_NAMES: usize = 10;
@@ -32,6 +33,8 @@ pub const FEEDBACK_WINDOW_EXPIRED_TEXT: &str =
 pub const ACK_TEXT: &str = "Danke für dein Feedback! 🙌\n\n\
 Wenn sonst irgendwas sein sollte, kannst du dich jederzeit an unser Team wenden – hier beißt keiner und jeder hilft gerne! :) \
 Falls es doch mal ein Problem geben sollte, wende dich bitte direkt an einen Community Moderator (bei kleineren Dingen), einen Moderator oder an den Owner. ❤️";
+const FEEDBACK_REQUEST_ID_LOCK_KEY: i64 = -7_010_020_001;
+const FEEDBACK_RESPONSE_ID_LOCK_KEY: i64 = -7_010_020_002;
 
 struct FeedbackRequestResponse {
     id: i64,
@@ -139,13 +142,13 @@ pub trait FeedbackPort: Send + Sync {
 }
 
 pub struct VoiceFeedback {
-    pub db: Db,
+    pub pool: PgPool,
     pub port: Arc<dyn FeedbackPort>,
 }
 
 impl VoiceFeedback {
-    pub fn new(db: Db, port: Arc<dyn FeedbackPort>) -> Arc<Self> {
-        Arc::new(Self { db, port })
+    pub fn new(pool: PgPool, port: Arc<dyn FeedbackPort>) -> Arc<Self> {
+        Arc::new(Self { pool, port })
     }
 
     /// Vom Tracker nach jeder finalisierten Session gerufen.
@@ -193,35 +196,42 @@ impl VoiceFeedback {
     }
 
     async fn had_request(&self, user_id: u64, request_type: &str) -> bool {
-        let request_type = request_type.to_string();
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT 1 FROM voice_feedback_requests
-                      WHERE user_id = ?1 AND request_type = ?2 LIMIT 1",
-                    rusqlite::params![user_id, request_type],
-                    |_| Ok(()),
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten()
-            .is_some()
+        let Ok(user_id) = u64_to_i64("voice_feedback_requests.user_id", user_id) else {
+            return false;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM activity.voice_feedback_requests
+                 WHERE user_id = $1
+                   AND request_type = $2
+                 LIMIT 1
+            ) AS "exists!"
+            "#,
+            user_id,
+            request_type,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false)
     }
 
     async fn distinct_voice_days(&self, user_id: u64) -> i64 {
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT COUNT(DISTINCT date(started_at)) FROM voice_session_log
-                      WHERE user_id = ?1",
-                    [user_id],
-                    |row| row.get(0),
-                )
-            })
-            .await
-            .unwrap_or(0)
+        let Ok(user_id) = u64_to_i64("voice_session_log.user_id", user_id) else {
+            return 0;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(DISTINCT (started_at AT TIME ZONE 'UTC')::date) AS "days!"
+              FROM activity.voice_session_log
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(0)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -258,42 +268,80 @@ impl VoiceFeedback {
         // Request anlegen.
         let (channel_name_owned, request_type_owned, co_text_owned) =
             (channel_name.to_string(), request_type.to_string(), co_text);
-        let request_id: Option<i64> = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_requests(
-                       user_id, guild_id, channel_id, channel_name, co_player_names,
-                       duration_seconds, request_type, status
-                     ) VALUES(?1,?2,?3,?4,?5,?6,?7,'pending')",
-                    rusqlite::params![
-                        user_id,
-                        guild_id,
-                        channel_id,
-                        channel_name_owned,
-                        co_text_owned,
-                        seconds,
-                        request_type_owned,
-                    ],
-                )?;
-                Ok(Some(conn.last_insert_rowid()))
-            })
+        let request_id = self
+            .insert_feedback_request(
+                user_id,
+                guild_id,
+                channel_id,
+                channel_name_owned,
+                co_text_owned,
+                seconds,
+                request_type_owned,
+            )
             .await
-            .unwrap_or(None);
+            .ok();
         let Some(request_id) = request_id else { return };
 
         let (status, message_id) = self.port.send_feedback_dm(user_id, text).await;
-        let _ = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE voice_feedback_requests
-                        SET status = ?1, prompt_message_id = ?2 WHERE id = ?3",
-                    rusqlite::params![status, message_id, request_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let prompt_message_id = message_id
+            .map(|id| u64_to_i64("voice_feedback_requests.prompt_message_id", id))
+            .transpose();
+        let Ok(prompt_message_id) = prompt_message_id else {
+            return;
+        };
+        let _ = sqlx::query!(
+            r#"
+            UPDATE activity.voice_feedback_requests
+               SET status = $1,
+                   prompt_message_id = $2
+             WHERE id = $3
+            "#,
+            status,
+            prompt_message_id,
+            request_id,
+        )
+        .execute(&self.pool)
+        .await;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn insert_feedback_request(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        channel_id: u64,
+        channel_name: String,
+        co_player_names: String,
+        duration_seconds: i64,
+        request_type: String,
+    ) -> VoiceDbResult<i64> {
+        let user_id = u64_to_i64("voice_feedback_requests.user_id", user_id)?;
+        let guild_id = u64_to_i64("voice_feedback_requests.guild_id", guild_id)?;
+        let channel_id = u64_to_i64("voice_feedback_requests.channel_id", channel_id)?;
+        let mut tx = self.pool.begin().await?;
+        lock_feedback_request_ids(&mut tx).await?;
+        let id = next_feedback_request_id(&mut tx).await?;
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_requests (
+                id, user_id, guild_id, channel_id, channel_name, co_player_names,
+                duration_seconds, request_type, status, sent_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'pending', NOW())
+            "#,
+            id,
+            user_id,
+            guild_id,
+            channel_id,
+            channel_name,
+            co_player_names,
+            duration_seconds,
+            request_type,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(id)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -320,47 +368,63 @@ impl VoiceFeedback {
     }
 
     async fn purge_feedback_requests(&self, user_id: u64) {
-        let prompt_ids: Vec<u64> = self
-            .db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT prompt_message_id
-                       FROM voice_feedback_requests
-                      WHERE user_id = ?1
-                        AND prompt_message_id IS NOT NULL",
-                )?;
-                let rows = stmt.query_map([user_id], |row| row.get::<_, i64>(0))?;
-                let ids = rows
-                    .filter_map(Result::ok)
-                    .filter_map(|id| u64::try_from(id).ok())
-                    .collect();
-                Ok(ids)
-            })
-            .await
-            .unwrap_or_default();
+        let prompt_ids: Vec<u64> = self.prompt_message_ids(user_id).await.unwrap_or_default();
         for message_id in prompt_ids {
             self.port.delete_feedback_prompt(user_id, message_id).await;
         }
-        let result = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM voice_feedback_responses
-                      WHERE request_id IN (
-                        SELECT id FROM voice_feedback_requests WHERE user_id = ?1
-                      )",
-                    [user_id],
-                )?;
-                conn.execute(
-                    "DELETE FROM voice_feedback_requests WHERE user_id = ?1",
-                    [user_id],
-                )?;
-                Ok(())
-            })
-            .await;
+        let result = self.delete_feedback_requests_for_user(user_id).await;
         if let Err(err) = result {
             tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht geloescht werden");
         }
+    }
+
+    async fn prompt_message_ids(&self, user_id: u64) -> VoiceDbResult<Vec<u64>> {
+        let user_id = u64_to_i64("voice_feedback_requests.user_id", user_id)?;
+        let rows = sqlx::query!(
+            r#"
+            SELECT prompt_message_id
+              FROM activity.voice_feedback_requests
+             WHERE user_id = $1
+               AND prompt_message_id IS NOT NULL
+            "#,
+            user_id,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| row.prompt_message_id)
+            .filter_map(|id| u64::try_from(id).ok())
+            .collect())
+    }
+
+    async fn delete_feedback_requests_for_user(&self, user_id: u64) -> VoiceDbResult<()> {
+        let user_id = u64_to_i64("voice_feedback_requests.user_id", user_id)?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query!(
+            r#"
+            DELETE FROM activity.voice_feedback_responses
+             WHERE request_id IN (
+                SELECT id
+                  FROM activity.voice_feedback_requests
+                 WHERE user_id = $1
+             )
+            "#,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query!(
+            r#"
+            DELETE FROM activity.voice_feedback_requests
+             WHERE user_id = $1
+            "#,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
     }
 
     /// Freitext-Antworten auf die Feedback-DM (Python `on_message` in DMs).
@@ -371,44 +435,16 @@ impl VoiceFeedback {
             return None;
         }
         let content = event.content.trim().to_string();
-        if content.is_empty()
-            || dl_community::privacy::is_opted_out(&self.db, event.author_id as i64).await
-        {
+        let Ok(author_id) = u64_to_i64("core.user_privacy.user_id", event.author_id) else {
+            return None;
+        };
+        if content.is_empty() || dl_community::privacy::is_opted_out(&self.pool, author_id).await {
             return None;
         }
 
         let user_id = event.author_id;
-        let row: Option<FeedbackRequestResponse> = self
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT id, sent_at_ts, status, request_type, co_player_names, channel_name, duration_seconds
-                       FROM voice_feedback_requests
-                      WHERE user_id = ?1
-                      ORDER BY sent_at_ts DESC
-                      LIMIT 1",
-                    [user_id],
-                    |row| {
-                        Ok(FeedbackRequestResponse {
-                            id: row.get(0)?,
-                            sent_at_ts: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            status: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                            request_type: row
-                                .get::<_, Option<String>>(3)?
-                                .unwrap_or_else(|| "first".to_string()),
-                            co_player_names: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                            channel_name: row
-                                .get::<_, Option<String>>(5)?
-                                .unwrap_or_else(|| "Voice".to_string()),
-                            duration_seconds: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten();
+        let row: Option<FeedbackRequestResponse> =
+            self.latest_request_for_user(user_id).await.ok().flatten();
         let row = row?;
 
         let now = chrono::Utc::now().timestamp();
@@ -420,21 +456,19 @@ impl VoiceFeedback {
         let request_id = row.id;
         let message_id = event.message_id;
         let content_for_db = content.clone();
-        let stored = self
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_responses(request_id, user_id, message_id, content)
-                     VALUES(?1, ?2, ?3, ?4)",
-                    rusqlite::params![request_id, user_id, message_id, content_for_db],
-                )?;
-                conn.execute(
-                    "UPDATE voice_feedback_requests SET status='responded' WHERE id = ?1",
-                    [request_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let stored = async {
+            insert_feedback_response(
+                &self.pool,
+                request_id,
+                user_id,
+                Some(message_id),
+                content_for_db,
+            )
+            .await?;
+            update_feedback_request_status(&self.pool, request_id, "responded").await?;
+            Ok::<(), VoiceDbError>(())
+        }
+        .await;
         if let Err(err) = stored {
             tracing::warn!(%err, request_id, user_id, "VoiceFeedback: Freitext-Antwort speichern fehlgeschlagen");
             return None;
@@ -468,6 +502,195 @@ impl VoiceFeedback {
 
         should_ack.then_some(ACK_TEXT)
     }
+
+    async fn latest_request_for_user(
+        &self,
+        user_id: u64,
+    ) -> VoiceDbResult<Option<FeedbackRequestResponse>> {
+        let user_id = u64_to_i64("voice_feedback_requests.user_id", user_id)?;
+        let row = sqlx::query!(
+            r#"
+            SELECT id,
+                   EXTRACT(EPOCH FROM sent_at)::int8 AS "sent_at_ts!",
+                   COALESCE(status, '') AS "status!",
+                   COALESCE(request_type, 'first') AS "request_type!",
+                   COALESCE(co_player_names, '') AS "co_player_names!",
+                   COALESCE(channel_name, 'Voice') AS "channel_name!",
+                   COALESCE(duration_seconds, 0) AS "duration_seconds!"
+              FROM activity.voice_feedback_requests
+             WHERE user_id = $1
+             ORDER BY sent_at DESC
+             LIMIT 1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| FeedbackRequestResponse {
+            id: row.id,
+            sent_at_ts: row.sent_at_ts,
+            status: row.status,
+            request_type: row.request_type,
+            co_player_names: row.co_player_names,
+            channel_name: row.channel_name,
+            duration_seconds: row.duration_seconds,
+        }))
+    }
+
+    async fn latest_request_for_button(
+        &self,
+        user_id: u64,
+    ) -> VoiceDbResult<Option<(i64, i64, String)>> {
+        let user_id = u64_to_i64("voice_feedback_requests.user_id", user_id)?;
+        let row = sqlx::query!(
+            r#"
+            SELECT id,
+                   EXTRACT(EPOCH FROM sent_at)::int8 AS "sent_at_ts!",
+                   COALESCE(status, '') AS "status!"
+              FROM activity.voice_feedback_requests
+             WHERE user_id = $1
+             ORDER BY id DESC
+             LIMIT 1
+            "#,
+            user_id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| (row.id, row.sent_at_ts, row.status)))
+    }
+
+    async fn request_by_id(
+        &self,
+        request_id: i64,
+    ) -> VoiceDbResult<Option<FeedbackRequestResponse>> {
+        let row = sqlx::query!(
+            r#"
+            SELECT id,
+                   EXTRACT(EPOCH FROM sent_at)::int8 AS "sent_at_ts!",
+                   COALESCE(status, '') AS "status!",
+                   COALESCE(request_type, 'first') AS "request_type!",
+                   COALESCE(co_player_names, '') AS "co_player_names!",
+                   COALESCE(channel_name, 'Voice') AS "channel_name!",
+                   COALESCE(duration_seconds, 0) AS "duration_seconds!"
+              FROM activity.voice_feedback_requests
+             WHERE id = $1
+            "#,
+            request_id,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|row| FeedbackRequestResponse {
+            id: row.id,
+            sent_at_ts: row.sent_at_ts,
+            status: row.status,
+            request_type: row.request_type,
+            co_player_names: row.co_player_names,
+            channel_name: row.channel_name,
+            duration_seconds: row.duration_seconds,
+        }))
+    }
+}
+
+async fn insert_feedback_response(
+    pool: &PgPool,
+    request_id: i64,
+    user_id: u64,
+    message_id: Option<u64>,
+    content: String,
+) -> VoiceDbResult<()> {
+    let user_id = u64_to_i64("voice_feedback_responses.user_id", user_id)?;
+    let message_id = message_id
+        .map(|id| u64_to_i64("voice_feedback_responses.message_id", id))
+        .transpose()?;
+    let mut tx = pool.begin().await?;
+    lock_feedback_response_ids(&mut tx).await?;
+    let id = next_feedback_response_id(&mut tx).await?;
+    sqlx::query!(
+        r#"
+        INSERT INTO activity.voice_feedback_responses (
+            id, request_id, user_id, message_id, content, received_at
+        )
+        VALUES ($1, $2, $3, $4, $5, NOW())
+        "#,
+        id,
+        request_id,
+        user_id,
+        message_id,
+        content,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn update_feedback_request_status(
+    pool: &PgPool,
+    request_id: i64,
+    status: &str,
+) -> VoiceDbResult<()> {
+    sqlx::query!(
+        r#"
+        UPDATE activity.voice_feedback_requests
+           SET status = $1
+         WHERE id = $2
+        "#,
+        status,
+        request_id,
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn lock_feedback_request_ids(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        SELECT 1 AS "locked!"
+          FROM pg_advisory_xact_lock($1)
+        "#,
+        FEEDBACK_REQUEST_ID_LOCK_KEY,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn next_feedback_request_id(tx: &mut Transaction<'_, Postgres>) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS "next_id!"
+          FROM activity.voice_feedback_requests
+        "#
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.next_id)
+}
+
+async fn lock_feedback_response_ids(tx: &mut Transaction<'_, Postgres>) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        SELECT 1 AS "locked!"
+          FROM pg_advisory_xact_lock($1)
+        "#,
+        FEEDBACK_RESPONSE_ID_LOCK_KEY,
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn next_feedback_response_id(tx: &mut Transaction<'_, Postgres>) -> Result<i64, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS "next_id!"
+          FROM activity.voice_feedback_responses
+        "#
+    )
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(row.next_id)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -499,23 +722,7 @@ impl InteractionHandler for FeedbackHandler {
             let user_id = interaction.user_id;
             let request: Option<(i64, i64, String)> = self
                 .feedback
-                .db
-                .read(move |conn| {
-                    conn.query_row(
-                        "SELECT id, sent_at_ts, status FROM voice_feedback_requests
-                          WHERE user_id = ?1
-                          ORDER BY id DESC LIMIT 1",
-                        [user_id],
-                        |row| {
-                            Ok((
-                                row.get(0)?,
-                                row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                                row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                            ))
-                        },
-                    )
-                    .optional()
-                })
+                .latest_request_for_button(user_id)
                 .await
                 .ok()
                 .flatten();
@@ -570,53 +777,22 @@ impl InteractionHandler for FeedbackHandler {
         let combined = answers.join("\n");
         let user_id = interaction.user_id;
         let combined_clone = combined.clone();
-        let _ = self
-            .feedback
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_responses(request_id, user_id, content)
-                     VALUES(?1, ?2, ?3)",
-                    rusqlite::params![request_id, user_id, combined_clone],
-                )?;
-                conn.execute(
-                    "UPDATE voice_feedback_requests SET status='responded' WHERE id = ?1",
-                    [request_id],
-                )
-                .map(|_| ())
-            })
-            .await;
+        let _ = async {
+            insert_feedback_response(
+                &self.feedback.pool,
+                request_id,
+                user_id,
+                None,
+                combined_clone,
+            )
+            .await?;
+            update_feedback_request_status(&self.feedback.pool, request_id, "responded").await?;
+            Ok::<(), VoiceDbError>(())
+        }
+        .await;
 
-        let request_meta: Option<FeedbackRequestResponse> = self
-            .feedback
-            .db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT id, sent_at_ts, status, request_type, co_player_names, channel_name, duration_seconds
-                       FROM voice_feedback_requests
-                      WHERE id = ?1",
-                    [request_id],
-                    |row| {
-                        Ok(FeedbackRequestResponse {
-                            id: row.get(0)?,
-                            sent_at_ts: row.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                            status: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                            request_type: row
-                                .get::<_, Option<String>>(3)?
-                                .unwrap_or_else(|| "first".to_string()),
-                            co_player_names: row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                            channel_name: row
-                                .get::<_, Option<String>>(5)?
-                                .unwrap_or_else(|| "Voice".to_string()),
-                            duration_seconds: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-                        })
-                    },
-                )
-                .optional()
-            })
-            .await
-            .ok()
-            .flatten();
+        let request_meta: Option<FeedbackRequestResponse> =
+            self.feedback.request_by_id(request_id).await.ok().flatten();
         let (request_type, co_players, channel_name, duration_min) = request_meta
             .map(|row| {
                 let duration_min = if row.duration_seconds > 0 {
@@ -693,6 +869,8 @@ pub fn spawn_dm_responses(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::await_holding_lock)]
+
     use super::*;
     use std::sync::Mutex as StdMutex;
 
@@ -753,26 +931,27 @@ mod tests {
         }
     }
 
-    const DDLS: [&str; 3] = [
-        "CREATE TABLE voice_feedback_requests(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, guild_id INTEGER, channel_id INTEGER, channel_name TEXT, co_player_names TEXT, duration_seconds INTEGER, request_type TEXT DEFAULT 'first', status TEXT, error_message TEXT, prompt_message_id INTEGER, sent_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
-        "CREATE TABLE voice_feedback_responses(id INTEGER PRIMARY KEY AUTOINCREMENT, request_id INTEGER, user_id INTEGER NOT NULL, message_id INTEGER, content TEXT, received_at_ts INTEGER NOT NULL DEFAULT (strftime('%s','now')))",
-        "CREATE TABLE voice_session_log(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, started_at DATETIME, ended_at DATETIME, duration_seconds INTEGER)",
-    ];
-
-    async fn setup() -> (tempfile::TempDir, Arc<VoiceFeedback>, Arc<MockPort>) {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("t.sqlite3")).expect("db");
-        for ddl in DDLS {
-            db.write(move |c| c.execute(ddl, []).map(|_| ()))
-                .await
-                .expect("ddl");
-        }
+    async fn setup() -> (dl_central_db::TestDb, Arc<VoiceFeedback>, Arc<MockPort>) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
         let port = Arc::new(MockPort {
             dms: StdMutex::new(Vec::new()),
             forwards: StdMutex::new(Vec::new()),
             deletes: StdMutex::new(Vec::new()),
         });
-        (dir, VoiceFeedback::new(db, port.clone()), port)
+        let feedback = VoiceFeedback::new(db.pool().clone(), port.clone());
+        (db, feedback, port)
+    }
+
+    fn ts(raw: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::NaiveDateTime::parse_from_str(raw, "%Y-%m-%d %H:%M:%S")
+            .expect("test timestamp")
+            .and_utc()
+    }
+
+    fn now_from_unix(value: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(value, 0).expect("valid unix timestamp")
     }
 
     fn dm_event(user_id: u64, message_id: u64, content: &str) -> MessageEvent {
@@ -808,18 +987,21 @@ mod tests {
             .on_session_end(1, 100, 10, "Lane 1".into(), vec![200, 300], 600, true)
             .await;
         assert_eq!(port.dms.lock().expect("lock").len(), 1);
-        let (status, rtype): (String, String) = feedback
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT status, request_type FROM voice_feedback_requests WHERE user_id = 100",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?)),
-                )
-            })
-            .await
-            .expect("request");
-        assert_eq!((status.as_str(), rtype.as_str()), ("sent", "first"));
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(status, '') AS "status!",
+                   COALESCE(request_type, '') AS "request_type!"
+              FROM activity.voice_feedback_requests
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&feedback.pool)
+        .await
+        .expect("request");
+        assert_eq!(
+            (row.status.as_str(), row.request_type.as_str()),
+            ("sent", "first")
+        );
 
         // Kurze Session / allein → kein weiterer Request
         feedback
@@ -834,44 +1016,63 @@ mod tests {
     #[tokio::test]
     async fn neuer_prompt_loescht_alle_alten_requests_und_responses() {
         let (_dir, feedback, port) = setup().await;
-        feedback
-            .db
-            .write(|conn| {
-                conn.execute_batch(
-                    "INSERT INTO voice_feedback_requests(id, user_id, status, prompt_message_id)
-                     VALUES (10, 100, 'sent', 900), (11, 100, 'responded', 901);
-                     INSERT INTO voice_feedback_responses(request_id, user_id, content)
-                     VALUES (10, 100, 'alt'), (11, 100, 'alt2');",
-                )
-            })
-            .await
-            .expect("seed");
+        let now = chrono::Utc::now();
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_requests (
+                id, user_id, status, prompt_message_id, sent_at
+            )
+            VALUES (10, 100, 'sent', 900, $1), (11, 100, 'responded', 901, $1)
+            "#,
+            now,
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_responses (
+                id, request_id, user_id, content, received_at
+            )
+            VALUES (20, 10, 100, 'alt', $1), (21, 11, 100, 'alt2', $1)
+            "#,
+            now,
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed responses");
 
         feedback
             .on_session_end(1, 100, 10, "Lane 1".into(), vec![200], 600, true)
             .await;
 
-        let (old_requests, old_responses, total_requests): (i64, i64, i64) = feedback
-            .db
-            .read(|conn| {
-                Ok((
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM voice_feedback_requests WHERE id IN (10, 11)",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                    conn.query_row("SELECT COUNT(*) FROM voice_feedback_responses", [], |row| {
-                        row.get(0)
-                    })?,
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM voice_feedback_requests WHERE user_id = 100",
-                        [],
-                        |row| row.get(0),
-                    )?,
-                ))
-            })
-            .await
-            .expect("counts");
+        let old_requests = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.voice_feedback_requests
+             WHERE id = ANY($1)
+            "#,
+            &[10_i64, 11_i64],
+        )
+        .fetch_one(&feedback.pool)
+        .await
+        .expect("old requests");
+        let old_responses = sqlx::query_scalar!(
+            r#"SELECT COUNT(*) AS "count!" FROM activity.voice_feedback_responses"#
+        )
+        .fetch_one(&feedback.pool)
+        .await
+        .expect("old responses");
+        let total_requests = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM activity.voice_feedback_requests
+             WHERE user_id = 100
+            "#
+        )
+        .fetch_one(&feedback.pool)
+        .await
+        .expect("total requests");
         assert_eq!(old_requests, 0);
         assert_eq!(old_responses, 0);
         assert_eq!(total_requests, 1);
@@ -890,32 +1091,42 @@ mod tests {
         assert_eq!(port.dms.lock().expect("lock").len(), 1);
 
         // Nur 2 verschiedene Tage → noch kein second
-        feedback
-            .db
-            .write(|conn| {
-                conn.execute_batch(
-                    "INSERT INTO voice_session_log(user_id, started_at) VALUES
-                       (100, '2026-06-01 18:00:00'), (100, '2026-06-02 18:00:00');",
-                )
-            })
-            .await
-            .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_session_log (
+                id, user_id, started_at, ended_at, duration_seconds, points
+            )
+            VALUES
+                (1001, 100, $1, $1, 60, 1),
+                (1002, 100, $2, $2, 60, 1)
+            "#,
+            ts("2026-06-01 18:00:00"),
+            ts("2026-06-02 18:00:00"),
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
         feedback
             .on_session_end(1, 100, 10, "Lane 1".into(), vec![200], 600, false)
             .await;
         assert_eq!(port.dms.lock().expect("lock").len(), 1);
 
         // 4 Tage → second kommt genau einmal
-        feedback
-            .db
-            .write(|conn| {
-                conn.execute_batch(
-                    "INSERT INTO voice_session_log(user_id, started_at) VALUES
-                       (100, '2026-06-03 18:00:00'), (100, '2026-06-04 18:00:00');",
-                )
-            })
-            .await
-            .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_session_log (
+                id, user_id, started_at, ended_at, duration_seconds, points
+            )
+            VALUES
+                (1003, 100, $1, $1, 60, 1),
+                (1004, 100, $2, $2, 60, 1)
+            "#,
+            ts("2026-06-03 18:00:00"),
+            ts("2026-06-04 18:00:00"),
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
         feedback
             .on_session_end(1, 100, 10, "Lane 1".into(), vec![200], 600, false)
             .await;
@@ -931,42 +1142,42 @@ mod tests {
     async fn dm_freitext_antwort_wie_python() {
         let (_dir, feedback, port) = setup().await;
         let now = chrono::Utc::now().timestamp();
-        feedback
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_requests(
-                       user_id, guild_id, channel_id, channel_name, co_player_names,
-                       duration_seconds, request_type, status, sent_at_ts
-                     ) VALUES(100, 1, 10, 'Lane 1', 'Alice, Bob', 601, 'first', 'sent', ?1)",
-                    [now],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_requests (
+                id, user_id, guild_id, channel_id, channel_name, co_player_names,
+                duration_seconds, request_type, status, sent_at
+            )
+            VALUES (2001, 100, 1, 10, 'Lane 1', 'Alice, Bob', 601, 'first', 'sent', $1)
+            "#,
+            now_from_unix(now),
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
 
         let ack = feedback
             .handle_dm_message(dm_event(100, 700, "War gut, aber bitte mehr Moderation."))
             .await;
         assert_eq!(ack, Some(ACK_TEXT));
-        let (status, message_id, content): (String, i64, String) = feedback
-            .db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT r.status, a.message_id, a.content
-                       FROM voice_feedback_requests r
-                       JOIN voice_feedback_responses a ON a.request_id = r.id
-                      WHERE r.user_id = 100",
-                    [],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-            })
-            .await
-            .expect("response");
-        assert_eq!(status, "responded");
-        assert_eq!(message_id, 700);
-        assert_eq!(content, "War gut, aber bitte mehr Moderation.");
+        let row = sqlx::query!(
+            r#"
+            SELECT COALESCE(r.status, '') AS "status!",
+                   a.message_id AS "message_id!",
+                   COALESCE(a.content, '') AS "content!"
+              FROM activity.voice_feedback_requests r
+              JOIN activity.voice_feedback_responses a ON a.request_id = r.id
+             WHERE r.user_id = 100
+             ORDER BY a.id
+             LIMIT 1
+            "#
+        )
+        .fetch_one(&feedback.pool)
+        .await
+        .expect("response");
+        assert_eq!(row.status, "responded");
+        assert_eq!(row.message_id, 700);
+        assert_eq!(row.content, "War gut, aber bitte mehr Moderation.");
         let forwards = port.forwards.lock().expect("lock");
         assert_eq!(forwards.len(), 1);
         assert!(forwards[0].contains("📩 Neues Voice-Feedback (Req #"));
@@ -983,23 +1194,17 @@ mod tests {
     async fn feedback_button_respektiert_responded_und_ablauf() {
         let (_dir, feedback, _port) = setup().await;
         let now = chrono::Utc::now().timestamp();
-        feedback
-            .db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_requests(id, user_id, status, sent_at_ts)
-                     VALUES (21, 100, 'responded', ?1)",
-                    [now],
-                )?;
-                conn.execute(
-                    "INSERT INTO voice_feedback_requests(id, user_id, status, sent_at_ts)
-                     VALUES (22, 200, 'sent', ?1)",
-                    [now - RESPONSE_WINDOW_SECONDS - 5],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_requests (id, user_id, status, sent_at)
+            VALUES (21, 100, 'responded', $1), (22, 200, 'sent', $2)
+            "#,
+            now_from_unix(now),
+            now_from_unix(now - RESPONSE_WINDOW_SECONDS - 5),
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
         let handler = FeedbackHandler {
             feedback: feedback.clone(),
         };
@@ -1034,20 +1239,19 @@ mod tests {
     #[tokio::test]
     async fn modal_forward_enthaelt_python_kontext() {
         let (_dir, feedback, port) = setup().await;
-        feedback
-            .db
-            .write(|conn| {
-                conn.execute(
-                    "INSERT INTO voice_feedback_requests(
-                       id, user_id, guild_id, channel_id, channel_name, co_player_names,
-                       duration_seconds, request_type, status
-                     ) VALUES(30, 100, 1, 10, 'Lane 7', 'Alice, Bob', 725, 'second', 'sent')",
-                    [],
-                )
-                .map(|_| ())
-            })
-            .await
-            .expect("seed");
+        sqlx::query!(
+            r#"
+            INSERT INTO activity.voice_feedback_requests (
+                id, user_id, guild_id, channel_id, channel_name, co_player_names,
+                duration_seconds, request_type, status, sent_at
+            )
+            VALUES (30, 100, 1, 10, 'Lane 7', 'Alice, Bob', 725, 'second', 'sent', $1)
+            "#,
+            chrono::Utc::now(),
+        )
+        .execute(&feedback.pool)
+        .await
+        .expect("seed");
 
         let handler = FeedbackHandler {
             feedback: feedback.clone(),

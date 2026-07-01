@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT 1 AS \"ok!\"\n            FROM moderation.ai_moderation_cases\n            LIMIT 0\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ok!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "b9befea09206f7fb176af0029ec3b7054933a29e3674e26b5891b17cee0bd718"
+}

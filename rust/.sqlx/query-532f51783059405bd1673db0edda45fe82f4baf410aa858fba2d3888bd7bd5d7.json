@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO steam.steam_tasks(type, payload, status)\n                VALUES('BUILD_PUBLISH', $1::text::jsonb, 'PENDING')\n                RETURNING id\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "532f51783059405bd1673db0edda45fe82f4baf410aa858fba2d3888bd7bd5d7"
+}

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE scrim.teams\n               SET coach = $2,\n                   discord_role_id = $3,\n                   discord_channel_id = $4\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "eb77910378f236a7d77396b6394268d35d7b96bfafec1c9b388a4ad59824c0a8"
+}

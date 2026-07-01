@@ -1,0 +1,94 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,\n               dm_enabled AS \"dm_enabled!\", dm_text,\n               remove_on_unreact AS \"remove_on_unreact!\",\n               backfill_pending AS \"backfill_pending!\",\n               active AS \"active!\", created_at, updated_at\n          FROM bot.reaction_role_mappings\n         WHERE id = $1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "source_channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "emoji",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "role_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "dm_enabled!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 7,
+        "name": "dm_text",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "remove_on_unreact!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 9,
+        "name": "backfill_pending!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 10,
+        "name": "active!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 11,
+        "name": "created_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 12,
+        "name": "updated_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e7935c47fed32ed734a635929c11d9b489dfb965fd99a817e925fb02268b55d"
+}

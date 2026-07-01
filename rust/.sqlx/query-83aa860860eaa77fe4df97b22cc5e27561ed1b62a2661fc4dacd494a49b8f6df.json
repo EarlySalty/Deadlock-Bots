@@ -1,0 +1,42 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT base_name, member_limit, min_rank, region\n              FROM voice.tempvoice_presets\n             WHERE user_id = $1\n               AND category_id = $2\n               AND name = $3\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "base_name",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "member_limit",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "min_rank",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "region",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "83aa860860eaa77fe4df97b22cc5e27561ed1b62a2661fc4dacd494a49b8f6df"
+}

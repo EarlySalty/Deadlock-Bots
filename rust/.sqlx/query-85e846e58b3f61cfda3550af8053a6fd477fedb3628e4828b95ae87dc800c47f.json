@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE activity.member_leave_surveys\n               SET follow_up_question = $1,\n                   follow_up_text = $2,\n                   extra_text = $3,\n                   responded_at = $4\n             WHERE id = $5 AND user_id = $6\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "85e846e58b3f61cfda3550af8053a6fd477fedb3628e4828b95ae87dc800c47f"
+}

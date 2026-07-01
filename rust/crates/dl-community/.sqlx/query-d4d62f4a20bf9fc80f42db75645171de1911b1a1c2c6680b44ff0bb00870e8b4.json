@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE scrim.participants\n               SET discord_id = COALESCE(discord_id, $2),\n                   updated_at = $3\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d4d62f4a20bf9fc80f42db75645171de1911b1a1c2c6680b44ff0bb00870e8b4"
+}

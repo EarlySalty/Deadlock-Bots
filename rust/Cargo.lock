@@ -386,12 +386,12 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
- "dl-db",
+ "dl-central-db",
  "dl-discord",
- "rusqlite",
  "serde_json",
  "serenity",
- "tempfile",
+ "sqlx",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
 ]
@@ -428,16 +428,15 @@ dependencies = [
  "dl-changelog",
  "dl-community",
  "dl-core",
- "dl-db",
  "dl-discord",
  "dl-moderation",
  "dl-squads",
  "dl-voice",
  "dl-webcore",
  "reqwest",
- "rusqlite",
  "serde_json",
  "serenity",
+ "sqlx",
  "tempfile",
  "tokio",
  "tracing",
@@ -530,6 +529,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-central-sync"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dl-central-db",
+ "dl-central-etl",
+ "tokio",
+]
+
+[[package]]
 name = "dl-changelog"
 version = "0.1.0"
 dependencies = [
@@ -554,16 +563,16 @@ dependencies = [
  "chrono-tz",
  "dl-ai",
  "dl-bridges",
- "dl-db",
+ "dl-central-db",
  "dl-discord",
  "dl-squads",
  "rand 0.8.6",
  "regex",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
  "serenity",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -588,15 +597,15 @@ dependencies = [
  "base64",
  "chrono",
  "dl-activity",
+ "dl-central-db",
  "dl-community",
  "dl-core",
- "dl-db",
  "dl-webcore",
  "rand 0.8.6",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -604,17 +613,6 @@ dependencies = [
  "tower-http",
  "tracing",
  "url",
-]
-
-[[package]]
-name = "dl-db"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
 ]
 
 [[package]]
@@ -717,12 +715,13 @@ name = "dl-twitch-invite-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dl-activity",
- "dl-db",
+ "dl-central-db",
  "reqwest",
- "rusqlite",
  "serde",
  "serde_json",
+ "sqlx",
  "tokio",
 ]
 
@@ -734,12 +733,12 @@ dependencies = [
  "chrono",
  "dl-activity",
  "dl-bridges",
+ "dl-central-db",
  "dl-community",
- "dl-db",
  "dl-discord",
- "rusqlite",
  "serde_json",
  "serenity",
+ "sqlx",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -752,9 +751,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "axum",
+ "dl-central-db",
  "dl-core",
  "dl-dashboard",
- "dl-db",
  "dl-stats",
  "dl-tierlist",
  "dl-webcore",

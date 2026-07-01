@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE bot.streamer_link_intents\n            SET status = 'expired'\n            WHERE status = 'pending'\n              AND expires_at < $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2c04918bf678bf042d69f86d6d8e682e33e14f2b6251dbd146abab5c914b308c"
+}

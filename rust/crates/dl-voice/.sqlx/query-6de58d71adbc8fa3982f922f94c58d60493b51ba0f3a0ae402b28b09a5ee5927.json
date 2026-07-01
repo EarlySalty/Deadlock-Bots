@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT new_name\n              FROM voice.rename_requests\n             WHERE channel_id = 100\n               AND status = 'PENDING'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "new_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "6de58d71adbc8fa3982f922f94c58d60493b51ba0f3a0ae402b28b09a5ee5927"
+}

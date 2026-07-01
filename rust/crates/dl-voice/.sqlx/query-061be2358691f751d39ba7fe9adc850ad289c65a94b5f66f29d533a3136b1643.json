@@ -1,0 +1,40 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT status,\n                   COALESCE(retry_count, 0) AS \"retry_count!\",\n                   assigned_worker_id AS \"assigned_worker_id!\",\n                   last_error\n              FROM voice.rename_requests\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "retry_count!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "assigned_worker_id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_error",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      null,
+      true,
+      true
+    ]
+  },
+  "hash": "061be2358691f751d39ba7fe9adc850ad289c65a94b5f66f29d533a3136b1643"
+}

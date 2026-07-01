@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT l.discord_id,\n                   p.deadlock_stage,\n                   p.deadlock_minutes,\n                   COALESCE(p.deadlock_updated_at, p.last_seen_at) AS \"fresh?\"\n            FROM core.steam_links l\n            JOIN activity.live_player_state p ON p.steam_id = l.steam_id\n            WHERE l.verified = TRUE\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "discord_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "deadlock_stage",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "deadlock_minutes",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "fresh?",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      null
+    ]
+  },
+  "hash": "6efcc44918d7ddd22bd6f29b65fa67e93f67505f2d992c8e9aab5731f2da0928"
+}

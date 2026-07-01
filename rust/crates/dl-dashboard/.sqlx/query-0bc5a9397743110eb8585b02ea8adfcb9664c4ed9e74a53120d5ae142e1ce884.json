@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COUNT(*) AS \"count!\"\n              FROM activity.user_retention_tracking\n             WHERE avg_weekly_sessions >= $1\n               AND total_active_days >= $2\n               AND last_active_at <= $3\n               AND opted_out = FALSE\n               AND (last_miss_you_sent_at IS NULL OR last_miss_you_sent_at <= $4)\n               AND miss_you_count < $5\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "0bc5a9397743110eb8585b02ea8adfcb9664c4ed9e74a53120d5ae142e1ce884"
+}

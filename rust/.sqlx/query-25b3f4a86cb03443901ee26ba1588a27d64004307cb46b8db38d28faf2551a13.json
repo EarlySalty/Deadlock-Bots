@@ -1,0 +1,46 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT typical_hours::text AS \"hours?\",\n                   typical_days::text AS \"days?\",\n                   COALESCE(activity_score_2w, 0)::INT AS \"score!\",\n                   to_char(last_pinged_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_pinged?\",\n                   COALESCE(ping_count_30d, 0)::INT AS \"ping_count!\"\n            FROM activity.user_activity_patterns\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "hours?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "days?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "score!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "last_pinged?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "ping_count!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "25b3f4a86cb03443901ee26ba1588a27d64004307cb46b8db38d28faf2551a13"
+}

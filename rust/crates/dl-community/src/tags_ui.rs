@@ -477,6 +477,8 @@ pub fn register(router: &mut InteractionRouter, service: Arc<TagService>) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]

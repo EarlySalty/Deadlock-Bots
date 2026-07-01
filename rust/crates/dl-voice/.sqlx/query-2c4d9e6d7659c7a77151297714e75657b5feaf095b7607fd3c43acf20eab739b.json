@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT prompt_message_id\n              FROM activity.voice_feedback_requests\n             WHERE user_id = $1\n               AND prompt_message_id IS NOT NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "prompt_message_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "2c4d9e6d7659c7a77151297714e75657b5feaf095b7607fd3c43acf20eab739b"
+}

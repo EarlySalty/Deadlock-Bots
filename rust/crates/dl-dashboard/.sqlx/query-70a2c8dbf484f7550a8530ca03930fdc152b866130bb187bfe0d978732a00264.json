@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                SELECT COUNT(*) AS \"sessions!\",\n                       to_char(MAX(ended_at) AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS \"last_session?\"\n                  FROM activity.voice_session_log\n                 WHERE user_id = $1\n                ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sessions!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "last_session?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "70a2c8dbf484f7550a8530ca03930fdc152b866130bb187bfe0d978732a00264"
+}

@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT rank, subrank\n              FROM voice.tempvoice_rank_pref\n             WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "rank",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "subrank",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "a8f46a62464cd7275f3c993382f9adfd318b289f84224878cfcd37c0254b9f94"
+}

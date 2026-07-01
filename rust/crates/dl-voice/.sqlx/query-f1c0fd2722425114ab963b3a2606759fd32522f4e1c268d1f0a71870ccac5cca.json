@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT deadlock_subrank\n              FROM core.steam_links\n             WHERE discord_id = $1\n               AND deadlock_rank IS NOT NULL\n               AND deadlock_rank > 0\n             ORDER BY primary_account DESC, updated_at DESC\n             LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "deadlock_subrank",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f1c0fd2722425114ab963b3a2606759fd32522f4e1c268d1f0a71870ccac5cca"
+}

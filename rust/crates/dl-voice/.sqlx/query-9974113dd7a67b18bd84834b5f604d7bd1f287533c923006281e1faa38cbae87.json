@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_presets (\n                user_id, category_id, name, base_name, member_limit,\n                min_rank, region, updated_at\n            )\n            VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())\n            ON CONFLICT (user_id, category_id, name) DO UPDATE SET\n                base_name = EXCLUDED.base_name,\n                member_limit = EXCLUDED.member_limit,\n                min_rank = EXCLUDED.min_rank,\n                region = EXCLUDED.region,\n                updated_at = NOW()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9974113dd7a67b18bd84834b5f604d7bd1f287533c923006281e1faa38cbae87"
+}

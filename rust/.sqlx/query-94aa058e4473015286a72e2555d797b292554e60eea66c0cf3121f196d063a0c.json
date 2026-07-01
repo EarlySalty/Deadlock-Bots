@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (COALESCE(MAX(id), 0) + 1)::int4 AS \"next_id!\"\n          FROM scrim.teams\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "94aa058e4473015286a72e2555d797b292554e60eea66c0cf3121f196d063a0c"
+}

@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.user_retention_tracking(\n                user_id, guild_id, first_seen_at, last_active_at, total_active_days, opted_out, updated_at\n            )\n            VALUES ($1, $2, $3, $3, 0, TRUE, $3)\n            ON CONFLICT(user_id) DO UPDATE SET\n              opted_out = TRUE,\n              updated_at = excluded.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "226e3fe55e1d73b8662588946eba386ed152f8c04fe337e76c68952bb38f67f6"
+}

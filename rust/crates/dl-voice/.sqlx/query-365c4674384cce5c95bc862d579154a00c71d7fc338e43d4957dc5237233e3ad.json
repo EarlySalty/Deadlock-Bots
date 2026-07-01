@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.tempvoice_lanes\n             WHERE channel_id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "365c4674384cce5c95bc862d579154a00c71d7fc338e43d4957dc5237233e3ad"
+}

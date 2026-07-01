@@ -1,0 +1,81 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT urt.user_id, urt.guild_id,\n                   EXTRACT(EPOCH FROM urt.last_active_at)::BIGINT AS \"last_active_at!\",\n                   urt.total_active_days,\n                   urt.avg_weekly_sessions,\n                   GREATEST(FLOOR(EXTRACT(EPOCH FROM ($6 - urt.last_active_at)) / 86400)::BIGINT, 0) AS \"days_inactive!\",\n                   msg.delivery_status AS \"last_message_status?\",\n                   EXTRACT(EPOCH FROM msg.sent_at)::BIGINT AS \"last_message_at?\",\n                   EXTRACT(EPOCH FROM urt.last_miss_you_sent_at)::BIGINT AS \"last_miss_you_sent_at?\",\n                   urt.miss_you_count\n              FROM activity.user_retention_tracking urt\n              LEFT JOIN LATERAL (\n                    SELECT delivery_status, sent_at\n                      FROM activity.user_retention_messages m\n                     WHERE m.user_id = urt.user_id\n                       AND m.message_type = 'miss_you'\n                     ORDER BY m.sent_at DESC\n                     LIMIT 1\n              ) msg ON TRUE\n             WHERE urt.avg_weekly_sessions >= $1\n               AND urt.total_active_days >= $2\n               AND urt.last_active_at <= $3\n               AND urt.opted_out = FALSE\n               AND (urt.last_miss_you_sent_at IS NULL OR urt.last_miss_you_sent_at <= $4)\n               AND urt.miss_you_count < $5\n             ORDER BY 6 DESC\n             LIMIT 50\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "last_active_at!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "total_active_days",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 4,
+        "name": "avg_weekly_sessions",
+        "type_info": "Float8"
+      },
+      {
+        "ordinal": 5,
+        "name": "days_inactive!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "last_message_status?",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "last_message_at?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 8,
+        "name": "last_miss_you_sent_at?",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 9,
+        "name": "miss_you_count",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Int4",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      null,
+      false,
+      true,
+      null,
+      false,
+      null,
+      null,
+      false
+    ]
+  },
+  "hash": "34f5940ef431e04aca6993635c0eb7044fdf6b979f6e9574dc0794025c45f9bc"
+}

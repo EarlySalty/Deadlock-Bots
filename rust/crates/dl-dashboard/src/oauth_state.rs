@@ -5,9 +5,11 @@
 //! und trägt optionale Metadaten (kompaktes JSON oder roher String). Diese
 //! Tabelle gehört weiterhin der gemeinsamen DB; wir legen sie nicht an.
 
-use dl_db::{Db, DbError};
-use rusqlite::{params, OptionalExtension};
+use chrono::{DateTime, Utc};
 use serde_json::Value;
+use sqlx::PgPool;
+
+use crate::db::{unix_to_utc, DashboardDbError, DashboardDbResult};
 
 /// Ein delegierter OAuth-State, wie `validate_state` ihn zurückgibt.
 #[derive(Debug, Clone, PartialEq)]
@@ -38,19 +40,19 @@ pub enum StateError {
     #[error("{0} darf nicht leer sein")]
     Empty(&'static str),
     #[error(transparent)]
-    Db(#[from] DbError),
+    Db(#[from] DashboardDbError),
 }
 
 #[derive(Clone)]
 pub struct OAuthStateStore {
-    db: Db,
+    pool: PgPool,
     default_ttl_secs: i64,
 }
 
 impl OAuthStateStore {
-    pub fn new(db: Db, default_ttl_secs: i64) -> Self {
+    pub fn new(pool: PgPool, default_ttl_secs: i64) -> Self {
         Self {
-            db,
+            pool,
             default_ttl_secs: default_ttl_secs.max(1),
         }
     }
@@ -91,99 +93,115 @@ impl OAuthStateStore {
             redirect_after,
             metadata,
         );
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO oauth_states(
-                        state, provider, flow_type, requesting_service,
-                        redirect_after, created_at, expires_at, used, metadata
-                     ) VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?)
-                     ON CONFLICT(state) DO UPDATE SET
-                        provider = excluded.provider,
-                        flow_type = excluded.flow_type,
-                        requesting_service = excluded.requesting_service,
-                        redirect_after = excluded.redirect_after,
-                        created_at = excluded.created_at,
-                        expires_at = excluded.expires_at,
-                        used = 0,
-                        metadata = excluded.metadata",
-                    params![s, p, f, rs, ra, now, expires_at, md],
-                )?;
-                Ok(())
-            })
-            .await?;
+        let created_at = unix_to_utc(now)?;
+        let expires_at_utc = unix_to_utc(expires_at)?;
+        sqlx::query!(
+            r#"
+            INSERT INTO bot.oauth_states(
+                state, provider, flow_type, requesting_service,
+                redirect_after, created_at, expires_at, used, metadata
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8::text::jsonb)
+            ON CONFLICT(state) DO UPDATE SET
+                provider = EXCLUDED.provider,
+                flow_type = EXCLUDED.flow_type,
+                requesting_service = EXCLUDED.requesting_service,
+                redirect_after = EXCLUDED.redirect_after,
+                created_at = EXCLUDED.created_at,
+                expires_at = EXCLUDED.expires_at,
+                used = FALSE,
+                metadata = EXCLUDED.metadata
+            "#,
+            s,
+            p,
+            f,
+            rs,
+            ra,
+            created_at,
+            expires_at_utc,
+            md,
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(DashboardDbError::from)?;
 
         Ok(self.validate(&state, now).await?)
     }
 
     /// Gibt den State zurück, falls er existiert, ungenutzt und nicht
     /// abgelaufen ist.
-    pub async fn validate(&self, state: &str, now: i64) -> Result<Option<OAuthState>, DbError> {
+    pub async fn validate(&self, state: &str, now: i64) -> DashboardDbResult<Option<OAuthState>> {
         let state = state.trim().to_string();
         if state.is_empty() {
             return Ok(None);
         }
-        self.db
-            .read(move |conn| {
-                let row = conn
-                    .query_row(
-                        "SELECT state, provider, flow_type, requesting_service,
-                                redirect_after, created_at, expires_at, used, metadata
-                         FROM oauth_states WHERE state = ?",
-                        params![state],
-                        |row| {
-                            Ok(RawState {
-                                state: row.get(0)?,
-                                provider: row.get(1)?,
-                                flow_type: row.get(2)?,
-                                requesting_service: row.get(3)?,
-                                redirect_after: row.get(4)?,
-                                created_at: row.get(5)?,
-                                expires_at: row.get(6)?,
-                                used: row.get(7)?,
-                                metadata: row.get(8)?,
-                            })
-                        },
-                    )
-                    .optional()?;
-                Ok(row.and_then(|r| r.into_valid(now)))
+        let row = sqlx::query!(
+            r#"
+            SELECT state, provider, flow_type, requesting_service, redirect_after,
+                   created_at, expires_at, used AS "used!", metadata::text AS "metadata?"
+              FROM bot.oauth_states
+             WHERE state = $1
+            "#,
+            state,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row
+            .map(|row| RawState {
+                state: row.state,
+                provider: row.provider,
+                flow_type: row.flow_type,
+                requesting_service: row.requesting_service,
+                redirect_after: row.redirect_after,
+                created_at: row.created_at,
+                expires_at: row.expires_at,
+                used: row.used,
+                metadata: row.metadata,
             })
-            .await
+            .and_then(|r| r.into_valid(now)))
     }
 
     /// Überschreibt die Metadaten eines States (für das Zurückschreiben des
     /// OAuth-Ergebnisses nach dem Callback — `_store_oauth_state_result`).
-    pub async fn update_metadata(&self, state: &str, metadata: &Value) -> Result<(), DbError> {
+    pub async fn update_metadata(&self, state: &str, metadata: &Value) -> DashboardDbResult<()> {
         let state = state.trim().to_string();
         let json = serde_json::to_string(metadata).unwrap_or_else(|_| "null".to_string());
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE oauth_states SET metadata = ? WHERE state = ?",
-                    params![json, state],
-                )?;
-                Ok(())
-            })
-            .await
+        sqlx::query!(
+            r#"
+            UPDATE bot.oauth_states
+               SET metadata = $1::text::jsonb
+             WHERE state = $2
+            "#,
+            json,
+            state,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Markiert den State als eingelöst. `true`, wenn er vorher gültig war —
     /// atomar, sodass paralleles Einlösen nur einmal gelingt.
-    pub async fn consume(&self, state: &str, now: i64) -> Result<bool, DbError> {
+    pub async fn consume(&self, state: &str, now: i64) -> DashboardDbResult<bool> {
         let state = state.trim().to_string();
         if state.is_empty() {
             return Ok(false);
         }
-        self.db
-            .write(move |conn| {
-                let rows = conn.execute(
-                    "UPDATE oauth_states SET used = 1
-                     WHERE state = ? AND COALESCE(used, 0) = 0 AND expires_at > ?",
-                    params![state, now],
-                )?;
-                Ok(rows > 0)
-            })
-            .await
+        let now = unix_to_utc(now)?;
+        let rows = sqlx::query!(
+            r#"
+            UPDATE bot.oauth_states
+               SET used = TRUE
+             WHERE state = $1
+               AND used IS NOT TRUE
+               AND expires_at > $2
+            "#,
+            state,
+            now,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(rows.rows_affected() > 0)
     }
 }
 
@@ -193,15 +211,17 @@ struct RawState {
     flow_type: String,
     requesting_service: Option<String>,
     redirect_after: String,
-    created_at: i64,
-    expires_at: i64,
-    used: i64,
+    created_at: DateTime<Utc>,
+    expires_at: DateTime<Utc>,
+    used: bool,
     metadata: Option<String>,
 }
 
 impl RawState {
     fn into_valid(self, now: i64) -> Option<OAuthState> {
-        if self.used != 0 || self.expires_at <= now {
+        let created_at = self.created_at.timestamp();
+        let expires_at = self.expires_at.timestamp();
+        if self.used || expires_at <= now {
             return None;
         }
         Some(OAuthState {
@@ -210,9 +230,9 @@ impl RawState {
             flow_type: self.flow_type,
             requesting_service: self.requesting_service,
             redirect_after: self.redirect_after,
-            created_at: self.created_at,
-            expires_at: self.expires_at,
-            used: self.used != 0,
+            created_at,
+            expires_at,
+            used: self.used,
             metadata: decode_metadata(self.metadata),
         })
     }
@@ -225,7 +245,11 @@ fn encode_metadata(metadata: Option<&Value>) -> Option<String> {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => {
             let trimmed = s.trim();
-            (!trimmed.is_empty()).then(|| trimmed.to_string())
+            if trimmed.is_empty() {
+                None
+            } else {
+                serde_json::to_string(trimmed).ok()
+            }
         }
         Some(value) => serde_json::to_string(value).ok(),
     }
@@ -257,37 +281,17 @@ fn derive_requesting_service(explicit: Option<&str>, metadata: Option<&Value>) -
         .map(str::to_string)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
     use serde_json::json;
 
-    async fn store() -> OAuthStateStore {
-        let file = tempfile::NamedTempFile::new().expect("tempfile");
-        let db = Db::open_creating(file.path()).expect("db");
-        // Schema wie in der echten DB (oauth_states-Vertrag).
-        db.write(|conn| {
-            conn.execute_batch(
-                "CREATE TABLE oauth_states (
-                    state TEXT PRIMARY KEY,
-                    provider TEXT NOT NULL,
-                    flow_type TEXT NOT NULL,
-                    requesting_service TEXT,
-                    redirect_after TEXT NOT NULL,
-                    created_at INTEGER NOT NULL,
-                    expires_at INTEGER NOT NULL,
-                    used INTEGER DEFAULT 0,
-                    metadata TEXT
-                 );",
-            )?;
-            Ok(())
-        })
-        .await
-        .expect("schema");
-        // Datei bleibt offen, solange der Prozess lebt — Handle leakt absichtlich
-        // (Test-Lebensdauer), damit der Pfad gültig bleibt.
-        std::mem::forget(file);
-        OAuthStateStore::new(db, 3600)
+    async fn store() -> (dl_central_db::TestDb, OAuthStateStore) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = OAuthStateStore::new(db.pool().clone(), 3600);
+        (db, store)
     }
 
     fn new_state<'a>(id: &'a str, meta: Option<&'a Value>) -> NewOAuthState<'a> {
@@ -303,7 +307,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_validate_consume_lebenszyklus() {
-        let store = store().await;
+        let (_db, store) = store().await;
         let created = store
             .create(new_state("abc", None), 1000)
             .await
@@ -326,7 +330,7 @@ mod tests {
 
     #[tokio::test]
     async fn abgelaufener_state_ist_ungueltig() {
-        let store = store().await;
+        let (_db, store) = store().await;
         store
             .create(new_state("exp", None), 1000)
             .await
@@ -338,7 +342,7 @@ mod tests {
 
     #[tokio::test]
     async fn metadata_json_und_requesting_service_aus_metadata() {
-        let store = store().await;
+        let (_db, store) = store().await;
         let meta = json!({"requesting_service": "turnier", "redirect_uri": "https://x"});
         let created = store
             .create(new_state("m", Some(&meta)), 1000)
@@ -357,7 +361,7 @@ mod tests {
 
     #[tokio::test]
     async fn leere_pflichtfelder_sind_fehler() {
-        let store = store().await;
+        let (_db, store) = store().await;
         let res = store
             .create(
                 NewOAuthState {
@@ -376,7 +380,7 @@ mod tests {
 
     #[tokio::test]
     async fn ueberschreiben_setzt_used_zurueck() {
-        let store = store().await;
+        let (_db, store) = store().await;
         store.create(new_state("re", None), 1000).await.expect("ok");
         assert!(store.consume("re", 1000).await.expect("ok"));
         // Neu anlegen mit gleicher ID → wieder einlösbar.

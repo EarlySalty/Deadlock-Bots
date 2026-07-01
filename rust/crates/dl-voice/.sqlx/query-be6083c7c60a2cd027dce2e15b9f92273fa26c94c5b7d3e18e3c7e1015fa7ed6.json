@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT view_version AS \"view_version!\"\n              FROM steam.steam_nudge_state\n             WHERE user_id = 100\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "view_version!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "be6083c7c60a2cd027dce2e15b9f92273fa26c94c5b7d3e18e3c7e1015fa7ed6"
+}

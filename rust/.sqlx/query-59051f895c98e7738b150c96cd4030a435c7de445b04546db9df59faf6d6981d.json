@@ -1,0 +1,29 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(channel_name, '') AS \"channel_name!\",\n                   duration_seconds AS \"duration_seconds!\"\n            FROM activity.voice_session_log\n            WHERE user_id = $1\n              AND guild_id = $2\n            ORDER BY ended_at DESC\n            LIMIT 1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "channel_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "duration_seconds!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      false
+    ]
+  },
+  "hash": "59051f895c98e7738b150c96cd4030a435c7de445b04546db9df59faf6d6981d"
+}

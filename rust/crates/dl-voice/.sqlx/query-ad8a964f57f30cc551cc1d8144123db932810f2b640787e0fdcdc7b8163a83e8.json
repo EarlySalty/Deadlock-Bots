@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            DELETE FROM voice.tempvoice_lurkers\n             WHERE channel_id = $1\n               AND user_id = $2\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ad8a964f57f30cc551cc1d8144123db932810f2b640787e0fdcdc7b8163a83e8"
+}

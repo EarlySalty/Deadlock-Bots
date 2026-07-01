@@ -1,0 +1,112 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT bot_request_id AS \"id!: i32\",\n                   discord_user_id,\n                   COALESCE(discord_username, '') AS \"discord_username!\",\n                   rank,\n                   COALESCE(subrank, '') AS \"subrank!\",\n                   COALESCE(hero, '') AS \"hero!\",\n                   COALESCE(games_played, '') AS \"games_played!\",\n                   COALESCE(hours_played, '') AS \"hours_played!\",\n                   COALESCE(NULLIF(scheduled_slot, ''), availability, '') AS \"scheduled_slot!\",\n                   COALESCE(current_problems, '') AS \"current_problems!\",\n                   COALESCE(ai_summary, '') AS \"ai_summary!\",\n                   COALESCE(status, '') AS \"status!\",\n                   assigned_coach_id,\n                   reserved_until,\n                   message_id,\n                   role_expires_at\n              FROM coaching.requests\n             WHERE bot_request_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!: i32",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_username!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "rank",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "subrank!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "hero!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 6,
+        "name": "games_played!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 7,
+        "name": "hours_played!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 8,
+        "name": "scheduled_slot!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 9,
+        "name": "current_problems!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 10,
+        "name": "ai_summary!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 11,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 12,
+        "name": "assigned_coach_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 13,
+        "name": "reserved_until",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 14,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 15,
+        "name": "role_expires_at",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true,
+      false,
+      null,
+      false,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "5a1b34de14ca67a1d2d14e22fb15db1fca3281dccd4ce73e98a96592c7c9464c"
+}

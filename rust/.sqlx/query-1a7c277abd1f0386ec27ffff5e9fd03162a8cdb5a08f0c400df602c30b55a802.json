@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        UPDATE tierlist.hero_build_clones\n                           SET status = 'failed',\n                               status_info = $1,\n                               updated_at = $2\n                         WHERE origin_hero_build_id = $3\n                           AND target_language = $4\n                           AND status = 'processing'\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1a7c277abd1f0386ec27ffff5e9fd03162a8cdb5a08f0c400df602c30b55a802"
+}

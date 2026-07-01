@@ -8,9 +8,10 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use dl_db::{Db, DbError};
-use rusqlite::{params, OptionalExtension};
 use serenity::all::{EmojiId, ReactionType};
+use sqlx::PgPool;
+
+use crate::db::{advisory_lock, pg_i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 
 #[cfg(test)]
 const BACKFILL_DM_DELAY: Duration = Duration::from_millis(0);
@@ -42,7 +43,7 @@ impl DmErr {
 #[derive(Debug, thiserror::Error)]
 pub enum ReactionRoleError {
     #[error(transparent)]
-    Db(#[from] DbError),
+    Db(#[from] CommunityDbError),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,13 +87,13 @@ struct ReactionRoleMapping {
 }
 
 pub struct ReactionRoleService {
-    db: Arc<Db>,
+    pool: PgPool,
     port: Arc<dyn ReactionRolePort>,
 }
 
 impl ReactionRoleService {
-    pub fn new(db: Arc<Db>, port: Arc<dyn ReactionRolePort>) -> Arc<Self> {
-        Arc::new(Self { db, port })
+    pub fn new(pool: PgPool, port: Arc<dyn ReactionRolePort>) -> Arc<Self> {
+        Arc::new(Self { pool, port })
     }
 
     pub async fn handle_reaction_add(
@@ -304,7 +305,7 @@ impl ReactionRoleService {
             return;
         };
         if let Err(err) =
-            upsert_scrim_participant_by_discord(&self.db, discord_id, display_name).await
+            upsert_scrim_participant_by_discord(&self.pool, discord_id, display_name).await
         {
             tracing::warn!(
                 %err,
@@ -319,194 +320,245 @@ impl ReactionRoleService {
         &self,
         message_id: u64,
         emoji: &str,
-    ) -> Result<Option<ReactionRoleMapping>, DbError> {
-        let emoji = emoji.to_string();
-        self.db
-            .read(move |conn| {
-                conn.query_row(
-                    "SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
-                            dm_enabled, dm_text, remove_on_unreact
-                       FROM reaction_role_mappings
-                      WHERE message_id = ?1 AND emoji = ?2 AND active = 1
-                      LIMIT 1",
-                    params![message_id, emoji],
-                    row_to_mapping,
-                )
-                .optional()
+    ) -> CommunityDbResult<Option<ReactionRoleMapping>> {
+        let message_id = u64_to_i64(message_id, "message_id")?;
+        let row = sqlx::query!(
+            r#"
+            SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
+                   dm_enabled, dm_text, remove_on_unreact
+              FROM bot.reaction_role_mappings
+             WHERE message_id = $1 AND emoji = $2 AND active = TRUE
+             LIMIT 1
+            "#,
+            message_id,
+            emoji,
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ReactionRoleMapping {
+                id: row.id,
+                guild_id: pg_i64_to_u64(row.guild_id, "guild_id")?,
+                source_channel_id: pg_i64_to_u64(row.source_channel_id, "source_channel_id")?,
+                message_id: pg_i64_to_u64(row.message_id, "message_id")?,
+                emoji: row.emoji,
+                role_id: pg_i64_to_u64(row.role_id, "role_id")?,
+                dm_enabled: row.dm_enabled,
+                dm_text: row.dm_text,
+                remove_on_unreact: row.remove_on_unreact,
             })
-            .await
+        })
+        .transpose()
     }
 
-    async fn pending_backfill_mappings(&self) -> Result<Vec<ReactionRoleMapping>, DbError> {
-        self.db
-            .read(move |conn| {
-                let mut stmt = conn.prepare(
-                    "SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
-                            dm_enabled, dm_text, remove_on_unreact
-                       FROM reaction_role_mappings
-                      WHERE backfill_pending = 1 AND active = 1
-                      ORDER BY id ASC",
-                )?;
-                let rows = stmt.query_map([], row_to_mapping)?;
-                rows.collect::<rusqlite::Result<Vec<_>>>()
+    async fn pending_backfill_mappings(&self) -> CommunityDbResult<Vec<ReactionRoleMapping>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
+                   dm_enabled, dm_text, remove_on_unreact
+              FROM bot.reaction_role_mappings
+             WHERE backfill_pending = TRUE AND active = TRUE
+             ORDER BY id ASC
+            "#
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(ReactionRoleMapping {
+                    id: row.id,
+                    guild_id: pg_i64_to_u64(row.guild_id, "guild_id")?,
+                    source_channel_id: pg_i64_to_u64(row.source_channel_id, "source_channel_id")?,
+                    message_id: pg_i64_to_u64(row.message_id, "message_id")?,
+                    emoji: row.emoji,
+                    role_id: pg_i64_to_u64(row.role_id, "role_id")?,
+                    dm_enabled: row.dm_enabled,
+                    dm_text: row.dm_text,
+                    remove_on_unreact: row.remove_on_unreact,
+                })
             })
-            .await
+            .collect()
     }
 
-    async fn reserve_dm_log(&self, mapping_id: i64, user_id: u64) -> Result<bool, DbError> {
-        let sent_at = chrono::Utc::now().timestamp();
-        self.db
-            .write(move |conn| {
-                let inserted = conn.execute(
-                    "INSERT OR IGNORE INTO reaction_role_dm_log(mapping_id, user_id, sent_at)
-                     VALUES(?1, ?2, ?3)",
-                    params![mapping_id, user_id, sent_at],
-                )?;
-                Ok(inserted == 1)
-            })
-            .await
+    async fn reserve_dm_log(&self, mapping_id: i64, user_id: u64) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(user_id, "user_id")?;
+        let result = sqlx::query!(
+            r#"
+            INSERT INTO bot.reaction_role_dm_log(mapping_id, user_id, sent_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT(mapping_id, user_id) DO NOTHING
+            "#,
+            mapping_id,
+            user_id,
+            chrono::Utc::now(),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
-    #[cfg(test)]
-    async fn mark_dm_logged(&self, mapping_id: i64, user_id: u64) -> Result<(), DbError> {
-        let sent_at = chrono::Utc::now().timestamp();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "INSERT INTO reaction_role_dm_log(mapping_id, user_id, sent_at)
-                     VALUES(?1, ?2, ?3)
-                     ON CONFLICT(mapping_id, user_id) DO UPDATE SET sent_at = excluded.sent_at",
-                    params![mapping_id, user_id, sent_at],
-                )?;
-                Ok(())
-            })
-            .await
+    #[cfg(all(test, feature = "testing"))]
+    async fn mark_dm_logged(&self, mapping_id: i64, user_id: u64) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "user_id")?;
+        sqlx::query!(
+            r#"
+            INSERT INTO bot.reaction_role_dm_log(mapping_id, user_id, sent_at)
+            VALUES ($1, $2, $3)
+            ON CONFLICT(mapping_id, user_id) DO UPDATE SET sent_at = excluded.sent_at
+            "#,
+            mapping_id,
+            user_id,
+            chrono::Utc::now(),
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
-    async fn touch_dm_logged(&self, mapping_id: i64, user_id: u64) -> Result<(), DbError> {
-        let sent_at = chrono::Utc::now().timestamp();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE reaction_role_dm_log
-                        SET sent_at = ?1
-                      WHERE mapping_id = ?2 AND user_id = ?3",
-                    params![sent_at, mapping_id, user_id],
-                )?;
-                Ok(())
-            })
-            .await
+    async fn touch_dm_logged(&self, mapping_id: i64, user_id: u64) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "user_id")?;
+        sqlx::query!(
+            r#"
+            UPDATE bot.reaction_role_dm_log
+               SET sent_at = $1
+             WHERE mapping_id = $2 AND user_id = $3
+            "#,
+            chrono::Utc::now(),
+            mapping_id,
+            user_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
-    async fn release_dm_reservation(&self, mapping_id: i64, user_id: u64) -> Result<(), DbError> {
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "DELETE FROM reaction_role_dm_log
-                      WHERE mapping_id = ?1 AND user_id = ?2",
-                    params![mapping_id, user_id],
-                )?;
-                Ok(())
-            })
-            .await
+    async fn release_dm_reservation(&self, mapping_id: i64, user_id: u64) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "user_id")?;
+        sqlx::query!(
+            r#"
+            DELETE FROM bot.reaction_role_dm_log
+             WHERE mapping_id = $1 AND user_id = $2
+            "#,
+            mapping_id,
+            user_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
-    async fn clear_backfill_pending(&self, mapping_id: i64) -> Result<(), DbError> {
-        let updated_at = chrono::Utc::now().timestamp();
-        self.db
-            .write(move |conn| {
-                conn.execute(
-                    "UPDATE reaction_role_mappings
-                        SET backfill_pending = 0, updated_at = ?1
-                      WHERE id = ?2",
-                    params![updated_at, mapping_id],
-                )?;
-                Ok(())
-            })
-            .await
+    async fn clear_backfill_pending(&self, mapping_id: i64) -> CommunityDbResult<()> {
+        sqlx::query!(
+            r#"
+            UPDATE bot.reaction_role_mappings
+               SET backfill_pending = FALSE,
+                   updated_at = $1
+             WHERE id = $2
+            "#,
+            chrono::Utc::now(),
+            mapping_id,
+        )
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 }
 
 async fn upsert_scrim_participant_by_discord(
-    db: &Db,
+    pool: &PgPool,
     discord_id: i64,
     display_name: &str,
-) -> Result<i64, DbError> {
+) -> CommunityDbResult<i64> {
     let display_name = display_name.trim().to_string();
-    let now = chrono::Utc::now().to_rfc3339();
-    db.write(move |conn| {
-        let tx = conn.transaction()?;
-        let existing_id = tx
-            .query_row(
-                "SELECT id
-                   FROM scrim_participant
-                  WHERE discord_id = ?1
-                  ORDER BY id ASC
-                  LIMIT 1",
-                params![discord_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(id) = existing_id {
-            tx.execute(
-                "UPDATE scrim_participant
-                    SET display_name = ?2,
-                        updated_at = ?3
-                  WHERE id = ?1",
-                params![id, display_name, now],
-            )?;
-            tx.commit()?;
-            return Ok(id);
-        }
+    let now = chrono::Utc::now();
+    let mut tx = pool.begin().await?;
+    advisory_lock(&mut tx, 0x4451_0008_0004_0001).await?;
 
-        let name_id = tx
-            .query_row(
-                "SELECT id
-                   FROM scrim_participant
-                  WHERE display_name = ?1
-                  ORDER BY id ASC
-                  LIMIT 1",
-                params![display_name],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?;
-        if let Some(id) = name_id {
-            tx.execute(
-                "UPDATE scrim_participant
-                    SET discord_id = COALESCE(discord_id, ?2),
-                        updated_at = ?3
-                  WHERE id = ?1",
-                params![id, discord_id, now],
-            )?;
-            tx.commit()?;
-            return Ok(id);
-        }
+    let existing_id = sqlx::query_scalar!(
+        r#"
+        SELECT id AS "id!: i32"
+          FROM scrim.participants
+         WHERE discord_id = $1
+         ORDER BY id ASC
+         LIMIT 1
+        "#,
+        discord_id,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(id) = existing_id {
+        sqlx::query!(
+            r#"
+            UPDATE scrim.participants
+               SET display_name = $2,
+                   updated_at = $3
+             WHERE id = $1
+            "#,
+            id,
+            display_name,
+            now,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(i64::from(id));
+    }
 
-        tx.execute(
-            "INSERT INTO scrim_participant(
-                 discord_id, display_name, status, source, created_at, updated_at
-             ) VALUES (?1, ?2, 'new', 'discord_reaction', ?3, ?3)",
-            params![discord_id, display_name, now],
-        )?;
-        let id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(id)
-    })
-    .await
-}
+    let name_id = sqlx::query_scalar!(
+        r#"
+        SELECT id AS "id!: i32"
+          FROM scrim.participants
+         WHERE display_name = $1
+         ORDER BY id ASC
+         LIMIT 1
+        "#,
+        display_name,
+    )
+    .fetch_optional(&mut *tx)
+    .await?;
+    if let Some(id) = name_id {
+        sqlx::query!(
+            r#"
+            UPDATE scrim.participants
+               SET discord_id = COALESCE(discord_id, $2),
+                   updated_at = $3
+             WHERE id = $1
+            "#,
+            id,
+            discord_id,
+            now,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        return Ok(i64::from(id));
+    }
 
-fn row_to_mapping(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReactionRoleMapping> {
-    Ok(ReactionRoleMapping {
-        id: row.get(0)?,
-        guild_id: row.get(1)?,
-        source_channel_id: row.get(2)?,
-        message_id: row.get(3)?,
-        emoji: row.get(4)?,
-        role_id: row.get(5)?,
-        dm_enabled: row.get::<_, i64>(6)? != 0,
-        dm_text: row.get(7)?,
-        remove_on_unreact: row.get::<_, i64>(8)? != 0,
-    })
+    let next_id = sqlx::query_scalar!(
+        r#"
+        SELECT COALESCE(MAX(id), 0) + 1 AS "next_id!: i32"
+          FROM scrim.participants
+        "#
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query!(
+        r#"
+        INSERT INTO scrim.participants(
+            id, discord_id, display_name, rank, rank_source, rank_verified,
+            roles, availability, status, source, created_at, updated_at
+        )
+        VALUES ($1, $2, $3, NULL, 'self', FALSE, NULL, NULL, 'new', 'discord_reaction', $4, $4)
+        "#,
+        next_id,
+        discord_id,
+        display_name,
+        now,
+    )
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(i64::from(next_id))
 }
 
 pub fn canonical_emoji(emoji: &ReactionType) -> String {
@@ -548,12 +600,13 @@ fn reaction_type_from_canonical(value: &str) -> ReactionType {
     ReactionType::Unicode(value.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use std::collections::VecDeque;
     use std::sync::{Mutex, MutexGuard};
 
     use super::*;
+    use dl_central_db::testing::{test_pool, TestDb};
 
     #[derive(Default)]
     struct MockState {
@@ -654,23 +707,14 @@ mod tests {
         }
     }
 
-    async fn test_service() -> Result<
-        (
-            tempfile::TempDir,
-            Arc<Db>,
-            Arc<MockPort>,
-            Arc<ReactionRoleService>,
-        ),
-        Box<dyn std::error::Error>,
-    > {
-        let dir = tempfile::tempdir()?;
-        let db = Arc::new(Db::open_creating(
-            dir.path().join("reaction_roles.sqlite3"),
-        )?);
-        db.bootstrap_schema().await?;
+    async fn test_service(
+    ) -> Result<(TestDb, PgPool, Arc<MockPort>, Arc<ReactionRoleService>), Box<dyn std::error::Error>>
+    {
+        let test_db = test_pool().await?;
+        let pool = test_db.pool().clone();
         let port = Arc::new(MockPort::default());
-        let service = ReactionRoleService::new(db.clone(), port.clone());
-        Ok((dir, db, port, service))
+        let service = ReactionRoleService::new(pool.clone(), port.clone());
+        Ok((test_db, pool, port, service))
     }
 
     struct MappingInsert {
@@ -682,74 +726,87 @@ mod tests {
         backfill_pending: bool,
     }
 
-    async fn insert_mapping(db: &Db, insert: MappingInsert) -> Result<i64, DbError> {
-        db.write(move |conn| {
-            conn.execute(
-                "INSERT INTO reaction_role_mappings(
-                    guild_id, source_channel_id, message_id, emoji, role_id,
-                    dm_enabled, dm_text, remove_on_unreact, backfill_pending,
-                    active, created_at, updated_at
-                 ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, 10, 10)",
-                params![
-                    42_u64,
-                    43_u64,
-                    insert.message_id,
-                    insert.emoji,
-                    insert.role_id,
-                    insert.dm_enabled as i64,
-                    "DM",
-                    insert.remove_on_unreact as i64,
-                    insert.backfill_pending as i64,
-                ],
-            )?;
-            Ok(conn.last_insert_rowid())
-        })
-        .await
+    async fn insert_mapping(
+        pool: &PgPool,
+        insert: MappingInsert,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO bot.reaction_role_mappings(
+                guild_id, source_channel_id, message_id, emoji, role_id,
+                dm_enabled, dm_text, remove_on_unreact, backfill_pending,
+                active, created_at, updated_at
+            )
+            VALUES (42, 43, $1, $2, $3, $4, 'DM', $5, $6, TRUE, now(), now())
+            RETURNING id
+            "#,
+            u64_to_i64(insert.message_id, "message_id")?,
+            insert.emoji,
+            u64_to_i64(insert.role_id, "role_id")?,
+            insert.dm_enabled,
+            insert.remove_on_unreact,
+            insert.backfill_pending,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(row.id)
     }
 
-    async fn dm_log_count(db: &Db, mapping_id: i64, user_id: u64) -> Result<i64, DbError> {
-        db.read(move |conn| {
-            conn.query_row(
-                "SELECT COUNT(*) FROM reaction_role_dm_log
-                  WHERE mapping_id = ?1 AND user_id = ?2",
-                params![mapping_id, user_id],
-                |row| row.get(0),
-            )
-        })
-        .await
+    async fn dm_log_count(
+        pool: &PgPool,
+        mapping_id: i64,
+        user_id: u64,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let count = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM bot.reaction_role_dm_log
+             WHERE mapping_id = $1 AND user_id = $2
+            "#,
+            mapping_id,
+            u64_to_i64(user_id, "user_id")?,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(count)
     }
 
-    async fn backfill_pending(db: &Db, mapping_id: i64) -> Result<bool, DbError> {
-        db.read(move |conn| {
-            conn.query_row(
-                "SELECT backfill_pending FROM reaction_role_mappings WHERE id = ?1",
-                params![mapping_id],
-                |row| row.get::<_, i64>(0).map(|value| value != 0),
-            )
-        })
-        .await
+    async fn backfill_pending(
+        pool: &PgPool,
+        mapping_id: i64,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let pending = sqlx::query_scalar!(
+            "SELECT backfill_pending FROM bot.reaction_role_mappings WHERE id = $1",
+            mapping_id,
+        )
+        .fetch_one(pool)
+        .await?;
+        Ok(pending)
     }
 
     async fn scrim_participants(
-        db: &Db,
-    ) -> Result<Vec<(i64, Option<i64>, String, String)>, DbError> {
-        db.read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, discord_id, display_name, source
-                   FROM scrim_participant
-                  ORDER BY id ASC",
-            )?;
-            let rows = stmt.query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, Option<i64>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .await
+        pool: &PgPool,
+    ) -> Result<Vec<(i64, Option<i64>, String, String)>, Box<dyn std::error::Error>> {
+        let rows = sqlx::query!(
+            r#"
+            SELECT id, discord_id, display_name, source
+              FROM scrim.participants
+             ORDER BY id ASC
+            "#
+        )
+        .fetch_all(pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                (
+                    i64::from(row.id),
+                    row.discord_id,
+                    row.display_name,
+                    row.source,
+                )
+            })
+            .collect())
     }
 
     #[test]
@@ -924,11 +981,9 @@ mod tests {
             },
         )
         .await?;
-        db.write(|conn| {
-            conn.execute("DROP TABLE scrim_participant", [])?;
-            Ok(())
-        })
-        .await?;
+        sqlx::query("DROP TABLE scrim.participants")
+            .execute(&db)
+            .await?;
 
         service
             .handle_reaction_add_with_display_name(

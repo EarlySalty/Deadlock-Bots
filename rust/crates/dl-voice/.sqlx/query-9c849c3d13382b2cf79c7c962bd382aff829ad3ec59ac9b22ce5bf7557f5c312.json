@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "DELETE FROM voice.deadlock_voice_watch",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "9c849c3d13382b2cf79c7c962bd382aff829ad3ec59ac9b22ce5bf7557f5c312"
+}

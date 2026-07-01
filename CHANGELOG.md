@@ -1,3 +1,11 @@
+## #179 — Zentrale Datenbank kann live aus den Alt-Daten befüllt werden
+
+**Ausgangslage:** Die zentrale Datenbank hatte das fertige Schema, aber der operative Schritt zum Befüllen aus den bestehenden Datenbanken war noch kein eigener, wiederholbarer Lauf.
+
+**Was wurde geändert:** Es gibt jetzt einen zentralen Sync-Lauf, der die bekannten Alt-Datenbanken zuerst konsistent snapshotet und danach über das geprüfte Ledger in die zentrale Datenbank lädt. Der Lauf meldet Zieltabellen, Zeilensummen und bekannte Orphan-Fälle, ohne Zugangsdaten auszugeben.
+
+**Wie es jetzt läuft:** Die zentrale Datenbank ist mit den aktuellen Bot-, Website- und Turnier-Daten befüllt. Ein späterer Cutover kann denselben Lauf direkt vor dem Umschalten wiederholen und hat dabei einen SQLite-Snapshot als Rollback-Anker.
+
 ## #178 — Bot-Build nutzt die zentrale Moderations-Datenbank
 
 **Ausgangslage:** Der Rust-Bot konnte auf dem aktuellen Branch nicht als Release-Binary gebaut werden, weil zwei Moderations-Bausteine noch die alte lokale Datenbank-Verbindung bekamen. Die Moderation erwartet inzwischen die zentrale Datenbank-Verbindung.

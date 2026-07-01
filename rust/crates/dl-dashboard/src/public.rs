@@ -50,31 +50,34 @@ fn with_cors(body: serde_json::Value, status: u16, max_age: u32) -> Response {
 }
 
 pub async fn patch_notes(State(app): State<DashboardApp>) -> Response {
-    let result = app
-        .db()
-        .read(|conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, title, url, posted_at, translated_content
-                 FROM changelog_posts
-                 WHERE translated_content IS NOT NULL AND translated_content != ''
-                 ORDER BY id DESC",
-            )?;
-            let patches = stmt
-                .query_map([], |row| {
-                    let content: String = row.get::<_, Option<String>>(4)?.unwrap_or_default();
-                    Ok(json!({
-                        "id": row.get::<_, Option<i64>>(0)?,
-                        "title": row.get::<_, Option<String>>(1)?.unwrap_or_default(),
-                        "url": row.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                        "posted_at": row.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                        "sections": detect_sections(&content),
-                        "translated_content": content,
-                    }))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?;
-            Ok(patches)
-        })
-        .await;
+    let result = sqlx::query!(
+        r#"
+        SELECT id, title, url,
+               to_char(posted_at AT TIME ZONE 'UTC', 'YYYY-MM-DD HH24:MI:SS') AS "posted_at?",
+               translated_content
+          FROM patchnotes.changelog_posts
+         WHERE translated_content IS NOT NULL
+           AND translated_content != ''
+         ORDER BY id DESC
+        "#
+    )
+    .fetch_all(app.pool())
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|row| {
+                let content = row.translated_content.unwrap_or_default();
+                json!({
+                    "id": row.id,
+                    "title": row.title,
+                    "url": row.url,
+                    "posted_at": row.posted_at.unwrap_or_default(),
+                    "sections": detect_sections(&content),
+                    "translated_content": content,
+                })
+            })
+            .collect::<Vec<_>>()
+    });
 
     match result {
         Ok(patches) => {

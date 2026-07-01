@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT (COALESCE(MAX(id), 0) + 1)::int8 AS \"next_id!\"\n        FROM activity.member_events\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "next_id!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "26f814cc9bba7e62136af0f07d44dfd0c7be3398987d7d15483e2e8ff5c7f088"
+}

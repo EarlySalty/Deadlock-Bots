@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT original_nick\n              FROM voice.tempvoice_lurkers\n             WHERE channel_id = $1\n               AND user_id = $2\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "original_nick",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "89f812af630e21f4cb2321e6eda8bb177e8ce526aad32addb136aeb463460373"
+}

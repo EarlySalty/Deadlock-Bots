@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)\n            VALUES ($1, TRUE, $2, $3, $2)\n            ON CONFLICT(user_id) DO UPDATE SET\n              opted_out = TRUE,\n              deleted_at = excluded.deleted_at,\n              reason = excluded.reason,\n              updated_at = excluded.updated_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e34ac6bcb8974e1f9adc6c35ab8e0b468e045be5497f02edc5b7daed7bd2d142"
+}

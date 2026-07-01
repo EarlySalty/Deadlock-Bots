@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT user_id,\n                   total_messages AS \"total_messages!\",\n                   total_points AS \"total_points!\"\n            FROM activity.text_stats\n            ORDER BY total_points DESC, total_messages DESC\n            LIMIT $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "total_messages!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "total_points!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "192ca940202b688af4851156e193e23a40b57bdc7bb5d1ec5371a6fa74cb3bc3"
+}

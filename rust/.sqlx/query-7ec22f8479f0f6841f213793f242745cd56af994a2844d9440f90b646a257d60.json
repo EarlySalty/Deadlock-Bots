@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT k, v\n              FROM bot.kv_store\n             WHERE ns = $1\n             ORDER BY k\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "k",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "v",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "7ec22f8479f0f6841f213793f242745cd56af994a2844d9440f90b646a257d60"
+}

@@ -25,14 +25,11 @@ fn unavailable() -> Value {
 }
 
 pub async fn repo_activity(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_read(&headers) {
+    if let Err(resp) = app.guard_read(&headers).await {
         return resp;
     }
-    // `data/repo_activity.json` liegt neben der DB (= repo/data/).
-    let Some(dir) = app.db().path().parent() else {
-        return ok_json(unavailable());
-    };
-    let path = dir.join("repo_activity.json");
+    // `data/repo_activity.json` liegt im konfigurierten Datenverzeichnis.
+    let path = app.data_dir().join("repo_activity.json");
     match tokio::fs::read_to_string(&path).await {
         Ok(raw) => (
             StatusCode::OK,
@@ -55,15 +52,12 @@ pub async fn repo_activity_refresh(
     State(app): State<DashboardApp>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(resp) = app.guard_mutate(&headers, true) {
+    if let Err(resp) = app.guard_mutate(&headers, true).await {
         return resp;
     }
-    // Binary unter repo/rust/target/release/, Repo-Wurzel = DB-Parent-Parent.
+    // Binary unter repo/rust/target/release/, Repo-Wurzel = Data-Parent.
     let (bin, repo_root) = {
-        let Some(data_dir) = app.db().path().parent() else {
-            return err_text(500, "Datenpfad nicht auflösbar");
-        };
-        let Some(rr) = data_dir.parent() else {
+        let Some(rr) = app.repo_root() else {
             return err_text(500, "Repo-Pfad nicht auflösbar");
         };
         (

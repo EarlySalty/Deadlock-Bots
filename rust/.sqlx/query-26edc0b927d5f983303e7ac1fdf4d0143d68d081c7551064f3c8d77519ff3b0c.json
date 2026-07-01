@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE activity.member_leave_surveys\n           SET web_payload = $1::text::jsonb,\n               web_submitted_at = $2\n         WHERE survey_token = $3\n           AND created_at >= $4\n           AND web_submitted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Timestamptz",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "26edc0b927d5f983303e7ac1fdf4d0143d68d081c7551064f3c8d77519ff3b0c"
+}

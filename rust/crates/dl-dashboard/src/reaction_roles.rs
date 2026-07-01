@@ -4,11 +4,12 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
+use chrono::{DateTime, Utc};
 use dl_community::reaction_roles::canonical_emoji_input;
-use dl_db::DbError;
-use rusqlite::{params, Connection, OptionalExtension};
 use serde_json::{json, Value};
+use sqlx::{PgPool, Postgres, Transaction};
 
+use crate::db::{utc_to_unix, DashboardDbError, DashboardDbResult};
 use crate::web::{err_text, ok_json, DashboardApp};
 
 fn get2<'a>(obj: &'a Value, k1: &str, k2: &str) -> Option<&'a Value> {
@@ -129,144 +130,215 @@ fn parse_payload(payload: &Value) -> Result<ReactionRolePayload, Response> {
     })
 }
 
-fn row_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
-    Ok(json!({
-        "id": row.get::<_, i64>(0)?,
-        "guild_id": row.get::<_, u64>(1)?,
-        "source_channel_id": row.get::<_, u64>(2)?,
-        "message_id": row.get::<_, u64>(3)?,
-        "emoji": row.get::<_, String>(4)?,
-        "role_id": row.get::<_, u64>(5)?,
-        "dm_enabled": row.get::<_, i64>(6)? != 0,
-        "dm_text": row.get::<_, Option<String>>(7)?,
-        "remove_on_unreact": row.get::<_, i64>(8)? != 0,
-        "backfill_pending": row.get::<_, i64>(9)? != 0,
-        "active": row.get::<_, i64>(10)? != 0,
-        "created_at": row.get::<_, i64>(11)?,
-        "updated_at": row.get::<_, i64>(12)?,
+struct MappingRow {
+    id: i64,
+    guild_id: i64,
+    source_channel_id: i64,
+    message_id: i64,
+    emoji: String,
+    role_id: i64,
+    dm_enabled: bool,
+    dm_text: Option<String>,
+    remove_on_unreact: bool,
+    backfill_pending: bool,
+    active: bool,
+    created_at: Option<DateTime<Utc>>,
+    updated_at: Option<DateTime<Utc>>,
+}
+
+fn mapping_json(row: MappingRow) -> Value {
+    json!({
+        "id": row.id,
+        "guild_id": row.guild_id,
+        "source_channel_id": row.source_channel_id,
+        "message_id": row.message_id,
+        "emoji": row.emoji,
+        "role_id": row.role_id,
+        "dm_enabled": row.dm_enabled,
+        "dm_text": row.dm_text,
+        "remove_on_unreact": row.remove_on_unreact,
+        "backfill_pending": row.backfill_pending,
+        "active": row.active,
+        "created_at": utc_to_unix(row.created_at),
+        "updated_at": utc_to_unix(row.updated_at),
+    })
+}
+
+async fn load_mapping_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: i64,
+) -> DashboardDbResult<Option<Value>> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
+               dm_enabled AS "dm_enabled!", dm_text,
+               remove_on_unreact AS "remove_on_unreact!",
+               backfill_pending AS "backfill_pending!",
+               active AS "active!", created_at, updated_at
+          FROM bot.reaction_role_mappings
+         WHERE id = $1
+        "#,
+        id,
+    )
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.map(|row| {
+        mapping_json(MappingRow {
+            id: row.id,
+            guild_id: row.guild_id,
+            source_channel_id: row.source_channel_id,
+            message_id: row.message_id,
+            emoji: row.emoji,
+            role_id: row.role_id,
+            dm_enabled: row.dm_enabled,
+            dm_text: row.dm_text,
+            remove_on_unreact: row.remove_on_unreact,
+            backfill_pending: row.backfill_pending,
+            active: row.active,
+            created_at: Some(row.created_at),
+            updated_at: Some(row.updated_at),
+        })
     }))
 }
 
-fn load_mapping(conn: &Connection, id: i64) -> rusqlite::Result<Option<Value>> {
-    conn.query_row(
-        "SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
-                dm_enabled, dm_text, remove_on_unreact, backfill_pending,
-                active, created_at, updated_at
-           FROM reaction_role_mappings
-          WHERE id = ?1",
-        params![id],
-        row_json,
-    )
-    .optional()
-}
-
-fn save_mapping(
-    conn: &mut Connection,
+async fn save_mapping(
+    pool: &PgPool,
     payload: ReactionRolePayload,
-    ts: i64,
-) -> rusqlite::Result<Option<Value>> {
-    let tx = conn.transaction()?;
+    ts: DateTime<Utc>,
+) -> DashboardDbResult<Option<Value>> {
+    let mut tx = pool.begin().await?;
     let saved_id = if let Some(id) = payload.id {
-        let exists = tx
-            .query_row(
-                "SELECT 1 FROM reaction_role_mappings WHERE id = ?1",
-                params![id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .is_some();
+        let exists = sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1 FROM bot.reaction_role_mappings WHERE id = $1
+            ) AS "exists!"
+            "#,
+            id,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
         if !exists {
-            tx.commit()?;
+            tx.commit().await?;
             return Ok(None);
         }
-        tx.execute(
-            "UPDATE reaction_role_mappings
-                SET guild_id = ?1,
-                    source_channel_id = ?2,
-                    message_id = ?3,
-                    emoji = ?4,
-                    role_id = ?5,
-                    dm_enabled = ?6,
-                    dm_text = ?7,
-                    remove_on_unreact = ?8,
-                    backfill_pending = ?9,
-                    active = 1,
-                    updated_at = ?10
-              WHERE id = ?11",
-            params![
-                payload.guild_id,
-                payload.source_channel_id,
-                payload.message_id,
-                payload.emoji,
-                payload.role_id,
-                payload.dm_enabled as i64,
-                payload.dm_text,
-                payload.remove_on_unreact as i64,
-                payload.backfill as i64,
-                ts,
-                id,
-            ],
-        )?;
+        sqlx::query!(
+            r#"
+            UPDATE bot.reaction_role_mappings
+               SET guild_id = $1,
+                   source_channel_id = $2,
+                   message_id = $3,
+                   emoji = $4,
+                   role_id = $5,
+                   dm_enabled = $6,
+                   dm_text = $7,
+                   remove_on_unreact = $8,
+                   backfill_pending = $9,
+                   active = TRUE,
+                   updated_at = $10
+             WHERE id = $11
+            "#,
+            payload.guild_id as i64,
+            payload.source_channel_id as i64,
+            payload.message_id as i64,
+            payload.emoji,
+            payload.role_id as i64,
+            payload.dm_enabled,
+            payload.dm_text,
+            payload.remove_on_unreact,
+            payload.backfill,
+            ts,
+            id,
+        )
+        .execute(&mut *tx)
+        .await?;
         id
     } else {
-        tx.execute(
-            "INSERT INTO reaction_role_mappings(
+        let row = sqlx::query!(
+            r#"
+            INSERT INTO bot.reaction_role_mappings(
                 guild_id, source_channel_id, message_id, emoji, role_id,
                 dm_enabled, dm_text, remove_on_unreact, backfill_pending,
                 active, created_at, updated_at
-             ) VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?10)
+            )
+            VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10, $10)
              ON CONFLICT(message_id, emoji) DO UPDATE SET
-                guild_id = excluded.guild_id,
-                source_channel_id = excluded.source_channel_id,
-                role_id = excluded.role_id,
-                dm_enabled = excluded.dm_enabled,
-                dm_text = excluded.dm_text,
-                remove_on_unreact = excluded.remove_on_unreact,
-                backfill_pending = excluded.backfill_pending,
-                active = 1,
-                updated_at = excluded.updated_at",
-            params![
-                payload.guild_id,
-                payload.source_channel_id,
-                payload.message_id,
-                payload.emoji,
-                payload.role_id,
-                payload.dm_enabled as i64,
-                payload.dm_text,
-                payload.remove_on_unreact as i64,
-                payload.backfill as i64,
-                ts,
-            ],
-        )?;
-        tx.query_row(
-            "SELECT id FROM reaction_role_mappings WHERE message_id = ?1 AND emoji = ?2",
-            params![payload.message_id, payload.emoji],
-            |row| row.get(0),
-        )?
+                guild_id = EXCLUDED.guild_id,
+                source_channel_id = EXCLUDED.source_channel_id,
+                role_id = EXCLUDED.role_id,
+                dm_enabled = EXCLUDED.dm_enabled,
+                dm_text = EXCLUDED.dm_text,
+                remove_on_unreact = EXCLUDED.remove_on_unreact,
+                backfill_pending = EXCLUDED.backfill_pending,
+                active = TRUE,
+                updated_at = EXCLUDED.updated_at
+            RETURNING id
+            "#,
+            payload.guild_id as i64,
+            payload.source_channel_id as i64,
+            payload.message_id as i64,
+            payload.emoji,
+            payload.role_id as i64,
+            payload.dm_enabled,
+            payload.dm_text,
+            payload.remove_on_unreact,
+            payload.backfill,
+            ts,
+        )
+        .fetch_one(&mut *tx)
+        .await?;
+        row.id
     };
-    let saved = load_mapping(&tx, saved_id)?;
-    tx.commit()?;
+    let saved = load_mapping_tx(&mut tx, saved_id).await?;
+    tx.commit().await?;
     Ok(saved)
 }
 
+fn is_unique_violation(err: &DashboardDbError) -> bool {
+    match err {
+        DashboardDbError::Sqlx(sqlx::Error::Database(db)) => db.code().as_deref() == Some("23505"),
+        _ => false,
+    }
+}
+
 pub async fn reaction_roles(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_full(&headers) {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
-    let result = app
-        .db()
-        .read(move |conn| {
-            let mut stmt = conn.prepare(
-                "SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
-                        dm_enabled, dm_text, remove_on_unreact, backfill_pending,
-                        active, created_at, updated_at
-                   FROM reaction_role_mappings
-                  ORDER BY id DESC",
-            )?;
-            let rows = stmt.query_map([], row_json)?;
-            rows.collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .await;
+    let result = sqlx::query!(
+        r#"
+        SELECT id, guild_id, source_channel_id, message_id, emoji, role_id,
+               dm_enabled AS "dm_enabled!", dm_text,
+               remove_on_unreact AS "remove_on_unreact!",
+               backfill_pending AS "backfill_pending!",
+               active AS "active!", created_at, updated_at
+          FROM bot.reaction_role_mappings
+         ORDER BY id DESC
+        "#
+    )
+    .fetch_all(app.pool())
+    .await
+    .map(|rows| {
+        rows.into_iter()
+            .map(|row| {
+                mapping_json(MappingRow {
+                    id: row.id,
+                    guild_id: row.guild_id,
+                    source_channel_id: row.source_channel_id,
+                    message_id: row.message_id,
+                    emoji: row.emoji,
+                    role_id: row.role_id,
+                    dm_enabled: row.dm_enabled,
+                    dm_text: row.dm_text,
+                    remove_on_unreact: row.remove_on_unreact,
+                    backfill_pending: row.backfill_pending,
+                    active: row.active,
+                    created_at: Some(row.created_at),
+                    updated_at: Some(row.updated_at),
+                })
+            })
+            .collect::<Vec<_>>()
+    });
     match result {
         Ok(mappings) => ok_json(json!(mappings)),
         Err(err) => {
@@ -281,7 +353,7 @@ pub async fn reaction_role_upsert(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let session = match app.guard_mutate(&headers, true) {
+    let session = match app.guard_mutate(&headers, true).await {
         Ok(session) => session,
         Err(resp) => return resp,
     };
@@ -293,11 +365,8 @@ pub async fn reaction_role_upsert(
         Ok(payload) => payload,
         Err(resp) => return resp,
     };
-    let ts = chrono::Utc::now().timestamp();
-    let result = app
-        .db()
-        .write(move |conn| save_mapping(conn, payload, ts))
-        .await;
+    let ts = chrono::Utc::now();
+    let result = save_mapping(app.pool(), payload, ts).await;
 
     match result {
         Ok(Some(mapping)) => {
@@ -312,9 +381,7 @@ pub async fn reaction_role_upsert(
             ok_json(json!({ "mapping": mapping }))
         }
         Ok(None) => err_text(404, "Reaction role mapping not found"),
-        Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
-            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
+        Err(err) if is_unique_violation(&err) => {
             err_text(409, "Reaction role mapping already exists")
         }
         Err(err) => {
@@ -329,7 +396,7 @@ pub async fn reaction_role_delete(
     headers: HeaderMap,
     Path(id_raw): Path<String>,
 ) -> Response {
-    let session = match app.guard_mutate(&headers, true) {
+    let session = match app.guard_mutate(&headers, true).await {
         Ok(session) => session,
         Err(resp) => return resp,
     };
@@ -337,22 +404,29 @@ pub async fn reaction_role_delete(
         Ok(id) => id,
         Err(resp) => return resp,
     };
-    let result = app
-        .db()
-        .write(move |conn| {
-            let tx = conn.transaction()?;
-            tx.execute(
-                "DELETE FROM reaction_role_dm_log WHERE mapping_id = ?1",
-                params![id],
-            )?;
-            let deleted = tx.execute(
-                "DELETE FROM reaction_role_mappings WHERE id = ?1",
-                params![id],
-            )?;
-            tx.commit()?;
-            Ok(deleted)
-        })
-        .await;
+    let result: DashboardDbResult<u64> = async {
+        let mut tx = app.pool().begin().await?;
+        sqlx::query!(
+            r#"
+            DELETE FROM bot.reaction_role_dm_log WHERE mapping_id = $1
+            "#,
+            id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        let deleted = sqlx::query!(
+            r#"
+            DELETE FROM bot.reaction_role_mappings WHERE id = $1
+            "#,
+            id,
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted)
+    }
+    .await;
     match result {
         Ok(deleted) => {
             tracing::info!(
@@ -373,7 +447,7 @@ pub async fn reaction_role_delete(
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "testing"))]
 mod tests {
     use axum::http::StatusCode;
 
@@ -448,39 +522,55 @@ mod tests {
     #[tokio::test]
     async fn save_mapping_verwendet_sqlite_id_und_insertet_unbekannte_id_nicht(
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let dir = tempfile::tempdir()?;
-        let db = dl_db::Db::open_creating(dir.path().join("reaction_roles.sqlite3"))?;
-        db.bootstrap_schema().await?;
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
 
-        let saved = db
-            .write(|conn| save_mapping(conn, payload(None, 100, 500), 10))
+        let saved = save_mapping(pool, payload(None, 100, 500), Utc::now())
             .await?
             .expect("created mapping");
         let saved_id = saved["id"].as_i64().expect("id");
         assert!(saved_id > 0);
         assert_ne!(saved_id, 99);
 
-        let unknown = db
-            .write(|conn| save_mapping(conn, payload(Some(99), 101, 501), 11))
-            .await?;
+        let unknown = save_mapping(pool, payload(Some(99), 101, 501), Utc::now()).await?;
         assert!(unknown.is_none());
-        let unknown_count: i64 = db
-            .read(|conn| {
-                conn.query_row(
-                    "SELECT COUNT(*) FROM reaction_role_mappings WHERE id = 99",
-                    [],
-                    |row| row.get(0),
-                )
-            })
-            .await?;
+        let unknown_count = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM bot.reaction_role_mappings
+             WHERE id = 99
+            "#
+        )
+        .fetch_one(pool)
+        .await?;
         assert_eq!(unknown_count, 0);
 
-        let updated = db
-            .write(move |conn| save_mapping(conn, payload(Some(saved_id), 100, 777), 12))
+        let updated = save_mapping(pool, payload(Some(saved_id), 100, 777), Utc::now())
             .await?
             .expect("updated mapping");
         assert_eq!(updated["id"].as_i64(), Some(saved_id));
         assert_eq!(updated["role_id"].as_u64(), Some(777));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn save_mapping_meldet_unique_konflikt_beim_id_update(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let first = save_mapping(pool, payload(None, 100, 500), Utc::now())
+            .await?
+            .expect("first");
+        let second = save_mapping(pool, payload(None, 101, 501), Utc::now())
+            .await?
+            .expect("second");
+
+        let err = save_mapping(pool, payload(second["id"].as_i64(), 100, 777), Utc::now())
+            .await
+            .expect_err("unique conflict");
+
+        assert!(is_unique_violation(&err));
+        assert_eq!(first["message_id"].as_u64(), Some(100));
         Ok(())
     }
 }

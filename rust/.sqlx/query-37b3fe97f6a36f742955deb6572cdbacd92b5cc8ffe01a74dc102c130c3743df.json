@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    SELECT status\n                      FROM coaching.requests\n                     WHERE discord_user_id = $1\n                     ORDER BY created_at DESC\n                     LIMIT 1\n                    ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "37b3fe97f6a36f742955deb6572cdbacd92b5cc8ffe01a74dc102c130c3743df"
+}

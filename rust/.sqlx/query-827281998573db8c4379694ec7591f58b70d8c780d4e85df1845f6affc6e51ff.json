@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            UPDATE voice.rename_requests\n               SET status = 'PENDING',\n                   created_at = NOW(),\n                   processed_at = NULL,\n                   assigned_worker_id = 0,\n                   last_error = $2\n             WHERE id = $1\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "827281998573db8c4379694ec7591f58b70d8c780d4e85df1845f6affc6e51ff"
+}

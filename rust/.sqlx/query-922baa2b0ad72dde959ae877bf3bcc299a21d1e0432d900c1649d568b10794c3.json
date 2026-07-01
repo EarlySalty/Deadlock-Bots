@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO scrim.teams(\n            id, name, coach, discord_role_id, discord_channel_id, created_at\n        )\n        VALUES($1, $2, $3, $4, $5, $6)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Text",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "922baa2b0ad72dde959ae877bf3bcc299a21d1e0432d900c1649d568b10794c3"
+}

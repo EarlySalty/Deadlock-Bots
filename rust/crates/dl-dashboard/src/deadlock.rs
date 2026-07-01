@@ -14,38 +14,15 @@ use axum::body::Bytes;
 use axum::extract::{Path, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
-use dl_db::DbError;
-use rusqlite::types::Value as SqlValue;
-use rusqlite::{params, Connection, OptionalExtension};
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
+use sqlx::{Postgres, Transaction};
 
+use crate::db::{i64_to_i32, utc_to_json_unix, DashboardDbError, DashboardDbResult};
 use crate::web::{err_text, ok_json, DashboardApp};
 
-/// SQLite-Wert → JSON (für unbekannt typisierte Durchreich-Felder).
-fn sql_to_json(value: SqlValue) -> Value {
-    match value {
-        SqlValue::Null => Value::Null,
-        SqlValue::Integer(i) => json!(i),
-        SqlValue::Real(f) => json!(f),
-        SqlValue::Text(s) => json!(s),
-        SqlValue::Blob(_) => Value::Null,
-    }
-}
-
-/// origin_build_id-Coercion: Integer direkt, numerischer Text geparst, sonst
-/// `None` (wie `_map_deadlock_hero_row`).
-fn coerce_opt_i64(value: SqlValue) -> Option<i64> {
-    match value {
-        SqlValue::Integer(i) => Some(i),
-        SqlValue::Real(f) => Some(f as i64),
-        SqlValue::Text(s) => s.trim().parse().ok(),
-        _ => None,
-    }
-}
-
 async fn global_target_build_name(app: &DashboardApp) -> String {
-    app.db()
-        .kv_get("deadlock", "global_target_build_name")
+    dl_central_db::kv::get(app.pool(), "deadlock", "global_target_build_name")
         .await
         .ok()
         .flatten()
@@ -53,7 +30,7 @@ async fn global_target_build_name(app: &DashboardApp) -> String {
 }
 
 pub async fn deadlock_config(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_full(&headers) {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     ok_json(json!({ "global_target_build_name": global_target_build_name(&app).await }))
@@ -92,7 +69,7 @@ pub async fn deadlock_config_update(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let session = match app.guard_mutate(&headers, true) {
+    let session = match app.guard_mutate(&headers, true).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -116,10 +93,8 @@ pub async fn deadlock_config_update(
     };
 
     let previous = global_target_build_name(&app).await;
-    if let Err(err) = app
-        .db()
-        .kv_set("deadlock", "global_target_build_name", name.clone())
-        .await
+    if let Err(err) =
+        dl_central_db::kv::set(app.pool(), "deadlock", "global_target_build_name", &name).await
     {
         tracing::error!(%err, "global_target_build_name speichern fehlgeschlagen");
         return err_text(500, "Saving config failed");
@@ -138,94 +113,99 @@ pub async fn deadlock_config_update(
 }
 
 pub async fn deadlock_heroes(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_full(&headers) {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     let config_name = global_target_build_name(&app).await;
 
-    let result = app
-        .db()
-        .read(move |conn| {
-            // Build-Snapshots je Held gruppieren.
-            let mut builds_stmt = conn.prepare(
-                "SELECT id, hero_id, build_id, build_name, author_name, is_active, sort_order,
-                        sync_status, sync_message, last_checked_at, last_synced_at,
-                        last_alerted_at, source_version, source_last_updated_ts,
-                        clone_build_id, clone_version, created_at, updated_at
-                 FROM deadlock_hero_builds
-                 ORDER BY hero_id ASC, sort_order ASC, build_id ASC",
-            )?;
-            let mut builds_by_hero: std::collections::HashMap<i64, Vec<Value>> =
-                std::collections::HashMap::new();
-            let mut brows = builds_stmt.query([])?;
-            while let Some(r) = brows.next()? {
-                let hero_id: i64 = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-                let build = json!({
-                    "id": r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                    "hero_id": hero_id,
-                    "build_id": r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-                    "build_name": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                    "author_name": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    "is_active": r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
-                    "sort_order": r.get::<_, Option<i64>>(6)?.unwrap_or(100),
-                    "sync_status": sql_to_json(r.get(7)?),
-                    "sync_message": sql_to_json(r.get(8)?),
-                    "last_checked_at": sql_to_json(r.get(9)?),
-                    "last_synced_at": sql_to_json(r.get(10)?),
-                    "last_alerted_at": sql_to_json(r.get(11)?),
-                    "source_version": sql_to_json(r.get(12)?),
-                    "source_last_updated_ts": sql_to_json(r.get(13)?),
-                    "clone_build_id": sql_to_json(r.get(14)?),
-                    "clone_version": sql_to_json(r.get(15)?),
-                    "created_at": sql_to_json(r.get(16)?),
-                    "updated_at": sql_to_json(r.get(17)?),
-                });
-                builds_by_hero.entry(hero_id).or_default().push(build);
-            }
+    let result: DashboardDbResult<Vec<Value>> = async {
+        let build_rows = sqlx::query!(
+            r#"
+            SELECT id, hero_id, build_id, build_name, author_name,
+                   is_active AS "is_active!", sort_order,
+                   sync_status, sync_message, last_checked_at, last_synced_at,
+                   last_alerted_at, source_version, source_last_updated_at,
+                   clone_build_id, clone_version, created_at, updated_at
+              FROM tierlist.deadlock_hero_builds
+             ORDER BY hero_id ASC, sort_order ASC, build_id ASC
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let mut builds_by_hero: std::collections::HashMap<i64, Vec<Value>> =
+            std::collections::HashMap::new();
+        for row in build_rows {
+            let hero_id = row.hero_id;
+            builds_by_hero
+                .entry(hero_id)
+                .or_default()
+                .push(build_json(HeroBuildDbRow {
+                    id: row.id,
+                    hero_id,
+                    build_id: row.build_id,
+                    build_name: row.build_name,
+                    author_name: row.author_name,
+                    is_active: row.is_active,
+                    sort_order: row.sort_order,
+                    sync_status: row.sync_status,
+                    sync_message: row.sync_message,
+                    last_checked_at: row.last_checked_at,
+                    last_synced_at: row.last_synced_at,
+                    last_alerted_at: row.last_alerted_at,
+                    source_version: row.source_version,
+                    source_last_updated_at: row.source_last_updated_at,
+                    clone_build_id: row.clone_build_id,
+                    clone_version: row.clone_version,
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                }));
+        }
 
-            let mut heroes_stmt = conn.prepare(
-                "SELECT id, hero_id, name, origin_build_id, target_build_name_override,
-                        is_active, created_at, updated_at
-                 FROM deadlock_heroes
-                 ORDER BY hero_id",
-            )?;
-            let mut heroes = Vec::new();
-            let mut hrows = heroes_stmt.query([])?;
-            while let Some(r) = hrows.next()? {
-                let hero_id: i64 = r.get::<_, Option<i64>>(1)?.unwrap_or(0);
-                let origin_build_id = coerce_opt_i64(r.get(3)?);
-                let is_active = r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0;
-                let mut hero = json!({
-                    "id": r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                    "hero_id": hero_id,
-                    "name": r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    "origin_build_id": origin_build_id,
-                    "target_build_name_override": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    "is_active": is_active,
-                    "created_at": sql_to_json(r.get(6)?),
-                    "updated_at": sql_to_json(r.get(7)?),
-                });
-                let hero_builds = builds_by_hero.remove(&hero_id).unwrap_or_default();
-                let has_builds = !hero_builds.is_empty();
-                hero["builds"] = json!(hero_builds);
-                // Ohne Builds: Legacy-Vorschlag aus origin_build_id.
-                if !has_builds {
-                    if let Some(legacy_id) = origin_build_id {
-                        hero["legacy_build_suggestion"] = json!({
-                            "build_id": legacy_id,
-                            "build_name": "",
-                            "author_name": "Legacy",
-                            "is_active": is_active,
-                            "sort_order": 100,
-                            "suggested": true,
-                        });
-                    }
+        let hero_rows = sqlx::query!(
+            r#"
+            SELECT id, hero_id, name, origin_build_id, target_build_name_override,
+                   is_active AS "is_active!", created_at, updated_at
+              FROM tierlist.deadlock_heroes
+             ORDER BY hero_id
+            "#
+        )
+        .fetch_all(app.pool())
+        .await?;
+        let mut heroes = Vec::new();
+        for row in hero_rows {
+            let hero_id = row.hero_id;
+            let origin_build_id = row.origin_build_id;
+            let is_active = row.is_active;
+            let mut hero = hero_json_base(HeroDbRow {
+                id: row.id,
+                hero_id,
+                name: row.name,
+                origin_build_id,
+                target_build_name_override: row.target_build_name_override,
+                is_active,
+                created_at: row.created_at,
+                updated_at: row.updated_at,
+            });
+            let hero_builds = builds_by_hero.remove(&hero_id).unwrap_or_default();
+            let has_builds = !hero_builds.is_empty();
+            hero["builds"] = json!(hero_builds);
+            if !has_builds {
+                if let Some(legacy_id) = origin_build_id {
+                    hero["legacy_build_suggestion"] = json!({
+                        "build_id": legacy_id,
+                        "build_name": "",
+                        "author_name": "Legacy",
+                        "is_active": is_active,
+                        "sort_order": 100,
+                        "suggested": true,
+                    });
                 }
-                heroes.push(hero);
             }
-            Ok(heroes)
-        })
-        .await;
+            heroes.push(hero);
+        }
+        Ok(heroes)
+    }
+    .await;
 
     match result {
         Ok(heroes) => ok_json(json!({
@@ -365,122 +345,205 @@ fn extract_builds(payload: &Value) -> Result<Option<Vec<BuildRow>>, Response> {
     }
 }
 
+struct HeroBuildDbRow {
+    id: i64,
+    hero_id: i64,
+    build_id: i64,
+    build_name: String,
+    author_name: String,
+    is_active: bool,
+    sort_order: i32,
+    sync_status: Option<String>,
+    sync_message: Option<String>,
+    last_checked_at: Option<DateTime<Utc>>,
+    last_synced_at: Option<DateTime<Utc>>,
+    last_alerted_at: Option<DateTime<Utc>>,
+    source_version: Option<i64>,
+    source_last_updated_at: Option<DateTime<Utc>>,
+    clone_build_id: Option<i64>,
+    clone_version: Option<i64>,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+fn build_json(row: HeroBuildDbRow) -> Value {
+    json!({
+        "id": row.id,
+        "hero_id": row.hero_id,
+        "build_id": row.build_id,
+        "build_name": row.build_name,
+        "author_name": row.author_name,
+        "is_active": row.is_active,
+        "sort_order": row.sort_order,
+        "sync_status": row.sync_status,
+        "sync_message": row.sync_message,
+        "last_checked_at": utc_to_json_unix(row.last_checked_at),
+        "last_synced_at": utc_to_json_unix(row.last_synced_at),
+        "last_alerted_at": utc_to_json_unix(row.last_alerted_at),
+        "source_version": row.source_version,
+        "source_last_updated_ts": utc_to_json_unix(row.source_last_updated_at),
+        "clone_build_id": row.clone_build_id,
+        "clone_version": row.clone_version,
+        "created_at": row.created_at.timestamp(),
+        "updated_at": row.updated_at.timestamp(),
+    })
+}
+
+struct HeroDbRow {
+    id: i64,
+    hero_id: i64,
+    name: String,
+    origin_build_id: Option<i64>,
+    target_build_name_override: Option<String>,
+    is_active: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+}
+
+fn hero_json_base(row: HeroDbRow) -> Value {
+    json!({
+        "id": row.id,
+        "hero_id": row.hero_id,
+        "name": row.name,
+        "origin_build_id": row.origin_build_id,
+        "target_build_name_override": row.target_build_name_override.unwrap_or_default(),
+        "is_active": row.is_active,
+        "created_at": row.created_at.timestamp(),
+        "updated_at": row.updated_at.timestamp(),
+    })
+}
+
 /// `_apply_deadlock_build_snapshot`: Builds upserten, dann nicht übermittelte
 /// build_ids des Helden löschen (Replace-Semantik; leere Liste → alle löschen).
-fn apply_snapshot(
-    conn: &Connection,
+async fn apply_snapshot(
+    tx: &mut Transaction<'_, Postgres>,
     hero_id: i64,
     builds: &[BuildRow],
-    ts: i64,
-) -> rusqlite::Result<()> {
+    ts: DateTime<Utc>,
+) -> DashboardDbResult<()> {
     for b in builds {
-        conn.execute(
-            "INSERT INTO deadlock_hero_builds (
+        let sort_order = i64_to_i32(b.sort_order, "sort_order")?;
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.deadlock_hero_builds (
                 hero_id, build_id, build_name, author_name, is_active, sort_order, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $7)
              ON CONFLICT(hero_id, build_id) DO UPDATE SET
-                build_name = excluded.build_name,
-                author_name = excluded.author_name,
-                is_active = excluded.is_active,
-                sort_order = excluded.sort_order,
-                updated_at = excluded.updated_at",
-            params![
-                hero_id,
-                b.build_id,
-                b.build_name,
-                b.author_name,
-                b.is_active as i64,
-                b.sort_order,
-                ts,
-                ts
-            ],
-        )?;
+                build_name = EXCLUDED.build_name,
+                author_name = EXCLUDED.author_name,
+                is_active = EXCLUDED.is_active,
+                sort_order = EXCLUDED.sort_order,
+                updated_at = EXCLUDED.updated_at
+            "#,
+            hero_id,
+            b.build_id,
+            b.build_name,
+            b.author_name,
+            b.is_active,
+            sort_order,
+            ts,
+        )
+        .execute(&mut **tx)
+        .await?;
     }
     if builds.is_empty() {
-        conn.execute(
-            "DELETE FROM deadlock_hero_builds WHERE hero_id = ?",
-            params![hero_id],
-        )?;
+        sqlx::query!(
+            r#"
+            DELETE FROM tierlist.deadlock_hero_builds WHERE hero_id = $1
+            "#,
+            hero_id,
+        )
+        .execute(&mut **tx)
+        .await?;
     } else {
-        let placeholders = builds.iter().map(|_| "?").collect::<Vec<_>>().join(", ");
-        let sql = format!(
-            "DELETE FROM deadlock_hero_builds WHERE hero_id = ? AND build_id NOT IN ({placeholders})"
-        );
-        let mut all = vec![hero_id];
-        all.extend(builds.iter().map(|b| b.build_id));
-        conn.execute(&sql, rusqlite::params_from_iter(all.iter()))?;
+        let build_ids: Vec<i64> = builds.iter().map(|b| b.build_id).collect();
+        sqlx::query!(
+            r#"
+            DELETE FROM tierlist.deadlock_hero_builds
+             WHERE hero_id = $1
+               AND NOT (build_id = ANY($2))
+            "#,
+            hero_id,
+            &build_ids,
+        )
+        .execute(&mut **tx)
+        .await?;
     }
     Ok(())
 }
 
 /// `_load_deadlock_hero_payload`: ein Held samt Builds (+ Legacy-Vorschlag),
 /// JSON-Form 1:1 wie der GET-Handler.
-fn load_hero_json(conn: &Connection, hero_id: i64) -> rusqlite::Result<Option<Value>> {
-    let mut bstmt = conn.prepare(
-        "SELECT id, hero_id, build_id, build_name, author_name, is_active, sort_order,
-                sync_status, sync_message, last_checked_at, last_synced_at, last_alerted_at,
-                source_version, source_last_updated_ts, clone_build_id, clone_version,
-                created_at, updated_at
-         FROM deadlock_hero_builds WHERE hero_id = ? ORDER BY sort_order ASC, build_id ASC",
-    )?;
-    let mut builds = Vec::new();
-    let mut br = bstmt.query(params![hero_id])?;
-    while let Some(r) = br.next()? {
-        builds.push(json!({
-            "id": r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-            "hero_id": r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-            "build_id": r.get::<_, Option<i64>>(2)?.unwrap_or(0),
-            "build_name": r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-            "author_name": r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-            "is_active": r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
-            "sort_order": r.get::<_, Option<i64>>(6)?.unwrap_or(100),
-            "sync_status": sql_to_json(r.get(7)?),
-            "sync_message": sql_to_json(r.get(8)?),
-            "last_checked_at": sql_to_json(r.get(9)?),
-            "last_synced_at": sql_to_json(r.get(10)?),
-            "last_alerted_at": sql_to_json(r.get(11)?),
-            "source_version": sql_to_json(r.get(12)?),
-            "source_last_updated_ts": sql_to_json(r.get(13)?),
-            "clone_build_id": sql_to_json(r.get(14)?),
-            "clone_version": sql_to_json(r.get(15)?),
-            "created_at": sql_to_json(r.get(16)?),
-            "updated_at": sql_to_json(r.get(17)?),
-        }));
-    }
+async fn load_hero_json(
+    tx: &mut Transaction<'_, Postgres>,
+    hero_id: i64,
+) -> DashboardDbResult<Option<Value>> {
+    let builds = sqlx::query!(
+        r#"
+        SELECT id, hero_id, build_id, build_name, author_name,
+               is_active AS "is_active!", sort_order,
+               sync_status, sync_message, last_checked_at, last_synced_at,
+               last_alerted_at, source_version, source_last_updated_at,
+               clone_build_id, clone_version, created_at, updated_at
+          FROM tierlist.deadlock_hero_builds
+         WHERE hero_id = $1
+         ORDER BY sort_order ASC, build_id ASC
+        "#,
+        hero_id,
+    )
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .map(|row| {
+        build_json(HeroBuildDbRow {
+            id: row.id,
+            hero_id: row.hero_id,
+            build_id: row.build_id,
+            build_name: row.build_name,
+            author_name: row.author_name,
+            is_active: row.is_active,
+            sort_order: row.sort_order,
+            sync_status: row.sync_status,
+            sync_message: row.sync_message,
+            last_checked_at: row.last_checked_at,
+            last_synced_at: row.last_synced_at,
+            last_alerted_at: row.last_alerted_at,
+            source_version: row.source_version,
+            source_last_updated_at: row.source_last_updated_at,
+            clone_build_id: row.clone_build_id,
+            clone_version: row.clone_version,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        })
+    })
+    .collect::<Vec<_>>();
 
-    let hero_row = conn
-        .query_row(
-            "SELECT id, hero_id, name, origin_build_id, target_build_name_override,
-                    is_active, created_at, updated_at
-             FROM deadlock_heroes WHERE hero_id = ?",
-            params![hero_id],
-            |r| {
-                Ok((
-                    r.get::<_, Option<i64>>(0)?.unwrap_or(0),
-                    r.get::<_, Option<i64>>(1)?.unwrap_or(0),
-                    r.get::<_, Option<String>>(2)?.unwrap_or_default(),
-                    coerce_opt_i64(r.get(3)?),
-                    r.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    r.get::<_, Option<i64>>(5)?.unwrap_or(0) != 0,
-                    sql_to_json(r.get(6)?),
-                    sql_to_json(r.get(7)?),
-                ))
-            },
-        )
-        .optional()?;
-    let Some((id, hid, name, origin, target_override, is_active, created, updated)) = hero_row
+    let Some(row) = sqlx::query!(
+        r#"
+        SELECT id, hero_id, name, origin_build_id, target_build_name_override,
+               is_active AS "is_active!", created_at, updated_at
+          FROM tierlist.deadlock_heroes
+         WHERE hero_id = $1
+        "#,
+        hero_id,
+    )
+    .fetch_optional(&mut **tx)
+    .await?
     else {
         return Ok(None);
     };
-    let mut hero = json!({
-        "id": id,
-        "hero_id": hid,
-        "name": name,
-        "origin_build_id": origin,
-        "target_build_name_override": target_override,
-        "is_active": is_active,
-        "created_at": created,
-        "updated_at": updated,
+    let origin = row.origin_build_id;
+    let is_active = row.is_active;
+    let mut hero = hero_json_base(HeroDbRow {
+        id: row.id,
+        hero_id: row.hero_id,
+        name: row.name,
+        origin_build_id: origin,
+        target_build_name_override: row.target_build_name_override,
+        is_active,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
     });
     let has_builds = !builds.is_empty();
     hero["builds"] = json!(builds);
@@ -499,6 +562,13 @@ fn load_hero_json(conn: &Connection, hero_id: i64) -> rusqlite::Result<Option<Va
     Ok(Some(hero))
 }
 
+fn is_unique_violation(err: &DashboardDbError) -> bool {
+    match err {
+        DashboardDbError::Sqlx(sqlx::Error::Database(db)) => db.code().as_deref() == Some("23505"),
+        _ => false,
+    }
+}
+
 /// POST `/api/deadlock/heroes` — Held anlegen/aktualisieren (+ Build-Snapshot).
 /// Port von `_handle_deadlock_upsert_hero`; Steam-Sync deferred (`sync_summary: null`).
 pub async fn deadlock_upsert_hero(
@@ -506,7 +576,7 @@ pub async fn deadlock_upsert_hero(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    let session = match app.guard_mutate(&headers, true) {
+    let session = match app.guard_mutate(&headers, true).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -575,77 +645,81 @@ pub async fn deadlock_upsert_hero(
         Err(resp) => return resp,
     };
 
-    let ts = chrono::Utc::now().timestamp();
+    let ts = chrono::Utc::now();
     let name_c = name.clone();
     let target_c = target_override.clone();
-    let result = app
-        .db()
-        .write(move |conn| {
-            let tx = conn.transaction()?;
-            let existing: Option<(String, Option<i64>, bool, String)> = tx
-                .query_row(
-                    "SELECT name, origin_build_id, is_active, target_build_name_override
-                     FROM deadlock_heroes WHERE hero_id = ?",
-                    params![hero_id],
-                    |r| {
-                        Ok((
-                            r.get::<_, Option<String>>(0)?.unwrap_or_default(),
-                            coerce_opt_i64(r.get(1)?),
-                            r.get::<_, Option<i64>>(2)?.unwrap_or(0) != 0,
-                            r.get::<_, Option<String>>(3)?.unwrap_or_default(),
-                        ))
-                    },
-                )
-                .optional()?;
+    let result: DashboardDbResult<(Option<Value>, String, String)> = async {
+        let mut tx = app.pool().begin().await?;
+        let existing_row = sqlx::query!(
+            r#"
+            SELECT name, origin_build_id, is_active AS "is_active!",
+                   target_build_name_override
+              FROM tierlist.deadlock_heroes
+             WHERE hero_id = $1
+            "#,
+            hero_id,
+        )
+        .fetch_optional(&mut *tx)
+        .await?;
+        let existing = existing_row.map(|r| {
+            (
+                r.name,
+                r.origin_build_id,
+                r.is_active,
+                r.target_build_name_override.unwrap_or_default(),
+            )
+        });
 
-            let origin_build_id = if has_origin {
-                parsed_origin
-            } else {
-                existing.as_ref().and_then(|e| e.1)
-            };
-            let target = if has_target {
-                target_c.clone()
-            } else {
-                existing.as_ref().map(|e| e.3.clone()).unwrap_or_default()
-            };
-            let is_active = if has_is_active {
-                parsed_is_active.unwrap_or(true)
-            } else {
-                existing.as_ref().map(|e| e.2).unwrap_or(true)
-            };
+        let origin_build_id = if has_origin {
+            parsed_origin
+        } else {
+            existing.as_ref().and_then(|e| e.1)
+        };
+        let target = if has_target {
+            target_c.clone()
+        } else {
+            existing.as_ref().map(|e| e.3.clone()).unwrap_or_default()
+        };
+        let is_active = if has_is_active {
+            parsed_is_active.unwrap_or(true)
+        } else {
+            existing.as_ref().map(|e| e.2).unwrap_or(true)
+        };
 
-            tx.execute(
-                "INSERT INTO deadlock_heroes (
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.deadlock_heroes (
                     hero_id, name, origin_build_id, target_build_name_override,
                     is_active, created_at, updated_at
-                 ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $6)
                  ON CONFLICT(hero_id) DO UPDATE SET
-                    name = excluded.name,
-                    origin_build_id = excluded.origin_build_id,
-                    target_build_name_override = excluded.target_build_name_override,
-                    is_active = excluded.is_active,
-                    updated_at = excluded.updated_at",
-                params![
-                    hero_id,
-                    name_c,
-                    origin_build_id,
-                    target,
-                    is_active as i64,
-                    ts,
-                    ts
-                ],
-            )?;
+                    name = EXCLUDED.name,
+                    origin_build_id = EXCLUDED.origin_build_id,
+                    target_build_name_override = EXCLUDED.target_build_name_override,
+                    is_active = EXCLUDED.is_active,
+                    updated_at = EXCLUDED.updated_at
+            "#,
+            hero_id,
+            name_c,
+            origin_build_id,
+            target,
+            is_active,
+            ts,
+        )
+        .execute(&mut *tx)
+        .await?;
 
-            if let Some(b) = &builds {
-                apply_snapshot(&tx, hero_id, b, ts)?;
-            }
-            let saved = load_hero_json(&tx, hero_id)?;
-            let prev_name = existing.as_ref().map(|e| e.0.clone()).unwrap_or_default();
-            let prev_override = existing.map(|e| e.3).unwrap_or_default();
-            tx.commit()?;
-            Ok((saved, prev_name, prev_override))
-        })
-        .await;
+        if let Some(b) = &builds {
+            apply_snapshot(&mut tx, hero_id, b, ts).await?;
+        }
+        let saved = load_hero_json(&mut tx, hero_id).await?;
+        let prev_name = existing.as_ref().map(|e| e.0.clone()).unwrap_or_default();
+        let prev_override = existing.map(|e| e.3).unwrap_or_default();
+        tx.commit().await?;
+        Ok((saved, prev_name, prev_override))
+    }
+    .await;
 
     match result {
         Ok((Some(hero), prev_name, prev_override)) => {
@@ -665,9 +739,7 @@ pub async fn deadlock_upsert_hero(
             ok_json(json!({ "hero": hero, "sync_summary": Value::Null }))
         }
         Ok((None, _, _)) => err_text(500, "Saving hero failed"),
-        Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
-            if e.code == rusqlite::ErrorCode::ConstraintViolation =>
-        {
+        Err(err) if is_unique_violation(&err) => {
             err_text(409, "Hero with same ID or name already exists")
         }
         Err(err) => {
@@ -684,7 +756,7 @@ pub async fn deadlock_delete_hero(
     headers: HeaderMap,
     Path(hero_id_raw): Path<String>,
 ) -> Response {
-    let session = match app.guard_mutate(&headers, true) {
+    let session = match app.guard_mutate(&headers, true).await {
         Ok(s) => s,
         Err(resp) => return resp,
     };
@@ -692,22 +764,29 @@ pub async fn deadlock_delete_hero(
         Ok(i) => i,
         Err(_) => return err_text(400, "hero_id must be integer"),
     };
-    let result = app
-        .db()
-        .write(move |conn| {
-            let tx = conn.transaction()?;
-            tx.execute(
-                "DELETE FROM deadlock_hero_builds WHERE hero_id = ?",
-                params![hero_id],
-            )?;
-            let deleted = tx.execute(
-                "DELETE FROM deadlock_heroes WHERE hero_id = ?",
-                params![hero_id],
-            )?;
-            tx.commit()?;
-            Ok(deleted)
-        })
-        .await;
+    let result: DashboardDbResult<u64> = async {
+        let mut tx = app.pool().begin().await?;
+        sqlx::query!(
+            r#"
+            DELETE FROM tierlist.deadlock_hero_builds WHERE hero_id = $1
+            "#,
+            hero_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        let deleted = sqlx::query!(
+            r#"
+            DELETE FROM tierlist.deadlock_heroes WHERE hero_id = $1
+            "#,
+            hero_id,
+        )
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        tx.commit().await?;
+        Ok(deleted)
+    }
+    .await;
     match result {
         Ok(deleted) => {
             tracing::info!(
@@ -730,6 +809,8 @@ pub async fn deadlock_delete_hero(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
 
     #[test]
@@ -829,5 +910,94 @@ mod tests {
         assert_eq!(camel.len(), 1);
         assert_eq!(camel[0].build_id, 3);
         assert_eq!(camel[0].sort_order, 5);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn apply_snapshot_ersetzt_builds_pro_held() -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let mut tx = db.pool().begin().await?;
+        let now = Utc::now();
+        sqlx::query!(
+            r#"
+            INSERT INTO tierlist.deadlock_heroes(
+                hero_id, name, is_active, created_at, updated_at
+            )
+            VALUES (10, 'Hero A', TRUE, $1, $1)
+            "#,
+            now,
+        )
+        .execute(&mut *tx)
+        .await?;
+        apply_snapshot(
+            &mut tx,
+            10,
+            &[
+                BuildRow {
+                    build_id: 100,
+                    build_name: "Build 100".to_string(),
+                    author_name: "Nani".to_string(),
+                    is_active: true,
+                    sort_order: 1,
+                },
+                BuildRow {
+                    build_id: 200,
+                    build_name: "Build 200".to_string(),
+                    author_name: "Nani".to_string(),
+                    is_active: true,
+                    sort_order: 2,
+                },
+            ],
+            now,
+        )
+        .await?;
+        tx.commit().await?;
+
+        let mut tx = db.pool().begin().await?;
+        apply_snapshot(
+            &mut tx,
+            10,
+            &[BuildRow {
+                build_id: 100,
+                build_name: "Build 100b".to_string(),
+                author_name: "Nani".to_string(),
+                is_active: false,
+                sort_order: 5,
+            }],
+            Utc::now(),
+        )
+        .await?;
+        tx.commit().await?;
+
+        let rows = sqlx::query!(
+            r#"
+            SELECT build_id, build_name, is_active AS "is_active!", sort_order
+              FROM tierlist.deadlock_hero_builds
+             WHERE hero_id = 10
+             ORDER BY build_id
+            "#
+        )
+        .fetch_all(db.pool())
+        .await?;
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].build_id, 100);
+        assert_eq!(rows[0].build_name, "Build 100b");
+        assert!(!rows[0].is_active);
+        assert_eq!(rows[0].sort_order, 5);
+
+        let mut tx = db.pool().begin().await?;
+        apply_snapshot(&mut tx, 10, &[], Utc::now()).await?;
+        tx.commit().await?;
+        let remaining = sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) AS "count!"
+              FROM tierlist.deadlock_hero_builds
+             WHERE hero_id = 10
+            "#
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(remaining, 0);
+        Ok(())
     }
 }

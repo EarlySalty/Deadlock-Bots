@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE coaching.sessions\n                   SET voice_channel_id = $1,\n                       voice_started_at = COALESCE(voice_started_at, $2),\n                       voice_last_seen_at = $2\n                 WHERE id = $3\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "a59a689cd605aa7cf70247560641a5336399beb0ae74698827ed9098b6814b41"
+}

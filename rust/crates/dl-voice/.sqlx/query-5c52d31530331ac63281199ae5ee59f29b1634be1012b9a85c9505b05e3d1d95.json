@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_feedback_requests (\n                id, user_id, guild_id, channel_id, channel_name, co_player_names,\n                duration_seconds, request_type, status, sent_at\n            )\n            VALUES (2001, 100, 1, 10, 'Lane 1', 'Alice, Bob', 601, 'first', 'sent', $1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5c52d31530331ac63281199ae5ee59f29b1634be1012b9a85c9505b05e3d1d95"
+}

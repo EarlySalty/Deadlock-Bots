@@ -1,0 +1,28 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                UPDATE coaching.requests\n                   SET bot_request_id = $1,\n                       coachee_id = $2,\n                       discord_user_id = $3,\n                       discord_username = $4,\n                       rank = $5,\n                       subrank = $6,\n                       hero = $7,\n                       games_played = $8,\n                       hours_played = $9,\n                       availability = $10,\n                       scheduled_slot = $11,\n                       current_problems = $12,\n                       preferred_coach_id = $13,\n                       updated_at = $14\n                 WHERE website_request_id = $15\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Text",
+        "Int8",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "1ec0e3c8318f2f0ede2c1818625a11f184e35a6b9f1081d1676109b1e4f39b3d"
+}

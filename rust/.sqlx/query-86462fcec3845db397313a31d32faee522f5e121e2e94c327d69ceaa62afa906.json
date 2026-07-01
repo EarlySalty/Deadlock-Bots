@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO activity.user_retention_tracking(\n                    user_id, guild_id, first_seen_at, last_active_at,\n                    total_active_days, avg_weekly_sessions, updated_at\n                )\n                VALUES ($1, $2, $3, $4, $5, $6, $7)\n                ON CONFLICT(user_id) DO UPDATE SET\n                  last_active_at = GREATEST(activity.user_retention_tracking.last_active_at, excluded.last_active_at),\n                  total_active_days = GREATEST(activity.user_retention_tracking.total_active_days, excluded.total_active_days),\n                  avg_weekly_sessions = excluded.avg_weekly_sessions,\n                  updated_at = excluded.updated_at\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Timestamptz",
+        "Int4",
+        "Float8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "86462fcec3845db397313a31d32faee522f5e121e2e94c327d69ceaa62afa906"
+}

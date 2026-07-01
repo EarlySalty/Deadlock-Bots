@@ -1,0 +1,47 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT id, coach_id, discord_user_id, voice_started_at, bot_request_id\n              FROM coaching.sessions\n             WHERE status = 'active'\n               AND survey_sent_at IS NULL\n               AND (\n                    $1::bigint IS NULL\n                    OR discord_user_id = $1\n                    OR coach_id = $2\n               )\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "coach_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "discord_user_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "voice_started_at",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "bot_request_id",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "6e85c3eb96502c04307fb0047d2dd8814b8835d40039a41968d4a2e2ed2b0e38"
+}
