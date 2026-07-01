@@ -212,7 +212,7 @@ fn transform_table_rows(
     let source_rows = source.read_rows(table)?;
     let target_rows = source_rows
         .iter()
-        .map(|row| transform_row(source_db, table, plan, row))
+        .map(|row| transform_source_row(source_db, table, plan, row))
         .collect::<Result<Vec<_>, _>>()?;
 
     Ok((source_rows.len() as u64, target_rows))
@@ -843,7 +843,7 @@ fn quote_pg_ident(identifier: &str) -> String {
     format!("\"{}\"", identifier.replace('"', "\"\""))
 }
 
-fn transform_row(
+pub fn transform_source_row(
     source_db: &str,
     table: &str,
     plan: &TablePlan,

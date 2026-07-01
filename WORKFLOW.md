@@ -15,6 +15,33 @@ Nur Ticket T0 aus `rust/docs/plans/2026-07-01-central-db-final-reconciliation.md
 ## Offen
 - T1-Empfehlung: Zeitfilter nur als Vorfilter verwenden; `no_clock` und `queue_state` vor Apply mit expliziten Tabellenpolicies behandeln. Kein T1-Code in diesem Schritt implementiert.
 
+# T1 Reconciliation Kandidaten-Erkennung (2026-07-01)
+
+## Ziel
+Ticket T1 aus `rust/docs/plans/2026-07-01-central-db-final-reconciliation.md`: read-only Kandidaten-Report in `dl-central-etl` fuer die aktiven SQLite-Quellen gegen den T0-Original-Snapshot und aktuelle PG-Targets. Kein Apply, kein Commit/Push, keine DSN-/Secret-Ausgabe.
+
+## Kritiker-Review
+- Unabhaengiger Review gestartet: uncommitted Diff, Plan T1/T2-Regeln und Kandidatenmodul werden geprueft. Keine Live-Daten/Postgres-Zugriffe, kein Commit.
+- Review abgeschlossen: Blocker gefunden. Report gibt nur aggregierte Tabellenzaehler aus, keine zeilenweisen Kandidaten/Hashes/Entscheidungen; Queue-/State-Klassifikation wird nicht konservativ gegatet; Patchnotes-URL-Konfliktregel fehlt.
+- Verifikation im Review: `cargo test -p dl-central-etl`; `cargo fmt --check -p dl-central-etl`; `cargo clippy -p dl-central-etl --all-targets -- -D warnings`; `git diff --check`.
+
+## Fortschritt
+- Branch/Arbeitsbaum geprueft; T0-Manifest und Plan gelesen.
+- Bestehende ETL-Konvertierung, Ledger-Mapping, Manifest-Struktur und Source-/Target-Reader gesichtet.
+- Umsetzungsentscheidung: Kandidaten werden per Vollvergleich aktueller SQLite-Quelle gegen Original-Snapshot erkannt; Zeitfilter bleibt nicht noetig fuer Korrektheit. Hashes entstehen nach bestehender ETL-Normalisierung in Zieltypen.
+- Implementiert: neues Modul `reconciliation_candidates` und Binary `dl-reconciliation-candidates`. Das Binary liest T0-Manifest, Ledger, Original-Snapshot, aktuelle SQLite-Quellen und PG-Targets read-only; Report enthaelt nur aggregierte Tabellenzaehler, keine Row-Nutzdaten und keine DSN.
+- Safe-Merge-Klassifikation umgesetzt: source_new/source_changed plus `insert_allowed`, `update_allowed`, `noop`, `conflict`; Tabellen ohne Target-PK werden als manual/skipped markiert.
+- Tests ergaenzt fuer Insert/Update/Noop/Conflict/Unchanged sowie kanonische JSON-Hash-Normalisierung.
+- Verifikation gruen: `cargo test -p dl-central-etl`; `cargo clippy -p dl-central-etl --all-targets -- -D warnings`; `cargo fmt --check -p dl-central-etl`; `git diff --check`.
+- Rework nach Kritiker-Befunden umgesetzt: Report enthaelt jetzt pro Kandidat Quelle, Ziel-PK, Source-Hash, optionalen Original-/Target-vorher-Hash, Aktion, Entscheidung und optionalen URL-Konflikt-PK/-Hash.
+- `classification=no_clock` und `classification=queue_state` werden fuer Kandidaten immer auf `manual` gesetzt; `bot.kv_store` ist im T1-Scope auf `ns='patchnotes_bot'` begrenzt.
+- Patchnotes-Tabellen erzwingen Konflikt bei gleicher `url` mit abweichender `id`, auch wenn die PK-basierte Entscheidung sonst Insert/Update/Noop waere.
+- Regressionstests ergaenzt fuer zeilenweisen Source/Original/Target-Fall, Queue-/NoClock-Manual-Policy, Patchnotes-URL-Konflikt und KV-Namespace-Trennung.
+- Rework-Verifikation gruen: `cargo test -p dl-central-etl`; `cargo clippy -p dl-central-etl --all-targets -- -D warnings`; `cargo fmt --check -p dl-central-etl`.
+
+## Offen
+- Kein Dry-Run gegen Live-PG ausgefuehrt, weil die geforderte Verifikation nur Build/Test/Lint/Format umfasst und keine Secret-/Infisical-Nutzung verlangt.
+
 # Central DB Final Reconciliation Plan (2026-07-01)
 
 ## Ziel

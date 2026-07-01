@@ -2,6 +2,7 @@ pub mod convert;
 pub mod engine;
 pub mod ledger;
 pub mod plan;
+pub mod reconciliation_candidates;
 pub mod reconciliation_manifest;
 pub mod snapshot;
 pub mod source;
@@ -19,6 +20,10 @@ pub use convert::{
 pub use engine::{migrate_table, run, EngineError, EtlReport, OrphanReport, TableResult};
 pub use ledger::{ColumnStatus, Ledger, LedgerError, LedgerSet, TableLedger};
 pub use plan::{build_table_plan, conversion_for, ColumnPlan, Converter, TablePlan};
+pub use reconciliation_candidates::{
+    build_candidate_report, canonical_target_row_hash, classify_candidate, CandidateOptions,
+    CandidateReport, MergeDecision, RowCandidateReport, SourceDelta,
+};
 pub use snapshot::{
     snapshot_db, snapshot_known_sources, source_snapshot_path, SnapshotError,
     DEADLOCK_SQLITE3_SOURCE, TOURNAMENT_SOURCE, WEBSITE_SOURCE,

@@ -7,7 +7,7 @@ use std::{
 };
 
 use chrono::{DateTime, FixedOffset, NaiveDateTime, SecondsFormat, TimeZone, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{ColumnStatus, Ledger, LedgerError, TableLedger};
@@ -38,7 +38,7 @@ pub struct ManifestOptions {
     pub generated_at: SystemTime,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciliationManifest {
     pub generated_at: String,
     pub mode: String,
@@ -49,7 +49,7 @@ pub struct ReconciliationManifest {
     pub next_ticket_recommendations: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CutoffManifest {
     pub selected_cutoff: String,
     pub selected_cutoff_unix_nanos: Option<u128>,
@@ -64,7 +64,7 @@ pub struct CutoffManifest {
     pub evidence: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotDirectoryManifest {
     pub path: String,
     pub selected: bool,
@@ -76,7 +76,7 @@ pub struct SnapshotDirectoryManifest {
     pub files: Vec<SnapshotFileManifest>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotFileManifest {
     pub source_db: String,
     pub path: String,
@@ -86,7 +86,7 @@ pub struct SnapshotFileManifest {
     pub sha256: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerFileManifest {
     pub source_db: String,
     pub ledger_file: String,
@@ -94,7 +94,7 @@ pub struct LedgerFileManifest {
     pub table_count: usize,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableManifest {
     pub source_db: String,
     pub ledger_file: String,
@@ -109,7 +109,7 @@ pub struct TableManifest {
     pub queue_state_indicators: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TableClassification {
     ClockPresent,
