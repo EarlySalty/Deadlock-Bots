@@ -339,11 +339,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 12
+          WHERE version BETWEEN 1 AND 13
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 12);
+    assert_eq!(migration_count_after_first, 13);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
@@ -352,6 +352,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 11, "barrier orphans and cross fks").await;
     let migration_12_signature_after_first =
         migration_row_signature(&pool, 12, "brain knowledge timeline").await;
+    let migration_13_signature_after_first =
+        migration_row_signature(&pool, 13, "brain insight records").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -359,11 +361,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 12
+          WHERE version BETWEEN 1 AND 13
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 12);
+    assert_eq!(migration_count_after_second, 13);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -383,6 +385,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 12, "brain knowledge timeline").await,
         migration_12_signature_after_first,
         "second migrator run must be a no-op for migration version 12"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 13, "brain insight records").await,
+        migration_13_signature_after_first,
+        "second migrator run must be a no-op for migration version 13"
     );
 
     let schema_count = scalar_i64(
@@ -499,6 +506,58 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "updated_at",
         ]
     );
+    assert_eq!(
+        table_columns_in_schema(&pool, "brain", "insight_records").await,
+        vec![
+            "id",
+            "insight_hash",
+            "insight_type",
+            "entity_type",
+            "entity_name",
+            "subject",
+            "summary",
+            "reason",
+            "validity_status",
+            "currentness",
+            "trust_tier",
+            "confidence",
+            "occurred_at",
+            "observed_at",
+            "source_patch_event_ids",
+            "source_urls",
+            "source_references",
+            "payload",
+            "metadata",
+            "created_at",
+            "updated_at",
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "brain", "insight_records").await,
+        vec!["id"]
+    );
+    assert_column_in_schema(
+        &pool,
+        "brain",
+        "insight_records",
+        "source_patch_event_ids",
+        "ARRAY",
+        "_int8",
+        "NO",
+        Some("'{}'::bigint[]"),
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "brain",
+        "insight_records",
+        "source_references",
+        "jsonb",
+        "jsonb",
+        "NO",
+        Some("'[]'::jsonb"),
+    )
+    .await;
 
     assert_eq!(
         table_columns(&pool, "users").await,

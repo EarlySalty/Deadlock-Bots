@@ -1,3 +1,11 @@
+## #182 — Patch-Erkenntnisse bekommen eine eigene Brain-Schicht
+
+**Ausgangslage:** Die zentrale Brain-Timeline kann Patch-Events, Forum-Claims und Current-State speichern, aber kuratierte Auswertungen aus der Patch-Historie hatten noch keinen eigenen Platz. Solche Hinweise sind wichtig, um alte Werte, Renames oder Reworks nicht versehentlich als aktuelle Wahrheit zu behandeln.
+
+**Was wurde geändert:** Das `brain`-Schema bekommt eine Insight-Tabelle mit stabilen Hashes, Entity-Bezug, Currentness, Vertrauensstufe, Quellen-Event-IDs, Links und strukturiertem Payload. Damit können Analyse-Agenten verdichtete Patch-Erkenntnisse speichern, ohne Rohdaten oder Current-State zu überschreiben.
+
+**Wie es jetzt läuft:** Das Brain kann künftig zwischen Rohereignis, aktuellem Snapshot und kuratierter Warn-/Erkenntnisschicht unterscheiden. Alte Patchinfos bleiben nachlesbar, werden aber explizit als historisch, ersetzt oder aktuell markiert.
+
 ## #181 — Brain bekommt einen zentralen Postgres-Bereich
 
 **Ausgangslage:** Das Deadlock-Brain sammelte Patch-, Forum- und Wissensdaten noch in einer eigenen SQLite-Datenbank. Für eine echte Historie mit Timeline, alten Patchständen, Reworks und aktuellem Gewinnerstand ist das als zentrale Wissensquelle zu schwach.
