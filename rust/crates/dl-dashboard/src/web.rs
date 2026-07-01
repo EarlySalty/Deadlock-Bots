@@ -21,7 +21,6 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use rusqlite::OptionalExtension;
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
@@ -1211,27 +1210,23 @@ async fn coaching_no_show_ban(
     let Ok(discord_user_id) = i64::try_from(user_id) else {
         return err_json(400, "invalid_discord_user_id");
     };
-    let now = now_unix();
-    let lookup = app
-        .db()
-        .read(move |conn| {
-            conn.query_row(
-                "SELECT expires_at, reason
-                   FROM coaching_bans
-                  WHERE discord_user_id = ?1 AND expires_at > ?2
-                  ORDER BY expires_at DESC
-                  LIMIT 1",
-                rusqlite::params![discord_user_id, now],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?)),
-            )
-            .optional()
-        })
-        .await;
+    let lookup = sqlx::query_as::<_, (chrono::DateTime<chrono::Utc>, Option<String>)>(
+        r#"
+        SELECT expires_at, reason
+          FROM coaching.bans
+         WHERE discord_user_id = $1 AND expires_at > now()
+         ORDER BY expires_at DESC
+         LIMIT 1
+        "#,
+    )
+    .bind(discord_user_id)
+    .fetch_optional(app.pool())
+    .await;
 
     match lookup {
         Ok(Some((expires_at, reason))) => ok_json(json!({
             "banned": true,
-            "expires_at": expires_at,
+            "expires_at": expires_at.timestamp(),
             "reason": reason,
         })),
         Ok(None) => ok_json(json!({ "banned": false })),
@@ -1722,30 +1717,22 @@ mod tests {
             "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
             _ => None,
         });
-        let (_dir, app_state) = test_app(cfg).await;
+        let (_dir, db, app_state) = test_app(cfg).await;
         let user_id = 424242_i64;
         let expires_at = now_unix() + 3600;
-        app_state
-            .db()
-            .write(move |conn| {
-                conn.execute(
-                    "CREATE TABLE coaching_bans (
-                        discord_user_id INTEGER PRIMARY KEY,
-                        banned_at INTEGER NOT NULL,
-                        expires_at INTEGER NOT NULL,
-                        reason TEXT
-                    )",
-                    [],
-                )?;
-                conn.execute(
-                    "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![user_id, now_unix(), expires_at, "no_show"],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("ban fixture");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.bans(discord_user_id, banned_at, expires_at, reason)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(user_id)
+        .bind(chrono::Utc::now())
+        .bind(chrono::DateTime::from_timestamp(expires_at, 0).expect("valid expires_at"))
+        .bind("no_show")
+        .execute(db.pool())
+        .await
+        .expect("ban fixture");
 
         let app = router(app_state);
         let response = app
@@ -1775,29 +1762,21 @@ mod tests {
             "TWITCH_INTERNAL_API_TOKEN" => Some("test-token".to_string()),
             _ => None,
         });
-        let (_dir, app_state) = test_app(cfg).await;
+        let (_dir, db, app_state) = test_app(cfg).await;
         let user_id = 515151_i64;
-        app_state
-            .db()
-            .write(move |conn| {
-                conn.execute(
-                    "CREATE TABLE coaching_bans (
-                        discord_user_id INTEGER PRIMARY KEY,
-                        banned_at INTEGER NOT NULL,
-                        expires_at INTEGER NOT NULL,
-                        reason TEXT
-                    )",
-                    [],
-                )?;
-                conn.execute(
-                    "INSERT INTO coaching_bans (discord_user_id, banned_at, expires_at, reason)
-                     VALUES (?1, ?2, ?3, ?4)",
-                    rusqlite::params![user_id, now_unix() - 7200, now_unix() - 3600, "old"],
-                )?;
-                Ok(())
-            })
-            .await
-            .expect("ban fixture");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.bans(discord_user_id, banned_at, expires_at, reason)
+            VALUES ($1, $2, $3, $4)
+            "#,
+        )
+        .bind(user_id)
+        .bind(chrono::DateTime::from_timestamp(now_unix() - 7200, 0).expect("valid banned_at"))
+        .bind(chrono::DateTime::from_timestamp(now_unix() - 3600, 0).expect("valid expires_at"))
+        .bind("old")
+        .execute(db.pool())
+        .await
+        .expect("ban fixture");
 
         let response = router(app_state)
             .oneshot(internal_post(

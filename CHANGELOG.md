@@ -1,3 +1,11 @@
+## #180 — Dashboard prüft Coaching-Sperren wieder in der zentralen Datenbank
+
+**Ausgangslage:** Nach dem Merge auf die zentrale Datenbank hing die interne Dashboard-Abfrage für Coaching-Sperren noch an der alten lokalen Datenbank-Logik. Dadurch brach der Release-Build des Web-Dienstes.
+
+**Was wurde geändert:** Die Sperren-Abfrage nutzt jetzt dieselbe zentrale Datenbank wie der Bot und die Tests legen ihre Sperren direkt dort an.
+
+**Wie es jetzt läuft:** Der Web-Dienst baut wieder als Release-Binary und die Website kann aktive Coaching-Sperren weiter über die interne Dashboard-Route prüfen.
+
 ## #179 — Zentrale Datenbank kann live aus den Alt-Daten befüllt werden
 
 **Ausgangslage:** Die zentrale Datenbank hatte das fertige Schema, aber der operative Schritt zum Befüllen aus den bestehenden Datenbanken war noch kein eigener, wiederholbarer Lauf.
