@@ -1,3 +1,11 @@
+## #183 — Server-Statistiken werden dauerhaft archiviert
+
+**Ausgangslage:** Discord zeigt Server-Statistiken (Neuzugänge, Aktivität, Retention) nur für die letzten 120 Tage und löscht ältere Daten unwiderruflich. Für langfristige Auswertungen — etwa wie gut neue Mitglieder ankommen — fehlte damit die Historie.
+
+**Was wurde geändert:** Die exportierten Statistiken werden jetzt dauerhaft und versioniert im Projekt abgelegt, mit fester Ablage-Routine für künftige Exporte.
+
+**Wie es jetzt läuft:** Wir können Trends über beliebig lange Zeiträume vergleichen und Entscheidungen (z.B. zum neuen Onboarding) an echten Langzeitdaten messen statt am 120-Tage-Fenster.
+
 ## #182 — Patch-Erkenntnisse bekommen eine eigene Brain-Schicht
 
 **Ausgangslage:** Die zentrale Brain-Timeline kann Patch-Events, Forum-Claims und Current-State speichern, aber kuratierte Auswertungen aus der Patch-Historie hatten noch keinen eigenen Platz. Solche Hinweise sind wichtig, um alte Werte, Renames oder Reworks nicht versehentlich als aktuelle Wahrheit zu behandeln.
