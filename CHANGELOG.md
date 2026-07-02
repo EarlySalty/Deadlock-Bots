@@ -1,3 +1,11 @@
+## #189 — Automatische Moderation ist zurück: ein System, doppelt geprüft, Mods entscheiden
+
+**Ausgangslage:** Die alte Auto-Moderation hatte Nachrichten teils eigenständig gelöscht — ohne Freigabe, schwer nachvollziehbar und zu vorschnell; wir hatten sie deshalb pausiert (#186). Dazu lief ein zweiter, getrennter Schutz gegen gekaperte Accounts — das fühlte sich wie mehrere uneinheitliche Systeme an.
+
+**Was wurde geändert:** Beides ist jetzt ein einziges System. Jeder Textverdacht wird von einer zweiten KI gegengeprüft, bevor überhaupt etwas passiert; Bilder laufen über eine eigene Prüfung. Von allein und ohne Rückfrage handelt der Bot nur noch bei klarem Betrug oder schweren Inhalten — alles andere kommt als Vorschlag mit Knöpfen (Übernehmen · Bannen · Verwerfen) zu den Mods. Jeder Fall erscheint als kompakte, nachvollziehbare Karte, jede automatische Aktion lässt sich per Knopf zurücknehmen.
+
+**Wie es jetzt läuft:** Kein stilles Löschen mehr. Was der Bot allein macht, ist eng auf die klaren Fälle begrenzt und immer dokumentiert — im Zweifel entscheidet ein Mensch.
+
 ## #188 — Server-Aufräumen: Kanäle umbenannt, Rechte entrümpelt, Invite-Kanal offen
 
 **Ausgangslage:** Über die Jahre hatten sich auf dem Server über 500 einzelne Rechte-Einstellungen angesammelt — vieles davon Leichen, Redundanzen oder Regeln, die niemand mehr erklären konnte. Dazu Kanalnamen, die nicht sagten, was drin ist, und ein Invite-Kanal, in den man ohne Extra-Rolle nicht mal schreiben konnte.
