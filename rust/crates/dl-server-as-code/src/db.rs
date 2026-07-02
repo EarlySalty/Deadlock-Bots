@@ -502,6 +502,24 @@ pub(crate) async fn load_preview(pool: &PgPool, preview_id: i64) -> Result<DiffP
     })
 }
 
+pub(crate) async fn preview_is_expired(
+    pool: &PgPool,
+    preview_id: i64,
+    max_age_minutes: i64,
+) -> Result<bool> {
+    let expired = sqlx::query_scalar(
+        "SELECT (now() - created_at) > ($2::double precision * interval '1 minute') AS preview_expired
+           FROM server_config.diff_previews
+          WHERE preview_id = $1",
+    )
+    .bind(preview_id)
+    .bind(max_age_minutes as f64)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(ServerAsCodeError::PreviewNotFound(preview_id))?;
+    Ok(expired)
+}
+
 pub(crate) fn diff_hash(diff: &ServerDiff) -> Result<String> {
     let json = serde_json::to_vec(diff)?;
     let digest = Sha256::digest(json);

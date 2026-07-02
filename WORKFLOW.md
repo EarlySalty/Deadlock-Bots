@@ -1,6 +1,11 @@
 # Welle2b W1 Onboarding-Fundament (2026-07-02)
 
 ## Welle2b W3 Incident-Hardening §0 (2026-07-03)
+- Rework-Implementierungsworker fuer Guard-Befunde 1-5 gestartet. Verbindlich bestaetigt: nur Worktree `Deadlock-Bots-welle2b`, kein Checkout `main`, kein Push, kein Commit durch diesen Worker; `CHANGELOG.md` bleibt unberuehrt.
+- TDD-Start: Regressions-Tests werden fuer effektive Rechte/Member-Deny-Deletes, Archiv-Namespace-Materialisierung, vorhandene Archiv-Kinder und DB-basierte Preview-Freshness ergaenzt.
+- Rework umgesetzt: Effektiv-Rechte-Guard vergleicht normalisierte Vorher/Nachher-Bitmasken (`kein VIEW_CHANNEL => 0`) und blockt nur Oeffnungen; Member-Deny-Deletes blocken konservativ ohne Member-Rollendaten. Archiv-Kandidaten umgehen den faq-/Scrim-Namespace-Filter, vorhandene Archiv-Kinder materialisieren eigene `@everyone -VIEW`-Denies.
+- Freshness-Rework umgesetzt: Apply-, Onboarding-Apply- und Serverguide-Apply-Pfade verwenden DB-berechnete Preview-Ablauf-Flags statt Prozesszeit.
+- Rework-Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot serversync::tests::onboarding_preview_load_bindet_guild_message_key_und_applied_status -- --ignored --nocapture`; `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace`; `git diff --check`. Kein Commit/Push.
 - Implementierungsworker gestartet im Worktree `Deadlock-Bots-welle2b` auf Branch `feat/welle2b-onboarding`. Verbindlich: kein Checkout von `main`, kein Push, kein Commit durch diesen Worker; `CHANGELOG.md` bleibt unberuehrt.
 - Pflichtkontext gelesen: `docs/onboarding-redesign/phase1-rechte-soll-modell.ENTWURF.md` §0 Incident-Lehren Welle 2a. Umsetzung startet TDD-fokussiert in `dl-server-as-code` Diff/Rules/Apply und `dl-bot` Serversync-Freshness.
 - Implementiert: Archivkanaele materialisieren eigene `@everyone -VIEW`-Overwrites; Diff hat effektive-Rechte-Guard mit geblockten Preview-Eintraegen; faq-/Coaching-Scrim-Namespaces und Owner-Overrides fuer Sammelpunkt/Coaching-Kategorie sind ergaenzt.

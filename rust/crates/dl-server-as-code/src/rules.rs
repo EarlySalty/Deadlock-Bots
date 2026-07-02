@@ -945,7 +945,7 @@ fn apply_welle2b_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'
         )],
     );
 
-    for channel_id in welle2b_archive_channel_ids(ctx) {
+    for channel_id in welle2b_archive_channel_ids(ctx, archive_category_id) {
         if let Some(channel) = desired.channels.get_mut(&channel_id) {
             channel.parent_category_id = Some(archive_category_id);
         }
@@ -995,8 +995,12 @@ fn ensure_archive_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) 
     category_id
 }
 
-fn welle2b_archive_channel_ids(ctx: &mut RuleContext<'_>) -> BTreeSet<DiscordId> {
+fn welle2b_archive_channel_ids(
+    ctx: &mut RuleContext<'_>,
+    archive_category_id: DiscordId,
+) -> BTreeSet<DiscordId> {
     let mut channel_ids = BTreeSet::new();
+    channel_ids.extend(child_channel_ids(ctx.actual, archive_category_id));
     if let Some(alt_category_id) = ctx.category_id("Alt") {
         channel_ids.extend(
             ctx.actual
@@ -1801,6 +1805,8 @@ mod tests {
     const FOOD: u64 = 228;
     const CUSTOM_GAME_CATEGORY: u64 = 229;
     const SAMMELPUNKT: u64 = 230;
+    const EXISTING_ARCHIVE_CATEGORY: u64 = 231;
+    const ALREADY_ARCHIVED_CHANNEL: u64 = 232;
     const BANNED_USER: u64 = 685_573_558_281_175_043;
     const BANNED_X2: u64 = 496_268_533_496_545_283;
     const BANNED_X4: u64 = 601_742_833_438_818_357;
@@ -2151,6 +2157,100 @@ mod tests {
             kreativ.topic.as_deref(),
             Some("Kunst, Mods, Movement-Clips, Food — zeig her, was du hast.")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_archivregeln_materialisieren_faq_trotz_namespace_filter() -> anyhow::Result<()> {
+        let mut actual = archive_candidate_model();
+        actual.overwrites.remove(&OverwriteKey {
+            channel_id: FAQ_USER_CHANNEL,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        });
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: true,
+            },
+        )?;
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == "📦 Archiv")
+            .expect("archive category")
+            .category_id;
+        let diff = diff_models(
+            &derived.desired,
+            &actual,
+            &derived.dynamic_namespaces,
+            &derived.exceptions,
+        )?;
+
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Update
+                && change.object.kind == ObjectKind::Channel
+                && change.object.object_id == FAQ_USER_CHANNEL
+                && change.fields.iter().any(|field| {
+                    field.field == "parent_category_id"
+                        && field.desired == serde_json::json!(archive_id)
+                })
+        }));
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Create
+                && change.object.kind == ObjectKind::PermissionOverwrite
+                && change.object.channel_id == Some(FAQ_USER_CHANNEL)
+                && change.object.target_kind == Some(TargetKind::Role)
+                && change.object.target_id == Some(GUILD_ID)
+        }));
+        assert!(!diff.filtered.iter().any(|filtered| {
+            filtered.change.object.kind == ObjectKind::PermissionOverwrite
+                && filtered.change.object.channel_id == Some(FAQ_USER_CHANNEL)
+                && filtered.change.action == crate::diff::DiffAction::Create
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_archivregeln_materialisieren_bestehende_archiv_kinder() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        actual.categories.insert(
+            EXISTING_ARCHIVE_CATEGORY,
+            category(EXISTING_ARCHIVE_CATEGORY, "📦 Archiv"),
+        );
+        actual.channels.insert(
+            ALREADY_ARCHIVED_CHANNEL,
+            channel(
+                ALREADY_ARCHIVED_CHANNEL,
+                "historischer-kanal",
+                Some(EXISTING_ARCHIVE_CATEGORY),
+            ),
+        );
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: true,
+            },
+        )?;
+
+        assert_eq!(
+            derived.desired.channels[&ALREADY_ARCHIVED_CHANNEL].parent_category_id,
+            Some(EXISTING_ARCHIVE_CATEGORY)
+        );
+        let overwrite = derived
+            .desired
+            .overwrites
+            .get(&OverwriteKey {
+                channel_id: ALREADY_ARCHIVED_CHANNEL,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            })
+            .expect("materialized archive deny");
+        assert_eq!(overwrite.allow_bits, 0);
+        assert_eq!(overwrite.deny_bits, Permissions::VIEW_CHANNEL.bits());
         Ok(())
     }
 

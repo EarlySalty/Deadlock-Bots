@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use chrono::{Duration, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
 use serenity::all::{ChannelId, GuildId, Http, Permissions, RoleId, TargetId};
@@ -244,7 +243,7 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
     port: &P,
 ) -> Result<ApplyReport> {
     let preview = db::load_preview(pool, preview_id).await?;
-    ensure_preview_fresh(preview.created_at)?;
+    ensure_preview_fresh(db::preview_is_expired(pool, preview_id, PREVIEW_MAX_AGE_MINUTES).await?)?;
     let recomputed_diff_hash = db::diff_hash(&preview.diff)?;
     let hashes_match =
         preview.diff_hash == recomputed_diff_hash && recomputed_diff_hash == confirmed_diff_hash;
@@ -389,8 +388,8 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
     })
 }
 
-fn ensure_preview_fresh(created_at: chrono::DateTime<Utc>) -> Result<()> {
-    if Utc::now().signed_duration_since(created_at) > Duration::minutes(PREVIEW_MAX_AGE_MINUTES) {
+fn ensure_preview_fresh(preview_expired: bool) -> Result<()> {
+    if preview_expired {
         return Err(ServerAsCodeError::PreviewExpired);
     }
     Ok(())

@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
+use chrono::{DateTime, SecondsFormat, Utc};
 use dl_discord::{BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec};
 use dl_server_as_code::diff::{DiffAction, DiffChange, FieldDiff, ServerDiff};
 use dl_server_as_code::{
@@ -2868,7 +2868,10 @@ async fn load_onboarding_preview(
     guild_id: u64,
 ) -> ServerSyncResult<StoredOnboardingPreview> {
     let row = sqlx::query(
-        "SELECT guild_id, diff_hash, diff_json::text AS diff_json, created_at
+        "SELECT guild_id,
+                diff_hash,
+                diff_json::text AS diff_json,
+                (now() - created_at) > ($6::double precision * interval '1 minute') AS preview_expired
            FROM server_config.diff_previews
           WHERE preview_id = $1
             AND guild_id = $2
@@ -2886,6 +2889,7 @@ async fn load_onboarding_preview(
     .bind(ObjectKind::BotMessage.as_db())
     .bind(ONBOARDING_DIFF_MESSAGE_KEY)
     .bind(ONBOARDING_DIFF_OBJECT_ID.to_string())
+    .bind(PREVIEW_MAX_AGE_MINUTES as f64)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
@@ -2894,7 +2898,7 @@ async fn load_onboarding_preview(
         ))
     })?;
 
-    ensure_preview_not_expired(row.try_get("created_at")?)?;
+    ensure_preview_not_expired(row.try_get("preview_expired")?)?;
     let diff_json: String = row.try_get("diff_json")?;
     let diff: ServerDiff = serde_json::from_str(&diff_json)?;
     let stored_hash: String = row.try_get("diff_hash")?;
@@ -2918,7 +2922,10 @@ async fn load_serverguide_preview(
     guild_id: u64,
 ) -> ServerSyncResult<StoredServerGuidePreview> {
     let row = sqlx::query(
-        "SELECT guild_id, diff_hash, diff_json::text AS diff_json, created_at
+        "SELECT guild_id,
+                diff_hash,
+                diff_json::text AS diff_json,
+                (now() - created_at) > ($6::double precision * interval '1 minute') AS preview_expired
            FROM server_config.diff_previews
           WHERE preview_id = $1
             AND guild_id = $2
@@ -2936,6 +2943,7 @@ async fn load_serverguide_preview(
     .bind(ObjectKind::BotMessage.as_db())
     .bind(SERVER_GUIDE_DIFF_MESSAGE_KEY)
     .bind(SERVER_GUIDE_DIFF_OBJECT_ID.to_string())
+    .bind(PREVIEW_MAX_AGE_MINUTES as f64)
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
@@ -2944,7 +2952,7 @@ async fn load_serverguide_preview(
         ))
     })?;
 
-    ensure_preview_not_expired(row.try_get("created_at")?)?;
+    ensure_preview_not_expired(row.try_get("preview_expired")?)?;
     let diff_json: String = row.try_get("diff_json")?;
     let diff: ServerDiff = serde_json::from_str(&diff_json)?;
     let stored_hash: String = row.try_get("diff_hash")?;
@@ -3124,10 +3132,8 @@ fn i64_to_u64(value: i64) -> ServerSyncResult<u64> {
         .map_err(|_| ServerSyncError::bad_request("BIGINT passt nicht in Discord-ID"))
 }
 
-fn ensure_preview_not_expired(created_at: DateTime<Utc>) -> ServerSyncResult<()> {
-    if Utc::now().signed_duration_since(created_at)
-        > ChronoDuration::minutes(PREVIEW_MAX_AGE_MINUTES)
-    {
+fn ensure_preview_not_expired(preview_expired: bool) -> ServerSyncResult<()> {
+    if preview_expired {
         return Err(ServerSyncError::bad_request(
             "Preview abgelaufen, bitte neu diffen",
         ));
