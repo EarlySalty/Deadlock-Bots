@@ -145,3 +145,33 @@ Wissensbasis-Nachzug-Backlog).
 - Cockpit-Eskalation „Bot meldet zurück" als Phase-4-Arbeitspaket einplanen
   (Voraussetzung für „ich find's raus"-Stufe des Lücken-Dreiklangs).
 - Wissensbasis-Ergänzungen (§6) in phase1-wissensbasis.ENTWURF.md einarbeiten.
+
+## 9. Nachtrag: Gemini-Test über Antigravity (2026-07-02)
+
+Auf Owner-Wunsch wurde Gemini nachgezogen — nicht per API-Key (Key geleakt +
+rotationspflichtig, Free-Tier-CLI von Google abgeschaltet), sondern headless
+über die Antigravity-CLI (`agy -p`) mit dem Google-Pro-Account des Owners.
+Modell meldet sich als **Gemini 3.5 Flash**; Modellwahl ist per CLI nicht
+steuerbar (nimmt Account-Default).
+
+**Ergebnis (gleiche 8 Szenarien, gleicher System-Prompt):**
+
+- **0 Halluzinationen in 8/8** — beide K.O.-Tests (Clan-Lücke, Haze-Build)
+  ehrlich bestanden, alle Fakten (Strg+R, #server-support, ~3h-Invite,
+  „stopp") exakt aus der Wissensbasis. Damit auf Sonnet-4.6-Niveau beim
+  Ehrlichkeits-Kriterium.
+- Ton: warm, kurz, ASCII-`:)`, keine AI-Floskeln. Kleine Schwächen:
+  einen Tick förmlicher als Sonnet/gpt-mini, Stil-Marker teils mechanisch
+  gesetzt („das kriegen wir hin" einmal unmotiviert angehängt).
+- Ranking-Einordnung: gleichauf mit gpt-5.4-mini um Platz 2, hinter
+  Sonnet 4.6.
+
+**Prod-Bewertung des Zugangswegs:** Die agy-Route ist NUR Dev/Test.
+Consumer-Abo = kein AVV/DPA für User-DMs (gleiche Blocker-Klasse wie
+MiniMax, §4), ToS-Grauzone (Bot-Automatisierung über Consumer-Account),
+Einzelaccount-Rate-Limits, Agent-CLI-Latenz (30–90 s/Antwort), und Google
+baut die Client-Landschaft gerade um (Gemini-CLI-Abschaltung als Beleg).
+Legitimer Gemini-Prod-Weg wäre die bezahlte Gemini-API (Paid-Tier trainiert
+nicht, DPA verfügbar; `GeminiClient` in dl-ai existiert bereits) — als
+günstiger Fallback-Kandidat hinter Sonnet 4.6 jetzt fachlich validiert.
+Modell-Entscheid aus §4 bleibt unverändert: **Ziel-Modell Sonnet 4.6.**
