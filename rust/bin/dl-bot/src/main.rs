@@ -1060,6 +1060,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_community::leave_survey::spawn(leave_survey.clone(), &dispatcher);
         dl_community::clips::spawn(clips.clone());
         dl_community::faq::spawn(faq.clone(), &dispatcher);
+        let _invite_lounge_watcher =
+            dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
         // KI-DM-Assistent: beantwortet Freitext-DMs an den Bot (MiniMax + Fallback).
         let dm_assistant = dl_community::dm_assistant::DmAssistant::new(
             dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())

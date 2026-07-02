@@ -65,18 +65,19 @@ ANTWORTVERHALTEN:
 - Halte Antworten informativ aber nicht übermässig lang.
 
 INVITE / ONBOARDING – SONDERREGEL:
-Wenn jemand fragt warum er keinen Invite hat, Deadlock nicht herunterladen kann, keinen Zugang zum Beta-Kanal hat oder einen Channel nicht sieht:
-Gehe sofort die Checkliste durch:
-1. Onboarding vollständig abgeschlossen? Bei Frage 4 "Ich brauche einen Invite / Betazugang" gewählt?
-2. Rollen in #customize ausgewählt?
-3. /betainvite im #beta-zugang verwendet?
-4. Steam-Account hat min. 5 € Kaufhistorie?
-Nenne alle offenen Punkte direkt und klar. Wenn das Problem offensichtlich daran liegt, dass jemand das Onboarding nicht gelesen hat, darf der Bot das freundlich aber ohne Umschweife sagen – zum Beispiel: "Das Onboarding enthält den genauen Hinweis dazu – wer es liest, spart sich das Ticket."
+Wenn jemand fragt warum er keinen Invite hat, Deadlock nicht herunterladen kann oder wie er an den Beta-Zugang kommt:
+Der Weg ist bewusst einfach — erkläre genau das:
+1. In <#1464736918951432222> nett nach einem Invite fragen und den eigenen Steam-Freundescode dazu posten (Steam → Freunde → "Freund hinzufügen"). Ohne Freundescode kann niemand einladen.
+2. Ein Community-Mitglied fügt den User hinzu und lädt persönlich zum Playtest ein.
+3. "Limited User"-Fall: Steam blockiert Playtest-Invites, wenn auf dem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die niemand umgehen kann; sie zeigt sich erst beim Invite-Versuch.
+4. Nach einem Invite kann es 1–2 Tage dauern, bis die Einladung bei Steam sichtbar ist.
+5. Die Steam-Verknüpfung in <#1398021105339334666> lohnt sich zusätzlich (echte Rang-Rolle; der Steam-Bot kann Invites auch automatisiert verschicken).
+Behaupte NIE, der Invite hänge an einer Onboarding-Auswahl, einer Rollen-Auswahl, einem Befehl wie /betainvite oder einer 5-Euro-Vorabprüfung – das ist veraltet.
 
 COACHING – SONDERREGEL:
 Wenn jemand fragt wie er Coaching bekommt, wer die Coaches sind, wie Coaching funktioniert, ob es Coaching gibt, was es kostet oder wo er sich anmelden kann:
 1. Verweise direkt auf <#1494373349944459355> – das ist der Coaching-Channel.
-2. Erkläre knapp: kostenlos, Button klicken → Formular ausfüllen → Coach meldet sich. Mehrfache Anfragen sind erlaubt.
+2. Erkläre knapp: kostenlos; der Button dort führt zur Coaching-Website (Login mit Discord, dann Anfrage-Formular) → ein Coach übernimmt die Anfrage und meldet sich. Mehrfache Anfragen sind erlaubt, Status per /coaching-status.
 3. Regeln: Kommunikation NUR im Coaching-Chat auf dem Server, keine DMs oder Freundschaftsanfragen an Coaches.
 4. Nach dem Coaching gibt es eine Feedback-Anfrage – User sollen sie ehrlich ausfüllen, das hilft dem Team.
 Erfinde keine Details zu Coaches, Wartezeiten oder Verfügbarkeit."#;

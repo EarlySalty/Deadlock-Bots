@@ -1,3 +1,10 @@
+## #190 — FAQ-Bot mit frischem Wissen + Invite-Lounge mit Bot-Aufpasser
+
+**Ausgangslage:** Die Wissensbasis unseres FAQ-Bots war an vielen Stellen veraltet — alte Kanalnamen, ein Invite-Ablauf, den es so nicht mehr gibt, und sogar falsche Preise beim Streamer-Dashboard. Wer den Bot gefragt hat, bekam teils Anleitungen für einen Server von gestern.
+
+**Was wurde geändert:** Wir haben die komplette Server-Doku gegen den echten Stand abgeglichen und neu geschrieben — inklusive einer neuen Ehrlichkeits-Seite, auf der steht, was es bei uns bewusst NICHT gibt (damit der Bot dort nicht rät). Kanäle werden jetzt überall rename-fest verlinkt. Außerdem: Der /betainvite-Befehl ist weg — im Invite-Kanal fragst du einfach nett nach einem Invite und postest deinen Steam-Freundescode, ein Community-Mitglied lädt dich ein.
+
+**Wie es jetzt läuft:** Der FAQ-Bot antwortet ab sofort mit aktuellem Wissen. Und in der Invite-Lounge passt der Bot mit auf: Fragst du nach einem Invite und vergisst den Freundescode, erinnert er dich einmal freundlich daran — mehr macht er dort nicht.
 ## #192 — Neuer Einstieg: 3 Fragen statt 10-Schritte-Assistent, Regelwerk neu, tote Kanäle ins Archiv
 
 **Ausgangslage:** Der Einstieg auf den Server war ein Hindernislauf — erst Discord-Fragen, dann noch ein 10-Schritte-Assistent im Regelkanal, der fast 200 verwaiste Threads hinterlassen hat. Dazu ein Haufen Kanäle, in denen seit Monaten nichts mehr passiert.

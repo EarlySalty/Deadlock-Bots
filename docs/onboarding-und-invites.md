@@ -1,32 +1,37 @@
 # Onboarding und Invites
 
 ## Worum geht es?
-Der Server fuhrt neue Mitglieder gezielt durch Regeln, Rollen und die wichtigsten Bereiche. Gleichzeitig hangt der Zugang zu manchen Bereichen, vor allem zum Beta-Invite-Flow, direkt davon ab, dass das Onboarding sauber abgeschlossen wurde.
+Der Server führt neue Mitglieder gezielt durch Regeln, Rollen und die wichtigsten Bereiche. Der Deadlock-Beta-Invite ist davon unabhängig und bewusst einfach: Du fragst in <#1464736918951432222> nett nach einem Invite, und jemand aus der Community lädt dich ein.
 
 ## Wie nutze ich das?
-Starte im `#regelwerk` uber den Button `Hier starten`. Der Bot legt dir dafur bevorzugt einen eigenen Onboarding-Thread an und fuhrt dich durch die wichtigsten Schritte: Regeln, Voice-Lanes, Mitspieler finden, Coaching, optionale Voice-Praeferenzen und die Steam-Verknupfung. Wenn du streamst, kannst du dabei auch direkt das Streamer-Setup in DMs starten.
+**Onboarding:** Starte im <#1315684135175716975> über den Button `Hier starten` — der Bot legt dir einen privaten Onboarding-Thread an. Nach dem Discord-Member-Screening startet das Onboarding auch automatisch (Bots, bereits verifizierte und bereits durchgelaufene User werden übersprungen). Die festen Schritte: Regeln, Voice-Lanes, Mitspieler finden, Coaching, Custom Games, optionale Voice-Präferenzen (Ton/Alter) und die Steam-Verknüpfung. Beim Steam-Schritt prüfst du selbst per Button `Ich hab verknüpft` — der Bot checkt dann live, ob die Verknüpfung da ist.
 
-Wichtig fur neue Mitglieder ohne Deadlock-Zugang: Im Discord-Onboarding musst du die passende Option fur Invite oder Betazugang auswahlen, damit `#beta-zugang` sichtbar wird. Danach solltest du in `#customize` beziehungsweise bei den Rollen-Auswahlen noch die relevanten Server-Rollen setzen, weil sonst weitere Bereiche fehlen konnen.
+Deine Voice-Tags kannst du jederzeit später über `/meine-tags` ändern; die Auswahl wird sofort gespeichert.
 
-Wenn du den Beta-Zugang brauchst, gehst du anschliessend in `#beta-zugang` und nutzt dort `/betainvite`. Fur diesen Flow braucht dein Steam-Account eine echte Kaufhistorie von mindestens 5 Euro. Reines Wallet-Aufladen oder reine Free-to-Play-Nutzung reicht dafur nicht. Die eigentliche Steam-Prufung und der Payment-Teil gehoren zur Steam-Integration; fur dich als User ist nur wichtig: Onboarding fertig, Channel sichtbar, `/betainvite` im richtigen Channel, 5-Euro-Voraussetzung erfullt.
+Zusätzlich gibt es das AI-Onboarding-Panel mit `Persönliche Tour starten` (3 kurze Fragen im Formular) und Quick-Buttons zu Spieler-Suche, Voice-Lanes, Feedback und Regelwerk. Und: Auf einigen Panels vergeben Reaktionen automatisch Rollen (Reaction Roles) — Reaktion entfernen kann die Rolle wieder entziehen.
 
-Zusatzlich gibt es eine DM-Ebene: Manche Hilfen, etwa fur Steam-Linking, Beta-Fragen oder Streamer-Setup, konnen dir auch in einer Bot-DM erklaert werden. Aus Usersicht merkt man davon vor allem, dass der Bot an passenden Stellen automatisch nachfragt und dir personalisierte nachste Schritte zeigt.
+**Deadlock-Invite:** <#1464736918951432222> ist eine offene Invite-Lounge — keine Befehle, keine Formulare, keine Vorbedingungen. So läuft es:
+
+1. Schreib eine nette Frage in den Kanal („mag mich wer einladen? :)") und poste deinen **Steam-Freundescode** dazu (findest du in Steam unter Freunde → „Freund hinzufügen").
+2. Ein Community-Mitglied fügt dich hinzu und lädt dich persönlich zum Playtest ein.
+3. Der Bot schaut mit drauf: Fehlt der Freundescode bei deiner Anfrage, erinnert er dich freundlich daran — ohne Code kann dich niemand einladen.
+
+Zusätzlich lohnt sich die Steam-Verknüpfung in <#1398021105339334666> in jedem Fall: Damit bekommst du deine echte Rang-Rolle, und der Steam-Bot kann Invites auch automatisiert verschicken (läuft als Sicherheitsnetz im Hintergrund).
 
 ## Kosten / Premium
-Der normale Server-Onboarding-Flow ist kostenlos. Beim Beta-Invite kann ein externer Payment-Flow Teil der Steam-Integration sein; fur den User-Flow ist vor allem die 5-Euro-Kaufhistorie relevant.
+Alles kostenlos. Ein Invite kostet nie Geld — weder von der Community noch vom Bot. Es gibt einen optionalen Ko-fi-Support (freiwillig, kein Pflichtkauf und keine Beschleunigung).
 
 ## Was passiert technisch (kurz)?
-Das Regelwerk-Panel startet einen privaten Onboarding-Thread, notfalls einen offentlichen Fallback-Thread. Der statische Flow zeigt dir feste Schritte, speichert einzelne Entscheidungen wie Voice-Tags und wartet bei der Steam-Verknupfung auf eine erfolgreiche Verifikation. Erganzend kann der Bot dir im Onboarding oder in DMs kurze Zusatzfragen stellen und daraus eine passendere Server-Tour ableiten.
+Das Regelwerk-Panel und der Screening-Autostart erzeugen private Onboarding-Threads; der Flow speichert Entscheidungen wie Voice-Tags. In <#1464736918951432222> beobachtet der Bot Invite-Anfragen und erinnert bei fehlendem Freundescode. Der Steam-Bot kann Invites zusätzlich automatisiert über die Steam-Spielsuche verschicken.
 
 ## Grenzen & häufige Fragen
-- Wenn `#beta-zugang` fehlt, liegt das fast immer daran, dass das Onboarding nicht vollstandig abgeschlossen wurde oder die falsche Option gewahlt wurde.
-- Rollen-Auswahl nach dem Onboarding ist kein Bonus-Schritt. Ohne passende Rollen fehlen weiter Kanale.
-- `/betainvite` funktioniert nur im richtigen Channel und nur, wenn die Steam-Voraussetzung erfullt ist.
-- Die Steam-Mechanik selbst wird separat behandelt. Als Stichwort fur Folgefragen gilt: Steam-Integration.
-- Wenn deine DMs geschlossen sind, konnen Teile wie Streamer-Setup oder Hilfen in DMs scheitern.
-- Die automatische Nachfrage im Onboarding hilft beim Einstieg, ersetzt aber keine Moderation und keinen Support-Fall.
+- **„Ich habe keinen Invite bekommen"**: Häufigster Grund ist ein „limited" Steam-Account — Steam blockiert Playtest-Invites, wenn auf dem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die erst beim Invite-Versuch sichtbar wird; kein Bot und kein Community-Mitglied kann sie umgehen.
+- Nach einem Invite kann es 1–2 Tage dauern, bis die Einladung bei Steam sichtbar ist.
+- Ohne Freundescode in deiner Anfrage kann dich niemand einladen — der Bot erinnert dich im Kanal daran.
+- Es gibt KEINE Onboarding-Option „Invite/Betazugang" und keinen Invite-Befehl — einfach im Kanal fragen.
+- Ein Streamer-Setup-Flow im Onboarding existiert aktuell nicht (nur Hinweise); Streamer-Themen laufen über das Twitch-Dashboard.
 
 ## Für Devs (knapp)
-- Cogs: `cogs/rules_channel.py`, `cogs/onboarding.py`, `cogs/ai_onboarding.py`, `cogs/welcome_dm/dm_main.py`, `cogs/welcome_dm/dm_assistant.py`, `cogs/website_invite_cog.py`
-- Abhangigkeiten: `StaticOnboarding`, Welcome-DM-Views, Steam-Linking, Website-Invite-Codes, optional Streamer-DM-Flow
-- Wichtige DB-Tabellen: `kv_store`, `user_privacy`, `member_events`; Invite-Codes liegen im Namespace `website_invites`
+- Rust: `dl-community/src/onboarding.rs` (+ `onboarding_steps.json`), `ai_onboarding.rs`, `tags_ui.rs`, `reaction_roles.rs`, Invite-Lounge-Watcher in `dl-community`; automatisierter Invite-Pfad im Steam-Bot: `steam-flows/src/betainvite/`
+- Der User-Slash-Command `/betainvite` wurde entfernt; der Funnel ist nur noch über den Panel-Button (`betainvite:panel:start`, Admin: `/publish_betainvite_panel`) erreichbar
+- Kanalnamen live: <#1464736918951432222>, <#1398021105339334666> (Server-as-Code-Renames)

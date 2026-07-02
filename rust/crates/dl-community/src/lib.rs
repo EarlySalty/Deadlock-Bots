@@ -12,6 +12,7 @@ mod db;
 pub mod dm_assistant;
 pub mod faq;
 pub mod feedback_hub;
+pub mod invite_lounge;
 pub mod invites;
 pub mod leave_survey;
 pub mod onboarding;
