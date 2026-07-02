@@ -177,6 +177,20 @@ fn server_config_table_contracts() -> Vec<(&'static str, Vec<&'static str>)> {
             ],
         ),
         (
+            "rollback_exports",
+            vec![
+                "rollback_export_id",
+                "guild_id",
+                "snapshot_id",
+                "created_by_user_id",
+                "artifact_hash",
+                "artifact_json",
+                "metadata",
+                "created_at",
+                "expires_at",
+            ],
+        ),
+        (
             "live_snapshot_categories",
             vec![
                 "snapshot_id",
@@ -869,6 +883,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "live_snapshot_permission_overwrites",
             "live_snapshot_roles",
             "live_snapshots",
+            "rollback_exports",
         ]
     );
     for (table, columns) in server_config_table_contracts() {

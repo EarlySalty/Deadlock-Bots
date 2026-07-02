@@ -11,6 +11,7 @@ mod journeyglue;
 mod master;
 mod modglue;
 mod onboardglue;
+mod serversync;
 
 use std::sync::Arc;
 
@@ -252,6 +253,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         tracing::error!(%err, "Application-ID nicht setzbar — Interaction-Followups schlagen fehl");
     }
     let changelog = dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
+    let owner_id = master::owner_id_from_lookup(env);
+    if owner_id.is_none() {
+        tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
+    }
+    let serversync_service: serversync::SharedServerSync = serversync::ServerSyncService::new(
+        central_pool.clone(),
+        adapter.clone(),
+        discord_token.clone(),
+        serversync::GUILD_ID,
+    );
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
         central_pool.clone(),
@@ -271,6 +282,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             state: changelog.clone(),
         }),
     );
+    serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {
@@ -662,10 +674,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         router.clone(),
         command_sync_config.guild_id,
     ));
-    let owner_id = master::owner_id_from_lookup(env);
-    if owner_id.is_none() {
-        tracing::warn!("OWNER_ID fehlt — !master/!m Owner-Commands bleiben gesperrt");
-    }
     let (master_action_tx, mut master_action_rx) =
         tokio::sync::mpsc::unbounded_channel::<master::MasterAction>();
 
@@ -712,6 +720,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let changelog_server = axum::serve(
         changelog_listener,
         dl_changelog::router(changelog)
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    );
+
+    // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN");
+    if serversync_token.is_none() {
+        tracing::warn!("SERVERSYNC_INTERNAL_TOKEN fehlt — Server-Sync-HTTP-Routen liefern 403");
+    }
+    let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);
+    let serversync_listener = tokio::net::TcpListener::bind(&serversync_addr)
+        .await
+        .with_context(|| format!("Server-Sync-Port binden: {serversync_addr}"))?;
+    tracing::info!(addr = %serversync_addr, "Server-Sync-API gebunden");
+    let serversync_server = axum::serve(
+        serversync_listener,
+        serversync::router(serversync_service.clone(), serversync_token)
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
@@ -904,6 +928,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _journey_ingestion =
             dl_activity::journey::spawn_ingestion(central_pool.clone(), &dispatcher);
         let _journey_retention = dl_activity::journey::spawn_retention(central_pool.clone());
+        let _server_sync_rollback_retention =
+            dl_community::privacy::spawn_server_sync_rollback_export_retention(
+                central_pool.clone(),
+            );
         let _journey_role_events =
             journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
@@ -1075,6 +1103,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tokio::select! {
         result = broker_server => result.context("Broker-Server")?,
         result = changelog_server => result.context("Changelog-Server")?,
+        result = serversync_server => result.context("Server-Sync-Server")?,
         action = master_action_rx.recv() => {
             match action {
                 Some(master::MasterAction::Restart) => {
