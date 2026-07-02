@@ -632,14 +632,6 @@ fn register_inner(
 
     // Öffentliche Commands
     router.on_command(
-        "betainvite",
-        spec(json!({
-            "name": "betainvite",
-            "description": "Starte den Deadlock-Playtest-Invite-Flow.",
-        })),
-        forward_slash("betainvite", &[], 15),
-    );
-    router.on_command(
         "account_verknüpfen",
         spec(json!({
             "name": "account_verknüpfen",
@@ -1201,7 +1193,6 @@ mod tests {
             .is_some());
         // Slash-Commands
         for name in [
-            "betainvite",
             "account_verknüpfen",
             "steam links",
             "steam whoami",
@@ -1218,8 +1209,8 @@ mod tests {
         ] {
             assert!(router.resolve_command(name).is_some(), "{name}");
         }
-        // 14 Routen, aber nur 11 Top-Level-Definitionen (steam-Gruppe dedupliziert)
-        assert_eq!(router.command_definitions().len(), 11);
+        // 13 Routen, aber nur 10 Top-Level-Definitionen (steam-Gruppe dedupliziert)
+        assert_eq!(router.command_definitions().len(), 10);
     }
 
     #[test]

@@ -1,7 +1,9 @@
 # Turniere
 
 ## Worum geht es?
-Das Turnier-Portal deckt den kompletten Spielerweg ab: Profil und Einwilligung hinterlegen, einem Event beitreten, ein Team gründen oder einem Team anschließen, Check-in erledigen und später Bracket, Gruppen und Leaderboard verfolgen. Sichtbar für Spieler sind vor allem die öffentlichen Turnierseiten, der eigene Status im Event, Team-Einladungen und die globale Rangliste.
+Das Turnier-Portal auf der Website deckt den kompletten Spielerweg ab: Profil und Einwilligung hinterlegen, einem Event beitreten, ein Team gründen oder einem Team anschließen, Check-in erledigen und später Bracket, Gruppen und Leaderboard verfolgen. Sichtbar für Spieler sind vor allem die öffentlichen Turnierseiten, der eigene Status im Event, Team-Einladungen und die globale Rangliste.
+
+Wichtig: Turniere laufen komplett über das Web-Portal. Die alten In-Discord-Turnierbefehle (z. B. `/turnier`, `!balance`) gibt es nicht mehr.
 
 ## Wie läuft die Anmeldung ab?
 Vor der ersten Teilnahme musst du eingeloggt sein und den Consent-Flow abschließen. Ohne aktuelle Einwilligung blockiert das System jede Team- oder Solo-Anmeldung. Im selben Bereich kannst du auch dein Spielerprofil pflegen: Anzeigename, Bio, Avatar und Benachrichtigungsoptionen für Matchstart, Check-in, Team-Einladungen und Turnier-News.
@@ -12,7 +14,7 @@ Danach gibt es drei übliche Wege in ein Turnier:
 - Du gründest ein eigenes Team. Das System setzt dich automatisch als Captain und trägt deine vorhandenen Rank-/Steam-Daten mit ein.
 - Du trittst einem bestehenden Team bei oder nimmst eine Einladung an.
 
-Anmeldung und Teamverwaltung sind nur offen, solange das Turnier im Status `registration` oder `checkin` ist. Wenn ein Team schon voll ist, blockiert der Join. Wer bereits in einem Team desselben Turniers steckt, kann nicht parallel noch einem zweiten Team beitreten.
+Beitritte und Bewerbungen sind offen, solange das Turnier im Status `registration` oder `checkin` ist. Einige Aktionen gehen nur während `registration`: Solo-Abmeldung, Team verlassen, Mitglieder kicken und die direkte Captain-Einladung. Wenn ein Team schon voll ist, blockiert der Join. Wer bereits in einem Team desselben Turniers steckt, kann nicht parallel noch einem zweiten Team beitreten.
 
 ## Team- und Recruit-Flow
 Captains können Teams auf drei Arten auffüllen:
@@ -42,12 +44,14 @@ Für aktive Events gibt es einen separaten Check-in. Das System speichert, ob du
 - freie Signups
 
 ## Welche Modi unterstützt das System?
-Der Backend-Code unterscheidet zwei Turniermodi:
+Der Backend-Code unterscheidet zwei Turnierformate:
 
 - `bracket_only`: direktes K.-o.-Format
 - `group_stage`: Gruppenphase plus anschließendes Bracket
 
 Automatisch wird ab 16 Teams auf Gruppenphase geschaltet; darunter bleibt es bei `bracket_only`. Admins können das per Override erzwingen. Zusätzlich gibt es Single- und Double-Elimination-Brackets. Für Spieler heißt das vor allem: Je nach Event spielst du entweder sofort im K.-o.-Baum oder zuerst in Gruppen und danach in den Playoffs.
+
+Dazu kommen Spielmodus-Varianten pro Event: `standard`, `mirror`, `all_same`, `random_heroes` und `single_lane`. Welche gilt, legt die Turnierleitung beim Anlegen fest — genauso wie Lobby-Details, Erinnerungen und die Kulanzzeit bei No-Shows.
 
 ## Leaderboard und Spielerprofil
 Das globale Leaderboard ist öffentlich und sortiert nach Turnierpunkten. Angezeigt werden unter anderem:
@@ -69,10 +73,13 @@ Ein Draft-System ist technisch vorhanden, aber aktuell kein Self-Service-Feature
 
 Wenn ein Event Draft-Regeln nutzt, bekommst du die Picks/Bans also nicht über ein eigenes Spieler-Dashboard, sondern über die Turnierleitung oder den Match-Flow mitgeteilt.
 
+## Turnier-DMs abbestellen
+Turnier-Benachrichtigungen per Discord-DM kannst du im Portal selbst abbestellen — getrennt nach Fun-Turnieren, Competitive oder allem. Der Bot überspringt dich dann bei den entsprechenden Erinnerungen.
+
 ## Häufige Grenzen
 - Ohne aktuelle Einwilligung (`Consent`) ist keine Anmeldung möglich.
 - Captain-Wechsel und Team-Auflösung haben Sonderregeln: Ein Captain kann nicht einfach verschwinden, solange noch andere Teammitglieder im Kader sind.
 - Ein Widerruf der Einwilligung ist blockiert, solange du in einem aktiven Turnier angemeldet bist.
-- Offene Einladungen und Bewerbungen sind an den Turnierstatus gebunden und funktionieren nicht mehr beliebig spät.
+- Einladungen **annehmen** und Bewerbungen **einreichen** geht nur, solange der Turnierstatus es erlaubt; **ablehnen** geht jederzeit.
 
 Kurz technisch: Das Portal speichert Profile, Signups, Einladungen, Bewerbungen, Check-ins und Matchbäume serverseitig. Rank- und Steam-Bezüge werden beim Anmelden oder Teamwechsel nachgeladen, damit das Bracket und das öffentliche Profil konsistent bleiben.
