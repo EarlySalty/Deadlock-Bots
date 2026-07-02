@@ -24,6 +24,8 @@ use crate::dispatcher::{
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
 
+const IMAGE_ATTACHMENT_EXTENSIONS: &[&str] = &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
+
 struct Handler {
     adapter: Arc<DiscordAdapter>,
     dispatcher: Arc<Dispatcher>,
@@ -35,8 +37,36 @@ struct Handler {
     command_prefix: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PermissionFlags {
+    author_is_admin: bool,
+    author_can_manage_messages: bool,
+    author_can_manage_guild: bool,
+    author_is_staff: bool,
+}
+
 fn is_staff_permissions(perms: Permissions) -> bool {
     perms.administrator() || perms.manage_messages() || perms.manage_guild()
+}
+
+fn permission_flags(perms: Permissions) -> PermissionFlags {
+    PermissionFlags {
+        author_is_admin: perms.administrator(),
+        author_can_manage_messages: perms.manage_messages(),
+        author_can_manage_guild: perms.administrator() || perms.manage_guild(),
+        author_is_staff: is_staff_permissions(perms),
+    }
+}
+
+fn is_image_attachment(content_type: Option<&str>, filename: &str) -> bool {
+    let content_type_is_image = content_type
+        .map(|c| c.to_ascii_lowercase().starts_with("image/"))
+        .unwrap_or(false);
+    let filename = filename.to_ascii_lowercase();
+    content_type_is_image
+        || IMAGE_ATTACHMENT_EXTENSIONS
+            .iter()
+            .any(|ext| filename.ends_with(ext))
 }
 
 pub fn presence_activity_name(feature_module_count: usize, command_prefix: &str) -> String {
@@ -283,13 +313,25 @@ impl EventHandler for Handler {
             .guild_id
             .and_then(|guild_id| {
                 let guild = ctx.cache.guild(guild_id)?;
-                let member = guild.members.get(&message.author.id)?;
-                let perms = guild.member_permissions(member);
+                if let Some(member) = guild.members.get(&message.author.id) {
+                    let flags = permission_flags(guild.member_permissions(member));
+                    return Some((
+                        flags.author_is_admin,
+                        flags.author_can_manage_messages,
+                        flags.author_can_manage_guild,
+                        flags.author_is_staff,
+                        member.joined_at.map(|t| t.unix_timestamp()),
+                        true,
+                    ));
+                }
+                let member = message.member.as_deref()?;
+                let flags =
+                    permission_flags(guild.partial_member_permissions(message.author.id, member));
                 Some((
-                    perms.administrator(),
-                    perms.manage_messages(),
-                    perms.administrator() || perms.manage_guild(),
-                    is_staff_permissions(perms),
+                    flags.author_is_admin,
+                    flags.author_can_manage_messages,
+                    flags.author_can_manage_guild,
+                    flags.author_is_staff,
                     member.joined_at.map(|t| t.unix_timestamp()),
                     true,
                 ))
@@ -298,17 +340,7 @@ impl EventHandler for Handler {
         let image_attachment_urls: Vec<String> = message
             .attachments
             .iter()
-            .filter(|a| {
-                a.content_type
-                    .as_deref()
-                    .map(|c| c.starts_with("image/"))
-                    .unwrap_or_else(|| {
-                        let name = a.filename.to_lowercase();
-                        [".png", ".jpg", ".jpeg", ".gif", ".webp"]
-                            .iter()
-                            .any(|ext| name.ends_with(ext))
-                    })
-            })
+            .filter(|a| is_image_attachment(a.content_type.as_deref(), &a.filename))
             .map(|a| a.url.clone())
             .collect();
         let attachments: Vec<MessageAttachment> = message
@@ -589,6 +621,33 @@ mod tests {
         assert!(is_staff_permissions(Permissions::MANAGE_MESSAGES));
         assert!(is_staff_permissions(Permissions::MANAGE_GUILD));
         assert!(!is_staff_permissions(Permissions::SEND_MESSAGES));
+    }
+
+    #[test]
+    fn permission_flags_map_staff_variants() {
+        let flags = permission_flags(Permissions::ADMINISTRATOR);
+        assert!(flags.author_is_admin);
+        assert!(flags.author_is_staff);
+
+        let flags = permission_flags(Permissions::MANAGE_MESSAGES);
+        assert!(!flags.author_is_admin);
+        assert!(flags.author_can_manage_messages);
+        assert!(flags.author_is_staff);
+
+        let flags = permission_flags(Permissions::MANAGE_GUILD);
+        assert!(!flags.author_is_admin);
+        assert!(flags.author_can_manage_guild);
+        assert!(flags.author_is_staff);
+    }
+
+    #[test]
+    fn image_attachment_detection_uses_filename_fallback_for_octet_stream() {
+        assert!(is_image_attachment(
+            Some("application/octet-stream"),
+            "proof.PNG"
+        ));
+        assert!(is_image_attachment(Some("image/jpeg"), "upload.bin"));
+        assert!(!is_image_attachment(Some("application/pdf"), "rules.pdf"));
     }
 
     #[test]

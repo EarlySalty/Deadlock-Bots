@@ -1,3 +1,11 @@
+## #190 — Bild-Scam rutscht bei frischen Accounts nicht mehr durch
+
+**Ausgangslage:** Ein Scam-Account konnte erneut Bilder posten, ohne dass der Moderator griff. Ursache war eine Schutzlücke beim Einordnen neuer Nachrichten: Wenn Discord ein Mitglied noch nicht im lokalen Cache hatte, wurde die Moderation aus Vorsicht komplett übersprungen. Zusätzlich konnten Bildanhänge mit ungenauem Dateityp übersehen werden.
+
+**Was wurde geändert:** Der Bot nutzt jetzt die Mitgliedsdaten, die Discord direkt mit der Nachricht mitschickt, wenn der Cache noch nicht vollständig ist. Bildanhänge werden außerdem nicht mehr nur über den gemeldeten Dateityp erkannt, sondern auch zuverlässig über die Dateiendung.
+
+**Wie es jetzt läuft:** Frische oder gerade erst gecachte Accounts werden wieder geprüft; Scam-Bilder gehen an die Bildprüfung und können wieder automatisch entfernt bzw. ans Mod-Team gemeldet werden.
+
 ## #189 — Automatische Moderation ist zurück: ein System, doppelt geprüft, Mods entscheiden
 
 **Ausgangslage:** Die alte Auto-Moderation hatte Nachrichten teils eigenständig gelöscht — ohne Freigabe, schwer nachvollziehbar und zu vorschnell; wir hatten sie deshalb pausiert (#186). Dazu lief ein zweiter, getrennter Schutz gegen gekaperte Accounts — das fühlte sich wie mehrere uneinheitliche Systeme an.
