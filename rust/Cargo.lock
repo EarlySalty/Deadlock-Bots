@@ -508,6 +508,8 @@ name = "dl-central-etl"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "dl-central-db",
+ "hex",
  "rusqlite",
  "serde",
  "serde_json",
@@ -517,6 +519,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "toml",
+ "url",
 ]
 
 [[package]]

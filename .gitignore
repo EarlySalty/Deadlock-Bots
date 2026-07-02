@@ -91,5 +91,8 @@ docs/superpowers/
 # SP1-Discovery: DB-Inventare sind die Wahrheit fuers Completeness-Gate (trotz globalem *.json-Ignore)
 !rust/docs/_work/sp1/inventory/*.tables.json
 
+# SP1-Reconciliation: T0-Baseline-Manifeste muessen reviewbar bleiben
+!rust/docs/_work/sp1/reconciliation/*.json
+
 # Laufzeit-PID des Rust-Discord-Bots
 deadlock-bot-rust.pid

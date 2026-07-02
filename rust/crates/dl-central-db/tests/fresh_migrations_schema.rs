@@ -339,11 +339,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 13
+          WHERE version BETWEEN 1 AND 14
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 13);
+    assert_eq!(migration_count_after_first, 14);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
@@ -354,6 +354,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 12, "brain knowledge timeline").await;
     let migration_13_signature_after_first =
         migration_row_signature(&pool, 13, "brain insight records").await;
+    let migration_14_signature_after_first =
+        migration_row_signature(&pool, 14, "patchnotes identity sequences").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -361,11 +363,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 13
+          WHERE version BETWEEN 1 AND 14
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 13);
+    assert_eq!(migration_count_after_second, 14);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -390,6 +392,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 13, "brain insight records").await,
         migration_13_signature_after_first,
         "second migrator run must be a no-op for migration version 13"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 14, "patchnotes identity sequences").await,
+        migration_14_signature_after_first,
+        "second migrator run must be a no-op for migration version 14"
     );
 
     let schema_count = scalar_i64(
