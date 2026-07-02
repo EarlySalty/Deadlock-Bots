@@ -1,3 +1,11 @@
+## #191 — Scam-Bilder bleiben auch in der Mod-Karte sichtbar
+
+**Ausgangslage:** Beim Nachtesten mit echten Discord-Bildern war die Erkennung jetzt korrekt, aber ein Folgefehler blieb: Wenn Discord ein Bild mit ungenauem Dateityp meldet, konnte es in der Moderationskarte nur als normaler Anhang statt direkt als Beweisbild auftauchen.
+
+**Was wurde geändert:** Die Darstellung nutzt jetzt dieselbe robuste Bild-Erkennung wie der Scan selbst. Die aktuellen Scam-Beispiele aus den Discord-Downloads sind als Regressionstest abgedeckt.
+
+**Wie es jetzt läuft:** Scam-Bilder werden erkannt, geprüft und in der Mod-Karte sichtbar eingebettet, auch wenn Discord den Dateityp ungenau liefert.
+
 ## #190 — Bild-Scam rutscht bei frischen Accounts nicht mehr durch
 
 **Ausgangslage:** Ein Scam-Account konnte erneut Bilder posten, ohne dass der Moderator griff. Ursache war eine Schutzlücke beim Einordnen neuer Nachrichten: Wenn Discord ein Mitglied noch nicht im lokalen Cache hatte, wurde die Moderation aus Vorsicht komplett übersprungen. Zusätzlich konnten Bildanhänge mit ungenauem Dateityp übersehen werden.

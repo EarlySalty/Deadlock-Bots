@@ -24,6 +24,8 @@ use tokio::time::{sleep, timeout};
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
 const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
+const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
+    &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
 const BRAIN_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -1179,6 +1181,13 @@ fn push_embed_field(embed: &mut Value, name: &str, value: String, inline: bool) 
     }));
 }
 
+fn case_attachment_is_image(attachment: &dl_moderation::store::CaseAttachment) -> bool {
+    attachment.content_type.to_lowercase().starts_with("image/")
+        || CASE_IMAGE_ATTACHMENT_EXTENSIONS
+            .iter()
+            .any(|ext| attachment.filename.to_lowercase().ends_with(ext))
+}
+
 fn apply_case_attachment_rendering(
     embed: &mut Value,
     attachments: &[dl_moderation::store::CaseAttachment],
@@ -1188,12 +1197,12 @@ fn apply_case_attachment_rendering(
     }
     let image_urls: Vec<&str> = attachments
         .iter()
-        .filter(|attachment| attachment.content_type.to_lowercase().starts_with("image/"))
+        .filter(|attachment| case_attachment_is_image(attachment))
         .map(|attachment| attachment.url.as_str())
         .collect();
     let other_urls: Vec<String> = attachments
         .iter()
-        .filter(|attachment| !attachment.content_type.to_lowercase().starts_with("image/"))
+        .filter(|attachment| !case_attachment_is_image(attachment))
         .map(|attachment| {
             let filename = if attachment.filename.trim().is_empty() {
                 "attachment"
@@ -2855,6 +2864,39 @@ mod tests {
         assert!(styled_engine.contains(BRAIN_BUILD_OVERRIDE));
         assert!(!styled_ask.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
         assert!(!styled_engine.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
+    }
+
+    #[test]
+    fn attachment_rendering_erkennt_bilder_mit_ungenauem_content_type() {
+        let mut embed = json!({});
+        apply_case_attachment_rendering(
+            &mut embed,
+            &[
+                dl_moderation::store::CaseAttachment {
+                    url: "https://cdn.example/scam.PNG".to_string(),
+                    content_type: "application/octet-stream".to_string(),
+                    filename: "scam.PNG".to_string(),
+                },
+                dl_moderation::store::CaseAttachment {
+                    url: "https://cdn.example/readme.txt".to_string(),
+                    content_type: "text/plain".to_string(),
+                    filename: "readme.txt".to_string(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            embed["image"]["url"].as_str(),
+            Some("https://cdn.example/scam.PNG")
+        );
+        let fields = embed["fields"].as_array().expect("fields");
+        let attachment_field = fields
+            .iter()
+            .find(|field| field["name"].as_str() == Some("Attachments"))
+            .expect("attachment field");
+        let value = attachment_field["value"].as_str().expect("field value");
+        assert!(value.contains("readme.txt"));
+        assert!(!value.contains("scam.PNG"));
     }
 
     #[test]
