@@ -1,3 +1,11 @@
+## #188 — Server-Aufräumen: Kanäle umbenannt, Rechte entrümpelt, Invite-Kanal offen
+
+**Ausgangslage:** Über die Jahre hatten sich auf dem Server über 500 einzelne Rechte-Einstellungen angesammelt — vieles davon Leichen, Redundanzen oder Regeln, die niemand mehr erklären konnte. Dazu Kanalnamen, die nicht sagten, was drin ist, und ein Invite-Kanal, in den man ohne Extra-Rolle nicht mal schreiben konnte.
+
+**Was wurde geändert:** Wir haben die kompletten Server-Rechte einmal von Grund auf neu sortiert und auf einen klaren Satz Regeln eingedampft — der Bot überwacht die jetzt automatisch und meldet Abweichungen. Vier Kanäle heißen jetzt so, wie sie gemeint sind: regelwerk, deadlock-rang, deadlock-invite und server-support. Vor dem Umbau wurde ein vollständiger Wiederherstellungspunkt gesichert und geprobt.
+
+**Wie es jetzt läuft:** #deadlock-invite ist für alle offen — Steam in #deadlock-rang verknüpfen, der Invite kommt automatisch, und wer schneller persönlich einladen will, darf das weiterhin. Für alle anderen sollte sich nichts verschlechtern; falls doch irgendwo Rechte fehlen, kurz ein Ticket aufmachen.
+
 ## #187 — Steam-Verknüpfung läuft jetzt komplett auf der neuen zentralen Datenbank
 
 **Ausgangslage:** Bei der Umstellung auf die neue zentrale Datenbank hatte der Bot User-Profile nirgends aktiv nachgetragen — das fiel erst auf, als eine neue Steam-Verknüpfung dagegen lief. Der Steam-Bot lief deshalb übergangsweise noch auf der alten, separaten Datenbank weiter.
