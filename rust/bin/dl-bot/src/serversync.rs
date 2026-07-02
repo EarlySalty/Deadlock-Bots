@@ -2202,7 +2202,8 @@ fn build_welle2b_onboarding_config(
 
     let mut prompts = vec![weiche_prompt(invite_role, frischling_role, spieler_suche)];
     prompts.push(ping_prompt(model, &mut blockers));
-    if let Some(prompt) = rank_prompt {
+    if let Some(mut prompt) = rank_prompt {
+        sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
     }
 
@@ -2458,6 +2459,34 @@ fn find_rank_prompt(
                     >= 10
         })
         .cloned()
+}
+
+/// Discord behaelt in der Onboarding-Config Kanal-IDs geloeschter Kanaele;
+/// uebernommene Prompts muessen vor dem PUT gegen das Live-Modell bereinigt
+/// werden, sonst blockt die Apply-Revalidierung dauerhaft an stale IDs.
+fn sanitize_carried_over_channel_ids(
+    prompt: &mut NativeOnboardingPrompt,
+    model: &GuildModel,
+    warnings: &mut Vec<String>,
+) {
+    for option in &mut prompt.options {
+        let (kept, dropped): (Vec<String>, Vec<String>) =
+            option.channel_ids.drain(..).partition(|channel_id| {
+                channel_id
+                    .parse::<u64>()
+                    .ok()
+                    .is_some_and(|id| model.channels.contains_key(&id))
+            });
+        if !dropped.is_empty() {
+            warnings.push(format!(
+                "Prompt `{}` Option `{}`: stale Kanal-IDs entfernt: {}",
+                prompt.title,
+                option.title,
+                dropped.join(", ")
+            ));
+        }
+        option.channel_ids = kept;
+    }
 }
 
 fn option_points_to_unverified_role(option: &NativeOnboardingOption, model: &GuildModel) -> bool {
