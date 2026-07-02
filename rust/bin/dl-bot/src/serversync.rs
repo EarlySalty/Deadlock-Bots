@@ -2235,11 +2235,16 @@ fn parse_live_onboarding_config(live_config: &Value) -> ServerSyncResult<NativeO
 }
 
 fn native_onboarding_put_payload(config: &NativeOnboardingConfig) -> NativeOnboardingPutConfig {
+    // Discord verlangt das id-Feld auch fuer NEUE Prompts/Optionen
+    // (BASE_TYPE_REQUIRED, live verifiziert 2026-07-03); neue Objekte
+    // bekommen eindeutige Platzhalter-IDs ("0", "1", ...), die Discord
+    // beim PUT durch echte Snowflakes ersetzt.
+    let mut placeholder = PlaceholderIdCounter::default();
     NativeOnboardingPutConfig {
         prompts: config
             .prompts
             .iter()
-            .map(native_onboarding_put_prompt)
+            .map(|prompt| native_onboarding_put_prompt(prompt, &mut placeholder))
             .collect(),
         default_channel_ids: config.default_channel_ids.clone(),
         enabled: config.enabled,
@@ -2247,15 +2252,31 @@ fn native_onboarding_put_payload(config: &NativeOnboardingConfig) -> NativeOnboa
     }
 }
 
-fn native_onboarding_put_prompt(prompt: &NativeOnboardingPrompt) -> NativeOnboardingPutPrompt {
+#[derive(Default)]
+struct PlaceholderIdCounter(u64);
+
+impl PlaceholderIdCounter {
+    fn fill(&mut self, id: &Option<String>) -> Option<String> {
+        id.clone().or_else(|| {
+            let next = self.0.to_string();
+            self.0 += 1;
+            Some(next)
+        })
+    }
+}
+
+fn native_onboarding_put_prompt(
+    prompt: &NativeOnboardingPrompt,
+    placeholder: &mut PlaceholderIdCounter,
+) -> NativeOnboardingPutPrompt {
     NativeOnboardingPutPrompt {
-        id: prompt.id.clone(),
+        id: placeholder.fill(&prompt.id),
         prompt_type: prompt.prompt_type,
         title: prompt.title.clone(),
         options: prompt
             .options
             .iter()
-            .map(native_onboarding_put_option)
+            .map(|option| native_onboarding_put_option(option, placeholder))
             .collect(),
         single_select: prompt.single_select,
         required: prompt.required,
@@ -2264,10 +2285,13 @@ fn native_onboarding_put_prompt(prompt: &NativeOnboardingPrompt) -> NativeOnboar
     }
 }
 
-fn native_onboarding_put_option(option: &NativeOnboardingOption) -> NativeOnboardingPutOption {
+fn native_onboarding_put_option(
+    option: &NativeOnboardingOption,
+    placeholder: &mut PlaceholderIdCounter,
+) -> NativeOnboardingPutOption {
     let (emoji_id, emoji_name, emoji_animated) = put_emoji_fields(option.emoji.as_ref());
     NativeOnboardingPutOption {
-        id: option.id.clone(),
+        id: placeholder.fill(&option.id),
         title: option.title.clone(),
         description: option.description.clone(),
         emoji_id,
@@ -5144,14 +5168,10 @@ mod tests {
         assert_eq!(prompts[0]["options"][0]["emoji_animated"], false);
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
-        assert!(!prompts[0]
-            .as_object()
-            .expect("weiche prompt")
-            .contains_key("id"));
-        assert!(!prompts[1]
-            .as_object()
-            .expect("ping prompt")
-            .contains_key("id"));
+        // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
+        // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
+        assert_eq!(prompts[0]["id"], "0");
+        assert!(prompts[1]["id"].is_string());
 
         let rank_option = &prompts[2]["options"][0];
         assert_eq!(rank_option["id"], "rank-option-0");
