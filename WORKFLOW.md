@@ -1,5 +1,22 @@
 # Deadlock-Bots Enforcement-Gaps (2026-06-30)
 
+## Phase-0 P0-Fixes (2026-07-02)
+
+## Ziel
+Leave-Survey-DM-Fehler 50007 typisiert als `blocked` klassifizieren und die geforderten deutschen user-sichtbaren Rust-Texte/Prompts umstellen. Kein Commit/Push.
+
+## Fortschritt
+- Worktree/Branch geprüft: `/home/naniadm/.worktrees/deadlock-bots-phase0`, `phase0-fixes`.
+- Repo-weite Suche nach den zu ändernden Mod-Log-Feldnamen/Titeln durchgeführt: Treffer nur in Rust-Erzeugung, Python-Referenz und Audit-/Changelog-Doku; keine Rust-Dashboard-/Parser-Kontrakte gefunden. Guard-Reason-Tests referenzieren alte englische Reasons und werden mit angepasst.
+- Implementiert: typisierte Leave-Survey-DM-Delivery (`sent`/`blocked`/`failed`), Adapter-Methode mit `serenity::Error`, 50007-Match auf `HttpError::UnsuccessfulRequest`, neutrale Blocked-Logzeile und Fehlertext bei echten Failures.
+- Implementiert: geforderte deutschen Voice-/Guard-/Mod-Log-Strings und Guard-Prompt-Sprachvorgabe; betroffene Guard-Reason-Tests angepasst.
+- Verifikation: `SQLX_OFFLINE=true cargo build --workspace` grün; `cargo fmt --all` und `cargo fmt --all -- --check` grün; `git diff --check` grün.
+- Pflicht-`clippy --all-targets` und Pflicht-`test --workspace` blockieren im bestehenden `dl-bot`-Testtarget: fehlende SQLx-Offline-Metadaten in `bin/dl-bot/src/build_publisher.rs` plus bestehender `use dl_db::Db`-Import in `bin/dl-bot/src/modglue.rs`.
+- Zusatzverifikation für geänderte Ziele: `SQLX_OFFLINE=true cargo clippy -p dl-bot --bin dl-bot -- -D warnings` grün; `SQLX_OFFLINE=true cargo clippy -p dl-discord -p dl-community -p dl-moderation -p dl-voice --all-targets -- -D warnings` grün; `dl-community`/`dl-discord`/`dl-moderation`-Tests grün im gezielten Lauf, `dl-voice`-Tests scheitern an fehlender Test-DB-DSN (`CENTRAL_TEST_DSN`/`DATABASE_URL`/`DEADLOCK_CENTRAL_DSN`).
+- Review 2026-07-02 gestartet: uncommitted Diff wird nur geprüft, keine Implementierungsänderungen; Pflicht-Baseline-Vergleich folgt mit Stash/Pop.
+- Review 2026-07-02 Baseline: `SQLX_OFFLINE=true cargo clippy --all-targets -- -D warnings` und `SQLX_OFFLINE=true cargo test --workspace` jeweils Diff 23 Compile-Errors vs Baseline 23 Compile-Errors; Fehlerlisten gleich (22 fehlende SQLx-Offline-Caches in `bin/dl-bot/src/build_publisher.rs` + bestehender `dl_db`-Import im `dl-bot`-Testmodul). Vor Baseline-Test wegen voller Platte nur `rust/target` per `cargo clean` entfernt.
+- Review 2026-07-02 Zusatztest: `SQLX_OFFLINE=true cargo test -p dl-community survey_dm_delivery_logtexte` grün; Test prüft Status/Logfragment, nicht den typisierten Serenity-50007-Match im Glue.
+
 ## Ziel
 Genau drei Rust-Enforcement-Befunde im isolierten Worktree `fix/enforcement-gaps` fixen: Review-Button-Rechte, Coaching-No-Show-Ban im Website-Intake, atomarer Coaching-Claim. Kein Commit/Push/Deploy. TempVoice bleibt unberuehrt.
 

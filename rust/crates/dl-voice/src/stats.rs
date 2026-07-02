@@ -424,7 +424,7 @@ impl VoiceStatsCommands {
     ) -> StatsReply {
         if let Err(remaining) = self.limiter.check(author_id) {
             return StatsReply::text(format!(
-                "⏰ Rate limit reached. Try again in {remaining} seconds."
+                "⏰ Langsam! Versuch's in {remaining} Sekunden nochmal."
             ));
         }
         let target = first_target(content).unwrap_or(author_id);
@@ -474,7 +474,7 @@ impl VoiceStatsCommands {
     async fn vleaderboard(&self, guild_id: u64, author_id: u64) -> StatsReply {
         if let Err(remaining) = self.limiter.check(author_id) {
             return StatsReply::text(format!(
-                "⏰ Rate limit reached. Try again in {remaining} seconds."
+                "⏰ Langsam! Versuch's in {remaining} Sekunden nochmal."
             ));
         }
         let rows = self.store.top(10).await;

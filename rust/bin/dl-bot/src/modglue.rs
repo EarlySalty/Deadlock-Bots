@@ -1044,12 +1044,12 @@ fn guard_action_text(
     let status = if guard_shadow_mode(case) {
         "nicht ausgeführt (Shadow)"
     } else if case.action_ok {
-        "yes"
+        "ja"
     } else {
-        "failed"
+        "fehlgeschlagen"
     };
     match action {
-        dl_moderation::guard::GuardAction::Enforce => format!("Ban: {status}"),
+        dl_moderation::guard::GuardAction::Enforce => format!("Bann: {status}"),
         dl_moderation::guard::GuardAction::Propose => format!(
             "Timeout {}m: {status}",
             dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
@@ -1075,7 +1075,7 @@ fn guard_deleted_text(case: &dl_moderation::guard::Incident) -> String {
     if case.deleted_count >= total {
         format!("{}/{total}", case.deleted_count)
     } else {
-        format!("{}/{total} failed", case.deleted_count)
+        format!("{}/{total} fehlgeschlagen", case.deleted_count)
     }
 }
 
@@ -1171,17 +1171,17 @@ fn build_case_log_embed(
             case.confidence
         ),
         "auto_delete_failed" => format!(
-            "⚠️ Auto-Delete Failed: {} ({:.2})",
+            "⚠️ Auto-Delete fehlgeschlagen: {} ({:.2})",
             category_label(&case.category),
             case.confidence
         ),
         "proposed" => format!(
-            "📝 Proposed: {} ({:.2})",
+            "📝 Vorschlag: {} ({:.2})",
             category_label(&case.category),
             case.confidence
         ),
-        "ragebait_escalated" => "📝 Ragebait Escalated".to_string(),
-        other => format!("📝 AI Moderation: {other}"),
+        "ragebait_escalated" => "📝 Ragebait eskaliert".to_string(),
+        other => format!("📝 KI-Moderation: {other}"),
     };
     let color = match action {
         "auto_delete" => 0xE74C3C,
@@ -1569,22 +1569,22 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         let mut fields = vec![
             json!({ "name": "Member", "value": format!("<@{}> ({})", case.user_id, case.user_id), "inline": false }),
             json!({ "name": "Case ID", "value": case.case_id, "inline": true }),
-            json!({ "name": "Account age", "value": fmt_delta(now, Some(case.account_created_at)), "inline": true }),
-            json!({ "name": "Time since join", "value": fmt_delta(now, case.joined_at), "inline": true }),
+            json!({ "name": "Account-Alter", "value": fmt_delta(now, Some(case.account_created_at)), "inline": true }),
+            json!({ "name": "Zeit seit Join", "value": fmt_delta(now, case.joined_at), "inline": true }),
             json!({ "name": "Auslöser", "value": case.trigger.as_str(), "inline": true }),
-            json!({ "name": "Activity window", "value": format!(
-                "{} msgs / {} channels in {}s",
+            json!({ "name": "Aktivitätsfenster", "value": format!(
+                "{} Nachrichten / {} Kanäle in {}s",
                 case.meta[1], case.meta[0], dl_moderation::guard::WINDOW_SECONDS
             ), "inline": false }),
-            json!({ "name": "Signals", "value": format!(
-                "Keywords: {} | Attachments: {}",
+            json!({ "name": "Signale", "value": format!(
+                "Schlagwörter: {} | Anhänge: {}",
                 case.meta[3] != 0, case.meta[2]
             ), "inline": true }),
-            json!({ "name": "Actions", "value": format!(
-                "{action_text}\nDeleted: {}\nDM sent: {}",
-                deleted_text, if case.dm_sent { "yes" } else { "no" }
+            json!({ "name": "Aktionen", "value": format!(
+                "{action_text}\nGelöscht: {}\nDM geschickt: {}",
+                deleted_text, if case.dm_sent { "ja" } else { "nein" }
             ), "inline": true }),
-            json!({ "name": "Reason", "value": reason_value, "inline": false }),
+            json!({ "name": "Grund", "value": reason_value, "inline": false }),
         ];
         if !locations.is_empty() {
             fields.push(json!({ "name": "Fundorte", "value": truncate_chars(&locations, DISCORD_FIELD_LIMIT), "inline": false }));
@@ -2018,6 +2018,22 @@ pub struct SurveyGlue {
     pub adapter: Arc<DiscordAdapter>,
 }
 
+fn is_discord_cannot_send_messages(err: &serenity::Error) -> bool {
+    matches!(
+        err,
+        serenity::Error::Http(HttpError::UnsuccessfulRequest(resp)) if resp.error.code == 50007
+    )
+}
+
+fn failed_survey_dm(
+    user_id: u64,
+    err: serenity::Error,
+) -> dl_community::leave_survey::SurveyDmDelivery {
+    let error = err.to_string();
+    tracing::warn!(user_id, %error, "Leave-Survey-DM fehlgeschlagen");
+    dl_community::leave_survey::SurveyDmDelivery::Failed(error)
+}
+
 #[async_trait::async_trait]
 impl dl_community::leave_survey::SurveyPort for SurveyGlue {
     async fn send_survey_dm(
@@ -2025,7 +2041,9 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
         user_id: u64,
         embed: serde_json::Value,
         components: serde_json::Value,
-    ) -> String {
+    ) -> dl_community::leave_survey::SurveyDmDelivery {
+        use dl_community::leave_survey::SurveyDmDelivery;
+
         let channel = match self
             .adapter
             .http
@@ -2033,16 +2051,20 @@ impl dl_community::leave_survey::SurveyPort for SurveyGlue {
             .await
         {
             Ok(channel) => channel,
-            Err(err) if err.to_string().contains("50007") => return "blocked".to_string(),
-            Err(_) => return "failed".to_string(),
+            Err(err) if is_discord_cannot_send_messages(&err) => return SurveyDmDelivery::Blocked,
+            Err(err) => return failed_survey_dm(user_id, err),
         };
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
-        match self.adapter.send_raw_public(channel.id.get(), &body).await {
-            Ok(_) => "sent".to_string(),
-            Err(err) if err.to_string().contains("50007") => "blocked".to_string(),
-            Err(_) => "failed".to_string(),
+        match self
+            .adapter
+            .send_raw_public_typed(channel.id.get(), &body)
+            .await
+        {
+            Ok(_) => SurveyDmDelivery::Sent,
+            Err(err) if is_discord_cannot_send_messages(&err) => SurveyDmDelivery::Blocked,
+            Err(err) => failed_survey_dm(user_id, err),
         }
     }
 

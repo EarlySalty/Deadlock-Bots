@@ -127,10 +127,51 @@ pub fn classify(
 
 // ── Discord-Seite ──────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SurveyDmDelivery {
+    Sent,
+    Blocked,
+    Failed(String),
+}
+
+impl SurveyDmDelivery {
+    fn status(&self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::Blocked => "blocked",
+            Self::Failed(_) => "failed",
+        }
+    }
+
+    fn log_fragment(&self) -> String {
+        match self {
+            Self::Sent => "sent".to_string(),
+            Self::Blocked => "blocked — erwartet, kein gemeinsamer Server mehr".to_string(),
+            Self::Failed(err) => format!("failed — {}", short_log_error(err)),
+        }
+    }
+}
+
+fn short_log_error(err: &str) -> String {
+    let cleaned = err.split_whitespace().collect::<Vec<_>>().join(" ");
+    if cleaned.is_empty() {
+        return "unbekannter Fehler".to_string();
+    }
+    if cleaned.chars().count() <= 180 {
+        return cleaned;
+    }
+    format!("{}…", cleaned.chars().take(179).collect::<String>())
+}
+
 #[async_trait::async_trait]
 pub trait SurveyPort: Send + Sync {
     /// DM mit Embed + Bucket-Select → "sent" | "blocked" | "failed".
-    async fn send_survey_dm(&self, user_id: u64, embed: Value, components: Value) -> String;
+    async fn send_survey_dm(
+        &self,
+        user_id: u64,
+        embed: Value,
+        components: Value,
+    ) -> SurveyDmDelivery;
     async fn post_log(&self, text: String);
     async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String>;
 }
@@ -245,21 +286,23 @@ impl LeaveSurvey {
             "options": options, "min_values": 1, "max_values": 1,
         }]}]);
 
-        let status = self.port.send_survey_dm(user_id, embed, components).await;
+        let delivery = self.port.send_survey_dm(user_id, embed, components).await;
+        let status = delivery.status();
         let _ = sqlx::query!(
             r#"
             UPDATE activity.member_leave_surveys
                SET dm_status = $1
              WHERE id = $2
             "#,
-            status.clone(),
+            status,
             survey_id,
         )
         .execute(&self.pool)
         .await;
+        let dm_log = delivery.log_fragment();
         self.port
             .post_log(format!(
-                "👋 Leave-Survey für <@{user_id}> (Bucket {bucket}, {days} Tage, DM: {status})"
+                "👋 Leave-Survey für <@{user_id}> (Bucket {bucket}, {days} Tage, DM: {dm_log})"
             ))
             .await;
     }
@@ -617,6 +660,24 @@ mod tests {
         assert_eq!(reason_options("B").len(), 7);
         assert_eq!(reason_options("C").len(), 6);
     }
+
+    #[test]
+    fn survey_dm_delivery_logtexte() {
+        assert_eq!(SurveyDmDelivery::Sent.status(), "sent");
+        assert_eq!(SurveyDmDelivery::Blocked.status(), "blocked");
+        assert_eq!(
+            SurveyDmDelivery::Failed("kaputt".to_string()).status(),
+            "failed"
+        );
+        assert_eq!(
+            SurveyDmDelivery::Blocked.log_fragment(),
+            "blocked — erwartet, kein gemeinsamer Server mehr"
+        );
+        assert_eq!(
+            SurveyDmDelivery::Failed("  Discord\nFehler  ".to_string()).log_fragment(),
+            "failed — Discord Fehler"
+        );
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -629,8 +690,13 @@ mod pg_tests {
 
     #[async_trait::async_trait]
     impl SurveyPort for MockSurveyPort {
-        async fn send_survey_dm(&self, _user_id: u64, _embed: Value, _components: Value) -> String {
-            "sent".to_string()
+        async fn send_survey_dm(
+            &self,
+            _user_id: u64,
+            _embed: Value,
+            _components: Value,
+        ) -> SurveyDmDelivery {
+            SurveyDmDelivery::Sent
         }
 
         async fn post_log(&self, _text: String) {}

@@ -1,3 +1,11 @@
+## #185 — Bot spricht durchgehend Deutsch, Logs werden ehrlicher
+
+**Ausgangslage:** Ein paar Bot-Antworten und Moderations-Meldungen waren noch auf Englisch (Reste der Technik-Umstellung), und die Abschieds-Umfrage tauchte in unseren Logs immer als „fehlgeschlagen" auf — obwohl Discord solche Nachrichten nach einem Austritt schlicht nicht mehr zustellen lässt.
+
+**Was wurde geändert:** Alle sichtbaren Texte sind jetzt durchgehend deutsch (inklusive der KI-Begründungen in Moderations-Meldungen), und die Logs unterscheiden sauber zwischen „wirklich kaputt" und „von Discord erwartbar blockiert".
+
+**Wie es jetzt läuft:** Wer mit dem Bot zu tun hat, liest Deutsch. Und wenn im Maschinenraum etwas wirklich schiefgeht, sehen wir es jetzt sofort, statt es im Dauerrauschen falscher Alarme zu übersehen.
+
 ## #184 — Neues Onboarding: das Konzept steht
 
 **Ausgangslage:** Unser Onboarding war über die Zeit zu einem Flickenteppich aus fünf halbfertigen Systemen gewachsen — immer weniger Neue sind wirklich angekommen, und an den wichtigsten Stellen (Invite bekommen, erste Frage stellen, Anschluss finden) hat es am häufigsten gehakt.

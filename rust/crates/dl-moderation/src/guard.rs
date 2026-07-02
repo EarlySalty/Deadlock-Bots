@@ -72,22 +72,21 @@ pub const KEYWORDS: [&str; 15] = [
     "earning $",
 ];
 
-/// System-Prompt wortgleich (SCAM_DETECTION_SYSTEM_PROMPT).
+/// System-Prompt für den Text-Scam-Check.
 pub const SCAM_DETECTION_SYSTEM_PROMPT: &str =
     "You are a scam detector for a Discord gaming server. \
 Decide if the message is financial spam or a scam (earnings promises, investment schemes, \
 Telegram/contact requests, profit-sharing, referral schemes, or similar). \
 Reply only with valid JSON, no other text: \
-{\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence\"}";
+{\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence, in German\"}";
 
-/// Vision-Prompt wortgleich zum Original (`VISION_SCAM_PROMPT`). Liefert
-/// dasselbe JSON-Schema wie der Text-Scam-Check.
+/// Vision-Prompt für den Bild-Scam-Check. Liefert dasselbe JSON-Schema wie der Text-Scam-Check.
 pub const VISION_SCAM_PROMPT: &str =
     "You are a scam detector for a Discord gaming server. Look at the image. \
 Decide if it shows financial/crypto/casino/gambling/giveaway scam content \
 (fake withdrawals, betting bonuses, promo codes, fake celebrity crypto promos, \
 trading/earnings proof). Reply ONLY with valid JSON, no other text: \
-{\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence\"}";
+{\"is_scam\": true|false, \"confidence\": 0.0-1.0, \"reason\": \"max one sentence, in German\"}";
 
 // ── Pure Detektion ─────────────────────────────────────────────────────────
 
@@ -207,22 +206,26 @@ pub fn should_trigger(msgs: &[RecentMsg]) -> Option<(String, [i64; 4])> {
     }
     let mut reason_bits: Vec<String> = Vec::new();
     if multi_channel_burst {
-        reason_bits.push("multi-channel burst".to_string());
+        reason_bits.push("Burst über mehrere Kanäle".to_string());
     }
     if two_channel_sus && !multi_channel_burst {
-        reason_bits.push("suspicious content across 2+ channels".to_string());
+        reason_bits.push("verdächtige Inhalte in 2+ Kanälen".to_string());
     }
     if attachment_multi_channel && !multi_channel_burst {
-        reason_bits.push("attachments across 2+ channels".to_string());
+        reason_bits.push("Anhänge in 2+ Kanälen".to_string());
     }
     if keyword_hit {
-        reason_bits.push("keyword match".to_string());
+        reason_bits.push("Schlagwort-Treffer".to_string());
     }
     if attachment_count > 0 {
-        reason_bits.push(format!("{attachment_count} attachment(s)"));
+        if attachment_count == 1 {
+            reason_bits.push("1 Anhang".to_string());
+        } else {
+            reason_bits.push(format!("{attachment_count} Anhänge"));
+        }
     }
     let reason = if reason_bits.is_empty() {
-        "burst from new account".to_string()
+        "Burst von neuem Account".to_string()
     } else {
         reason_bits.join("; ")
     };
@@ -387,13 +390,13 @@ pub struct Incident {
     pub reason: String,
     pub meta: [i64; 4],
     pub messages: Vec<RecentMsg>,
-    /// Account-Erstellung (Unix) — für „Account age" im Log.
+    /// Account-Erstellung (Unix) — für „Account-Alter" im Log.
     pub account_created_at: i64,
-    /// Guild-Join (Unix) — für „Time since join" im Log.
+    /// Guild-Join (Unix) — für „Zeit seit Join" im Log.
     pub joined_at: Option<i64>,
     /// Wurde die User-DM zugestellt? (Log-Feld „DM sent").
     pub dm_sent: bool,
-    /// Hat Ban/Timeout geklappt? (Log-Feld „Actions").
+    /// Hat Ban/Timeout geklappt? (Log-Feld „Aktionen").
     pub action_ok: bool,
     /// Wie viele Nachrichten gelöscht? (Log-Feld „Deleted").
     pub deleted_count: i64,
@@ -1363,20 +1366,20 @@ mod tests {
 
     #[test]
     fn burst_trigger_wie_python() {
-        // 3 Nachrichten in 3 Channels → multi-channel burst
+        // 3 Nachrichten in 3 Channels → Burst über mehrere Kanäle
         let msgs = vec![
             msg(1, 30, "hi", 0),
             msg(2, 20, "hi", 0),
             msg(3, 10, "hi", 0),
         ];
         let (reason, meta) = should_trigger(&msgs).expect("burst");
-        assert!(reason.contains("multi-channel burst"));
+        assert!(reason.contains("Burst über mehrere Kanäle"));
         assert_eq!(meta, [3, 3, 0, 0]);
         // 2 Channels + Keyword → suspicious
         let msgs = vec![msg(1, 30, "join my telegram", 0), msg(2, 10, "hi", 0)];
         let (reason, meta) = should_trigger(&msgs).expect("sus");
-        assert!(reason.contains("suspicious content"));
-        assert!(reason.contains("keyword match"));
+        assert!(reason.contains("verdächtige Inhalte"));
+        assert!(reason.contains("Schlagwort-Treffer"));
         assert_eq!(meta[3], 1);
         // 2 harmlose Nachrichten in 2 Channels → nichts
         let msgs = vec![msg(1, 30, "hi", 0), msg(2, 10, "ho", 0)];
@@ -1384,7 +1387,7 @@ mod tests {
         // Anhänge in 2 Channels → attachments-Trigger
         let msgs = vec![msg(1, 30, "", 1), msg(2, 10, "", 1)];
         let (reason, _) = should_trigger(&msgs).expect("attach");
-        assert!(reason.contains("attachments across 2+ channels"));
+        assert!(reason.contains("Anhänge in 2+ Kanälen"));
     }
 
     #[test]

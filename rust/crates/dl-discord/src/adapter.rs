@@ -211,6 +211,15 @@ impl DiscordAdapter {
             .map_err(|err| err.to_string())
     }
 
+    /// Öffentliche Variante, wenn Aufrufer den typisierten Serenity-Fehler brauchen.
+    pub async fn send_raw_public_typed(
+        &self,
+        channel_id: u64,
+        body: &Map<String, Value>,
+    ) -> Result<u64, serenity::Error> {
+        self.send_raw(channel_id, body).await
+    }
+
     /// Öffentliche Variante für Panel-Restore/-Edit aus dem Interaction-Dispatch.
     pub async fn edit_raw_public(
         &self,
