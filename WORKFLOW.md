@@ -1,5 +1,13 @@
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
 
+## Fix Server-Sync Live-Findings (Rollback-Serialisierung + Namens-Matching)
+- Implementierungsworker gestartet fuer zwei Live-Dry-Run-Bugs: Rollback-Artefakt darf kein rohes `GuildModel` mit Nicht-String-Map-Keys serialisieren; Regeln muessen Emoji-/Case-/Alias-Namen nur beim Matching erkennen. Verbindlich: keine Commits/Pushes/Deploys/Restarts/Live-Guild-Aufrufe.
+- Kontext gelesen: `serversync.rs`, `rules.rs`, `format.rs`, `model.rs`, Diff/Apply-Pfade und Onboarding-Dokumente. Umsetzung geplant ueber Vec-basiertes Rollback-DTO, normalisierte Match-Keys plus kleine Alias-Tabelle, und differenziertes Delete-Label fuer Permission-Overwrites.
+- Implementiert: Rollback-Artefakt nutzt `RollbackGuildModel` mit Vecs fuer Kategorien, Kanaele, Rollen, Overwrites und BotMessages; Verify/Restore baut daraus validiert wieder ein `GuildModel`. Pflicht-Roundtrip mit echten OverwriteKeys und Hash-Stabilitaet ergaenzt.
+- Implementiert: Matching normalisiert nur Lookup-Schluessel (Deko an Raendern strippen, trim, lowercase); Kategorie-Aliases eng auf `Streamer Only` -> `Streamer` und `Support`/`❓Support` -> `Support/Tickets`; Kanal-Renames und Struktur-Moves nutzen denselben Matching-Pfad, Soll-Namen bleiben unveraendert ausser dokumentierten Kanal-Renames.
+- Implementiert: `human_summary` unterscheidet Delete-Labels fuer Struktur/BotMessage/PermissionOverwrite; Overwrite-Delete wird nicht mehr als manueller Archivierungsschritt gelabelt.
+- Verifikation gruen: `cargo fmt`; `SQLX_OFFLINE=true cargo test -p dl-server-as-code`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace --all-features --no-fail-fast`; `cargo fmt --check`; `git diff --check`.
+
 ## Welle-2a Server-Sync-Command dl-bot (2026-07-02)
 - Rework-Implementierungsworker gestartet fuer Kritiker-Befunde aus `/tmp/serversync-review-report.md`: Restore-Pfad, 180d-Retention/Privacy, Snapshot-Bindung, Attachment-Guard, Auth-vor-Parse und Tokenvergleich. Keine Commits/Pushes.
 - Rework umgesetzt: `/serversync restore` und `POST /serversync/restore` erzeugen eine normale Diff-Preview aus verifiziertem Rollback-Artefakt v2; v1-Artefakte werden mit klarer Meldung abgelehnt, Hash-Mismatch blockiert. Rollback-Artefakte speichern jetzt DynamicNamespaces und DocumentedExceptions.

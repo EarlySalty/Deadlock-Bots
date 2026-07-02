@@ -1,5 +1,6 @@
 #![allow(clippy::result_large_err)]
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -13,7 +14,10 @@ use axum::{Json, Router};
 use chrono::{SecondsFormat, Utc};
 use dl_discord::{BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec};
 use dl_server_as_code::diff::ServerDiff;
-use dl_server_as_code::{ApplyOptions, ApplyReport, SnapshotImportReport};
+use dl_server_as_code::{
+    ApplyOptions, ApplyReport, BotMessageSpec, CategorySpec, ChannelSpec, GuildModel,
+    PermissionOverwriteSpec, RoleSpec, SnapshotImportReport,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serenity::all::GuildId;
@@ -137,13 +141,78 @@ pub struct MemberRoleAssignment {
     pub role_ids: Vec<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RollbackGuildModel {
+    pub guild_id: u64,
+    pub categories: Vec<CategorySpec>,
+    pub channels: Vec<ChannelSpec>,
+    pub roles: Vec<RoleSpec>,
+    pub overwrites: Vec<PermissionOverwriteSpec>,
+    pub bot_messages: Vec<BotMessageSpec>,
+}
+
+impl RollbackGuildModel {
+    fn from_model(model: &GuildModel) -> Self {
+        Self {
+            guild_id: model.guild_id,
+            categories: model.categories.values().cloned().collect(),
+            channels: model.channels.values().cloned().collect(),
+            roles: model.roles.values().cloned().collect(),
+            overwrites: model.overwrites.values().cloned().collect(),
+            bot_messages: model.bot_messages.values().cloned().collect(),
+        }
+    }
+
+    fn to_model(&self) -> ServerSyncResult<GuildModel> {
+        let mut model = GuildModel::new(self.guild_id);
+
+        model.categories = collect_unique_by(&self.categories, "Kategorie", |category| {
+            ensure_spec_guild(
+                "Kategorie",
+                category.category_id,
+                category.guild_id,
+                self.guild_id,
+            )?;
+            Ok(category.category_id)
+        })?;
+        model.channels = collect_unique_by(&self.channels, "Kanal", |channel| {
+            ensure_spec_guild("Kanal", channel.channel_id, channel.guild_id, self.guild_id)?;
+            Ok(channel.channel_id)
+        })?;
+        model.roles = collect_unique_by(&self.roles, "Rolle", |role| {
+            ensure_spec_guild("Rolle", role.role_id, role.guild_id, self.guild_id)?;
+            Ok(role.role_id)
+        })?;
+        model.overwrites = collect_unique_by(&self.overwrites, "Rechte-Overwrite", |overwrite| {
+            ensure_spec_guild(
+                "Rechte-Overwrite",
+                overwrite.key.channel_id,
+                overwrite.guild_id,
+                self.guild_id,
+            )?;
+            Ok(overwrite.key.clone())
+        })?;
+        model.bot_messages = collect_unique_by(&self.bot_messages, "Bot-Nachricht", |message| {
+            ensure_spec_guild(
+                "Bot-Nachricht",
+                message.channel_id,
+                message.guild_id,
+                self.guild_id,
+            )?;
+            Ok((message.channel_id, message.message_key.clone()))
+        })?;
+
+        Ok(model)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RollbackArtifact {
     pub version: String,
     pub guild_id: u64,
     pub created_at: String,
     pub snapshot_id: i64,
-    pub structure_snapshot: dl_server_as_code::GuildModel,
+    pub structure_snapshot: RollbackGuildModel,
     pub dynamic_namespaces: Vec<dl_server_as_code::DynamicNamespace>,
     pub documented_exceptions: Vec<dl_server_as_code::DocumentedException>,
     pub member_role_assignments: Vec<MemberRoleAssignment>,
@@ -391,9 +460,9 @@ impl ServerSyncOps for ServerSyncService {
         let artifact = RollbackArtifact {
             version: ROLLBACK_VERSION.to_string(),
             guild_id: self.guild_id,
-            created_at: created_at.clone(),
+            created_at,
             snapshot_id: report.snapshot_id,
-            structure_snapshot: model,
+            structure_snapshot: RollbackGuildModel::from_model(&model),
             dynamic_namespaces: derivation.dynamic_namespaces,
             documented_exceptions: derivation.exceptions,
             member_role_assignments,
@@ -503,8 +572,9 @@ impl ServerSyncOps for ServerSyncService {
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
                 .await?;
+        let rollback_model = artifact.structure_snapshot.to_model()?;
         let diff = dl_server_as_code::diff_models_with_options(
-            &artifact.structure_snapshot,
+            &rollback_model,
             &live,
             &artifact.dynamic_namespaces,
             &artifact.documented_exceptions,
@@ -605,6 +675,42 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
     })
 }
 
+fn collect_unique_by<T, K, F>(
+    specs: &[T],
+    label: &str,
+    mut key_fn: F,
+) -> ServerSyncResult<BTreeMap<K, T>>
+where
+    T: Clone,
+    K: Clone + Ord + std::fmt::Debug,
+    F: FnMut(&T) -> ServerSyncResult<K>,
+{
+    let mut out = BTreeMap::new();
+    for spec in specs {
+        let key = key_fn(spec)?;
+        if out.insert(key.clone(), spec.clone()).is_some() {
+            return Err(ServerSyncError::bad_request(format!(
+                "Rollback-Artefakt enthaelt doppelten {label}-Key {key:?}"
+            )));
+        }
+    }
+    Ok(out)
+}
+
+fn ensure_spec_guild(
+    label: &str,
+    object_id: u64,
+    actual_guild_id: u64,
+    expected_guild_id: u64,
+) -> ServerSyncResult<()> {
+    if actual_guild_id == expected_guild_id {
+        return Ok(());
+    }
+    Err(ServerSyncError::bad_request(format!(
+        "Rollback-Artefakt enthaelt {label} {object_id} fuer Guild {actual_guild_id}, erwartet {expected_guild_id}"
+    )))
+}
+
 fn id_to_i64(value: u64) -> ServerSyncResult<i64> {
     i64::try_from(value)
         .map_err(|_| ServerSyncError::bad_request("Discord-ID passt nicht in BIGINT"))
@@ -659,6 +765,7 @@ fn verify_rollback_artifact(
             "Rollback-Artefakt {loaded_id} gehoert nicht zu Guild {expected_guild_id}"
         )));
     }
+    artifact.structure_snapshot.to_model()?;
     Ok(artifact)
 }
 
@@ -1231,6 +1338,9 @@ mod tests {
 
     use axum::body::Body;
     use axum::http::Request;
+    use dl_server_as_code::{
+        BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, OverwriteKey, RoleSpec, TargetKind,
+    };
     use tower::ServiceExt;
 
     use super::*;
@@ -1379,7 +1489,7 @@ mod tests {
             guild_id: GUILD_ID,
             created_at: "2026-07-02T00:00:00.000Z".to_string(),
             snapshot_id: 10,
-            structure_snapshot: dl_server_as_code::GuildModel::new(GUILD_ID),
+            structure_snapshot: RollbackGuildModel::from_model(&GuildModel::new(GUILD_ID)),
             dynamic_namespaces: Vec::new(),
             documented_exceptions: Vec::new(),
             member_role_assignments: vec![MemberRoleAssignment {
@@ -1391,6 +1501,127 @@ mod tests {
         .expect("artifact value")
     }
 
+    fn rollback_roundtrip_model() -> GuildModel {
+        let mut model = GuildModel::new(GUILD_ID);
+        model.categories.insert(
+            100,
+            CategorySpec {
+                guild_id: GUILD_ID,
+                category_id: 100,
+                name: "🗨️Chat".to_string(),
+                position: 1,
+            },
+        );
+        model.channels.insert(
+            200,
+            ChannelSpec {
+                guild_id: GUILD_ID,
+                channel_id: 200,
+                name: "⚖️hier-starten-regelwerk".to_string(),
+                kind: ChannelKind::Text,
+                topic: Some("Regeln".to_string()),
+                position: 1,
+                parent_category_id: Some(100),
+                nsfw: false,
+                bitrate: None,
+                user_limit: None,
+                rate_limit_per_user: None,
+                status: None,
+            },
+        );
+        model.channels.insert(
+            201,
+            ChannelSpec {
+                guild_id: GUILD_ID,
+                channel_id: 201,
+                name: "Voice".to_string(),
+                kind: ChannelKind::Voice,
+                topic: None,
+                position: 2,
+                parent_category_id: Some(100),
+                nsfw: false,
+                bitrate: Some(64_000),
+                user_limit: Some(5),
+                rate_limit_per_user: None,
+                status: Some("offen".to_string()),
+            },
+        );
+        model.roles.insert(
+            GUILD_ID,
+            RoleSpec {
+                guild_id: GUILD_ID,
+                role_id: GUILD_ID,
+                name: "@everyone".to_string(),
+                color: 0,
+                hoist: false,
+                mentionable: false,
+                managed: false,
+                permissions_bitmask: 0,
+                position: 0,
+            },
+        );
+        model.roles.insert(
+            300,
+            RoleSpec {
+                guild_id: GUILD_ID,
+                role_id: 300,
+                name: "VIP".to_string(),
+                color: 0xff00ff,
+                hoist: true,
+                mentionable: true,
+                managed: false,
+                permissions_bitmask: 42,
+                position: 3,
+            },
+        );
+        for overwrite in [
+            PermissionOverwriteSpec {
+                guild_id: GUILD_ID,
+                key: OverwriteKey {
+                    channel_id: 200,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                },
+                allow_bits: 1,
+                deny_bits: 2,
+            },
+            PermissionOverwriteSpec {
+                guild_id: GUILD_ID,
+                key: OverwriteKey {
+                    channel_id: 200,
+                    target_kind: TargetKind::Member,
+                    target_id: 400,
+                },
+                allow_bits: 4,
+                deny_bits: 8,
+            },
+            PermissionOverwriteSpec {
+                guild_id: GUILD_ID,
+                key: OverwriteKey {
+                    channel_id: 201,
+                    target_kind: TargetKind::Role,
+                    target_id: 300,
+                },
+                allow_bits: 16,
+                deny_bits: 32,
+            },
+        ] {
+            model.overwrites.insert(overwrite.key.clone(), overwrite);
+        }
+        model.bot_messages.insert(
+            (200, "rules-panel".to_string()),
+            BotMessageSpec {
+                guild_id: GUILD_ID,
+                channel_id: 200,
+                message_key: "rules-panel".to_string(),
+                message_kind: "panel".to_string(),
+                message_id: Some(500),
+                content_hash: Some("hash".to_string()),
+            },
+        );
+        model
+    }
+
     #[test]
     fn rollback_artifact_v2_wird_akzeptiert() {
         let value = v2_artifact_value();
@@ -1398,6 +1629,49 @@ mod tests {
         let artifact = verify_rollback_artifact(7, &hash, value, GUILD_ID).expect("artifact");
         assert_eq!(artifact.version, ROLLBACK_VERSION);
         assert_eq!(artifact.member_role_assignments.len(), 1);
+    }
+
+    #[test]
+    fn rollback_artifact_serialisiert_vec_dto_mit_overwrites_hashstabil() {
+        let model = rollback_roundtrip_model();
+        let value = serde_json::to_value(RollbackArtifact {
+            version: ROLLBACK_VERSION.to_string(),
+            guild_id: GUILD_ID,
+            created_at: "2026-07-02T00:00:00.000Z".to_string(),
+            snapshot_id: 10,
+            structure_snapshot: RollbackGuildModel::from_model(&model),
+            dynamic_namespaces: Vec::new(),
+            documented_exceptions: Vec::new(),
+            member_role_assignments: vec![MemberRoleAssignment {
+                member_id: 1,
+                role_ids: vec![2, 3],
+            }],
+            native_onboarding_config: json!({"enabled": true}),
+        })
+        .expect("artifact value");
+
+        assert!(value["structure_snapshot"]["categories"].is_array());
+        assert!(value["structure_snapshot"]["channels"].is_array());
+        assert!(value["structure_snapshot"]["roles"].is_array());
+        assert!(value["structure_snapshot"]["overwrites"].is_array());
+        assert!(value["structure_snapshot"]["bot_messages"].is_array());
+
+        let hash = sha256_json_value(&value).expect("hash");
+        let roundtrip_value: Value =
+            serde_json::from_str(&serde_json::to_string(&value).expect("json text"))
+                .expect("roundtrip value");
+        assert_eq!(
+            sha256_json_value(&roundtrip_value).expect("roundtrip hash"),
+            hash
+        );
+
+        let artifact =
+            verify_rollback_artifact(7, &hash, roundtrip_value, GUILD_ID).expect("artifact");
+        let restored = artifact
+            .structure_snapshot
+            .to_model()
+            .expect("structure snapshot");
+        assert_eq!(restored, model);
     }
 
     #[test]

@@ -58,6 +58,15 @@ const DOCUMENTED_STRUCTURE_MOVES: &[(&str, &str)] = &[
     ("deadlock-invite", "Chat"),
 ];
 
+// Matching-only Alias-Tabelle fuer Live-Namen, die nicht 1:1 aus Dekoration/Case
+// ableitbar sind. Keine dieser Aliases schreibt Namen ins Soll-Modell.
+// Live-Dry-Run 2026-07-02: `Streamer Only` ist die Streamer-Kategorie;
+// `❓Support` ist die dokumentierte Kategorie `Support/Tickets`.
+const CATEGORY_MATCH_ALIASES: &[(&str, &str)] = &[
+    ("streamer only", "Streamer"),
+    ("support", "Support/Tickets"),
+];
+
 const FUNCTIONAL_EXCEPTION_USER_IDS: &[DiscordId] = &[
     271_549_384_787_755_008,
     702_594_328_328_929_331,
@@ -169,7 +178,7 @@ pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
     apply_everyone_basis(&mut desired, &mut ctx);
 
     for category_name in EXPECTED_CATEGORIES {
-        if !ctx.category_ids.contains_key(*category_name) {
+        if ctx.category_id(category_name).is_none() {
             ctx.warn_once(
                 "missing_category",
                 category_name,
@@ -178,7 +187,10 @@ pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
         }
     }
     for category in actual.categories.values() {
-        if !EXPECTED_CATEGORIES.contains(&category.name.as_str()) {
+        if !EXPECTED_CATEGORIES
+            .iter()
+            .any(|expected| category_matches_expected(&category.name, expected))
+        {
             ctx.warn_once(
                 "unknown_category",
                 &category.name,
@@ -261,14 +273,15 @@ impl<'a> RuleContext<'a> {
         let mut warning_keys = BTreeSet::new();
 
         for category in actual.categories.values() {
+            let match_key = category_match_key(&category.name);
             if category_ids
-                .insert(category.name.clone(), category.category_id)
+                .insert(match_key.clone(), category.category_id)
                 .is_some()
             {
-                let key = format!("duplicate_category:{}", category.name);
+                let key = format!("duplicate_category:{match_key}");
                 if warning_keys.insert(key) {
                     warnings.push(format!(
-                        "Kategorie `{}` kommt mehrfach vor; die letzte ID gewinnt fuer die Regelableitung",
+                        "Kategorie `{}` kollidiert beim Matching mehrfach; die letzte ID gewinnt fuer die Regelableitung",
                         category.name
                     ));
                 }
@@ -299,7 +312,7 @@ impl<'a> RuleContext<'a> {
     }
 
     fn category_id(&self, name: &str) -> Option<DiscordId> {
-        self.category_ids.get(name).copied()
+        self.category_ids.get(&category_match_key(name)).copied()
     }
 
     fn role_id(&mut self, name: &str) -> Option<DiscordId> {
@@ -394,7 +407,7 @@ fn apply_documented_structure_moves(desired: &mut GuildModel, ctx: &mut RuleCont
         for channel in desired
             .channels
             .values_mut()
-            .filter(|channel| channel.name == *channel_name)
+            .filter(|channel| channel_matches(&channel.name, &[*channel_name]))
         {
             channel.parent_category_id = Some(target_category_id);
         }
@@ -402,7 +415,7 @@ fn apply_documented_structure_moves(desired: &mut GuildModel, ctx: &mut RuleCont
 }
 
 fn documented_channel_rename(name: &str) -> Option<&'static str> {
-    match name {
+    match matching_key(name).as_str() {
         "hier-starten-regelwerk" => Some("regelwerk"),
         "rang-auswahl" => Some("deadlock-rang"),
         "lag-kompensator" => Some("server-support"),
@@ -797,7 +810,7 @@ fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContex
         let Some(name) = desired.channel_name(channel_id) else {
             continue;
         };
-        if name == "AFK" && desired.channel_parent(channel_id).is_none() {
+        if channel_matches(name, &["AFK"]) && desired.channel_parent(channel_id).is_none() {
             set_exact_overwrites(
                 desired,
                 ctx,
@@ -1330,7 +1343,31 @@ fn push_role_overwrite(
 }
 
 fn channel_matches(name: &str, candidates: &[&str]) -> bool {
-    candidates.contains(&name)
+    let name = matching_key(name);
+    candidates
+        .iter()
+        .any(|candidate| matching_key(candidate) == name)
+}
+
+fn category_matches_expected(name: &str, expected: &str) -> bool {
+    category_match_key(name) == matching_key(expected)
+}
+
+fn category_match_key(name: &str) -> String {
+    let key = matching_key(name);
+    for (alias, expected) in CATEGORY_MATCH_ALIASES {
+        if *alias == key {
+            return matching_key(expected);
+        }
+    }
+    key
+}
+
+fn matching_key(name: &str) -> String {
+    name.trim()
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric())
+        .trim()
+        .to_lowercase()
 }
 
 fn is_ticket_namespace_channel(name: &str) -> bool {
@@ -1359,6 +1396,12 @@ mod tests {
     const COACH_CHAT: u64 = 210;
     const TEAM_LEO: u64 = 211;
     const BOT_MESSAGE_CHANNEL: u64 = 212;
+    const VIP_CATEGORY: u64 = 213;
+    const STREAMER_CATEGORY: u64 = 214;
+    const DEADLOCK_ROUTER_CATEGORY: u64 = 215;
+    const SUPPORT_CATEGORY: u64 = 216;
+    const REGELWERK: u64 = 217;
+    const BETA_ZUGANG_EMOJI: u64 = 218;
     const BANNED_USER: u64 = 685_573_558_281_175_043;
     const BANNED_X2: u64 = 496_268_533_496_545_283;
     const BANNED_X4: u64 = 601_742_833_438_818_357;
@@ -1451,6 +1494,183 @@ mod tests {
             .categories
             .insert(COACHING_CATEGORY, category(COACHING_CATEGORY, "Coaching"));
         model
+    }
+
+    #[test]
+    fn live_category_matching_erkennt_emoji_case_und_explizite_aliases() {
+        for (live_name, expected_name) in [
+            ("🗨️Chat", "Chat"),
+            ("🎖️Coaching", "Coaching"),
+            ("vip", "VIP"),
+            ("Streamer Only", "Streamer"),
+            ("🛜Deadlock Router", "Deadlock Router"),
+            ("❓Support", "Support/Tickets"),
+        ] {
+            assert!(
+                category_matches_expected(live_name, expected_name),
+                "{live_name:?} muss {expected_name:?} matchen"
+            );
+        }
+    }
+
+    #[test]
+    fn documented_channel_renames_erkennen_emoji_deko_und_alt_namen() {
+        for (live_name, target_name) in [
+            ("⚖️hier-starten-regelwerk", "regelwerk"),
+            ("hier-starten-regelwerk", "regelwerk"),
+            ("rang-auswahl", "deadlock-rang"),
+            ("lag-kompensator", "server-support"),
+            ("community-fragen", "frag-die-community"),
+            ("beta-zugang", "deadlock-invite"),
+            ("🔑beta-zugang", "deadlock-invite"),
+        ] {
+            assert_eq!(
+                documented_channel_rename(live_name),
+                Some(target_name),
+                "{live_name:?} muss nach {target_name:?} umbenennen"
+            );
+        }
+    }
+
+    #[test]
+    fn live_namensmatching_wendet_regeln_an_ohne_kategorien_umzubenennen() -> anyhow::Result<()> {
+        let mut actual = documented_categories_model();
+        actual
+            .categories
+            .get_mut(&CHAT_CATEGORY)
+            .expect("chat")
+            .name = "🗨️Chat".to_string();
+        actual
+            .categories
+            .get_mut(&COACHING_CATEGORY)
+            .expect("coaching")
+            .name = "🎖️Coaching".to_string();
+        actual
+            .categories
+            .insert(VIP_CATEGORY, category(VIP_CATEGORY, "vip"));
+        actual.categories.insert(
+            STREAMER_CATEGORY,
+            category(STREAMER_CATEGORY, "Streamer Only"),
+        );
+        actual.categories.insert(
+            DEADLOCK_ROUTER_CATEGORY,
+            category(DEADLOCK_ROUTER_CATEGORY, "🛜Deadlock Router"),
+        );
+        actual
+            .categories
+            .insert(SUPPORT_CATEGORY, category(SUPPORT_CATEGORY, "❓Support"));
+        actual
+            .roles
+            .insert(DL_RANG_ROLE, role(DL_RANG_ROLE, ROLE_DL_RANG, 0));
+        actual.roles.insert(3001, role(3001, ROLE_VIP, 0));
+        actual
+            .roles
+            .insert(3002, role(3002, ROLE_SERVER_BOOSTER, 0));
+        actual
+            .roles
+            .insert(3003, role(3003, ROLE_SERVER_UNTERSTUETZER, 0));
+        actual.roles.insert(3004, role(3004, ROLE_STREAMER, 0));
+        actual.roles.insert(3005, role(3005, ROLE_TICKET_TOOL, 0));
+        actual.channels.insert(
+            REGELWERK,
+            channel(
+                REGELWERK,
+                "⚖️hier-starten-regelwerk",
+                Some(EINGANGSBEREICH_CATEGORY),
+            ),
+        );
+        actual.channels.insert(
+            BETA_ZUGANG,
+            channel(BETA_ZUGANG, "beta-zugang", Some(EINGANGSBEREICH_CATEGORY)),
+        );
+        actual.channels.insert(
+            BETA_ZUGANG_EMOJI,
+            channel(
+                BETA_ZUGANG_EMOJI,
+                "🔑deadlock-invite",
+                Some(EINGANGSBEREICH_CATEGORY),
+            ),
+        );
+
+        let derived = derive_desired_model(&actual)?;
+
+        for missing in [
+            "Kategorie `Chat`",
+            "Kategorie `Coaching`",
+            "Kategorie `VIP`",
+            "Kategorie `Streamer`",
+            "Kategorie `Deadlock Router`",
+            "Kategorie `Support/Tickets`",
+        ] {
+            assert!(
+                !derived
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains(missing)),
+                "{missing} darf nicht als fehlend gewarnt werden: {:?}",
+                derived.warnings
+            );
+        }
+
+        assert_eq!(
+            derived
+                .desired
+                .categories
+                .get(&CHAT_CATEGORY)
+                .map(|c| c.name.as_str()),
+            Some("🗨️Chat")
+        );
+        assert_eq!(
+            derived
+                .desired
+                .categories
+                .get(&VIP_CATEGORY)
+                .map(|c| c.name.as_str()),
+            Some("vip")
+        );
+        assert_eq!(
+            derived
+                .desired
+                .categories
+                .get(&STREAMER_CATEGORY)
+                .map(|c| c.name.as_str()),
+            Some("Streamer Only")
+        );
+        assert_eq!(
+            derived
+                .desired
+                .channels
+                .get(&REGELWERK)
+                .map(|c| c.name.as_str()),
+            Some("regelwerk")
+        );
+        assert_eq!(
+            derived
+                .desired
+                .channels
+                .get(&BETA_ZUGANG)
+                .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
+            Some(("deadlock-invite", Some(CHAT_CATEGORY)))
+        );
+        assert_eq!(
+            derived
+                .desired
+                .channels
+                .get(&BETA_ZUGANG_EMOJI)
+                .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
+            Some(("🔑deadlock-invite", Some(CHAT_CATEGORY)))
+        );
+        assert!(derived
+            .desired
+            .overwrites
+            .keys()
+            .all(|key| key.channel_id != BETA_ZUGANG));
+        assert!(derived
+            .desired
+            .overwrites
+            .keys()
+            .all(|key| key.channel_id != BETA_ZUGANG_EMOJI));
+        Ok(())
     }
 
     #[test]
