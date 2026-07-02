@@ -724,9 +724,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Server-Sync-Orchestrator :8901 — loopback-only plus X-Internal-Token.
-    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN");
+    // Gleiche Token-Kette wie der Master-Broker; SERVERSYNC_INTERNAL_TOKEN nur als Override.
+    let serversync_token = env("SERVERSYNC_INTERNAL_TOKEN")
+        .or_else(|| env("MASTER_BROKER_TOKEN"))
+        .or_else(|| env("MAIN_BOT_INTERNAL_TOKEN"))
+        .or_else(|| env("TWITCH_INTERNAL_API_TOKEN"));
     if serversync_token.is_none() {
-        tracing::warn!("SERVERSYNC_INTERNAL_TOKEN fehlt — Server-Sync-HTTP-Routen liefern 403");
+        tracing::warn!(
+            "Kein interner Token (SERVERSYNC_INTERNAL_TOKEN/MASTER_BROKER_TOKEN/MAIN_BOT_INTERNAL_TOKEN/TWITCH_INTERNAL_API_TOKEN) — Server-Sync-HTTP-Routen liefern 403"
+        );
     }
     let serversync_addr = format!("127.0.0.1:{}", serversync::PORT);
     let serversync_listener = tokio::net::TcpListener::bind(&serversync_addr)
