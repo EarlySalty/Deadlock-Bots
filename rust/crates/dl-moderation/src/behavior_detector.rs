@@ -23,6 +23,8 @@ pub const TIMEOUT_MINUTES: i64 = 1440;
 pub const PROPOSAL_TIMEOUT_MINUTES: i64 = 60;
 pub const CASE_COOLDOWN_SECONDS: i64 = 600;
 pub const HISTORY_MAX: usize = 20;
+pub const HISTORY_USER_MAX: usize = 128;
+pub const SUPPRESSED_USER_MAX: usize = 512;
 pub const EVIDENCE_IMAGE_LIMIT: usize = 4;
 
 pub const KEYWORDS: [&str; 15] = [
@@ -221,22 +223,31 @@ impl BehaviorDetector {
         now: i64,
     ) -> Vec<RecentMessage> {
         let mut history = self.history.lock().await;
-        let entry = history.entry(event.author_id).or_default();
-        entry.push_back(RecentMessage {
-            channel_id: event.channel_id,
-            message_id: event.message_id,
-            created_at: now,
-            content: event.content.clone(),
-            attachment_count: event.attachment_count,
-            image_count: event.image_attachment_count,
-            image_urls: event.image_attachment_urls.clone(),
-        });
-        while entry.len() > HISTORY_MAX {
-            entry.pop_front();
+        prune_history(&mut history, now, event.author_id);
+        let recent = {
+            let entry = history.entry(event.author_id).or_default();
+            entry.push_back(RecentMessage {
+                channel_id: event.channel_id,
+                message_id: event.message_id,
+                created_at: now,
+                content: event.content.clone(),
+                attachment_count: event.attachment_count,
+                image_count: event.image_attachment_count,
+                image_urls: event.image_attachment_urls.clone(),
+            });
+            while entry.len() > HISTORY_MAX {
+                entry.pop_front();
+            }
+            let cutoff = now - WINDOW_SECONDS;
+            entry.retain(|message| message.created_at >= cutoff);
+            entry.iter().cloned().collect()
+        };
+        while history.len() > HISTORY_USER_MAX {
+            if !evict_oldest_history(&mut history, event.author_id) {
+                break;
+            }
         }
-        let cutoff = now - WINDOW_SECONDS;
-        entry.retain(|message| message.created_at >= cutoff);
-        entry.iter().cloned().collect()
+        recent
     }
 
     async fn try_claim(&self, user_id: u64) -> bool {
@@ -254,10 +265,19 @@ impl BehaviorDetector {
     }
 
     async fn suppress_user(&self, user_id: u64, now: i64) {
-        self.suppressed_until
-            .lock()
-            .await
-            .insert(user_id, now + self.config.case_cooldown_seconds);
+        let mut suppressed = self.suppressed_until.lock().await;
+        suppressed.retain(|_, until| *until > now);
+        suppressed.insert(user_id, now + self.config.case_cooldown_seconds);
+        while suppressed.len() > SUPPRESSED_USER_MAX {
+            let Some(victim) = suppressed
+                .iter()
+                .min_by_key(|(user_id, until)| (*until, *user_id))
+                .map(|(user_id, _)| *user_id)
+            else {
+                break;
+            };
+            suppressed.remove(&victim);
+        }
     }
 
     async fn foreign_invite_code(&self, guild_id: u64, content: &str) -> Option<String> {
@@ -372,6 +392,48 @@ fn event_to_recent(event: &dl_discord::MessageEvent, now: i64) -> RecentMessage 
         attachment_count: event.attachment_count,
         image_count: event.image_attachment_count,
         image_urls: event.image_attachment_urls.clone(),
+    }
+}
+
+fn prune_history(
+    history: &mut HashMap<u64, VecDeque<RecentMessage>>,
+    now: i64,
+    protected_user_id: u64,
+) {
+    let cutoff = now - WINDOW_SECONDS;
+    history.retain(|_, messages| {
+        messages.retain(|message| message.created_at >= cutoff);
+        !messages.is_empty()
+    });
+    while history.len() >= HISTORY_USER_MAX && !history.contains_key(&protected_user_id) {
+        if !evict_oldest_history(history, protected_user_id) {
+            break;
+        }
+    }
+}
+
+fn evict_oldest_history(
+    history: &mut HashMap<u64, VecDeque<RecentMessage>>,
+    protected_user_id: u64,
+) -> bool {
+    let victim = history
+        .iter()
+        .filter(|(user_id, _)| **user_id != protected_user_id)
+        .min_by_key(|(user_id, messages)| {
+            (
+                messages
+                    .back()
+                    .map(|message| message.created_at)
+                    .unwrap_or(i64::MIN),
+                **user_id,
+            )
+        })
+        .map(|(user_id, _)| *user_id);
+    if let Some(user_id) = victim {
+        history.remove(&user_id);
+        true
+    } else {
+        false
     }
 }
 
@@ -778,5 +840,31 @@ mod tests {
             .detect(1, &image_event(100, 12, 1002, created_at, joined_at))
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn detector_history_stays_bounded_for_many_one_shot_users() {
+        let detector = BehaviorDetector::new(Arc::new(FakePort::default()));
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 90 * 24 * 3600;
+        let joined_at = Some(now - 30 * 24 * 3600);
+
+        for idx in 0..160 {
+            detector
+                .detect(
+                    1,
+                    &event(
+                        10_000 + idx,
+                        20,
+                        30_000 + idx,
+                        "normale nachricht",
+                        created_at,
+                        joined_at,
+                    ),
+                )
+                .await;
+        }
+
+        assert!(detector.history.lock().await.len() <= 128);
     }
 }

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value;
 use sqlx::PgPool;
 
-use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision};
+use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision, PolicyDecisionSource};
 use crate::behavior_detector::{BehaviorDetector, BehaviorSignal};
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
 use crate::content_analyzer::{ContentModerationPipeline, ModerationInput};
@@ -183,16 +183,20 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 ModerationInput::new(event.content.clone(), event.image_attachment_urls.clone());
             self.pipeline.evaluate(&input).await
         };
-        let decision = self
+        let outcome = self
             .policy
-            .decide_combined(content_verdict.as_ref(), behavior_signal.as_ref());
+            .decide_combined_outcome(content_verdict.as_ref(), behavior_signal.as_ref());
+        let decision = outcome.decision;
         if matches!(decision, PolicyDecision::Ignore) {
             return;
         };
 
-        let Some(verdict) =
-            content_verdict.or_else(|| behavior_signal.as_ref().map(behavior_verdict))
-        else {
+        let verdict = match outcome.source {
+            Some(PolicyDecisionSource::Behavior) => behavior_signal.as_ref().map(behavior_verdict),
+            Some(PolicyDecisionSource::Content) => content_verdict,
+            None => content_verdict.or_else(|| behavior_signal.as_ref().map(behavior_verdict)),
+        };
+        let Some(verdict) = verdict else {
             return;
         };
         self.persist_execute_and_post(guild_id, event, verdict, behavior_signal, decision)
@@ -212,7 +216,14 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             PolicyDecision::Proposal { .. } => "proposed",
             PolicyDecision::Ignore => "ignored",
         };
-        let draft = self.case_draft(guild_id, event, &verdict, behavior_signal.as_ref(), action);
+        let draft = self.case_draft(
+            guild_id,
+            event,
+            &verdict,
+            behavior_signal.as_ref(),
+            action,
+            &decision,
+        );
         let Some(case_id) = self.store.insert_case(draft).await else {
             tracing::warn!(
                 guild_id,
@@ -237,7 +248,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                     .delete_message(
                         event.channel_id,
                         event.message_id,
-                        "PLATZHALTER: Auto-Delete-Audit-Reason",
+                        "Automatische Moderation: Nachricht entfernt",
                     )
                     .await;
                 executed_actions.push(format!("delete:{}", if deleted { "ok" } else { "failed" }));
@@ -249,7 +260,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                                 guild_id,
                                 event.author_id,
                                 timeout_minutes,
-                                "PLATZHALTER: Auto-Timeout-Audit-Reason",
+                                "Automatische Moderation: Timeout",
                             )
                             .await;
                         executed_actions.push(format!(
@@ -261,11 +272,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                     ModerationAction::Ban => {
                         let banned = self
                             .port
-                            .ban_member(
-                                guild_id,
-                                event.author_id,
-                                "PLATZHALTER: Auto-Ban-Audit-Reason",
-                            )
+                            .ban_member(guild_id, event.author_id, "Automatische Moderation: Bann")
                             .await;
                         executed_actions
                             .push(format!("ban:{}", if banned { "ok" } else { "failed" }));
@@ -315,6 +322,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         verdict: &ModerationVerdict,
         behavior_signal: Option<&BehaviorSignal>,
         action: &str,
+        policy_decision: &PolicyDecision,
     ) -> CaseDraft {
         let source = match behavior_signal {
             Some(signal)
@@ -336,7 +344,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             user_id: event.author_id,
             user_tag: event.author_display_name.clone(),
             content: event.content.clone(),
-            category: verdict.verification.category.as_label().to_string(),
+            category: effective_category_label(verdict, behavior_signal),
             confidence: verdict.verification.confidence,
             reason: verdict.verification.reason.clone(),
             action: action.to_string(),
@@ -367,8 +375,13 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 },
                 "trigger": verdict.trigger,
                 "behavior": behavior_signal.map(behavior_signal_raw),
+                "policy": {
+                    "action": action,
+                    "timeout_minutes": policy_timeout_minutes(policy_decision),
+                },
             })
             .to_string(),
+            timeout_minutes: policy_timeout_minutes(policy_decision),
             escalated_with_context: false,
         }
     }
@@ -385,7 +398,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .delete_message(
                 case.channel_id,
                 case.message_id,
-                "PLATZHALTER: Accept-Delete-Audit-Reason",
+                "Von Moderator bestätigt: Nachricht entfernt",
             )
             .await;
         let _timed_out = self
@@ -393,12 +406,14 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .timeout_member(
                 case.guild_id,
                 case.user_id,
-                self.policy.config().timeout_minutes,
-                "PLATZHALTER: Accept-Timeout-Audit-Reason",
+                case.timeout_minutes
+                    .filter(|minutes| *minutes > 0)
+                    .unwrap_or_else(|| self.policy.config().timeout_minutes),
+                "Von Moderator bestätigt: Timeout",
             )
             .await;
         self.store.resolve_case(case_id, "accepted", mod_id).await;
-        ReviewOutcome::Done("PLATZHALTER: Accept-Reply".to_string())
+        ReviewOutcome::Done("Übernommen — Nachricht gelöscht und Timeout gesetzt.".to_string())
     }
 
     pub async fn ban_case(&self, case_id: &str, mod_id: u64) -> ReviewOutcome {
@@ -413,15 +428,15 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .delete_message(
                 case.channel_id,
                 case.message_id,
-                "PLATZHALTER: Ban-Delete-Audit-Reason",
+                "Von Moderator bestätigt: Nachricht entfernt (Bann)",
             )
             .await;
         let _banned = self
             .port
-            .ban_member(case.guild_id, case.user_id, "PLATZHALTER: Ban-Audit-Reason")
+            .ban_member(case.guild_id, case.user_id, "Von Moderator bestätigt: Bann")
             .await;
         self.store.resolve_case(case_id, "banned", mod_id).await;
-        ReviewOutcome::Done("PLATZHALTER: Ban-Reply".to_string())
+        ReviewOutcome::Done("Gebannt — Nachricht gelöscht.".to_string())
     }
 
     pub async fn deny_case(&self, case_id: &str, mod_id: u64, reason: &str) -> ReviewOutcome {
@@ -434,7 +449,7 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         self.store
             .resolve_case_denied(case_id, mod_id, reason)
             .await;
-        ReviewOutcome::Done("PLATZHALTER: Deny-Reply".to_string())
+        ReviewOutcome::Done("Verworfen — keine Aktion, Nachricht bleibt.".to_string())
     }
 
     pub async fn untimeout_case(&self, case_id: &str, mod_id: u64) -> ReviewOutcome {
@@ -449,13 +464,13 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .untimeout_member(
                 case.guild_id,
                 case.user_id,
-                "PLATZHALTER: Timeout-Reversal-Audit-Reason",
+                "Timeout durch Moderator aufgehoben",
             )
             .await;
         self.store
             .resolve_case(case_id, "timeout_reversed", mod_id)
             .await;
-        ReviewOutcome::Done("PLATZHALTER: Timeout-Reversal-Reply".to_string())
+        ReviewOutcome::Done("Timeout aufgehoben.".to_string())
     }
 
     pub async fn unban_case(&self, case_id: &str, mod_id: u64) -> ReviewOutcome {
@@ -470,11 +485,11 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             .unban_member(
                 case.guild_id,
                 case.user_id,
-                "PLATZHALTER: Unban-Audit-Reason",
+                "Bann durch Moderator aufgehoben",
             )
             .await;
         self.store.resolve_case(case_id, "unbanned", mod_id).await;
-        ReviewOutcome::Done("PLATZHALTER: Unban-Reply".to_string())
+        ReviewOutcome::Done("Entbannt.".to_string())
     }
 }
 
@@ -495,6 +510,30 @@ fn behavior_verdict(signal: &BehaviorSignal) -> ModerationVerdict {
             raw_json: raw,
         },
         trigger: signal.trigger_label().to_string(),
+    }
+}
+
+fn effective_category_label(
+    verdict: &ModerationVerdict,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> String {
+    if let Some(signal) = behavior_signal {
+        if verdict.trigger == signal.trigger_label()
+            && verdict.verification.reason == signal.reason_code
+        {
+            return signal.trigger_label().to_string();
+        }
+    }
+    verdict.verification.category.as_label().to_string()
+}
+
+fn policy_timeout_minutes(decision: &PolicyDecision) -> Option<i64> {
+    match decision {
+        PolicyDecision::AutoExecute {
+            timeout_minutes, ..
+        }
+        | PolicyDecision::Proposal { timeout_minutes } => Some(*timeout_minutes),
+        PolicyDecision::Ignore => None,
     }
 }
 
@@ -577,6 +616,8 @@ mod tests {
         untimeouts: AtomicUsize,
         unbans: AtomicUsize,
         posts: AtomicUsize,
+        timeout_minutes: Mutex<Vec<i64>>,
+        posted_embeds: Mutex<Vec<Value>>,
     }
 
     #[async_trait::async_trait]
@@ -590,10 +631,11 @@ mod tests {
             &self,
             _guild_id: u64,
             _user_id: u64,
-            _minutes: i64,
+            minutes: i64,
             _reason: &str,
         ) -> bool {
             self.timeouts.fetch_add(1, Ordering::Relaxed);
+            self.timeout_minutes.lock().await.push(minutes);
             true
         }
 
@@ -615,10 +657,11 @@ mod tests {
         async fn post_moderation_case(
             &self,
             _channel_id: u64,
-            _embed: Value,
+            embed: Value,
             _components: Value,
         ) -> Option<u64> {
             self.posts.fetch_add(1, Ordering::Relaxed);
+            self.posted_embeds.lock().await.push(embed);
             Some(55)
         }
     }
@@ -648,6 +691,7 @@ mod tests {
                     confidence: draft.confidence,
                     reason: draft.reason.clone(),
                     action: draft.action.clone(),
+                    timeout_minutes: draft.timeout_minutes,
                 },
             );
             self.drafts.lock().await.push(draft);
@@ -685,6 +729,17 @@ mod tests {
     impl BehaviorDetectorPort for FakeBehaviorPort {
         async fn resolve_invite_guild(&self, _code: &str) -> Option<u64> {
             None
+        }
+    }
+
+    struct StaticInviteBehaviorPort {
+        guild_id: Option<u64>,
+    }
+
+    #[async_trait::async_trait]
+    impl BehaviorDetectorPort for StaticInviteBehaviorPort {
+        async fn resolve_invite_guild(&self, _code: &str) -> Option<u64> {
+            self.guild_id
         }
     }
 
@@ -731,6 +786,54 @@ mod tests {
                 scan_channel_ids: vec![42],
                 moderation_channel_id: 99,
                 enforce: true,
+            },
+        );
+        (moderator, port)
+    }
+
+    async fn memory_moderator(
+        analysis_responses: &[&str],
+        verification_responses: &[&str],
+        behavior_detector: Option<Arc<BehaviorDetector>>,
+        scan_channel_ids: Vec<u64>,
+        enforce: bool,
+    ) -> (Arc<ModerationSystem<MemoryStore>>, Arc<CountingPort>) {
+        let analyzer_text = Arc::new(StaticText::default());
+        {
+            let mut responses = analyzer_text.responses.lock().await;
+            for response in analysis_responses {
+                responses.push((*response).to_string());
+            }
+        }
+        let verifier_text = Arc::new(StaticText::default());
+        {
+            let mut responses = verifier_text.responses.lock().await;
+            for response in verification_responses {
+                responses.push((*response).to_string());
+            }
+        }
+        let port = Arc::new(CountingPort::default());
+        let moderator = ModerationSystem::new_with_store(
+            MemoryStore::default(),
+            ContentModerationPipeline::new(
+                ContentAnalyzer::new(
+                    analyzer_text,
+                    None,
+                    ContentAnalyzerConfig {
+                        text_model: "MiniMax-M3".to_string(),
+                        image_model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
+                ContentVerifier::new(verifier_text, None, Default::default()),
+                0.5,
+            ),
+            behavior_detector,
+            ActionPolicy::new(ActionPolicyConfig::default()),
+            port.clone(),
+            ModerationSystemConfig {
+                scan_channel_ids,
+                moderation_channel_id: 99,
+                enforce,
             },
         );
         (moderator, port)
@@ -783,6 +886,16 @@ mod tests {
         event
     }
 
+    fn scanned_text_event(message_id: u64, content: &str) -> dl_discord::MessageEvent {
+        let mut event = event_with_unpersistable_guild();
+        event.guild_id = Some(1);
+        event.message_id = message_id;
+        event.content = content.to_string();
+        event.author_created_at = chrono::Utc::now().timestamp() - 90 * 24 * 3600;
+        event.author_joined_at = Some(chrono::Utc::now().timestamp() - 30 * 24 * 3600);
+        event
+    }
+
     #[test]
     fn default_config_uses_single_moderation_channel() {
         let config = ModerationSystemConfig::default();
@@ -823,6 +936,57 @@ mod tests {
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn shadow_mode_persists_and_posts_without_discord_enforcement_actions() {
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
+            None,
+            vec![42],
+            false,
+        )
+        .await;
+
+        moderator
+            .handle_message(&scanned_text_event(101, "free crypto"))
+            .await;
+
+        assert_eq!(moderator.store.drafts.lock().await.len(), 1);
+        assert_eq!(moderator.store.review_messages.lock().await.len(), 1);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[] as &[i64]);
+        assert_eq!(
+            moderator.store.actions.lock().await.as_slice(),
+            &["auto_execute_shadow".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_enforce_mode_executes_auto_action() {
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
+            None,
+            vec![42],
+            true,
+        )
+        .await;
+
+        moderator
+            .handle_message(&scanned_text_event(102, "free crypto"))
+            .await;
+
+        assert_eq!(moderator.store.drafts.lock().await.len(), 1);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 1);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[1440]);
     }
 
     #[tokio::test]
@@ -876,5 +1040,61 @@ mod tests {
         assert_eq!(draft.source, "behavior");
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
         assert!(draft.ai_raw_json.contains("account_takeover"));
+    }
+
+    #[tokio::test]
+    async fn behavior_trigger_wins_persisted_and_embedded_verdict_when_it_decides_action() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(
+            &[
+                r#"{"category":"other","confidence":0.9,"reason":"content-other"}"#,
+                r#"{"category":"other","confidence":0.9,"reason":"content-other"}"#,
+            ],
+            &[
+                r#"{"confirmed":false,"category":"other","confidence":0.9,"reason":"content-unconfirmed"}"#,
+                r#"{"confirmed":false,"category":"other","confidence":0.9,"reason":"content-unconfirmed"}"#,
+            ],
+            Some(detector),
+            vec![10, 11],
+            false,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+        let mut first = image_event(300, 10, 1100, created_at, joined_at);
+        first.content = "ambiguous report".to_string();
+        let mut second = image_event(300, 11, 1101, created_at, joined_at);
+        second.content = "ambiguous report".to_string();
+
+        moderator.handle_message(&first).await;
+        moderator.handle_message(&second).await;
+
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.category, "account_takeover");
+        assert_eq!(draft.reason, "behavior:account_takeover");
+        let embed = port.posted_embeds.lock().await.pop().expect("embed");
+        let serialized = embed.to_string();
+        assert!(serialized.contains("account_takeover"));
+        assert!(serialized.contains("behavior:account_takeover"));
+        assert!(!serialized.contains("content-unconfirmed"));
+    }
+
+    #[tokio::test]
+    async fn accept_uses_timeout_minutes_from_behavior_proposal() {
+        let detector =
+            crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
+                guild_id: Some(2),
+            }));
+        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![42], true).await;
+
+        moderator
+            .handle_message(&scanned_text_event(1200, "join https://discord.gg/FOREIGN"))
+            .await;
+        let outcome = moderator.accept_case("case-1200", 999).await;
+
+        assert!(matches!(outcome, ReviewOutcome::Done(_)));
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[60]);
     }
 }

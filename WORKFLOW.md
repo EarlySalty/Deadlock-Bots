@@ -151,6 +151,17 @@ Phase-1-Fundament fuer Journey-State-Machine, Message-/Voice-/Interaction-Metada
 - Erfolgreiche Steam-Link-/Invite-Statusereignisse kommen weiterhin aus externen Steam-Bot-/Invite-Flows; Phase-1 stellt Eventtypen und `record_journey_event` bereit, verdrahtet aber nur die heute im dl-bot vorhandenen Gateway-Handler direkt.
 # Mod-Guard Rework (2026-07-02)
 
+## Rework Enforce/Verdict/Duration/Eviction (2026-07-02)
+
+## Ziel
+Vier bestaetigte Kritikerbefunde gezielt beheben: Enforce fail-safe Default Shadow, gespeicherter/angezeigter Verdict muss dem ausschlaggebenden Trigger folgen, Proposal-Timeout-Dauer muss bis Accept getragen werden, Behavior-/Invite-Maps muessen global begrenzt wachsen. TDD, kein Commit/Push.
+
+## Fortschritt
+- Rework gestartet: Worktree/Branch geprueft, relevante Dateien gelesen (`main.rs`, `moderation_system.rs`, `action_policy.rs`, `behavior_detector.rs`, `modglue.rs`). Keine Commits/Pushes.
+- Rote Regressionstests ergaenzt: Enforce-Env defaultet noch auf true/akzeptiert `yes`, Behavior-Verdict wird bei Takeover+Content-Other noch nicht primaer persistiert/gezeigt, Accept nutzt noch 1440 statt 60 Minuten, Behavior-History und Invite-Cache wachsen noch ueber Zielgrenzen.
+- Implementiert: Enforce-Reihenfolge `MODERATION_ENFORCE` > `MOD_ENFORCE` > `SECURITY_GUARD_ENFORCE`, Default Shadow und nur `1`/`true` scharf; Policy liefert Gewinnerquelle, sodass Behavior-Hauptverdict fuer Case/Embed gewinnt; Proposal-Timeout wird in `ai_raw.policy.timeout_minutes` persistiert und beim Accept genutzt; Behavior-History/Suppression und Invite-Resolve-Cache haben TTL-/Max-Eviction.
+- Verifikation: neue Regressionen gruen (`SQLX_OFFLINE=true cargo test -p dl-moderation`, gezielte `dl-bot`-Tests). Direktes `SQLX_OFFLINE=true ./scripts/check.sh` bleibt wegen bestehender `build_publisher`-DB-Tests ohne DSN rot; derselbe Check im vorhandenen Throwaway-DB-Wrapper `./scripts/central_test_db.sh bash -lc 'SQLX_OFFLINE=true ./scripts/check.sh'` lief gruen mit `OK — alle Checks grün.`.
+
 ## Adversarial Critic Härtung 1-4,6 (2026-07-02)
 
 ## Ziel

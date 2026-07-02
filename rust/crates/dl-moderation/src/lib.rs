@@ -868,6 +868,7 @@ impl AiModerator {
                 })
                 .collect(),
             ai_raw_json: verdict.raw_json.clone(),
+            timeout_minutes: None,
             escalated_with_context,
         }
     }

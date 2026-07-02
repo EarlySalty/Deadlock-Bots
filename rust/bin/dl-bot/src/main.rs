@@ -36,6 +36,24 @@ fn env_bool_default(name: &str, default: bool) -> bool {
         .unwrap_or(default)
 }
 
+fn moderation_enforce_from_lookup<F>(lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<String>,
+{
+    fn explicit_true(value: &str) -> bool {
+        matches!(value.to_ascii_lowercase().as_str(), "1" | "true")
+    }
+
+    lookup("MODERATION_ENFORCE")
+        .or_else(|| lookup("MOD_ENFORCE"))
+        .map(|value| explicit_true(&value))
+        .unwrap_or_else(|| {
+            lookup("SECURITY_GUARD_ENFORCE")
+                .map(|value| explicit_true(&value))
+                .unwrap_or(false)
+        })
+}
+
 fn env_u64_default(name: &str, default: u64) -> u64 {
     env(name)
         .and_then(|value| value.parse::<u64>().ok())
@@ -462,15 +480,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         fallback_invites,
     ));
     behavior_glue.refresh_invite_allowlist().await;
-    let moderation_enforce = env("MODERATION_ENFORCE")
-        .or_else(|| env("MOD_ENFORCE"))
-        .map(|value| {
-            matches!(
-                value.to_ascii_lowercase().as_str(),
-                "1" | "true" | "yes" | "on"
-            )
-        })
-        .unwrap_or_else(|| env_bool_default("SECURITY_GUARD_ENFORCE", true));
+    let moderation_enforce = moderation_enforce_from_lookup(env);
     tracing::info!(
         enforce = moderation_enforce,
         "Moderation Enforcement-Modus gelesen"
@@ -1202,4 +1212,40 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         return Ok(master::restart_exit_code());
     }
     Ok(std::process::ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::moderation_enforce_from_lookup;
+    use std::collections::HashMap;
+
+    fn lookup<'a>(vars: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
+        |key| vars.get(key).map(|value| (*value).to_string())
+    }
+
+    #[test]
+    fn moderation_enforce_defaults_to_shadow_when_all_vars_are_unset() {
+        let vars = HashMap::new();
+
+        assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn moderation_enforce_uses_ordered_strict_true_vars() {
+        let vars = HashMap::from([
+            ("MODERATION_ENFORCE", "false"),
+            ("MOD_ENFORCE", "true"),
+            ("SECURITY_GUARD_ENFORCE", "true"),
+        ]);
+        assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+
+        let vars = HashMap::from([("MOD_ENFORCE", "1")]);
+        assert!(moderation_enforce_from_lookup(lookup(&vars)));
+
+        let vars = HashMap::from([("SECURITY_GUARD_ENFORCE", "true")]);
+        assert!(moderation_enforce_from_lookup(lookup(&vars)));
+
+        let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
+        assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
 }

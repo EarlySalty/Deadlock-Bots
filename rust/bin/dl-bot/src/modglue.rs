@@ -22,6 +22,7 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
+const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
@@ -987,11 +988,9 @@ impl ReviewHandler {
     fn outcome_reply(outcome: dl_moderation::ReviewOutcome) -> BridgeReply {
         use dl_moderation::ReviewOutcome;
         match outcome {
-            ReviewOutcome::NotFound => {
-                BridgeReply::ephemeral_text("PLATZHALTER: Case-nicht-gefunden-Reply")
-            }
+            ReviewOutcome::NotFound => BridgeReply::ephemeral_text("Fall nicht gefunden."),
             ReviewOutcome::AlreadyHandled => {
-                BridgeReply::ephemeral_text("PLATZHALTER: Case-bereits-bearbeitet-Reply")
+                BridgeReply::ephemeral_text("Dieser Fall wurde bereits bearbeitet.")
             }
             ReviewOutcome::Done(text) => BridgeReply::ephemeral_text(text),
         }
@@ -1006,7 +1005,7 @@ impl InteractionHandler for ReviewHandler {
             .strip_prefix("aimod:")
             .unwrap_or_default();
         let Some((action, case_id)) = rest.split_once(':') else {
-            return BridgeReply::ephemeral_text("PLATZHALTER: Unbekannte-Aktion-Reply");
+            return BridgeReply::ephemeral_text("Unbekannte Aktion.");
         };
         let authorized = match action {
             "accept" | "deny" | "denysubmit" | "untimeout" => {
@@ -1016,7 +1015,7 @@ impl InteractionHandler for ReviewHandler {
             _ => true,
         };
         if !authorized {
-            return BridgeReply::ephemeral_text("PLATZHALTER: Keine-Berechtigung-Reply");
+            return BridgeReply::ephemeral_text("Dir fehlt die Berechtigung für diese Aktion.");
         }
         match action {
             "accept" => {
@@ -1035,11 +1034,11 @@ impl InteractionHandler for ReviewHandler {
             "deny" => BridgeReply {
                 modal: Some(dl_discord::ModalSpec {
                     custom_id: format!("aimod:denysubmit:{case_id}"),
-                    title: "PLATZHALTER: Deny-Modal-Titel".to_string(),
+                    title: "Fall verwerfen".to_string(),
                     fields: vec![dl_discord::ModalField {
                         custom_id: "reason".to_string(),
-                        label: "PLATZHALTER: Deny-Modal-Label".to_string(),
-                        placeholder: "PLATZHALTER: Deny-Modal-Placeholder".to_string(),
+                        label: "Grund".to_string(),
+                        placeholder: "Warum ist das kein Verstoß?".to_string(),
                         required: true,
                         min_length: 4,
                         max_length: 500,
@@ -1077,7 +1076,7 @@ impl InteractionHandler for ReviewHandler {
                     .await;
                 Self::outcome_reply(outcome)
             }
-            _ => BridgeReply::ephemeral_text("PLATZHALTER: Unbekannte-Aktion-Reply"),
+            _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
         }
     }
 }
@@ -1283,6 +1282,7 @@ fn truncate_chars(value: &str, limit: usize) -> String {
 struct InviteCacheEntry {
     guild_id: u64,
     expires_at: i64,
+    last_seen_at: i64,
 }
 
 struct BehaviorInviteResolver {
@@ -1334,25 +1334,28 @@ impl BehaviorInviteResolver {
     }
 
     async fn cached_guild_id(&self, code: &str, now: i64) -> Option<u64> {
-        self.cache
-            .lock()
-            .await
-            .get(code)
-            .filter(|entry| entry.expires_at > now)
-            .map(|entry| entry.guild_id)
+        let mut cache = self.cache.lock().await;
+        prune_invite_cache(&mut cache, now);
+        let entry = cache.get_mut(code).filter(|entry| entry.expires_at > now)?;
+        entry.last_seen_at = now;
+        Some(entry.guild_id)
     }
 
     async fn remember_resolve_result(&self, code: &str, guild_id: Option<u64>, now: i64) {
         let Some(guild_id) = guild_id else {
             return;
         };
-        self.cache.lock().await.insert(
+        let mut cache = self.cache.lock().await;
+        prune_invite_cache(&mut cache, now);
+        cache.insert(
             code.to_string(),
             InviteCacheEntry {
                 guild_id,
                 expires_at: now + INVITE_CACHE_TTL_SECONDS,
+                last_seen_at: now,
             },
         );
+        prune_invite_cache(&mut cache, now);
     }
 
     async fn resolve(&self, http: &Http, code: &str) -> Option<u64> {
@@ -1381,6 +1384,20 @@ impl BehaviorInviteResolver {
         }
         self.remember_resolve_result(code, guild_id, now).await;
         guild_id
+    }
+}
+
+fn prune_invite_cache(cache: &mut HashMap<String, InviteCacheEntry>, now: i64) {
+    cache.retain(|_, entry| entry.expires_at > now);
+    while cache.len() > INVITE_CACHE_MAX_ENTRIES {
+        let Some(victim) = cache
+            .iter()
+            .min_by_key(|(code, entry)| (entry.last_seen_at, entry.expires_at, (*code).clone()))
+            .map(|(code, _)| code.clone())
+        else {
+            break;
+        };
+        cache.remove(&victim);
     }
 }
 
@@ -2929,6 +2946,20 @@ mod tests {
         assert_eq!(resolver.cached_guild_id("foreign", now).await, Some(2));
     }
 
+    #[tokio::test]
+    async fn invite_resolver_cache_bleibt_global_begrenzt() {
+        let resolver = BehaviorInviteResolver::new(1, Vec::new());
+        let now = 1_000_000;
+
+        for idx in 0..300 {
+            resolver
+                .remember_resolve_result(&format!("code-{idx}"), Some(2), now)
+                .await;
+        }
+
+        assert!(resolver.cache.lock().await.len() <= 256);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn brain_retriever_uebergibt_db_und_separator_vor_dash_frage(
@@ -3056,7 +3087,7 @@ mod tests {
 
         assert_eq!(
             reply.content.as_deref(),
-            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+            Some("Dir fehlt die Berechtigung für diese Aktion.")
         );
     }
 
@@ -3075,7 +3106,7 @@ mod tests {
 
         assert_eq!(
             reply.content.as_deref(),
-            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+            Some("Dir fehlt die Berechtigung für diese Aktion.")
         );
     }
 
@@ -3094,7 +3125,7 @@ mod tests {
 
         assert_eq!(
             reply.content.as_deref(),
-            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+            Some("Dir fehlt die Berechtigung für diese Aktion.")
         );
     }
 

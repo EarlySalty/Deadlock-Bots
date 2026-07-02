@@ -22,50 +22,50 @@ pub struct CompactCaseEmbedInput {
 pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
     let mut fields = vec![
         json!({
-            "name": "PLATZHALTER: User-Feld",
+            "name": "Nutzer",
             "value": format!("<@{}> (`{}`)", input.user_id, truncate_chars(&input.user_tag, 80)),
             "inline": false,
         }),
         json!({
-            "name": "PLATZHALTER: Kanal-Feld",
-            "value": format!("<#{}> | [Jump]({})", input.channel_id, case_jump_url(input.guild_id, input.channel_id, input.message_id)),
+            "name": "Kanal",
+            "value": format!("<#{}> · [zur Nachricht]({})", input.channel_id, case_jump_url(input.guild_id, input.channel_id, input.message_id)),
             "inline": false,
         }),
         json!({
-            "name": "PLATZHALTER: Kategorie-Feld",
-            "value": input.verdict.verification.category.as_label(),
+            "name": "Kategorie",
+            "value": effective_category_label(&input.verdict, input.behavior_signal.as_ref()),
             "inline": true,
         }),
         json!({
-            "name": "PLATZHALTER: Confidence-Feld",
+            "name": "Sicherheit",
             "value": format!(
-                "Analyze {:.0}% | Verify {:.0}%",
+                "Analyse {:.0}% · Verifikation {:.0}%",
                 input.verdict.analysis.confidence * 100.0,
                 input.verdict.verification.confidence * 100.0
             ),
             "inline": true,
         }),
         json!({
-            "name": "PLATZHALTER: Begruendung-Feld",
+            "name": "Begründung",
             "value": truncate_chars(&input.verdict.verification.reason, DISCORD_FIELD_LIMIT),
             "inline": false,
         }),
         json!({
-            "name": "PLATZHALTER: Ausloeser-Feld",
+            "name": "Auslöser",
             "value": truncate_chars(&input.verdict.trigger, DISCORD_FIELD_LIMIT),
             "inline": false,
         }),
     ];
     if let Some(signal) = &input.behavior_signal {
         fields.push(json!({
-            "name": "PLATZHALTER: Verhalten-Trigger-Feld",
+            "name": "Verhaltensmuster",
             "value": signal.trigger_label(),
             "inline": true,
         }));
         fields.push(json!({
-            "name": "PLATZHALTER: Aktivitaetsfenster-Feld",
+            "name": "Aktivität",
             "value": format!(
-                "{} messages / {} channels / {}s",
+                "{} Nachrichten · {} Kanäle · {}s",
                 signal.evidence.message_count,
                 signal.evidence.channel_ids.len(),
                 signal.evidence.window_seconds
@@ -73,13 +73,13 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
             "inline": true,
         }));
         fields.push(json!({
-            "name": "PLATZHALTER: Verhalten-Signale-Feld",
+            "name": "Signale",
             "value": truncate_chars(&behavior_signal_summary(signal), DISCORD_FIELD_LIMIT),
             "inline": false,
         }));
         if !signal.evidence.image_urls.is_empty() {
             fields.push(json!({
-                "name": "PLATZHALTER: Beweisbilder-Feld",
+                "name": "Bilder",
                 "value": truncate_chars(&signal.evidence.image_urls.join("\n"), DISCORD_FIELD_LIMIT),
                 "inline": false,
             }));
@@ -87,7 +87,7 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
     }
     if !input.executed_actions.is_empty() {
         fields.push(json!({
-            "name": "PLATZHALTER: Aktionen-Feld",
+            "name": "Ausgeführt",
             "value": truncate_chars(&input.executed_actions.join("\n"), DISCORD_FIELD_LIMIT),
             "inline": false,
         }));
@@ -95,9 +95,9 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
 
     json!({
         "title": match input.policy_decision {
-            PolicyDecision::AutoExecute { .. } => "PLATZHALTER: Auto-Vollzug-Embed-Titel",
-            PolicyDecision::Proposal { .. } => "PLATZHALTER: Vorschlag-Embed-Titel",
-            PolicyDecision::Ignore => "PLATZHALTER: Ignoriert-Embed-Titel",
+            PolicyDecision::AutoExecute { .. } => "🚨 Automatisch vollzogen",
+            PolicyDecision::Proposal { .. } => "⚠️ Bitte prüfen",
+            PolicyDecision::Ignore => "ℹ️ Beobachtet",
         },
         "color": match input.policy_decision {
             PolicyDecision::AutoExecute { .. } => 0xED4245,
@@ -114,13 +114,13 @@ pub fn build_case_components(case_id: &str, policy_decision: &PolicyDecision) ->
             ModerationAction::Timeout => vec![json!({
                 "type": 2,
                 "style": 3,
-                "label": "PLATZHALTER: Timeout-aufheben-Button",
+                "label": "Timeout aufheben",
                 "custom_id": format!("aimod:untimeout:{case_id}"),
             })],
             ModerationAction::Ban => vec![json!({
                 "type": 2,
                 "style": 3,
-                "label": "PLATZHALTER: Entbannen-Button",
+                "label": "Entbannen",
                 "custom_id": format!("aimod:unban:{case_id}"),
             })],
         },
@@ -128,19 +128,19 @@ pub fn build_case_components(case_id: &str, policy_decision: &PolicyDecision) ->
             json!({
                 "type": 2,
                 "style": 3,
-                "label": "PLATZHALTER: Annehmen-Button",
+                "label": "Übernehmen",
                 "custom_id": format!("aimod:accept:{case_id}"),
             }),
             json!({
                 "type": 2,
                 "style": 4,
-                "label": "PLATZHALTER: Ban-Button",
+                "label": "Bannen",
                 "custom_id": format!("aimod:ban:{case_id}"),
             }),
             json!({
                 "type": 2,
                 "style": 2,
-                "label": "PLATZHALTER: Ablehnen-Button",
+                "label": "Verwerfen",
                 "custom_id": format!("aimod:deny:{case_id}"),
             }),
         ],
@@ -171,6 +171,20 @@ fn behavior_signal_summary(signal: &BehaviorSignal) -> String {
 
 fn case_jump_url(guild_id: u64, channel_id: u64, message_id: u64) -> String {
     format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}")
+}
+
+fn effective_category_label(
+    verdict: &ModerationVerdict,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> String {
+    if let Some(signal) = behavior_signal {
+        if verdict.trigger == signal.trigger_label()
+            && verdict.verification.reason == signal.reason_code
+        {
+            return signal.trigger_label().to_string();
+        }
+    }
+    verdict.verification.category.as_label().to_string()
 }
 
 fn truncate_chars(value: &str, limit: usize) -> String {
@@ -226,7 +240,7 @@ mod tests {
         let serialized = embed.to_string();
 
         assert!(!serialized.contains("Case-ID"));
-        assert!(serialized.contains("PLATZHALTER"));
+        assert!(serialized.contains("Kategorie"));
         assert!(serialized.contains("66%"));
         assert!(serialized.contains("88%"));
         assert!(serialized.contains("free crypto"));
@@ -243,7 +257,7 @@ mod tests {
         let serialized = components.to_string();
 
         assert!(serialized.contains("aimod:accept:case-123"));
-        assert!(serialized.contains("PLATZHALTER: Annehmen-Button"));
+        assert!(serialized.contains("Übernehmen"));
     }
 
     #[test]
@@ -304,7 +318,7 @@ mod tests {
 
         assert!(!serialized.contains("Case-ID"));
         assert!(serialized.contains("account_takeover"));
-        assert!(serialized.contains("2 messages / 2 channels / 30s"));
+        assert!(serialized.contains("2 Nachrichten · 2 Kanäle · 30s"));
         assert!(serialized.contains("https://img/1.png"));
 
         let components = build_case_components(

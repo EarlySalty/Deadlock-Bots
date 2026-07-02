@@ -1,7 +1,7 @@
 //! Persistenz: moderation.ai_moderation_cases + moderation.ai_moderation_ragebait_hits.
 
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{postgres::PgRow, Decode, PgPool, Postgres, Row, Transaction, Type};
 
 const RAGEBAIT_HITS_ID_LOCK_KEY: i64 = 0x5241_4745_4241_4954;
 
@@ -28,6 +28,7 @@ pub struct CaseDraft {
     pub trigger_type: Option<String>,
     pub attachments: Vec<CaseAttachment>,
     pub ai_raw_json: String,
+    pub timeout_minutes: Option<i64>,
     pub escalated_with_context: bool,
 }
 
@@ -44,6 +45,7 @@ pub struct CaseRecord {
     pub confidence: f64,
     pub reason: String,
     pub action: String,
+    pub timeout_minutes: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -235,24 +237,25 @@ impl ModerationStore {
 
     /// Case laden (für den Review-Flow). None, wenn nicht vorhanden.
     pub async fn fetch_case(&self, case_id: &str) -> Option<CaseRecord> {
-        let row = match sqlx::query!(
+        let row = match sqlx::query(
             r#"
             SELECT
-                case_id AS "case_id!",
-                guild_id AS "guild_id!",
-                channel_id AS "channel_id!",
-                message_id AS "message_id!",
-                user_id AS "user_id!",
+                case_id,
+                guild_id,
+                channel_id,
+                message_id,
+                user_id,
                 user_tag,
                 ai_category,
                 ai_confidence,
                 ai_reason,
+                ai_raw::text AS ai_raw,
                 action
             FROM moderation.ai_moderation_cases
             WHERE case_id = $1
             "#,
-            case_id,
         )
+        .bind(case_id)
         .fetch_optional(&self.pool)
         .await
         {
@@ -263,22 +266,35 @@ impl ModerationStore {
             }
         };
 
-        let guild_id = db_id_to_u64(row.guild_id, "guild_id")?;
-        let channel_id = db_id_to_u64(row.channel_id, "channel_id")?;
-        let message_id = db_id_to_u64(row.message_id, "message_id")?;
-        let user_id = db_id_to_u64(row.user_id, "user_id")?;
+        let case_id: String = row_get(&row, "case_id")?;
+        let guild_id = db_id_to_u64(row_get::<i64>(&row, "guild_id")?, "guild_id")?;
+        let channel_id = db_id_to_u64(row_get::<i64>(&row, "channel_id")?, "channel_id")?;
+        let message_id = db_id_to_u64(row_get::<i64>(&row, "message_id")?, "message_id")?;
+        let user_id = db_id_to_u64(row_get::<i64>(&row, "user_id")?, "user_id")?;
+        let ai_raw: Option<String> = row_get(&row, "ai_raw")?;
 
         Some(CaseRecord {
-            case_id: row.case_id,
+            case_id,
             guild_id,
             channel_id,
             message_id,
             user_id,
-            user_tag: row.user_tag.unwrap_or_default(),
-            category: row.ai_category.unwrap_or_default(),
-            confidence: row.ai_confidence.unwrap_or(0.0),
-            reason: row.ai_reason.unwrap_or_default(),
-            action: row.action.unwrap_or_default(),
+            user_tag: row_get::<Option<String>>(&row, "user_tag")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            category: row_get::<Option<String>>(&row, "ai_category")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            confidence: row_get::<Option<f64>>(&row, "ai_confidence")
+                .unwrap_or_default()
+                .unwrap_or(0.0),
+            reason: row_get::<Option<String>>(&row, "ai_reason")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            action: row_get::<Option<String>>(&row, "action")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            timeout_minutes: timeout_minutes_from_ai_raw(ai_raw.as_deref()),
         })
     }
 
@@ -418,6 +434,33 @@ fn jsonb_text_or_string(raw: &str) -> String {
         .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()).to_string())
 }
 
+fn row_get<T>(row: &PgRow, field: &'static str) -> Option<T>
+where
+    for<'r> T: Decode<'r, Postgres> + Type<Postgres>,
+{
+    match row.try_get(field) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, "Moderation: Case-Feld konnte nicht gelesen werden");
+            None
+        }
+    }
+}
+
+fn timeout_minutes_from_ai_raw(raw: Option<&str>) -> Option<i64> {
+    let value = serde_json::from_str::<serde_json::Value>(raw?).ok()?;
+    value
+        .pointer("/policy/timeout_minutes")
+        .and_then(json_i64)
+        .filter(|minutes| *minutes > 0)
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
@@ -454,6 +497,7 @@ mod tests {
                 filename: "image.png".into(),
             }],
             ai_raw_json: "{\"response_text\":\"raw\"}".into(),
+            timeout_minutes: None,
             escalated_with_context: true,
         }
     }

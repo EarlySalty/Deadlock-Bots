@@ -38,6 +38,18 @@ pub enum PolicyDecision {
     },
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyDecisionSource {
+    Content,
+    Behavior,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyDecisionOutcome {
+    pub decision: PolicyDecision,
+    pub source: Option<PolicyDecisionSource>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActionPolicy {
     config: ActionPolicyConfig,
@@ -61,6 +73,14 @@ impl ActionPolicy {
         content: Option<&ModerationVerdict>,
         behavior: Option<&BehaviorSignal>,
     ) -> PolicyDecision {
+        self.decide_combined_outcome(content, behavior).decision
+    }
+
+    pub fn decide_combined_outcome(
+        &self,
+        content: Option<&ModerationVerdict>,
+        behavior: Option<&BehaviorSignal>,
+    ) -> PolicyDecisionOutcome {
         let content_decision = content
             .map(|verdict| self.decide_content(verdict))
             .unwrap_or(PolicyDecision::Ignore);
@@ -68,7 +88,16 @@ impl ActionPolicy {
             .map(|signal| self.decide_behavior(signal, content))
             .unwrap_or(PolicyDecision::Ignore);
 
-        choose_strongest(content_decision, behavior_decision)
+        choose_strongest_outcome(
+            PolicyDecisionOutcome {
+                source: decision_source(&content_decision, PolicyDecisionSource::Content),
+                decision: content_decision,
+            },
+            PolicyDecisionOutcome {
+                source: decision_source(&behavior_decision, PolicyDecisionSource::Behavior),
+                decision: behavior_decision,
+            },
+        )
     }
 
     fn decide_content(&self, verdict: &ModerationVerdict) -> PolicyDecision {
@@ -131,11 +160,25 @@ impl ActionPolicy {
     }
 }
 
-fn choose_strongest(left: PolicyDecision, right: PolicyDecision) -> PolicyDecision {
-    if decision_rank(&right) > decision_rank(&left) {
+fn choose_strongest_outcome(
+    left: PolicyDecisionOutcome,
+    right: PolicyDecisionOutcome,
+) -> PolicyDecisionOutcome {
+    if decision_rank(&right.decision) > decision_rank(&left.decision) {
         right
     } else {
         left
+    }
+}
+
+fn decision_source(
+    decision: &PolicyDecision,
+    source: PolicyDecisionSource,
+) -> Option<PolicyDecisionSource> {
+    if matches!(decision, PolicyDecision::Ignore) {
+        None
+    } else {
+        Some(source)
     }
 }
 
