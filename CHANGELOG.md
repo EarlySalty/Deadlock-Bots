@@ -1,10 +1,17 @@
-## #189 — Neuer Einstieg: 3 Fragen statt 10-Schritte-Assistent, Regelwerk neu, tote Kanäle ins Archiv
+## #190 — Neuer Einstieg: 3 Fragen statt 10-Schritte-Assistent, Regelwerk neu, tote Kanäle ins Archiv
 
 **Ausgangslage:** Der Einstieg auf den Server war ein Hindernislauf — erst Discord-Fragen, dann noch ein 10-Schritte-Assistent im Regelkanal, der fast 200 verwaiste Threads hinterlassen hat. Dazu ein Haufen Kanäle, in denen seit Monaten nichts mehr passiert.
 
 **Was wurde geändert:** Der Einstieg läuft jetzt komplett über das native Discord-Onboarding mit drei kurzen Fragen: Wo stehst du gerade (spielst du schon, brauchst du einen Invite, oder bist du ganz neu), welche Pings willst du, und wo stehst du im Rang. Der alte Assistent ist Geschichte, das Regelwerk wurde neu geschrieben und ist jetzt ein reines Nachschlagewerk. Tote Kanäle wandern ins Archiv — gelöscht wird nichts; movement, deadlock-art, mods und food ziehen zusammen in die neue kreativ-ecke. Neue Mitglieder bekommen außerdem einen Server Guide mit den ersten Schritten.
 
 **Wie es jetzt läuft:** Wer neu joint, beantwortet die drei Fragen und ist drin — wer angibt, noch keinen Invite zu haben, wird direkt zum Invite-Kanal geführt, und wer ganz neu ist, dem nehmen wir uns besonders an. Für Bestandsmitglieder ändert sich nichts, außer dass es aufgeräumter aussieht.
+## #189 — Automatische Moderation ist zurück: ein System, doppelt geprüft, Mods entscheiden
+
+**Ausgangslage:** Die alte Auto-Moderation hatte Nachrichten teils eigenständig gelöscht — ohne Freigabe, schwer nachvollziehbar und zu vorschnell; wir hatten sie deshalb pausiert (#186). Dazu lief ein zweiter, getrennter Schutz gegen gekaperte Accounts — das fühlte sich wie mehrere uneinheitliche Systeme an.
+
+**Was wurde geändert:** Beides ist jetzt ein einziges System. Jeder Textverdacht wird von einer zweiten KI gegengeprüft, bevor überhaupt etwas passiert; Bilder laufen über eine eigene Prüfung. Von allein und ohne Rückfrage handelt der Bot nur noch bei klarem Betrug oder schweren Inhalten — alles andere kommt als Vorschlag mit Knöpfen (Übernehmen · Bannen · Verwerfen) zu den Mods. Jeder Fall erscheint als kompakte, nachvollziehbare Karte, jede automatische Aktion lässt sich per Knopf zurücknehmen.
+
+**Wie es jetzt läuft:** Kein stilles Löschen mehr. Was der Bot allein macht, ist eng auf die klaren Fälle begrenzt und immer dokumentiert — im Zweifel entscheidet ein Mensch.
 
 ## #188 — Server-Aufräumen: Kanäle umbenannt, Rechte entrümpelt, Invite-Kanal offen
 

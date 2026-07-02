@@ -13,6 +13,21 @@ Hinweis: Der Snapshot ist vor den P0-Fixes gezogen — die beiden „Rassist"-Ro
 
 ---
 
+## 0. Verbindliche Umsetzungsregeln (Incident-Lehren Welle 2a, 2026-07-03)
+
+Beim Welle-2a-Apply (2026-07-02, 303 Änderungen) wurden 260 Kanal-Overwrites gelöscht, ohne dass die Kategorie-Sperren der F-Klasse materialisiert waren — Mod- und Privat-Kanäle wurden dadurch öffentlich sichtbar. Rollback via Export #1 (255/298 per Apply, Rest manuell per API; Owner-Verzicht auf faq-*-Kanäle und cuzyoul-Kanal-Sperren). Daraus folgen drei **verbindliche** Regeln für jede künftige Rechte-Welle:
+
+1. **Materialisierung vor Löschung.** Discord vererbt Rechte nicht — „Kategorie-Sync" ist eine Einmal-Kopie; ein Kanal ohne Overwrites fällt auf die @everyone-Basis zurück. Apply-Reihenfolge zwingend: (a) Kategorie-Overwrites setzen, (b) Kanal-Overwrites auf die Kategorie-Kopie bringen (Sync), (c) erst dann Redundanz löschen. Ein Overwrite-Delete ist nur zulässig, wenn die **effektiven Rechte** des Kanals danach unverändert sind — die Diff-Engine muss effektive Rechte vergleichen, nicht Overwrite-Listen.
+2. **Namespace-Vollständigkeit vor Apply.** Jeder zur Laufzeit erzeugte/verwaltete Kanaltyp braucht einen Namespace-Eintrag (3.11), sonst bricht der Apply an verschwundenen Kanälen ab und der Drift-Wächter rauscht. Neu aufzunehmen: `faq-*` (Bot-erzeugte 1:1-Kanäle; Bestand inzwischen gelöscht, Eintrag als Schutz für Neu-Anlagen) und **Scrim-/Team-Kanäle** (Kategorie Coaching/Scrim `1459526231686119600` — bis das Coaching-Projekt Team-Rollen liefert). Erkennungsmerkmal maschinell verwalteter Kanäle: eigener Manage-Overwrite des Bot-Accounts.
+3. **Apply-Robustheit.** 404/Gone auf ein Zielobjekt = **skip + Report**, kein Abbruch des Laufs (Welle 2a-Rollback brach bei Änderung 256/298 an einem zwischenzeitlich gelöschten faq-Kanal ab). Sicherheitskritische Änderungen (Sichtbarkeits-Denies) zuerst sortieren; Vorschauen sind Schnappschüsse — Apply gegen eine Vorschau älter als ~15 min ablehnen bzw. neu diffen.
+
+**Owner-Entscheide aus dem Incident (2026-07-03, überschreiben Teile von §5):**
+- Coaches behalten **Mod-Rechte im Scrim-/Team-Bereich** (Manage Channel/Messages, Move, Mute …) — „das ist deren Bereich". Im Soll über die Coaching-Kategorie (F-Klasse) abbilden statt je Kanal.
+- Die **Custom-Ping-Overwrites am Sammelpunkt bleiben** (Funny/Grind Custom Ping mit Zutritts-Allows) — Owner-Override zu Abweichung §5.5, die sie als reine Präferenz-Signale entfernen wollte.
+- Ist-Zustand nach Rollback = **Hybrid**: Alt-Namen und Alt-Rechte sind zurück, die 4 von Welle 2a neu angelegten Overwrites (Community Moderator +Sicht auf Moderation-Kategorie, DL-Rang, Steam-Verifiziert, Ticket Tool) **bleiben stehen**. Das DB-Soll-Modell ist noch der W2a-Stand → `/serversync diff` zeigt bis zur Neuableitung Dauer-Drift; vor der nächsten Welle Soll-Modell neu ableiten und gegen dieses Dokument reviewen.
+
+---
+
 ## 1. Rechte-Klassen
 
 Jeder Kanal/jede Kategorie bekommt genau EINE Klasse. Kanäle erben per Kategorie-Sync; `CUSTOM` nur, wo hier deklariert.
@@ -138,6 +153,8 @@ Der TicketTool-**User**-Overwrite (557628352828014614) wird durch die managed **
 | TempVoice-Lanes | dl-voice (engine.rs; konsumiert `Steam Verifiziert️✅` — Abriss-Vorsicht §6) | Ersteller-Overwrites gemäß Lane-Einstellungen (Lock/Hide/Limit), Lurker-Feature (`tv_lurker`) | auto-delete bei Leerung |
 | Ticket-Kanäle | TicketTool (extern) | s. 3.10 | close → archive/delete durch TicketTool |
 | Fallback-Kanäle (Phase 4) | Bot-Pate | `@everyone: −VIEW` · User: `+VIEW,+SEND` (nur User+Bot) | Auto-Cleanup nach 14 Tagen Inaktivität (§4.1) |
+| faq-\*-Kanäle | AI-Onboarding/FAQ (Bot-erzeugt) | `@everyone: −VIEW` · User: `+VIEW,+SEND` · Bot: Manage (§0.2 — Bestand gelöscht, Eintrag schützt Neu-Anlagen) | Bot-verwaltet |
+| Scrim-/Team-Kanäle | Coaching/Scrim (Kategorie `1459526231686119600`) | Team-Rollen/Kapitäns-Overwrites + Coach-Mod-Rechte (§0 Owner-Entscheid) | bis Coaching-Projekt Team-Rollen liefert (§4.2) |
 
 ### 3.12 Kategorie „Alt" + Beta Zugang
 Werden archiviert (§4.6). Im Soll-Modell existieren sie nicht; bis zur Archivierung gilt `@everyone: −VIEW` (Ist-Zustand von „Alt"). Die 54 Overwrites auf diesen Objekten entfallen mit der Archivierung. Die Rolle `Beta Zugang benötigt` verliert mit der offenen Invite-Lounge ihre letzte Funktion ⚑ (6.6).
@@ -178,7 +195,7 @@ Jeder Registry-Eintrag braucht vom Owner/Mod-Team: **Grund** (Warum gesperrt?) u
 2. **30 Owner-/Moderator-Overwrites** → löschen: beide Rollen tragen ADMINISTRATOR, jedes Overwrite ist wirkungslos.
 3. **23 Deadlocker-Overwrites** → entfallen mit Rollen-Abriss (§4.7). Kuriositäten im Ist: invertierte Gates — Custom Game Team 1/2 `Deadlocker: −CONNECT` bei `@everyone: +CONNECT` (Deadlocker durften NICHT connecten), clip-submission `Deadlocker: −VIEW` ⚑ 6.11.
 4. **16 English-Only-Overwrites** → entfallen: bei offener Basis redundant; Rolle bleibt als Label (§4.7).
-5. **12 Funny/Grind-Custom-Ping-Overwrites** → entfallen: Ping-Rollen sind Präferenz-Signale (§2).
+5. **12 Funny/Grind-Custom-Ping-Overwrites** → entfallen: Ping-Rollen sind Präferenz-Signale (§2). **Owner-Override 2026-07-03 (§0): am Sammelpunkt bleiben sie.**
 6. **16 VC-Move-Rechte-Overwrites** → auf 1 reduziert (`+CONNECT` Competitiv): Rolle hat MOVE guild-weit.
 7. **54 Overwrites auf Archiv-Kandidaten** („Alt" komplett, faq-\*, Beta Zugang, server-faq) → entfallen mit Archivierung (23 Objekte).
 8. **40-Bit-Voll-Masken** (TicketTool, Coaching-Ausschlüsse, VIP/Booster/Unterstützer/NSP-Sets, Eingangsbereich-27-Bit-Deny) → äquivalente Minimal-Sets; Verhalten identisch, Modell lesbar.

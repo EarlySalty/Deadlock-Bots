@@ -1,7 +1,7 @@
 //! Persistenz: moderation.ai_moderation_cases + moderation.ai_moderation_ragebait_hits.
 
 use serde::{Deserialize, Serialize};
-use sqlx::{PgPool, Postgres, Transaction};
+use sqlx::{postgres::PgRow, Decode, PgPool, Postgres, Row, Transaction, Type};
 
 const RAGEBAIT_HITS_ID_LOCK_KEY: i64 = 0x5241_4745_4241_4954;
 
@@ -24,8 +24,11 @@ pub struct CaseDraft {
     pub confidence: f64,
     pub reason: String,
     pub action: String,
+    pub source: String,
+    pub trigger_type: Option<String>,
     pub attachments: Vec<CaseAttachment>,
     pub ai_raw_json: String,
+    pub timeout_minutes: Option<i64>,
     pub escalated_with_context: bool,
 }
 
@@ -42,6 +45,7 @@ pub struct CaseRecord {
     pub confidence: f64,
     pub reason: String,
     pub action: String,
+    pub timeout_minutes: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -74,60 +78,57 @@ impl ModerationStore {
         Ok(())
     }
 
-    /// Case anlegen → case_id (message_id-basiert, wie das Original mit Zeit-Suffix).
-    pub async fn insert_case(&self, draft: CaseDraft) -> String {
+    /// Case anlegen -> case_id nur bei erfolgreicher Persistenz.
+    pub async fn insert_case(&self, draft: CaseDraft) -> Option<String> {
         let case_id = format!("{}-{}", draft.message_id, chrono::Utc::now().timestamp());
-        let Some(guild_id) = discord_id_to_i64(draft.guild_id, "guild_id") else {
-            return case_id;
-        };
-        let Some(channel_id) = discord_id_to_i64(draft.channel_id, "channel_id") else {
-            return case_id;
-        };
-        let Some(message_id) = discord_id_to_i64(draft.message_id, "message_id") else {
-            return case_id;
-        };
-        let Some(user_id) = discord_id_to_i64(draft.user_id, "user_id") else {
-            return case_id;
-        };
+        let guild_id = discord_id_to_i64(draft.guild_id, "guild_id")?;
+        let channel_id = discord_id_to_i64(draft.channel_id, "channel_id")?;
+        let message_id = discord_id_to_i64(draft.message_id, "message_id")?;
+        let user_id = discord_id_to_i64(draft.user_id, "user_id")?;
         let attachments_json =
             serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
         let ai_raw_json = jsonb_text_or_string(&draft.ai_raw_json);
 
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             INSERT INTO moderation.ai_moderation_cases(
                 case_id, guild_id, channel_id, message_id, user_id, user_tag,
                 original_content, attachments, ai_category, ai_confidence,
-                ai_reason, ai_raw, escalated_with_context, action, created_at
+                ai_reason, ai_raw, escalated_with_context, action, source, trigger_type, created_at
             )
             VALUES(
                 $1, $2, $3, $4, $5, $6,
                 $7, $8::text::jsonb, $9, $10,
-                $11, $12::text::jsonb, $13, $14, now()
+                $11, $12::text::jsonb, $13, $14, $15, $16, now()
             )
             "#,
-            &case_id,
-            guild_id,
-            channel_id,
-            message_id,
-            user_id,
-            draft.user_tag,
-            draft.content,
-            attachments_json,
-            draft.category,
-            draft.confidence,
-            draft.reason,
-            ai_raw_json,
-            draft.escalated_with_context,
-            draft.action,
         )
+        .bind(&case_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(user_id)
+        .bind(draft.user_tag)
+        .bind(draft.content)
+        .bind(attachments_json)
+        .bind(draft.category)
+        .bind(draft.confidence)
+        .bind(draft.reason)
+        .bind(ai_raw_json)
+        .bind(draft.escalated_with_context)
+        .bind(draft.action)
+        .bind(draft.source)
+        .bind(draft.trigger_type)
         .execute(&self.pool)
         .await;
 
-        if let Err(err) = result {
-            tracing::warn!(%err, "Moderation: Case-Insert fehlgeschlagen");
+        match result {
+            Ok(_) => Some(case_id),
+            Err(err) => {
+                tracing::warn!(%err, "Moderation: Case-Insert fehlgeschlagen");
+                None
+            }
         }
-        case_id
     }
 
     pub async fn set_review_message(&self, case_id: &str, message_id: u64) {
@@ -236,24 +237,25 @@ impl ModerationStore {
 
     /// Case laden (für den Review-Flow). None, wenn nicht vorhanden.
     pub async fn fetch_case(&self, case_id: &str) -> Option<CaseRecord> {
-        let row = match sqlx::query!(
+        let row = match sqlx::query(
             r#"
             SELECT
-                case_id AS "case_id!",
-                guild_id AS "guild_id!",
-                channel_id AS "channel_id!",
-                message_id AS "message_id!",
-                user_id AS "user_id!",
+                case_id,
+                guild_id,
+                channel_id,
+                message_id,
+                user_id,
                 user_tag,
                 ai_category,
                 ai_confidence,
                 ai_reason,
+                ai_raw::text AS ai_raw,
                 action
             FROM moderation.ai_moderation_cases
             WHERE case_id = $1
             "#,
-            case_id,
         )
+        .bind(case_id)
         .fetch_optional(&self.pool)
         .await
         {
@@ -264,22 +266,35 @@ impl ModerationStore {
             }
         };
 
-        let guild_id = db_id_to_u64(row.guild_id, "guild_id")?;
-        let channel_id = db_id_to_u64(row.channel_id, "channel_id")?;
-        let message_id = db_id_to_u64(row.message_id, "message_id")?;
-        let user_id = db_id_to_u64(row.user_id, "user_id")?;
+        let case_id: String = row_get(&row, "case_id")?;
+        let guild_id = db_id_to_u64(row_get::<i64>(&row, "guild_id")?, "guild_id")?;
+        let channel_id = db_id_to_u64(row_get::<i64>(&row, "channel_id")?, "channel_id")?;
+        let message_id = db_id_to_u64(row_get::<i64>(&row, "message_id")?, "message_id")?;
+        let user_id = db_id_to_u64(row_get::<i64>(&row, "user_id")?, "user_id")?;
+        let ai_raw: Option<String> = row_get(&row, "ai_raw")?;
 
         Some(CaseRecord {
-            case_id: row.case_id,
+            case_id,
             guild_id,
             channel_id,
             message_id,
             user_id,
-            user_tag: row.user_tag.unwrap_or_default(),
-            category: row.ai_category.unwrap_or_default(),
-            confidence: row.ai_confidence.unwrap_or(0.0),
-            reason: row.ai_reason.unwrap_or_default(),
-            action: row.action.unwrap_or_default(),
+            user_tag: row_get::<Option<String>>(&row, "user_tag")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            category: row_get::<Option<String>>(&row, "ai_category")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            confidence: row_get::<Option<f64>>(&row, "ai_confidence")
+                .unwrap_or_default()
+                .unwrap_or(0.0),
+            reason: row_get::<Option<String>>(&row, "ai_reason")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            action: row_get::<Option<String>>(&row, "action")
+                .unwrap_or_default()
+                .unwrap_or_default(),
+            timeout_minutes: timeout_minutes_from_ai_raw(ai_raw.as_deref()),
         })
     }
 
@@ -419,6 +434,33 @@ fn jsonb_text_or_string(raw: &str) -> String {
         .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()).to_string())
 }
 
+fn row_get<T>(row: &PgRow, field: &'static str) -> Option<T>
+where
+    for<'r> T: Decode<'r, Postgres> + Type<Postgres>,
+{
+    match row.try_get(field) {
+        Ok(value) => Some(value),
+        Err(err) => {
+            tracing::warn!(%err, field, "Moderation: Case-Feld konnte nicht gelesen werden");
+            None
+        }
+    }
+}
+
+fn timeout_minutes_from_ai_raw(raw: Option<&str>) -> Option<i64> {
+    let value = serde_json::from_str::<serde_json::Value>(raw?).ok()?;
+    value
+        .pointer("/policy/timeout_minutes")
+        .and_then(json_i64)
+        .filter(|minutes| *minutes > 0)
+}
+
+fn json_i64(value: &serde_json::Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|text| text.parse::<i64>().ok()))
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
@@ -447,12 +489,15 @@ mod tests {
             confidence: 0.95,
             reason: "Scam".into(),
             action: "proposed".into(),
+            source: "content".into(),
+            trigger_type: Some("content".into()),
             attachments: vec![CaseAttachment {
                 url: "https://cdn.example/image.png".into(),
                 content_type: "image/png".into(),
                 filename: "image.png".into(),
             }],
             ai_raw_json: "{\"response_text\":\"raw\"}".into(),
+            timeout_minutes: None,
             escalated_with_context: true,
         }
     }
@@ -461,7 +506,7 @@ mod tests {
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn case_lifecycle() -> TestResult {
         let (db, store) = store().await?;
-        let case_id = store.insert_case(draft()).await;
+        let case_id = store.insert_case(draft()).await.expect("case insert");
         store.set_review_message(&case_id, 999).await;
         store
             .update_case_action(&case_id, "auto_delete_failed")
@@ -530,7 +575,7 @@ mod tests {
         draft.ai_raw_json = "{}".into();
         draft.escalated_with_context = false;
 
-        let case_id = store.insert_case(draft).await;
+        let case_id = store.insert_case(draft).await.expect("case insert");
         let case = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(case.action, "proposed");
         assert_eq!(
