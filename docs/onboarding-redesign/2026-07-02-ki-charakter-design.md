@@ -77,11 +77,14 @@ Tiefentest (3 Dialoge à 4 Runden, inkl. Gaslighting-Drucktest).
 
 ## 4. Modell-Entscheid (revidiert §5.6-Zielmodell)
 
-- **Ziel-Modell Bot-Pate: Claude Sonnet 4.6** (`claude-sonnet-4-6`, $3/$15
-  pro 1M) — Testsieger + Owner-Präferenz („ansonsten nehmen wir Sonnet 4.6").
+- **Start-Modell Bot-Pate: gpt-5.4-mini** (`gpt-5.4-mini`, $0.75/$4.50
+  pro 1M) — Owner-Entscheid 02.07. („lass erstmal mini nehmen"): Platz 2 im
+  Bake-off (ehrlich in beiden Lücken-Tests), Key vorhanden, Nano bereits im
+  Scam-Guard im Einsatz, Anthropic-Konto derzeit ohne Guthaben.
+- **Späteres Ziel-Modell: Claude Sonnet 4.6** (`claude-sonnet-4-6`, $3/$15
+  pro 1M) — Testsieger; Umstieg „wann anders" (Owner), sobald Guthaben + DPA
+  da sind. Provider-Wechsel als Config-Umschalter bauen, nicht hart verdrahten.
   Sonnet 5 verworfen (neuer Tokenizer ≈ +30 % Tokens = real teurer, Owner-Veto).
-- **Fallback/Zweitprovider: gpt-5.4-mini** (Key vorhanden, Nano bereits im
-  Scam-Guard im Einsatz).
 - **Mistral Small ist als Ziel-Modell GESTRICHEN** (Qualitäts-K.O. im
   Bake-off) — §5.6 im Konzept muss aktualisiert werden: statt „EU-Hosting"
   gilt „Prozessor mit DPA + No-Training-Zusage (Discord-Policy-konform),
@@ -93,8 +96,10 @@ Tiefentest (3 Dialoge à 4 Runden, inkl. Gaslighting-Drucktest).
   recht = Discord-Dev-Policy-Verstoß, China-Sharing) — deckungsgleich mit
   der Owner-Entscheidung vom 02.07. (Konzept-Commit 20d4c6e).
 - **Vor echtem User-Content (Vorbedingung Phase 3 Cockpit / Phase 4 Kohorte):**
-  1. Anthropic-DPA abschließen/ablegen, 2. API-Guthaben laden (Konto aktuell
-  leer — 400 „credit balance too low"), 3. §5.6 im Konzept-Dokument updaten.
+  1. OpenAI-DPA abschließen/ablegen (Start-Modell mini), 2. §5.6 im
+  Konzept-Dokument updaten. Für den späteren Sonnet-Umstieg zusätzlich:
+  Anthropic-DPA + API-Guthaben (Konto aktuell leer — 400 „credit balance
+  too low").
 
 ## 5. System-Prompt v0.2 (Referenz-Entwurf)
 
@@ -141,7 +146,8 @@ Wissensbasis-Nachzug-Backlog).
   (T0 ohne LLM, §4.1) als eigenes Textpaket.
 - T0/T+2/T+7-Templates final texten (auf Basis Stil-Guide; T+2 nur bei
   Null-Aktivität, T+7 Reibungs-Feedback).
-- Anthropic: Guthaben + DPA (Owner), dann §5.6-Update im Konzept.
+- OpenAI-DPA ablegen (Start-Modell mini); Anthropic Guthaben + DPA erst
+  für den späteren Sonnet-Umstieg; danach §5.6-Update im Konzept.
 - Cockpit-Eskalation „Bot meldet zurück" als Phase-4-Arbeitspaket einplanen
   (Voraussetzung für „ich find's raus"-Stufe des Lücken-Dreiklangs).
 - Wissensbasis-Ergänzungen (§6) in phase1-wissensbasis.ENTWURF.md einarbeiten.
@@ -173,5 +179,6 @@ Einzelaccount-Rate-Limits, Agent-CLI-Latenz (30–90 s/Antwort), und Google
 baut die Client-Landschaft gerade um (Gemini-CLI-Abschaltung als Beleg).
 Legitimer Gemini-Prod-Weg wäre die bezahlte Gemini-API (Paid-Tier trainiert
 nicht, DPA verfügbar; `GeminiClient` in dl-ai existiert bereits) — als
-günstiger Fallback-Kandidat hinter Sonnet 4.6 jetzt fachlich validiert.
-Modell-Entscheid aus §4 bleibt unverändert: **Ziel-Modell Sonnet 4.6.**
+günstiger Fallback-Kandidat jetzt fachlich validiert.
+Modell-Entscheid nach diesem Test (Owner, 02.07.): **Start-Modell
+gpt-5.4-mini, späterer Umstieg auf Sonnet 4.6** — siehe §4.
