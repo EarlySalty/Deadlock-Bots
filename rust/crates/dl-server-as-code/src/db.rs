@@ -18,6 +18,7 @@ pub struct DiffPreview {
     pub preview_id: i64,
     pub guild_id: DiscordId,
     pub snapshot_id: Option<i64>,
+    pub created_at: DateTime<Utc>,
     pub diff_hash: String,
     pub human_summary: String,
     pub diff: ServerDiff,
@@ -435,29 +436,33 @@ pub async fn persist_diff_preview(
     let diff_json = serde_json::to_string(diff)?;
     let diff_hash = diff_hash(diff)?;
     let human_summary = format::human_summary(diff);
-    let (preview_id, created_snapshot_id): (i64, Option<i64>) = sqlx::query_as(
-        "INSERT INTO server_config.diff_previews
+    let (preview_id, created_snapshot_id, created_at): (i64, Option<i64>, DateTime<Utc>) =
+        sqlx::query_as(
+            "INSERT INTO server_config.diff_previews
          (guild_id, snapshot_id, diff_hash, diff_json, human_summary, created_by_user_id)
          VALUES ($1, $2, $3, $4::text::jsonb, $5, $6)
          ON CONFLICT (guild_id, diff_hash)
          DO UPDATE SET snapshot_id = EXCLUDED.snapshot_id,
                        diff_json = EXCLUDED.diff_json,
-                       human_summary = EXCLUDED.human_summary
-         RETURNING preview_id, snapshot_id",
-    )
-    .bind(id_to_i64(diff.guild_id)?)
-    .bind(snapshot_id)
-    .bind(&diff_hash)
-    .bind(diff_json)
-    .bind(&human_summary)
-    .bind(optional_id(created_by_user_id)?)
-    .fetch_one(pool)
-    .await?;
+                       human_summary = EXCLUDED.human_summary,
+                       created_by_user_id = EXCLUDED.created_by_user_id,
+                       created_at = now()
+         RETURNING preview_id, snapshot_id, created_at",
+        )
+        .bind(id_to_i64(diff.guild_id)?)
+        .bind(snapshot_id)
+        .bind(&diff_hash)
+        .bind(diff_json)
+        .bind(&human_summary)
+        .bind(optional_id(created_by_user_id)?)
+        .fetch_one(pool)
+        .await?;
 
     Ok(DiffPreview {
         preview_id,
         guild_id: diff.guild_id,
         snapshot_id: created_snapshot_id,
+        created_at,
         diff_hash,
         human_summary,
         diff: diff.clone(),
@@ -467,6 +472,7 @@ pub async fn persist_diff_preview(
 pub(crate) async fn load_preview(pool: &PgPool, preview_id: i64) -> Result<DiffPreview> {
     let row = sqlx::query(
         "SELECT preview_id, guild_id, snapshot_id, diff_hash, diff_json::text AS diff_json, human_summary
+                , created_at
            FROM server_config.diff_previews
           WHERE preview_id = $1",
     )
@@ -489,6 +495,7 @@ pub(crate) async fn load_preview(pool: &PgPool, preview_id: i64) -> Result<DiffP
         preview_id: row.try_get("preview_id")?,
         guild_id: i64_to_id(row.try_get::<i64, _>("guild_id")?),
         snapshot_id: row.try_get("snapshot_id")?,
+        created_at: row.try_get("created_at")?,
         diff_hash: stored_hash,
         human_summary: row.try_get("human_summary")?,
         diff,

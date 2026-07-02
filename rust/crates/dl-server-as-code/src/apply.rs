@@ -1,9 +1,11 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
+use chrono::{Duration, Utc};
 use serde::Serialize;
 use serde_json::{json, Value};
-use serenity::all::{ChannelId, GuildId, Http, RoleId, TargetId};
+use serenity::all::{ChannelId, GuildId, Http, Permissions, RoleId, TargetId};
+use serenity::http::StatusCode;
 use sqlx::PgPool;
 
 use crate::db;
@@ -19,6 +21,8 @@ const STATUS_DRY_RUN: &str = "dry_run";
 const STATUS_SKIPPED_MANUAL_ARCHIVE: &str =
     "skipped: manueller Schritt / Archivierung erforderlich";
 const STATUS_SKIPPED_NOT_IMPLEMENTED: &str = "skipped: not implemented";
+const STATUS_SKIPPED_TARGET_GONE: &str = "skipped: Objekt weg — übersprungen";
+const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyOptions {
@@ -240,6 +244,7 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
     port: &P,
 ) -> Result<ApplyReport> {
     let preview = db::load_preview(pool, preview_id).await?;
+    ensure_preview_fresh(preview.created_at)?;
     let recomputed_diff_hash = db::diff_hash(&preview.diff)?;
     let hashes_match =
         preview.diff_hash == recomputed_diff_hash && recomputed_diff_hash == confirmed_diff_hash;
@@ -277,9 +282,8 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
         });
     }
 
-    let dry_run_results = preview
-        .diff
-        .changes
+    let ordered_changes = apply_ordered_changes(&preview.diff.changes);
+    let dry_run_results = ordered_changes
         .iter()
         .map(|change| change_result(change, STATUS_DRY_RUN))
         .collect::<Vec<_>>();
@@ -308,7 +312,7 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
     let mut applied = 0usize;
     let mut change_results = Vec::new();
     let mut created_ids = CreatedIdMap::default();
-    for change in &preview.diff.changes {
+    for change in ordered_changes {
         if let Some(status) = skip_status(change) {
             change_results.push(change_result(change, status));
             continue;
@@ -317,6 +321,10 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
         let effective_change = remap_created_ids(change, &created_ids)?;
         let outcome = match port.apply_change(&effective_change).await {
             Ok(outcome) => outcome,
+            Err(err) if is_target_gone(&err) => {
+                change_results.push(change_result(change, STATUS_SKIPPED_TARGET_GONE));
+                continue;
+            }
             Err(err) => {
                 finish_apply_run(
                     pool,
@@ -379,6 +387,56 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
         applied_changes: applied,
         change_results,
     })
+}
+
+fn ensure_preview_fresh(created_at: chrono::DateTime<Utc>) -> Result<()> {
+    if Utc::now().signed_duration_since(created_at) > Duration::minutes(PREVIEW_MAX_AGE_MINUTES) {
+        return Err(ServerAsCodeError::PreviewExpired);
+    }
+    Ok(())
+}
+
+fn apply_ordered_changes(changes: &[DiffChange]) -> Vec<&DiffChange> {
+    let mut indexed = changes.iter().enumerate().collect::<Vec<_>>();
+    indexed.sort_by_key(|(index, change)| (apply_priority(change), *index));
+    indexed.into_iter().map(|(_, change)| change).collect()
+}
+
+fn apply_priority(change: &DiffChange) -> u8 {
+    match (change.object.kind, change.action) {
+        (ObjectKind::Category | ObjectKind::Channel | ObjectKind::Role, DiffAction::Create) => 0,
+        (ObjectKind::PermissionOverwrite, DiffAction::Create | DiffAction::Update)
+            if overwrite_denies_view(change) =>
+        {
+            1
+        }
+        (ObjectKind::PermissionOverwrite, DiffAction::Delete) => 3,
+        _ => 2,
+    }
+}
+
+fn overwrite_denies_view(change: &DiffChange) -> bool {
+    change
+        .desired
+        .as_ref()
+        .and_then(|desired| serde_json::from_value::<PermissionOverwriteSpec>(desired.clone()).ok())
+        .is_some_and(|overwrite| {
+            Permissions::from_bits_truncate(overwrite.deny_bits).contains(Permissions::VIEW_CHANNEL)
+        })
+}
+
+fn is_target_gone(error: &ServerAsCodeError) -> bool {
+    match error {
+        ServerAsCodeError::TargetGone { .. } => true,
+        ServerAsCodeError::Serenity(source) => match source.as_ref() {
+            serenity::Error::Http(http_error) => matches!(
+                http_error.status_code(),
+                Some(StatusCode::NOT_FOUND | StatusCode::GONE)
+            ),
+            _ => false,
+        },
+        _ => false,
+    }
 }
 
 /// Entscheidet, welche Änderungen Apply bewusst NICHT ausführt.
@@ -627,6 +685,82 @@ fn overwrite_payload(spec: &PermissionOverwriteSpec) -> Value {
     })
 }
 
+#[cfg(test)]
+mod unit_tests {
+    use super::*;
+    use crate::model::{OverwriteKey, RoleSpec};
+
+    const GUILD_ID: u64 = 1_289_721_245_281_292_288;
+    const CHANNEL_ID: u64 = 10;
+    const ROLE_ID: u64 = 20;
+
+    fn role_create_change() -> DiffChange {
+        let spec = RoleSpec {
+            guild_id: GUILD_ID,
+            role_id: ROLE_ID,
+            name: "Privat".to_string(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+            permissions_bitmask: 0,
+            position: 0,
+        };
+        DiffChange {
+            object: ObjectRef::role(&spec),
+            action: DiffAction::Create,
+            fields: Vec::new(),
+            desired: Some(serde_json::to_value(spec).expect("role json")),
+            actual: None,
+        }
+    }
+
+    fn overwrite_change(action: DiffAction, deny: Permissions) -> DiffChange {
+        let spec = PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: CHANNEL_ID,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            },
+            allow_bits: 0,
+            deny_bits: deny.bits(),
+        };
+        DiffChange {
+            object: ObjectRef::overwrite(&spec),
+            action,
+            fields: Vec::new(),
+            desired: (action != DiffAction::Delete)
+                .then(|| serde_json::to_value(&spec).expect("overwrite desired")),
+            actual: (action == DiffAction::Delete)
+                .then(|| serde_json::to_value(&spec).expect("overwrite actual")),
+        }
+    }
+
+    #[test]
+    fn apply_order_sortiert_sichtbarkeits_denies_vor_overwrite_deletes() {
+        let delete = overwrite_change(DiffAction::Delete, Permissions::empty());
+        let visibility_deny = overwrite_change(DiffAction::Create, Permissions::VIEW_CHANNEL);
+        let role_create = role_create_change();
+        let changes = vec![delete.clone(), visibility_deny.clone(), role_create.clone()];
+
+        let ordered = apply_ordered_changes(&changes);
+
+        assert_eq!(ordered[0], &role_create);
+        assert_eq!(ordered[1], &visibility_deny);
+        assert_eq!(ordered[2], &delete);
+    }
+
+    #[test]
+    fn target_gone_error_wird_als_skip_klassifiziert() {
+        let err = ServerAsCodeError::TargetGone {
+            object: overwrite_change(DiffAction::Delete, Permissions::empty()).object,
+        };
+
+        assert!(is_target_gone(&err));
+    }
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use std::sync::{
@@ -639,7 +773,8 @@ mod tests {
 
     use super::{
         apply_preview_with_port, ApplyChangeOutcome, ApplyOptions, DiscordApplyPort,
-        STATUS_SKIPPED_MANUAL_ARCHIVE, STATUS_SKIPPED_NOT_IMPLEMENTED,
+        STATUS_APPLIED, STATUS_SKIPPED_MANUAL_ARCHIVE, STATUS_SKIPPED_NOT_IMPLEMENTED,
+        STATUS_SKIPPED_TARGET_GONE,
     };
     use crate::db;
     use crate::diff::diff_models;
@@ -652,6 +787,8 @@ mod tests {
     const CATEGORY_ID: u64 = 700;
     const CHANNEL_ID: u64 = 701;
     const ROLE_ID: u64 = 800;
+    const ROLE_ID_2: u64 = 801;
+    const ROLE_ID_3: u64 = 802;
     const CREATED_CATEGORY_ID: u64 = 17_700;
     const CREATED_CHANNEL_ID: u64 = 17_701;
     const CREATED_ROLE_ID: u64 = 17_800;
@@ -694,6 +831,27 @@ mod tests {
         }
     }
 
+    #[derive(Default)]
+    struct GoneMiddlePort {
+        seen: Arc<Mutex<Vec<crate::diff::DiffChange>>>,
+    }
+
+    #[async_trait]
+    impl DiscordApplyPort for GoneMiddlePort {
+        async fn apply_change(
+            &self,
+            change: &crate::diff::DiffChange,
+        ) -> Result<ApplyChangeOutcome> {
+            self.seen.lock().expect("seen lock").push(change.clone());
+            if change.object.object_id == ROLE_ID_2 {
+                return Err(crate::ServerAsCodeError::TargetGone {
+                    object: change.object.clone(),
+                });
+            }
+            Ok(ApplyChangeOutcome::default())
+        }
+    }
+
     fn category(id: u64) -> CategorySpec {
         CategorySpec {
             guild_id: DEFAULT_GUILD_ID,
@@ -731,6 +889,17 @@ mod tests {
             managed: false,
             permissions_bitmask: 7,
             position: 1,
+        }
+    }
+
+    fn role_create_change(id: u64) -> crate::diff::DiffChange {
+        let spec = role(id);
+        crate::diff::DiffChange {
+            object: ObjectRef::role(&spec),
+            action: crate::diff::DiffAction::Create,
+            fields: Vec::new(),
+            desired: Some(serde_json::to_value(spec).expect("role desired")),
+            actual: None,
         }
     }
 
@@ -916,6 +1085,86 @@ mod tests {
                 }
                 && result.status == STATUS_SKIPPED_NOT_IMPLEMENTED
         }));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "braucht CENTRAL_TEST_DSN/DATABASE_URL/DEADLOCK_CENTRAL_DSN"]
+    async fn apply_ueberspringt_404_gone_und_fuehrt_rest_weiter() -> anyhow::Result<()> {
+        let pool = test_pool().await?;
+        let diff = crate::diff::ServerDiff {
+            guild_id: DEFAULT_GUILD_ID,
+            changes: vec![
+                role_create_change(ROLE_ID),
+                role_create_change(ROLE_ID_2),
+                role_create_change(ROLE_ID_3),
+            ],
+            filtered: Vec::new(),
+            blocked: Vec::new(),
+        };
+        let preview = db::persist_diff_preview(&pool, None, &diff, None).await?;
+        let port = GoneMiddlePort::default();
+
+        let report = apply_preview_with_port(
+            &pool,
+            preview.preview_id,
+            &preview.diff_hash,
+            ApplyOptions {
+                dry_run: false,
+                requested_by_user_id: None,
+            },
+            &port,
+        )
+        .await?;
+
+        assert_eq!(report.applied_changes, 2);
+        assert_eq!(port.seen.lock().expect("seen lock").len(), 3);
+        assert_eq!(
+            report
+                .change_results
+                .iter()
+                .filter(|result| result.status == STATUS_SKIPPED_TARGET_GONE)
+                .count(),
+            1
+        );
+        assert_eq!(report.change_results[2].status, STATUS_APPLIED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "braucht CENTRAL_TEST_DSN/DATABASE_URL/DEADLOCK_CENTRAL_DSN"]
+    async fn apply_lehnt_abgelaufene_preview_ab() -> anyhow::Result<()> {
+        let pool = test_pool().await?;
+        let diff = crate::diff::ServerDiff {
+            guild_id: DEFAULT_GUILD_ID,
+            changes: vec![role_create_change(ROLE_ID)],
+            filtered: Vec::new(),
+            blocked: Vec::new(),
+        };
+        let preview = db::persist_diff_preview(&pool, None, &diff, None).await?;
+        sqlx::query(
+            "UPDATE server_config.diff_previews
+                SET created_at = now() - interval '16 minutes'
+              WHERE preview_id = $1",
+        )
+        .bind(preview.preview_id)
+        .execute(&*pool)
+        .await?;
+
+        let err = apply_preview_with_port(
+            &pool,
+            preview.preview_id,
+            &preview.diff_hash,
+            ApplyOptions {
+                dry_run: true,
+                requested_by_user_id: None,
+            },
+            &CountingPort::default(),
+        )
+        .await
+        .expect_err("stale preview must fail");
+
+        assert!(matches!(err, crate::ServerAsCodeError::PreviewExpired));
         Ok(())
     }
 }

@@ -28,6 +28,7 @@ const ROLE_STREAMS: &str = "Streams";
 const CATEGORY_ARCHIV: &str = "📦 Archiv";
 const CHANNEL_KREATIV_ECKE: &str = "kreativ-ecke";
 const KREATIV_ECKE_TOPIC: &str = "Kunst, Mods, Movement-Clips, Food — zeig her, was du hast.";
+const COACHING_SCRIM_CATEGORY_ID: DiscordId = 1_459_526_231_686_119_600;
 
 const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
@@ -948,7 +949,15 @@ fn apply_welle2b_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'
         if let Some(channel) = desired.channels.get_mut(&channel_id) {
             channel.parent_category_id = Some(archive_category_id);
         }
-        set_exact_overwrites_without_retained(desired, channel_id, Vec::new());
+        set_exact_overwrites_without_retained(
+            desired,
+            channel_id,
+            vec![everyone_overwrite(
+                desired.guild_id,
+                channel_id,
+                f_everyone_hidden_profile(),
+            )],
+        );
     }
 
     ensure_kreativ_ecke(desired, ctx);
@@ -1174,6 +1183,12 @@ fn normalize_coaching_overwrites(
         if overwrite.allow_bits == 0 && overwrite.deny_bits == 0 {
             continue;
         }
+        if overwrite.key.channel_id == category_id
+            && is_coach_or_moderation_role_overwrite(ctx.actual, &overwrite)
+        {
+            desired.overwrites.insert(overwrite.key.clone(), overwrite);
+            continue;
+        }
         if is_admin_role_overwrite(ctx.actual, &overwrite) {
             continue;
         }
@@ -1249,6 +1264,27 @@ fn is_admin_role_overwrite(actual: &GuildModel, overwrite: &PermissionOverwriteS
         .is_some_and(|role| {
             Permissions::from_bits_truncate(role.permissions_bitmask)
                 .contains(Permissions::ADMINISTRATOR)
+        })
+}
+
+fn is_coach_or_moderation_role_overwrite(
+    actual: &GuildModel,
+    overwrite: &PermissionOverwriteSpec,
+) -> bool {
+    if overwrite.key.target_kind != TargetKind::Role {
+        return false;
+    }
+    actual
+        .roles
+        .get(&overwrite.key.target_id)
+        .is_some_and(|role| {
+            let key = matching_key(&role.name);
+            key.contains("coach")
+                || key.contains("moderator")
+                || key.contains("moderation")
+                || key.contains("mod")
+                || Permissions::from_bits_truncate(role.permissions_bitmask)
+                    .contains(Permissions::ADMINISTRATOR)
         })
 }
 
@@ -1416,6 +1452,9 @@ fn is_documented_exception_overwrite(
     ctx: &RuleContext<'_>,
     overwrite: &PermissionOverwriteSpec,
 ) -> bool {
+    if is_sammelpunkt_custom_ping_overwrite(ctx.actual, overwrite) {
+        return true;
+    }
     if overwrite.key.target_kind != TargetKind::Member {
         return false;
     }
@@ -1433,6 +1472,30 @@ fn is_documented_exception_overwrite(
         return is_functional_exception_channel(ctx.actual, overwrite.key.channel_id);
     }
     false
+}
+
+fn is_sammelpunkt_custom_ping_overwrite(
+    actual: &GuildModel,
+    overwrite: &PermissionOverwriteSpec,
+) -> bool {
+    if overwrite.key.target_kind != TargetKind::Role {
+        return false;
+    }
+    if !actual
+        .channel_name(overwrite.key.channel_id)
+        .is_some_and(|name| channel_matches(name, &["Sammelpunkt"]))
+    {
+        return false;
+    }
+    actual
+        .roles
+        .get(&overwrite.key.target_id)
+        .is_some_and(|role| {
+            let key = matching_key(&role.name);
+            (key.contains("funny") || key.contains("grind"))
+                && key.contains("custom")
+                && key.contains("ping")
+        })
 }
 
 fn build_documented_exceptions(
@@ -1535,6 +1598,18 @@ fn build_dynamic_namespaces(ctx: &RuleContext<'_>) -> Vec<DynamicNamespace> {
         namespace_key: "ticket_channels".to_string(),
         system_name: "TicketTool".to_string(),
         match_rule: NamespaceMatch::NamePattern(r"^(ticket|closed)-[0-9]+$".to_string()),
+    });
+    namespaces.push(DynamicNamespace {
+        namespace_id: None,
+        namespace_key: "faq_channels".to_string(),
+        system_name: "AI-Onboarding/FAQ".to_string(),
+        match_rule: NamespaceMatch::NamePrefix("faq-".to_string()),
+    });
+    namespaces.push(DynamicNamespace {
+        namespace_id: None,
+        namespace_key: "coaching_scrim_team_channels".to_string(),
+        system_name: "Coaching/Scrim".to_string(),
+        match_rule: NamespaceMatch::ParentCategory(COACHING_SCRIM_CATEGORY_ID),
     });
     namespaces.push(DynamicNamespace {
         namespace_id: None,
@@ -1691,6 +1766,7 @@ fn is_ticket_namespace_channel(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diff::diff_models;
     use crate::model::{BotMessageSpec, CategorySpec, ChannelSpec, RoleSpec};
 
     const GUILD_ID: u64 = 1289721245281292288;
@@ -1723,6 +1799,8 @@ mod tests {
     const DEADLOCK_ART: u64 = 226;
     const MODS: u64 = 227;
     const FOOD: u64 = 228;
+    const CUSTOM_GAME_CATEGORY: u64 = 229;
+    const SAMMELPUNKT: u64 = 230;
     const BANNED_USER: u64 = 685_573_558_281_175_043;
     const BANNED_X2: u64 = 496_268_533_496_545_283;
     const BANNED_X4: u64 = 601_742_833_438_818_357;
@@ -1730,6 +1808,9 @@ mod tests {
     const TEAM_LEO_ROLE: u64 = 301;
     const COACH_ROLE: u64 = 302;
     const DL_RANG_ROLE: u64 = 303;
+    const OLD_ARCHIVE_ROLE: u64 = 304;
+    const FUNNY_CUSTOM_PING_ROLE: u64 = 305;
+    const GRIND_CUSTOM_PING_ROLE: u64 = 306;
 
     fn category(id: u64, name: &str) -> CategorySpec {
         CategorySpec {
@@ -1831,6 +1912,9 @@ mod tests {
     fn archive_candidate_model() -> GuildModel {
         let mut model = actual_model();
         model
+            .roles
+            .insert(OLD_ARCHIVE_ROLE, role(OLD_ARCHIVE_ROLE, "Altrolle", 0));
+        model
             .categories
             .insert(ALT_CATEGORY, category(ALT_CATEGORY, "Alt"));
         for (id, name, parent) in [
@@ -1860,6 +1944,14 @@ mod tests {
                 ),
             );
         }
+        let old_allow = overwrite(
+            ALT_CHILD,
+            TargetKind::Role,
+            OLD_ARCHIVE_ROLE,
+            Permissions::VIEW_CHANNEL.bits(),
+            0,
+        );
+        model.overwrites.insert(old_allow.key.clone(), old_allow);
         model
     }
 
@@ -1995,15 +2087,54 @@ mod tests {
                 Some(archive_id),
                 "channel {channel_id} muss ins Archiv"
             );
-            assert!(
-                !derived
-                    .desired
-                    .overwrites
-                    .keys()
-                    .any(|key| key.channel_id == channel_id),
-                "channel {channel_id} darf keine eigenen Overwrites behalten"
+            let channel_overwrites = derived
+                .desired
+                .overwrites
+                .values()
+                .filter(|overwrite| overwrite.key.channel_id == channel_id)
+                .collect::<Vec<_>>();
+            assert_eq!(
+                channel_overwrites.len(),
+                1,
+                "channel {channel_id} braucht exakt die materialisierte Archiv-Sperre"
+            );
+            assert_eq!(channel_overwrites[0].key.target_kind, TargetKind::Role);
+            assert_eq!(channel_overwrites[0].key.target_id, GUILD_ID);
+            assert_eq!(channel_overwrites[0].allow_bits, 0);
+            assert_eq!(
+                channel_overwrites[0].deny_bits,
+                Permissions::VIEW_CHANNEL.bits()
             );
         }
+        let diff = diff_models(
+            &derived.desired,
+            &actual,
+            &derived.dynamic_namespaces,
+            &derived.exceptions,
+        )?;
+        assert!(
+            diff.blocked.iter().all(|blocked| {
+                ![
+                    ALT_CHILD,
+                    FAQ_USER_CHANNEL,
+                    SERVER_FAQ,
+                    BETA_INVITE_SPAM,
+                    MOVEMENT,
+                    DEADLOCK_ART,
+                    MODS,
+                    FOOD,
+                ]
+                .contains(&blocked.change.object.object_id)
+            }),
+            "Archiv-Deletes duerfen wegen materialisierter Sperre nicht blocken: {:?}",
+            diff.blocked
+        );
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Delete
+                && change.object.kind == ObjectKind::PermissionOverwrite
+                && change.object.channel_id == Some(ALT_CHILD)
+                && change.object.target_id == Some(OLD_ARCHIVE_ROLE)
+        }));
         assert_eq!(
             derived.desired.channels[&BETA_INVITE_LOG].parent_category_id,
             Some(CHAT_CATEGORY)
@@ -2020,6 +2151,27 @@ mod tests {
             kreativ.topic.as_deref(),
             Some("Kunst, Mods, Movement-Clips, Food — zeig her, was du hast.")
         );
+        Ok(())
+    }
+
+    #[test]
+    fn dynamic_namespaces_enthalten_faq_und_coaching_scrim() -> anyhow::Result<()> {
+        let actual = actual_model();
+
+        let derived = derive_desired_model(&actual)?;
+        let keys = derived
+            .dynamic_namespaces
+            .iter()
+            .map(|namespace| namespace.namespace_key.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(keys.contains("faq_channels"));
+        assert!(keys.contains("coaching_scrim_team_channels"));
+        assert!(derived.dynamic_namespaces.iter().any(|namespace| {
+            namespace.namespace_key == "coaching_scrim_team_channels"
+                && namespace.match_rule
+                    == NamespaceMatch::ParentCategory(COACHING_SCRIM_CATEGORY_ID)
+        }));
         Ok(())
     }
 
@@ -2398,6 +2550,28 @@ mod tests {
         actual
             .roles
             .insert(COACH_ROLE, role(COACH_ROLE, ROLE_COACH, 0));
+        let category_mod_overwrite = overwrite(
+            COACHING_CATEGORY,
+            TargetKind::Role,
+            ADMIN_ROLE,
+            Permissions::MANAGE_CHANNELS.bits(),
+            0,
+        );
+        let category_coach_overwrite = overwrite(
+            COACHING_CATEGORY,
+            TargetKind::Role,
+            COACH_ROLE,
+            (Permissions::MANAGE_CHANNELS | Permissions::MOVE_MEMBERS).bits(),
+            0,
+        );
+        actual.overwrites.insert(
+            category_mod_overwrite.key.clone(),
+            category_mod_overwrite.clone(),
+        );
+        actual.overwrites.insert(
+            category_coach_overwrite.key.clone(),
+            category_coach_overwrite.clone(),
+        );
         actual.channels.insert(
             COACH_CHAT,
             channel(COACH_CHAT, "coach-chat", Some(COACHING_CATEGORY)),
@@ -2461,6 +2635,17 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
+        assert_eq!(
+            derived.desired.overwrites.get(&category_mod_overwrite.key),
+            Some(&category_mod_overwrite)
+        );
+        assert_eq!(
+            derived
+                .desired
+                .overwrites
+                .get(&category_coach_overwrite.key),
+            Some(&category_coach_overwrite)
+        );
         assert!(!derived.desired.overwrites.contains_key(&OverwriteKey {
             channel_id: COACH_CHAT,
             target_kind: TargetKind::Role,
@@ -2508,6 +2693,49 @@ mod tests {
                 && exception.channel_id == Some(COACHING_CATEGORY)
                 && exception.deny_bits == Some(Permissions::VIEW_CHANNEL.bits())
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn sammelpunkt_funny_grind_custom_ping_overwrites_bleiben_im_soll() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        actual.categories.insert(
+            CUSTOM_GAME_CATEGORY,
+            category(CUSTOM_GAME_CATEGORY, "Custom Game"),
+        );
+        actual.channels.insert(
+            SAMMELPUNKT,
+            channel(SAMMELPUNKT, "Sammelpunkt", Some(CUSTOM_GAME_CATEGORY)),
+        );
+        actual.roles.insert(
+            FUNNY_CUSTOM_PING_ROLE,
+            role(FUNNY_CUSTOM_PING_ROLE, "Funny Custom Ping", 0),
+        );
+        actual.roles.insert(
+            GRIND_CUSTOM_PING_ROLE,
+            role(GRIND_CUSTOM_PING_ROLE, "Grind Custom Ping", 0),
+        );
+        let funny = overwrite(
+            SAMMELPUNKT,
+            TargetKind::Role,
+            FUNNY_CUSTOM_PING_ROLE,
+            Permissions::CONNECT.bits(),
+            0,
+        );
+        let grind = overwrite(
+            SAMMELPUNKT,
+            TargetKind::Role,
+            GRIND_CUSTOM_PING_ROLE,
+            Permissions::CONNECT.bits(),
+            0,
+        );
+        actual.overwrites.insert(funny.key.clone(), funny.clone());
+        actual.overwrites.insert(grind.key.clone(), grind.clone());
+
+        let derived = derive_desired_model(&actual)?;
+
+        assert_eq!(derived.desired.overwrites.get(&funny.key), Some(&funny));
+        assert_eq!(derived.desired.overwrites.get(&grind.key), Some(&grind));
         Ok(())
     }
 

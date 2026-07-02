@@ -14,18 +14,31 @@ use crate::model::ObjectKind;
 pub fn human_summary(diff: &ServerDiff) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "Server-Diff für Guild {} — {} Änderung(en), {} bewusst ausgefiltert.\n",
+        "Server-Diff für Guild {} — {} Änderung(en), {} bewusst ausgefiltert, {} geblockt.\n",
         diff.guild_id,
         diff.changes.len(),
-        diff.filtered.len()
+        diff.filtered.len(),
+        diff.blocked.len()
     ));
 
-    if diff.changes.is_empty() {
+    if diff.changes.is_empty() && diff.blocked.is_empty() {
         out.push_str("\nKeine Abweichungen: Ist-Zustand entspricht dem Soll-Modell.\n");
     } else {
-        out.push_str("\nÄnderungen (werden erst nach Bestätigung angewendet):\n");
-        for change in &diff.changes {
-            out.push_str(&format!("- {}\n", describe_change(change)));
+        if !diff.changes.is_empty() {
+            out.push_str("\nÄnderungen (werden erst nach Bestätigung angewendet):\n");
+            for change in &diff.changes {
+                out.push_str(&format!("- {}\n", describe_change(change)));
+            }
+        }
+        if !diff.blocked.is_empty() {
+            out.push_str("\nGeblockt (nicht anwendbar):\n");
+            for blocked in &diff.blocked {
+                out.push_str(&format!(
+                    "- {} — {}\n",
+                    object_label(&blocked.change),
+                    blocked.reason
+                ));
+            }
         }
     }
 

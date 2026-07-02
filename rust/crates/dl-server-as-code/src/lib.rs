@@ -23,8 +23,8 @@ pub use db::{
     persist_diff_preview, DiffPreview,
 };
 pub use diff::{
-    diff_models, diff_models_with_options, DiffAction, DiffChange, DiffOptions, FieldDiff,
-    FilterReason, ServerDiff,
+    diff_models, diff_models_with_options, BlockedDiff, DiffAction, DiffChange, DiffOptions,
+    FieldDiff, FilterReason, ServerDiff,
 };
 pub use drift::{detect_and_record_drift, AutoRevertRule, DriftRecord};
 pub use import::{import_live_guild_snapshot, SnapshotImportReport};
@@ -58,6 +58,8 @@ pub enum ServerAsCodeError {
     DiffHashMismatch { expected: String, actual: String },
     #[error("Diff-Preview {0} nicht gefunden")]
     PreviewNotFound(i64),
+    #[error("Preview abgelaufen, bitte neu diffen")]
+    PreviewExpired,
     #[error("Snapshot {0} nicht gefunden")]
     SnapshotNotFound(i64),
     #[error("JSON konnte nicht serialisiert werden: {0}")]
@@ -66,6 +68,8 @@ pub enum ServerAsCodeError {
     Sqlx(#[from] sqlx::Error),
     #[error(transparent)]
     Serenity(Box<serenity::Error>),
+    #[error("Objekt weg — übersprungen: {object:?}")]
+    TargetGone { object: ObjectRef },
     #[error("Regex-Regel {pattern} ist ungueltig: {source}")]
     Regex {
         pattern: String,

@@ -9,6 +9,9 @@ const CHAT_CATEGORY: u64 = 200;
 const GENERAL: u64 = 201;
 const TEMPVOICE_PARENT: u64 = 300;
 const TEMPVOICE_LANE: u64 = 301;
+const COACHING_SCRIM_PARENT: u64 = 1_459_526_231_686_119_600;
+const COACHING_TEAM_CHANNEL: u64 = 1_459_526_231_686_119_601;
+const FAQ_CHANNEL: u64 = 1_459_526_231_686_119_602;
 const ROLE_MEMBER: u64 = 400;
 const USER_BANNED: u64 = 500;
 
@@ -240,6 +243,69 @@ fn dynamischer_namespace_filtert_kanaele_und_overwrites_separat_aus() -> anyhow:
         "die Kategorie selbst ist nicht dynamisch"
     );
     assert_eq!(diff.filtered.len(), 2);
+    assert!(diff.filtered.iter().all(|filtered| {
+        matches!(
+            filtered.reason,
+            dl_server_as_code::FilterReason::DynamicNamespace { .. }
+        )
+    }));
+    Ok(())
+}
+
+#[test]
+fn faq_und_coaching_scrim_namespaces_filtern_channel_und_overwrite_drift() -> anyhow::Result<()> {
+    let desired = GuildModel::new(GUILD_ID);
+    let mut actual = GuildModel::new(GUILD_ID);
+    actual.categories.insert(
+        COACHING_SCRIM_PARENT,
+        category(COACHING_SCRIM_PARENT, "Coaching/Scrim", 1),
+    );
+    actual.channels.insert(
+        COACHING_TEAM_CHANNEL,
+        channel(
+            COACHING_TEAM_CHANNEL,
+            "team-leo",
+            Some(COACHING_SCRIM_PARENT),
+        ),
+    );
+    actual
+        .channels
+        .insert(FAQ_CHANNEL, channel(FAQ_CHANNEL, "faq-testuser", None));
+    for channel_id in [COACHING_TEAM_CHANNEL, FAQ_CHANNEL] {
+        actual.overwrites.insert(
+            OverwriteKey {
+                channel_id,
+                target_kind: TargetKind::Role,
+                target_id: ROLE_MEMBER,
+            },
+            overwrite(channel_id, TargetKind::Role, ROLE_MEMBER, 1, 2),
+        );
+    }
+
+    let namespaces = [
+        DynamicNamespace {
+            namespace_id: Some(9),
+            namespace_key: "coaching_scrim_team_channels".to_string(),
+            system_name: "Coaching/Scrim".to_string(),
+            match_rule: NamespaceMatch::ParentCategory(COACHING_SCRIM_PARENT),
+        },
+        DynamicNamespace {
+            namespace_id: Some(10),
+            namespace_key: "faq_channels".to_string(),
+            system_name: "AI-Onboarding/FAQ".to_string(),
+            match_rule: NamespaceMatch::NamePrefix("faq-".to_string()),
+        },
+    ];
+
+    let diff = diff_models(&desired, &actual, &namespaces, &[])?;
+
+    assert_eq!(
+        diff.changes.len(),
+        1,
+        "nur die Scrim-Kategorie selbst ist nicht dynamisch"
+    );
+    assert_eq!(diff.filtered.len(), 4);
+    assert!(diff.blocked.is_empty());
     assert!(diff.filtered.iter().all(|filtered| {
         matches!(
             filtered.reason,

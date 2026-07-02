@@ -1,9 +1,10 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use serenity::all::Permissions;
 
 use crate::model::{
     BotMessageSpec, CategorySpec, ChannelSpec, DiscordId, DocumentedException, DynamicNamespace,
-    GuildModel, ObjectKind, ObjectRef, PermissionOverwriteSpec, RoleSpec,
+    GuildModel, ObjectKind, ObjectRef, OverwriteKey, PermissionOverwriteSpec, RoleSpec, TargetKind,
 };
 use crate::Result;
 
@@ -51,10 +52,18 @@ pub struct FilteredDiff {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BlockedDiff {
+    pub change: DiffChange,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ServerDiff {
     pub guild_id: DiscordId,
     pub changes: Vec<DiffChange>,
     pub filtered: Vec<FilteredDiff>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked: Vec<BlockedDiff>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -64,7 +73,7 @@ pub struct DiffOptions {
 
 impl ServerDiff {
     pub fn is_empty(&self) -> bool {
-        self.changes.is_empty()
+        self.changes.is_empty() && self.blocked.is_empty()
     }
 }
 
@@ -104,6 +113,7 @@ pub fn diff_models_with_options(
 
     let mut changes = Vec::new();
     let mut filtered = Vec::new();
+    let mut blocked = Vec::new();
     for change in raw {
         if let Some(reason) = filter_reason(
             &change,
@@ -113,6 +123,8 @@ pub fn diff_models_with_options(
             documented_exceptions,
         )? {
             filtered.push(FilteredDiff { change, reason });
+        } else if let Some(reason) = effective_rights_block_reason(&change, desired, actual)? {
+            blocked.push(BlockedDiff { change, reason });
         } else {
             changes.push(change);
         }
@@ -122,6 +134,7 @@ pub fn diff_models_with_options(
         guild_id: desired.guild_id,
         changes,
         filtered,
+        blocked,
     })
 }
 
@@ -614,6 +627,132 @@ fn filter_reason(
     dynamic_namespace_filter(change, desired, actual, dynamic_namespaces)
 }
 
+fn effective_rights_block_reason(
+    change: &DiffChange,
+    desired: &GuildModel,
+    actual: &GuildModel,
+) -> Result<Option<String>> {
+    if change.object.kind != ObjectKind::PermissionOverwrite || change.action != DiffAction::Delete
+    {
+        return Ok(None);
+    }
+    let Some(actual_value) = change.actual.as_ref() else {
+        return Ok(None);
+    };
+    let actual_spec: PermissionOverwriteSpec = serde_json::from_value(actual_value.clone())?;
+    let channel_id = actual_spec.key.channel_id;
+    if !actual.channels.contains_key(&channel_id) && !desired.channels.contains_key(&channel_id) {
+        return Ok(None);
+    }
+    if desired_channel_materializes_visibility_deny(desired, channel_id) {
+        return Ok(None);
+    }
+
+    let before = effective_channel_permissions(
+        actual,
+        channel_id,
+        actual_spec.key.target_kind,
+        actual_spec.key.target_id,
+    );
+    let after = effective_channel_permissions(
+        desired,
+        channel_id,
+        actual_spec.key.target_kind,
+        actual_spec.key.target_id,
+    );
+    if before == after {
+        return Ok(None);
+    }
+
+    Ok(Some(format!(
+        "effektive Rechte würden sich ändern: {}: {before:#x} -> {after:#x}",
+        subject_label(
+            actual,
+            actual_spec.key.target_kind,
+            actual_spec.key.target_id
+        )
+    )))
+}
+
+fn desired_channel_materializes_visibility_deny(model: &GuildModel, channel_id: DiscordId) -> bool {
+    model
+        .overwrites
+        .get(&OverwriteKey {
+            channel_id,
+            target_kind: TargetKind::Role,
+            target_id: model.guild_id,
+        })
+        .is_some_and(|overwrite| {
+            Permissions::from_bits_truncate(overwrite.deny_bits).contains(Permissions::VIEW_CHANNEL)
+        })
+}
+
+fn effective_channel_permissions(
+    model: &GuildModel,
+    channel_id: DiscordId,
+    target_kind: TargetKind,
+    target_id: DiscordId,
+) -> u64 {
+    let mut permissions = model
+        .roles
+        .get(&model.guild_id)
+        .or_else(|| model.roles.values().find(|role| role.name == "@everyone"))
+        .map_or(0, |role| role.permissions_bitmask);
+
+    if target_kind == TargetKind::Role && target_id != model.guild_id {
+        permissions |= model
+            .roles
+            .get(&target_id)
+            .map_or(0, |role| role.permissions_bitmask);
+    }
+
+    if Permissions::from_bits_truncate(permissions).contains(Permissions::ADMINISTRATOR) {
+        return Permissions::all().bits();
+    }
+
+    if let Some(overwrite) = model.overwrites.get(&OverwriteKey {
+        channel_id,
+        target_kind: TargetKind::Role,
+        target_id: model.guild_id,
+    }) {
+        permissions = apply_overwrite_bits(permissions, overwrite);
+    }
+
+    if target_kind == TargetKind::Role && target_id != model.guild_id {
+        if let Some(overwrite) = model.overwrites.get(&OverwriteKey {
+            channel_id,
+            target_kind: TargetKind::Role,
+            target_id,
+        }) {
+            permissions = apply_overwrite_bits(permissions, overwrite);
+        }
+    }
+
+    if target_kind == TargetKind::Member {
+        if let Some(overwrite) = model.overwrites.get(&OverwriteKey {
+            channel_id,
+            target_kind: TargetKind::Member,
+            target_id,
+        }) {
+            permissions = apply_overwrite_bits(permissions, overwrite);
+        }
+    }
+
+    permissions
+}
+
+fn apply_overwrite_bits(base: u64, overwrite: &PermissionOverwriteSpec) -> u64 {
+    (base & !overwrite.deny_bits) | overwrite.allow_bits
+}
+
+fn subject_label(model: &GuildModel, target_kind: TargetKind, target_id: DiscordId) -> String {
+    match target_kind {
+        TargetKind::Role if target_id == model.guild_id => "@everyone".to_string(),
+        TargetKind::Role => format!("role:{target_id}"),
+        TargetKind::Member => format!("member:{target_id}"),
+    }
+}
+
 fn documented_exception_filter(
     change: &DiffChange,
     documented_exceptions: &[DocumentedException],
@@ -669,8 +808,12 @@ fn dynamic_namespace_filter(
 
 fn namespace_allows_free_overwrites(namespace: &DynamicNamespace) -> bool {
     // §3.11: TempVoice-Rechte werden je Lane-Einstellung von dl-voice verwaltet.
+    // faq-* und Coaching/Scrim-Teamkanaele sind ebenfalls runtime-/projektverwaltet.
     // Tickets und Bot-Pate-Fallbacks haben dagegen dokumentierte Rechte-Muster und werden geprueft.
-    namespace.system_name == "dl-voice" || namespace.namespace_key.starts_with("tempvoice_")
+    namespace.system_name == "dl-voice"
+        || namespace.namespace_key.starts_with("tempvoice_")
+        || namespace.namespace_key == "faq_channels"
+        || namespace.namespace_key == "coaching_scrim_team_channels"
 }
 
 pub(crate) fn diff_json(change: &DiffChange) -> Value {
@@ -681,4 +824,138 @@ pub(crate) fn diff_json(change: &DiffChange) -> Value {
         "desired": change.desired,
         "actual": change.actual,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{ChannelKind, OverwriteKey, RoleSpec};
+
+    const GUILD_ID: u64 = 1_289_721_245_281_292_288;
+    const CHANNEL_ID: u64 = 10;
+    const ROLE_ID: u64 = 20;
+
+    fn role(id: u64, name: &str, permissions: Permissions) -> RoleSpec {
+        RoleSpec {
+            guild_id: GUILD_ID,
+            role_id: id,
+            name: name.to_string(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+            permissions_bitmask: permissions.bits(),
+            position: 0,
+        }
+    }
+
+    fn model_with_channel() -> GuildModel {
+        let mut model = GuildModel::new(GUILD_ID);
+        model.roles.insert(
+            GUILD_ID,
+            role(
+                GUILD_ID,
+                "@everyone",
+                Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+            ),
+        );
+        model
+            .roles
+            .insert(ROLE_ID, role(ROLE_ID, "Privat", Permissions::empty()));
+        model.channels.insert(
+            CHANNEL_ID,
+            ChannelSpec {
+                guild_id: GUILD_ID,
+                channel_id: CHANNEL_ID,
+                name: "privat".to_string(),
+                kind: ChannelKind::Text,
+                topic: None,
+                position: 0,
+                parent_category_id: None,
+                nsfw: false,
+                bitrate: None,
+                user_limit: None,
+                rate_limit_per_user: None,
+                status: None,
+            },
+        );
+        model
+    }
+
+    fn overwrite(
+        target_kind: TargetKind,
+        target_id: u64,
+        allow: Permissions,
+        deny: Permissions,
+    ) -> PermissionOverwriteSpec {
+        PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: CHANNEL_ID,
+                target_kind,
+                target_id,
+            },
+            allow_bits: allow.bits(),
+            deny_bits: deny.bits(),
+        }
+    }
+
+    #[test]
+    fn overwrite_delete_ohne_materialisierten_ersatz_wird_wegen_effektiver_rechte_geblockt(
+    ) -> anyhow::Result<()> {
+        let desired = model_with_channel();
+        let mut actual = model_with_channel();
+        let hidden = overwrite(
+            TargetKind::Role,
+            GUILD_ID,
+            Permissions::empty(),
+            Permissions::VIEW_CHANNEL,
+        );
+        actual.overwrites.insert(hidden.key.clone(), hidden);
+
+        let diff = diff_models(&desired, &actual, &[], &[])?;
+
+        assert!(diff.changes.is_empty(), "{:?}", diff.changes);
+        assert_eq!(diff.blocked.len(), 1);
+        assert!(diff.blocked[0]
+            .reason
+            .contains("effektive Rechte würden sich ändern: @everyone"));
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_delete_mit_materialisiertem_view_deny_bleibt_ausfuehrbar() -> anyhow::Result<()> {
+        let mut desired = model_with_channel();
+        let materialized = overwrite(
+            TargetKind::Role,
+            GUILD_ID,
+            Permissions::empty(),
+            Permissions::VIEW_CHANNEL,
+        );
+        desired
+            .overwrites
+            .insert(materialized.key.clone(), materialized.clone());
+
+        let mut actual = model_with_channel();
+        actual
+            .overwrites
+            .insert(materialized.key.clone(), materialized);
+        let legacy_role_allow = overwrite(
+            TargetKind::Role,
+            ROLE_ID,
+            Permissions::VIEW_CHANNEL,
+            Permissions::empty(),
+        );
+        actual
+            .overwrites
+            .insert(legacy_role_allow.key.clone(), legacy_role_allow);
+
+        let diff = diff_models(&desired, &actual, &[], &[])?;
+
+        assert!(diff.blocked.is_empty(), "{:?}", diff.blocked);
+        assert_eq!(diff.changes.len(), 1);
+        assert_eq!(diff.changes[0].action, DiffAction::Delete);
+        assert_eq!(diff.changes[0].object.target_id, Some(ROLE_ID));
+        Ok(())
+    }
 }

@@ -13,7 +13,7 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use chrono::{SecondsFormat, Utc};
+use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use dl_discord::{BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec};
 use dl_server_as_code::diff::{DiffAction, DiffChange, FieldDiff, ServerDiff};
 use dl_server_as_code::{
@@ -52,6 +52,7 @@ const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
+const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
@@ -131,7 +132,12 @@ impl std::error::Error for ServerSyncError {}
 
 impl From<dl_server_as_code::ServerAsCodeError> for ServerSyncError {
     fn from(value: dl_server_as_code::ServerAsCodeError) -> Self {
-        Self::internal(value.to_string())
+        match value {
+            dl_server_as_code::ServerAsCodeError::PreviewExpired => {
+                Self::bad_request(value.to_string())
+            }
+            other => Self::internal(other.to_string()),
+        }
     }
 }
 
@@ -2689,6 +2695,7 @@ fn onboarding_diff(
         guild_id,
         changes,
         filtered: Vec::new(),
+        blocked: Vec::new(),
     })
 }
 
@@ -2749,6 +2756,7 @@ fn serverguide_diff(
             actual: Some(actual_value),
         }],
         filtered: Vec::new(),
+        blocked: Vec::new(),
     })
 }
 
@@ -2798,12 +2806,14 @@ fn serverguide_blocker_summary(blockers: &[String]) -> String {
     )
 }
 
+#[derive(Debug)]
 struct StoredOnboardingPreview {
     guild_id: u64,
     diff_hash: String,
     config: NativeOnboardingConfig,
 }
 
+#[derive(Debug)]
 struct StoredServerGuidePreview {
     guild_id: u64,
     diff_hash: String,
@@ -2819,29 +2829,33 @@ async fn persist_onboarding_preview(
 ) -> ServerSyncResult<dl_server_as_code::db::DiffPreview> {
     let diff_json = serde_json::to_string(diff)?;
     let diff_hash = sha256_hex(&serde_json::to_vec(diff)?);
-    let (preview_id, created_snapshot_id): (i64, Option<i64>) = sqlx::query_as(
-        "INSERT INTO server_config.diff_previews
+    let (preview_id, created_snapshot_id, created_at): (i64, Option<i64>, DateTime<Utc>) =
+        sqlx::query_as(
+            "INSERT INTO server_config.diff_previews
          (guild_id, snapshot_id, diff_hash, diff_json, human_summary, created_by_user_id)
          VALUES ($1, $2, $3, $4::text::jsonb, $5, $6)
          ON CONFLICT (guild_id, diff_hash)
          DO UPDATE SET snapshot_id = EXCLUDED.snapshot_id,
                        diff_json = EXCLUDED.diff_json,
-                       human_summary = EXCLUDED.human_summary
-         RETURNING preview_id, snapshot_id",
-    )
-    .bind(id_to_i64(diff.guild_id)?)
-    .bind(snapshot_id)
-    .bind(&diff_hash)
-    .bind(diff_json)
-    .bind(human_summary)
-    .bind(created_by_user_id.map(id_to_i64).transpose()?)
-    .fetch_one(pool)
-    .await?;
+                       human_summary = EXCLUDED.human_summary,
+                       created_by_user_id = EXCLUDED.created_by_user_id,
+                       created_at = now()
+         RETURNING preview_id, snapshot_id, created_at",
+        )
+        .bind(id_to_i64(diff.guild_id)?)
+        .bind(snapshot_id)
+        .bind(&diff_hash)
+        .bind(diff_json)
+        .bind(human_summary)
+        .bind(created_by_user_id.map(id_to_i64).transpose()?)
+        .fetch_one(pool)
+        .await?;
 
     Ok(dl_server_as_code::db::DiffPreview {
         preview_id,
         guild_id: diff.guild_id,
         snapshot_id: created_snapshot_id,
+        created_at,
         diff_hash,
         human_summary: human_summary.to_string(),
         diff: diff.clone(),
@@ -2854,7 +2868,7 @@ async fn load_onboarding_preview(
     guild_id: u64,
 ) -> ServerSyncResult<StoredOnboardingPreview> {
     let row = sqlx::query(
-        "SELECT guild_id, diff_hash, diff_json::text AS diff_json
+        "SELECT guild_id, diff_hash, diff_json::text AS diff_json, created_at
            FROM server_config.diff_previews
           WHERE preview_id = $1
             AND guild_id = $2
@@ -2880,6 +2894,7 @@ async fn load_onboarding_preview(
         ))
     })?;
 
+    ensure_preview_not_expired(row.try_get("created_at")?)?;
     let diff_json: String = row.try_get("diff_json")?;
     let diff: ServerDiff = serde_json::from_str(&diff_json)?;
     let stored_hash: String = row.try_get("diff_hash")?;
@@ -2903,7 +2918,7 @@ async fn load_serverguide_preview(
     guild_id: u64,
 ) -> ServerSyncResult<StoredServerGuidePreview> {
     let row = sqlx::query(
-        "SELECT guild_id, diff_hash, diff_json::text AS diff_json
+        "SELECT guild_id, diff_hash, diff_json::text AS diff_json, created_at
            FROM server_config.diff_previews
           WHERE preview_id = $1
             AND guild_id = $2
@@ -2929,6 +2944,7 @@ async fn load_serverguide_preview(
         ))
     })?;
 
+    ensure_preview_not_expired(row.try_get("created_at")?)?;
     let diff_json: String = row.try_get("diff_json")?;
     let diff: ServerDiff = serde_json::from_str(&diff_json)?;
     let stored_hash: String = row.try_get("diff_hash")?;
@@ -3106,6 +3122,17 @@ fn id_to_i64(value: u64) -> ServerSyncResult<i64> {
 fn i64_to_u64(value: i64) -> ServerSyncResult<u64> {
     u64::try_from(value)
         .map_err(|_| ServerSyncError::bad_request("BIGINT passt nicht in Discord-ID"))
+}
+
+fn ensure_preview_not_expired(created_at: DateTime<Utc>) -> ServerSyncResult<()> {
+    if Utc::now().signed_duration_since(created_at)
+        > ChronoDuration::minutes(PREVIEW_MAX_AGE_MINUTES)
+    {
+        return Err(ServerSyncError::bad_request(
+            "Preview abgelaufen, bitte neu diffen",
+        ));
+    }
+    Ok(())
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -5171,7 +5198,24 @@ mod tests {
             .is_ok());
 
         sqlx::query(
-            "UPDATE server_config.diff_previews SET applied_at = now() WHERE preview_id = $1",
+            "UPDATE server_config.diff_previews
+                SET created_at = now() - interval '16 minutes'
+              WHERE preview_id = $1",
+        )
+        .bind(good_id)
+        .execute(pool)
+        .await?;
+        let stale_err = load_onboarding_preview(pool, good_id, GUILD_ID)
+            .await
+            .expect_err("stale onboarding preview must fail");
+        assert!(stale_err
+            .to_string()
+            .contains("Preview abgelaufen, bitte neu diffen"));
+
+        sqlx::query(
+            "UPDATE server_config.diff_previews
+                SET created_at = now(), applied_at = now()
+              WHERE preview_id = $1",
         )
         .bind(good_id)
         .execute(pool)
@@ -5191,6 +5235,34 @@ mod tests {
         assert!(load_onboarding_preview(pool, wrong_key_id, GUILD_ID)
             .await
             .is_err());
+
+        let serverguide_config = build_server_guide_config(
+            &json!({"enabled": false, "new_member_actions": []}),
+            &serverguide_model(),
+        )
+        .config
+        .expect("serverguide config");
+        let serverguide = serverguide_diff(
+            GUILD_ID,
+            &live_serverguide_config_with_action_type(SERVER_GUIDE_ACTION_TYPE_CHAT),
+            &serverguide_config,
+        )
+        .expect("serverguide diff");
+        let serverguide_id = insert_raw_onboarding_preview(pool, GUILD_ID, &serverguide).await?;
+        sqlx::query(
+            "UPDATE server_config.diff_previews
+                SET created_at = now() - interval '16 minutes'
+              WHERE preview_id = $1",
+        )
+        .bind(serverguide_id)
+        .execute(pool)
+        .await?;
+        let stale_err = load_serverguide_preview(pool, serverguide_id, GUILD_ID)
+            .await
+            .expect_err("stale serverguide preview must fail");
+        assert!(stale_err
+            .to_string()
+            .contains("Preview abgelaufen, bitte neu diffen"));
 
         Ok(())
     }

@@ -1,5 +1,12 @@
 # Welle2b W1 Onboarding-Fundament (2026-07-02)
 
+## Welle2b W3 Incident-Hardening §0 (2026-07-03)
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-welle2b` auf Branch `feat/welle2b-onboarding`. Verbindlich: kein Checkout von `main`, kein Push, kein Commit durch diesen Worker; `CHANGELOG.md` bleibt unberuehrt.
+- Pflichtkontext gelesen: `docs/onboarding-redesign/phase1-rechte-soll-modell.ENTWURF.md` §0 Incident-Lehren Welle 2a. Umsetzung startet TDD-fokussiert in `dl-server-as-code` Diff/Rules/Apply und `dl-bot` Serversync-Freshness.
+- Implementiert: Archivkanaele materialisieren eigene `@everyone -VIEW`-Overwrites; Diff hat effektive-Rechte-Guard mit geblockten Preview-Eintraegen; faq-/Coaching-Scrim-Namespaces und Owner-Overrides fuer Sammelpunkt/Coaching-Kategorie sind ergaenzt.
+- Implementiert: Apply lehnt Previews aelter als 15 Minuten ab, sortiert Sichtbarkeits-Denies vor Overwrite-Deletes und behandelt 404/Gone als Skip+Report statt Laufabbruch. Onboarding-/Serverguide-Apply pruefen dieselbe Preview-Freshness.
+- Verifikation gruen: `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot serversync::tests::onboarding_preview_load_bindet_guild_message_key_und_applied_status -- --ignored --nocapture`; `./scripts/central_test_db.sh cargo test --workspace`; `git diff --check`. Kein Commit/Push.
+
 ## Welle2b W2 Kanal-Sanierung + Regelwerk + Server Guide (2026-07-03)
 - Implementierungsworker gestartet im Worktree `Deadlock-Bots-welle2b` auf Branch `feat/welle2b-onboarding`. Verbindlich: kein Checkout von `main`, kein Push, kein Commit durch diesen Worker; `CHANGELOG.md` bleibt unberuehrt.
 - Rework-Implementierungsworker fuer 3 Kritiker-Befunde gestartet: Server-Guide-DTO `title`/`description`, fester CHAT-action_type-Wert und 429-Retry fuer Regelwerk-REST. Verbindlich: TDD, kein Commit/Push durch diesen Worker.
