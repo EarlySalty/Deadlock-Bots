@@ -1,3 +1,11 @@
+## #186 — Automatische Text-Moderation vorübergehend pausiert
+
+**Ausgangslage:** Die automatische Moderation hat Textnachrichten teils eigenständig gelöscht und mit einer Auszeit belegt — ohne dass ein Mod das vorher freigeben oder hinterher leicht nachvollziehen konnte, und stellenweise zu vorschnell.
+
+**Was wurde geändert:** Der automatische Text-Scan ist abgeschaltet. Der Schutz gegen Spam-Wellen und übernommene Accounts (die Bilder-Fluten) läuft unverändert weiter.
+
+**Wie es jetzt läuft:** Der Bot entfernt aktuell keine Nachrichten mehr allein wegen einer KI-Textbewertung. Eine überarbeitete Version kommt, die jeden Verdacht doppelt prüft und den Mods eine nachvollziehbare Meldung mit Entscheidungsknöpfen gibt.
+
 ## #185 — Bot spricht durchgehend Deutsch, Logs werden ehrlicher
 
 **Ausgangslage:** Ein paar Bot-Antworten und Moderations-Meldungen waren noch auf Englisch (Reste der Technik-Umstellung), und die Abschieds-Umfrage tauchte in unseren Logs immer als „fehlgeschlagen" auf — obwohl Discord solche Nachrichten nach einem Austritt schlicht nicht mehr zustellen lässt.

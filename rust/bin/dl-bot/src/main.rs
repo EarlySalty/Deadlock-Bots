@@ -870,11 +870,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }
 
         // AI-Moderator (6): Scan-Kanal-Subscriber
+        // Der automatische Text-Scan ist per Default AUS (AI_MODERATOR_ENABLE),
+        // bis der überarbeitete, GPT-verifizierte Moderations-Guard live ist.
+        // Das Schema wird weiter angelegt und die aimod:-Review-Buttons bleiben
+        // registriert, damit bestehende Fälle abgearbeitet werden können.
+        // SecurityGuard (Bild-/Takeover-Schutz) ist davon unberührt.
         if let Some(moderator) = &moderator {
             if let Err(err) = moderator.store.ensure_schema().await {
                 tracing::warn!(%err, "Moderation: Schema-Anlage fehlgeschlagen");
             }
-            dl_moderation::spawn(moderator.clone(), &dispatcher);
+            if env_bool_default("AI_MODERATOR_ENABLE", false) {
+                dl_moderation::spawn(moderator.clone(), &dispatcher);
+            } else {
+                tracing::info!(
+                    "AI-Moderator-Scan deaktiviert (AI_MODERATOR_ENABLE nicht gesetzt)"
+                );
+            }
         } else {
             tracing::info!("AI-Moderator inaktiv (kein MiniMax-Key)");
         }
