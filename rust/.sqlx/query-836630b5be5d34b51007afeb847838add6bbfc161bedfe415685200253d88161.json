@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.deadlock_hero_builds\n                (hero_id, build_id, build_name, author_name, is_active, sort_order)\n            VALUES ($1, $2, $3, $4, TRUE, $5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "836630b5be5d34b51007afeb847838add6bbfc161bedfe415685200253d88161"
+}

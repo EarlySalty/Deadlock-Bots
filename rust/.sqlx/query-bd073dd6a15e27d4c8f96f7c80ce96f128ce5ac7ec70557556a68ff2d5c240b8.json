@@ -1,0 +1,52 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT message_id,\n                   channel_id,\n                   COALESCE(status, '') AS \"status!\",\n                   assigned_coach_id,\n                   ai_summary,\n                   reserved_until\n              FROM coaching.requests\n             WHERE bot_request_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "message_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "channel_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "status!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "assigned_coach_id",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 4,
+        "name": "ai_summary",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 5,
+        "name": "reserved_until",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      null,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "bd073dd6a15e27d4c8f96f7c80ce96f128ce5ac7ec70557556a68ff2d5c240b8"
+}

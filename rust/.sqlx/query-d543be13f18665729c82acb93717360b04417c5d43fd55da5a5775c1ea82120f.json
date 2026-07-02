@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.voice_session_log(\n                id, user_id, started_at, ended_at, duration_seconds, points\n            )\n            VALUES(1, 100, $1, $1, 1800, 0)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "d543be13f18665729c82acb93717360b04417c5d43fd55da5a5775c1ea82120f"
+}

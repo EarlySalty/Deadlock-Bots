@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                INSERT INTO activity.member_leave_surveys(\n                    id, user_id, guild_id, left_at, display_name, user_bucket,\n                    survey_token, created_at\n                )\n                VALUES ($1, $2, 42, $3, 'Nani', 'regular', 'dup-token', $3)\n                ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "cdcbac27c197c0592597dfc1e5d3eb51946b423bdb2bb7a967a56eef75890f93"
+}

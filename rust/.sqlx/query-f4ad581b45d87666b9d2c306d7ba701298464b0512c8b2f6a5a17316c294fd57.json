@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT total_active_days FROM activity.user_retention_tracking WHERE user_id = 5",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_active_days",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f4ad581b45d87666b9d2c306d7ba701298464b0512c8b2f6a5a17316c294fd57"
+}

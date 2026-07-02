@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.tempvoice_lane_tag_filter\n                (channel_id, required_tone_tag, updated_at)\n            VALUES ($1, $2, now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "06bb98a46506d352aa962f4232062cf524b99b403176d5086b4044d94d3f3234"
+}

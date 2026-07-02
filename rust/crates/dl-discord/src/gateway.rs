@@ -6,9 +6,9 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use serenity::all::{
-    Context, EventHandler, GatewayIntents, GuildChannel, GuildId, GuildMemberUpdateEvent,
-    InviteCreateEvent, InviteDeleteEvent, Member, Message, Permissions, Reaction, ReactionType,
-    Ready, User, UserId, VoiceState,
+    CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
+    GuildId, GuildMemberUpdateEvent, Interaction, InviteCreateEvent, InviteDeleteEvent, Member,
+    Message, Permissions, Reaction, ReactionType, Ready, User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -19,7 +19,7 @@ use crate::core_user_sync::{
 };
 use crate::dispatcher::{
     member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
-    GatewayEvent, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent,
+    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
@@ -64,6 +64,54 @@ fn is_self_reaction_user(
     application_id: Option<u64>,
 ) -> bool {
     user_id == current_user_id || application_id == Some(user_id.get())
+}
+
+fn command_route(name: &str, options: &[CommandDataOption]) -> String {
+    if let Some(option) = options.first() {
+        if let CommandDataOptionValue::SubCommand(inner) = &option.value {
+            return format!("{name} {}", command_route(&option.name, inner));
+        }
+        if let CommandDataOptionValue::SubCommandGroup(inner) = &option.value {
+            return format!("{name} {}", command_route(&option.name, inner));
+        }
+    }
+    name.to_string()
+}
+
+fn interaction_event(interaction: &Interaction) -> Option<InteractionEvent> {
+    match interaction {
+        Interaction::Command(cmd) => Some(InteractionEvent {
+            guild_id: cmd.guild_id.map(|id| id.get()),
+            channel_id: Some(cmd.channel_id.get()),
+            message_id: None,
+            interaction_id: cmd.id.get(),
+            user_id: cmd.user.id.get(),
+            interaction_kind: "command",
+            route: Some(command_route(&cmd.data.name, &cmd.data.options)),
+            occurred_at: cmd.id.created_at().unix_timestamp(),
+        }),
+        Interaction::Component(component) => Some(InteractionEvent {
+            guild_id: component.guild_id.map(|id| id.get()),
+            channel_id: Some(component.channel_id.get()),
+            message_id: Some(component.message.id.get()),
+            interaction_id: component.id.get(),
+            user_id: component.user.id.get(),
+            interaction_kind: "component",
+            route: Some(component.data.custom_id.to_string()),
+            occurred_at: component.id.created_at().unix_timestamp(),
+        }),
+        Interaction::Modal(modal) => Some(InteractionEvent {
+            guild_id: modal.guild_id.map(|id| id.get()),
+            channel_id: Some(modal.channel_id.get()),
+            message_id: modal.message.as_ref().map(|message| message.id.get()),
+            interaction_id: modal.id.get(),
+            user_id: modal.user.id.get(),
+            interaction_kind: "modal",
+            route: Some(modal.data.custom_id.to_string()),
+            occurred_at: modal.id.created_at().unix_timestamp(),
+        }),
+        _ => None,
+    }
 }
 
 #[async_trait]
@@ -164,6 +212,9 @@ impl EventHandler for Handler {
             CoreUserEventKind::InteractionCreate,
             profile_from_interaction(&interaction),
         );
+        if let Some(event) = interaction_event(&interaction) {
+            self.dispatcher.publish_interaction(event);
+        }
         crate::dispatch::dispatch(&self.adapter, &self.router, &interaction).await;
     }
 

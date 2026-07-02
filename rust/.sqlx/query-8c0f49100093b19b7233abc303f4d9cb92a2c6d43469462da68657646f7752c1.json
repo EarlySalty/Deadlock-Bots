@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT co_participant_ids::text AS \"co_participant_ids?\"\n            FROM activity.text_conversation_log\n            WHERE user_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "co_participant_ids?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "8c0f49100093b19b7233abc303f4d9cb92a2c6d43469462da68657646f7752c1"
+}

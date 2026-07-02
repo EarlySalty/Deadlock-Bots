@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO core.steam_links(discord_id,steam_id,steam_id64) VALUES (42,'STEAM_42',42)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4294d687794bc7bffa4a9c2184441b185ca1d153dcae19c60dc006e5663c1138"
+}

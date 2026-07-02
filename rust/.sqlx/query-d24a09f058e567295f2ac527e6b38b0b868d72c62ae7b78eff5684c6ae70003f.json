@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT id, discord_id, display_name\n          FROM scrim.participants\n         ORDER BY id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "discord_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "display_name",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "d24a09f058e567295f2ac527e6b38b0b868d72c62ae7b78eff5684c6ae70003f"
+}

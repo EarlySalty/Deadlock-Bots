@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                action AS \"action!\",\n                keyword_hit AS \"keyword_hit!\",\n                messages::text AS \"messages!\"\n            FROM moderation.security_guard_incidents\n            WHERE case_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "action!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "keyword_hit!",
+        "type_info": "Bool"
+      },
+      {
+        "ordinal": 2,
+        "name": "messages!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "1a340506340a21fd7f23345a959b7f9026f0da600b936a2168fafd20f8cc5fef"
+}

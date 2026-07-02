@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT action, mod_id, mod_review_message_id\n            FROM moderation.ai_moderation_cases\n            WHERE case_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "action",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "mod_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "mod_review_message_id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "4e780625682e154c4b4184c68b74ee098247b0e245a2e638a9179cc99a842ef8"
+}

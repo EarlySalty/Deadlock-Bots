@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.tierlist_hero_meta (hero_id, description, updated_at)\n            VALUES ($1, $2, $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "edb24c769ebeee0ba9bd1dd0897ba3597bdf93c06a02ac32d1f44de6b8cd653e"
+}

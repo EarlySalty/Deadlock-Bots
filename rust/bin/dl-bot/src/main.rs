@@ -7,6 +7,7 @@
 //! deshalb sind die Standard-Ports hier erst nach Freigabe zu übernehmen.
 
 mod build_publisher;
+mod journeyglue;
 mod master;
 mod modglue;
 mod onboardglue;
@@ -900,6 +901,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }),
         );
         dl_activity::analyzer::spawn_message_activity(central_pool.clone(), &dispatcher);
+        let _journey_ingestion =
+            dl_activity::journey::spawn_ingestion(central_pool.clone(), &dispatcher);
+        let _journey_retention = dl_activity::journey::spawn_retention(central_pool.clone());
+        let _journey_role_events =
+            journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
+        let _journey_tag_events = journeyglue::spawn_tag_events(
+            central_pool.clone(),
+            tag_service.clone(),
+            onboardglue::MAIN_GUILD_ID,
+        );
         // Text-Gamification (5): Konversations-Punkte → text_stats (speist das
         // öffentliche Text-Leaderboard) + 60-s-Flush-Loop.
         let text_sessions = Arc::new(dl_activity::text_stats::TextSessions::new(

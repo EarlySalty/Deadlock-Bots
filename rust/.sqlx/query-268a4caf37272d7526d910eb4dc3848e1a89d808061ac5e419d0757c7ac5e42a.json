@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO voice.tempvoice_bans(owner_id,banned_id) VALUES (42,99),(88,42)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "268a4caf37272d7526d910eb4dc3848e1a89d808061ac5e419d0757c7ac5e42a"
+}

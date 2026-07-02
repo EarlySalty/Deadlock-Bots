@@ -1,0 +1,27 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.reaction_role_mappings(\n                guild_id, source_channel_id, message_id, emoji, role_id,\n                dm_enabled, dm_text, remove_on_unreact, backfill_pending,\n                active, created_at, updated_at\n            )\n            VALUES (42, 43, $1, $2, $3, $4, 'DM', $5, $6, TRUE, now(), now())\n            RETURNING id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Int8",
+        "Bool",
+        "Bool",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "ff1f31acf6d2427043d24968aea46ae27a5c2399e63b9020197d87a659a22f5f"
+}

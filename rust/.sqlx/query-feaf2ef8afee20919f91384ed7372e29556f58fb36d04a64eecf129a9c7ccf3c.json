@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO coaching.requests(\n                request_uid, website_request_id, discord_user_id, discord_username,\n                rank, subrank, status, created_at, updated_at\n            )\n            VALUES ('website-union:seed', 'web-union', 801, 'WebsiteOnly',\n                    'Phantom', 'III', 'pending', now(), now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "feaf2ef8afee20919f91384ed7372e29556f58fb36d04a64eecf129a9c7ccf3c"
+}

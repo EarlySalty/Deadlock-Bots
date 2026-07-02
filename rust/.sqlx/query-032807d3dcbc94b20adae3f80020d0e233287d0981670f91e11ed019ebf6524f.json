@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO moderation.ai_moderation_ragebait_hits(\n                id, guild_id, user_id, message_id, channel_id, content_preview, created_at\n            )\n            VALUES\n                ($1, $2, $3, $4, $5, $6, now() - make_interval(mins => $7::int)),\n                ($8, $2, $3, $9, $5, $10, now() - make_interval(mins => $7::int) + interval '1 second')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Int4",
+        "Int8",
+        "Int8",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "032807d3dcbc94b20adae3f80020d0e233287d0981670f91e11ed019ebf6524f"
+}

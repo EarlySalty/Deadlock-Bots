@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO moderation.ai_moderation_cases\n                (case_id, guild_id, channel_id, message_id, user_id, created_at)\n            VALUES ($1, $2, $3, $4, $5, now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "0bcf1702b908c3a914c3f0b553025dd041a3cdbf7bc84f8c1a977961637cca5a"
+}

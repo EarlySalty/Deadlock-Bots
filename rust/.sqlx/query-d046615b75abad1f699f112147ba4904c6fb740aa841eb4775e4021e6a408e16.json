@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT\n                attachments::text AS \"attachments!\",\n                ai_raw::text AS \"raw!\",\n                escalated_with_context\n            FROM moderation.ai_moderation_cases\n            WHERE message_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "attachments!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "raw!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "escalated_with_context",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "d046615b75abad1f699f112147ba4904c6fb740aa841eb4775e4021e6a408e16"
+}

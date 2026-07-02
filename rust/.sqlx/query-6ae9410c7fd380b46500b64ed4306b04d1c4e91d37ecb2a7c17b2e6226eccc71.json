@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.user_activity_patterns(\n                user_id, typical_hours, typical_days, activity_score_2w, ping_count_30d\n            )\n            VALUES($1, $2::text::jsonb, $3::text::jsonb, 5, 0)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "6ae9410c7fd380b46500b64ed4306b04d1c4e91d37ecb2a7c17b2e6226eccc71"
+}

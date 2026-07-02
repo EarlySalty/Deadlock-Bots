@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT display_name AS \"display_name!\"\n            FROM activity.member_events\n            WHERE user_id = 42\n              AND event_type = 'leave'\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "display_name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "fdb0a0a70f1e9da014a46d1a618ccaa9960dfbfbe0963f7ebf7032e60a256b22"
+}

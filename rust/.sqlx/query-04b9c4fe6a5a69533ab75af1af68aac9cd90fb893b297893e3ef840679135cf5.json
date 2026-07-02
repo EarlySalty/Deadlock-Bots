@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT COUNT(*) AS \"count!\"\n          FROM scrim.team_members\n         WHERE team_id = $1\n           AND participant_id = $2\n           AND role = 'S'\n           AND is_captain = TRUE\n           AND is_bench = FALSE\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "count!",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "04b9c4fe6a5a69533ab75af1af68aac9cd90fb893b297893e3ef840679135cf5"
+}

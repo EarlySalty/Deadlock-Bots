@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.twitch_streamer_invites(streamer_login, guild_id, invite_code)\n            VALUES('coolstreamer', 1, 'ABC123')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "bd86a864bed842a64e389ed8826fd7169f59d23ddfbd932be6995d24d69ae228"
+}

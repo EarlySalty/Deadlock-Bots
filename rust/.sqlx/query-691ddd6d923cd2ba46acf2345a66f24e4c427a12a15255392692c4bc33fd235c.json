@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.member_events(id, user_id, guild_id, event_type, display_name)\n            VALUES(1, 10, 1, 'join', 'Schon da')\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "691ddd6d923cd2ba46acf2345a66f24e4c427a12a15255392692c4bc33fd235c"
+}

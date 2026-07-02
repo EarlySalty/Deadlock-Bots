@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.tierlist_build_votes\n                (build_id, upvotes, downvotes, updated_at)\n            VALUES ($1, $2, $3, $4)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "ccf906c8bd0274ce7d78756bbc8016fe82887601494d515c3f2f2405cacfc5e8"
+}

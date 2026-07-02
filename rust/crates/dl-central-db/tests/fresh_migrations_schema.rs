@@ -659,6 +659,15 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(migration_count_after_first, 15);
+    let journey_migration_count_after_first = scalar_i64(
+        &pool,
+        "SELECT count(*)
+           FROM _sqlx_migrations
+          WHERE version = 2026070220
+            AND success",
+    )
+    .await;
+    assert_eq!(journey_migration_count_after_first, 1);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
@@ -675,6 +684,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 15, "steam links one primary").await;
     let migration_2026070210_signature_after_first =
         migration_row_signature(&pool, 2026070210, "server config schema").await;
+    let migration_2026070220_signature_after_first =
+        migration_row_signature(&pool, 2026070220, "journey ingestion analytics").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -687,6 +698,15 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(migration_count_after_second, 15);
+    let journey_migration_count_after_second = scalar_i64(
+        &pool,
+        "SELECT count(*)
+           FROM _sqlx_migrations
+          WHERE version = 2026070220
+            AND success",
+    )
+    .await;
+    assert_eq!(journey_migration_count_after_second, 1);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -726,6 +746,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070210, "server config schema").await,
         migration_2026070210_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070210"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070220, "journey ingestion analytics").await,
+        migration_2026070220_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070220"
     );
 
     let schema_count = scalar_i64(
@@ -939,6 +964,140 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         Some("'[]'::jsonb"),
     )
     .await;
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "journey_events").await,
+        vec![
+            "id",
+            "user_id",
+            "guild_id",
+            "event_type",
+            "event_source",
+            "actor_kind",
+            "occurred_at",
+            "channel_id",
+            "message_id",
+            "metadata",
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "activity", "journey_events").await,
+        vec!["id"]
+    );
+    assert_column_in_schema(
+        &pool,
+        "activity",
+        "journey_events",
+        "metadata",
+        "jsonb",
+        "jsonb",
+        "NO",
+        Some("'{}'::jsonb"),
+    )
+    .await;
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "journey_user_state").await,
+        vec![
+            "user_id",
+            "guild_id",
+            "joined_at",
+            "screening_completed_at",
+            "native_onboarding_completed_at",
+            "weiche_choice",
+            "steam_linked_at",
+            "invite_friend_request_sent_at",
+            "invite_friend_request_accepted_at",
+            "invite_sent_at",
+            "invite_accepted_at",
+            "invite_actor_kind",
+            "first_message_at",
+            "first_voice_at",
+            "first_match_at",
+            "squad_joined_at",
+            "first_interaction_at",
+            "streamer_contact_activated_at",
+            "opt_out_at",
+            "last_event_at",
+            "last_event_type",
+            "metadata",
+            "updated_at",
+        ]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "activity", "journey_user_state").await,
+        vec!["user_id", "guild_id"]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "message_metadata_events").await,
+        vec![
+            "id",
+            "user_id",
+            "guild_id",
+            "channel_id",
+            "message_id",
+            "occurred_at",
+            "message_length",
+            "has_attachment",
+            "attachment_count",
+            "is_reply",
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "voice_metadata_events").await,
+        vec![
+            "id",
+            "user_id",
+            "guild_id",
+            "channel_id",
+            "event_type",
+            "occurred_at",
+            "duration_seconds",
+            "from_channel_id",
+            "to_channel_id",
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "voice_open_sessions").await,
+        vec![
+            "user_id",
+            "guild_id",
+            "channel_id",
+            "joined_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "interaction_events").await,
+        vec![
+            "id",
+            "user_id",
+            "guild_id",
+            "channel_id",
+            "message_id",
+            "interaction_id",
+            "interaction_kind",
+            "route",
+            "occurred_at",
+        ]
+    );
+    assert_eq!(
+        table_columns_in_schema(&pool, "activity", "message_daily_aggregates").await,
+        vec![
+            "day",
+            "guild_id",
+            "channel_id",
+            "message_count",
+            "total_message_length",
+            "attachment_message_count",
+            "reply_message_count",
+            "distinct_user_count",
+        ]
+    );
+    assert!(
+        !table_columns_in_schema(&pool, "activity", "message_daily_aggregates")
+            .await
+            .contains(&"user_id".to_string())
+    );
 
     assert_eq!(
         table_columns(&pool, "users").await,

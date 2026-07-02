@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO activity.live_player_state(steam_id,last_gameid) VALUES ('STEAM_42','a')",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b1b00af4e2d99b4f6b9bbdb30beca209df0b8e8867e4b176a30f95f7e2cf694a"
+}

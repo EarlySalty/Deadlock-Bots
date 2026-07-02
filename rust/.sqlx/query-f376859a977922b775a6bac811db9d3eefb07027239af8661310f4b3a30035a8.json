@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT mod_deny_reason\n            FROM moderation.ai_moderation_cases\n            WHERE case_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mod_deny_reason",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "f376859a977922b775a6bac811db9d3eefb07027239af8661310f4b3a30035a8"
+}

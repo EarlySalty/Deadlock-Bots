@@ -58,6 +58,21 @@ pub enum GatewayEvent {
     CacheReady { guild_ids: Vec<u64> },
 }
 
+/// Normalisierte Interaction-Metadaten. Optionen, Modal-Felder und Message-
+/// Inhalte werden bewusst nicht gespeichert; `route` ist Command-Name oder
+/// custom_id fuer stille Klick-/Interaktionsmetriken.
+#[derive(Debug, Clone)]
+pub struct InteractionEvent {
+    pub guild_id: Option<u64>,
+    pub channel_id: Option<u64>,
+    pub message_id: Option<u64>,
+    pub interaction_id: u64,
+    pub user_id: u64,
+    pub interaction_kind: &'static str,
+    pub route: Option<String>,
+    pub occurred_at: i64,
+}
+
 /// Normalisiertes Nachrichten-Ereignis (Bots bereits herausgefiltert).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MessageAttachment {
@@ -219,6 +234,7 @@ pub struct Dispatcher {
     member_tx: broadcast::Sender<MemberEvent>,
     role_tx: broadcast::Sender<RoleEvent>,
     channel_tx: broadcast::Sender<ChannelEvent>,
+    interaction_tx: broadcast::Sender<InteractionEvent>,
     gateway_tx: broadcast::Sender<GatewayEvent>,
 }
 
@@ -235,6 +251,7 @@ impl Dispatcher {
         let (member_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (role_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (channel_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (interaction_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (gateway_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
@@ -242,6 +259,7 @@ impl Dispatcher {
             member_tx,
             role_tx,
             channel_tx,
+            interaction_tx,
             gateway_tx,
         }
     }
@@ -266,6 +284,10 @@ impl Dispatcher {
         self.channel_tx.subscribe()
     }
 
+    pub fn subscribe_interactions(&self) -> broadcast::Receiver<InteractionEvent> {
+        self.interaction_tx.subscribe()
+    }
+
     pub fn subscribe_gateway(&self) -> broadcast::Receiver<GatewayEvent> {
         self.gateway_tx.subscribe()
     }
@@ -285,6 +307,10 @@ impl Dispatcher {
 
     pub fn publish_channel(&self, event: ChannelEvent) {
         let _ = self.channel_tx.send(event);
+    }
+
+    pub fn publish_interaction(&self, event: InteractionEvent) {
+        let _ = self.interaction_tx.send(event);
     }
 
     pub fn publish_gateway(&self, event: GatewayEvent) {

@@ -83,6 +83,17 @@ impl InteractionHandler for PrivacyHandler {
             Action::Confirm => {
                 match delete_user_data(&self.pool, uid, "slash_datenschutz".to_string(), now).await {
                     Ok(s) => {
+                        if interaction.guild_id > 0 {
+                            if let Err(err) = dl_activity::journey::record_privacy_opt_out_aggregate(
+                                &self.pool,
+                                interaction.guild_id,
+                                chrono::Utc::now(),
+                            )
+                            .await
+                            {
+                                tracing::warn!(%err, user_id = uid, "Journey opt_out-Aggregat konnte nicht geschrieben werden");
+                            }
+                        }
                         let voice = s.sum(&["voice_session_log.user_id", "voice_stats.user_id"]);
                         let steam = s.steam_ids.len();
                         BridgeReply::ephemeral_text(format!(

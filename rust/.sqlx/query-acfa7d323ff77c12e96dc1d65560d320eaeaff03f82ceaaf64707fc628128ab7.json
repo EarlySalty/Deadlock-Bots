@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO coaching.requests(\n                request_uid, website_request_id, discord_user_id, discord_username,\n                rank, subrank, current_problems, status, message_id, channel_id,\n                created_at, updated_at\n            )\n            VALUES\n              ('privacy-delete-42', 'privacy-delete-web-42', 42, 'DeleteMe',\n               'Phantom', 'III', 'private problem', 'pending', 4242, 4343, now(), now()),\n              ('privacy-delete-99', 'privacy-delete-web-99', 99, 'KeepMe',\n               'Phantom', 'III', 'other problem', 'pending', 9999, 9998, now(), now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "acfa7d323ff77c12e96dc1d65560d320eaeaff03f82ceaaf64707fc628128ab7"
+}

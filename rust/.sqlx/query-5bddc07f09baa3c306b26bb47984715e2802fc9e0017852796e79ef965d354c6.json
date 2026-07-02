@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO activity.message_activity(user_id,guild_id,message_count) VALUES (42,1,10)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "5bddc07f09baa3c306b26bb47984715e2802fc9e0017852796e79ef965d354c6"
+}

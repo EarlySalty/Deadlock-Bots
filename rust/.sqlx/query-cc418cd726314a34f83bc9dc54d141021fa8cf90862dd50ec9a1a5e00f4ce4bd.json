@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO activity.user_co_players(user_id,co_player_id) VALUES (42,99),(99,42),(1,2)",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "cc418cd726314a34f83bc9dc54d141021fa8cf90862dd50ec9a1a5e00f4ce4bd"
+}

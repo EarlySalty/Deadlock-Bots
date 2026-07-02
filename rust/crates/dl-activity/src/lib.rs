@@ -8,6 +8,7 @@ pub mod analyzer;
 mod db;
 pub mod glue;
 pub mod join_source;
+pub mod journey;
 pub mod lfg;
 pub mod player_finder;
 pub mod stats_cmd;

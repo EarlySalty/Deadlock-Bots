@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO coaching.requests(\n                request_uid, website_request_id, discord_user_id, discord_username,\n                rank, subrank, current_problems, status, message_id, channel_id,\n                created_at, updated_at\n            )\n            VALUES ('privacy-export-42', 'privacy-export-web-42', 42, 'ExportMe',\n                    'Phantom', 'III', 'exported problem', 'pending', 4242, 4343,\n                    now(), now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "7fa409d367c01882c8075b7b5b07f1598a0225484c8e9b86e166ea1592d0ad93"
+}

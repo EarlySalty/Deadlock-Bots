@@ -1,0 +1,26 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT guild_id, opted_out FROM activity.user_retention_tracking WHERE user_id = 42",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "guild_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "opted_out",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "f345111136978c373f8d60e2684573fa732fbc7af8d78edc25dd14228284e540"
+}

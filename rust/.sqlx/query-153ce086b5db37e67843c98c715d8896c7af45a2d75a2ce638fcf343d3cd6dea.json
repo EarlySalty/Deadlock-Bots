@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT ai_insights_json AS \"ai_insights_json!: serde_json::Value\"\n              FROM coaching.requests\n             WHERE bot_request_id = $1\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "ai_insights_json!: serde_json::Value",
+        "type_info": "Jsonb"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "153ce086b5db37e67843c98c715d8896c7af45a2d75a2ce638fcf343d3cd6dea"
+}

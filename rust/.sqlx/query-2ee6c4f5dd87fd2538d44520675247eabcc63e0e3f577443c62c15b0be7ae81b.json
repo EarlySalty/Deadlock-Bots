@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        UPDATE scrim.participants\n           SET status = 'waitlist'\n         WHERE id = $1\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2ee6c4f5dd87fd2538d44520675247eabcc63e0e3f577443c62c15b0be7ae81b"
+}

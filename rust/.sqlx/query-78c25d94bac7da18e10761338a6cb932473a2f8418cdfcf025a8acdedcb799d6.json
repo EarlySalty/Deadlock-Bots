@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.tierlist_streamers\n                (hero_id, twitch_login, display_name, sort_order, is_active, created_at)\n            VALUES ($1, $2, $3, $4, TRUE, $5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Text",
+        "Int4",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "78c25d94bac7da18e10761338a6cb932473a2f8418cdfcf025a8acdedcb799d6"
+}

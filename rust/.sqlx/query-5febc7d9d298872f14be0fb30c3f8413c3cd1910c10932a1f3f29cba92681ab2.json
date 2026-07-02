@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.deadlock_heroes(\n                hero_id, name, is_active, created_at, updated_at\n            )\n            VALUES (10, 'Hero A', TRUE, $1, $1)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5febc7d9d298872f14be0fb30c3f8413c3cd1910c10932a1f3f29cba92681ab2"
+}

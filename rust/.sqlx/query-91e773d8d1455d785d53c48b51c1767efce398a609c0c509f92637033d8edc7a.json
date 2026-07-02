@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.reaction_role_dm_log(mapping_id, user_id, sent_at)\n            VALUES ($1, $2, $3)\n            ON CONFLICT(mapping_id, user_id) DO UPDATE SET sent_at = excluded.sent_at\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "91e773d8d1455d785d53c48b51c1767efce398a609c0c509f92637033d8edc7a"
+}

@@ -54,6 +54,27 @@ impl TableSpec {
 /// gemappt. Nicht vorhandene Alt-Tabellen werden via `to_regclass` übersprungen.
 const USER_TABLES: &[TableSpec] = &[
     TableSpec::new(
+        "core_users",
+        "discord_id",
+        "core.users",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "user_tags",
+        "user_id",
+        "core.user_tags",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "user_mod_tags",
+        "user_id",
+        "core.user_mod_tags",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "voice_stats",
         "user_id",
         "voice.voice_stats",
@@ -92,6 +113,62 @@ const USER_TABLES: &[TableSpec] = &[
         "message_activity",
         "user_id",
         "activity.message_activity",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "text_conversation_log",
+        "user_id",
+        "activity.text_conversation_log",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "text_stats",
+        "user_id",
+        "activity.text_stats",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "journey_events",
+        "user_id",
+        "activity.journey_events",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "journey_user_state",
+        "user_id",
+        "activity.journey_user_state",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "message_metadata_events",
+        "user_id",
+        "activity.message_metadata_events",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "voice_metadata_events",
+        "user_id",
+        "activity.voice_metadata_events",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "voice_open_sessions",
+        "user_id",
+        "activity.voice_open_sessions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "interaction_events",
+        "user_id",
+        "activity.interaction_events",
         "user_id",
         ColumnType::I64,
     ),
@@ -159,6 +236,118 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "beta_invite_auto_failure_alerts",
+        "discord_id",
+        "steam.beta_invite_auto_failure_alerts",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "beta_invite_friendship_auto_poll",
+        "discord_id",
+        "steam.beta_invite_friendship_auto_poll",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "beta_invite_panel_clicks",
+        "discord_id",
+        "steam.beta_invite_panel_clicks",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "beta_invite_pending_payments",
+        "discord_id",
+        "steam.beta_invite_pending_payments",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "beta_invite_supporter_role_grants",
+        "discord_id",
+        "steam.beta_invite_supporter_role_grants",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "beta_invite_tickets",
+        "discord_id",
+        "steam.beta_invite_tickets",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "steam_launch_tokens",
+        "user_id",
+        "steam.steam_launch_tokens",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "steam_links_archive",
+        "user_id",
+        "steam.steam_links_archive",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "steam_links_leave_archive",
+        "user_id",
+        "steam.steam_links_leave_archive",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "steam_rank_assignments",
+        "user_id",
+        "steam.steam_rank_assignments",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "steam_rank_history",
+        "user_id",
+        "steam.steam_rank_history",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "customgames_tournament_signups",
+        "user_id",
+        "bot.customgames_tournament_signups",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "claimed_threads",
+        "assigned_user_id",
+        "bot.claimed_threads",
+        "assigned_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "faq_chat_sessions",
+        "user_id",
+        "bot.faq_chat_sessions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "onboarding_pending_verify",
+        "user_id",
+        "bot.onboarding_pending_verify",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "reaction_role_dm_log",
+        "user_id",
+        "bot.reaction_role_dm_log",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "server_faq_logs",
         "user_id",
         "bot.server_faq_logs",
@@ -169,6 +358,20 @@ const USER_TABLES: &[TableSpec] = &[
         "persistent_views",
         "user_id",
         "bot.persistent_views",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "streamer_link_intents",
+        "discord_id",
+        "bot.streamer_link_intents",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_auth_tokens",
+        "user_id",
+        "bot.turnier_auth_tokens",
         "user_id",
         ColumnType::I64,
     ),
@@ -194,6 +397,27 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "router_user_prefs",
+        "user_id",
+        "voice.router_user_prefs",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "tempvoice_presets",
+        "user_id",
+        "voice.tempvoice_presets",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "tempvoice_rank_pref",
+        "user_id",
+        "voice.tempvoice_rank_pref",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_sessions",
         "user_id",
         "coaching.sessions",
@@ -201,9 +425,37 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "coaching_sessions_legacy",
+        "user_id",
+        "coaching.sessions_legacy",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "coaching_requests",
         "discord_user_id",
         "coaching.requests",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "coaching_coaches",
+        "discord_user_id",
+        "coaching.coaches",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "coaching_coach_applications",
+        "discord_user_id",
+        "coaching.coach_applications",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "coaching_bans",
+        "discord_user_id",
+        "coaching.bans",
         "discord_user_id",
         ColumnType::I64,
     ),
@@ -305,7 +557,190 @@ const USER_TABLES: &[TableSpec] = &[
         "user_id",
         ColumnType::I64,
     ),
+    TableSpec::new(
+        "ai_moderation_cases",
+        "user_id",
+        "moderation.ai_moderation_cases",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "ai_moderation_ragebait_hits",
+        "user_id",
+        "moderation.ai_moderation_ragebait_hits",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "security_guard_incidents",
+        "user_id",
+        "moderation.security_guard_incidents",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "scrim_participants",
+        "discord_id",
+        "scrim.participants",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "tierlist_meta_tier_lists",
+        "owner_id",
+        "tierlist.meta_tier_lists",
+        "owner_id",
+        ColumnType::Text,
+    ),
+    TableSpec::new(
+        "tierlist_meta_votes",
+        "user_id",
+        "tierlist.meta_votes",
+        "user_id",
+        ColumnType::Text,
+    ),
+    TableSpec::new(
+        "turnier_audit_log",
+        "user_id",
+        "turnier.audit_log",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_checkins",
+        "discord_id",
+        "turnier.checkins",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_match_casters",
+        "discord_id",
+        "turnier.match_casters",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_player_points",
+        "discord_id",
+        "turnier.player_points",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_rank_cache",
+        "discord_id",
+        "turnier.rank_cache",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_sessions",
+        "discord_id",
+        "turnier.sessions",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_team_applications",
+        "discord_id",
+        "turnier.team_applications",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_team_invitations",
+        "discord_id",
+        "turnier.team_invitations",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_team_members",
+        "discord_id",
+        "turnier.team_members",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_tournament_casters",
+        "discord_id",
+        "turnier.tournament_casters",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_tournament_checkins",
+        "discord_id",
+        "turnier.tournament_checkins",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_tournament_dm_optout",
+        "discord_id",
+        "turnier.tournament_dm_optout",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_tournament_signups",
+        "discord_id",
+        "turnier.tournament_signups",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_user_consents",
+        "discord_id",
+        "turnier.user_consents",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "turnier_user_profiles",
+        "discord_id",
+        "turnier.user_profiles",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "clip_submissions",
+        "user_id",
+        "clips.clip_submissions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "clip_window_submissions",
+        "user_id",
+        "clips.clip_window_submissions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "clip_contest_submissions",
+        "user_id",
+        "clips.clip_contest_submissions",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "coaching_coachees",
+        "discord_user_id",
+        "coaching.coachees",
+        "discord_user_id",
+        ColumnType::I64,
+    ),
 ];
+
+const NULLABLE_USER_COLUMNS: &[TableSpec] = &[TableSpec::new(
+    "clip_contests",
+    "winner_user_id",
+    "clips.clip_contests",
+    "winner_user_id",
+    ColumnType::I64,
+)];
 
 const STEAM_SIDE_TABLES: &[TableSpec] = &[
     TableSpec::new(
@@ -419,6 +854,7 @@ async fn existing_relations(pool: &PgPool) -> Result<HashSet<&'static str>, sqlx
     let mut set = HashSet::new();
     for relation in USER_TABLES
         .iter()
+        .chain(NULLABLE_USER_COLUMNS.iter())
         .chain(STEAM_SIDE_TABLES.iter())
         .map(|spec| spec.relation)
         .chain([USER_CO_PLAYERS_REL, KV_REL, USER_PRIVACY_REL])
@@ -464,23 +900,13 @@ fn steam_lookup<'a>(sid: &'a SteamId, col_type: ColumnType) -> Option<LookupValu
     }
 }
 
-async fn delete_rows_i64(
-    tx: &mut Transaction<'_, Postgres>,
-    spec: TableSpec,
-    value: i64,
-) -> Result<i64, sqlx::Error> {
-    // Dynamic SQL is unavoidable for the privacy contract; `spec` is a static
-    // whitelist entry and all user data is bound as typed parameters.
-    let sql = format!("DELETE FROM {} WHERE {} = $1", spec.relation, spec.col);
-    let result = sqlx::query(&sql).bind(value).execute(&mut **tx).await?;
-    Ok(rows_to_i64(result.rows_affected()))
-}
-
 async fn delete_rows_lookup(
     tx: &mut Transaction<'_, Postgres>,
     spec: TableSpec,
     value: LookupValue<'_>,
 ) -> Result<i64, sqlx::Error> {
+    // Dynamic SQL is unavoidable for the privacy contract; `spec` is a static
+    // whitelist entry and all user data is bound as typed parameters.
     let sql = format!("DELETE FROM {} WHERE {} = $1", spec.relation, spec.col);
     let query = sqlx::query(&sql);
     let result = match value {
@@ -488,6 +914,49 @@ async fn delete_rows_lookup(
         LookupValue::Text(value) => query.bind(value).execute(&mut **tx).await?,
     };
     Ok(rows_to_i64(result.rows_affected()))
+}
+
+async fn delete_rows_user(
+    tx: &mut Transaction<'_, Postgres>,
+    spec: TableSpec,
+    user_id: i64,
+    user_key: &str,
+) -> Result<i64, sqlx::Error> {
+    match spec.col_type {
+        ColumnType::I64 => delete_rows_lookup(tx, spec, LookupValue::I64(user_id)).await,
+        ColumnType::Text => delete_rows_lookup(tx, spec, LookupValue::Text(user_key)).await,
+    }
+}
+
+async fn null_user_column_lookup(
+    tx: &mut Transaction<'_, Postgres>,
+    spec: TableSpec,
+    value: LookupValue<'_>,
+) -> Result<i64, sqlx::Error> {
+    // Dynamic SQL is unavoidable for the privacy contract; `spec` is a static
+    // whitelist entry and all user data is bound as typed parameters.
+    let sql = format!(
+        "UPDATE {} SET {} = NULL WHERE {} = $1",
+        spec.relation, spec.col, spec.col
+    );
+    let query = sqlx::query(&sql);
+    let result = match value {
+        LookupValue::I64(value) => query.bind(value).execute(&mut **tx).await?,
+        LookupValue::Text(value) => query.bind(value).execute(&mut **tx).await?,
+    };
+    Ok(rows_to_i64(result.rows_affected()))
+}
+
+async fn null_user_column(
+    tx: &mut Transaction<'_, Postgres>,
+    spec: TableSpec,
+    user_id: i64,
+    user_key: &str,
+) -> Result<i64, sqlx::Error> {
+    match spec.col_type {
+        ColumnType::I64 => null_user_column_lookup(tx, spec, LookupValue::I64(user_id)).await,
+        ColumnType::Text => null_user_column_lookup(tx, spec, LookupValue::Text(user_key)).await,
+    }
 }
 
 async fn select_rows_i64(
@@ -519,6 +988,18 @@ async fn select_rows_lookup(
             serde_json::from_str(&raw).map_err(CommunityDbError::from)
         })
         .collect()
+}
+
+async fn select_rows_user(
+    pool: &PgPool,
+    spec: TableSpec,
+    user_id: i64,
+    user_key: &str,
+) -> Result<Vec<Value>, CommunityDbError> {
+    match spec.col_type {
+        ColumnType::I64 => select_rows_lookup(pool, spec, LookupValue::I64(user_id)).await,
+        ColumnType::Text => select_rows_lookup(pool, spec, LookupValue::Text(user_key)).await,
+    }
 }
 
 async fn kv_value(pool: &PgPool, ns: &str, key: &str) -> CommunityDbResult<Option<Value>> {
@@ -617,6 +1098,7 @@ pub async fn delete_user_data(
     let now = utc_from_unix(now)?;
     let relations = existing_relations(pool).await?;
     let steam_ids = steam_ids_for_user(pool, user_id).await?;
+    let user_key = user_id.to_string();
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
 
     let mut tx = pool.begin().await?;
@@ -625,7 +1107,15 @@ pub async fn delete_user_data(
         if !relations.contains(spec.relation) {
             continue;
         }
-        let n = delete_rows_i64(&mut tx, spec, user_id).await?;
+        let n = delete_rows_user(&mut tx, spec, user_id, &user_key).await?;
+        counts.insert(spec.count_key(), n);
+    }
+
+    for &spec in NULLABLE_USER_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        let n = null_user_column(&mut tx, spec, user_id, &user_key).await?;
         counts.insert(spec.count_key(), n);
     }
 
@@ -738,6 +1228,7 @@ pub async fn delete_user_data(
 
 pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<Value> {
     let relations = existing_relations(pool).await?;
+    let user_key = user_id.to_string();
     let mut tbl = serde_json::Map::new();
 
     for &spec in USER_TABLES {
@@ -746,7 +1237,17 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         }
         tbl.insert(
             spec.count_key(),
-            Value::Array(select_rows_i64(pool, spec, user_id).await?),
+            Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
+        );
+    }
+
+    for &spec in NULLABLE_USER_COLUMNS {
+        if !relations.contains(spec.relation) {
+            continue;
+        }
+        tbl.insert(
+            spec.count_key(),
+            Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
         );
     }
 
@@ -879,6 +1380,121 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     }))
 }
 
+#[cfg(test)]
+mod privacy_contract_tests {
+    use super::*;
+    use std::collections::BTreeSet;
+    use std::fs;
+    use std::path::Path;
+
+    fn privacy_user_table_columns() -> BTreeSet<(String, String)> {
+        let mut out = USER_TABLES
+            .iter()
+            .chain(NULLABLE_USER_COLUMNS.iter())
+            .map(|spec| (spec.relation.to_string(), spec.col.to_string()))
+            .collect::<BTreeSet<_>>();
+        out.insert((USER_CO_PLAYERS_REL.to_string(), "user_id".to_string()));
+        out
+    }
+
+    fn privacy_contract_allowlist() -> BTreeSet<(String, String)> {
+        let mut out = BTreeSet::new();
+        // `core.user_privacy` ist der notwendige Opt-out-/Erasure-Grabstein:
+        // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
+        // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
+        out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        // `server_config.*`: Audit-Referenzen auf Mod-/Admin-AKTIONEN am
+        // Server-Soll-Modell (wer hat Diff erstellt / Apply angefordert /
+        // Drift adoptiert). Kein Community-Verhaltensdatum; Aufbewahrung zur
+        // Nachvollziehbarkeit administrativer Server-Aenderungen
+        // (berechtigtes Interesse). Ein Opt-out darf die Aenderungs-
+        // Historie des Servers nicht zerstoeren.
+        out.insert((
+            "server_config.diff_previews".to_string(),
+            "created_by_user_id".to_string(),
+        ));
+        out.insert((
+            "server_config.apply_runs".to_string(),
+            "requested_by_user_id".to_string(),
+        ));
+        out.insert((
+            "server_config.adoption_events".to_string(),
+            "adopted_by_user_id".to_string(),
+        ));
+        out
+    }
+
+    fn is_user_id_like_column(column: &str) -> bool {
+        column == "user_id"
+            || column.ends_with("_user_id")
+            || column == "discord_id"
+            || column == "member_id"
+            || column == "owner_id"
+            || (column.starts_with("actor") && column.ends_with("_id"))
+            || column.starts_with("target_user")
+    }
+
+    fn normalize_sql_ident(identifier: &str) -> String {
+        identifier.trim().trim_matches('"').replace('"', "")
+    }
+
+    fn migration_user_id_columns() -> BTreeSet<(String, String)> {
+        let migration_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dl-community under crates")
+            .join("dl-central-db/migrations");
+        let mut out = BTreeSet::new();
+        let entries = fs::read_dir(&migration_dir)
+            .unwrap_or_else(|err| panic!("read {}: {err}", migration_dir.display()));
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|err| panic!("read_dir entry {}: {err}", migration_dir.display()))
+                .path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            for chunk in raw.split("CREATE TABLE IF NOT EXISTS ").skip(1) {
+                let Some((relation, rest)) = chunk.split_once(" (") else {
+                    continue;
+                };
+                let relation = normalize_sql_ident(relation);
+                let Some((body, _)) = rest.split_once("\n);") else {
+                    continue;
+                };
+                for line in body.lines() {
+                    let trimmed = line.trim().trim_end_matches(',');
+                    let Some(column) = trimmed.split_whitespace().next() else {
+                        continue;
+                    };
+                    let column = normalize_sql_ident(column);
+                    if is_user_id_like_column(&column) {
+                        out.insert((relation.clone(), column));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn alle_migration_user_id_spalten_sind_im_privacy_vertrag() {
+        let schema_tables = migration_user_id_columns();
+        let privacy_tables = privacy_user_table_columns();
+        let allowlist = privacy_contract_allowlist();
+        let missing = schema_tables
+            .difference(&privacy_tables)
+            .filter(|entry| !allowlist.contains(*entry))
+            .cloned()
+            .collect::<Vec<_>>();
+        assert!(
+            missing.is_empty(),
+            "User-ID-Spalten fehlen in privacy.rs USER_TABLES oder Allowlist: {missing:?}"
+        );
+    }
+}
+
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
@@ -953,6 +1569,67 @@ mod tests {
         .execute(db.pool())
         .await
         .expect("message_activity");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.journey_events(user_id, guild_id, event_type, event_source)
+            VALUES (42, 1, 'join', 'privacy_test'), (99, 1, 'join', 'privacy_test')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("journey_events");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.journey_user_state(user_id, guild_id, joined_at)
+            VALUES (42, 1, now()), (99, 1, now())
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("journey_user_state");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.message_metadata_events(
+                user_id, guild_id, channel_id, message_id, occurred_at,
+                message_length, has_attachment, attachment_count, is_reply
+            )
+            VALUES (42, 1, 10, 420, now(), 5, false, 0, false),
+                   (99, 1, 10, 990, now(), 7, false, 0, false)
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("message_metadata_events");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.voice_metadata_events(user_id, guild_id, channel_id, event_type)
+            VALUES (42, 1, 20, 'join'), (99, 1, 20, 'join')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("voice_metadata_events");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.voice_open_sessions(user_id, guild_id, channel_id, joined_at)
+            VALUES (42, 1, 20, now()), (99, 1, 20, now())
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("voice_open_sessions");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.interaction_events(
+                user_id, guild_id, interaction_id, interaction_kind, route
+            )
+            VALUES (42, 1, 4200, 'component', 'privacy:test'),
+                   (99, 1, 9900, 'component', 'privacy:test')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("interaction_events");
         sqlx::query!(
             r#"
             INSERT INTO coaching.requests(
@@ -1015,6 +1692,21 @@ mod tests {
             Some(1)
         );
         assert_eq!(s.counts.get("live_player_state:STEAM_42").copied(), Some(1));
+        assert_eq!(s.counts.get("journey_events.user_id").copied(), Some(1));
+        assert_eq!(s.counts.get("journey_user_state.user_id").copied(), Some(1));
+        assert_eq!(
+            s.counts.get("message_metadata_events.user_id").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            s.counts.get("voice_metadata_events.user_id").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            s.counts.get("voice_open_sessions.user_id").copied(),
+            Some(1)
+        );
+        assert_eq!(s.counts.get("interaction_events.user_id").copied(), Some(1));
         assert_eq!(s.counts.get("user_co_players").copied(), Some(2));
         assert_eq!(s.counts.get("tempvoice_bans.owner_id").copied(), Some(1));
         assert_eq!(s.counts.get("tempvoice_bans.banned_id").copied(), Some(1));
@@ -1059,12 +1751,40 @@ mod tests {
         .fetch_one(db.pool())
         .await
         .expect("count");
+        let journey_self: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8 FROM activity.journey_events WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("journey count");
+        let journey_other: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8 FROM activity.journey_events WHERE user_id = 99",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("journey other count");
+        let message_meta_self: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8 FROM activity.message_metadata_events WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("message metadata count");
+        let interaction_self: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8 FROM activity.interaction_events WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("interaction count");
         assert_eq!(vs_self, 0);
         assert_eq!(vs_other, 1);
         assert_eq!(cop_foreign, 1);
         assert_eq!(view_other, 1);
         assert_eq!(coaching_self, 0);
         assert_eq!(coaching_other, 1);
+        assert_eq!(journey_self, 0);
+        assert_eq!(journey_other, 1);
+        assert_eq!(message_meta_self, 0);
+        assert_eq!(interaction_self, 0);
         assert!(is_opted_out(db.pool(), 42).await);
     }
 

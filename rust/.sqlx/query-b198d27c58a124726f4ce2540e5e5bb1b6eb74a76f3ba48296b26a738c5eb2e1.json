@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO core.user_privacy(user_id, opted_out, updated_at)\n            VALUES (7, FALSE, now())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "b198d27c58a124726f4ce2540e5e5bb1b6eb74a76f3ba48296b26a738c5eb2e1"
+}

@@ -53,6 +53,32 @@ Frischer Review der uncommitted Phase-1-Server-as-Code-Aenderungen auf Branch `p
 - Lokale Verifikation bisher: `cargo test -p dl-server-as-code` gruen mit 5 passed + 4 ignored; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings` gruen; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` gruen mit 9 passed.
 - Zusatzverifikation: `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored` gruen mit 2 passed; `git diff --check` gruen.
 - Baseline per `git stash -u`: sauberer Branch ist gegen `origin/main` bereits 1 Commit hinten (`0015_steam_links_one_primary.sql` + Test fehlt). Diff-Zaehler aktuell vs. origin/main: 2 D / 4 M + 12 untracked; nach Stash: 2 D / 1 M + 0 untracked.
+# P1 Journey+Ingestion+Analytics DSGVO (2026-07-02)
+
+## Ziel
+Phase-1-Fundament fuer Journey-State-Machine, Message-/Voice-/Interaction-Metadaten, Analytics-Grundgeruest, 180d-Retention und privacy.rs-Vertrag im Worktree `dl-bots-p1-journey-ingest`. Kein Commit/Push.
+
+## Fortschritt
+- Rework-Implementierung 2026-07-02 gestartet: Fix-Gruppen sind Interaction-Route-Sanitizing, Aktivierung `first_message`/`first_voice`, Event-Wiring fuer Privacy/Onboarding/Weiche, Privacy-Migration-Heuristik, DB-harter First-X-Dedupe und dokumentierte Aggregat-Distinct-Approximation. Kein Commit/Push/Rebase.
+- Rework umgesetzt: custom_id-Routen werden vor Raw-Write sanitisiert und bei Retention-Kompaktierung erneut SQL-seitig sanitisiert; `pct_communicated` zaehlt `first_message` ODER `first_voice`; First-X nutzt partiellen Unique-Index + `ON CONFLICT DO NOTHING`; Privacy-Test scannt alle Migrationen auf User-ID-Spalten; Opt-out wird anonym aggregiert, Onboarding/Weiche ueber Role-/Tag-Events verdrahtet; externe Journey-Record-API dokumentiert.
+- Rework-Verifikation gruen: Offline-Tests 95 passed (vorher 94); DB-Wrapper `dl-activity` 55 (vorher 52), `dl-community` 107, `dl-central-db` 8, `dl-bot` 33; Clippy `-D warnings` auf `dl-discord`, `dl-activity`, `dl-community`, `dl-central-db` gruen plus Zusatz `dl-bot` gruen; `cargo fmt --check` gruen; `git diff --check` gruen.
+- Kritiker-Review 2026-07-02 gestartet: uncommitted Diff wird hart gegen DSGVO, Ingestion-Stabilitaet, Retention, State-Machine, Analytics, Migration und Testmatrix geprueft. Keine Implementierungsfixes, kein Commit/Push.
+- Kritiker-Review Befunde: BLOCKER bei Interaction-Route/custom_id-Persistenz, weil raw custom_ids User-IDs enthalten koennen und spaeter in `interaction_daily_aggregates.route` ohne user_id weiterleben; WICHTIG bei Aktivierungsmetrik (nur first_message, nicht Voice/Interaction) und unverdrahteten Journey-Events ausser Join/Screening/First-Message/First-Voice/Interaction.
+- Review-Verifikation: aktueller Diff gruen fuer `SQLX_OFFLINE=true cargo test -p dl-discord -p dl-activity -p dl-community -p dl-central-db`, DB-Wrapper (`dl-activity` 52, `dl-community` 107, `dl-central-db` 8, `dl-bot` 33), Clippy `-D warnings`, `git diff --check`. Baseline per `git stash`: Offline-Test Diff 94 passed vs Baseline 92 passed; Clippy beidseitig gruen.
+- Frischer Verify-Kritiker 2026-07-02 gestartet: Rework wird nur geprueft, keine Code-Fixes/Commits; Fokus auf Sanitizing, Aktivierung <=14d, Event-Wiring, Privacy-Diff-Test, First-X-Dedupe, Startup-/Event-Pfad und Migration-Koordination.
+- Frischer Verify-Kritiker Ergebnis: kein BLOCKER im Rework gefunden; Interaction-Routen werden vor Raw-Write und bei SQL-Kompaktierung sanitisiert, First-X-Dedupe ist DB-hart, Opt-out schreibt nur anonymes Aggregat, Weiche-/Onboarding-Wiring ist fire-and-forget. NICE: Aktivierungs-DB-Test prueft Voice-getriebene Aktivierung, aber keinen strikten Voice-only-User mit `first_message_at IS NULL`.
+- Frische Verifikation gruen: Offline `cargo test -p dl-discord -p dl-activity -p dl-community -p dl-central-db` = 95 passed; DB-Wrapper mit `SQLX_OFFLINE=false` im Testprozess: `dl-activity` 55, `dl-community` 107, `dl-central-db` 8, `dl-bot` 33; Clippy `-D warnings` fuer vier Crates plus `dl-bot` gruen; `cargo fmt --check` und `git diff --check` gruen. Migration-Koordination: `origin/main` enthaelt `2026070210_server_config_schema.sql` im eigenen Schema `server_config.*`; lokale `2026070220` liegt danach und nutzt `activity.*`, kein Nummern-/Schema-Konflikt erkennbar.
+- Konzept/IST/Discord-Insights-README gelesen; relevante Pflichtpunkte: Metadaten-first, 180d-Retention, privacy.rs Delete+Export, Diff-Test, Aktivierung <=14 Tage.
+- Bestehende Eventpfade gesichtet: `dl-discord` normalisiert Message/Member/Voice ueber `Dispatcher`; Interactions laufen bisher direkt durch den Router. Privacy nutzt statische `USER_TABLES`/Export-Iteration in `dl-community/src/privacy.rs`.
+- Umsetzung gestartet: neue zentrale Migration im erlaubten Bereich `202607022*`; Ingestion soll in `dl-activity::journey` als nicht-blockierender Dispatcher-Subscriber liegen.
+- Migration `2026070220_journey_ingestion_analytics.sql` angelegt: Journey-Events/State, Message-/Voice-/Interaction-Metadaten, Voice-Open-Sessions und anonyme Tagesaggregate.
+- `dl-discord` publiziert jetzt minimale `InteractionEvent`-Metadaten; `dl-activity::journey` konsumiert Message/Member/Voice/Interaction mit Opt-out-Check vor jedem Write, First-Message/First-Voice-State, 180d-Retention und Analytics-Queries.
+- `dl-bot` startet Journey-Ingestion + Retention im Gateway-Pfad.
+- `privacy.rs` um alle neuen userbezogenen Tabellen fuer Delete+Export erweitert; Opt-out/Delete entfernt bereits ingestierte Journey-/Metadata-Rows. Diff-Test parst die Journey-Migration gegen `USER_TABLES`.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo build -p dl-discord -p dl-activity -p dl-community -p dl-bot`; `SQLX_OFFLINE=true cargo clippy -p dl-discord -p dl-activity -p dl-community -p dl-bot --all-targets -- -D warnings`; `SQLX_OFFLINE=true cargo test -p dl-discord -p dl-activity -p dl-community -p dl-central-db`; `./scripts/central_test_db.sh bash -lc 'SQLX_OFFLINE=false DATABASE_URL="$DEADLOCK_CENTRAL_DSN" cargo test -p dl-activity -p dl-community -p dl-central-db --features testing -- --include-ignored'`; gleicher Wrapper fuer `cargo test -p dl-bot --bin dl-bot`; `git diff --check`.
+
+## Offen
+- Erfolgreiche Steam-Link-/Invite-Statusereignisse kommen weiterhin aus externen Steam-Bot-/Invite-Flows; Phase-1 stellt Eventtypen und `record_journey_event` bereit, verdrahtet aber nur die heute im dl-bot vorhandenen Gateway-Handler direkt.
 
 # Rework core.users Upsert Nonblocking (2026-07-02)
 

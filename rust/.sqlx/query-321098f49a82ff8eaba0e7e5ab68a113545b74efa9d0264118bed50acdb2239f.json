@@ -1,0 +1,32 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT COALESCE(sessions_together, 0)::INT AS \"sessions!\",\n                   COALESCE(total_minutes_together, 0)::INT AS \"minutes!\",\n                   co_player_display_name AS \"name!\"\n            FROM activity.user_co_players\n            WHERE user_id = 100\n              AND co_player_id = 200\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "sessions!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "minutes!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "name!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      true
+    ]
+  },
+  "hash": "321098f49a82ff8eaba0e7e5ab68a113545b74efa9d0264118bed50acdb2239f"
+}
