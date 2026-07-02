@@ -38,6 +38,14 @@ const MAX_DISCORD_CONTENT_CHARS: usize = 1800;
 const MAX_BRIDGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const ONBOARDING_DIFF_MESSAGE_KEY: &str = "native-onboarding";
 const ONBOARDING_DIFF_OBJECT_ID: u64 = GUILD_ID;
+const SERVERSYNC_KV_NS: &str = "serversync";
+const WELLE2B_ARCHIVE_ENABLED_KEY: &str = "welle2b_archive_enabled";
+const REGELWERK_MESSAGE_ID_KEY: &str = "regelwerk_message_id";
+const RULES_CHANNEL_ID: u64 = dl_community::onboarding::RULES_CHANNEL_ID;
+const SERVER_GUIDE_DIFF_MESSAGE_KEY: &str = "server-guide";
+const SERVER_GUIDE_DIFF_OBJECT_ID: u64 = GUILD_ID;
+const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
+    "Server Guide per API nicht verfügbar — manuelle Owner-Konfiguration nötig";
 
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
@@ -259,6 +267,44 @@ pub struct DiffOutput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveFlagOutput {
+    pub guild_id: u64,
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegelwerkPublishOutput {
+    pub guild_id: u64,
+    pub dry_run: bool,
+    pub threads_found: usize,
+    pub threads_deleted: usize,
+    pub bot_messages_found: usize,
+    pub bot_messages_deleted: usize,
+    pub bot_message_ids: Vec<u64>,
+    pub bot_message_embed_titles: Vec<String>,
+    pub stored_message_id: Option<u64>,
+    pub posted_message_id: Option<u64>,
+    pub edited_message_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegelwerkBotMessage {
+    message_id: u64,
+    embed_titles: Vec<String>,
+}
+
+struct RegelwerkOutputInput<'a> {
+    dry_run: bool,
+    thread_count: usize,
+    threads_deleted: usize,
+    bot_messages: &'a [RegelwerkBotMessage],
+    bot_messages_deleted: usize,
+    stored_message_id: Option<u64>,
+    posted_message_id: Option<u64>,
+    edited_message_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RestoreOutput {
     pub rollback_export_id: i64,
     pub preview_id: i64,
@@ -320,6 +366,54 @@ pub struct NativeOnboardingOption {
     pub channel_ids: Vec<String>,
     #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
     pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordCurrentUser {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordThreadPage {
+    #[serde(default)]
+    threads: Vec<DiscordThread>,
+    #[serde(default)]
+    has_more: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordThread {
+    id: String,
+    #[serde(default)]
+    thread_metadata: Option<DiscordThreadMetadata>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordThreadMetadata {
+    archive_timestamp: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessage {
+    id: String,
+    author: DiscordMessageAuthor,
+    #[serde(default)]
+    embeds: Vec<DiscordMessageEmbed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessageAuthor {
+    id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessageEmbed {
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessageWriteResponse {
+    id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -385,6 +479,52 @@ pub struct OnboardingPreviewOutput {
     pub desired_config: Option<Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerGuideConfig {
+    pub enabled: bool,
+    pub welcome_message: ServerGuideWelcomeMessage,
+    pub new_member_actions: Vec<ServerGuideAction>,
+    pub resource_channels: Vec<ServerGuideResourceChannel>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerGuideWelcomeMessage {
+    pub author_ids: Vec<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerGuideAction {
+    pub channel_id: String,
+    pub action_type: i64,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerGuideResourceChannel {
+    pub channel_id: String,
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerGuideBuildOutput {
+    pub config: Option<ServerGuideConfig>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ServerGuidePreviewOutput {
+    pub preview_id: Option<i64>,
+    pub guild_id: u64,
+    pub diff_hash: Option<String>,
+    pub human_summary: String,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub diff_text: String,
+    pub desired_config: Option<Value>,
+}
+
 #[async_trait]
 pub trait ServerSyncOps: Send + Sync {
     fn guild_id(&self) -> u64;
@@ -412,6 +552,20 @@ pub trait ServerSyncOps: Send + Sync {
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<OnboardingPreviewOutput>;
     async fn onboarding_apply(
+        &self,
+        preview_id: i64,
+        hash: String,
+        confirm: bool,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ApplyOutput>;
+    async fn archive_enable(&self) -> ServerSyncResult<ArchiveFlagOutput>;
+    async fn archive_disable(&self) -> ServerSyncResult<ArchiveFlagOutput>;
+    async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput>;
+    async fn serverguide_preview(
+        &self,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ServerGuidePreviewOutput>;
+    async fn serverguide_apply(
         &self,
         preview_id: i64,
         hash: String,
@@ -527,6 +681,287 @@ impl ServerSyncService {
         Ok(())
     }
 
+    async fn fetch_server_guide_config(&self) -> ServerSyncResult<Value> {
+        let url = format!(
+            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
+            self.guild_id
+        );
+        let response = self
+            .http_client
+            .get(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .send()
+            .await?;
+        server_guide_response_json(response, "GET").await
+    }
+
+    async fn put_server_guide_config(&self, config: &ServerGuideConfig) -> ServerSyncResult<()> {
+        let url = format!(
+            "{DISCORD_API_BASE}/guilds/{}/new-member-welcome",
+            self.guild_id
+        );
+        let response = self
+            .http_client
+            .put(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .header("Content-Type", "application/json")
+            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+            .json(config)
+            .send()
+            .await?;
+        let _: Value = server_guide_response_json(response, "PUT").await?;
+        Ok(())
+    }
+
+    async fn welle2b_archive_enabled(&self) -> ServerSyncResult<bool> {
+        let value = self.load_serversync_kv(WELLE2B_ARCHIVE_ENABLED_KEY).await?;
+        Ok(value.as_deref() == Some("1"))
+    }
+
+    async fn set_welle2b_archive_enabled(
+        &self,
+        enabled: bool,
+    ) -> ServerSyncResult<ArchiveFlagOutput> {
+        if enabled {
+            self.store_serversync_kv(WELLE2B_ARCHIVE_ENABLED_KEY, "1")
+                .await?;
+        } else {
+            self.delete_serversync_kv(WELLE2B_ARCHIVE_ENABLED_KEY)
+                .await?;
+        }
+        Ok(ArchiveFlagOutput {
+            guild_id: self.guild_id,
+            enabled,
+        })
+    }
+
+    async fn load_serversync_kv(&self, key: &str) -> ServerSyncResult<Option<String>> {
+        let value = sqlx::query_scalar(
+            "SELECT v
+               FROM bot.kv_store
+              WHERE ns = $1
+                AND k = $2",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(value)
+    }
+
+    async fn store_serversync_kv(&self, key: &str, value: &str) -> ServerSyncResult<()> {
+        sqlx::query(
+            "INSERT INTO bot.kv_store(ns, k, v)
+             VALUES($1, $2, $3)
+             ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn delete_serversync_kv(&self, key: &str) -> ServerSyncResult<()> {
+        sqlx::query(
+            "DELETE FROM bot.kv_store
+              WHERE ns = $1
+                AND k = $2",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(key)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn discord_get_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+    ) -> ServerSyncResult<T> {
+        let response = self
+            .http_client
+            .get(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .send()
+            .await?;
+        discord_json_response(response, "GET").await
+    }
+
+    async fn discord_post_json<T: serde::de::DeserializeOwned>(
+        &self,
+        url: String,
+        payload: Value,
+    ) -> ServerSyncResult<T> {
+        let response = self
+            .http_client
+            .post(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .header("Content-Type", "application/json")
+            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+            .json(&payload)
+            .send()
+            .await?;
+        discord_json_response(response, "POST").await
+    }
+
+    async fn discord_delete(&self, url: String) -> ServerSyncResult<bool> {
+        let response = self
+            .http_client
+            .delete(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+            .send()
+            .await?;
+        let status = response.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let body_preview: String = body.chars().take(300).collect();
+            return Err(ServerSyncError::internal(format!(
+                "Discord DELETE fehlgeschlagen: HTTP {}: {}",
+                status.as_u16(),
+                body_preview
+            )));
+        }
+        Ok(true)
+    }
+
+    async fn fetch_current_bot_user_id(&self) -> ServerSyncResult<u64> {
+        let user: DiscordCurrentUser = self
+            .discord_get_json(format!("{DISCORD_API_BASE}/users/@me"))
+            .await?;
+        parse_discord_id("Bot-User-ID", &user.id)
+    }
+
+    async fn fetch_regelwerk_threads(&self) -> ServerSyncResult<Vec<u64>> {
+        let mut ids = Vec::new();
+        let active: DiscordThreadPage = self
+            .discord_get_json(format!(
+                "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/active"
+            ))
+            .await?;
+        ids.extend(thread_ids(active.threads)?);
+
+        for endpoint in ["archived/public", "archived/private"] {
+            let mut before: Option<String> = None;
+            loop {
+                let mut url = format!(
+                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/{endpoint}?limit=100"
+                );
+                if let Some(before) = before.as_deref() {
+                    url.push_str("&before=");
+                    url.push_str(before);
+                }
+                let page: DiscordThreadPage = self.discord_get_json(url).await?;
+                let next_before = page
+                    .threads
+                    .last()
+                    .and_then(|thread| thread.thread_metadata.as_ref())
+                    .and_then(|metadata| metadata.archive_timestamp.clone());
+                ids.extend(thread_ids(page.threads)?);
+                if !page.has_more || next_before.is_none() {
+                    break;
+                }
+                before = next_before;
+            }
+        }
+
+        ids.sort_unstable();
+        ids.dedup();
+        Ok(ids)
+    }
+
+    async fn fetch_regelwerk_bot_messages(
+        &self,
+        bot_user_id: u64,
+        stored_message_id: Option<u64>,
+    ) -> ServerSyncResult<Vec<RegelwerkBotMessage>> {
+        let mut messages = Vec::new();
+        let mut before: Option<u64> = None;
+        loop {
+            let mut url =
+                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages?limit=100");
+            if let Some(before) = before {
+                url.push_str("&before=");
+                url.push_str(&before.to_string());
+            }
+            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
+            if page.is_empty() {
+                break;
+            }
+            for message in &page {
+                let message_id = parse_discord_id("Message-ID", &message.id)?;
+                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                if author_id == bot_user_id && Some(message_id) != stored_message_id {
+                    messages.push(RegelwerkBotMessage {
+                        message_id,
+                        embed_titles: message
+                            .embeds
+                            .iter()
+                            .filter_map(|embed| embed.title.clone())
+                            .collect(),
+                    });
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+        }
+        Ok(messages)
+    }
+
+    async fn load_regelwerk_message_id(&self) -> ServerSyncResult<Option<u64>> {
+        self.load_serversync_kv(REGELWERK_MESSAGE_ID_KEY)
+            .await?
+            .map(|value| parse_discord_id("regelwerk_message_id", &value))
+            .transpose()
+    }
+
+    async fn store_regelwerk_message_id(&self, message_id: u64) -> ServerSyncResult<()> {
+        self.store_serversync_kv(REGELWERK_MESSAGE_ID_KEY, &message_id.to_string())
+            .await
+    }
+
+    async fn edit_regelwerk_message(
+        &self,
+        message_id: u64,
+        content: &str,
+    ) -> ServerSyncResult<Option<u64>> {
+        let url = format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{message_id}");
+        let response = self
+            .http_client
+            .patch(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .header("Content-Type", "application/json")
+            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+            .json(&json!({ "content": content }))
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let message: DiscordMessageWriteResponse = discord_json_response(response, "PATCH").await?;
+        parse_discord_id("Message-ID", &message.id).map(Some)
+    }
+
+    async fn post_regelwerk_message(&self, content: &str) -> ServerSyncResult<u64> {
+        let message: DiscordMessageWriteResponse = self
+            .discord_post_json(
+                format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages"),
+                json!({ "content": content }),
+            )
+            .await?;
+        parse_discord_id("Message-ID", &message.id)
+    }
+
     async fn load_rollback_artifact(
         &self,
         rollback_export_id: Option<i64>,
@@ -610,7 +1045,13 @@ impl ServerSyncOps for ServerSyncService {
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
-        let derivation = dl_server_as_code::derive_desired_model(&model)?;
+        let archive_enabled = self.welle2b_archive_enabled().await?;
+        let derivation = dl_server_as_code::derive_desired_model_with_options(
+            &model,
+            dl_server_as_code::DesiredModelOptions {
+                welle2b_archive_enabled: archive_enabled,
+            },
+        )?;
         let member_role_assignments = self.fetch_member_role_assignments().await?;
         let native_onboarding_config = self.fetch_native_onboarding_config().await?;
         let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -680,7 +1121,13 @@ impl ServerSyncOps for ServerSyncService {
         let snapshot =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
                 .await?;
-        let derivation = dl_server_as_code::derive_desired_model(&live)?;
+        let archive_enabled = self.welle2b_archive_enabled().await?;
+        let derivation = dl_server_as_code::derive_desired_model_with_options(
+            &live,
+            dl_server_as_code::DesiredModelOptions {
+                welle2b_archive_enabled: archive_enabled,
+            },
+        )?;
         dl_server_as_code::persist_desired_model(
             &self.pool,
             &derivation.desired,
@@ -961,6 +1408,266 @@ impl ServerSyncOps for ServerSyncService {
             details,
         })
     }
+
+    async fn serverguide_preview(
+        &self,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ServerGuidePreviewOutput> {
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let snapshot =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "serverguide_preview")
+                .await?;
+        let live_serverguide = self.fetch_server_guide_config().await?;
+        let built = build_server_guide_config(&live_serverguide, &live);
+        let Some(config) = built.config else {
+            return Ok(ServerGuidePreviewOutput {
+                preview_id: None,
+                guild_id: self.guild_id,
+                diff_hash: None,
+                human_summary: serverguide_blocker_summary(&built.blockers),
+                blockers: built.blockers,
+                warnings: built.warnings,
+                diff_text: "{}".to_string(),
+                desired_config: None,
+            });
+        };
+
+        let diff = serverguide_diff(self.guild_id, &live_serverguide, &config)?;
+        let human_summary = serverguide_human_summary(&diff, &config);
+        let preview = persist_onboarding_preview(
+            &self.pool,
+            Some(snapshot.snapshot_id),
+            &diff,
+            &human_summary,
+            requested_by_user_id,
+        )
+        .await?;
+        Ok(ServerGuidePreviewOutput {
+            preview_id: Some(preview.preview_id),
+            guild_id: self.guild_id,
+            diff_hash: Some(preview.diff_hash),
+            human_summary,
+            blockers: Vec::new(),
+            warnings: built.warnings,
+            diff_text: serde_json::to_string_pretty(&diff)?,
+            desired_config: Some(serde_json::to_value(&config)?),
+        })
+    }
+
+    async fn serverguide_apply(
+        &self,
+        preview_id: i64,
+        hash: String,
+        confirm: bool,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ApplyOutput> {
+        if hash.trim().is_empty() {
+            return Err(ServerSyncError::bad_request("hash fehlt"));
+        }
+        let preview = load_serverguide_preview(&self.pool, preview_id, self.guild_id).await?;
+        let confirmed = hash.trim();
+        if preview.diff_hash != confirmed {
+            let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+                pool: &self.pool,
+                preview_id,
+                guild_id: preview.guild_id,
+                confirmed_hash: confirmed,
+                requested_by_user_id,
+                dry_run: confirm,
+                status: "hash_mismatch",
+                result: json!({
+                    "stored": preview.diff_hash,
+                    "confirmed": confirmed,
+                }),
+                error_text: Some("diff hash binding mismatch"),
+            })
+            .await?;
+            return Err(ServerSyncError::bad_request(format!(
+                "Diff-Hash stimmt nicht: apply_run_id {apply_run_id}, erwartet {}, bekommen {}",
+                preview.diff_hash, confirmed
+            )));
+        }
+
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        validate_server_guide_config(&live, &preview.config)
+            .map_err(ServerSyncError::bad_request)?;
+
+        if !confirm {
+            let details = json!({
+                "preview_id": preview_id,
+                "dry_run": true,
+                "planned_changes": 1,
+                "server_guide": preview.config,
+            });
+            let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+                pool: &self.pool,
+                preview_id,
+                guild_id: preview.guild_id,
+                confirmed_hash: confirmed,
+                requested_by_user_id,
+                dry_run: true,
+                status: "dry_run",
+                result: details.clone(),
+                error_text: None,
+            })
+            .await?;
+            return Ok(ApplyOutput {
+                apply_run_id,
+                preview_id,
+                dry_run: true,
+                applied: 0,
+                skipped: 1,
+                failed: 0,
+                details_text: serde_json::to_string_pretty(&details)?,
+                details,
+            });
+        }
+
+        let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+            pool: &self.pool,
+            preview_id,
+            guild_id: preview.guild_id,
+            confirmed_hash: confirmed,
+            requested_by_user_id,
+            dry_run: false,
+            status: "running",
+            result: json!({}),
+            error_text: None,
+        })
+        .await?;
+        if let Err(err) = self.put_server_guide_config(&preview.config).await {
+            let details = json!({
+                "preview_id": preview_id,
+                "applied": 0,
+            });
+            finish_onboarding_apply_run(
+                &self.pool,
+                apply_run_id,
+                "failed",
+                details,
+                Some(&err.to_string()),
+            )
+            .await?;
+            return Err(err);
+        }
+
+        let details = json!({
+            "preview_id": preview_id,
+            "dry_run": false,
+            "applied": 1,
+        });
+        finish_onboarding_apply_run(&self.pool, apply_run_id, "applied", details.clone(), None)
+            .await?;
+        sqlx::query(
+            "UPDATE server_config.diff_previews SET applied_at = now() WHERE preview_id = $1",
+        )
+        .bind(preview_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(ApplyOutput {
+            apply_run_id,
+            preview_id,
+            dry_run: false,
+            applied: 1,
+            skipped: 0,
+            failed: 0,
+            details_text: serde_json::to_string_pretty(&details)?,
+            details,
+        })
+    }
+
+    async fn archive_enable(&self) -> ServerSyncResult<ArchiveFlagOutput> {
+        self.set_welle2b_archive_enabled(true).await
+    }
+
+    async fn archive_disable(&self) -> ServerSyncResult<ArchiveFlagOutput> {
+        self.set_welle2b_archive_enabled(false).await
+    }
+
+    async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput> {
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let content = build_regelwerk_text(&live)?;
+        let bot_user_id = self.fetch_current_bot_user_id().await?;
+        let stored_message_id = self.load_regelwerk_message_id().await?;
+        let thread_ids = self.fetch_regelwerk_threads().await?;
+        let bot_messages = self
+            .fetch_regelwerk_bot_messages(bot_user_id, stored_message_id)
+            .await?;
+
+        if !confirm {
+            return Ok(regelwerk_output(RegelwerkOutputInput {
+                dry_run: true,
+                thread_count: thread_ids.len(),
+                threads_deleted: 0,
+                bot_messages: &bot_messages,
+                bot_messages_deleted: 0,
+                stored_message_id,
+                posted_message_id: None,
+                edited_message_id: None,
+            }));
+        }
+
+        let mut threads_deleted = 0usize;
+        for thread_id in &thread_ids {
+            if self
+                .discord_delete(format!("{DISCORD_API_BASE}/channels/{thread_id}"))
+                .await?
+            {
+                threads_deleted += 1;
+            }
+        }
+
+        let mut bot_messages_deleted = 0usize;
+        for message in &bot_messages {
+            if self
+                .discord_delete(format!(
+                    "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{}",
+                    message.message_id
+                ))
+                .await?
+            {
+                bot_messages_deleted += 1;
+            }
+        }
+
+        let (posted_message_id, edited_message_id) = if let Some(message_id) = stored_message_id {
+            match self.edit_regelwerk_message(message_id, &content).await? {
+                Some(edited_id) => (None, Some(edited_id)),
+                None => {
+                    let posted_id = self.post_regelwerk_message(&content).await?;
+                    self.store_regelwerk_message_id(posted_id).await?;
+                    (Some(posted_id), None)
+                }
+            }
+        } else {
+            let posted_id = self.post_regelwerk_message(&content).await?;
+            self.store_regelwerk_message_id(posted_id).await?;
+            (Some(posted_id), None)
+        };
+
+        Ok(regelwerk_output(RegelwerkOutputInput {
+            dry_run: false,
+            thread_count: thread_ids.len(),
+            threads_deleted,
+            bot_messages: &bot_messages,
+            bot_messages_deleted,
+            stored_message_id,
+            posted_message_id,
+            edited_message_id,
+        }))
+    }
 }
 
 fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
@@ -974,6 +1681,87 @@ fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
         channels: report.channels,
         roles: report.roles,
         overwrites: report.overwrites,
+    }
+}
+
+async fn discord_json_response<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    method: &str,
+) -> ServerSyncResult<T> {
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body_preview: String = body.chars().take(300).collect();
+        return Err(ServerSyncError::internal(format!(
+            "Discord {method} fehlgeschlagen: HTTP {}: {}",
+            status.as_u16(),
+            body_preview
+        )));
+    }
+    Ok(response.json::<T>().await?)
+}
+
+async fn server_guide_response_json<T: serde::de::DeserializeOwned>(
+    response: reqwest::Response,
+    method: &str,
+) -> ServerSyncResult<T> {
+    let status = response.status();
+    if matches!(
+        status,
+        reqwest::StatusCode::UNAUTHORIZED
+            | reqwest::StatusCode::FORBIDDEN
+            | reqwest::StatusCode::NOT_FOUND
+    ) {
+        return Err(ServerSyncError::bad_request(
+            SERVER_GUIDE_UNAVAILABLE_MESSAGE,
+        ));
+    }
+    if !status.is_success() {
+        let body = response.text().await.unwrap_or_default();
+        let body_preview: String = body.chars().take(300).collect();
+        return Err(ServerSyncError::internal(format!(
+            "Discord Server Guide {method} fehlgeschlagen: HTTP {}: {}",
+            status.as_u16(),
+            body_preview
+        )));
+    }
+    Ok(response.json::<T>().await?)
+}
+
+fn parse_discord_id(label: &str, value: &str) -> ServerSyncResult<u64> {
+    value
+        .parse::<u64>()
+        .map_err(|_| ServerSyncError::bad_request(format!("{label} ist keine Discord-ID")))
+}
+
+fn thread_ids(threads: Vec<DiscordThread>) -> ServerSyncResult<Vec<u64>> {
+    threads
+        .into_iter()
+        .map(|thread| parse_discord_id("Thread-ID", &thread.id))
+        .collect()
+}
+
+fn regelwerk_output(input: RegelwerkOutputInput<'_>) -> RegelwerkPublishOutput {
+    RegelwerkPublishOutput {
+        guild_id: GUILD_ID,
+        dry_run: input.dry_run,
+        threads_found: input.thread_count,
+        threads_deleted: input.threads_deleted,
+        bot_messages_found: input.bot_messages.len(),
+        bot_messages_deleted: input.bot_messages_deleted,
+        bot_message_ids: input
+            .bot_messages
+            .iter()
+            .map(|message| message.message_id)
+            .collect(),
+        bot_message_embed_titles: input
+            .bot_messages
+            .iter()
+            .flat_map(|message| message.embed_titles.iter().cloned())
+            .collect(),
+        stored_message_id: input.stored_message_id,
+        posted_message_id: input.posted_message_id,
+        edited_message_id: input.edited_message_id,
     }
 }
 
@@ -1007,6 +1795,269 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
         details_text: serde_json::to_string_pretty(&details)?,
         details,
     })
+}
+
+fn build_regelwerk_text(model: &GuildModel) -> ServerSyncResult<String> {
+    let deadlock_rang = require_channel_mention(model, "deadlock-rang")?;
+    let deadlock_invite = require_channel_mention(model, "deadlock-invite")?;
+    let server_support = require_channel_mention(model, "server-support")?;
+    let frag_die_community = require_channel_mention(model, "frag-die-community")?;
+
+    Ok(format!(
+        "**📜 Regelwerk · Deutsche Deadlock Community**\n\n\
+**Verhalten**\n\
+- Respekt gegenüber allen — keine Beleidigungen, Diskriminierung oder persönlichen Angriffe\n\
+- Keine Hassrede, kein NSFW außerhalb der dafür markierten Kanäle, kein Spam, keine Fremdwerbung\n\
+- Privatsphäre respektieren — keine fremden Daten posten\n\
+- Schädliche Inhalte (Viren, IP-Grabber, Scam-Links) = sofortiger permanenter Bann\n\n\
+**Im Spielkontext erlaubt**\n\
+Situatives Trash-Talking, Sarkasmus, Wortspiele — solange es nicht persönlich wird. Ohne nonverbale Signale kann Ton schnell schiefgehen, also vorher abchecken, ob alle damit fein sind.\n\n\
+**Universalregel:** Sei kein Arschloch 😄\n\n\
+**Schnell zurechtfinden**\n\
+- {deadlock_rang} — Steam verknüpfen, Rang eintragen\n\
+- {deadlock_invite} — du hast Deadlock noch nicht? Hier bekommst du deinen Invite\n\
+- {server_support} — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n\
+- {frag_die_community} — jede Frage ist okay\n\n\
+**Moderation**\n\
+Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's diskreter sein soll. Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban."
+    ))
+}
+
+fn require_channel_mention(model: &GuildModel, name: &str) -> ServerSyncResult<String> {
+    resolve_channel_id(model, name)
+        .map(|id| format!("<#{id}>"))
+        .ok_or_else(|| ServerSyncError::bad_request(format!("Kanal `{name}` wurde nicht gefunden")))
+}
+
+fn build_server_guide_config(live_config: &Value, model: &GuildModel) -> ServerGuideBuildOutput {
+    let mut blockers = Vec::new();
+    let warnings = Vec::new();
+    let chat_action_type = resolve_server_guide_chat_action_type(live_config, model);
+    if chat_action_type.is_none() {
+        blockers.push(
+            "Server Guide Preview blockiert: CHAT action_type konnte aus der Live-GET-Response nicht verlässlich übernommen werden"
+                .to_string(),
+        );
+    }
+
+    let frag_die_community =
+        require_serverguide_channel_id(model, "frag-die-community", &mut blockers);
+    let deadlock_rang = require_serverguide_channel_id(model, "deadlock-rang", &mut blockers);
+    let spieler_suche = require_serverguide_channel_id(model, "spieler-suche", &mut blockers);
+    let patchnotes = require_serverguide_channel_id(model, "patchnotes", &mut blockers);
+    let server_support = require_serverguide_channel_id(model, "server-support", &mut blockers);
+    let regelwerk =
+        require_serverguide_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
+
+    let Some(action_type) = chat_action_type else {
+        return ServerGuideBuildOutput {
+            config: None,
+            blockers,
+            warnings,
+        };
+    };
+    let (
+        Some(frag_die_community),
+        Some(deadlock_rang),
+        Some(spieler_suche),
+        Some(patchnotes),
+        Some(server_support),
+        Some(regelwerk),
+    ) = (
+        frag_die_community,
+        deadlock_rang,
+        spieler_suche,
+        patchnotes,
+        server_support,
+        regelwerk,
+    )
+    else {
+        return ServerGuideBuildOutput {
+            config: None,
+            blockers,
+            warnings,
+        };
+    };
+
+    let config = ServerGuideConfig {
+        enabled: true,
+        welcome_message: ServerGuideWelcomeMessage {
+            author_ids: vec!["662995601738170389".to_string()],
+            message: "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, holst du dir in #deadlock-invite deinen Invite.".to_string(),
+        },
+        new_member_actions: vec![
+            ServerGuideAction {
+                channel_id: frag_die_community.to_string(),
+                action_type,
+                name: "Sag Hallo".to_string(),
+            },
+            ServerGuideAction {
+                channel_id: deadlock_rang.to_string(),
+                action_type,
+                name: "Steam verknüpfen & Rang eintragen".to_string(),
+            },
+            ServerGuideAction {
+                channel_id: spieler_suche.to_string(),
+                action_type,
+                name: "Such dir Mitspieler".to_string(),
+            },
+        ],
+        resource_channels: vec![
+            ServerGuideResourceChannel {
+                channel_id: regelwerk.to_string(),
+                name: "Regelwerk".to_string(),
+            },
+            ServerGuideResourceChannel {
+                channel_id: patchnotes.to_string(),
+                name: "Patchnotes".to_string(),
+            },
+            ServerGuideResourceChannel {
+                channel_id: server_support.to_string(),
+                name: "Hilfe & Support".to_string(),
+            },
+        ],
+    };
+
+    if let Err(err) = validate_server_guide_config(model, &config) {
+        blockers.push(err);
+        return ServerGuideBuildOutput {
+            config: None,
+            blockers,
+            warnings,
+        };
+    }
+
+    ServerGuideBuildOutput {
+        config: Some(config),
+        blockers,
+        warnings,
+    }
+}
+
+fn resolve_server_guide_chat_action_type(live_config: &Value, model: &GuildModel) -> Option<i64> {
+    let actions = live_config
+        .get("new_member_actions")
+        .and_then(Value::as_array)?;
+
+    for action in actions {
+        let action_type = action.get("action_type").and_then(value_as_i64)?;
+        let channel_id = action
+            .get("channel_id")
+            .and_then(Value::as_str)
+            .and_then(|value| value.parse::<u64>().ok())?;
+        if everyone_can_view_and_send(model, channel_id) {
+            return Some(action_type);
+        }
+    }
+
+    actions
+        .iter()
+        .find_map(|action| action.get("action_type").and_then(value_as_i64))
+}
+
+fn value_as_i64(value: &Value) -> Option<i64> {
+    value
+        .as_i64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
+}
+
+fn require_serverguide_channel_id(
+    model: &GuildModel,
+    name: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    let id = resolve_channel_id(model, name);
+    if id.is_none() {
+        blockers.push(format!(
+            "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
+        ));
+    }
+    id
+}
+
+fn require_serverguide_channel_id_by_id(
+    model: &GuildModel,
+    channel_id: u64,
+    label: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    if model.channels.contains_key(&channel_id) {
+        Some(channel_id)
+    } else {
+        blockers.push(format!(
+            "Kanal `{label}` ({channel_id}) wurde im Live-Guild-Modell nicht gefunden"
+        ));
+        None
+    }
+}
+
+fn validate_server_guide_config(
+    model: &GuildModel,
+    config: &ServerGuideConfig,
+) -> Result<(), String> {
+    if config.new_member_actions.len() < 3 {
+        return Err(format!(
+            "Server Guide braucht mindestens 3 new_member_actions, gefunden {}",
+            config.new_member_actions.len()
+        ));
+    }
+
+    let mut missing = Vec::new();
+    for action in &config.new_member_actions {
+        match action.channel_id.parse::<u64>() {
+            Ok(channel_id) if model.channels.contains_key(&channel_id) => {
+                if !everyone_can_view(model, channel_id) {
+                    missing.push(format!(
+                        "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sichtbar",
+                        action.name
+                    ));
+                }
+                if !everyone_can_view_and_send(model, channel_id) {
+                    missing.push(format!(
+                        "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sendbar",
+                        action.name
+                    ));
+                }
+            }
+            Ok(channel_id) => missing.push(format!(
+                "Action `{}`: Kanal `{channel_id}` fehlt",
+                action.name
+            )),
+            Err(_) => missing.push(format!(
+                "Action `{}`: Kanal `{}` ist keine Discord-ID",
+                action.name, action.channel_id
+            )),
+        }
+    }
+    for resource in &config.resource_channels {
+        match resource.channel_id.parse::<u64>() {
+            Ok(channel_id) if model.channels.contains_key(&channel_id) => {
+                if !everyone_can_view(model, channel_id) {
+                    missing.push(format!(
+                        "Resource `{}`: Kanal `{channel_id}` ist nicht @everyone-sichtbar",
+                        resource.name
+                    ));
+                }
+            }
+            Ok(channel_id) => missing.push(format!(
+                "Resource `{}`: Kanal `{channel_id}` fehlt",
+                resource.name
+            )),
+            Err(_) => missing.push(format!(
+                "Resource `{}`: Kanal `{}` ist keine Discord-ID",
+                resource.name, resource.channel_id
+            )),
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Server Guide Preview blockiert:\n- {}",
+            missing.join("\n- ")
+        ))
+    }
 }
 
 fn build_welle2b_onboarding_config(
@@ -1441,6 +2492,15 @@ fn validate_channel_ids_present(
 }
 
 fn everyone_can_view_and_send(model: &GuildModel, channel_id: u64) -> bool {
+    everyone_permissions_for_channel(model, channel_id)
+        .contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+}
+
+fn everyone_can_view(model: &GuildModel, channel_id: u64) -> bool {
+    everyone_permissions_for_channel(model, channel_id).contains(Permissions::VIEW_CHANNEL)
+}
+
+fn everyone_permissions_for_channel(model: &GuildModel, channel_id: u64) -> Permissions {
     let mut permissions = model
         .roles
         .get(&model.guild_id)
@@ -1456,7 +2516,7 @@ fn everyone_can_view_and_send(model: &GuildModel, channel_id: u64) -> bool {
         apply_everyone_overwrite(model, parent_id, &mut permissions);
     }
     apply_everyone_overwrite(model, channel_id, &mut permissions);
-    permissions.contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+    permissions
 }
 
 fn apply_everyone_overwrite(model: &GuildModel, channel_id: u64, permissions: &mut Permissions) {
@@ -1525,6 +2585,61 @@ fn onboarding_diff(
     })
 }
 
+fn serverguide_diff(
+    guild_id: u64,
+    live_config: &Value,
+    desired_config: &ServerGuideConfig,
+) -> ServerSyncResult<ServerDiff> {
+    let desired_value = json!({
+        "name": SERVER_GUIDE_DIFF_MESSAGE_KEY,
+        "config": desired_config,
+    });
+    let actual_value = json!({
+        "name": SERVER_GUIDE_DIFF_MESSAGE_KEY,
+        "config": live_config,
+    });
+    let desired_config_value = serde_json::to_value(desired_config)?;
+    let mut fields = Vec::new();
+    for field in [
+        "enabled",
+        "welcome_message",
+        "new_member_actions",
+        "resource_channels",
+    ] {
+        let desired = desired_config_value
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let actual = live_config.get(field).cloned().unwrap_or(Value::Null);
+        if desired != actual {
+            fields.push(FieldDiff {
+                field: field.to_string(),
+                desired,
+                actual,
+            });
+        }
+    }
+    Ok(ServerDiff {
+        guild_id,
+        changes: vec![DiffChange {
+            object: ObjectRef {
+                kind: ObjectKind::BotMessage,
+                guild_id,
+                object_id: SERVER_GUIDE_DIFF_OBJECT_ID,
+                channel_id: None,
+                target_kind: None,
+                target_id: None,
+                message_key: Some(SERVER_GUIDE_DIFF_MESSAGE_KEY.to_string()),
+            },
+            action: DiffAction::Update,
+            fields,
+            desired: Some(desired_value),
+            actual: Some(actual_value),
+        }],
+        filtered: Vec::new(),
+    })
+}
+
 fn onboarding_human_summary(diff: &ServerDiff, config: &NativeOnboardingConfig) -> String {
     let prompt_titles = config
         .prompts
@@ -1540,9 +2655,32 @@ fn onboarding_human_summary(diff: &ServerDiff, config: &NativeOnboardingConfig) 
     )
 }
 
+fn serverguide_human_summary(diff: &ServerDiff, config: &ServerGuideConfig) -> String {
+    let actions = config
+        .new_member_actions
+        .iter()
+        .map(|action| action.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "Server-Guide-Diff fuer Guild {}: {} Aenderung(en). Actions: {}",
+        diff.guild_id,
+        diff.changes.len(),
+        actions
+    )
+}
+
 fn onboarding_blocker_summary(blockers: &[String]) -> String {
     format!(
         "Onboarding-Preview blockiert: {} Blocker.\n- {}",
+        blockers.len(),
+        blockers.join("\n- ")
+    )
+}
+
+fn serverguide_blocker_summary(blockers: &[String]) -> String {
+    format!(
+        "Server-Guide-Preview blockiert: {} Blocker.\n- {}",
         blockers.len(),
         blockers.join("\n- ")
     )
@@ -1552,6 +2690,12 @@ struct StoredOnboardingPreview {
     guild_id: u64,
     diff_hash: String,
     config: NativeOnboardingConfig,
+}
+
+struct StoredServerGuidePreview {
+    guild_id: u64,
+    diff_hash: String,
+    config: ServerGuideConfig,
 }
 
 async fn persist_onboarding_preview(
@@ -1641,6 +2785,55 @@ async fn load_onboarding_preview(
     })
 }
 
+async fn load_serverguide_preview(
+    pool: &PgPool,
+    preview_id: i64,
+    guild_id: u64,
+) -> ServerSyncResult<StoredServerGuidePreview> {
+    let row = sqlx::query(
+        "SELECT guild_id, diff_hash, diff_json::text AS diff_json
+           FROM server_config.diff_previews
+          WHERE preview_id = $1
+            AND guild_id = $2
+            AND applied_at IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(COALESCE(diff_json->'changes', '[]'::jsonb)) AS elem(change)
+                 WHERE elem.change->'object'->>'kind' = $3
+                   AND elem.change->'object'->>'message_key' = $4
+                   AND elem.change->'object'->>'object_id' = $5
+            )",
+    )
+    .bind(preview_id)
+    .bind(id_to_i64(guild_id)?)
+    .bind(ObjectKind::BotMessage.as_db())
+    .bind(SERVER_GUIDE_DIFF_MESSAGE_KEY)
+    .bind(SERVER_GUIDE_DIFF_OBJECT_ID.to_string())
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ServerSyncError::bad_request(format!(
+            "Server-Guide-Preview {preview_id} nicht gefunden, guild-fremd, bereits angewendet oder keine Server-Guide-Preview"
+        ))
+    })?;
+
+    let diff_json: String = row.try_get("diff_json")?;
+    let diff: ServerDiff = serde_json::from_str(&diff_json)?;
+    let stored_hash: String = row.try_get("diff_hash")?;
+    let recomputed = sha256_hex(&serde_json::to_vec(&diff)?);
+    if stored_hash != recomputed {
+        return Err(ServerSyncError::bad_request(format!(
+            "Server-Guide-Preview {preview_id} Hash-Mismatch: gespeichert {stored_hash}, berechnet {recomputed}"
+        )));
+    }
+    let config = extract_serverguide_config_from_diff(&diff, guild_id)?;
+    Ok(StoredServerGuidePreview {
+        guild_id: i64_to_u64(row.try_get::<i64, _>("guild_id")?)?,
+        diff_hash: stored_hash,
+        config,
+    })
+}
+
 fn extract_onboarding_config_from_diff(
     diff: &ServerDiff,
     expected_guild_id: u64,
@@ -1664,11 +2857,41 @@ fn extract_onboarding_config_from_diff(
     })
 }
 
+fn extract_serverguide_config_from_diff(
+    diff: &ServerDiff,
+    expected_guild_id: u64,
+) -> ServerSyncResult<ServerGuideConfig> {
+    if diff.guild_id != expected_guild_id {
+        return Err(ServerSyncError::bad_request(format!(
+            "Preview gehoert zu Guild {}, erwartet {expected_guild_id}",
+            diff.guild_id
+        )));
+    }
+    let desired = diff
+        .changes
+        .iter()
+        .find(|change| is_serverguide_change(change, expected_guild_id))
+        .and_then(|change| change.desired.as_ref())
+        .ok_or_else(|| {
+            ServerSyncError::bad_request("Preview enthaelt keine Server-Guide-Zielconfig")
+        })?;
+    serde_json::from_value(desired["config"].clone()).map_err(|err| {
+        ServerSyncError::bad_request(format!("Server-Guide-Zielconfig ist ungueltig: {err}"))
+    })
+}
+
 fn is_native_onboarding_change(change: &DiffChange, expected_guild_id: u64) -> bool {
     change.object.kind == ObjectKind::BotMessage
         && change.object.guild_id == expected_guild_id
         && change.object.object_id == ONBOARDING_DIFF_OBJECT_ID
         && change.object.message_key.as_deref() == Some(ONBOARDING_DIFF_MESSAGE_KEY)
+}
+
+fn is_serverguide_change(change: &DiffChange, expected_guild_id: u64) -> bool {
+    change.object.kind == ObjectKind::BotMessage
+        && change.object.guild_id == expected_guild_id
+        && change.object.object_id == SERVER_GUIDE_DIFF_OBJECT_ID
+        && change.object.message_key.as_deref() == Some(SERVER_GUIDE_DIFF_MESSAGE_KEY)
 }
 
 struct OnboardingApplyRunInsert<'a> {
@@ -1889,6 +3112,34 @@ pub fn command_spec() -> CommandSpec {
                 },
                 {
                     "type": 1,
+                    "name": "serverguide-preview",
+                    "description": "serverguide-preview"
+                },
+                {
+                    "type": 1,
+                    "name": "archive-enable",
+                    "description": "archive-enable"
+                },
+                {
+                    "type": 1,
+                    "name": "archive-disable",
+                    "description": "archive-disable"
+                },
+                {
+                    "type": 1,
+                    "name": "regelwerk-publish",
+                    "description": "Regelwerk-Publish",
+                    "options": [
+                        {
+                            "type": 5,
+                            "name": "confirm",
+                            "description": "true = live; false = dry-run",
+                            "required": false
+                        }
+                    ]
+                },
+                {
+                    "type": 1,
                     "name": "onboarding-apply",
                     "description": "Native-Onboarding-Preview hash-gated anwenden; ohne confirm nur Dry-Run",
                     "options": [
@@ -1908,6 +3159,31 @@ pub fn command_spec() -> CommandSpec {
                             "type": 5,
                             "name": "confirm",
                             "description": "true = echter Apply; fehlt/false = Dry-Run",
+                            "required": false
+                        }
+                    ]
+                },
+                {
+                    "type": 1,
+                    "name": "serverguide-apply",
+                    "description": "serverguide-apply",
+                    "options": [
+                        {
+                            "type": 4,
+                            "name": "preview_id",
+                            "description": "preview_id",
+                            "required": true
+                        },
+                        {
+                            "type": 3,
+                            "name": "hash",
+                            "description": "diff_hash",
+                            "required": true
+                        },
+                        {
+                            "type": 5,
+                            "name": "confirm",
+                            "description": "true = live; false = dry-run",
                             "required": false
                         }
                     ]
@@ -1958,7 +3234,24 @@ pub fn register_commands(
         spec.clone(),
         handler.clone(),
     );
+    router.on_command(
+        "serversync serverguide-preview",
+        spec.clone(),
+        handler.clone(),
+    );
+    router.on_command("serversync archive-enable", spec.clone(), handler.clone());
+    router.on_command("serversync archive-disable", spec.clone(), handler.clone());
+    router.on_command(
+        "serversync regelwerk-publish",
+        spec.clone(),
+        handler.clone(),
+    );
     router.on_command("serversync onboarding-apply", spec.clone(), handler.clone());
+    router.on_command(
+        "serversync serverguide-apply",
+        spec.clone(),
+        handler.clone(),
+    );
     router.on_command("serversync apply", spec, handler);
 }
 
@@ -1988,8 +3281,21 @@ impl dl_discord::InteractionHandler for ServerSyncCommand {
             "serversync onboarding-preview" => {
                 command_onboarding_preview(self.service.as_ref(), interaction.user_id).await
             }
+            "serversync serverguide-preview" => {
+                command_serverguide_preview(self.service.as_ref(), interaction.user_id).await
+            }
+            "serversync archive-enable" => command_archive_flag(self.service.as_ref(), true).await,
+            "serversync archive-disable" => {
+                command_archive_flag(self.service.as_ref(), false).await
+            }
+            "serversync regelwerk-publish" => {
+                command_regelwerk_publish(self.service.as_ref(), &interaction).await
+            }
             "serversync onboarding-apply" => {
                 command_onboarding_apply(self.service.as_ref(), &interaction).await
+            }
+            "serversync serverguide-apply" => {
+                command_serverguide_apply(self.service.as_ref(), &interaction).await
             }
             "serversync apply" => command_apply(self.service.as_ref(), &interaction).await,
             _ => BridgeReply::ephemeral_text("Unbekannter Server-Sync-Befehl."),
@@ -2138,6 +3444,76 @@ async fn command_onboarding_preview(service: &dyn ServerSyncOps, user_id: u64) -
     }
 }
 
+async fn command_serverguide_preview(service: &dyn ServerSyncOps, user_id: u64) -> BridgeReply {
+    match service.serverguide_preview(Some(user_id)).await {
+        Ok(output) => {
+            let warnings = warning_text(&output.warnings);
+            let blockers = warning_text(&output.blockers);
+            let hash_text = output
+                .diff_hash
+                .as_deref()
+                .map(|hash| format!("diff_hash: {hash}\n"))
+                .unwrap_or_default();
+            let preview_text = output
+                .preview_id
+                .map(|id| format!("preview_id: {id}\n"))
+                .unwrap_or_default();
+            let text = format!(
+                "serverguide_preview\n{}{}{}{}{}",
+                preview_text, hash_text, blockers, warnings, output.human_summary
+            );
+            let (attachments, notice) = attachment_or_db_notice(
+                format!(
+                    "serversync-serverguide-diff-{}.json",
+                    output.preview_id.unwrap_or_default()
+                ),
+                output.diff_text.into_bytes(),
+                "Diff",
+                output.preview_id.unwrap_or_default(),
+            );
+            BridgeReply {
+                content: Some(truncate_discord(&(text + &notice))),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_archive_flag(service: &dyn ServerSyncOps, enabled: bool) -> BridgeReply {
+    let result = if enabled {
+        service.archive_enable().await
+    } else {
+        service.archive_disable().await
+    };
+    match result {
+        Ok(output) => BridgeReply::ephemeral_text(format!("archive_enabled: {}", output.enabled)),
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_regelwerk_publish(
+    service: &dyn ServerSyncOps,
+    interaction: &BridgeInteraction,
+) -> BridgeReply {
+    let confirm = option_bool(&interaction.options, "confirm").unwrap_or(false);
+    match service.regelwerk_publish(confirm).await {
+        Ok(output) => BridgeReply::ephemeral_text(format!(
+            "regelwerk_publish\nmode: {}\nthreads_found: {}\nthreads_deleted: {}\nbot_messages_found: {}\nbot_messages_deleted: {}\nposted_message_id: {:?}\nedited_message_id: {:?}",
+            if output.dry_run { "dry-run" } else { "live" },
+            output.threads_found,
+            output.threads_deleted,
+            output.bot_messages_found,
+            output.bot_messages_deleted,
+            output.posted_message_id,
+            output.edited_message_id
+        )),
+        Err(err) => command_error(err),
+    }
+}
+
 async fn command_onboarding_apply(
     service: &dyn ServerSyncOps,
     interaction: &BridgeInteraction,
@@ -2164,6 +3540,50 @@ async fn command_onboarding_apply(
             );
             let content = format!(
                 "Onboarding-Apply.\npreview_id: {}\napply_run_id: {}\nModus: {}\napplied: {} | skipped: {} | failed: {}",
+                output.preview_id,
+                output.apply_run_id,
+                if output.dry_run { "dry-run" } else { "live" },
+                output.applied,
+                output.skipped,
+                output.failed
+            );
+            BridgeReply {
+                content: Some(content + &notice),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_serverguide_apply(
+    service: &dyn ServerSyncOps,
+    interaction: &BridgeInteraction,
+) -> BridgeReply {
+    let preview_id = match option_i64(&interaction.options, "preview_id") {
+        Ok(value) => value,
+        Err(err) => return command_error(err),
+    };
+    let hash = match option_string(&interaction.options, "hash") {
+        Ok(value) => value,
+        Err(err) => return command_error(err),
+    };
+    let confirm = option_bool(&interaction.options, "confirm").unwrap_or(false);
+    match service
+        .serverguide_apply(preview_id, hash, confirm, Some(interaction.user_id))
+        .await
+    {
+        Ok(output) => {
+            let (attachments, notice) = attachment_or_db_notice(
+                format!("serversync-serverguide-apply-{}.json", output.apply_run_id),
+                output.details_text.into_bytes(),
+                "Apply-Report",
+                output.apply_run_id,
+            );
+            let content = format!(
+                "serverguide_apply\npreview_id: {}\napply_run_id: {}\nmode: {}\napplied: {} | skipped: {} | failed: {}",
                 output.preview_id,
                 output.apply_run_id,
                 if output.dry_run { "dry-run" } else { "live" },
@@ -2333,7 +3753,21 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
             "/serversync/onboarding-preview",
             post(http_onboarding_preview),
         )
+        .route(
+            "/serversync/serverguide-preview",
+            post(http_serverguide_preview),
+        )
+        .route("/serversync/archive-enable", post(http_archive_enable))
+        .route("/serversync/archive-disable", post(http_archive_disable))
+        .route(
+            "/serversync/regelwerk-publish",
+            post(http_regelwerk_publish),
+        )
         .route("/serversync/onboarding-apply", post(http_onboarding_apply))
+        .route(
+            "/serversync/serverguide-apply",
+            post(http_serverguide_apply),
+        )
         .route("/serversync/apply", post(http_apply))
         .with_state(HttpState { service, token })
 }
@@ -2496,6 +3930,77 @@ async fn http_onboarding_preview(
     }
 }
 
+async fn http_serverguide_preview(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    match state.service.serverguide_preview(None).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+async fn http_archive_enable(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    match state.service.archive_enable().await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+async fn http_archive_disable(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    match state.service.archive_disable().await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ConfirmRequest {
+    #[serde(default)]
+    confirm: bool,
+}
+
+async fn http_regelwerk_publish(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        ConfirmRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.regelwerk_publish(body.confirm).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 async fn http_onboarding_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -2512,6 +4017,29 @@ async fn http_onboarding_apply(
     match state
         .service
         .onboarding_apply(body.preview_id, body.hash, body.confirm, None)
+        .await
+    {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+async fn http_serverguide_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = match parse_json_body::<ApplyRequest>(body) {
+        Ok(body) => body,
+        Err(error) => return json_error(error),
+    };
+    match state
+        .service
+        .serverguide_apply(body.preview_id, body.hash, body.confirm, None)
         .await
     {
         Ok(output) => json_ok(json!(output)),
@@ -2571,13 +4099,18 @@ mod tests {
 
     type ApplyCall = (i64, String, bool, Option<u64>);
     type OnboardingApplyCall = (i64, String, bool, Option<u64>);
+    type ServerGuideApplyCall = (i64, String, bool, Option<u64>);
     type RestoreCall = (Option<i64>, Option<u64>);
+    type ConfirmCall = bool;
 
     #[derive(Default)]
     struct MockServerSync {
         apply_calls: Mutex<Vec<ApplyCall>>,
         onboarding_apply_calls: Mutex<Vec<OnboardingApplyCall>>,
+        serverguide_apply_calls: Mutex<Vec<ServerGuideApplyCall>>,
         restore_calls: Mutex<Vec<RestoreCall>>,
+        archive_calls: Mutex<Vec<bool>>,
+        regelwerk_calls: Mutex<Vec<ConfirmCall>>,
     }
 
     #[async_trait]
@@ -2714,6 +4247,87 @@ mod tests {
                 failed: 0,
                 details_text: "{}".to_string(),
                 details: json!({}),
+            })
+        }
+
+        async fn serverguide_preview(
+            &self,
+            _requested_by_user_id: Option<u64>,
+        ) -> ServerSyncResult<ServerGuidePreviewOutput> {
+            Ok(ServerGuidePreviewOutput {
+                preview_id: Some(31),
+                guild_id: GUILD_ID,
+                diff_hash: Some("serverguide-hash".to_string()),
+                human_summary: "Server-Guide-Diff: 1 Änderung(en).".to_string(),
+                blockers: Vec::new(),
+                warnings: vec!["serverguide warn".to_string()],
+                diff_text: "{\"serverguide\":true}".to_string(),
+                desired_config: Some(json!({"enabled": true})),
+            })
+        }
+
+        async fn serverguide_apply(
+            &self,
+            preview_id: i64,
+            hash: String,
+            confirm: bool,
+            requested_by_user_id: Option<u64>,
+        ) -> ServerSyncResult<ApplyOutput> {
+            self.serverguide_apply_calls
+                .lock()
+                .expect("serverguide apply calls")
+                .push((preview_id, hash, confirm, requested_by_user_id));
+            Ok(ApplyOutput {
+                apply_run_id: 32,
+                preview_id,
+                dry_run: !confirm,
+                applied: usize::from(confirm),
+                skipped: usize::from(!confirm),
+                failed: 0,
+                details_text: "{}".to_string(),
+                details: json!({}),
+            })
+        }
+
+        async fn archive_enable(&self) -> ServerSyncResult<ArchiveFlagOutput> {
+            self.archive_calls.lock().expect("archive calls").push(true);
+            Ok(ArchiveFlagOutput {
+                guild_id: GUILD_ID,
+                enabled: true,
+            })
+        }
+
+        async fn archive_disable(&self) -> ServerSyncResult<ArchiveFlagOutput> {
+            self.archive_calls
+                .lock()
+                .expect("archive calls")
+                .push(false);
+            Ok(ArchiveFlagOutput {
+                guild_id: GUILD_ID,
+                enabled: false,
+            })
+        }
+
+        async fn regelwerk_publish(
+            &self,
+            confirm: bool,
+        ) -> ServerSyncResult<RegelwerkPublishOutput> {
+            self.regelwerk_calls
+                .lock()
+                .expect("regelwerk calls")
+                .push(confirm);
+            Ok(RegelwerkPublishOutput {
+                guild_id: GUILD_ID,
+                dry_run: !confirm,
+                threads_found: 195,
+                threads_deleted: if confirm { 195 } else { 0 },
+                bot_messages_found: 2,
+                bot_messages_deleted: if confirm { 2 } else { 0 },
+                bot_message_ids: vec![7001, 7002],
+                bot_message_embed_titles: vec!["Hier starten ➜".to_string()],
+                stored_message_id: Some(7003),
+                posted_message_id: None,
+                edited_message_id: confirm.then_some(7003),
             })
         }
     }
@@ -2983,6 +4597,30 @@ mod tests {
         model
     }
 
+    #[test]
+    fn regelwerk_text_ersetzt_channelnamen_durch_mentions() {
+        let text = build_regelwerk_text(&onboarding_model()).expect("regelwerk text");
+
+        assert!(text.contains("- <#6007> — Steam verknüpfen, Rang eintragen"));
+        assert!(text
+            .contains("- <#6008> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite"));
+        assert!(text.contains("- <#6009> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"));
+        assert!(text.contains("- <#6002> — jede Frage ist okay"));
+        assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
+        assert!(!text.contains("#deadlock-rang"));
+        assert!(!text.contains("<@&"));
+    }
+
+    fn serverguide_model() -> GuildModel {
+        let mut model = onboarding_model();
+        model.overwrites.retain(|key, _| key.channel_id != 6007);
+        model.channels.insert(
+            RULES_CHANNEL_ID,
+            onboarding_channel(RULES_CHANNEL_ID, "regelwerk"),
+        );
+        model
+    }
+
     fn rank_live_onboarding_config() -> Value {
         let rank_options = (0..12)
             .map(|idx| {
@@ -3023,6 +4661,94 @@ mod tests {
                 }
             ]
         })
+    }
+
+    fn live_serverguide_config_with_action_type(action_type: i64) -> Value {
+        json!({
+            "enabled": false,
+            "welcome_message": {
+                "author_ids": ["1"],
+                "message": "alt"
+            },
+            "new_member_actions": [
+                {
+                    "channel_id": "6002",
+                    "action_type": action_type,
+                    "name": "Alt"
+                }
+            ],
+            "resource_channels": []
+        })
+    }
+
+    #[test]
+    fn serverguide_builder_baut_sollconfig_mit_live_chat_action_type() {
+        let model = serverguide_model();
+        let built = build_server_guide_config(&live_serverguide_config_with_action_type(0), &model);
+        let config = built.config.expect("serverguide config");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        assert!(config.enabled);
+        assert_eq!(
+            config.welcome_message.author_ids,
+            vec!["662995601738170389".to_string()]
+        );
+        assert_eq!(
+            config.welcome_message.message,
+            "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, holst du dir in #deadlock-invite deinen Invite."
+        );
+        assert_eq!(config.new_member_actions.len(), 3);
+        assert_eq!(config.new_member_actions[0].name, "Sag Hallo");
+        assert_eq!(config.new_member_actions[0].channel_id, "6002");
+        assert_eq!(config.new_member_actions[0].action_type, 0);
+        assert_eq!(
+            config.new_member_actions[1].name,
+            "Steam verknüpfen & Rang eintragen"
+        );
+        assert_eq!(config.new_member_actions[1].channel_id, "6007");
+        assert_eq!(config.new_member_actions[2].name, "Such dir Mitspieler");
+        assert_eq!(config.resource_channels[0].name, "Regelwerk");
+        assert_eq!(
+            config.resource_channels[0].channel_id,
+            RULES_CHANNEL_ID.to_string()
+        );
+        assert_eq!(config.resource_channels[1].name, "Patchnotes");
+        assert_eq!(config.resource_channels[2].name, "Hilfe & Support");
+    }
+
+    #[test]
+    fn serverguide_builder_blockt_ohne_live_action_type_und_bei_nicht_sendbarem_chat() {
+        let missing_type = build_server_guide_config(
+            &json!({"enabled": false, "new_member_actions": []}),
+            &serverguide_model(),
+        );
+        assert!(missing_type.config.is_none());
+        assert!(missing_type
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("CHAT action_type")));
+
+        let mut read_only = serverguide_model();
+        let overwrite = PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: 6007,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            },
+            allow_bits: Permissions::VIEW_CHANNEL.bits(),
+            deny_bits: Permissions::SEND_MESSAGES.bits(),
+        };
+        read_only
+            .overwrites
+            .insert(overwrite.key.clone(), overwrite);
+        let blocked =
+            build_server_guide_config(&live_serverguide_config_with_action_type(0), &read_only);
+        assert!(blocked.config.is_none());
+        assert!(blocked
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("nicht @everyone-sendbar")));
     }
 
     #[test]
@@ -3540,6 +5266,130 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serverguide_preview_http_liefert_hash_und_apply_parst_confirm() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let preview = app
+            .clone()
+            .oneshot(request(
+                "/serversync/serverguide-preview",
+                Some("secret"),
+                json!({}),
+            ))
+            .await
+            .expect("preview response");
+        let (status, body) = response_json(preview).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["preview_id"], 31);
+        assert_eq!(body["result"]["diff_hash"], "serverguide-hash");
+
+        let apply = app
+            .oneshot(request(
+                "/serversync/serverguide-apply",
+                Some("secret"),
+                json!({"preview_id": 31, "hash": "serverguide-hash", "confirm": true}),
+            ))
+            .await
+            .expect("apply response");
+        let (status, body) = response_json(apply).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["apply_run_id"], 32);
+        assert_eq!(
+            service
+                .serverguide_apply_calls
+                .lock()
+                .expect("serverguide apply calls")
+                .as_slice(),
+            &[(31, "serverguide-hash".to_string(), true, None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn archive_enable_disable_http_toggelt_flag() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let enable = app
+            .clone()
+            .oneshot(request(
+                "/serversync/archive-enable",
+                Some("secret"),
+                json!({}),
+            ))
+            .await
+            .expect("enable response");
+        let (status, body) = response_json(enable).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["enabled"], true);
+
+        let disable = app
+            .oneshot(request(
+                "/serversync/archive-disable",
+                Some("secret"),
+                json!({}),
+            ))
+            .await
+            .expect("disable response");
+        let (status, body) = response_json(disable).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["enabled"], false);
+        assert_eq!(
+            service
+                .archive_calls
+                .lock()
+                .expect("archive calls")
+                .as_slice(),
+            &[true, false]
+        );
+    }
+
+    #[tokio::test]
+    async fn regelwerk_publish_http_ist_dry_run_default_und_parst_confirm() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let dry_run = app
+            .clone()
+            .oneshot(request_raw(
+                "/serversync/regelwerk-publish",
+                Some("secret"),
+                "",
+            ))
+            .await
+            .expect("dry-run response");
+        let (status, body) = response_json(dry_run).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["threads_deleted"], 0);
+        assert_eq!(
+            body["result"]["bot_message_embed_titles"][0],
+            "Hier starten ➜"
+        );
+
+        let confirmed = app
+            .oneshot(request(
+                "/serversync/regelwerk-publish",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("confirm response");
+        let (status, body) = response_json(confirmed).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], false);
+        assert_eq!(body["result"]["edited_message_id"], 7003);
+        assert_eq!(
+            service
+                .regelwerk_calls
+                .lock()
+                .expect("regelwerk calls")
+                .as_slice(),
+            &[false, true]
+        );
+    }
+
+    #[tokio::test]
     async fn onboarding_apply_http_parst_confirm_und_hash() {
         let service = Arc::new(MockServerSync::default());
         let app = router(service.clone(), Some("secret".to_string()));
@@ -3649,5 +5499,36 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("diff_hash: onboarding-hash"));
+    }
+
+    #[tokio::test]
+    async fn slash_archive_enable_owner_toggelt_flag() {
+        let service = Arc::new(MockServerSync::default());
+        let handler = ServerSyncCommand {
+            service: service.clone(),
+            owner_id: Some(10),
+        };
+
+        let reply = dl_discord::InteractionHandler::handle(
+            &handler,
+            BridgeInteraction {
+                command: "serversync archive-enable".to_string(),
+                guild_id: GUILD_ID,
+                user_id: 10,
+                ..BridgeInteraction::default()
+            },
+        )
+        .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some("archive_enabled: true"));
+        assert_eq!(
+            service
+                .archive_calls
+                .lock()
+                .expect("archive calls")
+                .as_slice(),
+            &[true]
+        );
     }
 }

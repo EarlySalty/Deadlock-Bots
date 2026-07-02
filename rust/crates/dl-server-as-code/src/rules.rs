@@ -25,6 +25,9 @@ const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
 const ROLE_INVITE_GAST: &str = "Invite-Gast";
 const ROLE_FRISCHLING: &str = "Frischling";
 const ROLE_STREAMS: &str = "Streams";
+const CATEGORY_ARCHIV: &str = "📦 Archiv";
+const CHANNEL_KREATIV_ECKE: &str = "kreativ-ecke";
+const KREATIV_ECKE_TOPIC: &str = "Kunst, Mods, Movement-Clips, Food — zeig her, was du hast.";
 
 const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
@@ -74,6 +77,10 @@ const DOCUMENTED_STRUCTURE_MOVES: &[(&str, &str)] = &[
     ("deadlock-invite", "Chat"),
 ];
 
+const WELLE2B_ARCHIVE_CHANNEL_NAMES: &[&str] =
+    &["server-faq", "movement", "deadlock-art", "mods", "food"];
+const WELLE2B_KREATIV_SOURCE_CHANNEL_NAMES: &[&str] = &["movement", "deadlock-art", "mods", "food"];
+
 // Matching-only Alias-Tabelle fuer Live-Namen, die nicht 1:1 aus Dekoration/Case
 // ableitbar sind. Keine dieser Aliases schreibt Namen ins Soll-Modell.
 // Live-Dry-Run 2026-07-02: `Streamer Only` ist die Streamer-Kategorie;
@@ -110,6 +117,11 @@ pub struct DesiredDerivation {
     pub dynamic_namespaces: Vec<DynamicNamespace>,
     pub exceptions: Vec<DocumentedException>,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DesiredModelOptions {
+    pub welle2b_archive_enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -186,6 +198,13 @@ pub fn f_role_visibility_profile() -> PermissionOverwriteProfile {
 }
 
 pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
+    derive_desired_model_with_options(actual, DesiredModelOptions::default())
+}
+
+pub fn derive_desired_model_with_options(
+    actual: &GuildModel,
+    options: DesiredModelOptions,
+) -> Result<DesiredDerivation> {
     let mut ctx = RuleContext::new(actual);
     let mut desired = actual.clone();
 
@@ -207,6 +226,7 @@ pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
         if !EXPECTED_CATEGORIES
             .iter()
             .any(|expected| category_matches_expected(&category.name, expected))
+            && !category_matches_expected(&category.name, CATEGORY_ARCHIV)
         {
             ctx.warn_once(
                 "unknown_category",
@@ -257,8 +277,11 @@ pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
         "Support/Tickets",
         apply_support_tickets,
     );
-    apply_category_if_present(&mut desired, &mut ctx, "Alt", apply_alt_category);
-    apply_category_if_present(&mut desired, &mut ctx, "Beta Zugang", apply_alt_category);
+    if options.welle2b_archive_enabled {
+        apply_category_if_present(&mut desired, &mut ctx, "Alt", apply_alt_category);
+        apply_category_if_present(&mut desired, &mut ctx, "Beta Zugang", apply_alt_category);
+        apply_welle2b_archive_rules(&mut desired, &mut ctx);
+    }
     apply_global_channel_overrides(&mut desired, &mut ctx);
 
     let dynamic_namespaces = build_dynamic_namespaces(&ctx);
@@ -909,6 +932,158 @@ fn apply_alt_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, categ
     clear_children(desired, ctx, category_id);
 }
 
+fn apply_welle2b_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let archive_category_id = ensure_archive_category(desired, ctx);
+    set_exact_overwrites_without_retained(
+        desired,
+        archive_category_id,
+        vec![everyone_overwrite(
+            desired.guild_id,
+            archive_category_id,
+            f_everyone_hidden_profile(),
+        )],
+    );
+
+    for channel_id in welle2b_archive_channel_ids(ctx) {
+        if let Some(channel) = desired.channels.get_mut(&channel_id) {
+            channel.parent_category_id = Some(archive_category_id);
+        }
+        set_exact_overwrites_without_retained(desired, channel_id, Vec::new());
+    }
+
+    ensure_kreativ_ecke(desired, ctx);
+}
+
+fn ensure_archive_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> DiscordId {
+    if let Some(category_id) = desired
+        .categories
+        .values()
+        .find(|category| category_matches_expected(&category.name, CATEGORY_ARCHIV))
+        .map(|category| category.category_id)
+    {
+        return category_id;
+    }
+
+    let category_id = next_synthetic_discord_id(desired);
+    let position = desired
+        .categories
+        .values()
+        .map(|category| category.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    desired.categories.insert(
+        category_id,
+        crate::model::CategorySpec {
+            guild_id: desired.guild_id,
+            category_id,
+            name: CATEGORY_ARCHIV.to_string(),
+            position,
+        },
+    );
+    ctx.category_ids
+        .insert(category_match_key(CATEGORY_ARCHIV), category_id);
+    category_id
+}
+
+fn welle2b_archive_channel_ids(ctx: &mut RuleContext<'_>) -> BTreeSet<DiscordId> {
+    let mut channel_ids = BTreeSet::new();
+    if let Some(alt_category_id) = ctx.category_id("Alt") {
+        channel_ids.extend(
+            ctx.actual
+                .channels
+                .values()
+                .filter(|channel| channel.parent_category_id == Some(alt_category_id))
+                .map(|channel| channel.channel_id),
+        );
+    }
+
+    for channel in ctx.actual.channels.values() {
+        if is_welle2b_archive_channel_name(&channel.name) {
+            channel_ids.insert(channel.channel_id);
+        }
+    }
+    channel_ids
+}
+
+fn is_welle2b_archive_channel_name(name: &str) -> bool {
+    let lower = name.to_lowercase();
+    if lower.starts_with("faq-") {
+        return true;
+    }
+    if lower.contains("beta-invite") {
+        return !lower.contains("log");
+    }
+    channel_matches(name, WELLE2B_ARCHIVE_CHANNEL_NAMES)
+}
+
+fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let Some(parent_category_id) = kreativ_source_category_id(ctx) else {
+        ctx.warn_once(
+            "missing_kreativ_source",
+            CHANNEL_KREATIV_ECKE,
+            "Kreativ-Quellkanaele `movement`, `deadlock-art`, `mods`, `food` wurden im Ist-Modell nicht mit Kategorie gefunden; `kreativ-ecke` wird nicht automatisch angelegt".to_string(),
+        );
+        return;
+    };
+
+    if let Some(channel) = desired
+        .channels
+        .values_mut()
+        .find(|channel| channel_matches(&channel.name, &[CHANNEL_KREATIV_ECKE]))
+    {
+        channel.parent_category_id = Some(parent_category_id);
+        channel.topic = Some(KREATIV_ECKE_TOPIC.to_string());
+        return;
+    }
+
+    let channel_id = next_synthetic_discord_id(desired);
+    let position = desired
+        .channels
+        .values()
+        .filter(|channel| channel.parent_category_id == Some(parent_category_id))
+        .map(|channel| channel.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    desired.channels.insert(
+        channel_id,
+        crate::model::ChannelSpec {
+            guild_id: desired.guild_id,
+            channel_id,
+            name: CHANNEL_KREATIV_ECKE.to_string(),
+            kind: ChannelKind::Text,
+            topic: Some(KREATIV_ECKE_TOPIC.to_string()),
+            position,
+            parent_category_id: Some(parent_category_id),
+            nsfw: false,
+            bitrate: None,
+            user_limit: None,
+            rate_limit_per_user: None,
+            status: None,
+        },
+    );
+}
+
+fn kreativ_source_category_id(ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
+    let mut parents = ctx
+        .actual
+        .channels
+        .values()
+        .filter(|channel| channel_matches(&channel.name, WELLE2B_KREATIV_SOURCE_CHANNEL_NAMES))
+        .filter_map(|channel| channel.parent_category_id)
+        .collect::<BTreeSet<_>>();
+    let first = parents.pop_first();
+    if !parents.is_empty() {
+        ctx.warn_once(
+            "multiple_kreativ_source_categories",
+            CHANNEL_KREATIV_ECKE,
+            "`movement`, `deadlock-art`, `mods`, `food` liegen im Ist-Modell in mehreren Kategorien; `kreativ-ecke` nutzt die erste gefundene Kategorie".to_string(),
+        );
+    }
+    first
+}
+
 fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     let channel_ids: Vec<_> = desired.channels.keys().copied().collect();
     for channel_id in channel_ids {
@@ -1204,10 +1379,22 @@ fn set_exact_overwrites(
     overwrites: Vec<PermissionOverwriteSpec>,
 ) {
     let retained = retained_exception_overwrites(ctx, channel_id);
+    set_exact_overwrites_without_retained(
+        desired,
+        channel_id,
+        retained.into_iter().chain(overwrites).collect(),
+    );
+}
+
+fn set_exact_overwrites_without_retained(
+    desired: &mut GuildModel,
+    channel_id: DiscordId,
+    overwrites: Vec<PermissionOverwriteSpec>,
+) {
     desired
         .overwrites
         .retain(|key, _| key.channel_id != channel_id);
-    for overwrite in retained.into_iter().chain(overwrites) {
+    for overwrite in overwrites {
         desired.overwrites.insert(overwrite.key.clone(), overwrite);
     }
 }
@@ -1475,6 +1662,25 @@ fn matching_key(name: &str) -> String {
         .to_lowercase()
 }
 
+fn next_synthetic_discord_id(model: &GuildModel) -> DiscordId {
+    let mut candidate = model
+        .categories
+        .keys()
+        .chain(model.channels.keys())
+        .chain(model.roles.keys())
+        .copied()
+        .max()
+        .unwrap_or(model.guild_id)
+        .saturating_add(1);
+    while model.categories.contains_key(&candidate)
+        || model.channels.contains_key(&candidate)
+        || model.roles.contains_key(&candidate)
+    {
+        candidate = candidate.saturating_add(1);
+    }
+    candidate
+}
+
 fn is_ticket_namespace_channel(name: &str) -> bool {
     let Some((prefix, suffix)) = name.split_once('-') else {
         return false;
@@ -1507,6 +1713,16 @@ mod tests {
     const SUPPORT_CATEGORY: u64 = 216;
     const REGELWERK: u64 = 217;
     const BETA_ZUGANG_EMOJI: u64 = 218;
+    const ALT_CATEGORY: u64 = 219;
+    const ALT_CHILD: u64 = 220;
+    const FAQ_USER_CHANNEL: u64 = 221;
+    const SERVER_FAQ: u64 = 222;
+    const BETA_INVITE_SPAM: u64 = 223;
+    const BETA_INVITE_LOG: u64 = 224;
+    const MOVEMENT: u64 = 225;
+    const DEADLOCK_ART: u64 = 226;
+    const MODS: u64 = 227;
+    const FOOD: u64 = 228;
     const BANNED_USER: u64 = 685_573_558_281_175_043;
     const BANNED_X2: u64 = 496_268_533_496_545_283;
     const BANNED_X4: u64 = 601_742_833_438_818_357;
@@ -1612,6 +1828,41 @@ mod tests {
         model
     }
 
+    fn archive_candidate_model() -> GuildModel {
+        let mut model = actual_model();
+        model
+            .categories
+            .insert(ALT_CATEGORY, category(ALT_CATEGORY, "Alt"));
+        for (id, name, parent) in [
+            (ALT_CHILD, "low-elo-ranked", Some(ALT_CATEGORY)),
+            (FAQ_USER_CHANNEL, "faq-testuser", Some(CHAT_CATEGORY)),
+            (SERVER_FAQ, "server-faq", Some(CHAT_CATEGORY)),
+            (BETA_INVITE_SPAM, "beta-invite-spam", Some(CHAT_CATEGORY)),
+            (BETA_INVITE_LOG, "beta-invite-log", Some(CHAT_CATEGORY)),
+            (MOVEMENT, "movement", Some(CHAT_CATEGORY)),
+            (DEADLOCK_ART, "deadlock-art", Some(CHAT_CATEGORY)),
+            (MODS, "mods", Some(CHAT_CATEGORY)),
+            (FOOD, "food", Some(CHAT_CATEGORY)),
+        ] {
+            model.channels.insert(id, channel(id, name, parent));
+            model.overwrites.insert(
+                OverwriteKey {
+                    channel_id: id,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                },
+                overwrite(
+                    id,
+                    TargetKind::Role,
+                    GUILD_ID,
+                    0,
+                    Permissions::VIEW_CHANNEL.bits(),
+                ),
+            );
+        }
+        model
+    }
+
     fn documented_categories_model() -> GuildModel {
         let mut model = actual_model();
         model.categories.insert(
@@ -1661,6 +1912,115 @@ mod tests {
                 "{live_name:?} muss nach {target_name:?} umbenennen"
             );
         }
+    }
+
+    #[test]
+    fn welle2b_archivregeln_sind_ohne_flag_inaktiv() -> anyhow::Result<()> {
+        let actual = archive_candidate_model();
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: false,
+            },
+        )?;
+
+        assert!(derived
+            .desired
+            .categories
+            .values()
+            .all(|category| category.name != "📦 Archiv"));
+        assert!(derived
+            .desired
+            .channels
+            .values()
+            .all(|channel| channel.name != "kreativ-ecke"));
+        assert_eq!(
+            derived.desired.channels[&ALT_CHILD].parent_category_id,
+            Some(ALT_CATEGORY)
+        );
+        assert!(derived.desired.overwrites.contains_key(&OverwriteKey {
+            channel_id: ALT_CHILD,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_archivregeln_erstellen_archiv_und_kreativ_ecke() -> anyhow::Result<()> {
+        let actual = archive_candidate_model();
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: true,
+            },
+        )?;
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == "📦 Archiv")
+            .expect("archive category")
+            .category_id;
+
+        let archive_overwrites = derived
+            .desired
+            .overwrites
+            .values()
+            .filter(|overwrite| overwrite.key.channel_id == archive_id)
+            .collect::<Vec<_>>();
+        assert_eq!(archive_overwrites.len(), 1);
+        assert_eq!(archive_overwrites[0].key.target_kind, TargetKind::Role);
+        assert_eq!(archive_overwrites[0].key.target_id, GUILD_ID);
+        assert_eq!(archive_overwrites[0].allow_bits, 0);
+        assert_eq!(
+            archive_overwrites[0].deny_bits,
+            Permissions::VIEW_CHANNEL.bits()
+        );
+
+        for channel_id in [
+            ALT_CHILD,
+            FAQ_USER_CHANNEL,
+            SERVER_FAQ,
+            BETA_INVITE_SPAM,
+            MOVEMENT,
+            DEADLOCK_ART,
+            MODS,
+            FOOD,
+        ] {
+            assert_eq!(
+                derived.desired.channels[&channel_id].parent_category_id,
+                Some(archive_id),
+                "channel {channel_id} muss ins Archiv"
+            );
+            assert!(
+                !derived
+                    .desired
+                    .overwrites
+                    .keys()
+                    .any(|key| key.channel_id == channel_id),
+                "channel {channel_id} darf keine eigenen Overwrites behalten"
+            );
+        }
+        assert_eq!(
+            derived.desired.channels[&BETA_INVITE_LOG].parent_category_id,
+            Some(CHAT_CATEGORY)
+        );
+
+        let kreativ = derived
+            .desired
+            .channels
+            .values()
+            .find(|channel| channel.name == "kreativ-ecke")
+            .expect("kreativ-ecke");
+        assert_eq!(kreativ.parent_category_id, Some(CHAT_CATEGORY));
+        assert_eq!(
+            kreativ.topic.as_deref(),
+            Some("Kunst, Mods, Movement-Clips, Food — zeig her, was du hast.")
+        );
+        Ok(())
     }
 
     #[test]

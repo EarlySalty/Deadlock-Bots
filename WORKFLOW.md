@@ -1,5 +1,12 @@
 # Welle2b W1 Onboarding-Fundament (2026-07-02)
 
+## Welle2b W2 Kanal-Sanierung + Regelwerk + Server Guide (2026-07-03)
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-welle2b` auf Branch `feat/welle2b-onboarding`. Verbindlich: kein Checkout von `main`, kein Push, kein Commit durch diesen Worker; `CHANGELOG.md` bleibt unberuehrt.
+- Pflichtkontext gelesen: Konzept §3 und §4.6, Ist-Zustand-Kanalbefunde, bestehende `dl-server-as-code::rules` und `rust/bin/dl-bot/src/serversync.rs`. Umsetzung erfolgt ueber bestehendes Preview/Hash/Apply-Muster und KV-Flags in `bot.kv_store`.
+- Implementiert im Zwischenstand: `DesiredModelOptions` mit gegatetem Welle2b-Archiv, neue Kategorie `📦 Archiv`, Umzug eindeutiger Archivkandidaten, `kreativ-ecke`, `/serversync archive-enable|archive-disable` plus HTTP; `regelwerk-publish` mit Dry-Run, Thread-/Bot-Message-Cleanup und KV-Message-ID; `serverguide-preview|apply` mit GET/PUT `/new-member-welcome`, Hash-Preview und clientseitiger Rechtevalidierung.
+- Zieltests bisher gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code welle2b_archivregeln`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot regelwerk`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serverguide`; Archiv-HTTP-/Slash-Einzeltests.
+- Abschluss-Verifikation gruen: `cargo fmt --all`; `cargo fmt --all -- --check`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace` aus `rust/`; `git diff --check`. Kein Commit/Push.
+
 ## Ziel
 Native Discord-Onboarding-Welle 2b lokal vorbereiten: neue Soll-Rollen, hash-gated Onboarding-Preview/Apply, `COMPLETED_ONBOARDING`-Journey-Event mit persistentem Dedupe, Legacy-Wizard-Einstiege deaktivieren. Kein Commit/Push; `CHANGELOG.md` bleibt unberuehrt.
 
