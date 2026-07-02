@@ -1,6 +1,7 @@
 # Server-Wissensbasis v1 — GERÜST (Phase 1)
 
-Status: GERÜST — Struktur steht, Inhalte teils Platzhalter.
+Status: FAQ-PROSA FINAL (F1–F15 von Claude geschrieben, 2026-07-02) —
+Struktur-Teil 1 wartet auf Generator (Server-as-Code), Pflege-Owner offen (Phase 3).
 Quellen: `docs/onboarding-redesign/2026-07-02-konzept.md` (§5.4, §4.1, §4.2),
 `docs/onboarding-redesign/2026-07-02-ist-zustand.md`.
 
@@ -121,99 +122,144 @@ Format pro Frage: Antwort = **[PLATZHALTER — finalen Text schreibt Claude]** +
 Stichpunkte (Fakten, die die finale Antwort enthalten MUSS). Belege: Ist-Zustand §4.
 
 ### F1: Wie bekomme ich einen Deadlock-Invite?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Der Weg ist kurz: Verknüpf deinen Steam-Account in `#deadlock-rang` (Button-Panel) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — das war's, dein Invite kommt automatisch. Entweder lädt dich vorher ein Mitglied persönlich ein, oder der Bot verschickt den Invite spätestens ein paar Stunden nach bestätigter Freundschaft von selbst. Falls du `#deadlock-invite` noch nicht siehst: Wähl im Kanäle-&-Rollen-Tab „Ich hab Deadlock noch nicht" aus, dann taucht der Kanal auf.
+
+*Muss enthalten (Checkliste):*
 - Weiche 🔑 wählen (falls nicht geschehen: Kanäle&Rollen-Tab) → `deadlock-invite`
 - Kern-Ablauf in einem Satz: Steam verknüpfen in `#deadlock-rang` → Invite kommt automatisch
 - Beide Wege nennen: Mensch kann persönlich einladen ODER Bot nach 3 h automatisch
 - Ehrlich: was der User tun muss (Steam-Link + Freundschaftsanfrage annehmen) — das erklärte das alte Panel nie (dokumentierter Churn-Hebel!)
 
 ### F2: Welchem Bot muss ich die Steam-Freundschaftsanfrage schicken?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Normalerweise musst du gar keine schicken — nach dem Steam-Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie nur auf Steam annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.
+
+*Muss enthalten (Checkliste):*
 - DIE dokumentiert unbeantwortete Ticket-Frage (User verließ Server <1 Tag)
 - Bot-Name + Freundescode explizit nennen (Stolperfalle Freundescode, Ist-Zustand: 820142646 — beim Generieren aus Soll-Modell aktuell halten)
 - Klarstellen: Anfrage kommt normalerweise VOM Bot nach Steam-Verify; User muss nur annehmen
 - Schritt-für-Schritt: Steam → Freunde → Code eingeben (Fallback-Weg)
 
 ### F3: Wie lange dauert mein Invite und wo sehe ich den Status?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Sobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es maximal etwa 3 Stunden — oft geht es schneller, wenn dich ein Mitglied persönlich einlädt. Den aktuellen Stand (Steam verknüpft → Freundschaft bestätigt → Invite raus) kannst du jederzeit beim Bot per DM abfragen. Und was da steht, stimmt auch: Der angezeigte Status ist der echte Systemstatus, keine Beruhigungsmeldung.
+
+*Muss enthalten (Checkliste):*
 - Wartezeiten ehrlich kommunizieren (waren nirgends kommuniziert → Kern-Reibung)
 - Zeitanker: Bot-Netz feuert 3 h nach bestätigter Freundschaft (Startwert, justierbar)
 - Status-Abfrage: Bot-DM (Phase 3) / Paket-Tracker beim Bot-Paten (Phase 4)
 - Versprechen: angezeigter Status = echter Status (keine Falschmeldungen mehr)
 
 ### F4: Mein Invite hängt / ich bekomme Fehlermeldungen — was tun?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> In fast allen Fällen hakt es an einem von drei Punkten: Steam ist noch nicht verknüpft, die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen (nach 24 h erinnern wir dich einmal daran), oder dein Steam-Account ist „limited" (siehe F6). Schau die drei Punkte kurz durch — wenn es dann immer noch klemmt, schreib einfach in `#frag-die-community` oder öffne ein Ticket in `#server-support`: Da schaut ein Mensch drauf, in der Regel noch am selben Tag.
+
+*Muss enthalten (Checkliste):*
 - Häufigste Ursachen: Steam nicht verknüpft, Freundschaftsanfrage nicht angenommen (24-h-Erinnerung kommt), Limited-User
 - Kein Ping-Spam mehr (Phase-0-Fix ②/④ referenzieren)
 - Eskalationsweg: `frag-die-community` oder `server-support` → Mensch antwortet am selben Tag
 
 ### F5: Kann mich auch ein Mensch direkt einladen?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Ja, ausdrücklich — das ist bei uns kein Gefallen, sondern der bevorzugte Weg. Wenn ein Mitglied dich persönlich einladen will, meldet es das kurz im System und der automatische Versand pausiert. Für dich ändert sich nichts am Ablauf oder Ergebnis; in deinem Status steht dann einfach „persönlich eingeladen von X". Kommt kein Mensch dazu, springt nach ein paar Stunden der Bot ein.
+
+*Muss enthalten (Checkliste):*
 - Ja — der frühere Mod-Goodwill ist jetzt offizieller Weg (Mensch-Fenster)
 - Mitglied meldet „Ich lade persönlich ein" im Cockpit → Bot-Netz pausiert
 - Für den Gast ändert sich nichts am Ergebnis; Status zeigt „persönlich eingeladen von X"
 
 ### F6: Der Bot sagt, mein Steam-Account ist „limited" — warum bekomme ich keinen Invite?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Das ist leider eine Beschränkung von Valve, kein Fehler bei uns: Steam stuft Accounts als „limited" ein, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — und solche Accounts können keine Playtest-Einladungen über unseren Weg erhalten. Sobald du irgendwas für 5 $ auf Steam gekauft hast, fällt die Sperre weg. Dein Fall landet außerdem automatisch bei einem Menschen aus dem Team, der mit dir die Optionen durchgeht.
+
+*Muss enthalten (Checkliste):*
 - GC-Code 6 = echte Valve-Restriktion (Limited User), KEIN Bot-Fehler
 - Ehrlich erklären, was ein Limited Account ist (kein 5-$-Kauf auf Steam)
 - Ein Mensch übernimmt automatisch (Eskalations-Endstufe für diesen Fall)
 
 ### F7: Wie verknüpfe ich meinen Steam-Account?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Geh in `#deadlock-rang` (hieß früher `rang-auswahl`) — dort findest du das einzige Button-Panel des Servers, mehr Buttons gibt's bei uns absichtlich nicht. Klick auf „Verknüpfen", logg dich auf der Steam-Seite ein, fertig. Wenn etwas nicht durchgelaufen ist, kannst du über dasselbe Panel jederzeit neu prüfen lassen.
+
+*Muss enthalten (Checkliste):*
 - Panel in `#deadlock-rang` (ex `rang-auswahl` — alter Name für Bestands-User erwähnen, Übergangszeit)
 - Ablauf: Button → Steam-OpenID-Login → fertig; Recheck-Möglichkeit
 - Einziges öffentliches Button-Panel des Servers (bewusst so)
 
 ### F8: Was passiert bei der Steam-Verifizierung mit meinen Daten — und was bringt sie mir?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Was du davon hast: deine echte Rang-Rolle (automatisch aktuell statt Selbstauskunft), die Möglichkeit, Freunde per Invite reinzuholen, und Rank-up-Feiern, wenn du kletterst. Zur Technik: Die Verknüpfung läuft über den offiziellen Steam-Login (OpenID) — wir sehen nie dein Passwort und haben keinerlei Zugriff auf deinen Account, wir bekommen nur deine Steam-ID. Du kannst deine Daten jederzeit exportieren oder löschen lassen, und wenn irgendwas hakt, kümmert sich ein Mensch aus dem Team.
+
+*Muss enthalten (Checkliste):*
 - Größter dokumentierter Skepsis-Punkt → Nutzen VOR Mechanik: echte Rang-Rolle, Invite-Fähigkeit, Rank-up-Feiern
 - Bestehende vorbildliche Datenschutz-Erklärung übernehmen (aus altem Panel — behalten!)
 - Nur OpenID (keine Passwörter, kein Kontozugriff); Löschung/Export möglich (privacy-Pfade)
 - Mensch-Fallback bei Problemen (kein Owner-Direkt-Ping mehr)
 
 ### F9: Wie bekomme ich meine Rang-Rolle / wie ändere ich meinen Rang?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Es gibt zwei Stufen. Stufe 1: Beim Onboarding gibst du deinen Rang selbst an (12 Optionen) und bekommst die passende „(unverifiziert)"-Rolle — ändern kannst du das jederzeit im Kanäle-&-Rollen-Tab. Stufe 2: Verknüpfst du deinen Steam-Account in `#deadlock-rang`, bekommst du deine echte Rang-Rolle, die sich ab dann von selbst aktuell hält — da musst du nie wieder etwas anfassen.
+
+*Muss enthalten (Checkliste):*
 - Zwei Stufen: Selbstauskunft im Onboarding → „(unverifiziert)"-Rolle; Steam-Verify → echte, automatisch aktuelle Rang-Rolle
 - Ändern: Kanäle&Rollen-Tab (Selbstauskunft) bzw. automatisch nach Verify
 - 12 Rang-Optionen, 66 Rang-Rollen gesamt (Struktur-Teil referenzieren)
 
 ### F10: Ich bin ganz neu — bringt mir jemand das Spiel bei?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Ja, genau dafür sind wir da. Wähl im Kanäle-&-Rollen-Tab „Ich bin ganz neu und will's lernen" — dann meldet sich unser Bot mit einem Paten-Angebot: Wenn du willst (nur dann!), bekommst du einen echten Menschen an die Seite, der sich am selben Tag meldet und in der ersten Woche ein Match mit dir spielt. Dazu gibt's unser kostenloses Coaching-Programm, in das dich dein Pate direkt vermittelt, und die Neue-Spieler-Lane, in der niemand von dir erwartet, dass du schon irgendwas kannst.
+
+*Muss enthalten (Checkliste):*
 - Zwei dokumentierte solcher Bitten blieben unbeantwortet trotz Gratis-Coaching → diese Antwort MUSS sitzen
 - Ja: 🌱-Weiche wählen → Paten-Angebot (Mensch, Opt-in); Pate spielt erstes Match mit
 - Coaching-Programm ist kostenlos; Pate/Cockpit vermittelt aktiv (Lern-Bitten werden als Coaching-Lead geflaggt)
 - Neue-Spieler-Lane für druckfreies Reinkommen
 
 ### F11: Wie funktioniert das kostenlose Coaching und wie melde ich mich an?
-**Antwort: [PLATZHALTER]**
-- Anmeldewege: [PLATZHALTER — Coaching-Bereich bleibt unangetastet, Ablauf aus bestehendem Coaching-System übernehmen: Website-Panel + Claim-Flow]
+**Antwort:**
+> Unser Coaching ist komplett kostenlos: Erfahrene Spieler aus der Community nehmen sich Zeit für dich — von Grundlagen bis Rang-Aufstieg. Anmelden kannst du dich über den Coaching-Bereich auf unserer Website; deine Anfrage landet direkt beim Coach-Team hier im Discord, und ein Coach übernimmt sie. Dazu gibt's den Scrim-Bereich, in dem Teams gemeinsam üben und sich gegenseitig besser machen. Zur Einordnung: Dein Pate begleitet dich in den ersten Tagen bis zum ersten Match — Coaching ist das strukturierte Lernen danach.
+
+*Muss enthalten (Checkliste):*
+- Anmeldewege: Website-Coaching-Bereich → Anfrage wird in den Discord gespiegelt, Coach claimt (bestehender Flow bleibt unangetastet)
 - Scrim-Bereich als Kultur-Aushängeschild erwähnen (Peer-Mentoring, Anti-Toxicity)
 - Abgrenzung: Pate = erste Tage & erstes Match; Coaching = strukturiertes Lernen
 
 ### F12: Wo finde ich Mitspieler für ein Match?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Drei Wege, alle unkompliziert: Schreib in `#spieler-suche`, wer du bist und worauf du Lust hast — das ist unser aktivster Kanal für genau das. Oder spring direkt in eine Voice-Lane: In den Chill-Lanes ist der Rang komplett egal, in den Rang-Lanes findest du Mitspieler auf deinem Niveau. Reinsetzen ist ausdrücklich erlaubt — die Lanes sind offen, du musst niemanden um Erlaubnis fragen.
+
+*Muss enthalten (Checkliste):*
 - `spieler-suche` (aktivster Neuen-Kanal, 20 Autoren) + LFG/player_finder als Verweis-Ziel
 - Rang-Lanes (deklarieren, reinsetzen) und Chill-Lanes (rang-egal)
 - Community-Spielabend erwähnen, sobald live (Phase 5 — bis dahin weglassen)
 
 ### F13: Wie funktionieren die Lanes — und darf ich in jede rein?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Ja, du darfst in jede rein — unsere Lanes haben keine Türsteher. Wer eine Rang-Lane öffnet, gibt an, für welchen Rang-Bereich sie gedacht ist, und der Bot benennt und sortiert sie automatisch; das ist eine Ansage, kein Schloss. Die Regel dahinter ist einfach: Der Lane-Ersteller entscheidet, wer bleibt — und bei Streit entscheiden die Mods. Daneben gibt's die Chill-Lanes (Rang komplett egal, unser Wohnzimmer) und die Neue-Spieler-Lane. Nur zuschauen und zuhören ist übrigens völlig okay.
+
+*Muss enthalten (Checkliste):*
 - Lane öffnen: User deklariert Rang/Range, Bot benennt/sortiert automatisch; Lane bleibt OFFEN (Deklaration statt Türsteher)
 - Sichtbare Norm zitieren: „Der Lane-Ersteller entscheidet, wer bleibt; bei Streit entscheiden Mods"
 - Chill-Lanes = rang-egales Wohnzimmer; Neue-Spieler-Lane für 🌱
-- 👻-Lurker-Feature (zuschauen ohne Druck) erwähnen, falls es bleibt [OFFEN: Owner-Entscheid Lurker, Konzept §8]
+- 👻-Lurker-Feature (zuschauen ohne Druck) als eigenen Satz ergänzen, sobald Owner-Entscheid bestätigt [OFFEN: Konzept §8 — aktuell nur der neutrale Schluss-Satz oben]
 
 ### F14: Wie stelle ich Pings/Benachrichtigungen ein (oder ab)?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Alles selbst steuerbar, jederzeit: Oben links über dem Kanalbaum findest du „Kanäle & Rollen" — dort schaltest du Pings für Patchnotes, Spielersuche, Events/Turniere, Custom Games und Streams einzeln an oder aus. Auch deine Start-Auswahl (Mitspieler suchen / Invite brauchen / ganz neu) kannst du dort ändern — das ist nur eine Angabe über dich, keine Berechtigung. Und die Nachrichten vom Bot: Ein Klick auf Opt-out genügt — oder ignorier ihn einfach zweimal, dann versteht er das auch.
+
+*Muss enthalten (Checkliste):*
 - Kanäle&Rollen-Tab: Patchnotes, Spielersuche, Events/Turniere, Custom Games, Streams — jederzeit selbst umschaltbar
 - Auch die Weiche (🎮/🔑/🌱) ist dort selbst änderbar (reine Präferenz, keine Rechte)
 - Bot-Paten-DMs: Opt-out jederzeit, 2× nicht antworten reicht auch
 
 ### F15: Wo fange ich am besten an — und wo kann ich einfach Fragen stellen?
-**Antwort: [PLATZHALTER]**
+**Antwort:**
+> Folg einfach der Server-Guide-Checkliste (oben im Kanalbaum): Sag Hallo in `#frag-die-community`, verknüpf deinen Steam-Account, spring in eine Lane, stell deine Pings ein — in der Reihenfolge, ohne Zeitdruck. Und für alles andere gilt: `#frag-die-community` ist genau dafür da, es gibt keine dummen Fragen, und hier antworten dir echte Menschen — normalerweise noch am selben Tag. Unser Bot hilft auch gern weiter, sagt dir aber ehrlich, wenn er etwas nicht weiß, und holt dann einen Menschen dazu.
+
+*Muss enthalten (Checkliste):*
 - Server-Guide-Checkliste als roter Faden (Hallo → Steam → Lane → Pings)
-- `frag-die-community`: JEDE Frage bekommt am selben Tag eine menschliche Antwort (Garantie erst öffentlich versprechen, wenn intern 2+ Wochen stabil — bis dahin weichere Formulierung!)
+- `frag-die-community`: JEDE Frage bekommt am selben Tag eine menschliche Antwort (Garantie erst öffentlich versprechen, wenn intern 2+ Wochen stabil — bis dahin weichere Formulierung! → deshalb oben „normalerweise")
 - Bot-Pate ist ansprechbar (offen deklarierter Bot), verweist aktiv auf Menschen
 
 **Übergangs-FAQ (befristet, nach Phase 2 löschen):**
