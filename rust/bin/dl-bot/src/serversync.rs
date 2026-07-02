@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use axum::body::Bytes;
 use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
@@ -17,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use serenity::all::GuildId;
 use sha2::{Digest, Sha256};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::master;
 
@@ -25,9 +26,11 @@ pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
 pub const PORT: u16 = 8901;
 pub const TOKEN_HEADER: &str = "X-Internal-Token";
 const AUDIT_LOG_REASON: &str = "Onboarding-Redesign Welle 2a (Rechte-Sanierung)";
-const ROLLBACK_VERSION: &str = "serversync.rollback_export.v1";
+const ROLLBACK_VERSION: &str = "serversync.rollback_export.v2";
+const ROLLBACK_VERSION_V1: &str = "serversync.rollback_export.v1";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_DISCORD_CONTENT_CHARS: usize = 1800;
+const MAX_BRIDGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 
 pub type SharedServerSync = Arc<dyn ServerSyncOps>;
 type ServerSyncResult<T> = Result<T, ServerSyncError>;
@@ -141,6 +144,8 @@ pub struct RollbackArtifact {
     pub created_at: String,
     pub snapshot_id: i64,
     pub structure_snapshot: dl_server_as_code::GuildModel,
+    pub dynamic_namespaces: Vec<dl_server_as_code::DynamicNamespace>,
+    pub documented_exceptions: Vec<dl_server_as_code::DocumentedException>,
     pub member_role_assignments: Vec<MemberRoleAssignment>,
     pub native_onboarding_config: Value,
 }
@@ -169,6 +174,18 @@ pub struct DiffOutput {
     pub diff_text: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RestoreOutput {
+    pub rollback_export_id: i64,
+    pub preview_id: i64,
+    pub guild_id: u64,
+    pub artifact_hash: String,
+    pub diff_hash: String,
+    pub human_summary: String,
+    pub warnings: Vec<String>,
+    pub diff_text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyOutput {
     pub apply_run_id: i64,
@@ -191,6 +208,11 @@ pub trait ServerSyncOps: Send + Sync {
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RollbackExportOutput>;
     async fn diff(&self, requested_by_user_id: Option<u64>) -> ServerSyncResult<DiffOutput>;
+    async fn restore(
+        &self,
+        rollback_export_id: Option<i64>,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<RestoreOutput>;
     async fn apply(
         &self,
         preview_id: i64,
@@ -278,6 +300,57 @@ impl ServerSyncService {
         }
         Ok(response.json::<Value>().await?)
     }
+
+    async fn load_rollback_artifact(
+        &self,
+        rollback_export_id: Option<i64>,
+    ) -> ServerSyncResult<(i64, String, RollbackArtifact)> {
+        let guild_id = id_to_i64(self.guild_id)?;
+        let row = if let Some(rollback_export_id) = rollback_export_id {
+            sqlx::query(
+                "SELECT rollback_export_id, artifact_hash, artifact_json::text AS artifact_json
+                   FROM server_config.rollback_exports
+                  WHERE rollback_export_id = $1
+                    AND guild_id = $2
+                    AND expires_at > now()",
+            )
+            .bind(rollback_export_id)
+            .bind(guild_id)
+            .fetch_optional(&self.pool)
+            .await?
+        } else {
+            sqlx::query(
+                "SELECT rollback_export_id, artifact_hash, artifact_json::text AS artifact_json
+                   FROM server_config.rollback_exports
+                  WHERE guild_id = $1
+                    AND expires_at > now()
+                  ORDER BY created_at DESC, rollback_export_id DESC
+                  LIMIT 1",
+            )
+            .bind(guild_id)
+            .fetch_optional(&self.pool)
+            .await?
+        }
+        .ok_or_else(|| {
+            ServerSyncError::bad_request(match rollback_export_id {
+                Some(id) => format!("Rollback-Export {id} nicht gefunden oder abgelaufen"),
+                None => "Kein gueltiger Rollback-Export gefunden".to_string(),
+            })
+        })?;
+
+        let loaded_id: i64 = row.try_get("rollback_export_id")?;
+        let stored_hash: String = row.try_get("artifact_hash")?;
+        let artifact_text: String = row.try_get("artifact_json")?;
+        let artifact_value: Value = serde_json::from_str(&artifact_text).map_err(|err| {
+            ServerSyncError::bad_request(format!(
+                "Rollback-Artefakt {loaded_id} ist kein gueltiges JSON: {err}"
+            ))
+        })?;
+
+        let artifact =
+            verify_rollback_artifact(loaded_id, &stored_hash, artifact_value, self.guild_id)?;
+        Ok((loaded_id, stored_hash, artifact))
+    }
 }
 
 #[async_trait]
@@ -311,6 +384,7 @@ impl ServerSyncOps for ServerSyncService {
         let report =
             dl_server_as_code::db::persist_snapshot_model(&self.pool, &model, "rollback_export")
                 .await?;
+        let derivation = dl_server_as_code::derive_desired_model(&model)?;
         let member_role_assignments = self.fetch_member_role_assignments().await?;
         let native_onboarding_config = self.fetch_native_onboarding_config().await?;
         let created_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -320,15 +394,19 @@ impl ServerSyncOps for ServerSyncService {
             created_at: created_at.clone(),
             snapshot_id: report.snapshot_id,
             structure_snapshot: model,
+            dynamic_namespaces: derivation.dynamic_namespaces,
+            documented_exceptions: derivation.exceptions,
             member_role_assignments,
             native_onboarding_config,
         };
         let artifact_value = serde_json::to_value(&artifact)?;
         let artifact_text = serde_json::to_string_pretty(&artifact_value)?;
-        let artifact_hash = sha256_hex(serde_json::to_vec(&artifact_value)?.as_slice());
+        let artifact_hash = sha256_json_value(&artifact_value)?;
         let metadata = json!({
             "version": ROLLBACK_VERSION,
             "member_count": artifact.member_role_assignments.len(),
+            "dynamic_namespace_count": artifact.dynamic_namespaces.len(),
+            "documented_exception_count": artifact.documented_exceptions.len(),
         });
         let rollback_export_id: i64 = sqlx::query_scalar(
             "INSERT INTO server_config.rollback_exports
@@ -373,6 +451,9 @@ impl ServerSyncOps for ServerSyncService {
             self.guild_id,
         )
         .await?;
+        let snapshot =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "diff_preview")
+                .await?;
         let derivation = dl_server_as_code::derive_desired_model(&live)?;
         dl_server_as_code::persist_desired_model(
             &self.pool,
@@ -390,15 +471,64 @@ impl ServerSyncOps for ServerSyncService {
                 compare_relative_positions: false,
             },
         )?;
-        let preview =
-            dl_server_as_code::persist_diff_preview(&self.pool, None, &diff, requested_by_user_id)
-                .await?;
+        let preview = dl_server_as_code::persist_diff_preview(
+            &self.pool,
+            Some(snapshot.snapshot_id),
+            &diff,
+            requested_by_user_id,
+        )
+        .await?;
         Ok(DiffOutput {
             preview_id: preview.preview_id,
             guild_id: preview.guild_id,
             diff_hash: preview.diff_hash,
             human_summary: preview.human_summary,
             warnings: derivation.warnings,
+            diff_text: serde_json::to_string_pretty(&preview.diff)?,
+        })
+    }
+
+    async fn restore(
+        &self,
+        rollback_export_id: Option<i64>,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<RestoreOutput> {
+        let (rollback_export_id, artifact_hash, artifact) =
+            self.load_rollback_artifact(rollback_export_id).await?;
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let snapshot =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "restore_preview")
+                .await?;
+        let diff = dl_server_as_code::diff_models_with_options(
+            &artifact.structure_snapshot,
+            &live,
+            &artifact.dynamic_namespaces,
+            &artifact.documented_exceptions,
+            dl_server_as_code::DiffOptions {
+                compare_relative_positions: false,
+            },
+        )?;
+        let preview = dl_server_as_code::persist_diff_preview(
+            &self.pool,
+            Some(snapshot.snapshot_id),
+            &diff,
+            requested_by_user_id,
+        )
+        .await?;
+        Ok(RestoreOutput {
+            rollback_export_id,
+            preview_id: preview.preview_id,
+            guild_id: preview.guild_id,
+            artifact_hash,
+            diff_hash: preview.diff_hash,
+            human_summary: preview.human_summary,
+            warnings: vec![
+                "Member-Rollen und natives Onboarding bleiben im Artefakt, werden in Welle 2a aber nicht restored.".to_string(),
+            ],
             diff_text: serde_json::to_string_pretty(&preview.diff)?,
         })
     }
@@ -484,6 +614,72 @@ fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
 }
 
+fn sha256_json_value(value: &Value) -> ServerSyncResult<String> {
+    let canonical = canonical_json_value(value);
+    Ok(sha256_hex(&serde_json::to_vec(&canonical)?))
+}
+
+fn verify_rollback_artifact(
+    loaded_id: i64,
+    stored_hash: &str,
+    artifact_value: Value,
+    expected_guild_id: u64,
+) -> ServerSyncResult<RollbackArtifact> {
+    let version = artifact_value
+        .get("version")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if version == ROLLBACK_VERSION_V1 {
+        return Err(ServerSyncError::bad_request(format!(
+            "Rollback-Artefakt {loaded_id} ist v1 und enthaelt keine Diff-Ausnahmen; bitte neuen v2-Rollback-Export erstellen"
+        )));
+    }
+    if version != ROLLBACK_VERSION {
+        return Err(ServerSyncError::bad_request(format!(
+            "Rollback-Artefakt {loaded_id} hat nicht unterstuetzte Version {version:?}; erwartet {ROLLBACK_VERSION}"
+        )));
+    }
+
+    let actual_hash = sha256_json_value(&artifact_value)?;
+    if actual_hash != stored_hash {
+        return Err(ServerSyncError::bad_request(format!(
+            "Rollback-Artefakt {loaded_id} Hash-Mismatch: gespeichert {stored_hash}, berechnet {actual_hash}"
+        )));
+    }
+
+    let artifact: RollbackArtifact = serde_json::from_value(artifact_value).map_err(|err| {
+        ServerSyncError::bad_request(format!(
+            "Rollback-Artefakt {loaded_id} ist kein lesbares v2-Artefakt: {err}"
+        ))
+    })?;
+    if artifact.guild_id != expected_guild_id
+        || artifact.structure_snapshot.guild_id != expected_guild_id
+    {
+        return Err(ServerSyncError::bad_request(format!(
+            "Rollback-Artefakt {loaded_id} gehoert nicht zu Guild {expected_guild_id}"
+        )));
+    }
+    Ok(artifact)
+}
+
+fn canonical_json_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(canonical_json_value).collect()),
+        Value::Object(map) => {
+            let mut keys = map.keys().collect::<Vec<_>>();
+            keys.sort_unstable();
+            let mut out = serde_json::Map::new();
+            for key in keys {
+                if let Some(value) = map.get(key) {
+                    out.insert(key.clone(), canonical_json_value(value));
+                }
+            }
+            Value::Object(out)
+        }
+        _ => value.clone(),
+    }
+}
+
 fn rollback_filename(rollback_export_id: i64, snapshot_id: i64) -> String {
     format!("serversync-rollback-{rollback_export_id}-snapshot-{snapshot_id}.json")
 }
@@ -508,6 +704,19 @@ pub fn command_spec() -> CommandSpec {
                     "type": 1,
                     "name": "diff",
                     "description": "Dry-Run-Diff gegen das Soll-Modell erzeugen"
+                },
+                {
+                    "type": 1,
+                    "name": "restore",
+                    "description": "Rollback-Artefakt als hash-gated Restore-Preview erzeugen",
+                    "options": [
+                        {
+                            "type": 4,
+                            "name": "rollback_export_id",
+                            "description": "Rollback-Export-ID; fehlt = letzter gueltiger Export",
+                            "required": false
+                        }
+                    ]
                 },
                 {
                     "type": 1,
@@ -549,6 +758,7 @@ pub fn register_commands(
     router.on_command("serversync snapshot", spec.clone(), handler.clone());
     router.on_command("serversync rollback-export", spec.clone(), handler.clone());
     router.on_command("serversync diff", spec.clone(), handler.clone());
+    router.on_command("serversync restore", spec.clone(), handler.clone());
     router.on_command("serversync apply", spec, handler);
 }
 
@@ -574,6 +784,7 @@ impl dl_discord::InteractionHandler for ServerSyncCommand {
                 command_rollback_export(self.service.as_ref(), interaction.user_id).await
             }
             "serversync diff" => command_diff(self.service.as_ref(), interaction.user_id).await,
+            "serversync restore" => command_restore(self.service.as_ref(), &interaction).await,
             "serversync apply" => command_apply(self.service.as_ref(), &interaction).await,
             _ => BridgeReply::ephemeral_text("Unbekannter Server-Sync-Befehl."),
         }
@@ -592,22 +803,28 @@ async fn command_snapshot(service: &dyn ServerSyncOps, user_id: u64) -> BridgeRe
 
 async fn command_rollback_export(service: &dyn ServerSyncOps, user_id: u64) -> BridgeReply {
     match service.rollback_export(Some(user_id)).await {
-        Ok(output) => BridgeReply {
-            content: Some(format!(
+        Ok(output) => {
+            let (attachments, notice) = attachment_or_db_notice(
+                output.filename,
+                output.artifact_text.into_bytes(),
+                "Artefakt",
+                output.rollback_export_id,
+            );
+            let content = format!(
                 "Rollback-Export erstellt.\nrollback_export_id: {}\nsnapshot_id: {}\nartifact_hash: {}\nMember: {} | Rollen-Zuweisungen: {}",
                 output.rollback_export_id,
                 output.snapshot_id,
                 output.artifact_hash,
                 output.members,
                 output.member_role_edges
-            )),
-            ephemeral: true,
-            attachments: vec![BridgeAttachment {
-                filename: output.filename,
-                data: output.artifact_text.into_bytes(),
-            }],
-            ..BridgeReply::default()
-        },
+            );
+            BridgeReply {
+                content: Some(content + &notice),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
         Err(err) => command_error(err),
     }
 }
@@ -620,13 +837,56 @@ async fn command_diff(service: &dyn ServerSyncOps, user_id: u64) -> BridgeReply 
                 "Diff-Preview erstellt.\npreview_id: {}\ndiff_hash: {}\n{}{}",
                 output.preview_id, output.diff_hash, warnings, output.human_summary
             );
+            let (attachments, notice) = attachment_or_db_notice(
+                format!("serversync-diff-{}.json", output.preview_id),
+                output.diff_text.into_bytes(),
+                "Diff",
+                output.preview_id,
+            );
             BridgeReply {
-                content: Some(truncate_discord(&text)),
+                content: Some(truncate_discord(&(text + &notice))),
                 ephemeral: true,
-                attachments: vec![BridgeAttachment {
-                    filename: format!("serversync-diff-{}.json", output.preview_id),
-                    data: output.diff_text.into_bytes(),
-                }],
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_restore(
+    service: &dyn ServerSyncOps,
+    interaction: &BridgeInteraction,
+) -> BridgeReply {
+    let rollback_export_id = match option_i64_optional(&interaction.options, "rollback_export_id") {
+        Ok(value) => value,
+        Err(err) => return command_error(err),
+    };
+    match service
+        .restore(rollback_export_id, Some(interaction.user_id))
+        .await
+    {
+        Ok(output) => {
+            let warnings = warning_text(&output.warnings);
+            let text = format!(
+                "Restore-Preview erstellt.\nrollback_export_id: {}\npreview_id: {}\nartifact_hash: {}\ndiff_hash: {}\n{}{}",
+                output.rollback_export_id,
+                output.preview_id,
+                output.artifact_hash,
+                output.diff_hash,
+                warnings,
+                output.human_summary
+            );
+            let (attachments, notice) = attachment_or_db_notice(
+                format!("serversync-restore-diff-{}.json", output.preview_id),
+                output.diff_text.into_bytes(),
+                "Diff",
+                output.preview_id,
+            );
+            BridgeReply {
+                content: Some(truncate_discord(&(text + &notice))),
+                ephemeral: true,
+                attachments,
                 ..BridgeReply::default()
             }
         }
@@ -651,8 +911,14 @@ async fn command_apply(
         .apply(preview_id, hash, confirm, Some(interaction.user_id))
         .await
     {
-        Ok(output) => BridgeReply {
-            content: Some(format!(
+        Ok(output) => {
+            let (attachments, notice) = attachment_or_db_notice(
+                format!("serversync-apply-{}.json", output.apply_run_id),
+                output.details_text.into_bytes(),
+                "Apply-Report",
+                output.apply_run_id,
+            );
+            let content = format!(
                 "Apply-Report.\npreview_id: {}\napply_run_id: {}\nModus: {}\napplied: {} | skipped: {} | failed: {}",
                 output.preview_id,
                 output.apply_run_id,
@@ -660,20 +926,35 @@ async fn command_apply(
                 output.applied,
                 output.skipped,
                 output.failed
-            )),
-            ephemeral: true,
-            attachments: vec![BridgeAttachment {
-                filename: format!("serversync-apply-{}.json", output.apply_run_id),
-                data: output.details_text.into_bytes(),
-            }],
-            ..BridgeReply::default()
-        },
+            );
+            BridgeReply {
+                content: Some(content + &notice),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
         Err(err) => command_error(err),
     }
 }
 
 fn command_error(error: ServerSyncError) -> BridgeReply {
     BridgeReply::ephemeral_text(format!("Server-Sync fehlgeschlagen: {error}"))
+}
+
+fn attachment_or_db_notice(
+    filename: String,
+    data: Vec<u8>,
+    db_label: &str,
+    db_id: i64,
+) -> (Vec<BridgeAttachment>, String) {
+    if data.len() <= MAX_BRIDGE_ATTACHMENT_BYTES {
+        return (vec![BridgeAttachment { filename, data }], String::new());
+    }
+    (
+        Vec::new(),
+        format!("\n{db_label} liegt in der DB (id {db_id}); Attachment war groesser als 10 MiB."),
+    )
 }
 
 fn warning_text(warnings: &[String]) -> String {
@@ -714,6 +995,16 @@ fn option_i64(
     )))
 }
 
+fn option_i64_optional(
+    options: &std::collections::HashMap<String, Value>,
+    key: &str,
+) -> ServerSyncResult<Option<i64>> {
+    if !options.contains_key(key) || options.get(key).is_some_and(Value::is_null) {
+        return Ok(None);
+    }
+    option_i64(options, key).map(Some)
+}
+
 fn option_string(
     options: &std::collections::HashMap<String, Value>,
     key: &str,
@@ -749,6 +1040,7 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
         .route("/serversync/snapshot", post(http_snapshot))
         .route("/serversync/rollback-export", post(http_rollback_export))
         .route("/serversync/diff", post(http_diff))
+        .route("/serversync/restore", post(http_restore))
         .route("/serversync/apply", post(http_apply))
         .with_state(HttpState { service, token })
 }
@@ -769,6 +1061,14 @@ fn json_error(error: ServerSyncError) -> Response {
 
 fn json_ok(result: Value) -> Response {
     json_response(StatusCode::OK, json!({ "ok": true, "result": result }))
+}
+
+fn parse_json_body<T>(body: Bytes) -> ServerSyncResult<T>
+where
+    T: serde::de::DeserializeOwned,
+{
+    serde_json::from_slice(&body)
+        .map_err(|err| ServerSyncError::bad_request(format!("ungueltiges JSON: {err}")))
 }
 
 fn authorize(
@@ -801,11 +1101,10 @@ fn authorize(
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    a.bytes()
-        .zip(b.bytes())
+    let left = Sha256::digest(a.as_bytes());
+    let right = Sha256::digest(b.as_bytes());
+    left.iter()
+        .zip(right.iter())
         .fold(0u8, |acc, (left, right)| acc | (left ^ right))
         == 0
 }
@@ -862,6 +1161,34 @@ async fn http_diff(
     }
 }
 
+#[derive(Debug, Default, Deserialize)]
+struct RestoreRequest {
+    rollback_export_id: Option<i64>,
+}
+
+async fn http_restore(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        RestoreRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.restore(body.rollback_export_id, None).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ApplyRequest {
     preview_id: i64,
@@ -874,11 +1201,15 @@ async fn http_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    Json(body): Json<ApplyRequest>,
+    body: Bytes,
 ) -> Response {
     if let Err(error) = authorize(&state, &peer, &headers) {
         return json_error(error);
     }
+    let body = match parse_json_body::<ApplyRequest>(body) {
+        Ok(body) => body,
+        Err(error) => return json_error(error),
+    };
     match state
         .service
         .apply(body.preview_id, body.hash, body.confirm, None)
@@ -905,10 +1236,12 @@ mod tests {
     use super::*;
 
     type ApplyCall = (i64, String, bool, Option<u64>);
+    type RestoreCall = (Option<i64>, Option<u64>);
 
     #[derive(Default)]
     struct MockServerSync {
         apply_calls: Mutex<Vec<ApplyCall>>,
+        restore_calls: Mutex<Vec<RestoreCall>>,
     }
 
     #[async_trait]
@@ -963,6 +1296,27 @@ mod tests {
             })
         }
 
+        async fn restore(
+            &self,
+            rollback_export_id: Option<i64>,
+            requested_by_user_id: Option<u64>,
+        ) -> ServerSyncResult<RestoreOutput> {
+            self.restore_calls
+                .lock()
+                .expect("restore calls")
+                .push((rollback_export_id, requested_by_user_id));
+            Ok(RestoreOutput {
+                rollback_export_id: rollback_export_id.unwrap_or(7),
+                preview_id: 13,
+                guild_id: GUILD_ID,
+                artifact_hash: "artifact-hash".to_string(),
+                diff_hash: "restore-hash".to_string(),
+                human_summary: "restore summary".to_string(),
+                warnings: vec!["restore warn".to_string()],
+                diff_text: "{\"restore\":true}".to_string(),
+            })
+        }
+
         async fn apply(
             &self,
             preview_id: i64,
@@ -990,6 +1344,10 @@ mod tests {
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
+        request_raw(path, token, body.to_string())
+    }
+
+    fn request_raw(path: &str, token: Option<&str>, body: impl Into<String>) -> Request<Body> {
         let mut builder = Request::builder()
             .method("POST")
             .uri(path)
@@ -997,7 +1355,7 @@ mod tests {
         if let Some(token) = token {
             builder = builder.header(TOKEN_HEADER, token);
         }
-        let mut request = builder.body(Body::from(body.to_string())).expect("request");
+        let mut request = builder.body(Body::from(body.into())).expect("request");
         request
             .extensions_mut()
             .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4444))));
@@ -1013,6 +1371,74 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    fn v2_artifact_value() -> Value {
+        serde_json::to_value(RollbackArtifact {
+            version: ROLLBACK_VERSION.to_string(),
+            guild_id: GUILD_ID,
+            created_at: "2026-07-02T00:00:00.000Z".to_string(),
+            snapshot_id: 10,
+            structure_snapshot: dl_server_as_code::GuildModel::new(GUILD_ID),
+            dynamic_namespaces: Vec::new(),
+            documented_exceptions: Vec::new(),
+            member_role_assignments: vec![MemberRoleAssignment {
+                member_id: 1,
+                role_ids: vec![2, 3],
+            }],
+            native_onboarding_config: json!({}),
+        })
+        .expect("artifact value")
+    }
+
+    #[test]
+    fn rollback_artifact_v2_wird_akzeptiert() {
+        let value = v2_artifact_value();
+        let hash = sha256_json_value(&value).expect("hash");
+        let artifact = verify_rollback_artifact(7, &hash, value, GUILD_ID).expect("artifact");
+        assert_eq!(artifact.version, ROLLBACK_VERSION);
+        assert_eq!(artifact.member_role_assignments.len(), 1);
+    }
+
+    #[test]
+    fn rollback_artifact_v1_wird_abgelehnt() {
+        let err = verify_rollback_artifact(
+            7,
+            "ignored",
+            json!({
+                "version": ROLLBACK_VERSION_V1,
+                "guild_id": GUILD_ID,
+            }),
+            GUILD_ID,
+        )
+        .expect_err("v1 must fail");
+        assert_eq!(err.kind, ServerSyncErrorKind::BadRequest);
+        assert!(err.to_string().contains("v1"));
+        assert!(err.to_string().contains("v2"));
+    }
+
+    #[test]
+    fn rollback_artifact_hash_mismatch_wird_abgelehnt() {
+        let err = verify_rollback_artifact(7, "wrong-hash", v2_artifact_value(), GUILD_ID)
+            .expect_err("hash mismatch must fail");
+        assert_eq!(err.kind, ServerSyncErrorKind::BadRequest);
+        assert!(err.to_string().contains("Hash-Mismatch"));
+    }
+
+    #[test]
+    fn attachment_guard_erlaubt_exakt_10_mib_und_blockt_darueber() {
+        let exact = vec![0; MAX_BRIDGE_ATTACHMENT_BYTES];
+        let (attachments, notice) =
+            attachment_or_db_notice("exact.json".to_string(), exact, "Artefakt", 7);
+        assert_eq!(attachments.len(), 1);
+        assert!(notice.is_empty());
+        assert_eq!(attachments[0].data.len(), MAX_BRIDGE_ATTACHMENT_BYTES);
+
+        let too_large = vec![0; MAX_BRIDGE_ATTACHMENT_BYTES + 1];
+        let (attachments, notice) =
+            attachment_or_db_notice("large.json".to_string(), too_large, "Artefakt", 7);
+        assert!(attachments.is_empty());
+        assert!(notice.contains("Artefakt liegt in der DB (id 7)"));
     }
 
     #[tokio::test]
@@ -1049,6 +1475,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn apply_mit_kaputtem_json_ohne_header_liefert_403() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service, Some("secret".to_string()));
+        let response = app
+            .oneshot(request_raw("/serversync/apply", None, "{kaputt"))
+            .await
+            .expect("response");
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["ok"], false);
+    }
+
+    #[tokio::test]
     async fn apply_parst_confirm_und_liefert_json() {
         let service = Arc::new(MockServerSync::default());
         let app = router(service.clone(), Some("secret".to_string()));
@@ -1067,6 +1506,33 @@ mod tests {
         assert_eq!(
             service.apply_calls.lock().expect("apply calls").as_slice(),
             &[(42, "abc".to_string(), true, None)]
+        );
+    }
+
+    #[tokio::test]
+    async fn restore_http_erzeugt_preview() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+        let response = app
+            .oneshot(request(
+                "/serversync/restore",
+                Some("secret"),
+                json!({"rollback_export_id": 99}),
+            ))
+            .await
+            .expect("response");
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["ok"], true);
+        assert_eq!(body["result"]["preview_id"], 13);
+        assert_eq!(body["result"]["rollback_export_id"], 99);
+        assert_eq!(
+            service
+                .restore_calls
+                .lock()
+                .expect("restore calls")
+                .as_slice(),
+            &[(Some(99), None)]
         );
     }
 

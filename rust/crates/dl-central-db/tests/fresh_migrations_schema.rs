@@ -187,6 +187,7 @@ fn server_config_table_contracts() -> Vec<(&'static str, Vec<&'static str>)> {
                 "artifact_json",
                 "metadata",
                 "created_at",
+                "expires_at",
             ],
         ),
         (

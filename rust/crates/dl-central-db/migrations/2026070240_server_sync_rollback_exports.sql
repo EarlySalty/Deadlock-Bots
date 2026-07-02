@@ -6,9 +6,12 @@ CREATE TABLE IF NOT EXISTS server_config.rollback_exports (
     artifact_hash TEXT NOT NULL,
     artifact_json JSONB NOT NULL,
     metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    expires_at TIMESTAMPTZ NOT NULL DEFAULT (now() + INTERVAL '180 days')
 );
 
 CREATE INDEX IF NOT EXISTS rollback_exports_guild_created_idx
     ON server_config.rollback_exports (guild_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS rollback_exports_expires_at_idx
+    ON server_config.rollback_exports (expires_at);

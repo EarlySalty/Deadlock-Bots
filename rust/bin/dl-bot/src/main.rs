@@ -928,6 +928,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _journey_ingestion =
             dl_activity::journey::spawn_ingestion(central_pool.clone(), &dispatcher);
         let _journey_retention = dl_activity::journey::spawn_retention(central_pool.clone());
+        let _server_sync_rollback_retention =
+            dl_community::privacy::spawn_server_sync_rollback_export_retention(
+                central_pool.clone(),
+            );
         let _journey_role_events =
             journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(

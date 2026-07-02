@@ -6,6 +6,7 @@
 //! `core.user_privacy`.
 
 use std::collections::{BTreeMap, HashSet};
+use std::time::Duration as StdDuration;
 
 use dl_central_db::kv;
 use serde_json::Value;
@@ -804,6 +805,8 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
 const USER_CO_PLAYERS_REL: &str = "activity.user_co_players";
 const KV_REL: &str = "bot.kv_store";
 const USER_PRIVACY_REL: &str = "core.user_privacy";
+const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
+const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
 
 #[derive(Debug, Default, Clone)]
 pub struct DeleteSummary {
@@ -1052,6 +1055,41 @@ fn redact_other_id(rows: &mut [Value], uid: i64, redact_field: &str) {
     }
 }
 
+pub async fn purge_expired_server_sync_rollback_exports(
+    pool: &PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommunityDbResult<i64> {
+    if !relation_exists(pool, SERVER_SYNC_ROLLBACK_EXPORTS_REL).await? {
+        return Ok(0);
+    }
+    let result = sqlx::query("DELETE FROM server_config.rollback_exports WHERE expires_at <= $1")
+        .bind(now)
+        .execute(pool)
+        .await?;
+    Ok(rows_to_i64(result.rows_affected()))
+}
+
+pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match purge_expired_server_sync_rollback_exports(&pool, chrono::Utc::now()).await {
+                Ok(deleted) => {
+                    if deleted > 0 {
+                        tracing::info!(
+                            deleted,
+                            "Server-Sync-Rollback-Export-Retention abgeschlossen"
+                        );
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Server-Sync-Rollback-Export-Retention fehlgeschlagen");
+                }
+            }
+            tokio::time::sleep(PRIVACY_RETENTION_JOB_INTERVAL).await;
+        }
+    })
+}
+
 pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
     sqlx::query!(
         r#"
@@ -1096,10 +1134,15 @@ pub async fn delete_user_data(
     now: i64,
 ) -> CommunityDbResult<DeleteSummary> {
     let now = utc_from_unix(now)?;
+    let expired_rollback_exports = purge_expired_server_sync_rollback_exports(pool, now).await?;
     let relations = existing_relations(pool).await?;
     let steam_ids = steam_ids_for_user(pool, user_id).await?;
     let user_key = user_id.to_string();
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
+    counts.insert(
+        "server_config.rollback_exports.expired".to_string(),
+        expired_rollback_exports,
+    );
 
     let mut tx = pool.begin().await?;
 
@@ -1421,6 +1464,10 @@ mod privacy_contract_tests {
             "server_config.adoption_events".to_string(),
             "adopted_by_user_id".to_string(),
         ));
+        // Rollback-Artefakte koennen verschachtelte Member-IDs im JSON
+        // enthalten; sie sind deshalb ueber `expires_at` auf 180 Tage
+        // begrenzt und werden durch den Privacy-Retention-Purge geloescht.
+        // Die Admin-ID bleibt nur als Ersteller-Auditreferenz allowlisted.
         out.insert((
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
@@ -1480,6 +1527,19 @@ mod privacy_contract_tests {
             }
         }
         out
+    }
+
+    #[test]
+    fn rollback_exports_json_member_ids_sind_retention_gebunden() {
+        let migration = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dl-community under crates")
+            .join("dl-central-db/migrations/2026070240_server_sync_rollback_exports.sql");
+        let raw = fs::read_to_string(&migration)
+            .unwrap_or_else(|err| panic!("read {}: {err}", migration.display()));
+        assert!(raw.contains("expires_at TIMESTAMPTZ NOT NULL DEFAULT"));
+        assert!(raw.contains("INTERVAL '180 days'"));
+        assert!(raw.contains("rollback_exports_expires_at_idx"));
     }
 
     #[test]
@@ -1552,6 +1612,46 @@ mod tests {
         assert!(is_opted_out(db.pool(), 5).await);
         set_opt_in(db.pool(), 5, 2000).await.expect("opt in");
         assert!(!is_opted_out(db.pool(), 5).await);
+    }
+
+    #[tokio::test]
+    async fn rollback_export_retention_purged_abgelaufene_artefakte() {
+        let db = mk_db().await;
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO server_config.rollback_exports(
+                guild_id, created_by_user_id, artifact_hash, artifact_json, metadata, expires_at
+            )
+            VALUES
+              (1, 42, 'old', $1::text::jsonb, '{}'::jsonb, $2),
+              (1, 42, 'new', $1::text::jsonb, '{}'::jsonb, $3)
+            "#,
+        )
+        .bind(r#"{"member_role_assignments":[{"member_id":42,"role_ids":[1]}]}"#)
+        .bind(now - chrono::Duration::seconds(1))
+        .bind(now + chrono::Duration::days(180))
+        .execute(db.pool())
+        .await
+        .expect("insert rollback exports");
+
+        let deleted = purge_expired_server_sync_rollback_exports(db.pool(), now)
+            .await
+            .expect("purge");
+        assert_eq!(deleted, 1);
+
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::int8 FROM server_config.rollback_exports")
+                .fetch_one(db.pool())
+                .await
+                .expect("remaining");
+        let newest_hash: String =
+            sqlx::query_scalar("SELECT artifact_hash FROM server_config.rollback_exports")
+                .fetch_one(db.pool())
+                .await
+                .expect("hash");
+        assert_eq!(remaining, 1);
+        assert_eq!(newest_hash, "new");
     }
 
     #[tokio::test]
