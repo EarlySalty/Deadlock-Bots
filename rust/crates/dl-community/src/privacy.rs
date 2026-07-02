@@ -1421,6 +1421,10 @@ mod privacy_contract_tests {
             "server_config.adoption_events".to_string(),
             "adopted_by_user_id".to_string(),
         ));
+        out.insert((
+            "server_config.rollback_exports".to_string(),
+            "created_by_user_id".to_string(),
+        ));
         out
     }
 

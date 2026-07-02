@@ -1,5 +1,14 @@
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
 
+## Welle-2a Server-Sync-Command dl-bot (2026-07-02)
+- Implementierungsworker gestartet auf Branch `feat/server-sync-welle2a`; verbindliche Worker-Regel: keine Commits/Pushes, Aenderungen bleiben uncommitted.
+- Pflichtkontext gelesen: Konzept §5.1/§7, Soll-Modell/Owner-Entscheidungen 6.1-6.15, `dl-server-as-code` API, `dl-discord` Command-Dispatch sowie Broker-/Changelog-HTTP-Muster.
+- Umsetzungsrichtung: gemeinsame Bot-Service-Schicht fuer Snapshot, Rollback-Export, Diff und Apply; Slash-Commands owner-only fuer Guild `1289721245281292288`; interne loopback HTTP-API auf Port 8901 mit `SERVERSYNC_INTERNAL_TOKEN`.
+- Implementiert: Migration `2026070240_server_sync_rollback_exports.sql`, Fresh-Schema-Vertrag, `serversync`-Service im dl-bot, Slash-Command-Gruppe `/serversync` und interne HTTP-Routen `/serversync/*` auf Port 8901. Verifikation laeuft noch; kein Commit/Push.
+- DSGVO-Vertrag angepasst: `server_config.rollback_exports.created_by_user_id` ist analog zu Diff-/Apply-/Adoption-Auditspalten als server_config-Auditreferenz allowlisted; Rollback-Artefakt speichert Member-Rollen nur als IDs.
+- Verifikation gruen: `cargo fmt --check`; `SQLX_OFFLINE=true cargo check -p dl-bot`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync` (6 Tests); `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot` (39 Tests); `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored` (2 Tests); `SQLX_OFFLINE=true cargo test -p dl-community privacy_contract_tests::alle_migration_user_id_spalten_sind_im_privacy_vertrag`; `./scripts/central_test_db.sh cargo test --workspace --all-features --no-fail-fast`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `git diff --check`.
+- Zusatzbefund: `SQLX_OFFLINE=true cargo clippy --workspace --all-features --all-targets -- -D warnings` scheitert an bestehenden, unberuehrten `dl-community`-Testlints (`coaching_requests.rs` await-holding-lock, `faq.rs` unwrap_used). Nicht gefixt, weil ausserhalb Scope.
+
 ## Mini-Rework Rollen-Fallback + Filter-Randtests
 - Mini-Rework gestartet: Scope ist nur konservativer Coaching-User-Overwrite-Fallback bei fehlender Ersatzrolle, zwei Exception-Filter-Randtests und diese WORKFLOW-Notiz. Kein Commit/Push.
 - Implementiert: fehlende Coaching-Ersatzrolle bzw. nicht aufloesbare Ersatzzuordnung behaelt den Original-User-Overwrite unveraendert im Soll-Modell und warnt mit "Ersatz nicht möglich, manuell klären".

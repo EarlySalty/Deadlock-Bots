@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 serenity.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 chrono.workspace = true
 async-trait.workspace = true
@@ -25,6 +26,7 @@ dl-moderation.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-discord.workspace = true
+dl-server-as-code.workspace = true
 dl-squads.workspace = true
 dl-voice.workspace = true
 dl-webcore.workspace = true
@@ -32,6 +34,8 @@ anyhow.workspace = true
 axum.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+hex.workspace = true
+sha2.workspace = true
 
 [lints]
 workspace = true
@@ -39,3 +43,4 @@ workspace = true
 [dev-dependencies]
 dl-central-db = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tower.workspace = true
