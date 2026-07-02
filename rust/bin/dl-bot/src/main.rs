@@ -442,14 +442,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderation_scan_channel_ids =
         dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
 
-    // SecurityGuard (6): sg:*-Mod-Buttons am Router, Scan gateway-gated
-    router.on_prefix(
-        "sg:",
-        Arc::new(modglue::GuardReviewHandler {
-            adapter: adapter.clone(),
-            moderation_channel_id,
-        }),
-    );
     let moderation_text_analyze_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
     let moderation_text_analyze_model =
         env("MOD_TEXT_ANALYZE_MODEL").unwrap_or_else(|| dl_ai::DEFAULT_MODEL.to_string());
@@ -457,8 +449,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
     let moderation_verify_client =
         openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
-    let guard_client = moderation_text_analyze_client.clone();
-    let openai_vision_client = dl_ai::OpenAiClient::from_env(|k| std::env::var(k).ok());
     let our_guild_id = env("OUR_GUILD_ID")
         .or_else(|| env("MAIN_GUILD_ID"))
         .and_then(|v| v.parse::<u64>().ok())
@@ -466,34 +456,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let fallback_invites = env("INVITE_ALLOWLIST_FALLBACK")
         .map(|raw| modglue::parse_invite_allowlist_fallback(&raw))
         .unwrap_or_default();
-    let guard_glue = Arc::new(modglue::GuardGlue::new(
+    let behavior_glue = Arc::new(modglue::BehaviorDetectorGlue::new(
         adapter.clone(),
         our_guild_id,
         fallback_invites,
-        moderation_channel_id,
     ));
-    guard_glue.refresh_invite_allowlist().await;
-    let escalation_contact_handle = env("ESCALATION_CONTACT_HANDLE")
-        .unwrap_or_else(|| dl_moderation::guard::DEFAULT_ESCALATION_CONTACT_HANDLE.to_string());
-    let security_guard_enforce = env_bool_default("SECURITY_GUARD_ENFORCE", true);
+    behavior_glue.refresh_invite_allowlist().await;
+    let moderation_enforce = env("MODERATION_ENFORCE")
+        .or_else(|| env("MOD_ENFORCE"))
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or_else(|| env_bool_default("SECURITY_GUARD_ENFORCE", true));
     tracing::info!(
-        enforce = security_guard_enforce,
-        "SecurityGuard Enforcement-Modus gelesen (SECURITY_GUARD_ENFORCE)"
+        enforce = moderation_enforce,
+        "Moderation Enforcement-Modus gelesen"
     );
-    let security_guard = dl_moderation::guard::SecurityGuard::new_with_config(
-        central_pool.clone(),
-        guard_client
-            .clone()
-            .map(|c| c as Arc<dyn dl_ai::TextGenerator>),
-        openai_vision_client
-            .clone()
-            .map(|c| c as Arc<dyn dl_ai::VisionGenerator>),
-        guard_glue,
-        dl_moderation::guard::SecurityGuardConfig {
-            escalation_contact_handle,
-            enforce: security_guard_enforce,
-        },
-    );
+    let behavior_detector = dl_moderation::behavior_detector::BehaviorDetector::new(behavior_glue);
 
     // Onboarding-Wizard (7): rp:panel:start + Thread-Schritte
     let wizard =
@@ -732,11 +714,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                         0.60,
                     ),
                     timeout_minutes: env_i64_default("MOD_TIMEOUT_MINUTES", 1440),
+                    behavior_proposal_timeout_minutes: env_i64_default(
+                        "MOD_BEHAVIOR_PROPOSAL_TIMEOUT_MINUTES",
+                        60,
+                    ),
                 },
             );
-            let moderator = dl_moderation::ModerationSystem::new(
+            let moderator = dl_moderation::ModerationSystem::new_with_behavior_detector(
                 central_pool.clone(),
                 pipeline,
+                Some(behavior_detector.clone()),
                 policy,
                 Arc::new(modglue::ModGlue {
                     adapter: adapter.clone(),
@@ -745,6 +732,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 dl_moderation::moderation_system::ModerationSystemConfig {
                     scan_channel_ids: moderation_scan_channel_ids.clone(),
                     moderation_channel_id,
+                    enforce: moderation_enforce,
                 },
             );
             router.on_prefix(
@@ -938,12 +926,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter.clone(),
         );
 
-        // SecurityGuard (6): Message-Subscriber (Takeover/Burst/Keyword)
-        if let Err(err) = security_guard.ensure_schema().await {
-            tracing::warn!(%err, "SecurityGuard: Schema-Anlage fehlgeschlagen");
-        }
-        dl_moderation::guard::spawn(security_guard.clone(), &dispatcher);
-
         // Player-Finder (5): portiert, aber per Flag deaktiviert (Redesign geplant)
         if dl_activity::player_finder::enabled(|k| std::env::var(k).ok()) {
             let _finder = dl_activity::player_finder::PlayerFinder::new(central_pool.clone());
@@ -994,7 +976,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // bis der überarbeitete, GPT-verifizierte Moderations-Guard live ist.
         // Das Schema wird weiter angelegt und die aimod:-Review-Buttons bleiben
         // registriert, damit bestehende Fälle abgearbeitet werden können.
-        // SecurityGuard (Bild-/Takeover-Schutz) ist davon unberührt.
         if let Some(moderator) = &moderator {
             if let Err(err) = moderator.store.ensure_schema().await {
                 tracing::warn!(%err, "Moderation: Schema-Anlage fehlgeschlagen");

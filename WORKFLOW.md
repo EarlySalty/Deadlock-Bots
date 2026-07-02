@@ -1,3 +1,18 @@
+# Mod-Guard SecurityGuard-Integration (2026-07-02)
+
+## Ziel
+SecurityGuard als eigenstaendigen Pfad aufloesen und als stateful Verhalten-Detektor in `ModerationSystem` integrieren. Ein Verdict, ein Case, ein kompakter Embed, ein Kanal. Kein Commit/Push, kein Service-Neustart.
+
+## Fortschritt
+- Worktree geprueft: `/home/naniadm/.worktrees/deadlock-bots-mod-guard`, Branch `feat/mod-guard-rework`.
+- `git fetch origin main` ausgefuehrt und Branch per `git rebase origin/main` auf `d893f06` rebased. Konflikte in `WORKFLOW.md` und `rust/bin/dl-bot/src/modglue.rs` geloest; Rebase abgeschlossen.
+- Implementierungsanalyse gestartet: Legacy-Guard, Mod-Glue, Policy, Case-Store, Embed und `main.rs`-Wiring werden fuer die Aufloesung des zweiten Pfads gelesen.
+- Implementiert: `guard.rs` entfernt; stateful Heuristiken in neues `behavior_detector` verschoben. `ModerationSystem` wertet Content-Pipeline und Behavior-Signal gemeinsam aus, persistiert einen Case im gemeinsamen Store, rendert ein kompaktes Embed und nutzt nur `aimod:*`-Buttons inkl. Unban.
+- `main.rs` bereinigt: kein `sg:`-Router, kein `guard::spawn`; ein Scanner hinter `AI_MODERATOR_ENABLE`. `MODERATION_ENFORCE`/`MOD_ENFORCE` steuert Vollzug, `SECURITY_GUARD_ENFORCE` bleibt nur Fallback.
+- Migration `2026070230_moderation_unified_behavior_cases.sql` ergaenzt `source` und `trigger_type` an `moderation.ai_moderation_cases`; alte SecurityGuard-SQLx-Caches entfernt.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-moderation`; `SQLX_OFFLINE=true cargo clippy -p dl-moderation --all-targets -- -D warnings`; `SQLX_OFFLINE=true cargo clippy -p dl-bot --bin dl-bot -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`; `SQLX_OFFLINE=true cargo build --release`; `./scripts/central_test_db.sh bash -lc './scripts/check.sh'`.
+- Direktes `SQLX_OFFLINE=true ./scripts/check.sh` scheiterte erwartbar ohne Test-DB-DSN an bestehenden `dl-bot` Build-Publisher-DB-Tests; derselbe Check im Test-DB-Wrapper lief gruen.
+
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
 
 ## Fix Server-Sync Live-Findings (Rollback-Serialisierung + Namens-Matching)

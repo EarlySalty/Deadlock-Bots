@@ -24,6 +24,8 @@ pub struct CaseDraft {
     pub confidence: f64,
     pub reason: String,
     pub action: String,
+    pub source: String,
+    pub trigger_type: Option<String>,
     pub attachments: Vec<CaseAttachment>,
     pub ai_raw_json: String,
     pub escalated_with_context: bool,
@@ -85,34 +87,36 @@ impl ModerationStore {
             serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
         let ai_raw_json = jsonb_text_or_string(&draft.ai_raw_json);
 
-        let result = sqlx::query!(
+        let result = sqlx::query(
             r#"
             INSERT INTO moderation.ai_moderation_cases(
                 case_id, guild_id, channel_id, message_id, user_id, user_tag,
                 original_content, attachments, ai_category, ai_confidence,
-                ai_reason, ai_raw, escalated_with_context, action, created_at
+                ai_reason, ai_raw, escalated_with_context, action, source, trigger_type, created_at
             )
             VALUES(
                 $1, $2, $3, $4, $5, $6,
                 $7, $8::text::jsonb, $9, $10,
-                $11, $12::text::jsonb, $13, $14, now()
+                $11, $12::text::jsonb, $13, $14, $15, $16, now()
             )
             "#,
-            &case_id,
-            guild_id,
-            channel_id,
-            message_id,
-            user_id,
-            draft.user_tag,
-            draft.content,
-            attachments_json,
-            draft.category,
-            draft.confidence,
-            draft.reason,
-            ai_raw_json,
-            draft.escalated_with_context,
-            draft.action,
         )
+        .bind(&case_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(message_id)
+        .bind(user_id)
+        .bind(draft.user_tag)
+        .bind(draft.content)
+        .bind(attachments_json)
+        .bind(draft.category)
+        .bind(draft.confidence)
+        .bind(draft.reason)
+        .bind(ai_raw_json)
+        .bind(draft.escalated_with_context)
+        .bind(draft.action)
+        .bind(draft.source)
+        .bind(draft.trigger_type)
         .execute(&self.pool)
         .await;
 
@@ -442,6 +446,8 @@ mod tests {
             confidence: 0.95,
             reason: "Scam".into(),
             action: "proposed".into(),
+            source: "content".into(),
+            trigger_type: Some("content".into()),
             attachments: vec![CaseAttachment {
                 url: "https://cdn.example/image.png".into(),
                 content_type: "image/png".into(),

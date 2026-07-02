@@ -22,7 +22,6 @@ use tokio::task::JoinHandle;
 use tokio::time::{sleep, timeout};
 
 const INVITE_CACHE_TTL_SECONDS: i64 = 3600;
-const MAX_EVIDENCE_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
@@ -49,11 +48,6 @@ const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
 const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
 const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
 const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
-const SCAM_PROPOSAL_FOOTER_DELETE_OK: &str =
-    "Nachricht gelöscht. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
-const SCAM_PROPOSAL_FOOTER_DELETE_FAILED: &str =
-    "⚠️ Nachricht konnte NICHT gelöscht werden — bitte manuell entfernen. Account möglicherweise gehackt — Timeout-Status siehe Feld oben.";
-
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
@@ -895,6 +889,14 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             .is_ok()
     }
 
+    async fn unban_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .remove_ban(GuildId::new(guild_id), UserId::new(user_id), Some(reason))
+            .await
+            .is_ok()
+    }
+
     async fn post_moderation_case(
         &self,
         channel_id: u64,
@@ -937,6 +939,7 @@ trait AimodReviewActions: Send + Sync {
         reason: &str,
     ) -> dl_moderation::ReviewOutcome;
     async fn untimeout_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome;
+    async fn unban_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome;
 }
 
 #[async_trait::async_trait]
@@ -960,6 +963,10 @@ impl AimodReviewActions for dl_moderation::ModerationSystem {
 
     async fn untimeout_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome {
         self.untimeout_case(case_id, mod_id).await
+    }
+
+    async fn unban_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome {
+        self.unban_case(case_id, mod_id).await
     }
 }
 
@@ -1005,7 +1012,7 @@ impl InteractionHandler for ReviewHandler {
             "accept" | "deny" | "denysubmit" | "untimeout" => {
                 interaction.author_can_moderate_members
             }
-            "ban" => interaction.author_can_ban_members,
+            "ban" | "unban" => interaction.author_can_ban_members,
             _ => true,
         };
         if !authorized {
@@ -1063,31 +1070,19 @@ impl InteractionHandler for ReviewHandler {
                     .await;
                 Self::outcome_reply(outcome)
             }
+            "unban" => {
+                let outcome = self
+                    .moderator
+                    .unban_case(case_id, interaction.user_id)
+                    .await;
+                Self::outcome_reply(outcome)
+            }
             _ => BridgeReply::ephemeral_text("PLATZHALTER: Unbekannte-Aktion-Reply"),
         }
     }
 }
 
-// ── SecurityGuard-Anbindung ────────────────────────────────────────────────
-
-/// Zeitspanne `now - past` lesbar (Original: `_fmt_delta`): „Xd Yh" / „Xh Ym"
-/// / „Xm", `n/a` ohne Zeitpunkt. Eingaben in Unix-Sekunden.
-fn fmt_delta(now: i64, past: Option<i64>) -> String {
-    let Some(past) = past else {
-        return "n/a".to_string();
-    };
-    let total = (now - past).max(0);
-    let days = total / 86_400;
-    let hours = (total % 86_400) / 3_600;
-    let minutes = (total % 3_600) / 60;
-    if days > 0 {
-        format!("{days}d {hours}h")
-    } else if hours > 0 {
-        format!("{hours}h {minutes}m")
-    } else {
-        format!("{minutes}m")
-    }
-}
+// ── Moderation-Hilfen ──────────────────────────────────────────────────────
 
 fn normalize_text(value: &str) -> String {
     value
@@ -1161,72 +1156,6 @@ fn safe_message_text(value: &str, limit: usize) -> String {
         return "[kein Text]".to_string();
     }
     truncate_chars(text, limit)
-}
-
-fn guard_shadow_mode(case: &dl_moderation::guard::Incident) -> bool {
-    !case.delete_attempted && !case.action_ok && !case.dm_sent && case.deleted_count == 0
-}
-
-fn guard_action_text(
-    case: &dl_moderation::guard::Incident,
-    action: &dl_moderation::guard::GuardAction,
-) -> String {
-    let status = if guard_shadow_mode(case) {
-        "nicht ausgeführt (Shadow)"
-    } else if case.action_ok {
-        "ja"
-    } else {
-        "fehlgeschlagen"
-    };
-    match action {
-        dl_moderation::guard::GuardAction::Enforce => format!("Bann: {status}"),
-        dl_moderation::guard::GuardAction::Propose => format!(
-            "Timeout {}m: {status}",
-            dl_moderation::guard::PROPOSAL_TIMEOUT_MINUTES
-        ),
-        dl_moderation::guard::GuardAction::Hijack => {
-            format!(
-                "Timeout {}m: {status}",
-                dl_moderation::guard::TIMEOUT_MINUTES
-            )
-        }
-        dl_moderation::guard::GuardAction::SoftWarn => format!("Soft-Warn: {status}"),
-    }
-}
-
-fn guard_deleted_text(case: &dl_moderation::guard::Incident) -> String {
-    if !case.delete_attempted {
-        return "nicht ausgeführt (Shadow)".to_string();
-    }
-    let total = case.messages.len() as i64;
-    if total == 0 {
-        return case.deleted_count.to_string();
-    }
-    if case.deleted_count >= total {
-        format!("{}/{total}", case.deleted_count)
-    } else {
-        format!("{}/{total} fehlgeschlagen", case.deleted_count)
-    }
-}
-
-fn guard_locations(case: &dl_moderation::guard::Incident) -> String {
-    case.messages
-        .iter()
-        .map(|msg| {
-            let jump = case_jump_url(case.guild_id, msg.channel_id, msg.message_id);
-            let mut parts = vec![format!("<#{}> | [Jump]({jump})", msg.channel_id)];
-            if msg.image_count > 0 {
-                parts.push(format!("Bilder: {}", msg.image_count));
-            } else if msg.attachment_count > 0 {
-                parts.push(format!("Anhänge: {}", msg.attachment_count));
-            }
-            if !msg.content.trim().is_empty() {
-                parts.push(safe_message_text(&msg.content, 120));
-            }
-            parts.join(" | ")
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 fn embed_fields_mut(embed: &mut Value) -> Option<&mut Vec<Value>> {
@@ -1350,44 +1279,20 @@ fn truncate_chars(value: &str, limit: usize) -> String {
     value.chars().take(limit).collect()
 }
 
-fn evidence_filename(url: &str) -> String {
-    let raw = url
-        .rsplit('/')
-        .next()
-        .and_then(|part| part.split(['?', '#']).next())
-        .filter(|part| !part.trim().is_empty())
-        .unwrap_or("evidence-image.jpg");
-    let sanitized: String = raw
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || matches!(ch, '.' | '_' | '-') {
-                ch
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    if sanitized.is_empty() {
-        "evidence-image.jpg".to_string()
-    } else {
-        sanitized
-    }
-}
-
 #[derive(Debug, Clone)]
 struct InviteCacheEntry {
     guild_id: u64,
     expires_at: i64,
 }
 
-struct GuardInviteResolver {
+struct BehaviorInviteResolver {
     our_guild_id: u64,
     fallback_codes: HashSet<String>,
     allowlist: RwLock<HashSet<String>>,
     cache: Mutex<HashMap<String, InviteCacheEntry>>,
 }
 
-impl GuardInviteResolver {
+impl BehaviorInviteResolver {
     fn new(our_guild_id: u64, fallback_codes: Vec<String>) -> Self {
         let fallback_codes: HashSet<String> = fallback_codes.into_iter().collect();
         Self {
@@ -1410,7 +1315,7 @@ impl GuardInviteResolver {
                 }
             }
             Err(err) => {
-                tracing::warn!(%err, guild_id = self.our_guild_id, "SecurityGuard: eigene Invites nicht abrufbar");
+                tracing::warn!(%err, guild_id = self.our_guild_id, "BehaviorDetector: eigene Invites nicht abrufbar");
             }
         }
         match http
@@ -1422,7 +1327,7 @@ impl GuardInviteResolver {
             }
             Ok(_) => {}
             Err(err) => {
-                tracing::debug!(%err, guild_id = self.our_guild_id, "SecurityGuard: Vanity-Invite nicht abrufbar");
+                tracing::debug!(%err, guild_id = self.our_guild_id, "BehaviorDetector: Vanity-Invite nicht abrufbar");
             }
         }
         *self.allowlist.write().await = next;
@@ -1467,7 +1372,7 @@ impl GuardInviteResolver {
         let guild_id = match http.get_invite(code, false, false, None).await {
             Ok(invite) => invite.guild.map(|guild| guild.id.get()),
             Err(err) => {
-                tracing::debug!(%err, %code, "SecurityGuard: Invite nicht auflösbar");
+                tracing::debug!(%err, %code, "BehaviorDetector: Invite nicht aufloesbar");
                 None
             }
         };
@@ -1495,7 +1400,7 @@ pub fn parse_invite_allowlist_fallback(raw: &str) -> Vec<String> {
         if token.is_empty() {
             continue;
         }
-        let extracted = dl_moderation::guard::extract_invite_codes(token);
+        let extracted = dl_moderation::behavior_detector::extract_invite_codes(token);
         if extracted.is_empty() && looks_like_invite_code(token) {
             if seen.insert(token.to_string()) {
                 out.push(token.to_string());
@@ -1511,28 +1416,20 @@ pub fn parse_invite_allowlist_fallback(raw: &str) -> Vec<String> {
     out
 }
 
-pub struct GuardGlue {
+pub struct BehaviorDetectorGlue {
     pub adapter: Arc<DiscordAdapter>,
-    invite_resolver: Arc<GuardInviteResolver>,
-    evidence_http: reqwest::Client,
-    moderation_channel_id: u64,
+    invite_resolver: Arc<BehaviorInviteResolver>,
 }
 
-impl GuardGlue {
+impl BehaviorDetectorGlue {
     pub fn new(
         adapter: Arc<DiscordAdapter>,
         our_guild_id: u64,
         fallback_codes: Vec<String>,
-        moderation_channel_id: u64,
     ) -> Self {
         Self {
             adapter,
-            invite_resolver: Arc::new(GuardInviteResolver::new(our_guild_id, fallback_codes)),
-            evidence_http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(30))
-                .build()
-                .unwrap_or_default(),
-            moderation_channel_id,
+            invite_resolver: Arc::new(BehaviorInviteResolver::new(our_guild_id, fallback_codes)),
         }
     }
 
@@ -1544,471 +1441,9 @@ impl GuardGlue {
 }
 
 #[async_trait::async_trait]
-impl dl_moderation::guard::GuardPort for GuardGlue {
-    async fn ban(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
-        match self
-            .adapter
-            .http
-            .ban_user(
-                GuildId::new(guild_id),
-                UserId::new(user_id),
-                1, // 1 Tag Nachrichten löschen (wie delete_message_days=1)
-                Some(reason),
-            )
-            .await
-        {
-            Ok(_) => true,
-            Err(err) => {
-                tracing::warn!(%err, guild_id, user_id, "SecurityGuard: Ban fehlgeschlagen");
-                false
-            }
-        }
-    }
-
-    async fn timeout(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str) -> bool {
-        let until = chrono::Utc::now() + chrono::Duration::minutes(minutes);
-        match self
-            .adapter
-            .http
-            .edit_member(
-                GuildId::new(guild_id),
-                UserId::new(user_id),
-                &json!({ "communication_disabled_until": until.to_rfc3339() }),
-                Some(reason),
-            )
-            .await
-        {
-            Ok(_) => true,
-            Err(err) => {
-                tracing::warn!(%err, guild_id, user_id, minutes, "SecurityGuard: Timeout fehlgeschlagen");
-                false
-            }
-        }
-    }
-
-    async fn delete_message(&self, channel_id: u64, message_id: u64) -> bool {
-        match self
-            .adapter
-            .http
-            .delete_message(
-                ChannelId::new(channel_id),
-                MessageId::new(message_id),
-                Some("SecurityGuard: Beweissicherung/Aufräumen"),
-            )
-            .await
-        {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::warn!(%err, channel_id, message_id, "SecurityGuard: Nachricht konnte nicht geloescht werden");
-                false
-            }
-        }
-    }
-
-    async fn send_dm(&self, user_id: u64, text: String) -> bool {
-        let Ok(channel) = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        else {
-            return false;
-        };
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(text));
-        self.adapter
-            .send_raw_public(channel.id.get(), &body)
-            .await
-            .is_ok()
-    }
-
-    async fn send_dm_with_appeal(&self, user_id: u64, text: String, case_id: &str) -> bool {
-        let Ok(channel) = self
-            .adapter
-            .http
-            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
-            .await
-        else {
-            return false;
-        };
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(text));
-        // „Einspruch"-Button → läuft über den registrierten sg:-Prefix in den
-        // GuardReviewHandler (öffnet das Einspruch-Modal).
-        body.insert(
-            "components".into(),
-            json!([{ "type": 1, "components": [
-                { "type": 2, "style": 1, "label": "Einspruch",
-                  "custom_id": format!("sg:appeal:{case_id}") },
-            ]}]),
-        );
-        self.adapter
-            .send_raw_public(channel.id.get(), &body)
-            .await
-            .is_ok()
-    }
-
-    async fn post_mod_alert(
-        &self,
-        case: &dl_moderation::guard::Incident,
-        action: &dl_moderation::guard::GuardAction,
-    ) {
-        let shadow = guard_shadow_mode(case);
-        let (title, color) = if shadow {
-            ("🛡️ Scam-Verdacht (Shadow, keine Aktion)", 0x95A5A6)
-        } else {
-            match action {
-                dl_moderation::guard::GuardAction::Enforce => ("🛡️ Scam-Vollzug (Ban)", 0xED4245),
-                dl_moderation::guard::GuardAction::Propose => {
-                    ("🛡️ Scam-Verdacht (Holding-Timeout 60 min)", 0xFFA500)
-                }
-                dl_moderation::guard::GuardAction::SoftWarn => ("🛡️ Soft-Warn", 0x95A5A6),
-                dl_moderation::guard::GuardAction::Hijack => (
-                    "⚠️ Account-Hijack/Takeover — Quarantäne (24h-Timeout, reversibel)",
-                    0xE74C3C,
-                ),
-            }
-        };
-        let preview: String = case
-            .messages
-            .iter()
-            .filter(|m| !m.content.is_empty())
-            .map(|m| {
-                format!(
-                    "<#{}>: {}",
-                    m.channel_id,
-                    m.content.chars().take(150).collect::<String>()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n")
-            .chars()
-            .take(900)
-            .collect();
-
-        // Angereicherte Log-Felder (Original: `_log_incident`): Account-Alter,
-        // Zeit seit Join, Aktivitätsfenster, Signale, Aktionen.
-        let now = chrono::Utc::now().timestamp();
-        let is_ban = matches!(action, dl_moderation::guard::GuardAction::Enforce);
-        let action_text = guard_action_text(case, action);
-        let deleted_text = guard_deleted_text(case);
-        let locations = guard_locations(case);
-        let reason_value: String = if case.reason.is_empty() {
-            "auto-detected burst".to_string()
-        } else {
-            case.reason.chars().take(1000).collect()
-        };
-        // meta = [channel_count, message_count, attachment_count, keyword_hit].
-        let mut fields = vec![
-            json!({ "name": "Member", "value": format!("<@{}> ({})", case.user_id, case.user_id), "inline": false }),
-            json!({ "name": "Case ID", "value": case.case_id, "inline": true }),
-            json!({ "name": "Account-Alter", "value": fmt_delta(now, Some(case.account_created_at)), "inline": true }),
-            json!({ "name": "Zeit seit Join", "value": fmt_delta(now, case.joined_at), "inline": true }),
-            json!({ "name": "Auslöser", "value": case.trigger.as_str(), "inline": true }),
-            json!({ "name": "Aktivitätsfenster", "value": format!(
-                "{} Nachrichten / {} Kanäle in {}s",
-                case.meta[1], case.meta[0], dl_moderation::guard::WINDOW_SECONDS
-            ), "inline": false }),
-            json!({ "name": "Signale", "value": format!(
-                "Schlagwörter: {} | Anhänge: {}",
-                case.meta[3] != 0, case.meta[2]
-            ), "inline": true }),
-            json!({ "name": "Aktionen", "value": format!(
-                "{action_text}\nGelöscht: {}\nDM geschickt: {}",
-                deleted_text, if case.dm_sent { "ja" } else { "nein" }
-            ), "inline": true }),
-            json!({ "name": "Grund", "value": reason_value, "inline": false }),
-        ];
-        if !locations.is_empty() {
-            fields.push(json!({ "name": "Fundorte", "value": truncate_chars(&locations, DISCORD_FIELD_LIMIT), "inline": false }));
-        }
-        if !preview.is_empty() {
-            fields.push(json!({ "name": "Nachrichten", "value": preview, "inline": false }));
-        }
-        let footer = if matches!(action, dl_moderation::guard::GuardAction::Hijack)
-            && case.delete_attempted
-        {
-            let delete_ok = case.deleted_count >= case.messages.len() as i64;
-            Some(if delete_ok {
-                SCAM_PROPOSAL_FOOTER_DELETE_OK
-            } else {
-                SCAM_PROPOSAL_FOOTER_DELETE_FAILED
-            })
-        } else {
-            None
-        };
-        let embed = if let Some(footer) = footer {
-            json!({
-                "title": title,
-                "color": color,
-                "fields": fields,
-                "footer": { "text": footer },
-            })
-        } else {
-            json!({
-                "title": title,
-                "color": color,
-                "fields": fields,
-            })
-        };
-        let mut buttons = Vec::new();
-        if is_ban && case.action_ok {
-            buttons.push(json!({ "type": 2, "style": 2, "label": "Entbannen",
-                "custom_id": format!("sg:unban:{}:{}", case.guild_id, case.user_id) }));
-        } else {
-            buttons.push(json!({ "type": 2, "style": 4, "label": "Ban",
-                    "custom_id": format!("sg:ban:{}:{}", case.guild_id, case.user_id) }));
-            if matches!(
-                action,
-                dl_moderation::guard::GuardAction::Propose
-                    | dl_moderation::guard::GuardAction::Hijack
-            ) && case.action_ok
-            {
-                buttons.push(json!({ "type": 2, "style": 3, "label": "Timeout aufheben",
-                        "custom_id": format!("sg:untimeout:{}:{}", case.guild_id, case.user_id) }));
-            }
-        }
-        let components = json!([{ "type": 1, "components": buttons }]);
-        let mut body = serde_json::Map::new();
-        body.insert("embeds".into(), json!([embed]));
-        body.insert("components".into(), components);
-        let files = case
-            .evidence_images
-            .iter()
-            .map(|image| {
-                serenity::all::CreateAttachment::bytes(image.data.clone(), image.filename.clone())
-            })
-            .collect::<Vec<_>>();
-        if let Err(err) = self
-            .adapter
-            .http
-            .send_message(ChannelId::new(self.moderation_channel_id), files, &body)
-            .await
-        {
-            tracing::warn!(%err, case_id = %case.case_id, "SecurityGuard: Mod-Alert konnte nicht gepostet werden");
-        }
-    }
-
-    async fn post_self_deleting_notice(
-        &self,
-        channel_id: u64,
-        text: String,
-        delete_after_secs: u64,
-    ) {
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(text));
-        let Ok(message_id) = self.adapter.send_raw_public(channel_id, &body).await else {
-            return;
-        };
-        let adapter = self.adapter.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(delete_after_secs)).await;
-            let _ = adapter
-                .http
-                .delete_message(
-                    ChannelId::new(channel_id),
-                    MessageId::new(message_id),
-                    Some("SecurityGuard: selbstlöschende Notiz"),
-                )
-                .await;
-        });
-    }
-
+impl dl_moderation::behavior_detector::BehaviorDetectorPort for BehaviorDetectorGlue {
     async fn resolve_invite_guild(&self, code: &str) -> Option<u64> {
         self.invite_resolver.resolve(&self.adapter.http, code).await
-    }
-
-    async fn fetch_evidence_image(&self, url: &str) -> Option<dl_moderation::guard::EvidenceImage> {
-        let response = match self.evidence_http.get(url).send().await {
-            Ok(response) => response,
-            Err(err) => {
-                tracing::warn!(%err, "SecurityGuard: Beweisbild-Download fehlgeschlagen");
-                return None;
-            }
-        };
-        if !response.status().is_success() {
-            tracing::warn!(status = %response.status(), "SecurityGuard: Beweisbild-HTTP-Fehler");
-            return None;
-        }
-        if response
-            .content_length()
-            .map(|len| len > MAX_EVIDENCE_IMAGE_BYTES)
-            .unwrap_or(false)
-        {
-            tracing::warn!("SecurityGuard: Beweisbild zu gross, uebersprungen");
-            return None;
-        }
-        let bytes = match response.bytes().await {
-            Ok(bytes) => bytes,
-            Err(err) => {
-                tracing::warn!(%err, "SecurityGuard: Beweisbild nicht lesbar");
-                return None;
-            }
-        };
-        if bytes.len() as u64 > MAX_EVIDENCE_IMAGE_BYTES {
-            tracing::warn!("SecurityGuard: Beweisbild zu gross, uebersprungen");
-            return None;
-        }
-        Some(dl_moderation::guard::EvidenceImage {
-            filename: evidence_filename(url),
-            data: bytes.to_vec(),
-        })
-    }
-}
-
-/// sg:*-Mod-Buttons (Ban / Timeout aufheben / Unban) mit Rechte-Guard,
-/// plus der User-seitige Einspruch-Flow (appeal / appealsubmit — ohne
-/// Rechte-Guard, da vom betroffenen User in der DM ausgelöst).
-pub struct GuardReviewHandler {
-    pub adapter: Arc<DiscordAdapter>,
-    pub moderation_channel_id: u64,
-}
-
-impl GuardReviewHandler {
-    /// Einspruch-Button → Einspruch-Modal (Original: AppealView → AppealModal).
-    fn open_appeal_modal(case_id: &str) -> BridgeReply {
-        BridgeReply {
-            modal: Some(dl_discord::ModalSpec {
-                custom_id: format!("sg:appealsubmit:{case_id}"),
-                title: "Einspruch".to_string(),
-                fields: vec![dl_discord::ModalField {
-                    custom_id: "reason".to_string(),
-                    label: "Grund für den Einspruch".to_string(),
-                    placeholder: "Erkläre, warum dieser Bann überprüft werden sollte.".to_string(),
-                    required: true,
-                    min_length: dl_moderation::guard::APPEAL_MIN_CHARS,
-                    max_length: dl_moderation::guard::APPEAL_MAX_CHARS,
-                    paragraph: true,
-                }],
-            }),
-            ..BridgeReply::default()
-        }
-    }
-
-    /// Einspruch-Modal abgeschickt → Embed in den Mod-Kanal + Bestätigung an
-    /// den User (Original: `handle_appeal_submission`).
-    async fn submit_appeal(&self, interaction: &BridgeInteraction, case_id: &str) -> BridgeReply {
-        let appeal_text = interaction
-            .options
-            .get("reason")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .replace('`', "'")
-            .trim()
-            .to_string();
-        let safe_appeal: String = if appeal_text.is_empty() {
-            "(leer)".to_string()
-        } else {
-            appeal_text.chars().take(1000).collect()
-        };
-        let embed = json!({
-            "title": "Einspruch eingegangen",
-            "color": 0x3498DB,
-            "fields": [
-                { "name": "Mitglied", "value": format!("<@{0}> ({0})", interaction.user_id), "inline": false },
-                { "name": "Fall-ID", "value": case_id, "inline": true },
-                { "name": "Begründung des Einspruchs", "value": safe_appeal, "inline": false },
-            ],
-        });
-        let mut body = serde_json::Map::new();
-        body.insert("embeds".into(), json!([embed]));
-        let _ = self
-            .adapter
-            .send_raw_public(self.moderation_channel_id, &body)
-            .await;
-        BridgeReply::ephemeral_text("Dein Einspruch wurde an das Mod-Team weitergeleitet.")
-    }
-}
-
-#[async_trait::async_trait]
-impl InteractionHandler for GuardReviewHandler {
-    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
-        let rest = interaction
-            .custom_id
-            .strip_prefix("sg:")
-            .unwrap_or_default();
-        // Einspruch-Flow (vom betroffenen User, kein Mod-Recht nötig):
-        // custom_id `sg:appeal:{case_id}` / `sg:appealsubmit:{case_id}`.
-        if let Some(case_id) = rest.strip_prefix("appeal:") {
-            return Self::open_appeal_modal(case_id);
-        }
-        if let Some(case_id) = rest.strip_prefix("appealsubmit:") {
-            return self.submit_appeal(&interaction, case_id).await;
-        }
-
-        let parts: Vec<&str> = rest.split(':').collect();
-        let (Some(action), Some(guild_id), Some(user_id)) = (
-            parts.first().copied(),
-            parts.get(1).and_then(|v| v.parse::<u64>().ok()),
-            parts.get(2).and_then(|v| v.parse::<u64>().ok()),
-        ) else {
-            return BridgeReply::ephemeral_text("Unbekannte Aktion.");
-        };
-        // Alle übrigen sg:*-Aktionen sind Mod-Buttons → action-spezifischer Rechte-Guard.
-        let authorized = match action {
-            "ban" | "unban" => interaction.author_can_ban_members,
-            "untimeout" => interaction.author_can_moderate_members,
-            _ => true,
-        };
-        if !authorized {
-            return BridgeReply::ephemeral_text("Keine Berechtigung.");
-        }
-        match action {
-            "ban" => {
-                let ok = self
-                    .adapter
-                    .http
-                    .ban_user(
-                        GuildId::new(guild_id),
-                        UserId::new(user_id),
-                        1,
-                        Some("SecurityGuard: Mod-Bestätigung"),
-                    )
-                    .await
-                    .is_ok();
-                BridgeReply::ephemeral_text(if ok {
-                    "Gebannt."
-                } else {
-                    "Ban fehlgeschlagen."
-                })
-            }
-            "untimeout" => {
-                let ok = self
-                    .adapter
-                    .http
-                    .edit_member(
-                        GuildId::new(guild_id),
-                        UserId::new(user_id),
-                        &json!({ "communication_disabled_until": null }),
-                        Some("SecurityGuard: Timeout aufgehoben"),
-                    )
-                    .await
-                    .is_ok();
-                BridgeReply::ephemeral_text(if ok {
-                    "Timeout aufgehoben."
-                } else {
-                    "Aufheben fehlgeschlagen."
-                })
-            }
-            "unban" => {
-                let ok = self
-                    .adapter
-                    .http
-                    .remove_ban(
-                        GuildId::new(guild_id),
-                        UserId::new(user_id),
-                        Some("SecurityGuard: Unban durch Mod"),
-                    )
-                    .await
-                    .is_ok();
-                BridgeReply::ephemeral_text(if ok {
-                    "Entbannt."
-                } else {
-                    "Entbannen fehlgeschlagen."
-                })
-            }
-            _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
-        }
     }
 }
 
@@ -3344,6 +2779,10 @@ mod tests {
         ) -> dl_moderation::ReviewOutcome {
             dl_moderation::ReviewOutcome::Done("untimeout".to_string())
         }
+
+        async fn unban_case(&self, _case_id: &str, _mod_id: u64) -> dl_moderation::ReviewOutcome {
+            dl_moderation::ReviewOutcome::Done("unban".to_string())
+        }
     }
 
     fn test_review_handler() -> (tempfile::TempDir, ReviewHandler) {
@@ -3477,7 +2916,7 @@ mod tests {
 
     #[tokio::test]
     async fn invite_resolver_cacht_nur_definitive_guild_ids() {
-        let resolver = GuardInviteResolver::new(1, Vec::new());
+        let resolver = BehaviorInviteResolver::new(1, Vec::new());
         let now = 1_000_000;
 
         resolver.remember_resolve_result("expired", None, now).await;
@@ -3641,41 +3080,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn securityguard_untimeout_braucht_moderate_members_nicht_manage_roles() {
-        let handler = GuardReviewHandler {
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
-            moderation_channel_id: dl_moderation::moderation_channel::DEFAULT_MODERATION_CHANNEL_ID,
-        };
+    async fn aimod_unban_braucht_ban_members_nicht_manage_roles() {
+        let (_dir, handler) = test_review_handler();
 
         let reply = handler
             .handle(BridgeInteraction {
-                custom_id: "sg:untimeout:1:2".to_string(),
+                custom_id: "aimod:unban:test-case".to_string(),
                 user_id: 7,
                 author_can_manage_roles: true,
                 ..BridgeInteraction::default()
             })
             .await;
 
-        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
-    }
-
-    #[tokio::test]
-    async fn securityguard_ban_braucht_ban_members_nicht_manage_roles() {
-        let handler = GuardReviewHandler {
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
-            moderation_channel_id: dl_moderation::moderation_channel::DEFAULT_MODERATION_CHANNEL_ID,
-        };
-
-        let reply = handler
-            .handle(BridgeInteraction {
-                custom_id: "sg:ban:1:2".to_string(),
-                user_id: 7,
-                author_can_manage_roles: true,
-                ..BridgeInteraction::default()
-            })
-            .await;
-
-        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+        );
     }
 
     #[test]

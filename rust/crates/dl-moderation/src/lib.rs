@@ -10,8 +10,9 @@
 //! - `needs_context`/`ok` → nichts
 //!
 //! Der neue aktive Scanner sitzt in den sprechenden Modulen
-//! `content_analyzer`, `content_verifier`, `moderation_verdict`,
-//! `action_policy`, `case_embed` und `moderation_system`.
+//! `content_analyzer`, `content_verifier`, `behavior_detector`,
+//! `moderation_verdict`, `action_policy`, `case_embed` und
+//! `moderation_system`.
 //!
 //! Der Ragebaiter-Free-Warnhinweis ist portiert: in Kanälen mit
 //! `required_tone_tag = "ragebaiter_free"` (aus `tempvoice_lane_tag_filter`)
@@ -35,10 +36,10 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 pub mod action_policy;
+pub mod behavior_detector;
 pub mod case_embed;
 pub mod content_analyzer;
 pub mod content_verifier;
-pub mod guard;
 pub mod moderation_channel;
 pub mod moderation_system;
 pub mod moderation_verdict;
@@ -855,6 +856,8 @@ impl AiModerator {
             confidence: verdict.confidence,
             reason: verdict.reason.clone(),
             action: action.to_string(),
+            source: "content".to_string(),
+            trigger_type: Some("content".to_string()),
             attachments: event
                 .attachments
                 .iter()
