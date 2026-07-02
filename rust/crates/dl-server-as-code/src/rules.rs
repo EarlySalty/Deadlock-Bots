@@ -1100,9 +1100,10 @@ fn kreativ_source_category_id(ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
 fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     let channel_ids: Vec<_> = desired.channels.keys().copied().collect();
     for channel_id in channel_ids {
-        let Some(name) = desired.channel_name(channel_id) else {
+        let Some(name) = desired.channel_name(channel_id).map(str::to_string) else {
             continue;
         };
+        let name = name.as_str();
         if channel_matches(name, &["AFK"]) && desired.channel_parent(channel_id).is_none() {
             set_exact_overwrites(
                 desired,
@@ -1112,6 +1113,24 @@ fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContex
                     desired.guild_id,
                     channel_id,
                     deny(Permissions::SPEAK | Permissions::STREAM | Permissions::SEND_MESSAGES),
+                )],
+            );
+        }
+        // §4.4 offene Invite-Lounge: Der Ist-Zustand traegt ein @everyone
+        // -VIEW/-SEND-Gate (Rollback-Stand vom alten `beta-zugang`). Eine
+        // Oeffnung nur ueber Overwrite-LOESCHUNG wuerde der Effektiv-Rechte-
+        // Guard (§0.1) zu Recht blocken — die gewollte Oeffnung steht deshalb
+        // EXPLIZIT im Soll (Update statt Delete) und ist zusaetzlich robust
+        // gegen kuenftige Basis-Aenderungen.
+        if channel_matches(name, &["deadlock-invite", "beta-zugang"]) {
+            set_exact_overwrites(
+                desired,
+                ctx,
+                channel_id,
+                vec![everyone_overwrite(
+                    desired.guild_id,
+                    channel_id,
+                    allow(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES),
                 )],
             );
         }
@@ -2403,16 +2422,24 @@ mod tests {
                 .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
             Some(("🔑deadlock-invite", Some(CHAT_CATEGORY)))
         );
-        assert!(derived
-            .desired
-            .overwrites
-            .keys()
-            .all(|key| key.channel_id != BETA_ZUGANG));
-        assert!(derived
-            .desired
-            .overwrites
-            .keys()
-            .all(|key| key.channel_id != BETA_ZUGANG_EMOJI));
+        for invite_channel in [BETA_ZUGANG, BETA_ZUGANG_EMOJI] {
+            let invite_overwrites: Vec<_> = derived
+                .desired
+                .overwrites
+                .values()
+                .filter(|overwrite| overwrite.key.channel_id == invite_channel)
+                .collect();
+            assert_eq!(
+                invite_overwrites.len(),
+                1,
+                "offene Invite-Lounge steht explizit im Soll (§0.1-Guard-kompatibel)"
+            );
+            assert_eq!(
+                invite_overwrites[0].allow_bits,
+                Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES
+            );
+            assert_eq!(invite_overwrites[0].deny_bits, Permissions::empty());
+        }
         Ok(())
     }
 
@@ -2626,13 +2653,20 @@ mod tests {
         let invite = derived.desired.channels.get(&BETA_ZUGANG).expect("invite");
         assert_eq!(invite.name, "deadlock-invite");
         assert_eq!(invite.parent_category_id, Some(CHAT_CATEGORY));
-        assert!(
-            derived
-                .desired
-                .overwrites
-                .keys()
-                .all(|key| key.channel_id != BETA_ZUGANG),
-            "Chat-P0-Regel entfernt alte Beta-Gates nach dem Umzug"
+        let invite_overwrites: Vec<_> = derived
+            .desired
+            .overwrites
+            .values()
+            .filter(|overwrite| overwrite.key.channel_id == BETA_ZUGANG)
+            .collect();
+        assert_eq!(
+            invite_overwrites.len(),
+            1,
+            "alte Beta-Gates entfernt, offene Invite-Lounge explizit im Soll"
+        );
+        assert_eq!(
+            invite_overwrites[0].allow_bits,
+            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES
         );
         Ok(())
     }
