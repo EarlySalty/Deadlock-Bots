@@ -1,3 +1,35 @@
+# P1 LLM-Provider-Abstraktion (2026-07-02)
+
+## Ziel
+Phase-1-Arbeitspaket fuer `dl-ai`: neue Chat-Provider-Abstraktion mit MiniMax-, Mistral- und Mock-Provider, pro Einsatzzweck per Env umschaltbar. Kein Commit/Push.
+
+## Fortschritt
+- Pflichtkonzept gelesen: §4.1 Bot-Pate und §5.6 KI-Compliance-Gate. Ziel ist Mistral Small 4; MiniMax darf nur synthetische Dev-/Testdaten sehen.
+- Bestehende Rust-LLM-Nutzung gesichtet: `rust/crates/dl-ai` enthaelt MiniMax/OpenAI/Gemini-Clients und alte `TextGenerator`-/`VisionGenerator`-Traits; bestehende Call-Sites bleiben im Scope unveraendert.
+- Implementiert: neues `ChatProvider`-Trait mit `ChatMessage`, `ChatParams`, `ChatResponse`, `TokenUsage` und `ChatProviderError` (`Timeout`, `RateLimit`, `Auth`, `Provider`) via `thiserror`.
+- Implementiert: `MiniMaxChatProvider` (Token-Plan + Standard), `MistralChatProvider` (`/v1/chat/completions`, `MISTRAL_API_KEY`, Default `mistral-small-2603`) und `MockChatProvider`.
+- Implementiert: `LlmProviderConfig` mit Provider-Auswahl pro Zweck (`bot_pate`, `cockpit_vorschlag`, `faq`) ueber `DL_LLM_PROVIDER_*`; Default zentral Mistral, Compliance-Kommentar zu MiniMax nur synthetisch/Dev.
+- Robustheit: Request-Timeout, begrenzte Retries mit Backoff fuer 429/5xx, typisierte Auth/RateLimit-Fehler, Logs nur mit Provider/Status/Dauer/Tokens bzw. Fehlerklasse, keine Prompt-Inhalte.
+- Tests ohne echte API-Calls: lokale axum-Mocks fuer Mistral/MiniMax und Trait-Mock. Verifikation gruen: aus `rust/crates/dl-ai` `cargo build`; `cargo clippy --all-targets -- -D warnings`; `cargo test` (15 Tests + 0 Doctests). Zusatz: `cargo fmt -p dl-ai -- --check`; `git diff --check`.
+
+## Kritiker-Review
+- Review gestartet: uncommitted Diff in `dl-ai` wird nur geprueft, keine Implementierung, kein Commit/Push.
+- Review abgeschlossen: keine Secret-/Prompt-Logging-Leaks in der neuen Provider-Schicht gefunden; MiniMax-Wire-Format entspricht dem bestehenden `MiniMaxClient`.
+- Wichtige Risiken: MiniMax-Dev-only ist nur kommentiert, nicht technisch gegated; Mistral/OpenAI-Response-Parser akzeptiert nur String-Content, obwohl Mistral auch Content-Chunks dokumentiert.
+- Verifikation im Review gruen: aus `rust/crates/dl-ai` `cargo test` (15 Tests + 0 Doctests) und `cargo clippy --all-targets -- -D warnings`; zusaetzlich `cargo fmt -p dl-ai -- --check` und `git diff --check`.
+
+## Rework Fortschritt
+- Rework gestartet: Baseline `cargo test` aus `rust/crates/dl-ai` gruen mit 15 Tests + 0 Doctests.
+- MiniMax-Compliance-Gate technisch umgesetzt: alle drei bestehenden Use-Cases bleiben `user_content`; MiniMax fuer `user_content` liefert `ComplianceViolation`, synthetische Klassifizierung bleibt erlaubt, Dev-Escape nur ueber `DL_LLM_ALLOW_MINIMAX_USER_CONTENT_DEV_ONLY=ich-weiss-was-ich-tue` mit `warn!`.
+- Mistral/OpenAI-Parser umgesetzt: `message.content` akzeptiert String oder Text-Chunk-Array, ignoriert Nicht-Text-Chunks und behaelt den sauberen Fehler fuer `null`/fehlenden Inhalt.
+- Testluecken geschlossen: Parser-Cases fuer String/Chunk/Mixed/null/leere Choices; Compliance-Cases fuer Block/Synthetic/Escape-Warnung; Retry-Cases fuer 5xx-Obergrenze und kein Retry bei 400/401.
+- Rework-Verifikation gruen: `cargo test` aus `rust/crates/dl-ai` 22 Tests + 0 Doctests (vorher 15); `cargo clippy --all-targets -- -D warnings`; `cargo fmt -p dl-ai -- --check`; `git diff --check`.
+
+## Verify-Kritiker nach Rework
+- Review 2026-07-02: Compliance-Gate, Parser, Retry-Matrix, neue warn!-Pfade und Scope geprueft; kein Blocker/Wichtig gefunden.
+- Verifikation erneut gruen: aus `rust/crates/dl-ai` `cargo test` (22 Tests + 0 Doctests), `cargo clippy --all-targets -- -D warnings`; aus `rust/` `cargo fmt -p dl-ai -- --check`.
+- Rest-Risiko: 403-Auth ist im Code gemeinsam mit 401 behandelt, aber nicht als eigener Testfall abgedeckt; direkte Provider-Konstruktoren bleiben Low-Level-API und umgehen die Config-Policy.
+
 # Rework core.users Upsert Nonblocking (2026-07-02)
 
 ## Ziel

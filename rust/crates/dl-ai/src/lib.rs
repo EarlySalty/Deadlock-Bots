@@ -18,6 +18,9 @@ use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 
+mod chat_provider;
+pub use chat_provider::*;
+
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
