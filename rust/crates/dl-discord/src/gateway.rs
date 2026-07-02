@@ -667,6 +667,21 @@ mod tests {
     }
 
     #[test]
+    fn image_attachment_detection_covers_discord_scam_exports() {
+        for filename in [
+            "IMG-20260502-WA3379.jpg",
+            "1778988670733.jpg",
+            "DSC_0113.jpg",
+        ] {
+            assert!(is_image_attachment(Some("image/jpeg"), filename));
+            assert!(is_image_attachment(
+                Some("application/octet-stream"),
+                filename
+            ));
+        }
+    }
+
+    #[test]
     fn screening_completion_braucht_cache_after_pending() {
         let event = screening_completed_from_member_update(1, 2, true, None);
 
