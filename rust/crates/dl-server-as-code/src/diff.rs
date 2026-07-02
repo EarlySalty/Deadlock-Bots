@@ -622,18 +622,18 @@ fn documented_exception_filter(
         return Ok(None);
     }
 
-    let candidates = [change.actual.as_ref(), change.desired.as_ref()];
-    for candidate in candidates.into_iter().flatten() {
-        let spec: PermissionOverwriteSpec = serde_json::from_value(candidate.clone())?;
-        if let Some(exception) = documented_exceptions
-            .iter()
-            .find(|exception| exception.matches_overwrite(&spec))
-        {
-            return Ok(Some(FilterReason::DocumentedException {
-                exception_key: exception.exception_key.clone(),
-                exception_id: exception.exception_id,
-            }));
-        }
+    let Some(actual) = change.actual.as_ref() else {
+        return Ok(None);
+    };
+    let spec: PermissionOverwriteSpec = serde_json::from_value(actual.clone())?;
+    if let Some(exception) = documented_exceptions
+        .iter()
+        .find(|exception| exception.matches_overwrite(&spec))
+    {
+        return Ok(Some(FilterReason::DocumentedException {
+            exception_key: exception.exception_key.clone(),
+            exception_id: exception.exception_id,
+        }));
     }
     Ok(None)
 }
@@ -652,6 +652,12 @@ fn dynamic_namespace_filter(
         if namespace.matches_channel(actual, channel_id)?
             || namespace.matches_channel(desired, channel_id)?
         {
+            match change.object.kind {
+                ObjectKind::Channel
+                    if matches!(change.action, DiffAction::Create | DiffAction::Delete) => {}
+                ObjectKind::PermissionOverwrite if namespace_allows_free_overwrites(namespace) => {}
+                _ => continue,
+            }
             return Ok(Some(FilterReason::DynamicNamespace {
                 namespace_key: namespace.namespace_key.clone(),
                 system_name: namespace.system_name.clone(),
@@ -659,6 +665,12 @@ fn dynamic_namespace_filter(
         }
     }
     Ok(None)
+}
+
+fn namespace_allows_free_overwrites(namespace: &DynamicNamespace) -> bool {
+    // §3.11: TempVoice-Rechte werden je Lane-Einstellung von dl-voice verwaltet.
+    // Tickets und Bot-Pate-Fallbacks haben dagegen dokumentierte Rechte-Muster und werden geprueft.
+    namespace.system_name == "dl-voice" || namespace.namespace_key.starts_with("tempvoice_")
 }
 
 pub(crate) fn diff_json(change: &DiffChange) -> Value {

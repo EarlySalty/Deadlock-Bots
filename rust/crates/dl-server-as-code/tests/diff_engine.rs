@@ -288,6 +288,196 @@ fn dokumentierte_ausnahme_filtert_user_ban_overwrite() -> anyhow::Result<()> {
 }
 
 #[test]
+fn dokumentierte_ausnahme_filtert_nur_exakten_actual_zustand() -> anyhow::Result<()> {
+    let mut desired = GuildModel::new(GUILD_ID);
+    desired.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 0, 1024),
+    );
+
+    let mut actual = GuildModel::new(GUILD_ID);
+    actual.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 0, 512),
+    );
+
+    let exception = DocumentedException {
+        exception_id: Some(42),
+        exception_key: "X1".to_string(),
+        object_kind: ObjectKind::PermissionOverwrite,
+        channel_id: Some(GENERAL),
+        target_kind: Some(TargetKind::Member),
+        target_id: Some(USER_BANNED),
+        allow_bits: Some(0),
+        deny_bits: Some(1024),
+        reason: "PLATZHALTER rust/crates/dl-server-as-code/tests/diff_engine.rs:278".to_string(),
+    };
+
+    let diff = diff_models(&desired, &actual, &[], &[exception])?;
+    assert_eq!(diff.filtered.len(), 0);
+    assert_eq!(diff.changes.len(), 1);
+    assert_eq!(diff.changes[0].action, DiffAction::Update);
+    assert!(diff.changes[0]
+        .fields
+        .iter()
+        .any(|field| field.field == "deny_bits"));
+    Ok(())
+}
+
+#[test]
+fn dokumentierte_ausnahme_filtert_nicht_wenn_actual_overwrite_entfernt_wurde() -> anyhow::Result<()>
+{
+    let mut desired = GuildModel::new(GUILD_ID);
+    desired.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 0, 1024),
+    );
+
+    let actual = GuildModel::new(GUILD_ID);
+    let exception = DocumentedException {
+        exception_id: Some(42),
+        exception_key: "X1".to_string(),
+        object_kind: ObjectKind::PermissionOverwrite,
+        channel_id: Some(GENERAL),
+        target_kind: Some(TargetKind::Member),
+        target_id: Some(USER_BANNED),
+        allow_bits: Some(0),
+        deny_bits: Some(1024),
+        reason: "PLATZHALTER rust/crates/dl-server-as-code/tests/diff_engine.rs:334".to_string(),
+    };
+
+    let diff = diff_models(&desired, &actual, &[], &[exception])?;
+    assert_eq!(diff.filtered.len(), 0);
+    assert_eq!(diff.changes.len(), 1);
+    assert_eq!(diff.changes[0].action, DiffAction::Create);
+    assert_eq!(diff.changes[0].object.kind, ObjectKind::PermissionOverwrite);
+    Ok(())
+}
+
+#[test]
+fn dokumentierte_ausnahme_mit_allow_und_deny_filtert_nur_exakt() -> anyhow::Result<()> {
+    let exception = DocumentedException {
+        exception_id: Some(43),
+        exception_key: "X2".to_string(),
+        object_kind: ObjectKind::PermissionOverwrite,
+        channel_id: Some(GENERAL),
+        target_kind: Some(TargetKind::Member),
+        target_id: Some(USER_BANNED),
+        allow_bits: Some(64),
+        deny_bits: Some(1024),
+        reason: "PLATZHALTER rust/crates/dl-server-as-code/tests/diff_engine.rs:362".to_string(),
+    };
+
+    let mut desired = GuildModel::new(GUILD_ID);
+    desired.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 64, 1024),
+    );
+    let mut actual = GuildModel::new(GUILD_ID);
+    actual.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 32, 1024),
+    );
+
+    let drift = diff_models(&desired, &actual, &[], std::slice::from_ref(&exception))?;
+    assert_eq!(drift.filtered.len(), 0);
+    assert_eq!(drift.changes.len(), 1);
+    assert_eq!(drift.changes[0].action, DiffAction::Update);
+    assert_eq!(
+        drift.changes[0]
+            .fields
+            .iter()
+            .map(|field| field.field.as_str())
+            .collect::<Vec<_>>(),
+        vec!["allow_bits"]
+    );
+
+    let desired = GuildModel::new(GUILD_ID);
+    let mut actual = GuildModel::new(GUILD_ID);
+    actual.overwrites.insert(
+        OverwriteKey {
+            channel_id: GENERAL,
+            target_kind: TargetKind::Member,
+            target_id: USER_BANNED,
+        },
+        overwrite(GENERAL, TargetKind::Member, USER_BANNED, 64, 1024),
+    );
+
+    let exact = diff_models(&desired, &actual, &[], &[exception])?;
+    assert_eq!(exact.changes.len(), 0);
+    assert_eq!(exact.filtered.len(), 1);
+    assert!(matches!(
+        exact.filtered[0].reason,
+        dl_server_as_code::FilterReason::DocumentedException {
+            exception_id: Some(43),
+            ..
+        }
+    ));
+    Ok(())
+}
+
+#[test]
+fn ticket_namespace_filtert_overwrite_drift_nicht() -> anyhow::Result<()> {
+    let ticket_channel = 901;
+    let mut desired = GuildModel::new(GUILD_ID);
+    desired
+        .channels
+        .insert(ticket_channel, channel(ticket_channel, "ticket-17", None));
+    desired.overwrites.insert(
+        OverwriteKey {
+            channel_id: ticket_channel,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        },
+        overwrite(ticket_channel, TargetKind::Role, GUILD_ID, 0, 1024),
+    );
+
+    let mut actual = desired.clone();
+    actual
+        .overwrites
+        .get_mut(&OverwriteKey {
+            channel_id: ticket_channel,
+            target_kind: TargetKind::Role,
+            target_id: GUILD_ID,
+        })
+        .expect("ticket overwrite")
+        .deny_bits = 0;
+
+    let namespace = DynamicNamespace {
+        namespace_id: Some(8),
+        namespace_key: "ticket_channels".to_string(),
+        system_name: "TicketTool".to_string(),
+        match_rule: NamespaceMatch::NamePattern(r"^(ticket|closed)-[0-9]+$".to_string()),
+    };
+
+    let diff = diff_models(&desired, &actual, &[namespace], &[])?;
+    assert_eq!(diff.filtered.len(), 0);
+    assert_eq!(diff.changes.len(), 1);
+    assert_eq!(diff.changes[0].object.kind, ObjectKind::PermissionOverwrite);
+    Ok(())
+}
+
+#[test]
 fn menschenlesbare_ausgabe_beschreibt_leeren_und_vollen_diff() -> anyhow::Result<()> {
     // Leerer Diff: klare Alles-in-Ordnung-Meldung.
     let desired = GuildModel::new(GUILD_ID);

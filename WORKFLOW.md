@@ -1,3 +1,33 @@
+# Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
+
+## Mini-Rework Rollen-Fallback + Filter-Randtests
+- Mini-Rework gestartet: Scope ist nur konservativer Coaching-User-Overwrite-Fallback bei fehlender Ersatzrolle, zwei Exception-Filter-Randtests und diese WORKFLOW-Notiz. Kein Commit/Push.
+- Implementiert: fehlende Coaching-Ersatzrolle bzw. nicht aufloesbare Ersatzzuordnung behaelt den Original-User-Overwrite unveraendert im Soll-Modell und warnt mit "Ersatz nicht möglich, manuell klären".
+- Tests ergaenzt: Rollen-Fallback ohne Team-Leo-Rolle prueft byte-identischen Overwrite-Erhalt + Warning; Diff-Engine prueft entfernten dokumentierten Ban-Overwrite und `allow_bits`+`deny_bits`-Registry-Exaktheit.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code` = 18 passed + 8 ignored; `SQLX_OFFLINE=true cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `cargo fmt -p dl-server-as-code -- --check`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` = 28 passed; `git diff --check`. Punkt 2 fand keinen `diff.rs`-Bug, daher keine Diff-Code-Aenderung.
+
+## Ziel
+Dokumentierte Rechte-Regeln aus `docs/onboarding-redesign/phase1-rechte-soll-modell.ENTWURF.md` als pure Ist->Soll-Transformation fuer `dl-server-as-code` plus transaktionaler Bulk-Persist des Soll-Modells. Kein Commit/Push.
+
+## Fortschritt
+- Pflichtlektuere gelesen: Soll-Modell-Doku komplett, danach `model.rs`, `db.rs`, `diff.rs`, `import.rs`; zusaetzlich Schema, Exporte und bestehende Tests gesichtet.
+- Umsetzung gestartet: neues `rules.rs` fuer ID-erbende Transformation; DB-Persist soll vorhandene `desired_*`, `dynamic_namespaces` und `documented_exceptions` idempotent upserten.
+- Implementiert: `derive_desired_model` klont das Ist-Modell, setzt @everyone-Basisrechte nach §2/6.1, wendet Kategorie-/Kanal-Overwrite-Regeln aus §3/§6 namebasiert an, erzeugt DynamicNamespaces fuer TempVoice/Tickets/Bot-Pate und DocumentedExceptions fuer User-Bans/funktionale 6.8-User-Allows.
+- Implementiert: `persist_desired_model` transaktional mit Upserts fuer `desired_*`, `dynamic_namespaces`, `documented_exceptions`; stale Desired-Zeilen werden fuer die Guild entfernt, stale Namespaces/Ausnahmen inaktiv gesetzt. `adopt_change` blieb unveraendert.
+- Tests ergaenzt: pure Regeltests fuer Profile, @everyone ohne TTS/private Threads, unbekannte Kategorien, Ban-Ausnahmen und Struktur-Invariante; ignorierter DB-Test fuer idempotenten Bulk-Persist + Registry-Roundtrip.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code` = 11 passed + 8 ignored; `SQLX_OFFLINE=true cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `cargo fmt --check -p dl-server-as-code`; `git diff --check`; zusaetzlich `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` = 21 passed.
+
+## Rework nach adversarialem Review
+- Soll-Doku-Stellen erneut gelesen: §3.3/3.4/3.6/3.10/3.11, §4.1/4.2, §5 und Owner-Entscheidungen 6.4/6.8/6.9/6.10. Keine Commits/Pushes.
+- Regeln gehaertet: dokumentierte Struktur-Umzuege `deadlock-rang` -> Eingangsbereich, `stream-updates` -> Medien, `deadlock-invite` -> Chat setzen jetzt `parent_category_id`; Kinderregeln laufen danach gegen das Soll-Modell, sodass verschobene Kanaele die neue Kategorieklasse bekommen.
+- Coaching-Rework: leere und ADMIN-redundante Overwrites werden entfernt; ueberbreite Coaching-Masken werden reduziert; Team-Kapitaens-/Coach-User-Overwrites werden rollenbasiert ersetzt oder geloescht. X1/X2/X4 bleiben wegen 6.9/6.10 1:1; X3 bleibt nur als Coaching-Kategorie `-VIEW`.
+- Diff-Rework: DocumentedExceptions filtern nur noch, wenn die Actual-Seite exakt dem Registry-Zustand entspricht; DynamicNamespaces filtern Kanal-Existenz und nur TempVoice-Overwrite-Freiheit, Ticket-/Bot-Pate-Overwrite-Drift bleibt sichtbar.
+- Tests erweitert: Struktur-Invariante prueft IDs, Parent-Erhalt fuer nicht umgezogene Kanaele, BotMessage-Objekte und 6.9/6.10-bytegleiche Overwrites; DB-Test prueft Stale-Sweep fuer Kategorien, Rollen und Overwrites; Diff-Tests decken abgeschwaechte Exceptions und Ticket-Overwrite-Drift ab.
+- Rework-Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code` = 15 passed + 8 ignored; `SQLX_OFFLINE=true cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `cargo fmt -p dl-server-as-code -- --check`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` = 25 passed; `SQLX_OFFLINE=true cargo check --workspace --all-features`; `git diff --check`.
+- Verify-Kritiker 2026-07-02 gestartet: Fixes werden read-only gegen Soll-Doku, Code und Tests geprueft; keine Code-/Testaenderungen, kein Commit/Push.
+- Verify-Kritiker Ergebnis: keine BLOCKER gefunden. Fix 2 und 4 sind funktional weitgehend umgesetzt, aber test-/sicherheitsseitig nur teilweise belegt: fehlende Coaching-Ersatzrolle fuehrt zu Warning+Overwrite-Entfall, und Exception-Filter-Randfaelle `actual fehlt` sowie `allow+deny` sind nicht direkt getestet.
+- Verify-Kritiker Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code` = 15 passed + 8 ignored; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` = 25 passed; `SQLX_OFFLINE=true cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `SQLX_OFFLINE=true cargo check --workspace --all-features`; `git diff --check`.
+
 # P1 LLM-Provider-Abstraktion (2026-07-02)
 
 ## Ziel

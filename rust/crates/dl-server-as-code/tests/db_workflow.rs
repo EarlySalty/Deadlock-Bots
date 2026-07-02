@@ -1,8 +1,9 @@
 use dl_central_db::test_pool;
 use dl_server_as_code::{
     adopt_change, apply_preview, db, detect_and_record_drift, diff_models, ApplyOptions,
-    CategorySpec, ChannelKind, ChannelSpec, GuildModel, OverwriteKey, PermissionOverwriteSpec,
-    RoleSpec, TargetKind,
+    BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, DocumentedException, DynamicNamespace,
+    GuildModel, NamespaceMatch, ObjectKind, OverwriteKey, PermissionOverwriteSpec, RoleSpec,
+    TargetKind,
 };
 use serenity::all::Http;
 use sqlx::{PgPool, Row};
@@ -162,6 +163,169 @@ async fn snapshot_persistiert_jeden_lauf_neu_und_laedt_modell() -> anyhow::Resul
 
     let loaded = db::load_snapshot_model(&db, first.snapshot_id).await?;
     assert_eq!(loaded, model(7));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "braucht CENTRAL_TEST_DSN/DATABASE_URL/DEADLOCK_CENTRAL_DSN"]
+async fn desired_bulk_persist_ist_idempotent_und_schreibt_registries() -> anyhow::Result<()> {
+    let db = test_pool().await?;
+    let mut expanded = model(7);
+    expanded.categories.insert(
+        798,
+        CategorySpec {
+            guild_id: GUILD_ID,
+            category_id: 798,
+            name: "Stale Kategorie".to_string(),
+            position: 99,
+        },
+    );
+    expanded.channels.insert(
+        799,
+        ChannelSpec {
+            guild_id: GUILD_ID,
+            channel_id: 799,
+            name: "stale".to_string(),
+            kind: ChannelKind::Text,
+            topic: None,
+            position: 3,
+            parent_category_id: Some(CATEGORY_ID),
+            nsfw: false,
+            bitrate: None,
+            user_limit: None,
+            rate_limit_per_user: None,
+            status: None,
+        },
+    );
+    expanded.roles.insert(
+        801,
+        RoleSpec {
+            guild_id: GUILD_ID,
+            role_id: 801,
+            name: "Stale Rolle".to_string(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+            permissions_bitmask: 123,
+            position: 99,
+        },
+    );
+    expanded.overwrites.insert(
+        OverwriteKey {
+            channel_id: 799,
+            target_kind: TargetKind::Role,
+            target_id: 801,
+        },
+        PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: 799,
+                target_kind: TargetKind::Role,
+                target_id: 801,
+            },
+            allow_bits: 8,
+            deny_bits: 16,
+        },
+    );
+    expanded.bot_messages.insert(
+        (CHANNEL_ID, "panel-main".to_string()),
+        BotMessageSpec {
+            guild_id: GUILD_ID,
+            channel_id: CHANNEL_ID,
+            message_key: "panel-main".to_string(),
+            message_kind: "panel".to_string(),
+            message_id: Some(900),
+            content_hash: Some("hash-a".to_string()),
+        },
+    );
+    let namespaces = vec![
+        DynamicNamespace {
+            namespace_id: None,
+            namespace_key: "tickets".to_string(),
+            system_name: "TicketTool".to_string(),
+            match_rule: NamespaceMatch::NamePrefix("ticket-".to_string()),
+        },
+        DynamicNamespace {
+            namespace_id: None,
+            namespace_key: "stale_namespace".to_string(),
+            system_name: "old".to_string(),
+            match_rule: NamespaceMatch::NamePrefix("old-".to_string()),
+        },
+    ];
+    let exceptions = vec![
+        DocumentedException {
+            exception_id: None,
+            exception_key: "user-ban-1".to_string(),
+            object_kind: ObjectKind::PermissionOverwrite,
+            channel_id: Some(CHANNEL_ID),
+            target_kind: Some(TargetKind::Member),
+            target_id: Some(500),
+            allow_bits: Some(0),
+            deny_bits: Some(2),
+            reason: "PLATZHALTER rust/crates/dl-server-as-code/tests/db_workflow.rs:204"
+                .to_string(),
+        },
+        DocumentedException {
+            exception_id: None,
+            exception_key: "stale-exception".to_string(),
+            object_kind: ObjectKind::PermissionOverwrite,
+            channel_id: Some(799),
+            target_kind: Some(TargetKind::Member),
+            target_id: Some(501),
+            allow_bits: Some(0),
+            deny_bits: Some(4),
+            reason: "PLATZHALTER rust/crates/dl-server-as-code/tests/db_workflow.rs:217"
+                .to_string(),
+        },
+    ];
+    db::persist_desired_model(&db, &expanded, &namespaces, &exceptions).await?;
+
+    let mut base = model(11);
+    base.bot_messages.insert(
+        (CHANNEL_ID, "panel-main".to_string()),
+        BotMessageSpec {
+            guild_id: GUILD_ID,
+            channel_id: CHANNEL_ID,
+            message_key: "panel-main".to_string(),
+            message_kind: "panel".to_string(),
+            message_id: Some(901),
+            content_hash: Some("hash-b".to_string()),
+        },
+    );
+    db::persist_desired_model(&db, &base, &namespaces[..1], &exceptions[..1]).await?;
+    db::persist_desired_model(&db, &base, &namespaces[..1], &exceptions[..1]).await?;
+
+    let loaded = db::load_desired_model(&db, GUILD_ID).await?;
+    assert_eq!(
+        loaded
+            .roles
+            .get(&ROLE_ID)
+            .map(|role| role.permissions_bitmask),
+        Some(11)
+    );
+    assert!(!loaded.categories.contains_key(&798));
+    assert!(!loaded.channels.contains_key(&799));
+    assert!(!loaded.roles.contains_key(&801));
+    assert!(!loaded.overwrites.contains_key(&OverwriteKey {
+        channel_id: 799,
+        target_kind: TargetKind::Role,
+        target_id: 801,
+    }));
+    assert_eq!(
+        loaded
+            .bot_messages
+            .get(&(CHANNEL_ID, "panel-main".to_string()))
+            .and_then(|message| message.message_id),
+        Some(901)
+    );
+
+    let loaded_namespaces = db::load_dynamic_namespaces(&db, GUILD_ID).await?;
+    assert_eq!(loaded_namespaces.len(), 1);
+    assert_eq!(loaded_namespaces[0].namespace_key, "tickets");
+    let loaded_exceptions = db::load_documented_exceptions(&db, GUILD_ID).await?;
+    assert_eq!(loaded_exceptions.len(), 1);
+    assert_eq!(loaded_exceptions[0].exception_key, "user-ban-1");
     Ok(())
 }
 

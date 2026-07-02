@@ -15,10 +15,12 @@ pub mod drift;
 pub mod format;
 pub mod import;
 pub mod model;
+pub mod rules;
 
 pub use apply::{apply_preview, ApplyChangeResult, ApplyOptions, ApplyReport};
 pub use db::{
-    adopt_change, load_desired_model, load_snapshot_model, persist_diff_preview, DiffPreview,
+    adopt_change, load_desired_model, load_snapshot_model, persist_desired_model,
+    persist_diff_preview, DiffPreview,
 };
 pub use diff::{
     diff_models, diff_models_with_options, DiffAction, DiffChange, DiffOptions, FieldDiff,
@@ -30,6 +32,11 @@ pub use model::{
     BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, DiscordId, DocumentedException,
     DynamicNamespace, GuildModel, NamespaceMatch, ObjectKind, ObjectRef, OverwriteKey,
     PermissionOverwriteSpec, RoleSpec, TargetKind,
+};
+pub use rules::{
+    derive_desired_model, everyone_basis_bits, f_everyone_hidden_profile,
+    f_role_visibility_profile, p0_public_profile, p1_announcement_profile, p2_panel_bot_profile,
+    DesiredDerivation, PermissionOverwriteProfile,
 };
 
 pub const DEFAULT_GUILD_ID: u64 = 1_289_721_245_281_292_288;

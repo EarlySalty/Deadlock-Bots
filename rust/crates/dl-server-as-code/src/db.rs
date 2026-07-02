@@ -133,6 +133,39 @@ pub async fn persist_snapshot_model(
     })
 }
 
+pub async fn persist_desired_model(
+    pool: &PgPool,
+    model: &GuildModel,
+    dynamic_namespaces: &[DynamicNamespace],
+    documented_exceptions: &[DocumentedException],
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    let guild_i64 = id_to_i64(model.guild_id)?;
+
+    for category in model.categories.values() {
+        upsert_desired_category(&mut tx, category).await?;
+    }
+    for channel in model.channels.values() {
+        upsert_desired_channel(&mut tx, channel).await?;
+    }
+    for role in model.roles.values() {
+        upsert_desired_role(&mut tx, role).await?;
+    }
+    for overwrite in model.overwrites.values() {
+        upsert_desired_overwrite(&mut tx, overwrite).await?;
+    }
+    for message in model.bot_messages.values() {
+        upsert_desired_bot_message(&mut tx, message).await?;
+    }
+
+    delete_absent_desired_rows(&mut tx, model, guild_i64).await?;
+    persist_dynamic_namespaces(&mut tx, model.guild_id, dynamic_namespaces).await?;
+    persist_documented_exceptions(&mut tx, model.guild_id, documented_exceptions).await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn load_desired_model(pool: &PgPool, guild_id: DiscordId) -> Result<GuildModel> {
     let mut model = GuildModel::new(guild_id);
     let guild_i64 = id_to_i64(guild_id)?;
@@ -832,6 +865,28 @@ async fn delete_desired_object(
     Ok(())
 }
 
+async fn upsert_desired_category(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spec: &CategorySpec,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO server_config.desired_categories
+         (guild_id, category_id, name, position)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (guild_id, category_id)
+         DO UPDATE SET name = EXCLUDED.name,
+                       position = EXCLUDED.position,
+                       updated_at = now()",
+    )
+    .bind(id_to_i64(spec.guild_id)?)
+    .bind(id_to_i64(spec.category_id)?)
+    .bind(&spec.name)
+    .bind(spec.position)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
 async fn upsert_desired_channel(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     spec: &ChannelSpec,
@@ -868,6 +923,284 @@ async fn upsert_desired_channel(
     .bind(&spec.status)
     .execute(&mut **tx)
     .await?;
+    Ok(())
+}
+
+async fn upsert_desired_role(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spec: &RoleSpec,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO server_config.desired_roles
+         (guild_id, role_id, name, color, hoist, mentionable, managed, permissions_bitmask, position)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+         ON CONFLICT (guild_id, role_id)
+         DO UPDATE SET name = EXCLUDED.name,
+                       color = EXCLUDED.color,
+                       hoist = EXCLUDED.hoist,
+                       mentionable = EXCLUDED.mentionable,
+                       managed = EXCLUDED.managed,
+                       permissions_bitmask = EXCLUDED.permissions_bitmask,
+                       position = EXCLUDED.position,
+                       updated_at = now()",
+    )
+    .bind(id_to_i64(spec.guild_id)?)
+    .bind(id_to_i64(spec.role_id)?)
+    .bind(&spec.name)
+    .bind(spec.color)
+    .bind(spec.hoist)
+    .bind(spec.mentionable)
+    .bind(spec.managed)
+    .bind(bitmask_to_i64(spec.permissions_bitmask)?)
+    .bind(spec.position)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_desired_overwrite(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spec: &PermissionOverwriteSpec,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO server_config.desired_permission_overwrites
+         (guild_id, channel_id, target_type, target_id, allow_bits, deny_bits)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (guild_id, channel_id, target_type, target_id)
+         DO UPDATE SET allow_bits = EXCLUDED.allow_bits,
+                       deny_bits = EXCLUDED.deny_bits,
+                       updated_at = now()",
+    )
+    .bind(id_to_i64(spec.guild_id)?)
+    .bind(id_to_i64(spec.key.channel_id)?)
+    .bind(spec.key.target_kind.as_db())
+    .bind(id_to_i64(spec.key.target_id)?)
+    .bind(bitmask_to_i64(spec.allow_bits)?)
+    .bind(bitmask_to_i64(spec.deny_bits)?)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn upsert_desired_bot_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    spec: &BotMessageSpec,
+) -> Result<()> {
+    sqlx::query(
+        "INSERT INTO server_config.desired_bot_messages
+         (guild_id, channel_id, message_key, message_kind, message_id, expected_hash)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (guild_id, channel_id, message_key)
+         DO UPDATE SET message_kind = EXCLUDED.message_kind,
+                       message_id = EXCLUDED.message_id,
+                       expected_hash = EXCLUDED.expected_hash,
+                       updated_at = now()",
+    )
+    .bind(id_to_i64(spec.guild_id)?)
+    .bind(id_to_i64(spec.channel_id)?)
+    .bind(&spec.message_key)
+    .bind(&spec.message_kind)
+    .bind(optional_id(spec.message_id)?)
+    .bind(&spec.content_hash)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn delete_absent_desired_rows(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    model: &GuildModel,
+    guild_i64: i64,
+) -> Result<()> {
+    let category_ids = ids_to_i64(model.categories.keys().copied())?;
+    sqlx::query(
+        "DELETE FROM server_config.desired_categories
+          WHERE guild_id = $1
+            AND NOT (category_id = ANY($2::bigint[]))",
+    )
+    .bind(guild_i64)
+    .bind(&category_ids)
+    .execute(&mut **tx)
+    .await?;
+
+    let channel_ids = ids_to_i64(model.channels.keys().copied())?;
+    sqlx::query(
+        "DELETE FROM server_config.desired_channels
+          WHERE guild_id = $1
+            AND NOT (channel_id = ANY($2::bigint[]))",
+    )
+    .bind(guild_i64)
+    .bind(&channel_ids)
+    .execute(&mut **tx)
+    .await?;
+
+    let role_ids = ids_to_i64(model.roles.keys().copied())?;
+    sqlx::query(
+        "DELETE FROM server_config.desired_roles
+          WHERE guild_id = $1
+            AND NOT (role_id = ANY($2::bigint[]))",
+    )
+    .bind(guild_i64)
+    .bind(&role_ids)
+    .execute(&mut **tx)
+    .await?;
+
+    let mut overwrite_channel_ids = Vec::new();
+    let mut overwrite_target_types = Vec::new();
+    let mut overwrite_target_ids = Vec::new();
+    for key in model.overwrites.keys() {
+        overwrite_channel_ids.push(id_to_i64(key.channel_id)?);
+        overwrite_target_types.push(key.target_kind.as_db().to_string());
+        overwrite_target_ids.push(id_to_i64(key.target_id)?);
+    }
+    sqlx::query(
+        "DELETE FROM server_config.desired_permission_overwrites desired
+          WHERE guild_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM unnest($2::bigint[], $3::text[], $4::bigint[])
+                       AS keep(channel_id, target_type, target_id)
+                 WHERE keep.channel_id = desired.channel_id
+                   AND keep.target_type = desired.target_type
+                   AND keep.target_id = desired.target_id
+            )",
+    )
+    .bind(guild_i64)
+    .bind(&overwrite_channel_ids)
+    .bind(&overwrite_target_types)
+    .bind(&overwrite_target_ids)
+    .execute(&mut **tx)
+    .await?;
+
+    let mut message_channel_ids = Vec::new();
+    let mut message_keys = Vec::new();
+    for (channel_id, message_key) in model.bot_messages.keys() {
+        message_channel_ids.push(id_to_i64(*channel_id)?);
+        message_keys.push(message_key.clone());
+    }
+    sqlx::query(
+        "DELETE FROM server_config.desired_bot_messages desired
+          WHERE guild_id = $1
+            AND NOT EXISTS (
+                SELECT 1
+                  FROM unnest($2::bigint[], $3::text[]) AS keep(channel_id, message_key)
+                 WHERE keep.channel_id = desired.channel_id
+                   AND keep.message_key = desired.message_key
+            )",
+    )
+    .bind(guild_i64)
+    .bind(&message_channel_ids)
+    .bind(&message_keys)
+    .execute(&mut **tx)
+    .await?;
+
+    Ok(())
+}
+
+async fn persist_dynamic_namespaces(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    guild_id: DiscordId,
+    namespaces: &[DynamicNamespace],
+) -> Result<()> {
+    let guild_i64 = id_to_i64(guild_id)?;
+    let namespace_keys: Vec<_> = namespaces
+        .iter()
+        .map(|namespace| namespace.namespace_key.clone())
+        .collect();
+    sqlx::query(
+        "UPDATE server_config.dynamic_namespaces
+            SET active = false,
+                updated_at = now()
+          WHERE guild_id = $1
+            AND NOT (namespace_key = ANY($2::text[]))",
+    )
+    .bind(guild_i64)
+    .bind(&namespace_keys)
+    .execute(&mut **tx)
+    .await?;
+
+    for namespace in namespaces {
+        let (rule_type, rule_json) = namespace_match_to_db(&namespace.match_rule)?;
+        sqlx::query(
+            "INSERT INTO server_config.dynamic_namespaces
+             (guild_id, namespace_key, system_name, object_kind, match_rule_type, match_rule, foreign_writer, active)
+             VALUES ($1, $2, $3, 'channel', $4, $5::text::jsonb, $6, true)
+             ON CONFLICT (guild_id, namespace_key)
+             DO UPDATE SET system_name = EXCLUDED.system_name,
+                           object_kind = EXCLUDED.object_kind,
+                           match_rule_type = EXCLUDED.match_rule_type,
+                           match_rule = EXCLUDED.match_rule,
+                           foreign_writer = EXCLUDED.foreign_writer,
+                           active = true,
+                           updated_at = now()",
+        )
+        .bind(guild_i64)
+        .bind(&namespace.namespace_key)
+        .bind(&namespace.system_name)
+        .bind(rule_type)
+        .bind(rule_json.to_string())
+        .bind(&namespace.system_name)
+        .execute(&mut **tx)
+        .await?;
+    }
+    Ok(())
+}
+
+async fn persist_documented_exceptions(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    guild_id: DiscordId,
+    exceptions: &[DocumentedException],
+) -> Result<()> {
+    let guild_i64 = id_to_i64(guild_id)?;
+    let exception_keys: Vec<_> = exceptions
+        .iter()
+        .map(|exception| exception.exception_key.clone())
+        .collect();
+    sqlx::query(
+        "UPDATE server_config.documented_exceptions
+            SET active = false,
+                updated_at = now()
+          WHERE guild_id = $1
+            AND NOT (exception_key = ANY($2::text[]))",
+    )
+    .bind(guild_i64)
+    .bind(&exception_keys)
+    .execute(&mut **tx)
+    .await?;
+
+    for exception in exceptions {
+        sqlx::query(
+            "INSERT INTO server_config.documented_exceptions
+             (guild_id, exception_key, exception_type, object_kind, object_id, channel_id, target_type,
+              target_id, allow_bits, deny_bits, reason, active)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, true)
+             ON CONFLICT (guild_id, exception_key)
+             DO UPDATE SET exception_type = EXCLUDED.exception_type,
+                           object_kind = EXCLUDED.object_kind,
+                           object_id = EXCLUDED.object_id,
+                           channel_id = EXCLUDED.channel_id,
+                           target_type = EXCLUDED.target_type,
+                           target_id = EXCLUDED.target_id,
+                           allow_bits = EXCLUDED.allow_bits,
+                           deny_bits = EXCLUDED.deny_bits,
+                           reason = EXCLUDED.reason,
+                           active = true,
+                           updated_at = now()",
+        )
+        .bind(guild_i64)
+        .bind(&exception.exception_key)
+        .bind(exception_type(exception))
+        .bind(exception.object_kind.as_db())
+        .bind(optional_id(exception.channel_id)?)
+        .bind(optional_id(exception.channel_id)?)
+        .bind(exception.target_kind.map(TargetKind::as_db))
+        .bind(optional_id(exception.target_id)?)
+        .bind(optional_bitmask_i64(exception.allow_bits)?)
+        .bind(optional_bitmask_i64(exception.deny_bits)?)
+        .bind(&exception.reason)
+        .execute(&mut **tx)
+        .await?;
+    }
     Ok(())
 }
 
@@ -955,6 +1288,39 @@ fn json_string(value: &Value, key: &str) -> Result<String> {
         .to_string())
 }
 
+fn namespace_match_to_db(match_rule: &NamespaceMatch) -> Result<(&'static str, Value)> {
+    match match_rule {
+        NamespaceMatch::ParentCategory(parent_category_id) => Ok((
+            "parent_category",
+            serde_json::json!({ "parent_category_id": *parent_category_id }),
+        )),
+        NamespaceMatch::NamePrefix(prefix) => {
+            Ok(("name_prefix", serde_json::json!({ "prefix": prefix })))
+        }
+        NamespaceMatch::NamePattern(pattern) => {
+            Ok(("name_pattern", serde_json::json!({ "pattern": pattern })))
+        }
+        NamespaceMatch::ChannelId(channel_id) => Ok((
+            "channel_id",
+            serde_json::json!({ "channel_id": *channel_id }),
+        )),
+    }
+}
+
+fn exception_type(exception: &DocumentedException) -> &'static str {
+    match exception.object_kind {
+        ObjectKind::PermissionOverwrite => "permission_overwrite",
+        ObjectKind::Category => "category",
+        ObjectKind::Channel => "channel",
+        ObjectKind::Role => "role",
+        ObjectKind::BotMessage => "bot_message",
+    }
+}
+
+fn ids_to_i64(ids: impl IntoIterator<Item = u64>) -> Result<Vec<i64>> {
+    ids.into_iter().map(id_to_i64).collect()
+}
+
 fn optional_id(value: Option<u64>) -> Result<Option<i64>> {
     value.map(id_to_i64).transpose()
 }
@@ -965,4 +1331,8 @@ fn optional_u64(value: Option<i64>) -> Option<u64> {
 
 fn optional_bitmask(value: Option<i64>) -> Option<u64> {
     value.map(i64_to_bitmask)
+}
+
+fn optional_bitmask_i64(value: Option<u64>) -> Result<Option<i64>> {
+    value.map(bitmask_to_i64).transpose()
 }
