@@ -3180,7 +3180,7 @@ mod tests {
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
-    use dl_db::Db;
+    use sqlx::postgres::PgPoolOptions;
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
@@ -3227,9 +3227,11 @@ mod tests {
 
     fn test_review_handler() -> (tempfile::TempDir, ReviewHandler) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let db = Db::open_creating(dir.path().join("moderation.sqlite3")).expect("db");
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://dl-bot-review-handler-test.invalid/deadlock")
+            .expect("lazy pg pool");
         let moderator = dl_moderation::AiModerator::new(
-            db,
+            pool,
             Arc::new(StaticGenerator),
             None,
             Arc::new(NoopModPort),
