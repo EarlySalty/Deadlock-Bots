@@ -32,3 +32,42 @@ Das blieb bisher folgenlos, weil kein anderer Schema-Teil hart gegen `core.users
 ## Reconciliation-Statistik
 
 Kandidaten gesamt: 7361. `applied: 1389`, `noop: 8`, `conflict: 5`, `skipped: 5959` (davon der Großteil `steam.steam_rank_history` mit 4939 Zeilen — bekannte offene Owner-Entscheidung "Steam-Queue-Replay" aus dem Reconciliation-Plan, absichtlich nicht automatisch gemergt).
+
+## Nachtrag — Steam-Bot-Cutover nachgeholt (05:21–05:28 CEST)
+
+`upsert_user` per `CoreUserSync` (rust/crates/dl-discord/src/core_user_sync.rs) in dl-bot's
+Gateway-Handler verdrahtet (`interaction_create`/`message`/`guild_member_addition`/
+`guild_member_update`), 10-Minuten-Cooldown pro discord_id, DB-Write per `tokio::spawn`
+entkoppelt vom Event-Dispatch (ein unabhängiger Kritiker fand zunächst einen blockierenden
+`.await` vor dem fachlichen Dispatch — Risiko: Discords 3s-Interaction-ACK-Fenster vs. 10s
+DB-Pool-Timeout; behoben und erneut grün verifiziert vor dem Merge nach main, main
+`73713ce`). Live bestätigt: `core.users` bekommt seit dem Bot-Neustart organisch neue
+Zeilen aus echtem Discord-Traffic (nicht nur dem historischen Stub-Backfill).
+
+Steam-Bot/Steam-Core (Deadlock-Steam-Bot main `6dd650d`, central-postgres-sp3) danach
+regulär auf zentrale Postgres umgestellt: Release-Binaries neu gebaut (Cargo-Fingerprint-
+Cache hatte den Rollback-Binary-Austausch nicht erkannt — expliziter Rebuild via
+`touch`+`cargo build --release` nötig, sonst wäre das alte SQLite-Binary stehen geblieben),
+`Environment=DEADLOCK_DB_PATH=…` aus beiden systemd-Units entfernt (neue Binaries lesen
+nur noch `DEADLOCK_CENTRAL_DSN`, bereits über die bestehende Infisical-Config verfügbar —
+keine Secret-Änderung nötig). Wartungsfenster: Dienste gestoppt, `lsof` bestätigt keine
+offene SQLite-Datei mehr, Dienste mit neuen Binaries gestartet.
+
+Live-Beweis: `steam.steam_role_cleanup_pending` (6 durabler Backlog-Einträge aus der Zeit
+vor dem Cutover) beim Boot vollständig gedraint (0 danach), `core.steam_links` mit 291
+Zeilen in den ersten 5 Minuten aktualisiert (realer `friend_sync`-Lauf gegen die zentrale
+DB), Steam-GC-Session aktiv, keine Journal-Fehler.
+
+Offen (kein Blocker, aus unabhängigem Bug-Sweep `rust/docs/audit/2026-07-02-steam-domain-bug-sweep.md`
+im Steam-Bot-Repo): 1 Hoch-Befund (parallele Link-Upserts können mehrere Primary-Accounts
+pro User erzeugen — fehlende Partial-Unique-Constraint), 4 Mittel-Befunde (Rank-History
+nicht Account-spezifisch, Subrank-Tiebreaker im Background-Sync inkonsistent zu
+`/checkrank`, Ko-fi-Token-Race bei Doppelklick, Friend-Request-Status hängt an
+prozesslokalem Waiter). Keiner davon wurde durch den Cutover verschärft — alle bestehen
+bereits seit dem SP3-Merge im Code, unabhängig vom aktiven DB-Backend.
+
+Separat gefunden, nicht behoben (anderes Themenfeld, nicht Teil dieses Cutovers):
+`rust/bin/dl-bot/src/modglue.rs:3183` referenziert seit einem fremden Commit vom 2026-06-30
+(`wip(enforcement): …`) die Crate `dl_db`, die seit der SP1-Migration nicht mehr im
+Workspace existiert. Betrifft nur den Test-Build (`cargo test`/`clippy --all-targets`),
+nicht den Release-Build (`cargo build --workspace` bleibt grün).

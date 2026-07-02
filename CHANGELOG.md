@@ -1,3 +1,11 @@
+## #187 — Steam-Verknüpfung läuft jetzt komplett auf der neuen zentralen Datenbank
+
+**Ausgangslage:** Bei der Umstellung auf die neue zentrale Datenbank hatte der Bot User-Profile nirgends aktiv nachgetragen — das fiel erst auf, als eine neue Steam-Verknüpfung dagegen lief. Der Steam-Bot lief deshalb übergangsweise noch auf der alten, separaten Datenbank weiter.
+
+**Was wurde geändert:** Der Bot trägt jetzt bei jeder normalen Aktivität (Nachricht, Befehl, Server-Beitritt) automatisch nach, wer gerade da ist — mit eingebauter Bremse, damit das keine unnötige Last erzeugt. Erst danach wurde der Steam-Bot komplett auf die neue Datenbank umgestellt.
+
+**Wie es jetzt läuft:** Neue Steam-Verknüpfungen funktionieren zuverlässig für jeden User, auch für welche, die vorher noch nie mit dem Bot interagiert haben. Steam-Bot und Hauptbot teilen sich jetzt dieselbe Datenbank.
+
 ## #186 — Automatische Text-Moderation vorübergehend pausiert
 
 **Ausgangslage:** Die automatische Moderation hat Textnachrichten teils eigenständig gelöscht und mit einer Auszeit belegt — ohne dass ein Mod das vorher freigeben oder hinterher leicht nachvollziehen konnte, und stellenweise zu vorschnell.
