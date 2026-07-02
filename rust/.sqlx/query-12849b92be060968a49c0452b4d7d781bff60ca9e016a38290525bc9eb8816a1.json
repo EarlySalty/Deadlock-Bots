@@ -1,0 +1,38 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT c.origin_hero_build_id,\n                   c.status,\n                   c.attempts AS \"attempts!\",\n                   t.payload::text AS \"payload?\"\n              FROM tierlist.hero_build_clones c\n              LEFT JOIN steam.steam_tasks t\n                     ON t.payload ? 'origin_hero_build_id'\n                    AND t.payload->>'origin_hero_build_id' ~ '^-?[0-9]+$'\n                    AND (t.payload->>'origin_hero_build_id')::BIGINT = c.origin_hero_build_id\n             ORDER BY c.origin_hero_build_id\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "origin_hero_build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 3,
+        "name": "payload?",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      null
+    ]
+  },
+  "hash": "12849b92be060968a49c0452b4d7d781bff60ca9e016a38290525bc9eb8816a1"
+}

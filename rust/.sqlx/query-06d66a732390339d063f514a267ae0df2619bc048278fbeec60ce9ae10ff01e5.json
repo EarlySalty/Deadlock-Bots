@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO steam.steam_tasks(id, type, payload, status, result, finished_at)\n            VALUES(920, 'BUILD_PUBLISH', $1::text::jsonb, 'DONE', $2::text::jsonb, $3)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "06d66a732390339d063f514a267ae0df2619bc048278fbeec60ce9ae10ff01e5"
+}

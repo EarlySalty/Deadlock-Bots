@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO core.users (discord_id)\n            VALUES (100), (200)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "c567d47618c7d9444eb3dcf5b48aef99d0d02b71f3764326d40a26fadd560dd4"
+}

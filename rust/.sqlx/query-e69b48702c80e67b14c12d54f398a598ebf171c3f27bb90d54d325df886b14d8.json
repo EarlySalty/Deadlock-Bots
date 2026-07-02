@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT status, attempts AS \"attempts!\", uploaded_build_id, uploaded_version, status_info\n              FROM tierlist.hero_build_clones\n             WHERE origin_hero_build_id = 600\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "status",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "attempts!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "uploaded_build_id",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "uploaded_version",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "status_info",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "e69b48702c80e67b14c12d54f398a598ebf171c3f27bb90d54d325df886b14d8"
+}

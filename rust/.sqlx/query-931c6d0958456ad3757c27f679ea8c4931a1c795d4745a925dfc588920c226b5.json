@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO bot.standalone_bot_state(bot, heartbeat, payload)\n            VALUES('steam', now(), $1::text::jsonb)\n            ON CONFLICT(bot) DO UPDATE\n               SET payload = EXCLUDED.payload,\n                   heartbeat = EXCLUDED.heartbeat,\n                   updated_at = now()\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "931c6d0958456ad3757c27f679ea8c4931a1c795d4745a925dfc588920c226b5"
+}

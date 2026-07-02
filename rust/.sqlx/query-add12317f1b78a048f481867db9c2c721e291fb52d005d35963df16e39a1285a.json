@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.hero_build_clones(\n                origin_hero_build_id, hero_id, target_language, target_name,\n                target_description, created_at, attempts\n            )\n            VALUES($1, $2, 2, $3, $4, $5, $6)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Text",
+        "Text",
+        "Timestamptz",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "add12317f1b78a048f481867db9c2c721e291fb52d005d35963df16e39a1285a"
+}

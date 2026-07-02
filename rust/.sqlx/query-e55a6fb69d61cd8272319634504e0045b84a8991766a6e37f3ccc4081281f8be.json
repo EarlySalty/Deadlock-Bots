@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.hero_build_clones(\n                origin_hero_build_id, hero_id, target_language, status,\n                created_at, updated_at, last_attempt_at, attempts\n            ) VALUES(600, 1, 2, 'processing', $1, $1, $2, 2)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "e55a6fb69d61cd8272319634504e0045b84a8991766a6e37f3ccc4081281f8be"
+}

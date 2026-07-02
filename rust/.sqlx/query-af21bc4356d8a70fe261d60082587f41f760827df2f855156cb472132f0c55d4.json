@@ -1,0 +1,18 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.hero_build_sources(\n                hero_build_id, author_account_id, hero_id, language, version, name, published_at\n            )\n            VALUES($1, $2, $3, 1, 1, $4, $5)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Text",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "af21bc4356d8a70fe261d60082587f41f760827df2f855156cb472132f0c55d4"
+}

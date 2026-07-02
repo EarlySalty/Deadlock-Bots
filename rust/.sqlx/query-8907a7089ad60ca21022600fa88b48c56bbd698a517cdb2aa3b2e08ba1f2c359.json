@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO activity.live_player_state (\n                steam_id, deadlock_stage, deadlock_minutes, deadlock_localized,\n                deadlock_updated_at, last_seen_at, in_match_now_strict,\n                last_server_id, deadlock_party_hint\n            )\n            VALUES\n                ('steam-a', 'match', 12, 'Spiel (12. min.)', $1, $1, TRUE, 'srv-1', NULL),\n                ('steam-c', 'lobby', NULL, 'Lobby (2/6)', $1, $1, FALSE, 'srv-2', NULL)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8907a7089ad60ca21022600fa88b48c56bbd698a517cdb2aa3b2e08ba1f2c359"
+}

@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO tierlist.watched_build_authors(author_account_id, priority)\n            VALUES($1, $2)\n            ON CONFLICT(author_account_id) DO UPDATE\n               SET priority = EXCLUDED.priority\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "decc413690f9742fd5c5b43936358687bebf3d69a3b276e4cc0f273af0642d3e"
+}

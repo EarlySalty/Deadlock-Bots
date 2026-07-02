@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO core.steam_links (\n                discord_id, steam_id, verified, primary_account, updated_at\n            )\n            VALUES (100, 'x', TRUE, TRUE, NOW())\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "4d6b3981822291187cd70637474317647259db035a6e05aaecaec715c5de0990"
+}
