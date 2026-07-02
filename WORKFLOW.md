@@ -4,12 +4,16 @@
 Native Discord-Onboarding-Welle 2b lokal vorbereiten: neue Soll-Rollen, hash-gated Onboarding-Preview/Apply, `COMPLETED_ONBOARDING`-Journey-Event mit persistentem Dedupe, Legacy-Wizard-Einstiege deaktivieren. Kein Commit/Push; `CHANGELOG.md` bleibt unberuehrt.
 
 ## Fortschritt
+- Rework-Implementierungsworker fuer Kritiker-Befunde 1-8 gestartet. Verbindlich: nur Worktree `Deadlock-Bots-welle2b`, kein Commit/Push, `CHANGELOG.md` unberuehrt; Abschluss mit uncommitted Working Tree fuer Claude-Review.
 - Pflichtkontext gelesen: Konzept §3, `serversync.rs`, `dl-server-as-code::rules`, `dl-discord` Gateway/Dispatcher, `dl-activity::journey`, `journeyglue.rs`, `dl-community::onboarding` und Privacy-KV-Pfade.
 - Umsetzungsrichtung: Onboarding-Diff als `ServerDiff`-Preview mit kuenstlichem `native-onboarding`-Objekt in `server_config.diff_previews`; Apply laedt die gebundene Ziel-Config und schreibt per Discord-REST-PUT nur bei Hash-Match. Dedupe fuer Completed-Onboarding ueber `bot.kv_store`.
 - TDD gestartet: rote Tests fuer neue Rollen, Onboarding-Payload/7-5-Validierung, Completed-Onboarding-Klassifikation/Dedupe und deaktivierte Legacy-Wizard-Einstiege werden angelegt.
 - Implementiert: neue Soll-Rollen `Invite-Gast`, `Frischling`, `Streams`; Native-Onboarding-Preview/Apply fuer Slash und HTTP mit 7/5-Pruefung, Platzhalter-Snowflakes und Rang-Prompt-Uebernahme; `COMPLETED_ONBOARDING`-Event mit Nachlese, weicher Klassifikation und persistentem KV-Dedupe; Alt-Wizard-Auto-Start sowie `/publish_rules_panel`/`rp:panel:start` deaktiviert, Legacy-Wizard/Privacy-Pfade bleiben erhalten.
 - Platzhalterstelle aus dieser Welle: `rust/crates/dl-community/src/onboarding.rs` antwortet fuer alte Panel-/Command-Einstiege exakt mit `"Platzhalter"`, bis Claude den finalen Text liefert.
 - Verifikation gruen: `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot journeyglue::tests::native_onboarding_dedupe_marker_ist_persistent_und_einmalig -- --ignored`; `git diff --check`.
+- Rework umgesetzt: Onboarding-PUT serialisiert Discord-konform mit `emoji_*` statt GET-`emoji`, neue Prompts/Optionen lassen IDs weg, Rollenmatching ist exakt, Preview-Apply ist an Guild/Objekt/Message-Key/unapplied gebunden und revalidiert Live-Rollen/-Kanaele vor PUT.
+- Rework umgesetzt: Native-Onboarding-MemberFlags pruefen Prozess-Dedupe und KV vor Sleep/REST; KV-Claim und Journey-Record committen atomar in einer Transaktion. Welle2b-Rolle `Streams` erbt keine Template-Permissions mehr; `/publish_rules_panel`-Deregistrierung ist am Bulk-Overwrite-Startup-Sync dokumentiert.
+- Rework-Verifikation gruen: `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot onboarding -- --ignored`; `git diff --check`. Kein Commit/Push.
 
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
 

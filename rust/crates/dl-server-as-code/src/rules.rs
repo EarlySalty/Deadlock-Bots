@@ -442,7 +442,7 @@ fn apply_welle2b_roles(desired: &mut GuildModel) {
         hoist: template.is_some_and(|role| role.hoist),
         mentionable: template.is_some_and(|role| role.mentionable),
         managed: false,
-        permissions_bitmask: template.map_or(0, |role| role.permissions_bitmask),
+        permissions_bitmask: 0,
         position: next_position,
     };
     desired.roles.insert(role.role_id, role);
@@ -1857,7 +1857,15 @@ mod tests {
         let mut actual = actual_model();
         actual.roles.insert(
             400,
-            role_with_flags(400, "Patchnotes Ping Rolle", 0, 0x66ccff, false, true, 8),
+            role_with_flags(
+                400,
+                "Patchnotes Ping Rolle",
+                Permissions::ADMINISTRATOR.bits(),
+                0x66ccff,
+                false,
+                true,
+                8,
+            ),
         );
 
         let derived = derive_desired_model(&actual)?;

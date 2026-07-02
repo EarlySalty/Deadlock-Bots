@@ -577,6 +577,16 @@ pub async fn record_journey_event(
     pool: &PgPool,
     input: JourneyEventInput,
 ) -> ActivityDbResult<bool> {
+    let mut tx = pool.begin().await?;
+    let recorded = record_journey_event_tx(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(recorded)
+}
+
+pub async fn record_journey_event_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    input: JourneyEventInput,
+) -> ActivityDbResult<bool> {
     let user_id = discord_id_to_i64(input.user_id, "journey_events.user_id")?;
     let guild_id = discord_id_to_i64(input.guild_id, "journey_events.guild_id")?;
     let channel_id = optional_discord_id(input.channel_id, "journey_events.channel_id")?;
@@ -585,13 +595,11 @@ pub async fn record_journey_event(
     let metadata_json = metadata_text(&input.metadata)?;
     let weiche_choice = metadata_string(&input.metadata, &["weiche_choice", "choice"]);
 
-    let mut tx = pool.begin().await?;
-    if is_opted_out_tx(&mut tx, user_id).await? {
-        tx.commit().await?;
+    if is_opted_out_tx(tx, user_id).await? {
         return Ok(false);
     }
     insert_journey_event_tx(
-        &mut tx,
+        tx,
         user_id,
         guild_id,
         input.event_type,
@@ -604,7 +612,7 @@ pub async fn record_journey_event(
     )
     .await?;
     upsert_journey_state_tx(
-        &mut tx,
+        tx,
         user_id,
         guild_id,
         input.event_type,
@@ -614,7 +622,6 @@ pub async fn record_journey_event(
         &metadata_json,
     )
     .await?;
-    tx.commit().await?;
     Ok(true)
 }
 

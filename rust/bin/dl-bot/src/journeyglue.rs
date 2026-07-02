@@ -1,3 +1,4 @@
+use std::collections::{HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -6,9 +7,11 @@ use chrono::Utc;
 use dl_community::tags::{TagEvent, TagService};
 use serde_json::json;
 use serenity::all::{GuildId, UserId};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
+use tokio::sync::Mutex;
 
 pub const NATIVE_ONBOARDING_DEDUPE_NS: &str = "native_onboarding:completed";
+const NATIVE_ONBOARDING_PROCESS_DEDUPE_LIMIT: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeOnboardingRole {
@@ -30,6 +33,48 @@ impl NativeOnboardingChoice {
             Self::Freshling => "freshling",
             Self::Player => "player_lfg",
         }
+    }
+}
+
+struct NativeOnboardingProcessDedupe {
+    limit: usize,
+    inner: Mutex<NativeOnboardingProcessDedupeInner>,
+}
+
+#[derive(Default)]
+struct NativeOnboardingProcessDedupeInner {
+    keys: HashSet<String>,
+    order: VecDeque<String>,
+}
+
+impl NativeOnboardingProcessDedupe {
+    fn new(limit: usize) -> Self {
+        Self {
+            limit,
+            inner: Mutex::new(NativeOnboardingProcessDedupeInner::default()),
+        }
+    }
+
+    async fn mark_unknown(&self, key: String) -> bool {
+        let mut inner = self.inner.lock().await;
+        if inner.keys.contains(&key) {
+            return false;
+        }
+        inner.keys.insert(key.clone());
+        inner.order.push_back(key);
+        while inner.keys.len() > self.limit {
+            if let Some(oldest) = inner.order.pop_front() {
+                inner.keys.remove(&oldest);
+            } else {
+                break;
+            }
+        }
+        true
+    }
+
+    async fn forget(&self, key: &str) {
+        let mut inner = self.inner.lock().await;
+        inner.keys.remove(key);
     }
 }
 
@@ -137,12 +182,46 @@ fn normalized_role_name(name: &str) -> String {
         .to_lowercase()
 }
 
+#[cfg(test)]
 pub async fn claim_native_onboarding_once(
     pool: &PgPool,
     guild_id: u64,
     user_id: u64,
 ) -> Result<bool, sqlx::Error> {
-    let key = format!("{guild_id}:{user_id}");
+    let mut tx = pool.begin().await?;
+    let claimed = claim_native_onboarding_once_tx(&mut tx, guild_id, user_id).await?;
+    tx.commit().await?;
+    Ok(claimed)
+}
+
+fn native_onboarding_dedupe_key(guild_id: u64, user_id: u64) -> String {
+    format!("{guild_id}:{user_id}")
+}
+
+async fn native_onboarding_claim_exists(
+    pool: &PgPool,
+    guild_id: u64,
+    user_id: u64,
+) -> Result<bool, sqlx::Error> {
+    sqlx::query_scalar::<_, i32>(
+        "SELECT 1
+           FROM bot.kv_store
+          WHERE ns = $1 AND k = $2
+          LIMIT 1",
+    )
+    .bind(NATIVE_ONBOARDING_DEDUPE_NS)
+    .bind(native_onboarding_dedupe_key(guild_id, user_id))
+    .fetch_optional(pool)
+    .await
+    .map(|row| row.is_some())
+}
+
+async fn claim_native_onboarding_once_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    guild_id: u64,
+    user_id: u64,
+) -> Result<bool, sqlx::Error> {
+    let key = native_onboarding_dedupe_key(guild_id, user_id);
     let value = json!({
         "guild_id": guild_id,
         "user_id": user_id,
@@ -157,14 +236,48 @@ pub async fn claim_native_onboarding_once(
     .bind(NATIVE_ONBOARDING_DEDUPE_NS)
     .bind(key)
     .bind(value)
-    .execute(pool)
+    .execute(&mut **tx)
     .await
     .map(|result| result.rows_affected() > 0)
+}
+
+async fn record_native_onboarding_completed_once(
+    pool: &PgPool,
+    guild_id: u64,
+    user_id: u64,
+    choice: NativeOnboardingChoice,
+    matched_role_id: Option<u64>,
+    member_role_count: usize,
+) -> anyhow::Result<bool> {
+    let occurred_at = Utc::now();
+    let mut tx = pool.begin().await?;
+    if !claim_native_onboarding_once_tx(&mut tx, guild_id, user_id).await? {
+        tx.commit().await?;
+        return Ok(false);
+    }
+
+    let mut input = dl_activity::journey::JourneyEventInput::new(
+        user_id,
+        guild_id,
+        dl_activity::journey::JourneyEventType::NativeOnboardingCompleted,
+        occurred_at,
+    );
+    input.event_source = "member_flags_completed_onboarding";
+    input.metadata = json!({
+        "weiche_choice": choice.as_str(),
+        "matched_role_id": matched_role_id,
+        "member_role_count": member_role_count,
+    });
+    let recorded = dl_activity::journey::record_journey_event_tx(&mut tx, input).await?;
+    tx.commit().await?;
+    Ok(recorded)
 }
 
 async fn handle_native_onboarding_completed(
     pool: PgPool,
     lookup: Arc<dyn NativeOnboardingLookup>,
+    process_dedupe: Arc<NativeOnboardingProcessDedupe>,
+    dedupe_key: String,
     guild_id: u64,
     user_id: u64,
     reread_delay: Duration,
@@ -177,19 +290,11 @@ async fn handle_native_onboarding_completed(
         Ok(value) => value,
         Err(err) => {
             tracing::warn!(%err, guild_id, user_id, "Native-Onboarding Rollen-Nachlese fehlgeschlagen");
+            process_dedupe.forget(&dedupe_key).await;
             return;
         }
     };
     let choice = classify_native_onboarding_choice(&member_role_ids, &roles);
-    match claim_native_onboarding_once(&pool, guild_id, user_id).await {
-        Ok(true) => {}
-        Ok(false) => return,
-        Err(err) => {
-            tracing::warn!(%err, guild_id, user_id, "Native-Onboarding Dedupe fehlgeschlagen");
-            return;
-        }
-    }
-
     let matched_role_id = match choice {
         NativeOnboardingChoice::InviteGuest => {
             role_id_by_name(&member_role_ids, &roles, "Invite-Gast")
@@ -199,21 +304,18 @@ async fn handle_native_onboarding_completed(
         }
         NativeOnboardingChoice::Player => None,
     };
-    if let Err(err) = dl_activity::journey::record_native_onboarding_completed_event(
+    if let Err(err) = record_native_onboarding_completed_once(
         &pool,
-        user_id,
         guild_id,
-        "member_flags_completed_onboarding",
-        Utc::now(),
-        json!({
-            "weiche_choice": choice.as_str(),
-            "matched_role_id": matched_role_id,
-            "member_role_count": member_role_ids.len(),
-        }),
+        user_id,
+        choice,
+        matched_role_id,
+        member_role_ids.len(),
     )
     .await
     {
-        tracing::warn!(%err, guild_id, user_id, "Journey native_onboarding_completed aus MemberFlags fehlgeschlagen");
+        tracing::warn!(%err, guild_id, user_id, "Native-Onboarding Claim+Journey-Record fehlgeschlagen");
+        process_dedupe.forget(&dedupe_key).await;
     }
 }
 
@@ -254,17 +356,36 @@ pub fn spawn_native_onboarding_completed_with_lookup(
     reread_delay: Duration,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_members();
+    let process_dedupe = Arc::new(NativeOnboardingProcessDedupe::new(
+        NATIVE_ONBOARDING_PROCESS_DEDUPE_LIMIT,
+    ));
     tokio::spawn(async move {
         loop {
             match events.recv().await {
                 Ok(dl_discord::MemberEvent::NativeOnboardingCompleted { guild_id, user_id })
                     if guild_id == guild_id_filter =>
                 {
+                    let dedupe_key = native_onboarding_dedupe_key(guild_id, user_id);
+                    if !process_dedupe.mark_unknown(dedupe_key.clone()).await {
+                        continue;
+                    }
+                    match native_onboarding_claim_exists(&pool, guild_id, user_id).await {
+                        Ok(true) => continue,
+                        Ok(false) => {}
+                        Err(err) => {
+                            tracing::warn!(%err, guild_id, user_id, "Native-Onboarding KV-Dedupe-Vorabpruefung fehlgeschlagen");
+                            process_dedupe.forget(&dedupe_key).await;
+                            continue;
+                        }
+                    }
                     let pool = pool.clone();
                     let lookup = lookup.clone();
+                    let process_dedupe = process_dedupe.clone();
                     tokio::spawn(handle_native_onboarding_completed(
                         pool,
                         lookup,
+                        process_dedupe,
+                        dedupe_key,
                         guild_id,
                         user_id,
                         reread_delay,
@@ -399,6 +520,7 @@ pub fn spawn_tag_events(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn native_onboarding_weiche_klassifikation_priorisiert_invite_vor_frischling() {
@@ -438,6 +560,136 @@ mod tests {
         assert!(!claim_native_onboarding_once(pool, 1, 42).await?);
         assert!(claim_native_onboarding_once(pool, 2, 42).await?);
 
+        Ok(())
+    }
+
+    struct CountingLookup {
+        calls: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl NativeOnboardingLookup for CountingLookup {
+        async fn member_roles_and_guild_roles(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+        ) -> Result<(Vec<u64>, Vec<NativeOnboardingRole>), String> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok((Vec::new(), Vec::new()))
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn native_onboarding_vorab_dedupe_verhindert_rest_duplikate(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool().clone();
+        let dispatcher = dl_discord::Dispatcher::new();
+        let lookup = Arc::new(CountingLookup {
+            calls: AtomicUsize::new(0),
+        });
+        let task = spawn_native_onboarding_completed_with_lookup(
+            pool,
+            lookup.clone(),
+            &dispatcher,
+            1,
+            Duration::from_millis(10),
+        );
+
+        for _ in 0..5 {
+            dispatcher.publish_member(dl_discord::MemberEvent::NativeOnboardingCompleted {
+                guild_id: 1,
+                user_id: 42,
+            });
+        }
+
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        task.abort();
+
+        assert_eq!(lookup.calls.load(Ordering::SeqCst), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn native_onboarding_claim_und_journey_record_committen_atomar(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+
+        assert!(
+            record_native_onboarding_completed_once(
+                pool,
+                1,
+                42,
+                NativeOnboardingChoice::Player,
+                None,
+                0,
+            )
+            .await?
+        );
+        assert!(
+            !record_native_onboarding_completed_once(
+                pool,
+                1,
+                42,
+                NativeOnboardingChoice::Player,
+                None,
+                0,
+            )
+            .await?
+        );
+
+        let kv_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::int8 FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(NATIVE_ONBOARDING_DEDUPE_NS)
+                .bind(native_onboarding_dedupe_key(1, 42))
+                .fetch_one(pool)
+                .await?;
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8
+               FROM activity.journey_events
+              WHERE guild_id = 1
+                AND user_id = 42
+                AND event_type = 'native_onboarding_completed'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(kv_count, 1);
+        assert_eq!(event_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn native_onboarding_record_fehler_rollt_kv_claim_zurueck(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let user_id = u64::MAX;
+        let key = native_onboarding_dedupe_key(1, user_id);
+
+        let err = record_native_onboarding_completed_once(
+            pool,
+            1,
+            user_id,
+            NativeOnboardingChoice::Player,
+            None,
+            0,
+        )
+        .await
+        .expect_err("out-of-range user id must fail after tx claim attempt");
+        assert!(err.to_string().contains("passt nicht in PostgreSQL BIGINT"));
+
+        let kv_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::int8 FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(NATIVE_ONBOARDING_DEDUPE_NS)
+                .bind(key)
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(kv_count, 0);
         Ok(())
     }
 }

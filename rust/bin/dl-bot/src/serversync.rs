@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -322,6 +322,50 @@ pub struct NativeOnboardingOption {
     pub extra: BTreeMap<String, Value>,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NativeOnboardingPutConfig {
+    prompts: Vec<NativeOnboardingPutPrompt>,
+    default_channel_ids: Vec<String>,
+    enabled: bool,
+    mode: Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NativeOnboardingPutPrompt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    #[serde(rename = "type")]
+    prompt_type: u8,
+    title: String,
+    options: Vec<NativeOnboardingPutOption>,
+    single_select: bool,
+    required: bool,
+    in_onboarding: bool,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NativeOnboardingPutOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emoji_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emoji_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    emoji_animated: Option<bool>,
+    #[serde(default)]
+    role_ids: Vec<String>,
+    #[serde(default)]
+    channel_ids: Vec<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OnboardingBuildOutput {
     pub config: NativeOnboardingConfig,
@@ -460,13 +504,14 @@ impl ServerSyncService {
         config: &NativeOnboardingConfig,
     ) -> ServerSyncResult<()> {
         let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let payload = native_onboarding_put_payload(config);
         let response = self
             .http_client
             .put(url)
             .header("Authorization", format!("Bot {}", self.discord_token))
             .header("Content-Type", "application/json")
             .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-            .json(config)
+            .json(&payload)
             .send()
             .await?;
         let status = response.status();
@@ -799,7 +844,7 @@ impl ServerSyncOps for ServerSyncService {
         if hash.trim().is_empty() {
             return Err(ServerSyncError::bad_request("hash fehlt"));
         }
-        let preview = load_onboarding_preview(&self.pool, preview_id).await?;
+        let preview = load_onboarding_preview(&self.pool, preview_id, self.guild_id).await?;
         let confirmed = hash.trim();
         if preview.diff_hash != confirmed {
             let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
@@ -829,6 +874,8 @@ impl ServerSyncOps for ServerSyncService {
         )
         .await?;
         validate_default_channels_7_5(&live, &preview.config.default_channel_ids)
+            .map_err(ServerSyncError::bad_request)?;
+        validate_onboarding_references(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
         if !confirm {
@@ -969,7 +1016,6 @@ fn build_welle2b_onboarding_config(
     let live = parse_live_onboarding_config(live_config)?;
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
-    let mut ids = PlaceholderIds::from_live(live_config);
 
     let default_channel_ids = resolve_default_channel_ids(model, &mut blockers);
     if !default_channel_ids.is_empty() {
@@ -990,13 +1036,8 @@ fn build_welle2b_onboarding_config(
         );
     }
 
-    let mut prompts = vec![weiche_prompt(
-        &mut ids,
-        invite_role,
-        frischling_role,
-        spieler_suche,
-    )];
-    prompts.push(ping_prompt(&mut ids, model, &mut blockers));
+    let mut prompts = vec![weiche_prompt(invite_role, frischling_role, spieler_suche)];
+    prompts.push(ping_prompt(model, &mut blockers));
     if let Some(prompt) = rank_prompt {
         prompts.push(prompt);
     }
@@ -1028,19 +1069,103 @@ fn parse_live_onboarding_config(live_config: &Value) -> ServerSyncResult<NativeO
     })
 }
 
+fn native_onboarding_put_payload(config: &NativeOnboardingConfig) -> NativeOnboardingPutConfig {
+    NativeOnboardingPutConfig {
+        prompts: config
+            .prompts
+            .iter()
+            .map(native_onboarding_put_prompt)
+            .collect(),
+        default_channel_ids: config.default_channel_ids.clone(),
+        enabled: config.enabled,
+        mode: config.mode.clone(),
+    }
+}
+
+fn native_onboarding_put_prompt(prompt: &NativeOnboardingPrompt) -> NativeOnboardingPutPrompt {
+    NativeOnboardingPutPrompt {
+        id: prompt.id.clone(),
+        prompt_type: prompt.prompt_type,
+        title: prompt.title.clone(),
+        options: prompt
+            .options
+            .iter()
+            .map(native_onboarding_put_option)
+            .collect(),
+        single_select: prompt.single_select,
+        required: prompt.required,
+        in_onboarding: prompt.in_onboarding,
+        extra: put_extra_without_emoji_fields(&prompt.extra),
+    }
+}
+
+fn native_onboarding_put_option(option: &NativeOnboardingOption) -> NativeOnboardingPutOption {
+    let (emoji_id, emoji_name, emoji_animated) = put_emoji_fields(option.emoji.as_ref());
+    NativeOnboardingPutOption {
+        id: option.id.clone(),
+        title: option.title.clone(),
+        description: option.description.clone(),
+        emoji_id,
+        emoji_name,
+        emoji_animated,
+        role_ids: option.role_ids.clone(),
+        channel_ids: option.channel_ids.clone(),
+        extra: put_extra_without_emoji_fields(&option.extra),
+    }
+}
+
+fn put_emoji_fields(emoji: Option<&Value>) -> (Option<String>, Option<String>, Option<bool>) {
+    let Some(emoji) = emoji else {
+        return (None, None, None);
+    };
+    let emoji_id = emoji.get("id").and_then(|value| {
+        value
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| value.as_u64().map(|id| id.to_string()))
+    });
+    let emoji_name = emoji
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let has_emoji = emoji_id.is_some() || emoji_name.is_some();
+    let emoji_animated = has_emoji.then(|| {
+        emoji
+            .get("animated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    });
+    (emoji_id, emoji_name, emoji_animated)
+}
+
+fn put_extra_without_emoji_fields(extra: &BTreeMap<String, Value>) -> BTreeMap<String, Value> {
+    extra
+        .iter()
+        .filter(|(key, _)| {
+            !matches!(
+                key.as_str(),
+                "emoji" | "emoji_id" | "emoji_name" | "emoji_animated"
+            )
+        })
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
+}
+
 fn weiche_prompt(
-    ids: &mut PlaceholderIds,
     invite_role: Option<u64>,
     frischling_role: Option<u64>,
     spieler_suche: Option<u64>,
 ) -> NativeOnboardingPrompt {
     NativeOnboardingPrompt {
-        id: Some(ids.next()),
+        // Neue Prompts/Optionen lassen `id` im PUT weg. Falls Discord im
+        // Live-Apply jemals ein `id`-Feld erzwingt (400), ist der Fallback
+        // generierte Platzhalter-Strings; Default bleibt bewusst `None`.
+        id: None,
         prompt_type: 0,
         title: "Wo stehst du gerade?".to_string(),
         options: vec![
             NativeOnboardingOption {
-                id: Some(ids.next()),
+                id: None,
                 title: "Ich spiele Deadlock und suche Mitspieler".to_string(),
                 description: None,
                 emoji: Some(json!({ "name": "🎮" })),
@@ -1054,7 +1179,7 @@ fn weiche_prompt(
                 extra: BTreeMap::new(),
             },
             NativeOnboardingOption {
-                id: Some(ids.next()),
+                id: None,
                 title: "Ich hab Deadlock noch nicht — ich brauche einen Invite".to_string(),
                 description: None,
                 emoji: Some(json!({ "name": "🔑" })),
@@ -1065,7 +1190,7 @@ fn weiche_prompt(
                 extra: BTreeMap::new(),
             },
             NativeOnboardingOption {
-                id: Some(ids.next()),
+                id: None,
                 title: "Ich bin ganz neu und will's lernen — nehmt mich an die Hand".to_string(),
                 description: None,
                 emoji: Some(json!({ "name": "🌱" })),
@@ -1083,11 +1208,7 @@ fn weiche_prompt(
     }
 }
 
-fn ping_prompt(
-    ids: &mut PlaceholderIds,
-    model: &GuildModel,
-    blockers: &mut Vec<String>,
-) -> NativeOnboardingPrompt {
+fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardingPrompt {
     let options = [
         (
             "Patchnotes",
@@ -1118,7 +1239,7 @@ fn ping_prompt(
     ]
     .into_iter()
     .map(|(title, aliases)| NativeOnboardingOption {
-        id: Some(ids.next()),
+        id: None,
         title: title.to_string(),
         description: None,
         emoji: None,
@@ -1131,7 +1252,7 @@ fn ping_prompt(
     .collect();
 
     NativeOnboardingPrompt {
-        id: Some(ids.next()),
+        id: None,
         prompt_type: 0,
         title: "Wofür willst du Pings bekommen?".to_string(),
         options,
@@ -1219,12 +1340,7 @@ fn resolve_role_id(model: &GuildModel, aliases: &[&str]) -> Option<u64> {
         .values()
         .filter(|role| {
             let role_name = normalized_name(&role.name);
-            normalized_aliases.iter().any(|alias| {
-                role_name == *alias
-                    || alias
-                        .split_whitespace()
-                        .all(|token| role_name.split_whitespace().any(|part| part == token))
-            })
+            normalized_aliases.contains(&role_name)
         })
         .collect::<Vec<_>>();
     candidates.sort_by_key(|role| (role.managed, !role.mentionable, role.position));
@@ -1239,42 +1355,6 @@ fn normalized_name(name: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-struct PlaceholderIds {
-    used: BTreeSet<String>,
-    next_id: u64,
-}
-
-impl PlaceholderIds {
-    fn from_live(live: &Value) -> Self {
-        let mut used = BTreeSet::new();
-        if let Some(prompts) = live.get("prompts").and_then(Value::as_array) {
-            for prompt in prompts {
-                if let Some(id) = prompt.get("id").and_then(Value::as_str) {
-                    used.insert(id.to_string());
-                }
-                if let Some(options) = prompt.get("options").and_then(Value::as_array) {
-                    for option in options {
-                        if let Some(id) = option.get("id").and_then(Value::as_str) {
-                            used.insert(id.to_string());
-                        }
-                    }
-                }
-            }
-        }
-        Self { used, next_id: 0 }
-    }
-
-    fn next(&mut self) -> String {
-        loop {
-            let candidate = self.next_id.to_string();
-            self.next_id += 1;
-            if self.used.insert(candidate.clone()) {
-                return candidate;
-            }
-        }
-    }
 }
 
 fn validate_default_channels_7_5(
@@ -1299,6 +1379,65 @@ fn validate_default_channels_7_5(
         ));
     }
     Ok(())
+}
+
+fn validate_onboarding_references(
+    model: &GuildModel,
+    config: &NativeOnboardingConfig,
+) -> Result<(), String> {
+    let mut missing = Vec::new();
+    validate_channel_ids_present(
+        model,
+        "default_channel_ids",
+        &config.default_channel_ids,
+        &mut missing,
+    );
+    for prompt in &config.prompts {
+        for option in &prompt.options {
+            let context = format!("Prompt `{}` Option `{}`", prompt.title, option.title);
+            validate_role_ids_present(model, &context, &option.role_ids, &mut missing);
+            validate_channel_ids_present(model, &context, &option.channel_ids, &mut missing);
+        }
+    }
+
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Native-Onboarding-Apply blockiert: Live-Guild-Modell enthaelt referenzierte Rollen/Kanaele nicht mehr:\n- {}",
+            missing.join("\n- ")
+        ))
+    }
+}
+
+fn validate_role_ids_present(
+    model: &GuildModel,
+    context: &str,
+    role_ids: &[String],
+    missing: &mut Vec<String>,
+) {
+    for raw in role_ids {
+        match raw.parse::<u64>() {
+            Ok(id) if model.roles.contains_key(&id) => {}
+            Ok(id) => missing.push(format!("{context}: Rolle `{id}` fehlt")),
+            Err(_) => missing.push(format!("{context}: Rolle `{raw}` ist keine Discord-ID")),
+        }
+    }
+}
+
+fn validate_channel_ids_present(
+    model: &GuildModel,
+    context: &str,
+    channel_ids: &[String],
+    missing: &mut Vec<String>,
+) {
+    for raw in channel_ids {
+        match raw.parse::<u64>() {
+            Ok(id) if model.channels.contains_key(&id) => {}
+            Ok(id) => missing.push(format!("{context}: Kanal `{id}` fehlt")),
+            Err(_) => missing.push(format!("{context}: Kanal `{raw}` ist keine Discord-ID")),
+        }
+    }
 }
 
 fn everyone_can_view_and_send(model: &GuildModel, channel_id: u64) -> bool {
@@ -1456,17 +1595,33 @@ async fn persist_onboarding_preview(
 async fn load_onboarding_preview(
     pool: &PgPool,
     preview_id: i64,
+    guild_id: u64,
 ) -> ServerSyncResult<StoredOnboardingPreview> {
     let row = sqlx::query(
         "SELECT guild_id, diff_hash, diff_json::text AS diff_json
            FROM server_config.diff_previews
-          WHERE preview_id = $1",
+          WHERE preview_id = $1
+            AND guild_id = $2
+            AND applied_at IS NULL
+            AND EXISTS (
+                SELECT 1
+                  FROM jsonb_array_elements(COALESCE(diff_json->'changes', '[]'::jsonb)) AS elem(change)
+                 WHERE elem.change->'object'->>'kind' = $3
+                   AND elem.change->'object'->>'message_key' = $4
+                   AND elem.change->'object'->>'object_id' = $5
+            )",
     )
     .bind(preview_id)
+    .bind(id_to_i64(guild_id)?)
+    .bind(ObjectKind::BotMessage.as_db())
+    .bind(ONBOARDING_DIFF_MESSAGE_KEY)
+    .bind(ONBOARDING_DIFF_OBJECT_ID.to_string())
     .fetch_optional(pool)
     .await?
     .ok_or_else(|| {
-        ServerSyncError::bad_request(format!("Diff-Preview {preview_id} nicht gefunden"))
+        ServerSyncError::bad_request(format!(
+            "Onboarding-Preview {preview_id} nicht gefunden, guild-fremd, bereits angewendet oder keine Native-Onboarding-Preview"
+        ))
     })?;
 
     let diff_json: String = row.try_get("diff_json")?;
@@ -1478,7 +1633,7 @@ async fn load_onboarding_preview(
             "Onboarding-Preview {preview_id} Hash-Mismatch: gespeichert {stored_hash}, berechnet {recomputed}"
         )));
     }
-    let config = extract_onboarding_config_from_diff(&diff)?;
+    let config = extract_onboarding_config_from_diff(&diff, guild_id)?;
     Ok(StoredOnboardingPreview {
         guild_id: i64_to_u64(row.try_get::<i64, _>("guild_id")?)?,
         diff_hash: stored_hash,
@@ -1488,14 +1643,18 @@ async fn load_onboarding_preview(
 
 fn extract_onboarding_config_from_diff(
     diff: &ServerDiff,
+    expected_guild_id: u64,
 ) -> ServerSyncResult<NativeOnboardingConfig> {
+    if diff.guild_id != expected_guild_id {
+        return Err(ServerSyncError::bad_request(format!(
+            "Preview gehoert zu Guild {}, erwartet {expected_guild_id}",
+            diff.guild_id
+        )));
+    }
     let desired = diff
         .changes
         .iter()
-        .find(|change| {
-            change.object.kind == ObjectKind::BotMessage
-                && change.object.message_key.as_deref() == Some(ONBOARDING_DIFF_MESSAGE_KEY)
-        })
+        .find(|change| is_native_onboarding_change(change, expected_guild_id))
         .and_then(|change| change.desired.as_ref())
         .ok_or_else(|| {
             ServerSyncError::bad_request("Preview enthaelt keine Native-Onboarding-Zielconfig")
@@ -1503,6 +1662,13 @@ fn extract_onboarding_config_from_diff(
     serde_json::from_value(desired["config"].clone()).map_err(|err| {
         ServerSyncError::bad_request(format!("Native-Onboarding-Zielconfig ist ungueltig: {err}"))
     })
+}
+
+fn is_native_onboarding_change(change: &DiffChange, expected_guild_id: u64) -> bool {
+    change.object.kind == ObjectKind::BotMessage
+        && change.object.guild_id == expected_guild_id
+        && change.object.object_id == ONBOARDING_DIFF_OBJECT_ID
+        && change.object.message_key.as_deref() == Some(ONBOARDING_DIFF_MESSAGE_KEY)
 }
 
 struct OnboardingApplyRunInsert<'a> {
@@ -2391,7 +2557,6 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     use axum::body::Body;
@@ -2821,12 +2986,16 @@ mod tests {
     fn rank_live_onboarding_config() -> Value {
         let rank_options = (0..12)
             .map(|idx| {
-                json!({
+                let mut option = json!({
                     "id": format!("rank-option-{idx}"),
                     "title": format!("Rank {idx}"),
                     "role_ids": [format!("{}", 5100 + idx)],
                     "channel_ids": [],
-                })
+                });
+                if idx == 0 {
+                    option["emoji"] = json!({"id": "9000", "name": "ranked", "animated": true});
+                }
+                option
             })
             .collect::<Vec<_>>();
         json!({
@@ -2888,29 +3057,22 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_payload_nutzt_eindeutige_placeholder_ids_und_name_resolved_ids() {
+    fn onboarding_payload_laesst_neue_ids_weg_und_nutzt_name_resolved_ids() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
         let built = build_welle2b_onboarding_config(&live, &model).expect("build");
         let payload = serde_json::to_value(&built.config).expect("payload");
 
-        let ids = payload["prompts"]
-            .as_array()
-            .expect("prompts")
-            .iter()
-            .flat_map(|prompt| {
-                std::iter::once(prompt["id"].as_str().expect("prompt id").to_string()).chain(
-                    prompt["options"]
-                        .as_array()
-                        .expect("options")
-                        .iter()
-                        .map(|option| option["id"].as_str().expect("option id").to_string()),
-                )
-            })
-            .collect::<Vec<_>>();
-        let unique = ids.iter().collect::<BTreeSet<_>>();
-        assert_eq!(ids.len(), unique.len(), "IDs muessen eindeutig sein");
+        let prompts = payload["prompts"].as_array().expect("prompts");
+        for prompt in [&prompts[0], &prompts[1]] {
+            assert!(!prompt.as_object().expect("prompt").contains_key("id"));
+            for option in prompt["options"].as_array().expect("options") {
+                assert!(!option.as_object().expect("option").contains_key("id"));
+            }
+        }
+        assert_eq!(prompts[2]["id"], "rank-prompt");
+        assert_eq!(prompts[2]["options"][0]["id"], "rank-option-0");
 
         let weiche = &payload["prompts"][0]["options"];
         assert_eq!(
@@ -2929,6 +3091,175 @@ mod tests {
         assert_eq!(ping_options[0]["role_ids"], json!(["5003"]));
         assert_eq!(ping_options[4]["title"], "Streams");
         assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
+    }
+
+    #[test]
+    fn onboarding_put_payload_wandelt_get_emoji_objekte_in_put_emoji_felder() {
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+
+        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+        let payload =
+            serde_json::to_value(native_onboarding_put_payload(&built.config)).expect("payload");
+
+        assert_json_key_absent_recursive(&payload, "emoji");
+        let prompts = payload["prompts"].as_array().expect("prompts");
+        assert_eq!(prompts[0]["options"][0]["emoji_name"], "🎮");
+        assert_eq!(prompts[0]["options"][0]["emoji_animated"], false);
+        assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
+        assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
+        assert!(!prompts[0]
+            .as_object()
+            .expect("weiche prompt")
+            .contains_key("id"));
+        assert!(!prompts[1]
+            .as_object()
+            .expect("ping prompt")
+            .contains_key("id"));
+
+        let rank_option = &prompts[2]["options"][0];
+        assert_eq!(rank_option["id"], "rank-option-0");
+        assert_eq!(rank_option["emoji_id"], "9000");
+        assert_eq!(rank_option["emoji_name"], "ranked");
+        assert_eq!(rank_option["emoji_animated"], true);
+    }
+
+    fn assert_json_key_absent_recursive(value: &Value, forbidden: &str) {
+        match value {
+            Value::Object(map) => {
+                assert!(
+                    !map.contains_key(forbidden),
+                    "JSON enthaelt verbotenen Key `{forbidden}`: {value}"
+                );
+                for child in map.values() {
+                    assert_json_key_absent_recursive(child, forbidden);
+                }
+            }
+            Value::Array(values) => {
+                for child in values {
+                    assert_json_key_absent_recursive(child, forbidden);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    #[test]
+    fn onboarding_ping_rollen_matching_ist_exakt_statt_token_fuzzy() {
+        let mut model = onboarding_model();
+        model
+            .roles
+            .retain(|_, role| role.name != "Patchnotes Ping Rolle");
+        model.roles.insert(
+            5999,
+            onboarding_role(5999, "Deadlock Patchnotes Ping Rolle", true),
+        );
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("builder returns blockers");
+
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Rolle `Patchnotes`")));
+        assert!(built.config.prompts[1].options[0].role_ids.is_empty());
+    }
+
+    #[test]
+    fn onboarding_apply_revalidiert_role_und_channel_ids_gegen_live_modell() {
+        let mut config =
+            build_welle2b_onboarding_config(&rank_live_onboarding_config(), &onboarding_model())
+                .expect("build")
+                .config;
+        config.prompts[1].options[0].role_ids = vec!["999999".to_string()];
+        config.prompts[0].options[0].channel_ids = vec!["kaputt".to_string()];
+
+        let err = validate_onboarding_references(&onboarding_model(), &config)
+            .expect_err("missing refs block apply");
+
+        assert!(err.contains("Rolle `999999` fehlt"));
+        assert!(err.contains("Kanal `kaputt` ist keine Discord-ID"));
+    }
+
+    #[test]
+    fn onboarding_preview_extraktion_blockt_falschen_message_key() {
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+        let config = build_welle2b_onboarding_config(&live, &model)
+            .expect("build")
+            .config;
+        let mut diff = onboarding_diff(GUILD_ID, &live, &config).expect("diff");
+        diff.changes[0].object.message_key = Some("anderer-key".to_string());
+
+        let err = extract_onboarding_config_from_diff(&diff, GUILD_ID)
+            .expect_err("wrong message_key must fail");
+
+        assert!(err
+            .to_string()
+            .contains("keine Native-Onboarding-Zielconfig"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn onboarding_preview_load_bindet_guild_message_key_und_applied_status(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+        let config = build_welle2b_onboarding_config(&live, &model)
+            .expect("build")
+            .config;
+        let diff = onboarding_diff(GUILD_ID, &live, &config).expect("diff");
+
+        let good_id = insert_raw_onboarding_preview(pool, GUILD_ID, &diff).await?;
+        assert!(load_onboarding_preview(pool, good_id, GUILD_ID)
+            .await
+            .is_ok());
+
+        sqlx::query(
+            "UPDATE server_config.diff_previews SET applied_at = now() WHERE preview_id = $1",
+        )
+        .bind(good_id)
+        .execute(pool)
+        .await?;
+        assert!(load_onboarding_preview(pool, good_id, GUILD_ID)
+            .await
+            .is_err());
+
+        let wrong_guild_id = insert_raw_onboarding_preview(pool, GUILD_ID + 1, &diff).await?;
+        assert!(load_onboarding_preview(pool, wrong_guild_id, GUILD_ID)
+            .await
+            .is_err());
+
+        let mut wrong_key = diff.clone();
+        wrong_key.changes[0].object.message_key = Some("anderer-key".to_string());
+        let wrong_key_id = insert_raw_onboarding_preview(pool, GUILD_ID, &wrong_key).await?;
+        assert!(load_onboarding_preview(pool, wrong_key_id, GUILD_ID)
+            .await
+            .is_err());
+
+        Ok(())
+    }
+
+    async fn insert_raw_onboarding_preview(
+        pool: &PgPool,
+        guild_id: u64,
+        diff: &ServerDiff,
+    ) -> Result<i64, Box<dyn std::error::Error>> {
+        let diff_hash = sha256_hex(&serde_json::to_vec(diff)?);
+        let preview_id = sqlx::query_scalar(
+            "INSERT INTO server_config.diff_previews
+             (guild_id, diff_hash, diff_json, human_summary)
+             VALUES ($1, $2, $3::text::jsonb, 'test')
+             RETURNING preview_id",
+        )
+        .bind(i64::try_from(guild_id)?)
+        .bind(diff_hash)
+        .bind(serde_json::to_string(diff)?)
+        .fetch_one(pool)
+        .await?;
+        Ok(preview_id)
     }
 
     #[test]

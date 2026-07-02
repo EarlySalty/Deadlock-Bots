@@ -482,6 +482,10 @@ impl InteractionHandler for OnboardingHandler {
 
 pub fn register(router: &mut InteractionRouter, wizard: Arc<OnboardingWizard>) {
     let handler = Arc::new(OnboardingHandler { wizard });
+    // `/publish_rules_panel` wird absichtlich nicht mehr registriert. Der
+    // Startup-Sync in `dl-discord::dispatch::sync_commands` ist ein
+    // Bulk-Overwrite und per Default aktiv (`DL_BOT_COMMAND_SYNC` != 0), damit
+    // der alte Slash-Command bei Discord entfernt wird.
     router.on_custom_id("rp:panel:start", handler.clone());
     router.on_prefix("ob:", handler);
 }
