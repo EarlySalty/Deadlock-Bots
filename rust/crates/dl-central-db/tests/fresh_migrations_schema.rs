@@ -234,6 +234,34 @@ async fn steam_links_owner_unique_index_count(pool: &PgPool) -> i64 {
     .expect("steam_links owner unique index count")
 }
 
+async fn steam_links_one_primary_unique_index_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT array_agg(a.attname::text ORDER BY k.ord) AS columns,
+                       pg_get_expr(i.indpred, i.indrelid) AS predicate
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'core'
+                   AND t.relname = 'steam_links'
+                   AND i.indisunique
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, i.indpred, i.indrelid
+           ) indexes
+          WHERE columns = ARRAY['discord_id']::text[]
+            AND predicate LIKE '%primary_account%'
+            AND predicate LIKE '%discord_id <> 0%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("steam_links one-primary unique index count")
+}
+
 async fn trigger_names(pool: &PgPool, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT tg.tgname
@@ -339,11 +367,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 14
+          WHERE version BETWEEN 1 AND 15
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 14);
+    assert_eq!(migration_count_after_first, 15);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
@@ -356,6 +384,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 13, "brain insight records").await;
     let migration_14_signature_after_first =
         migration_row_signature(&pool, 14, "patchnotes identity sequences").await;
+    let migration_15_signature_after_first =
+        migration_row_signature(&pool, 15, "steam links one primary").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -363,11 +393,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 14
+          WHERE version BETWEEN 1 AND 15
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 14);
+    assert_eq!(migration_count_after_second, 15);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -397,6 +427,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 14, "patchnotes identity sequences").await,
         migration_14_signature_after_first,
         "second migrator run must be a no-op for migration version 14"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 15, "steam links one primary").await,
+        migration_15_signature_after_first,
+        "second migrator run must be a no-op for migration version 15"
     );
 
     let schema_count = scalar_i64(
@@ -811,6 +846,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         steam_links_owner_unique_index_count(&pool).await,
         1,
         "expected one partial unique owner index on steam_id where discord_id != 0"
+    );
+    assert_eq!(
+        steam_links_one_primary_unique_index_count(&pool).await,
+        1,
+        "expected one partial unique primary index on discord_id where primary_account and discord_id != 0"
     );
 
     assert_eq!(
