@@ -9,7 +9,7 @@ use chrono::{DateTime, NaiveDate, SecondsFormat, Utc};
 use serde::Serialize;
 use serde_json::{Number, Value};
 use sha2::{Digest, Sha256};
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
 use crate::{
     build_table_plan,
@@ -18,7 +18,7 @@ use crate::{
     reconciliation_manifest::{ReconciliationManifest, TableClassification},
     snapshot::source_snapshot_path,
     source::{SourceError, SourceSqlite},
-    target::{TargetRow, TargetValue},
+    target::{TargetError, TargetRow, TargetValue, TargetWriter},
     ColumnPlan, Converter, TablePlan,
 };
 
@@ -29,6 +29,19 @@ pub struct CandidateOptions {
     pub original_snapshot_dir: Option<PathBuf>,
     pub current_sources: BTreeMap<String, PathBuf>,
     pub generated_at: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReconciliationOptions {
+    pub candidate_options: CandidateOptions,
+    pub mode: ReconciliationMode,
+    pub abort_table_on_conflict: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReconciliationMode {
+    DryRun,
+    Apply,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -87,6 +100,65 @@ pub struct RowCandidateReport {
     pub decision: MergeDecision,
     pub conflict_target_pk: Option<String>,
     pub conflict_target_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ReconciliationAuditReport {
+    pub generated_at: String,
+    pub mode: String,
+    pub cutoff: String,
+    pub original_snapshot_dir: String,
+    pub source_files: Vec<SourceFileReport>,
+    pub totals: AuditCounters,
+    pub tables: Vec<TableAuditReport>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct AuditCounters {
+    pub applied: u64,
+    pub noop: u64,
+    pub conflict: u64,
+    pub skipped: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TableAuditReport {
+    pub source_db: String,
+    pub ledger_file: String,
+    pub source_table: String,
+    pub target: Option<String>,
+    pub classification: TableClassification,
+    pub scope_filter: Option<String>,
+    pub source_rows: u64,
+    pub original_rows: u64,
+    pub target_rows_read: u64,
+    pub counters: AuditCounters,
+    pub rows: Vec<RowAuditReport>,
+    pub skipped_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RowAuditReport {
+    pub source: String,
+    pub target_pk: String,
+    pub source_hash: String,
+    pub target_hash_before: Option<String>,
+    pub action: AuditAction,
+    pub reason: String,
+    pub source_delta: SourceDelta,
+    pub merge_decision: MergeDecision,
+    pub original_hash: Option<String>,
+    pub conflict_target_pk: Option<String>,
+    pub conflict_target_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuditAction {
+    Applied,
+    Noop,
+    Conflict,
+    Skipped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -163,6 +235,12 @@ pub enum CandidateError {
         target: String,
         #[source]
         source: Box<sqlx::Error>,
+    },
+    #[error("Postgres-Schreibquery fehlgeschlagen fuer {target}")]
+    TargetWrite {
+        target: String,
+        #[source]
+        source: Box<TargetError>,
     },
     #[error("JSON-Normalisierung fehlgeschlagen")]
     Json(#[from] serde_json::Error),
@@ -248,6 +326,280 @@ pub async fn build_candidate_report(
     })
 }
 
+pub async fn run_reconciliation(
+    options: &ReconciliationOptions,
+    pool: &PgPool,
+) -> Result<ReconciliationAuditReport, CandidateError> {
+    match options.mode {
+        ReconciliationMode::DryRun => {
+            let report = build_candidate_report(&options.candidate_options, pool).await?;
+            Ok(candidate_report_to_audit(
+                report,
+                ReconciliationMode::DryRun,
+                false,
+            ))
+        }
+        ReconciliationMode::Apply => apply_reconciliation_report(options, pool).await,
+    }
+}
+
+async fn apply_reconciliation_report(
+    options: &ReconciliationOptions,
+    pool: &PgPool,
+) -> Result<ReconciliationAuditReport, CandidateError> {
+    let manifest = load_manifest(&options.candidate_options.manifest_path)?;
+    let original_snapshot_dir = options
+        .candidate_options
+        .original_snapshot_dir
+        .clone()
+        .or_else(|| {
+            manifest
+                .cutoff
+                .selected_snapshot_dir
+                .as_ref()
+                .map(PathBuf::from)
+        })
+        .ok_or(CandidateError::MissingOriginalSnapshotDir)?;
+    let source_pairs = open_source_pairs(
+        &manifest,
+        &options.candidate_options,
+        &original_snapshot_dir,
+    )?;
+    let source_files = source_pairs
+        .iter()
+        .map(|(source_db, pair)| SourceFileReport {
+            source_db: source_db.clone(),
+            current_path: path_string(&pair.current_path),
+            original_snapshot_path: path_string(&pair.original_path),
+        })
+        .collect::<Vec<_>>();
+    let ledgers = load_manifest_ledgers(&manifest, &options.candidate_options.ledger_dir)?;
+    let writer = TargetWriter::new(pool.clone());
+
+    let mut tables = Vec::new();
+    let mut totals = AuditCounters::default();
+
+    for table in manifest
+        .tables
+        .iter()
+        .filter(|table| source_pairs.contains_key(&table.source_db))
+    {
+        let ledger_key = (table.source_db.clone(), table.ledger_file.clone());
+        let ledger =
+            ledgers
+                .get(&ledger_key)
+                .ok_or_else(|| CandidateError::MissingLedgerTable {
+                    source_db: table.source_db.clone(),
+                    ledger_file: table.ledger_file.clone(),
+                    source_table: table.source_table.clone(),
+                })?;
+        let table_ledger = ledger.table(&table.source_table).ok_or_else(|| {
+            CandidateError::MissingLedgerTable {
+                source_db: table.source_db.clone(),
+                ledger_file: table.ledger_file.clone(),
+                source_table: table.source_table.clone(),
+            }
+        })?;
+        let pair = source_pairs
+            .get(&table.source_db)
+            .expect("source_pairs was filtered above");
+        let table_report = apply_table(
+            table,
+            table_ledger,
+            &pair.current,
+            &pair.original,
+            pool,
+            &writer,
+            options.abort_table_on_conflict,
+        )
+        .await?;
+        totals.add(&table_report.counters);
+        tables.push(table_report);
+    }
+
+    Ok(ReconciliationAuditReport {
+        generated_at: system_time_rfc3339(options.candidate_options.generated_at),
+        mode: "apply_table_transactions".to_string(),
+        cutoff: manifest.cutoff.selected_cutoff,
+        original_snapshot_dir: path_string(&original_snapshot_dir),
+        source_files,
+        totals,
+        tables,
+    })
+}
+
+async fn apply_table(
+    table: &crate::reconciliation_manifest::TableManifest,
+    table_ledger: &TableLedger,
+    current: &SourceSqlite,
+    original: &SourceSqlite,
+    pool: &PgPool,
+    writer: &TargetWriter,
+    abort_table_on_conflict: bool,
+) -> Result<TableAuditReport, CandidateError> {
+    let candidate_table = reconcile_table(table, table_ledger, current, original, pool).await?;
+    if candidate_table.candidates.is_empty() || candidate_table.skipped_reason.is_some() {
+        return Ok(candidate_table_to_audit(
+            candidate_table,
+            ReconciliationMode::Apply,
+            false,
+        ));
+    }
+
+    let has_blocking_decision = candidate_table.candidates.iter().any(|candidate| {
+        matches!(
+            candidate.decision,
+            MergeDecision::Conflict | MergeDecision::Manual
+        )
+    });
+    if abort_table_on_conflict && has_blocking_decision {
+        return Ok(candidate_table_to_audit(
+            candidate_table,
+            ReconciliationMode::Apply,
+            true,
+        ));
+    }
+
+    let plan = build_table_plan(
+        current,
+        &table.source_db,
+        &table.source_table,
+        table_ledger,
+        pool,
+    )
+    .await
+    .map_err(|source| CandidateError::Engine {
+        source_db: table.source_db.clone(),
+        source_table: table.source_table.clone(),
+        source: Box::new(source),
+    })?;
+    let current_target_rows = match source_target_rows(current, &plan, "source") {
+        Ok(rows) => rows,
+        Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+            return duplicate_virtual_identity_table_report(table, current, original, &plan)
+                .map(|table| candidate_table_to_audit(table, ReconciliationMode::Apply, false));
+        }
+        Err(err) => return Err(err),
+    };
+    let original_rows = match source_hashes(original, &plan, "original") {
+        Ok(rows) => rows,
+        Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+            return duplicate_virtual_identity_table_report(table, current, original, &plan)
+                .map(|table| candidate_table_to_audit(table, ReconciliationMode::Apply, false));
+        }
+        Err(err) => return Err(err),
+    };
+    let current_rows = match source_hashes(current, &plan, "source") {
+        Ok(rows) => rows,
+        Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+            return duplicate_virtual_identity_table_report(table, current, original, &plan)
+                .map(|table| candidate_table_to_audit(table, ReconciliationMode::Apply, false));
+        }
+        Err(err) => return Err(err),
+    };
+
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|source| CandidateError::TargetRead {
+            target: plan.target.clone(),
+            source: Box::new(source),
+        })?;
+    lock_target_table(&mut tx, &plan).await?;
+    let locked_target_rows = target_hashes_in_tx(&mut tx, &plan).await?;
+    let locked_candidates = row_candidate_reports(
+        &plan,
+        table.classification,
+        &original_rows,
+        &current_rows,
+        &locked_target_rows,
+    );
+
+    let locked_candidate_table = TableCandidateReport {
+        source_db: table.source_db.clone(),
+        ledger_file: table.ledger_file.clone(),
+        source_table: table.source_table.clone(),
+        target: Some(plan.target.clone()),
+        classification: table.classification,
+        scope_filter: reconciliation_scope_filter(&plan).map(str::to_string),
+        source_rows: current_rows.row_count,
+        original_rows: original_rows.row_count,
+        target_rows_read: locked_target_rows.row_count,
+        counters: candidate_counters(&locked_candidates),
+        candidates: locked_candidates,
+        skipped_reason: None,
+    };
+
+    let has_locked_blocking_decision = locked_candidate_table.candidates.iter().any(|candidate| {
+        matches!(
+            candidate.decision,
+            MergeDecision::Conflict | MergeDecision::Manual
+        )
+    });
+    if abort_table_on_conflict && has_locked_blocking_decision {
+        drop(tx);
+        return Ok(candidate_table_to_audit(
+            locked_candidate_table,
+            ReconciliationMode::Apply,
+            true,
+        ));
+    }
+
+    let mut upsert_rows = Vec::new();
+    let mut insert_rows = Vec::new();
+    for candidate in &locked_candidate_table.candidates {
+        if !matches!(
+            candidate.decision,
+            MergeDecision::InsertAllowed | MergeDecision::UpdateAllowed
+        ) {
+            continue;
+        }
+        let row = current_target_rows
+            .get(&candidate.target_pk)
+            .cloned()
+            .ok_or_else(|| CandidateError::MissingTargetPrimaryKeyValue {
+                target: plan.target.clone(),
+                column: candidate.target_pk.clone(),
+            })?;
+        if plan.primary_key.is_empty() {
+            insert_rows.push(row);
+        } else {
+            upsert_rows.push(row);
+        }
+    }
+
+    if !upsert_rows.is_empty() {
+        writer
+            .upsert_rows_in_tx(&mut tx, &plan, &upsert_rows)
+            .await
+            .map_err(|source| CandidateError::TargetWrite {
+                target: plan.target.clone(),
+                source: Box::new(source),
+            })?;
+    }
+    if !insert_rows.is_empty() {
+        writer
+            .insert_rows_in_tx(&mut tx, &plan, &insert_rows)
+            .await
+            .map_err(|source| CandidateError::TargetWrite {
+                target: plan.target.clone(),
+                source: Box::new(source),
+            })?;
+    }
+    tx.commit()
+        .await
+        .map_err(|source| CandidateError::TargetRead {
+            target: plan.target.clone(),
+            source: Box::new(source),
+        })?;
+
+    Ok(candidate_table_to_audit(
+        locked_candidate_table,
+        ReconciliationMode::Apply,
+        false,
+    ))
+}
+
 pub fn classify_candidate(
     original_hash: Option<&str>,
     source_hash: &str,
@@ -317,7 +669,7 @@ async fn reconcile_table(
         source: Box::new(source),
     })?;
 
-    if plan.primary_key.is_empty() {
+    if effective_primary_key(&plan).is_empty() {
         let source_rows = count_rows(current, &plan, "source")?;
         let original_rows = count_rows(original, &plan, "original")?;
         return Ok(TableCandidateReport {
@@ -339,8 +691,20 @@ async fn reconcile_table(
         });
     }
 
-    let original_rows = source_hashes(original, &plan, "original")?;
-    let current_rows = source_hashes(current, &plan, "source")?;
+    let original_rows = match source_hashes(original, &plan, "original") {
+        Ok(rows) => rows,
+        Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+            return duplicate_virtual_identity_table_report(table, current, original, &plan);
+        }
+        Err(err) => return Err(err),
+    };
+    let current_rows = match source_hashes(current, &plan, "source") {
+        Ok(rows) => rows,
+        Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+            return duplicate_virtual_identity_table_report(table, current, original, &plan);
+        }
+        Err(err) => return Err(err),
+    };
     let candidate_count = current_rows
         .rows
         .iter()
@@ -354,7 +718,13 @@ async fn reconcile_table(
     let target_rows = if candidate_count == 0 {
         TargetHashSet::default()
     } else {
-        target_hashes(pool, &plan).await?
+        match target_hashes(pool, &plan).await {
+            Ok(rows) => rows,
+            Err(err) if is_virtual_identity_duplicate(&err, &plan) => {
+                return duplicate_virtual_identity_table_report(table, current, original, &plan);
+            }
+            Err(err) => return Err(err),
+        }
     };
     let candidates = row_candidate_reports(
         &plan,
@@ -379,6 +749,39 @@ async fn reconcile_table(
         candidates,
         skipped_reason: None,
     })
+}
+
+fn duplicate_virtual_identity_table_report(
+    table: &crate::reconciliation_manifest::TableManifest,
+    current: &SourceSqlite,
+    original: &SourceSqlite,
+    plan: &TablePlan,
+) -> Result<TableCandidateReport, CandidateError> {
+    let source_rows = count_rows(current, plan, "source")?;
+    let original_rows = count_rows(original, plan, "original")?;
+
+    Ok(TableCandidateReport {
+        source_db: table.source_db.clone(),
+        ledger_file: table.ledger_file.clone(),
+        source_table: table.source_table.clone(),
+        target: Some(plan.target.clone()),
+        classification: table.classification,
+        scope_filter: reconciliation_scope_filter(plan).map(str::to_string),
+        source_rows,
+        original_rows,
+        target_rows_read: 0,
+        counters: CandidateCounters {
+            manual: source_rows,
+            ..CandidateCounters::default()
+        },
+        candidates: Vec::new(),
+        skipped_reason: Some("duplicate_virtual_identity_manual_policy_required".to_string()),
+    })
+}
+
+fn is_virtual_identity_duplicate(error: &CandidateError, plan: &TablePlan) -> bool {
+    matches!(error, CandidateError::DuplicatePrimaryKey { .. })
+        && plan.target == "steam.steam_rank_history"
 }
 
 fn source_hashes(
@@ -447,6 +850,85 @@ async fn target_hashes(pool: &PgPool, plan: &TablePlan) -> Result<TargetHashSet,
     Ok(TargetHashSet::from_rows(rows.len() as u64, rows_by_pk))
 }
 
+async fn target_hashes_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    plan: &TablePlan,
+) -> Result<TargetHashSet, CandidateError> {
+    let sql = target_select_sql(plan);
+    let rows = sqlx::query(&sql)
+        .fetch_all(&mut **tx)
+        .await
+        .map_err(|source| CandidateError::TargetRead {
+            target: plan.target.clone(),
+            source: Box::new(source),
+        })?;
+    let mut rows_by_pk = BTreeMap::new();
+    for row in &rows {
+        let target_row = pg_target_row(row, plan)?;
+        let pk = target_primary_key(&target_row, plan)?;
+        let hash = canonical_target_row_hash(&target_row, &plan.columns)?;
+        let fingerprint = RowFingerprint {
+            hash,
+            url: row_url(&target_row),
+        };
+        if rows_by_pk.insert(pk, fingerprint).is_some() {
+            return Err(CandidateError::DuplicatePrimaryKey {
+                scope: "target",
+                source_db: plan.source_db.clone(),
+                source_table: plan.source_table.clone(),
+            });
+        }
+    }
+
+    Ok(TargetHashSet::from_rows(rows.len() as u64, rows_by_pk))
+}
+
+fn source_target_rows(
+    source: &SourceSqlite,
+    plan: &TablePlan,
+    scope: &'static str,
+) -> Result<BTreeMap<String, TargetRow>, CandidateError> {
+    let rows = read_scoped_source_rows(source, plan, scope)?;
+    let mut out = BTreeMap::new();
+    for row in &rows {
+        let target_row = transform_source_row(&plan.source_db, &plan.source_table, plan, row)
+            .map_err(|source| CandidateError::Engine {
+                source_db: plan.source_db.clone(),
+                source_table: plan.source_table.clone(),
+                source: Box::new(source),
+            })?;
+        let pk = target_primary_key(&target_row, plan)?;
+        if out.insert(pk, target_row).is_some() {
+            return Err(CandidateError::DuplicatePrimaryKey {
+                scope,
+                source_db: plan.source_db.clone(),
+                source_table: plan.source_table.clone(),
+            });
+        }
+    }
+
+    Ok(out)
+}
+
+async fn lock_target_table(
+    tx: &mut Transaction<'_, Postgres>,
+    plan: &TablePlan,
+) -> Result<(), CandidateError> {
+    let sql = format!(
+        "LOCK TABLE {} IN SHARE ROW EXCLUSIVE MODE",
+        quote_pg_path(&plan.target)
+    );
+    sqlx::query(&sql)
+        .execute(&mut **tx)
+        .await
+        .map_err(|source| CandidateError::TargetRead {
+            target: plan.target.clone(),
+            source: Box::new(source),
+        })?;
+
+    Ok(())
+}
+
 fn row_candidate_reports(
     plan: &TablePlan,
     table_classification: TableClassification,
@@ -456,7 +938,7 @@ fn row_candidate_reports(
 ) -> Vec<RowCandidateReport> {
     let mut candidates = Vec::new();
     let source = format!("{}.{}", plan.source_db, plan.source_table);
-    let manual_policy = requires_manual_policy(table_classification);
+    let table_policy = table_policy(plan, table_classification);
 
     for (pk, source_row) in &current_rows.rows {
         let original_hash = original_rows.rows.get(pk).map(|row| row.hash.as_str());
@@ -471,9 +953,7 @@ fn row_candidate_reports(
         if url_conflict.is_some() {
             classification.decision = MergeDecision::Conflict;
         }
-        if manual_policy {
-            classification.decision = MergeDecision::Manual;
-        }
+        classification.decision = apply_table_policy(table_policy, classification);
 
         candidates.push(RowCandidateReport {
             source: source.clone(),
@@ -513,11 +993,210 @@ fn candidate_counters(candidates: &[RowCandidateReport]) -> CandidateCounters {
     counters
 }
 
-fn requires_manual_policy(classification: TableClassification) -> bool {
-    matches!(
-        classification,
-        TableClassification::QueueState | TableClassification::NoClock
-    )
+fn candidate_report_to_audit(
+    report: CandidateReport,
+    mode: ReconciliationMode,
+    table_aborted: bool,
+) -> ReconciliationAuditReport {
+    let mut totals = AuditCounters::default();
+    let tables = report
+        .tables
+        .into_iter()
+        .map(|table| {
+            let audit_table = candidate_table_to_audit(table, mode, table_aborted);
+            totals.add(&audit_table.counters);
+            audit_table
+        })
+        .collect::<Vec<_>>();
+
+    ReconciliationAuditReport {
+        generated_at: report.generated_at,
+        mode: match mode {
+            ReconciliationMode::DryRun => "dry_run_read_only".to_string(),
+            ReconciliationMode::Apply => "apply_table_transactions".to_string(),
+        },
+        cutoff: report.cutoff,
+        original_snapshot_dir: report.original_snapshot_dir,
+        source_files: report.source_files,
+        totals,
+        tables,
+    }
+}
+
+fn candidate_table_to_audit(
+    table: TableCandidateReport,
+    mode: ReconciliationMode,
+    table_aborted: bool,
+) -> TableAuditReport {
+    let skipped_reason = table.skipped_reason.clone();
+    let table_manual = table.counters.manual;
+    let rows = table
+        .candidates
+        .iter()
+        .map(|candidate| row_to_audit(candidate, mode, table_aborted))
+        .collect::<Vec<_>>();
+    let mut counters = audit_counters(&rows);
+    if skipped_reason.is_some() && rows.is_empty() {
+        counters.skipped += table_manual;
+    }
+
+    TableAuditReport {
+        source_db: table.source_db,
+        ledger_file: table.ledger_file,
+        source_table: table.source_table,
+        target: table.target,
+        classification: table.classification,
+        scope_filter: table.scope_filter,
+        source_rows: table.source_rows,
+        original_rows: table.original_rows,
+        target_rows_read: table.target_rows_read,
+        counters,
+        rows,
+        skipped_reason,
+    }
+}
+
+fn row_to_audit(
+    candidate: &RowCandidateReport,
+    mode: ReconciliationMode,
+    table_aborted: bool,
+) -> RowAuditReport {
+    let action = audit_action(candidate.decision, mode, table_aborted);
+    let reason = audit_reason(candidate, mode, table_aborted);
+
+    RowAuditReport {
+        source: candidate.source.clone(),
+        target_pk: candidate.target_pk.clone(),
+        source_hash: candidate.source_hash.clone(),
+        target_hash_before: candidate.target_hash_before.clone(),
+        action,
+        reason,
+        source_delta: candidate.action,
+        merge_decision: candidate.decision,
+        original_hash: candidate.original_hash.clone(),
+        conflict_target_pk: candidate.conflict_target_pk.clone(),
+        conflict_target_hash: candidate.conflict_target_hash.clone(),
+    }
+}
+
+fn audit_action(
+    decision: MergeDecision,
+    mode: ReconciliationMode,
+    table_aborted: bool,
+) -> AuditAction {
+    match decision {
+        MergeDecision::Noop => AuditAction::Noop,
+        MergeDecision::Conflict => AuditAction::Conflict,
+        MergeDecision::Manual => AuditAction::Skipped,
+        MergeDecision::InsertAllowed | MergeDecision::UpdateAllowed => {
+            if mode == ReconciliationMode::Apply && !table_aborted {
+                AuditAction::Applied
+            } else {
+                AuditAction::Skipped
+            }
+        }
+    }
+}
+
+fn audit_reason(
+    candidate: &RowCandidateReport,
+    mode: ReconciliationMode,
+    table_aborted: bool,
+) -> String {
+    if table_aborted
+        && matches!(
+            candidate.decision,
+            MergeDecision::InsertAllowed | MergeDecision::UpdateAllowed
+        )
+    {
+        return "table_conflict_abort_no_rows_applied".to_string();
+    }
+
+    match candidate.decision {
+        MergeDecision::InsertAllowed => match mode {
+            ReconciliationMode::DryRun => "dry_run_would_insert_target_missing".to_string(),
+            ReconciliationMode::Apply => "insert_applied_target_missing".to_string(),
+        },
+        MergeDecision::UpdateAllowed => match mode {
+            ReconciliationMode::DryRun => "dry_run_would_update_target_equals_original".to_string(),
+            ReconciliationMode::Apply => "update_applied_target_equals_original".to_string(),
+        },
+        MergeDecision::Noop => "target_already_equals_source".to_string(),
+        MergeDecision::Conflict if candidate.conflict_target_pk.is_some() => {
+            "patchnotes_url_conflict_same_url_different_id".to_string()
+        }
+        MergeDecision::Conflict => {
+            "target_changed_independently_or_append_identity_payload_conflict".to_string()
+        }
+        MergeDecision::Manual => "manual_policy_required_for_table".to_string(),
+    }
+}
+
+fn audit_counters(rows: &[RowAuditReport]) -> AuditCounters {
+    let mut counters = AuditCounters::default();
+    for row in rows {
+        match row.action {
+            AuditAction::Applied => counters.applied += 1,
+            AuditAction::Noop => counters.noop += 1,
+            AuditAction::Conflict => counters.conflict += 1,
+            AuditAction::Skipped => counters.skipped += 1,
+        }
+    }
+    counters
+}
+
+fn apply_table_policy(
+    policy: TablePolicy,
+    classification: CandidateClassification,
+) -> MergeDecision {
+    match policy {
+        TablePolicy::Normal => classification.decision,
+        TablePolicy::ManualAll => match classification.decision {
+            MergeDecision::Noop => MergeDecision::Noop,
+            MergeDecision::Conflict => MergeDecision::Conflict,
+            _ => MergeDecision::Manual,
+        },
+        TablePolicy::InsertOnly => match classification.decision {
+            MergeDecision::UpdateAllowed => MergeDecision::Manual,
+            other => other,
+        },
+        TablePolicy::AppendIdentityOnly => match classification.decision {
+            MergeDecision::Noop | MergeDecision::InsertAllowed => classification.decision,
+            _ if classification.delta == SourceDelta::Changed => MergeDecision::Conflict,
+            other => other,
+        },
+    }
+}
+
+fn table_policy(plan: &TablePlan, classification: TableClassification) -> TablePolicy {
+    if plan.target == "steam.steam_tasks" {
+        return TablePolicy::ManualAll;
+    }
+
+    if plan.target == "steam.steam_rank_history" {
+        return TablePolicy::AppendIdentityOnly;
+    }
+
+    if is_website_meta_target(&plan.target) {
+        return TablePolicy::InsertOnly;
+    }
+
+    match classification {
+        TableClassification::QueueState
+            if plan.target == "steam.steam_tasks"
+                || plan.target.ends_with(".notification_queue") =>
+        {
+            TablePolicy::ManualAll
+        }
+        _ => TablePolicy::Normal,
+    }
+}
+
+fn is_website_meta_target(target: &str) -> bool {
+    target == "core.meta_users"
+        || target == "patchnotes.meta_patch_notes"
+        || target.starts_with("tierlist.meta_")
+        || target.starts_with("content.meta_")
 }
 
 fn patchnotes_url_conflict(
@@ -643,7 +1322,7 @@ fn target_select_sql(plan: &TablePlan) -> String {
 }
 
 fn target_primary_key(row: &TargetRow, plan: &TablePlan) -> Result<String, CandidateError> {
-    plan.primary_key
+    effective_primary_key(plan)
         .iter()
         .map(|column| {
             let value = row.values.get(column).ok_or_else(|| {
@@ -659,6 +1338,14 @@ fn target_primary_key(row: &TargetRow, plan: &TablePlan) -> Result<String, Candi
         })
         .collect::<Result<Vec<_>, CandidateError>>()
         .map(|parts| parts.join(","))
+}
+
+fn effective_primary_key(plan: &TablePlan) -> Vec<String> {
+    if plan.target == "steam.steam_rank_history" {
+        vec!["user_id".to_string(), "captured_at".to_string()]
+    } else {
+        plan.primary_key.clone()
+    }
 }
 
 fn target_value_primary_key_part(value: &TargetValue) -> Result<String, CandidateError> {
@@ -946,6 +1633,15 @@ impl CandidateCounters {
     }
 }
 
+impl AuditCounters {
+    fn add(&mut self, other: &Self) {
+        self.applied += other.applied;
+        self.noop += other.noop;
+        self.conflict += other.conflict;
+        self.skipped += other.skipped;
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 struct CanonicalColumn<'a> {
     column: &'a str,
@@ -962,6 +1658,14 @@ enum TargetKind {
     Jsonb,
     Timestamptz,
     Date,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TablePolicy {
+    Normal,
+    ManualAll,
+    InsertOnly,
+    AppendIdentityOnly,
 }
 
 struct SourcePair {
@@ -1125,18 +1829,18 @@ mod tests {
     }
 
     #[test]
-    fn queue_state_and_no_clock_classifications_force_manual_decisions() {
-        let plan = demo_items_plan();
+    fn steam_tasks_queue_policy_forces_manual_decisions() {
+        let plan = steam_tasks_plan();
         let (_original_file, original) = sqlite_source(
             r#"
-            CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
-            INSERT INTO items(id, body) VALUES (1, 'queued-before');
+            CREATE TABLE steam_tasks(id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL);
+            INSERT INTO steam_tasks(id, type, status) VALUES (1, 'rank_fetch', 'PENDING');
             "#,
         );
         let (_current_file, current) = sqlite_source(
             r#"
-            CREATE TABLE items(id INTEGER PRIMARY KEY, body TEXT NOT NULL);
-            INSERT INTO items(id, body) VALUES (1, 'queued-after');
+            CREATE TABLE steam_tasks(id INTEGER PRIMARY KEY, type TEXT NOT NULL, status TEXT NOT NULL);
+            INSERT INTO steam_tasks(id, type, status) VALUES (1, 'rank_fetch', 'RUNNING');
             "#,
         );
         let original_rows = source_hashes(&original, &plan, "original").expect("original hashes");
@@ -1149,27 +1853,22 @@ mod tests {
             )]),
         );
 
-        for classification in [
+        let candidates = row_candidate_reports(
+            &plan,
             TableClassification::QueueState,
-            TableClassification::NoClock,
-        ] {
-            let candidates = row_candidate_reports(
-                &plan,
-                classification,
-                &original_rows,
-                &current_rows,
-                &target_rows,
-            );
-            let counters = candidate_counters(&candidates);
+            &original_rows,
+            &current_rows,
+            &target_rows,
+        );
+        let counters = candidate_counters(&candidates);
 
-            assert_eq!(candidates.len(), 1, "{classification:?}");
-            assert_eq!(candidates[0].decision, MergeDecision::Manual);
-            assert_eq!(counters.source_changed, 1);
-            assert_eq!(counters.manual, 1);
-            assert_eq!(counters.update_allowed, 0);
-            assert_eq!(counters.insert_allowed, 0);
-            assert_eq!(counters.noop, 0);
-        }
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].decision, MergeDecision::Manual);
+        assert_eq!(counters.source_changed, 1);
+        assert_eq!(counters.manual, 1);
+        assert_eq!(counters.update_allowed, 0);
+        assert_eq!(counters.insert_allowed, 0);
+        assert_eq!(counters.noop, 0);
     }
 
     #[test]
@@ -1281,7 +1980,109 @@ mod tests {
 
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].target_pk, "ns=patchnotes_bot,k=last_seen");
-        assert_eq!(candidates[0].decision, MergeDecision::Manual);
+        assert_eq!(candidates[0].decision, MergeDecision::UpdateAllowed);
+    }
+
+    #[test]
+    fn website_meta_policy_allows_inserts_but_not_updates() {
+        let plan = meta_users_plan();
+        let (_original_file, original) = sqlite_source(
+            r#"
+            CREATE TABLE meta_users(id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO meta_users(id, username) VALUES (1, 'old');
+            "#,
+        );
+        let (_current_file, current) = sqlite_source(
+            r#"
+            CREATE TABLE meta_users(id INTEGER PRIMARY KEY, username TEXT);
+            INSERT INTO meta_users(id, username) VALUES (1, 'new'), (2, 'fresh');
+            "#,
+        );
+        let original_rows = source_hashes(&original, &plan, "original").expect("original hashes");
+        let current_rows = source_hashes(&current, &plan, "source").expect("current hashes");
+        let target_rows = TargetHashSet::from_rows(
+            1,
+            BTreeMap::from([(
+                "id=1".to_string(),
+                original_rows.rows.get("id=1").expect("id=1").clone(),
+            )]),
+        );
+
+        let candidates = row_candidate_reports(
+            &plan,
+            TableClassification::NoClock,
+            &original_rows,
+            &current_rows,
+            &target_rows,
+        );
+
+        assert_eq!(
+            candidate_for_pk(&candidates, "id=1").decision,
+            MergeDecision::Manual
+        );
+        assert_eq!(
+            candidate_for_pk(&candidates, "id=2").decision,
+            MergeDecision::InsertAllowed
+        );
+    }
+
+    #[test]
+    fn steam_rank_history_uses_virtual_append_identity() {
+        let plan = steam_rank_history_plan();
+        let (_original_file, original) = sqlite_source(
+            r#"
+            CREATE TABLE steam_rank_history(user_id INTEGER NOT NULL, captured_at TEXT NOT NULL, rank_name TEXT);
+            INSERT INTO steam_rank_history(user_id, captured_at, rank_name)
+            VALUES (7, '2026-07-01T00:00:00Z', 'Old');
+            "#,
+        );
+        let (_current_file, current) = sqlite_source(
+            r#"
+            CREATE TABLE steam_rank_history(user_id INTEGER NOT NULL, captured_at TEXT NOT NULL, rank_name TEXT);
+            INSERT INTO steam_rank_history(user_id, captured_at, rank_name)
+            VALUES
+                (7, '2026-07-01T00:00:00Z', 'Changed'),
+                (7, '2026-07-02T00:00:00Z', 'Fresh');
+            "#,
+        );
+        let original_rows = source_hashes(&original, &plan, "original").expect("original hashes");
+        let current_rows = source_hashes(&current, &plan, "source").expect("current hashes");
+        let target_rows = TargetHashSet::from_rows(
+            1,
+            BTreeMap::from([(
+                "user_id=7,captured_at=2026-07-01T00:00:00.000000000Z".to_string(),
+                original_rows
+                    .rows
+                    .get("user_id=7,captured_at=2026-07-01T00:00:00.000000000Z")
+                    .expect("old history row")
+                    .clone(),
+            )]),
+        );
+
+        let candidates = row_candidate_reports(
+            &plan,
+            TableClassification::AppendOnly,
+            &original_rows,
+            &current_rows,
+            &target_rows,
+        );
+
+        assert_eq!(
+            candidate_for_pk(
+                &candidates,
+                "user_id=7,captured_at=2026-07-01T00:00:00.000000000Z"
+            )
+            .decision,
+            MergeDecision::Conflict
+        );
+        assert_eq!(
+            candidate_for_pk(
+                &candidates,
+                "user_id=7,captured_at=2026-07-02T00:00:00.000000000Z"
+            )
+            .decision,
+            MergeDecision::InsertAllowed
+        );
     }
 
     #[test]
@@ -1368,6 +2169,80 @@ mod tests {
                 column("v", "v", "TEXT", "text", Converter::TextToText),
             ],
             primary_key: vec!["ns".to_string(), "k".to_string()],
+            dropped_cols: Vec::new(),
+        }
+    }
+
+    fn steam_tasks_plan() -> TablePlan {
+        TablePlan {
+            source_db: "deadlock-sqlite3".to_string(),
+            source_table: "steam_tasks".to_string(),
+            target: "steam.steam_tasks".to_string(),
+            target_schema: "steam".to_string(),
+            target_table: "steam_tasks".to_string(),
+            columns: vec![
+                column("id", "id", "INTEGER", "int8", Converter::IntegerToInt8),
+                column("type", "type", "TEXT", "text", Converter::TextToText),
+                column("status", "status", "TEXT", "text", Converter::TextToText),
+            ],
+            primary_key: vec!["id".to_string()],
+            dropped_cols: Vec::new(),
+        }
+    }
+
+    fn meta_users_plan() -> TablePlan {
+        TablePlan {
+            source_db: "website".to_string(),
+            source_table: "meta_users".to_string(),
+            target: "core.meta_users".to_string(),
+            target_schema: "core".to_string(),
+            target_table: "meta_users".to_string(),
+            columns: vec![
+                column("id", "id", "INTEGER", "int8", Converter::IntegerToInt8),
+                column(
+                    "username",
+                    "username",
+                    "TEXT",
+                    "text",
+                    Converter::TextToText,
+                ),
+            ],
+            primary_key: vec!["id".to_string()],
+            dropped_cols: Vec::new(),
+        }
+    }
+
+    fn steam_rank_history_plan() -> TablePlan {
+        TablePlan {
+            source_db: "deadlock-sqlite3".to_string(),
+            source_table: "steam_rank_history".to_string(),
+            target: "steam.steam_rank_history".to_string(),
+            target_schema: "steam".to_string(),
+            target_table: "steam_rank_history".to_string(),
+            columns: vec![
+                column(
+                    "user_id",
+                    "user_id",
+                    "INTEGER",
+                    "int8",
+                    Converter::IntegerToInt8,
+                ),
+                column(
+                    "captured_at",
+                    "captured_at",
+                    "TEXT",
+                    "timestamptz",
+                    Converter::TextToTimestamptz,
+                ),
+                column(
+                    "rank_name",
+                    "rank_name",
+                    "TEXT",
+                    "text",
+                    Converter::TextToText,
+                ),
+            ],
+            primary_key: Vec::new(),
             dropped_cols: Vec::new(),
         }
     }

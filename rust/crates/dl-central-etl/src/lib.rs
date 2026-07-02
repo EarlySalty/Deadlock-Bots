@@ -21,8 +21,10 @@ pub use engine::{migrate_table, run, EngineError, EtlReport, OrphanReport, Table
 pub use ledger::{ColumnStatus, Ledger, LedgerError, LedgerSet, TableLedger};
 pub use plan::{build_table_plan, conversion_for, ColumnPlan, Converter, TablePlan};
 pub use reconciliation_candidates::{
-    build_candidate_report, canonical_target_row_hash, classify_candidate, CandidateOptions,
-    CandidateReport, MergeDecision, RowCandidateReport, SourceDelta,
+    build_candidate_report, canonical_target_row_hash, classify_candidate, run_reconciliation,
+    AuditAction, AuditCounters, CandidateOptions, CandidateReport, MergeDecision,
+    ReconciliationAuditReport, ReconciliationMode, ReconciliationOptions, RowAuditReport,
+    RowCandidateReport, SourceDelta, TableAuditReport,
 };
 pub use snapshot::{
     snapshot_db, snapshot_known_sources, source_snapshot_path, SnapshotError,

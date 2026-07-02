@@ -100,6 +100,40 @@ impl TargetWriter {
         Ok(rows.len() as u64)
     }
 
+    pub(crate) async fn insert_rows_in_tx(
+        &self,
+        tx: &mut Transaction<'_, Postgres>,
+        plan: &TablePlan,
+        rows: &[TargetRow],
+    ) -> Result<u64, TargetError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let columns = plan
+            .columns
+            .iter()
+            .map(|column| column.target_column.clone())
+            .collect::<Vec<_>>();
+        let sql = build_insert_sql(plan, &columns, &rows[0])?;
+
+        for row in rows {
+            let mut query = sqlx::query(&sql);
+            for column in &columns {
+                let value =
+                    row.values
+                        .get(column)
+                        .ok_or_else(|| TargetError::MissingColumnValue {
+                            column: column.clone(),
+                        })?;
+                query = bind_value(query, value);
+            }
+            query.execute(&mut **tx).await?;
+        }
+
+        Ok(rows.len() as u64)
+    }
+
     async fn replace_rows_in_tx(
         &self,
         tx: &mut Transaction<'_, Postgres>,
