@@ -2345,8 +2345,12 @@ fn weiche_prompt(
             },
             NativeOnboardingOption {
                 id: None,
-                title: "Ich hab Deadlock noch nicht — ich brauche einen Invite".to_string(),
-                description: None,
+                title: "Ich brauche noch einen Invite".to_string(),
+                // Discord-Limit: Options-Titel max. 50 Zeichen — der volle
+                // Konsens-Wortlaut steht in der Description (max. 100).
+                description: Some(
+                    "Ich hab Deadlock noch nicht — ich brauche einen Invite".to_string(),
+                ),
                 emoji: Some(json!({ "name": "🔑" })),
                 role_ids: invite_role
                     .map(|id| vec![id.to_string()])
@@ -2356,8 +2360,10 @@ fn weiche_prompt(
             },
             NativeOnboardingOption {
                 id: None,
-                title: "Ich bin ganz neu und will's lernen — nehmt mich an die Hand".to_string(),
-                description: None,
+                title: "Ich bin ganz neu — nehmt mich an die Hand".to_string(),
+                description: Some(
+                    "Ich bin ganz neu und will's lernen — nehmt mich an die Hand".to_string(),
+                ),
                 emoji: Some(json!({ "name": "🌱" })),
                 role_ids: frischling_role
                     .map(|id| vec![id.to_string()])
