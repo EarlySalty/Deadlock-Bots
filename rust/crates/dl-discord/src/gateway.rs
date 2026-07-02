@@ -14,6 +14,9 @@ use serenity::async_trait;
 use serenity::gateway::ActivityData;
 
 use crate::adapter::DiscordAdapter;
+use crate::core_user_sync::{
+    profile_from_interaction, profile_from_user, CoreUserEventKind, CoreUserProfile, CoreUserSync,
+};
 use crate::dispatcher::{
     member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
     GatewayEvent, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent,
@@ -26,6 +29,7 @@ struct Handler {
     dispatcher: Arc<Dispatcher>,
     router: Arc<InteractionRouter>,
     invite_tracker: Arc<InviteTracker>,
+    core_user_sync: Arc<CoreUserSync>,
     reaction_roles: Option<Arc<dyn ReactionRoleGatewayPort>>,
     feature_module_count: usize,
     command_prefix: String,
@@ -122,6 +126,15 @@ async fn reaction_user_is_bot(
     }
 }
 
+impl Handler {
+    fn record_core_user(&self, kind: CoreUserEventKind, profile: Option<CoreUserProfile>) {
+        let Some(profile) = profile else {
+            return;
+        };
+        self.core_user_sync.record(kind, profile);
+    }
+}
+
 #[async_trait]
 impl EventHandler for Handler {
     async fn ready(&self, ctx: Context, ready: Ready) {
@@ -147,6 +160,10 @@ impl EventHandler for Handler {
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: serenity::all::Interaction) {
+        self.record_core_user(
+            CoreUserEventKind::InteractionCreate,
+            profile_from_interaction(&interaction),
+        );
         crate::dispatch::dispatch(&self.adapter, &self.router, &interaction).await;
     }
 
@@ -198,6 +215,10 @@ impl EventHandler for Handler {
         if message.author.bot {
             return;
         }
+        self.record_core_user(
+            CoreUserEventKind::MessageCreate,
+            profile_from_user(&message.author),
+        );
         // Admin-Flag bleibt eng fuer Admin-Commands; Staff-Schutz fuer
         // Moderation folgt Python: administrator || manage_messages || manage_guild.
         let (
@@ -287,6 +308,10 @@ impl EventHandler for Handler {
     }
 
     async fn guild_member_addition(&self, ctx: Context, member: Member) {
+        self.record_core_user(
+            CoreUserEventKind::GuildMemberAdd,
+            profile_from_user(&member.user),
+        );
         // Beitrittsquelle per Invite-uses-Delta erkennen (rohe Metadaten).
         let metadata = self.invite_tracker.on_join(&ctx.http, &member).await;
         let join_position = ctx
@@ -330,6 +355,10 @@ impl EventHandler for Handler {
         new: Option<Member>,
         event: GuildMemberUpdateEvent,
     ) {
+        self.record_core_user(
+            CoreUserEventKind::GuildMemberUpdate,
+            profile_from_user(&event.user),
+        );
         // Rollen und Member-Screening diffen. Vorher-Zustand kommt aus dem
         // Cache (old); ohne Cache kein sicherer Übergang möglich.
         let Some(old) = old else {
@@ -485,7 +514,8 @@ pub async fn build_client(
             adapter,
             dispatcher,
             router,
-            invite_tracker: Arc::new(InviteTracker::new(options.pool)),
+            invite_tracker: Arc::new(InviteTracker::new(options.pool.clone())),
+            core_user_sync: Arc::new(CoreUserSync::new(options.pool)),
             reaction_roles: options.reaction_roles,
             feature_module_count: options.feature_module_count,
             command_prefix: options.command_prefix,
