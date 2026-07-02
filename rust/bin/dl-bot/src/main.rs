@@ -882,9 +882,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             if env_bool_default("AI_MODERATOR_ENABLE", false) {
                 dl_moderation::spawn(moderator.clone(), &dispatcher);
             } else {
-                tracing::info!(
-                    "AI-Moderator-Scan deaktiviert (AI_MODERATOR_ENABLE nicht gesetzt)"
-                );
+                tracing::info!("AI-Moderator-Scan deaktiviert (AI_MODERATOR_ENABLE nicht gesetzt)");
             }
         } else {
             tracing::info!("AI-Moderator inaktiv (kein MiniMax-Key)");
