@@ -1,3 +1,11 @@
+## #184 — Neues Onboarding: das Konzept steht
+
+**Ausgangslage:** Unser Onboarding war über die Zeit zu einem Flickenteppich aus fünf halbfertigen Systemen gewachsen — immer weniger Neue sind wirklich angekommen, und an den wichtigsten Stellen (Invite bekommen, erste Frage stellen, Anschluss finden) hat es am häufigsten gehakt.
+
+**Was wurde geändert:** Wir haben den kompletten Ist-Zustand vermessen (echte Zahlen, echte Chats, echte Stolperstellen), Forschung ausgewertet, was neue Mitglieder wirklich aktiviert, und daraus ein vollständiges Neubau-Konzept erarbeitet und hart gegengeprüft: ein einziger klarer Einstieg, danach echte Menschen statt Automaten-Wände, ein Bot-Begleiter für Fragen, ein ehrlicher Invite-Weg und aufgeräumte Kanäle und Rollen.
+
+**Wie es jetzt läuft:** Der Umbau passiert in Etappen und wird vor jedem sichtbaren Schritt angekündigt. Für euch ändert sich erst etwas, wenn wir es ankündigen — Feedback ist ab jetzt ausdrücklich erwünscht.
+
 ## #183 — Server-Statistiken werden dauerhaft archiviert
 
 **Ausgangslage:** Discord zeigt Server-Statistiken (Neuzugänge, Aktivität, Retention) nur für die letzten 120 Tage und löscht ältere Daten unwiderruflich. Für langfristige Auswertungen — etwa wie gut neue Mitglieder ankommen — fehlte damit die Historie.
