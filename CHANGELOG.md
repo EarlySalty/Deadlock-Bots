@@ -1,3 +1,11 @@
+## #189 — Neuer Einstieg: 3 Fragen statt 10-Schritte-Assistent, Regelwerk neu, tote Kanäle ins Archiv
+
+**Ausgangslage:** Der Einstieg auf den Server war ein Hindernislauf — erst Discord-Fragen, dann noch ein 10-Schritte-Assistent im Regelkanal, der fast 200 verwaiste Threads hinterlassen hat. Dazu ein Haufen Kanäle, in denen seit Monaten nichts mehr passiert.
+
+**Was wurde geändert:** Der Einstieg läuft jetzt komplett über das native Discord-Onboarding mit drei kurzen Fragen: Wo stehst du gerade (spielst du schon, brauchst du einen Invite, oder bist du ganz neu), welche Pings willst du, und wo stehst du im Rang. Der alte Assistent ist Geschichte, das Regelwerk wurde neu geschrieben und ist jetzt ein reines Nachschlagewerk. Tote Kanäle wandern ins Archiv — gelöscht wird nichts; movement, deadlock-art, mods und food ziehen zusammen in die neue kreativ-ecke. Neue Mitglieder bekommen außerdem einen Server Guide mit den ersten Schritten.
+
+**Wie es jetzt läuft:** Wer neu joint, beantwortet die drei Fragen und ist drin — wer angibt, noch keinen Invite zu haben, wird direkt zum Invite-Kanal geführt, und wer ganz neu ist, dem nehmen wir uns besonders an. Für Bestandsmitglieder ändert sich nichts, außer dass es aufgeräumter aussieht.
+
 ## #188 — Server-Aufräumen: Kanäle umbenannt, Rechte entrümpelt, Invite-Kanal offen
 
 **Ausgangslage:** Über die Jahre hatten sich auf dem Server über 500 einzelne Rechte-Einstellungen angesammelt — vieles davon Leichen, Redundanzen oder Regeln, die niemand mehr erklären konnte. Dazu Kanalnamen, die nicht sagten, was drin ist, und ein Invite-Kanal, in den man ohne Extra-Rolle nicht mal schreiben konnte.
