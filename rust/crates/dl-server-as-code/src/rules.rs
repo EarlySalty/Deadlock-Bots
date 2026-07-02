@@ -2436,9 +2436,9 @@ mod tests {
             );
             assert_eq!(
                 invite_overwrites[0].allow_bits,
-                Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES
+                (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).bits()
             );
-            assert_eq!(invite_overwrites[0].deny_bits, Permissions::empty());
+            assert_eq!(invite_overwrites[0].deny_bits, Permissions::empty().bits());
         }
         Ok(())
     }
@@ -2666,7 +2666,7 @@ mod tests {
         );
         assert_eq!(
             invite_overwrites[0].allow_bits,
-            Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES
+            (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).bits()
         );
         Ok(())
     }
