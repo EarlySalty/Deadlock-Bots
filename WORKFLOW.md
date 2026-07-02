@@ -1,3 +1,14 @@
+# Invite-Lounge-Watcher deadlock-invite (2026-07-02)
+
+## Ziel
+Neuer Rust-Message-Listener in `dl-community` fuer den offenen Kanal `#deadlock-invite`: bei Invite-Frage ohne Steam-Freundescode einmalig pro User/24h per Text-Reply hinweisen. Kein Commit/Push; vorhandene uncommitted Aenderungen bleiben erhalten.
+
+## Fortschritt
+- Workflow gelesen und Worktree-Status geprueft; bestehende fremde Aenderungen u. a. in Docs, `dl-bridges::steam` und `dl-community::faq.rs` werden nicht reverted.
+- Kanal-ID-Befund: `cogs/onboarding.py` enthaelt `CH_BETA = 1428745737323155679`; `onboarding_steps.json` referenziert denselben Kanal als Invite-/Zugangskanal; Server-as-Code/Konzept dokumentieren Rename `beta-zugang` -> `deadlock-invite`. Daher feste Konstante statt Env-Var.
+- Implementiert: neues Modul `dl_community::invite_lounge` mit Dispatcher-Subscriber, deterministischer Invite-/Freundescode-Heuristik, Text-Reply-Port ohne Embeds/Buttons und KV-Cooldown `invite_lounge:cooldown/user:<id>` fuer 24h.
+- Verdrahtet: `rust/bin/dl-bot/src/main.rs` startet den Watcher im gateway-gated Message-Listener-Block.
+- Verifikation gruen: `cargo fmt --check -p dl-community -p dl-bot`; `cargo check -p dl-community`; `cargo test -p dl-community` (51 passed); Zusatz wegen `main.rs`-Wiring: `cargo check -p dl-bot`.
 # Welle2b W1 Onboarding-Fundament (2026-07-02)
 
 ## Welle2b W3 Incident-Hardening §0 (2026-07-03)
@@ -38,6 +49,12 @@ Native Discord-Onboarding-Welle 2b lokal vorbereiten: neue Soll-Rollen, hash-gat
 - Rework-Verifikation gruen: `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot onboarding -- --ignored`; `git diff --check`. Kein Commit/Push.
 
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
+
+## Slash /betainvite entfernen (2026-07-02)
+- Implementierungsworker gestartet: Scope ist nur der user-facing Slash-Command `/betainvite` in `dl-bridges::steam`; Button-/Prefix-Funnel `betainvite:` und Admin-Panel-Command bleiben erhalten. Kein Commit/Push.
+- Implementiert: Slash-Command-Registrierung `betainvite` entfernt; Registrierungstest erwartet weiter den `betainvite:`-Prefix und zaehlt eine Top-Level-Command-Definition weniger.
+- Sync-Befund: `dl-discord::dispatch::sync_commands` nutzt Bulk-Overwrite via `create_guild_commands`/`create_global_commands` mit `router.command_definitions()`, daher verschwindet ein entfernter Command beim naechsten aktivierten Sync.
+- Verifikation gruen: `cargo check -p dl-bridges`; `cargo test -p dl-bridges router_registrierung_vollstaendig`; `cargo fmt --check -p dl-bridges`.
 
 ## Fix Server-Sync Live-Findings (Rollback-Serialisierung + Namens-Matching)
 - Implementierungsworker gestartet fuer zwei Live-Dry-Run-Bugs: Rollback-Artefakt darf kein rohes `GuildModel` mit Nicht-String-Map-Keys serialisieren; Regeln muessen Emoji-/Case-/Alias-Namen nur beim Matching erkennen. Verbindlich: keine Commits/Pushes/Deploys/Restarts/Live-Guild-Aufrufe.

@@ -31,9 +31,15 @@ markiert). Es gibt drei Sorten, je nachdem was du spielen willst:
 Sobald du drin bist, wird **deine** Lane erstellt und du wirst hineingezogen. Du
 bist automatisch der **Owner** dieser Lane und darfst sie steuern.
 
+**Alternative: der Router-Kanal.** Statt eines festen Einstiegs kannst du auch
+den Router-Voice betreten. Dort wählst du per Panel `Casual`, `Ranked`,
+`Street Brawl` oder `Auto-Join`. Bei Auto-Join sucht dir der Bot eine passende
+offene Lane — bevorzugt eine mit Leuten, mit denen du öfter spielst, und mit
+1–5 Mitgliedern. Über den Router erstellte Casual-Lanes starten mit 6 Plätzen.
+
 ## 3. Das Steuerungs-Panel
 
-Die Lane steuerst du im Kanal **`#sprach-kanal-verwalten`**. Das Panel zeigt dir
+Die Lane steuerst du im Kanal **<#1439564934592729161>**. Das Panel zeigt dir
 Knöpfe — welche genau, hängt vom Lane-Typ ab (Ranked hat mehr als Chill).
 
 ### Immer verfügbar
@@ -41,11 +47,11 @@ Knöpfe — welche genau, hängt vom Lane-Typ ab (Ranked hat mehr als Chill).
 | Knopf | Was er macht |
 |---|---|
 | 🇩🇪 **DE** / 🇪🇺 **EU** | Setzt die Region deiner Lane. Die Wahl bleibt an **dir** hängen (siehe Abschnitt 5) und gilt auch für deine nächsten Lanes. |
-| 👑 **Owner übernehmen** | Macht dich zum Owner — gedacht für den Fall, dass der ursprüngliche Owner die Lane verlassen hat. |
+| 👑 **Owner übernehmen** | Macht dich zum Owner, wenn der ursprüngliche Owner die Lane verlassen hat. Zuerst dürfen die aktivsten Mitglieder der Lane übernehmen; nach 20 Minuten darf es jeder in der Lane. |
 | 🎚️ **Limit setzen** | Begrenzt die Platzanzahl (0–99; 0 = kein Limit). |
 | 🎯 **Mein Rang** | Deine Rang-Präferenz für die Lane-Benennung/Sortierung. |
 | 👢 **Kick** / 🚫 **Ban** / ♻️ **Unban** | Mitglieder aus der Lane entfernen, sperren bzw. entsperren. |
-| 🛡️ **Tag-Filter** | Zugangs-Filter: Mindest-Alter (z. B. 25+), Tonfall (Ragebaiter-Free), Ragebaiter blockieren. |
+| 🛡️ **Tag-Filter** | Zugangs-Filter für die Lane. Durchgesetzt werden Mindest-Alter (z. B. 25+) und das Blockieren von Ragebaitern; die Tonfall-Präferenz ist nur eine Info und sperrt niemanden aus. |
 | 👻 **Lurker** | Schiebt stille Mitglieder, die nur „mithören", in einen reduzierten Zustand. |
 
 ### Schnell-Vorlagen
@@ -55,6 +61,13 @@ Knöpfe — welche genau, hängt vom Lane-Typ ab (Ranked hat mehr als Chill).
 | **Duo Call** | Stellt die Lane auf eine Duo-Runde (Name + Limit 2). |
 | **Trio Call** | Stellt die Lane auf eine Trio-Runde (Name + Limit 3). |
 | **Normale Lane** (Reset) | Setzt Vorlage/Limit wieder auf den Standard zurück. |
+
+### Nur in Nicht-Ranked-Lanes
+
+| Knopf | Was er macht |
+|---|---|
+| **Umbenennen** | Gibt deiner Lane einen eigenen Namen. |
+| **Modus wechseln** | Wechselt den Lane-Modus (z. B. Casual ↔ Street Brawl) — die Lane übernimmt die Regeln des neuen Modus. |
 
 ### Nur in Ranked-Lanes
 
@@ -127,6 +140,8 @@ er auf einfachere Anzeigen zurück.
   willst, und (für Kick/Ban/Filter) Owner oder Mod sein.
 - **Mindest-Rang lässt sich nicht setzen.** Das geht nur in Ranked/Comp, du musst
   verifiziert sein, und du kannst keinen höheren Rang verlangen als deinen eigenen.
+  Ein gesetzter Mindest-Rang sperrt den Zutritt wirklich (Berechtigungen) und
+  erscheint als Zusatz im Kanalnamen.
 - **Street Brawl bleibt bei 4 Plätzen.** Das ist so gewollt — Street-Brawl-Lanes
   ignorieren Rang-Caps und Mindest-Rang und haben immer maximal 4 Slots (solange
   die Lane in der Street-Brawl-Kategorie bleibt; siehe Abschnitt 4).

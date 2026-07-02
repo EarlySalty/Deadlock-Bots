@@ -15,7 +15,7 @@ Im normalen Betrieb umfasst ein Post:
 Außerdem kann der Bot vorbereitete Sonderposts einmalig aus einer hinterlegten Datei abschicken. Das ist für kuratierte Ankündigungen oder Tests gedacht und kann je nach Konfiguration in den normalen Patchnotes-Channel oder in einen separaten Logs-/Staff-Channel gehen.
 
 ## Welche Quelle nutzt er?
-Die primäre Beobachtung hängt am offiziellen Deadlock-Changelog-Forum. Zusätzlich berücksichtigt die Erkennung Steam-Announcement-Links und Steam-Community-Mirror. Wenn ein Forumspost im Kern nur auf die Steam-News verweist, zieht der Bot bei Bedarf den eigentlichen Steam-Inhalt nach, damit nicht bloß eine kurze Link-Vorschau gepostet wird.
+Der Bot beobachtet zwei Quellen gleichberechtigt: das offizielle Deadlock-Changelog-Forum und die Steam-News. Er nimmt jeweils den neuesten Eintrag (bei Gleichstand gewinnt das Forum). Zusätzlich reagiert er auf Steam-Signale fast in Echtzeit: Ein erkanntes Steam-Update löst einen mehrminütigen Intensiv-Scan aus, damit der Patch so schnell wie möglich im Channel landet. Wenn ein Forumspost im Kern nur auf die Steam-News verweist, zieht der Bot den eigentlichen Steam-Inhalt nach, damit nicht bloß eine kurze Link-Vorschau gepostet wird.
 
 Wichtig für Nutzer: Der Bot versucht immer die echte Patchquelle zu erwischen, nicht nur irgendeinen Kommentar oder Link-Fetzen. Gleichzeitig merkt er sich bereits verarbeitete Posts, damit identische Inhalte nicht mehrfach im Channel landen.
 
@@ -42,10 +42,12 @@ Ja, der Bot kann eine KI-gestützte Aufbereitung verwenden. Für Nutzer ist der 
 
 Die Doku hier erklärt bewusst nicht die interne Prompt- oder API-Mechanik, sondern nur den sichtbaren Nutzen.
 
+Falls eine Übersetzung mal danebenliegt, kann das Team einen Patch direkt im Channel neu übersetzen lassen: `!tpatch` (ohne Ping) bzw. `!ppatch` (mit Ping), mit kurzem Cooldown pro Channel.
+
 ## Häufige Grenzen
 - Der Bot erklärt keine Patchinhalte aus sich heraus, sondern verarbeitet nur erkannte Changelog-Quellen.
 - Bereits bekannte oder identische Inhalte werden blockiert, damit der Channel nicht zugespammt wird.
 - Bei Quellfehlern oder API-Problemen kann ein Post ausbleiben, obwohl der Bot weiterläuft.
-- Der FAQ-Bot ergänzt Antworten ohnehin schon mit aktuellen Patch-Kontexten; deshalb dient diese Seite nur zum Verständnis des Bots selbst, nicht als Patch-Archiv.
+- Diese Seite dient zum Verständnis des Bots selbst, nicht als Patch-Archiv — fürs Nachschlagen alter Patches gibt es das Patch-Portal auf der Website.
 
-Kurz technisch: Der Bot scannt Forum und Steam, speichert gefundene Patches in einer Datenbank, schützt sich gegen Doppelposts und schickt den finalen Text in Discord in mehrere Chunks, wenn eine Nachricht zu lang wäre.
+Kurz technisch: Der Bot scannt Forum und Steam, speichert gefundene Patches in einer Datenbank, schützt sich gegen Doppelposts (Inhalts-Signatur, URL- und Patch-ID-Abgleich) und schickt den finalen Text in Discord in mehreren Chunks, wenn eine Nachricht zu lang wäre. Nach dem Speichern stößt er zusätzlich den Wissens-Sync fürs Deadlock-Brain an.

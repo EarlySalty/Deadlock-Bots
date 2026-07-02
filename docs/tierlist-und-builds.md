@@ -1,27 +1,26 @@
 # Tierlist und Builds
 
 ## Worum geht es?
-Der Server hat eine oeffentliche Deadlock-Tierlist mit Hero-Einstufungen, Build-Empfehlungen und Verlauf pro Patch. Aus Usersicht ist das die zentrale Stelle, um schnell zu sehen, welche Heroes aktuell stark sind, welche Builds zum Hero hinterlegt wurden und wie sich die Meta veraendert.
+Der Server hat eine öffentliche Deadlock-Tierlist mit Hero-Einstufungen, Build-Empfehlungen und Verlauf pro Patch. Aus Usersicht ist das die zentrale Stelle, um schnell zu sehen, welche Heroes aktuell stark sind, welche Builds zum Hero hinterlegt wurden und wie sich die Meta verändert.
 
 ## Wie nutze ich das?
-Oeffne die Tierlist auf der Website und waehle dort den passenden Datenbereich aus, zum Beispiel alle Ranks oder hoehere Brackets wie `Phantom+` oder `Eternus`. In der Tierlist siehst du fuer jeden Hero seine aktuelle Einstufung, Winrate, Match-Zahl und eine kurze Beschreibung. Wenn du tiefer reingehst, findest du darunter die fuer diesen Hero hinterlegten Builds.
+Öffne die Tierlist auf der Website (unter `/builds/`) und wähle dort den passenden Datenbereich aus: alle Ranks (`all`) oder die höheren Brackets `Phantom+` und `Eternus`. In der Tierlist siehst du für jeden Hero seine aktuelle Einstufung, Winrate, Match-Zahl und eine kurze Beschreibung. Wenn du tiefer reingehst, findest du darunter die für diesen Hero hinterlegten Builds; dazu gibt es eine Verlaufs-Ansicht pro Patch.
 
-Builds kannst du als Spieler vor allem lesen und vergleichen. Die Reihenfolge ist nicht zufaellig: Builds werden zusammen mit Vote-Zahlen angezeigt und dadurch im Frontend sinnvoll sortiert. Wenn dir ein Build hilft, kannst du ihn positiv bewerten; wenn er aus deiner Sicht schlecht oder veraltet ist, kannst du ihn runtervoten. So entsteht ueber die Zeit eine brauchbare Community-Sortierung, ohne dass du selbst irgendetwas publishen musst.
+Builds kannst du als Spieler vor allem lesen, vergleichen und bewerten. Die Grundreihenfolge legt das Team fest; deine Up- und Downvotes entscheiden bei gleichrangigen Builds über die Reihenfolge und geben dem Team ein ehrliches Qualitäts-Signal. Für manche Heroes können außerdem Streamer-Hinweise auftauchen — es gibt also eine Twitch-Verbindung, die Details dazu kommen separat in den Twitch-Dokus.
 
-Wenn du beobachten willst, ob ein neuer oder geaenderter Build schon angekommen ist, schaust du einfach spaeter noch einmal auf denselben Hero. Neue oder aktualisierte Build-Daten tauchen nach dem Backend-Sync auf der oeffentlichen Seite auf. Fuer manche Heroes koennen dort ausserdem Streamer-Hinweise auftauchen. Es gibt also eine Twitch-Verbindung, die Details dazu kommen aber separat in den Twitch-Dokus.
 ## Kosten / Premium
 kostenlos
 
 ## Was passiert technisch (kurz)?
-Die Tierlist zieht regelmaessig externe Hero-Stats, bildet daraus pro Bucket Snapshots und ordnet Heroes anhand konfigurierter Winrate-Schwellen in Tiers ein. Hinterlegte Builds und Streamer-Verknuepfungen werden zu jedem Hero mit ausgeliefert; Build-Votes werden getrennt gespeichert. Die eigentliche Build-Auslieferung auf die Zielplattform passiert asynchron im Hintergrund, deshalb koennen neue Builds oder Updates mit Verzoegerung sichtbar werden.
+Die Tierlist zieht regelmäßig externe Hero-Stats (standardmäßig alle 8 Stunden), bildet daraus pro Bucket Snapshots und ordnet Heroes anhand konfigurierter Winrate-Schwellen in Tiers ein — Heroes mit zu wenigen Matches (Standard: unter 500) fallen raus. Hinterlegte Builds und Streamer-Verknüpfungen werden zu jedem Hero mit ausgeliefert; Build-Votes werden getrennt gespeichert (mit kurzem Spam-Schutz von 5 Sekunden pro Absender).
 
 ## Grenzen & häufige Fragen
-- Die Tierlist ist datengetrieben und patchabhaengig. Nach einem frischen Patch koennen sich Einstufungen deutlich verschieben.
-- Build-Votes sind ein Signal, aber kein Garant dafuer, dass ein Build fuer jeden Rang oder jeden Spielstil optimal ist.
-- Neue Builds erscheinen nicht immer sofort. Der Hintergrund-Worker verarbeitet sie in Intervallen und kann bei externen Problemen warten.
+- Die Tierlist ist datengetrieben und patchabhängig. Nach einem frischen Patch können sich Einstufungen deutlich verschieben.
+- Build-Votes sind ein Signal, aber kein Garant dafür, dass ein Build für jeden Rang oder jeden Spielstil optimal ist — und sie stehen in der Sortierung hinter der redaktionellen Reihenfolge.
+- Ein automatischer Abgleich der Builds in den Spiel-Client (In-Game-Katalog) läuft aktuell nicht — Build-Pflege passiert redaktionell über das Dashboard.
 - Twitch-Links bei Heroes sind nur ein Hinweis auf passende Streamer oder Creator. Die komplette Twitch-Feature-Doku kommt separat.
 
 ## Für Devs (knapp)
-- Cogs: `cogs/tierlist_public_cog.py`, `cogs/build_publisher.py`
-- Abhangigkeiten: `service/tierlist_public.py`, Deadlock-API, Steam-Bridge-Taskqueue
-- Wichtige DB-Tabellen: `tierlist_settings`, `tierlist_snapshots`, `tierlist_snapshot_heroes`, `tierlist_build_votes`, `tierlist_streamers`, `tierlist_hero_meta`, `deadlock_hero_builds`, `hero_build_clones`, `steam_tasks`
+- Rust live: `dl-tierlist` (Public-API: Heroes/Tierlist/History/Votes + Admin-Routes inkl. Refresh; Settings: 8h-Intervall, min_matches 500, Buckets `all`/`phantom_plus`/`eternus`; Sortierung `(sort_order, votes)` in `data.rs`)
+- Der alte Steam-Build-Sync (`MAINTAIN_BUILD_CATALOG`/Build-Publisher-Worker) ist nicht nach Rust portiert; Upsert/Delete halten nur die DB konsistent (`dl-dashboard/src/deadlock.rs`)
+- Wichtige DB-Tabellen: Schema `tierlist.*` (Settings, Snapshots, Votes, Streamer, Hero-Meta); `steam.steam_tasks` gehört zum Steam-Schema

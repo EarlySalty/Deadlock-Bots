@@ -24,36 +24,38 @@ Bleibt der Status nach einem vollständigen Reconnect (alle Scopes vergeben, OAu
 
 ## Steam lässt sich nicht verbinden / Rang wird nicht erkannt
 
-Die Steam-Verknüpfung hat **zwei** Schritte – ein reiner Login reicht nicht:
+Die Steam-Verknüpfung hat **drei** Schritte – ein reiner Login reicht nicht:
 
-1. Verknüpfe Steam über `/account_verknüpfen` (alternativ `/link`) oder das Steam-Link-Panel. Der Login läuft über Steam selbst, ohne Passwort-Eingabe beim Bot.
-2. **Bestätige danach die Steam-Freundschaft mit dem Bot.** Erst damit gilt der Link als vollständig verifiziert – und erst dann funktionieren Verified-Rolle, Rang-Erkennung und Invite sauber.
-3. Mehrere Accounts hinterlegt? Mit `/steam links` siehst du, was gespeichert ist; mit `/steam setprimary` setzt du deinen Hauptaccount (für viele Features zählt der Primäraccount).
+1. Verknüpfe Steam über `/account_verknüpfen` oder das Steam-Panel in <#1398021105339334666> (Button `Steam verknüpfen`). Der Login läuft über Steam selbst, ohne Passwort-Eingabe beim Bot.
+2. Gib deinen **Steam-Freundescode** ein (Panel-Button `Freundescode eingeben`), damit der Bot dir die Freundschaftsanfrage schicken kann.
+3. **Nimm die Steam-Freundschaftsanfrage des Bots an.** Erst damit gilt der Link als vollständig verifiziert – und erst dann funktionieren Verified-Rolle, Rang-Erkennung und Invite sauber.
 
-Hinweis: Ist dein Steam-Account eingeschränkt, kann Steam Aktionen wie Einladungen blockieren. Deinen Rang prüfst du mit `/steam_rank` oder dem `Rank Check`-Button im Steam-Panel.
+Mehrere Accounts hinterlegt? Mit `/steam links` siehst du, was gespeichert ist; mit `/steam setprimary` setzt du deinen Hauptaccount (für viele Features zählt der Primäraccount). `/steam whoami` zeigt deine gespeicherte ID, `/steam unlink` entfernt eine Verknüpfung.
 
-## Kein Beta-Invite / #beta-zugang fehlt / Invite kommt nicht an
+Rang prüfen: `/steam_rank` oder der Button `📊 Rang prüfen` im Panel zeigen den Rang nur an. Wenn deine **Rang-Rollen** nicht stimmen, nutze `/checkrank` – das gleicht die Rollen tatsächlich ab.
+
+## Kein Beta-Invite / Invite kommt nicht an
 
 Geh die Punkte der Reihe nach durch:
 
-1. **Onboarding vollständig abgeschlossen?** Starte es notfalls neu in `#regelwerk` über `Hier starten`. Du musst dort die Option für **Invite/Betazugang** gewählt haben, sonst wird `#beta-zugang` nicht sichtbar.
-2. **Rollen gesetzt?** Nach dem Onboarding in `#customize` bzw. der Rollen-Auswahl die passenden Rollen wählen – fehlen sie, fehlen Kanäle.
-3. **`/betainvite` im richtigen Channel** (`#beta-zugang`) ausführen.
-4. **Steam-Voraussetzung:** Dein Steam-Account braucht mindestens **5 € echte Kaufhistorie**. Reines Wallet-Aufladen oder Free-to-Play reicht dafür nicht.
-5. Ein Invite taucht nicht immer sofort in der Bibliothek auf – prüfe später noch einmal deine Steam-Playtest-Einladungen. Vorübergehende Steam-Probleme lassen sich oft mit einem späteren erneuten Versuch lösen.
+1. **In <#1464736918951432222> gefragt?** Der Weg ist bewusst simpel: nette Frage in den Kanal („mag mich wer einladen? :)") plus dein **Steam-Freundescode** (Steam → Freunde → „Freund hinzufügen"). Ohne Code kann dich niemand einladen — der Bot erinnert dich im Kanal daran.
+2. **Freundschaftsanfrage angenommen?** Wer dich einlädt, muss erst mit dir auf Steam befreundet sein. Schau in deine Steam-Anfragen.
+3. **„Limited User"?** Steam blockiert Playtest-Invites, wenn auf deinem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die niemand umgehen kann — sobald dein Account die Schwelle erreicht, klappt es.
+4. Ein Invite taucht nicht immer sofort in der Bibliothek auf – es kann **1–2 Tage** dauern. Prüfe deine Steam-Playtest-Einladungen später noch einmal.
+5. Die Steam-Verknüpfung in <#1398021105339334666> lohnt sich zusätzlich — damit kann auch der Steam-Bot automatisiert einladen.
 
 ## Coaching: Zugang, Ablauf, Status
 
-1. Coaching anfragen in `#ich-brauch-einen-coach` über den Coaching-Button oder mit `/coaching-anfrage`. Im Formular Rang, Main-Hero, Verfügbarkeit und Ziele/Probleme eintragen.
-2. Coaching ist **kostenlos**, und du darfst **mehrfach** anfragen.
-3. Mit `/coaching-status` siehst du, ob deine Anfrage noch analysiert wird, auf einen Coach wartet oder schon läuft.
+1. Coaching läuft über die **Website**: Im Coaching-Kanal führt dich der Button zur Anfrage-Seite (Login mit Discord, dann Formular mit Rang, Zielen und Verfügbarkeit). Auch `/coaching-anfrage` gibt dir den Website-Link.
+2. Coaching ist **kostenlos**, und du darfst **mehrfach** anfragen. Deine Anfrage landet automatisch beim Coach-Team im Discord, ein Coach übernimmt sie.
+3. Mit `/coaching-status` siehst du jederzeit den Stand deiner Anfrage.
 4. Die Kommunikation läuft **nur im Coaching-Chat auf dem Server** – keine DMs, keine Freundschaftsanfragen an Coaches.
-5. Nach der Session kommt eine Feedback-Anfrage – bitte ehrlich ausfüllen, das hilft dem Team.
+5. Nach der gemeinsamen Coaching-Session kommt eine Feedback-Anfrage per DM – bitte ehrlich ausfüllen, das hilft dem Team.
 
 ## Rang-Anzeige bei den Voice-Lanes
 
 - Dein Server-Rang wird **automatisch** vergeben, sobald dein Steam-Account verifiziert verknüpft ist (siehe Abschnitt Steam oben).
-- Bei Ranked Lanes erscheint der Rang automatisch im Kanalnamen; Basis ist der ursprüngliche Lane-Ersteller.
+- Bei Ranked Lanes erscheint der Rang automatisch im Kanalnamen; Basis ist der Rang-Anker der Lane (ursprünglicher Ersteller bzw. erstes Mitglied mit Rang).
 
 ## Was dieser Bereich nicht klärt
 

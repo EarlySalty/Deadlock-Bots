@@ -1,31 +1,32 @@
 # Coaching
 
 ## Worum geht es?
-Das Server-Coaching ist ein kostenloses Community-Angebot. Du schilderst kurz deinen Rang, deinen Hero und deine Baustellen, und danach meldet sich ein echter Coach aus dem Server bei dir. Es geht hier um Human-Coaching, nicht um ein AI-Coaching.
+Das Server-Coaching ist ein kostenloses Community-Angebot. Du schilderst kurz deinen Rang, deine Ziele und deine Baustellen, und danach meldet sich ein echter Coach aus dem Server bei dir. Es geht hier um Human-Coaching, nicht um ein AI-Coaching.
 
 ## Wie nutze ich das?
-Gehe in `#ich-brauch-einen-coach` und klicke auf den Coaching-Button oder nutze alternativ `/coaching-anfrage`. Im Formular trägst du Rang, Main-Hero, Verfugbarkeit, Games oder Stunden und deine Ziele oder Probleme ein. Danach wird deine Anfrage im Coaching-Channel gepostet, damit ein Coach sie sehen und claimen kann.
+Die Anfrage läuft über die **Website**: Im Kanal <#1494373349944459355> bringt dich der Button zur Coaching-Seite, und auch `/coaching-anfrage` gibt dir den Website-Link. Dort meldest du dich mit Discord an und füllst das Anfrage-Formular aus (Rang, Ziele, Verfügbarkeit und was dich gerade aufhält).
 
-Sobald ein Coach ubernimmt, bekommst du Bescheid und stimmst euch direkt im Coaching-Chat auf dem Server ab. Die Kommunikation lauft nur dort, nicht per DM und nicht uber Freundschaftsanfragen. Wenn ihr gemeinsam in einer Coaching-Voice seid und die Session endet, bekommst du eine Feedback-Nachricht und fur kurze Zeit Zugriff auf den Feedback-Kanal.
+Deine Anfrage landet danach automatisch beim Coach-Team im Discord: Sie wird dort mit Claim-Buttons gespiegelt, ein Coach übernimmt sie und meldet sich bei dir. Die Abstimmung läuft im Coaching-Chat auf dem Server — nicht per DM und nicht über Freundschaftsanfragen. Wenn ihr gemeinsam in einer Coaching-Voice seid und die Session endet, bekommst du eine Feedback-Nachricht und für ein paar Tage Zugriff auf den Feedback-Kanal.
 
-Du kannst mehr als einmal Coaching anfragen. Mit `/coaching-status` kannst du jederzeit prufen, ob deine letzte Anfrage noch analysiert wird, schon auf einen Coach wartet oder bereits lauft.
+Du kannst mehr als einmal Coaching anfragen. Mit `/coaching-status` prüfst du jederzeit, ob deine letzte Anfrage noch offen ist, auf einen Coach wartet oder bereits läuft.
+
+Dazu gehört auch der **Scrim-Bereich**: Über die Coaching-Website kannst du dich für Scrims (Übungsspiele im Team) anmelden — Teams üben zusammen und machen sich gegenseitig besser.
 
 ## Kosten / Premium
 kostenlos
 
 ## Was passiert technisch (kurz)?
-Der Bot speichert deine Anfrage, bereitet sie fur Coaches auf und postet sie als Embed im Coaching-Channel. Coaches konnen dort direkt claimen; ab dann lauft fur dich eine aktive Coaching-Phase mit zeitlich begrenzter Rolle. Wenn die Voice-Session erkannt wurde und endet, entfernt der Bot die aktive Rolle wieder, vergibt kurzzeitig die Feedback-Berechtigung und schickt dir den Feedback-Hinweis per DM.
+Das Website-Formular speichert die Anfrage; eine Spiegelung postet sie als Embed mit Claim-/Freigabe-/Abbruch-Buttons ins Coach-Team. Ab dem Claim läuft für dich eine aktive Coaching-Phase mit zeitlich begrenzter Rolle. Wenn die gemeinsame Voice-Session endet, entfernt der Bot die aktive Rolle, vergibt kurzzeitig die Feedback-Berechtigung (5 Tage) und schickt dir den Feedback-Hinweis per DM. Für Coaches gibt es auf der Website eine eigene Plattform mit Warteschlange, Coachee-Details, Zielen/Notizen und Terminen.
 
 ## Grenzen & häufige Fragen
-- Coaching lauft nur im Coaching-Chat auf dem Server. Bitte keine DMs und keine Freundschaftsanfragen an Coaches.
-- Wenn sich ein Coach meldet, solltest du zeitnah reagieren. Wenn ein Coaching wegen Nicht-Melden abgebrochen wird, gibt es eine vorubergehende Sperre fur neue Anfragen.
+- Coaching läuft nur im Coaching-Chat auf dem Server. Bitte keine DMs und keine Freundschaftsanfragen an Coaches.
+- Wenn sich ein Coach meldet, solltest du zeitnah reagieren. Wird ein Coaching wegen Nicht-Melden abgebrochen, kann eine 7-Tage-Sperre für neue Anfragen gesetzt werden.
 - Die aktive Coaching-Phase ist zeitlich begrenzt. Wenn in diesem Fenster keine Session zustande kommt, brauchst du danach eine neue Anfrage.
-- Nach dem Coaching solltest du das Feedback ehrlich ausfullen. Kurzes positives Feedback ist okay, konstruktive Kritik aber genauso wichtig.
-- Offensichtlich unseriose oder komplett sinnfreie Anfragen konnen vom System ausgesiebt werden und erscheinen dann nicht fur Coaches.
-- Es gibt keine feste Garantie fur sofortige Verfugbarkeit. Coaches sind Community-Mitglieder und keine 24/7-Hotline.
-- Wenn du den sichtbaren Ablauf einhaeltst, ist das System bewusst simpel: Button, Formular, Coach meldet sich, Session im Server, danach Feedback.
+- Nach dem Coaching solltest du das Feedback ehrlich ausfüllen. Kurzes positives Feedback ist okay, konstruktive Kritik aber genauso wichtig.
+- Es gibt keine feste Garantie für sofortige Verfügbarkeit. Coaches sind Community-Mitglieder und keine 24/7-Hotline.
+- Der sichtbare Ablauf ist bewusst simpel: Website-Formular, Coach meldet sich, Session im Server, danach Feedback.
 
 ## Für Devs (knapp)
-- Cogs: `cogs/coaching_panel.py`, `cogs/coaching_request.py`, `cogs/coaching_role_manager.py`, `cogs/coaching_survey.py`
-- Abhangigkeiten: `AIConnector` nur fur die interne Anfragesortierung, Rollen-/Voice-Erkennung uber Guild-State, Feedback-Link uber den konfigurierten Feedback-Channel
-- Wichtige DB-Tabellen: `coaching_requests`, `coaching_sessions`, `coaching_bans`, `kv_store`
+- Rust live: `dl-community/src/coaching_requests.rs` (Spiegelung, Claim/Release/Abort, Status, Survey, Sperren), `coaching.rs` (Coach-Rollen-Sync + Notification-Polling)
+- Website: `builds/backend-rust/src/routes/coaching.rs` + `platform.rs` (Coach-Plattform), Frontend `dl-coaching/` (Anfrage-Seite `/anfrage`, Scrim-Anmeldung)
+- Wichtige DB-Tabellen: Coaching-Anfragen/Sessions/Sperren zentral in Postgres; Anfragen entstehen auf der Website, nicht mehr im Discord-Modal
