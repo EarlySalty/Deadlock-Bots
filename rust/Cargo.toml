@@ -22,6 +22,7 @@ members = [
     "crates/dl-dashboard",
     "crates/dl-central-db",
     "crates/dl-central-etl",
+    "crates/dl-server-as-code",
     "bin/dl-bot",
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
@@ -102,6 +103,7 @@ dl-community = { path = "crates/dl-community" }
 dl-dashboard = { path = "crates/dl-dashboard" }
 dl-central-db = { path = "crates/dl-central-db" }
 dl-central-etl = { path = "crates/dl-central-etl" }
+dl-server-as-code = { path = "crates/dl-server-as-code" }
 
 [workspace.lints.clippy]
 unwrap_used = "warn"

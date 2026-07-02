@@ -29,6 +29,30 @@ Phase-1-Arbeitspaket fuer `dl-ai`: neue Chat-Provider-Abstraktion mit MiniMax-, 
 - Review 2026-07-02: Compliance-Gate, Parser, Retry-Matrix, neue warn!-Pfade und Scope geprueft; kein Blocker/Wichtig gefunden.
 - Verifikation erneut gruen: aus `rust/crates/dl-ai` `cargo test` (22 Tests + 0 Doctests), `cargo clippy --all-targets -- -D warnings`; aus `rust/` `cargo fmt -p dl-ai -- --check`.
 - Rest-Risiko: 403-Auth ist im Code gemeinsam mit 401 behandelt, aber nicht als eigener Testfall abgedeckt; direkte Provider-Konstruktoren bleiben Low-Level-API und umgehen die Config-Policy.
+# Kritiker P1 Server-as-Code (2026-07-02)
+
+## Ziel
+Frischer Review der uncommitted Phase-1-Server-as-Code-Aenderungen auf Branch `p1-server-as-code` gegen `origin/main`. Keine Implementierungsaenderung, kein Commit/Push.
+
+## Frische Verifikation nach Rework
+- Gestartet: unabhaengige reine Verifikation der Rework-Behauptungen. Keine Code-Fixes, kein Commit/Push; nur `WORKFLOW.md` wird fuer Fortschritt aktualisiert.
+- Code-Review-Zwischenstand: Hash-Rebind und private Apply-Ports wirken umgesetzt; ein Sicherheitsbefund bleibt offen, weil Apply PermissionOverwrite-Deletes live an Serenity weiterreicht, waehrend nur Kategorie/Kanal/Rolle-Deletes geskippt werden.
+- Verifikation ausgefuehrt: `cargo test -p dl-server-as-code` gruen mit 6 passed + 7 ignored; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` gruen mit 15 passed; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings` gruen; Fresh-Migration-Test gruen mit 2 passed; `cargo fmt --check -p dl-server-as-code` gruen.
+- Weitere Testabdeckungsluecken: Drift-Dedupe-Test prueft nicht explizit die Aktualisierung von `last_seen_at`; Format-Test prueft nur den leeren Diff, nicht alle drei Aktionen und fuenf `ObjectKind`-Labels.
+
+## Rework-Implementierung
+- Rework gestartet: 2 Blocker + 6 wichtige Befunde werden direkt in `dl-server-as-code`, server_config-Migration und Fresh-Migration-Test bearbeitet. Keine Commit-/Push-/Rebase-Aktion durch diesen Worker.
+- Befundkontext gelesen: `apply.rs`, `db.rs`, `diff.rs`, `drift.rs`, `lib.rs`, `model.rs`, server_config-Migration und bestehende `dl-server-as-code`-Tests.
+- Implementiert: Drei-Wege-Diff-Hash-Pruefung beim Apply-Laden, private Apply-Ports, Create-ID-Rueckschreiben, Delete-/BotMessage-Skip-Ergebnisse, Drift-Dedupe/Resolve, Adopt-Orphan-Cleanup, Positionsdiff-Default aus und Fresh-Migration-Check fuer alle 18 `server_config`-Tabellen.
+- Dokumentiert: BotMessages/Panels bleiben Phase-2-Folgearbeit; Apply meldet sie als `skipped: not implemented`.
+- Verifikation nach Rework gruen: `cargo test -p dl-server-as-code` mit 6 passed + 7 ignored; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` mit 15 passed; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings` gruen; Zusatz `cargo clippy -p dl-server-as-code --features testing --all-targets -- -D warnings` gruen; Fresh-Migration-Test mit 2 passed; `cargo fmt --check -p dl-server-as-code -p dl-central-db` gruen.
+- `git diff --check` wegen ausdruecklicher No-Git-Regel nicht ausgefuehrt; Ersatzpruefung der beruehrten Dateien auf trailing whitespace und Konfliktmarker war sauber.
+
+## Fortschritt
+- Review gestartet: Worktree/Branch, bestehendes `WORKFLOW.md` und Diff-Scope werden geprueft; Fokus liegt auf Discord-Write-Sicherheit, Diff-Engine, Migration, Import, Drift/Adopt und geforderter Verifikation.
+- Lokale Verifikation bisher: `cargo test -p dl-server-as-code` gruen mit 5 passed + 4 ignored; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings` gruen; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored` gruen mit 9 passed.
+- Zusatzverifikation: `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored` gruen mit 2 passed; `git diff --check` gruen.
+- Baseline per `git stash -u`: sauberer Branch ist gegen `origin/main` bereits 1 Commit hinten (`0015_steam_links_one_primary.sql` + Test fehlt). Diff-Zaehler aktuell vs. origin/main: 2 D / 4 M + 12 untracked; nach Stash: 2 D / 1 M + 0 untracked.
 
 # Rework core.users Upsert Nonblocking (2026-07-02)
 
@@ -494,3 +518,16 @@ Acht technische Internal-Dokus unter `docs/internal/` fuer Admins, Mods und Devs
 
 ## Offen
 - Acht Markdown-Dateien jetzt schreiben, Wortzahlen pruefen und kurzen Verifikationslauf machen.
+
+# P1 Server-as-Code (Schema+Import+Diff+Apply-Geruest) (2026-07-02)
+
+## Ziel
+Phase-1-Backend fuer deklarative Discord-Serverstruktur: Central-DB-Schema, Ist-Import, Soll/Ist-Diff, Zwei-Schritt-Apply-Geruest, Drift-Erkennung und Adopt-Funktion. Kein Commit/Push, keine Live-Guild-Tests.
+
+## Fortschritt
+- Pflichtdokumente gelesen: Konzept §5.1/§5.3/§7, Ist-Zustand und Rechte-Soll-Entwurf.
+- Bestehende `dl-central-db`-Migrationen/Test-Harness gesichtet; neue Migrationen werden im geforderten 202607021*-Bereich angelegt.
+- Neues Crate `dl-server-as-code` angelegt: reine Modelle, Diff-Engine, Placeholder-Human-Summary, Serenity-Ist-Import, Preview-Persistenz, confirmed-hash Apply mit Dry-Run-Default, Drift-Events und Adopt-Funktion.
+- Migration `2026070210_server_config_schema.sql` angelegt: `server_config`-Schema fuer Soll/Ist-Struktur, dynamische Namespaces, dokumentierte Ausnahmen, Diff-Previews, Apply-Runs, Auto-Revert-Whitelist, Drift- und Adoption-Events.
+- Tests umgesetzt: 5 pure Diff-Tests plus 4 ignored DB-Workflow-Tests gegen `dl_central_db::testing`; Fresh-Migration-Schema-Test in `dl-central-db` erweitert.
+- Verifikation gruen: `cargo build -p dl-server-as-code`; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `cargo clippy -p dl-central-db --features testing --all-targets -- -D warnings`; `cargo test -p dl-server-as-code`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored`; `cargo test -p dl-central-db`; `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`; `cargo fmt -p dl-server-as-code -p dl-central-db -- --check`; `git diff --check`.

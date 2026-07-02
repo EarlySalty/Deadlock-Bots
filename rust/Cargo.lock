@@ -666,6 +666,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-server-as-code"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "chrono",
+ "dl-central-db",
+ "hex",
+ "regex",
+ "serde",
+ "serde_json",
+ "serenity",
+ "sha2",
+ "sqlx",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "dl-squads"
 version = "0.1.0"
 dependencies = [

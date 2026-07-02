@@ -86,6 +86,293 @@ async fn table_columns(pool: &PgPool, table: &str) -> Vec<String> {
     table_columns_in_schema(pool, "core", table).await
 }
 
+fn server_config_table_contracts() -> Vec<(&'static str, Vec<&'static str>)> {
+    vec![
+        (
+            "desired_categories",
+            vec![
+                "guild_id",
+                "category_id",
+                "name",
+                "position",
+                "note",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "desired_channels",
+            vec![
+                "guild_id",
+                "channel_id",
+                "name",
+                "channel_type",
+                "topic",
+                "position",
+                "parent_category_id",
+                "nsfw",
+                "bitrate",
+                "user_limit",
+                "rate_limit_per_user",
+                "status",
+                "note",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "desired_roles",
+            vec![
+                "guild_id",
+                "role_id",
+                "name",
+                "color",
+                "hoist",
+                "mentionable",
+                "managed",
+                "permissions_bitmask",
+                "position",
+                "note",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "desired_permission_overwrites",
+            vec![
+                "guild_id",
+                "channel_id",
+                "target_type",
+                "target_id",
+                "allow_bits",
+                "deny_bits",
+                "note",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "desired_bot_messages",
+            vec![
+                "guild_id",
+                "channel_id",
+                "message_key",
+                "message_kind",
+                "message_id",
+                "expected_hash",
+                "metadata",
+                "note",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "live_snapshots",
+            vec![
+                "snapshot_id",
+                "guild_id",
+                "captured_at",
+                "source",
+                "metadata",
+            ],
+        ),
+        (
+            "live_snapshot_categories",
+            vec![
+                "snapshot_id",
+                "captured_at",
+                "guild_id",
+                "category_id",
+                "name",
+                "position",
+            ],
+        ),
+        (
+            "live_snapshot_channels",
+            vec![
+                "snapshot_id",
+                "captured_at",
+                "guild_id",
+                "channel_id",
+                "name",
+                "channel_type",
+                "topic",
+                "position",
+                "parent_category_id",
+                "nsfw",
+                "bitrate",
+                "user_limit",
+                "rate_limit_per_user",
+                "status",
+            ],
+        ),
+        (
+            "live_snapshot_roles",
+            vec![
+                "snapshot_id",
+                "captured_at",
+                "guild_id",
+                "role_id",
+                "name",
+                "color",
+                "hoist",
+                "mentionable",
+                "managed",
+                "permissions_bitmask",
+                "position",
+            ],
+        ),
+        (
+            "live_snapshot_permission_overwrites",
+            vec![
+                "snapshot_id",
+                "captured_at",
+                "guild_id",
+                "channel_id",
+                "target_type",
+                "target_id",
+                "allow_bits",
+                "deny_bits",
+            ],
+        ),
+        (
+            "live_snapshot_bot_messages",
+            vec![
+                "snapshot_id",
+                "captured_at",
+                "guild_id",
+                "channel_id",
+                "message_key",
+                "message_kind",
+                "message_id",
+                "observed_hash",
+                "metadata",
+            ],
+        ),
+        (
+            "dynamic_namespaces",
+            vec![
+                "namespace_id",
+                "guild_id",
+                "namespace_key",
+                "system_name",
+                "object_kind",
+                "match_rule_type",
+                "match_rule",
+                "foreign_writer",
+                "active",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "documented_exceptions",
+            vec![
+                "exception_id",
+                "guild_id",
+                "exception_key",
+                "exception_type",
+                "object_kind",
+                "object_id",
+                "channel_id",
+                "target_type",
+                "target_id",
+                "allow_bits",
+                "deny_bits",
+                "reason",
+                "review_at",
+                "expires_at",
+                "metadata",
+                "active",
+                "created_at",
+                "updated_at",
+            ],
+        ),
+        (
+            "diff_previews",
+            vec![
+                "preview_id",
+                "guild_id",
+                "snapshot_id",
+                "diff_hash",
+                "diff_json",
+                "human_summary",
+                "created_by_user_id",
+                "created_at",
+                "applied_at",
+            ],
+        ),
+        (
+            "apply_runs",
+            vec![
+                "apply_run_id",
+                "preview_id",
+                "guild_id",
+                "confirmed_diff_hash",
+                "requested_by_user_id",
+                "dry_run",
+                "status",
+                "result_json",
+                "error_text",
+                "started_at",
+                "finished_at",
+            ],
+        ),
+        (
+            "auto_revert_whitelist",
+            vec![
+                "whitelist_id",
+                "guild_id",
+                "object_kind",
+                "object_id",
+                "target_type",
+                "target_id",
+                "permission_bits",
+                "action",
+                "reason",
+                "active",
+                "created_at",
+            ],
+        ),
+        (
+            "drift_events",
+            vec![
+                "drift_event_id",
+                "guild_id",
+                "snapshot_id",
+                "preview_id",
+                "detected_at",
+                "last_seen_at",
+                "resolved_at",
+                "fingerprint",
+                "event_kind",
+                "severity",
+                "object_kind",
+                "object_id",
+                "action",
+                "diff_json",
+                "filtered_dynamic",
+                "documented_exception_id",
+                "auto_revert_eligible",
+                "status",
+            ],
+        ),
+        (
+            "adoption_events",
+            vec![
+                "adoption_event_id",
+                "guild_id",
+                "snapshot_id",
+                "adopted_by_user_id",
+                "object_kind",
+                "object_id",
+                "adopted_diff",
+                "created_at",
+            ],
+        ),
+    ]
+}
+
 async fn column_in_schema(pool: &PgPool, schema: &str, table: &str, name: &str) -> ColumnInfo {
     let (data_type, udt_name, is_nullable, column_default) = sqlx::query_as(
         "SELECT data_type, udt_name, is_nullable, column_default
@@ -386,6 +673,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 14, "patchnotes identity sequences").await;
     let migration_15_signature_after_first =
         migration_row_signature(&pool, 15, "steam links one primary").await;
+    let migration_2026070210_signature_after_first =
+        migration_row_signature(&pool, 2026070210, "server config schema").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -433,6 +722,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_15_signature_after_first,
         "second migrator run must be a no-op for migration version 15"
     );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070210, "server config schema").await,
+        migration_2026070210_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070210"
+    );
 
     let schema_count = scalar_i64(
         &pool,
@@ -452,11 +746,12 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
               'bot',
               'clips',
               'content',
-              'brain'
+              'brain',
+              'server_config'
           )",
     )
     .await;
-    assert_eq!(schema_count, 14);
+    assert_eq!(schema_count, 15);
 
     let timescaledb_count = scalar_i64(
         &pool,
@@ -518,6 +813,50 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         Some("'{}'::jsonb"),
     )
     .await;
+    let server_config_tables: Vec<String> = sqlx::query_scalar(
+        "SELECT table_name
+           FROM information_schema.tables
+          WHERE table_schema = 'server_config'
+            AND table_type = 'BASE TABLE'
+          ORDER BY table_name",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("server_config tables");
+    assert_eq!(
+        server_config_tables,
+        vec![
+            "adoption_events",
+            "apply_runs",
+            "auto_revert_whitelist",
+            "desired_bot_messages",
+            "desired_categories",
+            "desired_channels",
+            "desired_permission_overwrites",
+            "desired_roles",
+            "diff_previews",
+            "documented_exceptions",
+            "drift_events",
+            "dynamic_namespaces",
+            "live_snapshot_bot_messages",
+            "live_snapshot_categories",
+            "live_snapshot_channels",
+            "live_snapshot_permission_overwrites",
+            "live_snapshot_roles",
+            "live_snapshots",
+        ]
+    );
+    for (table, columns) in server_config_table_contracts() {
+        assert_eq!(
+            table_columns_in_schema(&pool, "server_config", table).await,
+            columns,
+            "server_config.{table} columns"
+        );
+    }
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "server_config", "desired_channels").await,
+        vec!["guild_id", "channel_id"]
+    );
     assert_column_in_schema(
         &pool,
         "brain",
