@@ -192,25 +192,25 @@ Jeder Registry-Eintrag braucht vom Owner/Mod-Team: **Grund** (Warum gesperrt?) u
 
 ---
 
-## 6. Offene Owner-Entscheidungen
+## 6. Owner-Entscheidungen (Stand 2026-07-02 — 13/15 entschieden)
 
-| # | Frage | Vorschlag |
+| # | Frage | ENTSCHEIDUNG (Owner) |
 |---|---|---|
-| 6.1 | @everyone-Basis: TTS entfernen? CREATE_PRIVATE_THREADS entfernen (private Threads sterben, §4.1)? USE_APPLICATION_COMMANDS behalten (Prinzip 5 verbietet nur EIGENE User-Slash-Commands, nicht externe Apps)? | ja / ja / behalten |
-| 6.2 | server-support: öffentlich schreibbar (Support-Anliegen im Klartext) oder read-only (nur Ticket-Verweis)? | schreibbar |
-| 6.3 | ankündigungen: senden nur CM (+ADMIN-Rollen) — oder weiterhin auch Turnier Moderation/Coach/Turnier Caster inkl. @everyone-Mention? | nur CM; Turnier-Ankündigungen über Bot |
-| 6.4 | stream-updates: nach Ping-Rollen-Abriss öffentlicher Live-Feed in Medien (P1) oder Streamer-intern behalten? | öffentlich (Ziel des „Streams"-Pings) |
-| 6.5 | rank-ups: öffentlich beschreibbar (Gratulieren) oder Bot-Feed read-only? | öffentlich lassen |
-| 6.6 | Rolle `Beta Zugang benötigt`: mit offener Invite-Lounge abreißen (entrechten, löschen nach Frist)? | ja, in Welle 2c |
-| 6.7 | Coach-MOVE: pro Lane-Kategorie (3 Overwrites, Vorschlag) oder guild-weit (0 Overwrites, aber Move überall)? | pro Kategorie |
-| 6.8 | Einzel-User-Allows: moderator-only (271549384787755008, 702594328328929331), bot-logs (335030285240631296) — Rolle geben, behalten als Registry-Ausnahme oder entfernen? | Rolle geben oder raus |
-| 6.9 | Ban-Konsolidierung auf Kategorie-Ebene: X1/X2 verlieren dann die Sicht auf ganze Kategorien statt Einzelkanäle (leicht strenger als heute). OK? Alternativ 1:1-Migration der Einzelkanal-Denies. | Kategorie-Ebene |
-| 6.10 | X4: wirkungslose `−DEAFEN`-Einträge löschen? | ja |
-| 6.11 | Custom Game Team 1/2 + Caster Channel: heutige invertierte/vollmaskierte Gates gewollt? Soll: Team-VCs offen, nur Caster-VC gegated. | wie Soll |
-| 6.12 | Streamer-Bereich: behalten VIP/Server Booster/Server Unterstützer Einblick (heute ja, mit Spezial-Masken)? | nein — nur Streamer + Streamer VC Zugriff |
-| 6.13 | AutoMod-Whitelist „sicherheitskritische Rechte" für Auto-Revert (§5.1) — Vorschlag: ADMINISTRATOR, MANAGE_GUILD, MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_WEBHOOKS, MENTION_EVERYONE, BAN/KICK auf Nicht-Mod-Rollen | bestätigen |
-| 6.14 | `Moderator` trägt ADMINISTRATOR (neben Owner). Bewusst? (Kein Rechte-Problem im Modell, aber jede ADMIN-Rolle ist Drift-blind — Overwrites greifen nicht.) | bestätigen/prüfen |
-| 6.15 | Gründe + Review-Daten für die 4 Registry-Ausnahmen X1-X4 nachliefern (Pflichtfeld im DB-Modell). | Owner/Mod-Team |
+| 6.1 | @everyone-Basis: TTS / private Threads / App-Commands | ✅ TTS raus; private Threads raus; App-Commands behalten |
+| 6.2 | server-support schreibbar oder read-only? | ✅ READ-ONLY — nur Ticket-Verweis („Support-Kanal schreibbar hat keinen Sinn") |
+| 6.3 | ankündigungen: wer darf senden? | ✅ BLEIBT WIE HEUTE — exakt die Rollen, die es jetzt dürfen (Ist 1:1 ins Soll) |
+| 6.4 | stream-updates öffentlicher Live-Feed? | ✅ JA öffentlich; ZUSATZ: Stream-Vorschaubild kommt zurück ins Embed (eigener Task) |
+| 6.5 | rank-ups öffentlich beschreibbar? | ✅ BLEIBT wie er ist |
+| 6.6 | Rolle `Beta Zugang benötigt` abreißen? | ✅ BLEIBT vorerst — Rolle hat Erkennungswert für User-Status |
+| 6.7 | Coach-MOVE pro Kategorie oder guild-weit? | ✅ pro Kategorie (sauber auf die Kategorien, die es brauchen) |
+| 6.8 | Einzel-User-Allows (moderator-only, bot-logs) | ✅ ERSTMAL LASSEN — als dokumentierte Registry-Ausnahmen migrieren |
+| 6.9 | Ban-Konsolidierung Kategorie-Ebene vs 1:1 (X1 shadow_rizzard, X2 furzerchen) | ⏸ OFFEN (Owner: „erstmal ignorieren") — bis Entscheid: 1:1 migrieren |
+| 6.10 | X4 (neburo69): wirkungslose −DEAFEN-Einträge löschen? | ⏸ OFFEN (Owner: „erstmal ignorieren") — bis Entscheid: 1:1 migrieren |
+| 6.11 | Custom-Game-VCs: Team-VCs offen, nur Caster-VC gegated? | ✅ JA wie Soll |
+| 6.12 | Streamer-Bereich: VIP/Booster/Unterstützer-Einblick? | ✅ Text-Einblick RAUS; Streamer-VC-Zugriff für VIP/Booster/Unterstützer BLEIBT |
+| 6.13 | Auto-Revert-Whitelist sicherheitskritischer Rechte | ✅ KEIN Auto-Revert — Whitelist bleibt LEER; Bot meldet verdächtige Rechte-Änderungen nur in einen Admin-Kanal, Owner prüft selbst |
+| 6.14 | Moderator trägt ADMINISTRATOR | ✅ BLEIBT (bewusste Owner-Entscheidung; Owner vertraut Mod-Team). Dokumentiertes Restrisiko: Admin-Rollen sind für Drift-Überwachung/Overwrites blind |
+| 6.15 | Gründe + Review-Daten für Registry-Ausnahmen X1-X4 | ✅ JA, wird dokumentiert (Owner/Mod-Team liefert nach; Pflichtfeld bleibt) |
 
 ---
 
