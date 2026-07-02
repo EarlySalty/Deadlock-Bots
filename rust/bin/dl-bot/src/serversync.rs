@@ -1,8 +1,10 @@
 #![allow(clippy::result_large_err)]
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 
 use async_trait::async_trait;
 use axum::body::Bytes;
@@ -46,6 +48,10 @@ const SERVER_GUIDE_DIFF_MESSAGE_KEY: &str = "server-guide";
 const SERVER_GUIDE_DIFF_OBJECT_ID: u64 = GUILD_ID;
 const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
     "Server Guide per API nicht verfügbar — manuelle Owner-Konfiguration nötig";
+// docs.discord.food/resources/guild New Member Action Type: 0=VIEW, 1=CHAT.
+const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
+const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
+const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
@@ -497,13 +503,17 @@ pub struct ServerGuideWelcomeMessage {
 pub struct ServerGuideAction {
     pub channel_id: String,
     pub action_type: i64,
-    pub name: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ServerGuideResourceChannel {
     pub channel_id: String,
-    pub name: String,
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -780,13 +790,21 @@ impl ServerSyncService {
         &self,
         url: String,
     ) -> ServerSyncResult<T> {
-        let response = self
-            .http_client
-            .get(url)
-            .header("Authorization", format!("Bot {}", self.discord_token))
-            .send()
-            .await?;
-        discord_json_response(response, "GET").await
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .get(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token));
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "GET",
+        )
+        .await?;
+        discord_regelwerk_json_response(response, "GET")
     }
 
     async fn discord_post_json<T: serde::de::DeserializeOwned>(
@@ -794,37 +812,51 @@ impl ServerSyncService {
         url: String,
         payload: Value,
     ) -> ServerSyncResult<T> {
-        let response = self
-            .http_client
-            .post(url)
-            .header("Authorization", format!("Bot {}", self.discord_token))
-            .header("Content-Type", "application/json")
-            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-            .json(&payload)
-            .send()
-            .await?;
-        discord_json_response(response, "POST").await
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .post(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("Content-Type", "application/json")
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                    .json(&payload);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "POST",
+        )
+        .await?;
+        discord_regelwerk_json_response(response, "POST")
     }
 
     async fn discord_delete(&self, url: String) -> ServerSyncResult<bool> {
-        let response = self
-            .http_client
-            .delete(url)
-            .header("Authorization", format!("Bot {}", self.discord_token))
-            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-            .send()
-            .await?;
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .delete(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "DELETE",
+        )
+        .await?;
         let status = response.status();
         if status == reqwest::StatusCode::NOT_FOUND {
             return Ok(false);
         }
         if !status.is_success() {
-            let body = response.text().await.unwrap_or_default();
-            let body_preview: String = body.chars().take(300).collect();
             return Err(ServerSyncError::internal(format!(
                 "Discord DELETE fehlgeschlagen: HTTP {}: {}",
                 status.as_u16(),
-                body_preview
+                response.body_preview()
             )));
         }
         Ok(true)
@@ -936,19 +968,29 @@ impl ServerSyncService {
         content: &str,
     ) -> ServerSyncResult<Option<u64>> {
         let url = format!("{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{message_id}");
-        let response = self
-            .http_client
-            .patch(url)
-            .header("Authorization", format!("Bot {}", self.discord_token))
-            .header("Content-Type", "application/json")
-            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-            .json(&json!({ "content": content }))
-            .send()
-            .await?;
+        let payload = json!({ "content": content });
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .patch(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("Content-Type", "application/json")
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                    .json(&payload);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "PATCH",
+        )
+        .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
         }
-        let message: DiscordMessageWriteResponse = discord_json_response(response, "PATCH").await?;
+        let message: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "PATCH")?;
         parse_discord_id("Message-ID", &message.id).map(Some)
     }
 
@@ -1620,17 +1662,20 @@ impl ServerSyncOps for ServerSyncService {
         }
 
         let mut threads_deleted = 0usize;
-        for thread_id in &thread_ids {
+        for (index, thread_id) in thread_ids.iter().enumerate() {
             if self
                 .discord_delete(format!("{DISCORD_API_BASE}/channels/{thread_id}"))
                 .await?
             {
                 threads_deleted += 1;
             }
+            if index + 1 < thread_ids.len() {
+                tokio::time::sleep(REGELWERK_DELETE_DELAY).await;
+            }
         }
 
         let mut bot_messages_deleted = 0usize;
-        for message in &bot_messages {
+        for (index, message) in bot_messages.iter().enumerate() {
             if self
                 .discord_delete(format!(
                     "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/messages/{}",
@@ -1639,6 +1684,9 @@ impl ServerSyncOps for ServerSyncService {
                 .await?
             {
                 bot_messages_deleted += 1;
+            }
+            if index + 1 < bot_messages.len() {
+                tokio::time::sleep(REGELWERK_DELETE_DELAY).await;
             }
         }
 
@@ -1684,21 +1732,115 @@ fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
     }
 }
 
-async fn discord_json_response<T: serde::de::DeserializeOwned>(
-    response: reqwest::Response,
+struct DiscordRestResponse {
+    status: reqwest::StatusCode,
+    headers: reqwest::header::HeaderMap,
+    body: Bytes,
+}
+
+impl DiscordRestResponse {
+    async fn from_response(response: reqwest::Response) -> ServerSyncResult<Self> {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.bytes().await?;
+        Ok(Self {
+            status,
+            headers,
+            body,
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test(status: reqwest::StatusCode, body: String) -> Self {
+        Self {
+            status,
+            headers: reqwest::header::HeaderMap::new(),
+            body: Bytes::from(body),
+        }
+    }
+
+    fn status(&self) -> reqwest::StatusCode {
+        self.status
+    }
+
+    fn body_preview(&self) -> String {
+        String::from_utf8_lossy(&self.body)
+            .chars()
+            .take(300)
+            .collect()
+    }
+}
+
+async fn discord_regelwerk_send_with_retry<S, Fut>(
+    mut send: S,
+    method: &str,
+) -> ServerSyncResult<DiscordRestResponse>
+where
+    S: FnMut() -> Fut,
+    Fut: Future<Output = ServerSyncResult<DiscordRestResponse>>,
+{
+    for attempt in 1..=REGELWERK_DISCORD_MAX_ATTEMPTS {
+        let response = send().await?;
+        if response.status() != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Ok(response);
+        }
+        if attempt == REGELWERK_DISCORD_MAX_ATTEMPTS {
+            return Ok(response);
+        }
+        let retry_after = regelwerk_retry_after(&response).unwrap_or(Duration::from_secs(1));
+        tracing::warn!(
+            method,
+            attempt,
+            retry_after_ms = retry_after.as_millis(),
+            "Discord Regelwerk REST rate-limited"
+        );
+        tokio::time::sleep(retry_after).await;
+    }
+    unreachable!("retry loop always returns")
+}
+
+fn discord_regelwerk_json_response<T: serde::de::DeserializeOwned>(
+    response: DiscordRestResponse,
     method: &str,
 ) -> ServerSyncResult<T> {
     let status = response.status();
     if !status.is_success() {
-        let body = response.text().await.unwrap_or_default();
-        let body_preview: String = body.chars().take(300).collect();
         return Err(ServerSyncError::internal(format!(
             "Discord {method} fehlgeschlagen: HTTP {}: {}",
             status.as_u16(),
-            body_preview
+            response.body_preview()
         )));
     }
-    Ok(response.json::<T>().await?)
+    Ok(serde_json::from_slice::<T>(&response.body)?)
+}
+
+fn regelwerk_retry_after(response: &DiscordRestResponse) -> Option<Duration> {
+    retry_after_from_body(&response.body)
+        .or_else(|| retry_after_from_header(&response.headers))
+        .and_then(retry_after_duration)
+}
+
+fn retry_after_duration(seconds: f64) -> Option<Duration> {
+    seconds
+        .is_finite()
+        .then(|| Duration::from_secs_f64(seconds.max(0.0)))
+}
+
+fn retry_after_from_body(body: &[u8]) -> Option<f64> {
+    let value = serde_json::from_slice::<Value>(body).ok()?;
+    let retry_after = value.get("retry_after")?;
+    retry_after
+        .as_f64()
+        .or_else(|| retry_after.as_str().and_then(|raw| raw.parse::<f64>().ok()))
+}
+
+fn retry_after_from_header(headers: &reqwest::header::HeaderMap) -> Option<f64> {
+    headers
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .parse::<f64>()
+        .ok()
 }
 
 async fn server_guide_response_json<T: serde::de::DeserializeOwned>(
@@ -1829,16 +1971,9 @@ fn require_channel_mention(model: &GuildModel, name: &str) -> ServerSyncResult<S
         .ok_or_else(|| ServerSyncError::bad_request(format!("Kanal `{name}` wurde nicht gefunden")))
 }
 
-fn build_server_guide_config(live_config: &Value, model: &GuildModel) -> ServerGuideBuildOutput {
+fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> ServerGuideBuildOutput {
     let mut blockers = Vec::new();
     let warnings = Vec::new();
-    let chat_action_type = resolve_server_guide_chat_action_type(live_config, model);
-    if chat_action_type.is_none() {
-        blockers.push(
-            "Server Guide Preview blockiert: CHAT action_type konnte aus der Live-GET-Response nicht verlässlich übernommen werden"
-                .to_string(),
-        );
-    }
 
     let frag_die_community =
         require_serverguide_channel_id(model, "frag-die-community", &mut blockers);
@@ -1849,13 +1984,6 @@ fn build_server_guide_config(live_config: &Value, model: &GuildModel) -> ServerG
     let regelwerk =
         require_serverguide_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
 
-    let Some(action_type) = chat_action_type else {
-        return ServerGuideBuildOutput {
-            config: None,
-            blockers,
-            warnings,
-        };
-    };
     let (
         Some(frag_die_community),
         Some(deadlock_rang),
@@ -1888,32 +2016,38 @@ fn build_server_guide_config(live_config: &Value, model: &GuildModel) -> ServerG
         new_member_actions: vec![
             ServerGuideAction {
                 channel_id: frag_die_community.to_string(),
-                action_type,
-                name: "Sag Hallo".to_string(),
+                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                title: "Sag Hallo".to_string(),
+                description: Some(String::new()),
             },
             ServerGuideAction {
                 channel_id: deadlock_rang.to_string(),
-                action_type,
-                name: "Steam verknüpfen & Rang eintragen".to_string(),
+                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                title: "Steam verknüpfen & Rang eintragen".to_string(),
+                description: Some(String::new()),
             },
             ServerGuideAction {
                 channel_id: spieler_suche.to_string(),
-                action_type,
-                name: "Such dir Mitspieler".to_string(),
+                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                title: "Such dir Mitspieler".to_string(),
+                description: Some(String::new()),
             },
         ],
         resource_channels: vec![
             ServerGuideResourceChannel {
                 channel_id: regelwerk.to_string(),
-                name: "Regelwerk".to_string(),
+                title: "Regelwerk".to_string(),
+                description: Some(String::new()),
             },
             ServerGuideResourceChannel {
                 channel_id: patchnotes.to_string(),
-                name: "Patchnotes".to_string(),
+                title: "Patchnotes".to_string(),
+                description: Some(String::new()),
             },
             ServerGuideResourceChannel {
                 channel_id: server_support.to_string(),
-                name: "Hilfe & Support".to_string(),
+                title: "Hilfe & Support".to_string(),
+                description: Some(String::new()),
             },
         ],
     };
@@ -1932,33 +2066,6 @@ fn build_server_guide_config(live_config: &Value, model: &GuildModel) -> ServerG
         blockers,
         warnings,
     }
-}
-
-fn resolve_server_guide_chat_action_type(live_config: &Value, model: &GuildModel) -> Option<i64> {
-    let actions = live_config
-        .get("new_member_actions")
-        .and_then(Value::as_array)?;
-
-    for action in actions {
-        let action_type = action.get("action_type").and_then(value_as_i64)?;
-        let channel_id = action
-            .get("channel_id")
-            .and_then(Value::as_str)
-            .and_then(|value| value.parse::<u64>().ok())?;
-        if everyone_can_view_and_send(model, channel_id) {
-            return Some(action_type);
-        }
-    }
-
-    actions
-        .iter()
-        .find_map(|action| action.get("action_type").and_then(value_as_i64))
-}
-
-fn value_as_i64(value: &Value) -> Option<i64> {
-    value
-        .as_i64()
-        .or_else(|| value.as_str().and_then(|raw| raw.parse::<i64>().ok()))
 }
 
 fn require_serverguide_channel_id(
@@ -2009,23 +2116,23 @@ fn validate_server_guide_config(
                 if !everyone_can_view(model, channel_id) {
                     missing.push(format!(
                         "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sichtbar",
-                        action.name
+                        action.title
                     ));
                 }
                 if !everyone_can_view_and_send(model, channel_id) {
                     missing.push(format!(
                         "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sendbar",
-                        action.name
+                        action.title
                     ));
                 }
             }
             Ok(channel_id) => missing.push(format!(
                 "Action `{}`: Kanal `{channel_id}` fehlt",
-                action.name
+                action.title
             )),
             Err(_) => missing.push(format!(
                 "Action `{}`: Kanal `{}` ist keine Discord-ID",
-                action.name, action.channel_id
+                action.title, action.channel_id
             )),
         }
     }
@@ -2035,17 +2142,17 @@ fn validate_server_guide_config(
                 if !everyone_can_view(model, channel_id) {
                     missing.push(format!(
                         "Resource `{}`: Kanal `{channel_id}` ist nicht @everyone-sichtbar",
-                        resource.name
+                        resource.title
                     ));
                 }
             }
             Ok(channel_id) => missing.push(format!(
                 "Resource `{}`: Kanal `{channel_id}` fehlt",
-                resource.name
+                resource.title
             )),
             Err(_) => missing.push(format!(
                 "Resource `{}`: Kanal `{}` ist keine Discord-ID",
-                resource.name, resource.channel_id
+                resource.title, resource.channel_id
             )),
         }
     }
@@ -2590,13 +2697,15 @@ fn serverguide_diff(
     live_config: &Value,
     desired_config: &ServerGuideConfig,
 ) -> ServerSyncResult<ServerDiff> {
+    let actual_config: ServerGuideConfig = serde_json::from_value(live_config.clone())?;
+    let actual_config_value = serde_json::to_value(&actual_config)?;
     let desired_value = json!({
         "name": SERVER_GUIDE_DIFF_MESSAGE_KEY,
         "config": desired_config,
     });
     let actual_value = json!({
         "name": SERVER_GUIDE_DIFF_MESSAGE_KEY,
-        "config": live_config,
+        "config": actual_config_value.clone(),
     });
     let desired_config_value = serde_json::to_value(desired_config)?;
     let mut fields = Vec::new();
@@ -2610,7 +2719,10 @@ fn serverguide_diff(
             .get(field)
             .cloned()
             .unwrap_or(Value::Null);
-        let actual = live_config.get(field).cloned().unwrap_or(Value::Null);
+        let actual = actual_config_value
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null);
         if desired != actual {
             fields.push(FieldDiff {
                 field: field.to_string(),
@@ -2659,7 +2771,7 @@ fn serverguide_human_summary(diff: &ServerDiff, config: &ServerGuideConfig) -> S
     let actions = config
         .new_member_actions
         .iter()
-        .map(|action| action.name.as_str())
+        .map(|action| action.title.as_str())
         .collect::<Vec<_>>()
         .join(" | ");
     format!(
@@ -4085,7 +4197,7 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
     use axum::http::Request;
@@ -4674,7 +4786,8 @@ mod tests {
                 {
                     "channel_id": "6002",
                     "action_type": action_type,
-                    "name": "Alt"
+                    "title": "Alt",
+                    "description": ""
                 }
             ],
             "resource_channels": []
@@ -4682,7 +4795,7 @@ mod tests {
     }
 
     #[test]
-    fn serverguide_builder_baut_sollconfig_mit_live_chat_action_type() {
+    fn serverguide_builder_baut_sollconfig_mit_dokumentiertem_chat_action_type() {
         let model = serverguide_model();
         let built = build_server_guide_config(&live_serverguide_config_with_action_type(0), &model);
         let config = built.config.expect("serverguide config");
@@ -4698,35 +4811,38 @@ mod tests {
             "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, holst du dir in #deadlock-invite deinen Invite."
         );
         assert_eq!(config.new_member_actions.len(), 3);
-        assert_eq!(config.new_member_actions[0].name, "Sag Hallo");
+        assert_eq!(config.new_member_actions[0].title, "Sag Hallo");
         assert_eq!(config.new_member_actions[0].channel_id, "6002");
-        assert_eq!(config.new_member_actions[0].action_type, 0);
         assert_eq!(
-            config.new_member_actions[1].name,
+            config.new_member_actions[0].action_type,
+            SERVER_GUIDE_ACTION_TYPE_CHAT
+        );
+        assert_eq!(
+            config.new_member_actions[1].title,
             "Steam verknüpfen & Rang eintragen"
         );
         assert_eq!(config.new_member_actions[1].channel_id, "6007");
-        assert_eq!(config.new_member_actions[2].name, "Such dir Mitspieler");
-        assert_eq!(config.resource_channels[0].name, "Regelwerk");
+        assert_eq!(config.new_member_actions[2].title, "Such dir Mitspieler");
+        assert_eq!(config.resource_channels[0].title, "Regelwerk");
         assert_eq!(
             config.resource_channels[0].channel_id,
             RULES_CHANNEL_ID.to_string()
         );
-        assert_eq!(config.resource_channels[1].name, "Patchnotes");
-        assert_eq!(config.resource_channels[2].name, "Hilfe & Support");
+        assert_eq!(config.resource_channels[1].title, "Patchnotes");
+        assert_eq!(config.resource_channels[2].title, "Hilfe & Support");
     }
 
     #[test]
-    fn serverguide_builder_blockt_ohne_live_action_type_und_bei_nicht_sendbarem_chat() {
-        let missing_type = build_server_guide_config(
+    fn serverguide_builder_blockt_nur_bei_nicht_sendbarem_chat() {
+        let without_live_actions = build_server_guide_config(
             &json!({"enabled": false, "new_member_actions": []}),
             &serverguide_model(),
         );
-        assert!(missing_type.config.is_none());
-        assert!(missing_type
-            .blockers
-            .iter()
-            .any(|blocker| blocker.contains("CHAT action_type")));
+        assert!(
+            without_live_actions.config.is_some(),
+            "blockers: {:?}",
+            without_live_actions.blockers
+        );
 
         let mut read_only = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
@@ -4749,6 +4865,117 @@ mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.contains("nicht @everyone-sendbar")));
+    }
+
+    #[test]
+    fn serverguide_put_payload_serialisiert_title_description_statt_name() {
+        let config = build_server_guide_config(
+            &json!({"enabled": false, "new_member_actions": []}),
+            &serverguide_model(),
+        )
+        .config
+        .expect("serverguide config");
+        let payload = serde_json::to_value(&config).expect("payload");
+
+        assert_json_key_absent_recursive(&payload, "name");
+        assert_eq!(payload["new_member_actions"][0]["title"], "Sag Hallo");
+        assert_eq!(payload["new_member_actions"][0]["description"], "");
+        assert_eq!(payload["resource_channels"][0]["title"], "Regelwerk");
+        assert_eq!(payload["resource_channels"][0]["description"], "");
+
+        let parsed: ServerGuideConfig = serde_json::from_value(json!({
+            "enabled": true,
+            "welcome_message": {"author_ids": ["1"], "message": "Willkommen"},
+            "new_member_actions": [{
+                "channel_id": "6002",
+                "action_type": 1,
+                "title": "Live Action",
+                "description": "Live Beschreibung"
+            }],
+            "resource_channels": [{
+                "channel_id": "6004",
+                "title": "Live Resource",
+                "description": "Resource Beschreibung"
+            }]
+        }))
+        .expect("GET response parses");
+        assert_eq!(parsed.new_member_actions[0].title, "Live Action");
+        assert_eq!(
+            parsed.new_member_actions[0].description.as_deref(),
+            Some("Live Beschreibung")
+        );
+        assert_eq!(parsed.resource_channels[0].title, "Live Resource");
+        assert_eq!(
+            parsed.resource_channels[0].description.as_deref(),
+            Some("Resource Beschreibung")
+        );
+    }
+
+    #[test]
+    fn serverguide_diff_parst_get_response_mit_title() {
+        let config = build_server_guide_config(
+            &json!({"enabled": false, "new_member_actions": []}),
+            &serverguide_model(),
+        )
+        .config
+        .expect("serverguide config");
+        let diff = serverguide_diff(
+            GUILD_ID,
+            &live_serverguide_config_with_action_type(SERVER_GUIDE_ACTION_TYPE_CHAT),
+            &config,
+        )
+        .expect("serverguide diff");
+        let actual = diff.changes[0].actual.as_ref().expect("actual");
+
+        assert_eq!(actual["config"]["new_member_actions"][0]["title"], "Alt");
+        assert_json_key_absent_recursive(&actual["config"], "name");
+    }
+
+    #[tokio::test]
+    async fn regelwerk_discord_retry_retryt_429_mit_retry_after_body() {
+        let attempts = Arc::new(Mutex::new(0usize));
+        let attempts_for_sender = Arc::clone(&attempts);
+
+        let response = discord_regelwerk_send_with_retry(
+            move || {
+                let attempts_for_call = Arc::clone(&attempts_for_sender);
+                async move {
+                    let mut attempts = attempts_for_call.lock().expect("attempts");
+                    *attempts += 1;
+                    if *attempts == 1 {
+                        return Ok(DiscordRestResponse::for_test(
+                            reqwest::StatusCode::TOO_MANY_REQUESTS,
+                            json!({"retry_after": 0.0}).to_string(),
+                        ));
+                    }
+                    Ok(DiscordRestResponse::for_test(
+                        reqwest::StatusCode::OK,
+                        json!({"ok": true}).to_string(),
+                    ))
+                }
+            },
+            "GET",
+        )
+        .await
+        .expect("retry succeeds");
+        let body: Value = discord_regelwerk_json_response(response, "GET").expect("json response");
+
+        assert_eq!(body, json!({"ok": true}));
+        assert_eq!(*attempts.lock().expect("attempts"), 2);
+    }
+
+    #[test]
+    fn regelwerk_retry_after_nutzt_header_fallback() {
+        let mut response =
+            DiscordRestResponse::for_test(reqwest::StatusCode::TOO_MANY_REQUESTS, "{}".to_string());
+        response.headers.insert(
+            reqwest::header::RETRY_AFTER,
+            reqwest::header::HeaderValue::from_static("0.25"),
+        );
+
+        let retry_after = regelwerk_retry_after(&response).expect("retry-after header");
+
+        assert_eq!(retry_after.as_millis(), 250);
     }
 
     #[test]
