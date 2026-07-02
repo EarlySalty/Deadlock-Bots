@@ -58,7 +58,7 @@ const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
     "frag-die-community",
     "spieler-suche",
-    "memes",
+    "memes-channel",
     "rank-ups",
     "patchnotes",
     "deadlock-rang",
@@ -2385,6 +2385,8 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
                 "Spielersuche Ping Rolle",
                 "Spielersuche",
                 "Spieler-Suche",
+                // Live-Rollenname (Ist-Zustand 2026-07-03).
+                "Spieler Suche Ping",
             ],
         ),
         (
@@ -2396,9 +2398,22 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
                 "Events Turniere",
                 "Turniere",
                 "Events",
+                // Live existiert keine Events/Turniere-Rolle; Competitive-
+                // Turniere/Scrims pingen heute "Grind Custom Ping" (Ist-Zustand
+                // 2026-07-03, alte Onboarding-Interessen-Frage).
+                "Grind Custom Ping",
             ],
         ),
-        ("Custom Games", &["Custom Games Ping Rolle", "Custom Games"]),
+        (
+            "Custom Games",
+            &[
+                "Custom Games Ping Rolle",
+                "Custom Games",
+                // Live-Pendant: spaßige Customs (Hide and Seek etc.) pingen
+                // heute "Funny Custom Ping" (Ist-Zustand 2026-07-03).
+                "Funny Custom Ping",
+            ],
+        ),
         ("Streams", &["Streams"]),
     ]
     .into_iter()
@@ -4717,7 +4732,7 @@ mod tests {
             (6001, "allgemein"),
             (6002, "frag-die-community"),
             (6003, "spieler-suche"),
-            (6004, "memes"),
+            (6004, "memes-channel"),
             (6005, "rank-ups"),
             (6006, "patchnotes"),
             (6007, "deadlock-rang"),
