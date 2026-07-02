@@ -1,3 +1,26 @@
+# Rework core.users Upsert Nonblocking (2026-07-02)
+
+## Ziel
+Core-User-Upsert aus Discord-Gateway-Handlern entkoppeln: nur In-Memory-Reserve bleibt im Event-Pfad, DB-Write laeuft im Hintergrund. Kein Commit/Push.
+
+## Fortschritt
+- Bestehende uncommitted Core-User-Sync-Aenderungen und Kritikerbefund gelesen.
+- `CoreUserSync::record` auf synchronen Reserve+`tokio::spawn`-Pfad umgestellt; Upsert-Fehler loggen weiter und loeschen Reservierungen nur noch timestamp-genau.
+- Gateway-Call-Sites auf nicht-async `record_core_user` umgestellt; Trigger bleibt vor fachlichem Dispatch, blockiert aber nicht mehr auf Postgres.
+- Tests werden angepasst: bestehende DB-Tests pollen den asynchronen Write; neuer Unit-Test simuliert einen blockierenden/fehlenden Upsert ohne echte DB.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo build -p dl-discord`; `SQLX_OFFLINE=true cargo clippy -p dl-discord --all-targets -- -D warnings`; `cargo fmt --check`; `./scripts/central_test_db.sh cargo test -p dl-discord --features testing -- --include-ignored`.
+
+# Adversarial Critic: core.users Upsert-Wiring (2026-07-02)
+
+## Ziel
+Unabhaengiger Review der uncommitted Aenderungen fuer `core.users`-Upsert-Wiring in `dl-discord`. Keine Implementierungsaenderung, kein Commit/Push.
+
+## Fortschritt
+- Review gestartet: Worktree/Branch geprueft, relevante Dateien und Pflicht-Verifikation werden eigenstaendig gelesen/ausgefuehrt.
+- `core_user_sync.rs`, kompletter Diff in `gateway.rs`/`lib.rs`, `dl_central_db::upsert_user`, Schema/Tests und Serenity-Dispatch lokal gelesen.
+- Befund: Mutex wird nicht ueber `.await` gehalten und Upsert-Fehler werden geloggt/Reservierung geloescht; aber Gateway wartet vor Command-/Message-/Join-Dispatch synchron auf den Core-User-Upsert.
+- Verifikation: `SQLX_OFFLINE=true cargo build -p dl-discord` gruen; `SQLX_OFFLINE=true cargo clippy -p dl-discord --all-targets -- -D warnings` gruen; Auftragspfad `./scripts/central_test_db.sh` fehlt, aequivalenter Lauf aus `rust/` mit `./scripts/central_test_db.sh cargo test -p dl-discord --features testing -- --include-ignored` gruen.
+
 # Patchnotes IDENTITY Migration (2026-07-01)
 
 ## Ziel

@@ -11,6 +11,7 @@
 //!   (DL_BOT_GATEWAY=1) — bis zum Cutover hält der Python-Bot die Session.
 
 pub mod adapter;
+mod core_user_sync;
 pub mod dispatch;
 pub mod dispatcher;
 pub mod gateway;
