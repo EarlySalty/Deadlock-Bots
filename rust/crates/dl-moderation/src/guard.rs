@@ -15,7 +15,7 @@
 //! etablierte Streuung oder Takeover → Hijack-Timeout.
 //!
 //! Takeover-Bild-Label (Original: `_finalize_takeover_ai_label`): Bei einem
-//! Takeover mit Bild-Anhängen holt der Guard best-effort ein MiniMax-Vision-
+//! Takeover mit Bild-Anhängen holt der Guard best-effort ein Vision-
 //! Label (`generate_multimodal`) und hängt es als Mod-Kontext an den Grund —
 //! KEIN Gate, die Quarantäne bleibt deterministisch.
 //!

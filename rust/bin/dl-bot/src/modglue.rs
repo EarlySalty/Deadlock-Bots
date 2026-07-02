@@ -835,6 +835,79 @@ impl dl_moderation::ModPort for ModGlue {
     }
 }
 
+#[async_trait::async_trait]
+impl dl_moderation::moderation_system::ModerationPort for ModGlue {
+    async fn delete_message(&self, channel_id: u64, message_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn timeout_member(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        minutes: i64,
+        reason: &str,
+    ) -> bool {
+        let until = chrono::Utc::now() + chrono::Duration::minutes(minutes);
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "communication_disabled_until": until.to_rfc3339() }),
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn ban_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .ban_user(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                1,
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn untimeout_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "communication_disabled_until": null }),
+                Some(reason),
+            )
+            .await
+            .is_ok()
+    }
+
+    async fn post_moderation_case(
+        &self,
+        channel_id: u64,
+        embed: Value,
+        components: Value,
+    ) -> Option<u64> {
+        let mut body = serde_json::Map::new();
+        body.insert("embeds".into(), json!([embed]));
+        body.insert("components".into(), components);
+        self.adapter.send_raw_public(channel_id, &body).await.ok()
+    }
+}
+
 impl ModGlue {
     fn display_name_for_message(&self, guild_id: u64, message: &Message) -> String {
         self.adapter
@@ -853,17 +926,65 @@ impl ModGlue {
 /// Review-Buttons: aimod:accept|ban|deny:{case_id} (Mod-Guard via Rechte).
 /// `deny` öffnet ein Modal (Pflicht-Grund) → Submit kommt als
 /// `aimod:denysubmit:{case_id}` über dieselbe Prefix-Route zurück.
+#[async_trait::async_trait]
+trait AimodReviewActions: Send + Sync {
+    async fn accept_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome;
+    async fn ban_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome;
+    async fn deny_case(
+        &self,
+        case_id: &str,
+        mod_id: u64,
+        reason: &str,
+    ) -> dl_moderation::ReviewOutcome;
+    async fn untimeout_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome;
+}
+
+#[async_trait::async_trait]
+impl AimodReviewActions for dl_moderation::ModerationSystem {
+    async fn accept_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome {
+        self.accept_case(case_id, mod_id).await
+    }
+
+    async fn ban_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome {
+        self.ban_case(case_id, mod_id).await
+    }
+
+    async fn deny_case(
+        &self,
+        case_id: &str,
+        mod_id: u64,
+        reason: &str,
+    ) -> dl_moderation::ReviewOutcome {
+        self.deny_case(case_id, mod_id, reason).await
+    }
+
+    async fn untimeout_case(&self, case_id: &str, mod_id: u64) -> dl_moderation::ReviewOutcome {
+        self.untimeout_case(case_id, mod_id).await
+    }
+}
+
 pub struct ReviewHandler {
-    pub moderator: Arc<dl_moderation::AiModerator>,
+    moderator: Arc<dyn AimodReviewActions>,
 }
 
 impl ReviewHandler {
+    pub fn new(moderator: Arc<dl_moderation::ModerationSystem>) -> Self {
+        Self { moderator }
+    }
+
+    #[cfg(test)]
+    fn with_actions(moderator: Arc<dyn AimodReviewActions>) -> Self {
+        Self { moderator }
+    }
+
     fn outcome_reply(outcome: dl_moderation::ReviewOutcome) -> BridgeReply {
         use dl_moderation::ReviewOutcome;
         match outcome {
-            ReviewOutcome::NotFound => BridgeReply::ephemeral_text("Case nicht gefunden."),
+            ReviewOutcome::NotFound => {
+                BridgeReply::ephemeral_text("PLATZHALTER: Case-nicht-gefunden-Reply")
+            }
             ReviewOutcome::AlreadyHandled => {
-                BridgeReply::ephemeral_text("Case wurde bereits bearbeitet.")
+                BridgeReply::ephemeral_text("PLATZHALTER: Case-bereits-bearbeitet-Reply")
             }
             ReviewOutcome::Done(text) => BridgeReply::ephemeral_text(text),
         }
@@ -878,15 +999,17 @@ impl InteractionHandler for ReviewHandler {
             .strip_prefix("aimod:")
             .unwrap_or_default();
         let Some((action, case_id)) = rest.split_once(':') else {
-            return BridgeReply::ephemeral_text("Unbekannte Aktion.");
+            return BridgeReply::ephemeral_text("PLATZHALTER: Unbekannte-Aktion-Reply");
         };
         let authorized = match action {
-            "accept" | "deny" | "denysubmit" => interaction.author_can_moderate_members,
+            "accept" | "deny" | "denysubmit" | "untimeout" => {
+                interaction.author_can_moderate_members
+            }
             "ban" => interaction.author_can_ban_members,
             _ => true,
         };
         if !authorized {
-            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+            return BridgeReply::ephemeral_text("PLATZHALTER: Keine-Berechtigung-Reply");
         }
         match action {
             "accept" => {
@@ -905,11 +1028,11 @@ impl InteractionHandler for ReviewHandler {
             "deny" => BridgeReply {
                 modal: Some(dl_discord::ModalSpec {
                     custom_id: format!("aimod:denysubmit:{case_id}"),
-                    title: "Moderation ablehnen".to_string(),
+                    title: "PLATZHALTER: Deny-Modal-Titel".to_string(),
                     fields: vec![dl_discord::ModalField {
                         custom_id: "reason".to_string(),
-                        label: "Warum lehnst du ab?".to_string(),
-                        placeholder: "Kurze Begruendung fuer die Ablehnung.".to_string(),
+                        label: "PLATZHALTER: Deny-Modal-Label".to_string(),
+                        placeholder: "PLATZHALTER: Deny-Modal-Placeholder".to_string(),
                         required: true,
                         min_length: 4,
                         max_length: 500,
@@ -933,7 +1056,14 @@ impl InteractionHandler for ReviewHandler {
                     .await;
                 Self::outcome_reply(outcome)
             }
-            _ => BridgeReply::ephemeral_text("Unbekannte Aktion."),
+            "untimeout" => {
+                let outcome = self
+                    .moderator
+                    .untimeout_case(case_id, interaction.user_id)
+                    .await;
+                Self::outcome_reply(outcome)
+            }
+            _ => BridgeReply::ephemeral_text("PLATZHALTER: Unbekannte-Aktion-Reply"),
         }
     }
 }
@@ -1385,6 +1515,7 @@ pub struct GuardGlue {
     pub adapter: Arc<DiscordAdapter>,
     invite_resolver: Arc<GuardInviteResolver>,
     evidence_http: reqwest::Client,
+    moderation_channel_id: u64,
 }
 
 impl GuardGlue {
@@ -1392,6 +1523,7 @@ impl GuardGlue {
         adapter: Arc<DiscordAdapter>,
         our_guild_id: u64,
         fallback_codes: Vec<String>,
+        moderation_channel_id: u64,
     ) -> Self {
         Self {
             adapter,
@@ -1400,6 +1532,7 @@ impl GuardGlue {
                 .timeout(Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
+            moderation_channel_id,
         }
     }
 
@@ -1649,11 +1782,7 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
         if let Err(err) = self
             .adapter
             .http
-            .send_message(
-                ChannelId::new(dl_moderation::guard::MOD_CHANNEL_ID),
-                files,
-                &body,
-            )
+            .send_message(ChannelId::new(self.moderation_channel_id), files, &body)
             .await
         {
             tracing::warn!(%err, case_id = %case.case_id, "SecurityGuard: Mod-Alert konnte nicht gepostet werden");
@@ -1732,6 +1861,7 @@ impl dl_moderation::guard::GuardPort for GuardGlue {
 /// Rechte-Guard, da vom betroffenen User in der DM ausgelöst).
 pub struct GuardReviewHandler {
     pub adapter: Arc<DiscordAdapter>,
+    pub moderation_channel_id: u64,
 }
 
 impl GuardReviewHandler {
@@ -1784,7 +1914,7 @@ impl GuardReviewHandler {
         body.insert("embeds".into(), json!([embed]));
         let _ = self
             .adapter
-            .send_raw_public(dl_moderation::guard::MOD_CHANNEL_ID, &body)
+            .send_raw_public(self.moderation_channel_id, &body)
             .await;
         BridgeReply::ephemeral_text("Dein Einspruch wurde an das Mod-Team weitergeleitet.")
     }
@@ -3180,63 +3310,48 @@ mod tests {
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
-    use sqlx::postgres::PgPoolOptions;
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))
     }
 
-    struct StaticGenerator;
-
-    #[async_trait::async_trait]
-    impl dl_ai::TextGenerator for StaticGenerator {
-        async fn generate_text(&self, _request: dl_ai::GenerateRequest) -> Option<String> {
-            Some("{\"verdict\":\"ok\"}".to_string())
-        }
-    }
-
     #[derive(Default)]
-    struct NoopModPort;
+    struct FakeReviewActions;
 
     #[async_trait::async_trait]
-    impl dl_moderation::ModPort for NoopModPort {
-        async fn delete_message(&self, _channel_id: u64, _message_id: u64, _reason: &str) -> bool {
-            true
+    impl AimodReviewActions for FakeReviewActions {
+        async fn accept_case(&self, _case_id: &str, _mod_id: u64) -> dl_moderation::ReviewOutcome {
+            dl_moderation::ReviewOutcome::Done("accepted".to_string())
         }
 
-        async fn timeout_member(&self, _guild_id: u64, _user_id: u64, _minutes: i64) -> bool {
-            true
+        async fn ban_case(&self, _case_id: &str, _mod_id: u64) -> dl_moderation::ReviewOutcome {
+            dl_moderation::ReviewOutcome::Done("banned".to_string())
         }
 
-        async fn ban_member(&self, _guild_id: u64, _user_id: u64, _reason: &str) -> bool {
-            true
-        }
-
-        async fn post_review(
+        async fn deny_case(
             &self,
-            _case: &dl_moderation::store::CaseDraft,
-            _buttons_case_id: &str,
-        ) -> Option<u64> {
-            None
+            _case_id: &str,
+            _mod_id: u64,
+            _reason: &str,
+        ) -> dl_moderation::ReviewOutcome {
+            dl_moderation::ReviewOutcome::Done("denied".to_string())
         }
 
-        async fn post_log(&self, _text: String) {}
-
-        async fn send_dm(&self, _user_id: u64, _text: String) {}
+        async fn untimeout_case(
+            &self,
+            _case_id: &str,
+            _mod_id: u64,
+        ) -> dl_moderation::ReviewOutcome {
+            dl_moderation::ReviewOutcome::Done("untimeout".to_string())
+        }
     }
 
     fn test_review_handler() -> (tempfile::TempDir, ReviewHandler) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let pool = PgPoolOptions::new()
-            .connect_lazy("postgres://dl-bot-review-handler-test.invalid/deadlock")
-            .expect("lazy pg pool");
-        let moderator = dl_moderation::AiModerator::new(
-            pool,
-            Arc::new(StaticGenerator),
-            None,
-            Arc::new(NoopModPort),
-        );
-        (dir, ReviewHandler { moderator })
+        (
+            dir,
+            ReviewHandler::with_actions(Arc::new(FakeReviewActions)),
+        )
     }
 
     #[cfg(unix)]
@@ -3500,7 +3615,10 @@ mod tests {
             })
             .await;
 
-        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+        );
     }
 
     #[tokio::test]
@@ -3516,13 +3634,17 @@ mod tests {
             })
             .await;
 
-        assert_eq!(reply.content.as_deref(), Some("Keine Berechtigung."));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("PLATZHALTER: Keine-Berechtigung-Reply")
+        );
     }
 
     #[tokio::test]
     async fn securityguard_untimeout_braucht_moderate_members_nicht_manage_roles() {
         let handler = GuardReviewHandler {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
+            moderation_channel_id: dl_moderation::moderation_channel::DEFAULT_MODERATION_CHANNEL_ID,
         };
 
         let reply = handler
@@ -3541,6 +3663,7 @@ mod tests {
     async fn securityguard_ban_braucht_ban_members_nicht_manage_roles() {
         let handler = GuardReviewHandler {
             adapter: dl_discord::DiscordAdapter::new("test-token"),
+            moderation_channel_id: dl_moderation::moderation_channel::DEFAULT_MODERATION_CHANNEL_ID,
         };
 
         let reply = handler

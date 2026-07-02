@@ -42,10 +42,37 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_i64_default(name: &str, default: i64) -> i64 {
+    env(name)
+        .and_then(|value| value.parse::<i64>().ok())
+        .unwrap_or(default)
+}
+
+fn env_f64_default(name: &str, default: f64) -> f64 {
+    env(name)
+        .and_then(|value| value.parse::<f64>().ok())
+        .map(|value| value.clamp(0.0, 1.0))
+        .unwrap_or(default)
+}
+
 fn env_usize_default(name: &str, default: usize) -> usize {
     env(name)
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(default)
+}
+
+fn openai_client_with_model_from_env(
+    model_env: &str,
+    default_model: &str,
+) -> Option<(Arc<dl_ai::OpenAiClient>, String)> {
+    let api_key = env("OPENAI_API_KEY").or_else(|| env("DEADLOCK_OPENAI_KEY"))?;
+    let base_url =
+        env("OPENAI_BASE_URL").unwrap_or_else(|| "https://api.openai.com/v1".to_string());
+    let model = env(model_env).unwrap_or_else(|| default_model.to_string());
+    Some((
+        dl_ai::OpenAiClient::new(base_url, api_key, model.clone()),
+        model,
+    ))
 }
 
 fn default_brain_bin() -> String {
@@ -408,14 +435,29 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // /meine-tags-Selbstverwaltung (Slash + Select/Reset-Komponenten).
     dl_community::tags_ui::register(&mut router, tag_service.clone());
 
+    let moderation_channel_id =
+        dl_moderation::moderation_channel::moderation_channel_id_from_lookup(|k| {
+            std::env::var(k).ok()
+        });
+    let moderation_scan_channel_ids =
+        dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
+
     // SecurityGuard (6): sg:*-Mod-Buttons am Router, Scan gateway-gated
     router.on_prefix(
         "sg:",
         Arc::new(modglue::GuardReviewHandler {
             adapter: adapter.clone(),
+            moderation_channel_id,
         }),
     );
-    let guard_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
+    let moderation_text_analyze_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
+    let moderation_text_analyze_model =
+        env("MOD_TEXT_ANALYZE_MODEL").unwrap_or_else(|| dl_ai::DEFAULT_MODEL.to_string());
+    let moderation_image_analyze_client =
+        openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let moderation_verify_client =
+        openai_client_with_model_from_env("MOD_VERIFY_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
+    let guard_client = moderation_text_analyze_client.clone();
     let openai_vision_client = dl_ai::OpenAiClient::from_env(|k| std::env::var(k).ok());
     let our_guild_id = env("OUR_GUILD_ID")
         .or_else(|| env("MAIN_GUILD_ID"))
@@ -428,6 +470,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         our_guild_id,
         fallback_invites,
+        moderation_channel_id,
     ));
     guard_glue.refresh_invite_allowlist().await;
     let escalation_contact_handle = env("ESCALATION_CONTACT_HANDLE")
@@ -644,28 +687,74 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
     );
 
-    // AI-Moderator (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated
-    let moderator = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok()).map(|client| {
-        let vision = openai_vision_client
-            .clone()
-            .map(|c| c as Arc<dyn dl_ai::VisionGenerator>);
-        let moderator = dl_moderation::AiModerator::new(
-            central_pool.clone(),
-            client as Arc<dyn dl_ai::TextGenerator>,
-            vision,
-            Arc::new(modglue::ModGlue {
-                adapter: adapter.clone(),
-                tags: tag_service.clone(),
-            }),
-        );
-        router.on_prefix(
-            "aimod:",
-            Arc::new(modglue::ReviewHandler {
-                moderator: moderator.clone(),
-            }),
-        );
-        moderator
-    });
+    // Moderation (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated.
+    // Text-Analyze laeuft ueber MiniMax, Bild-Analyze und Verify ueber OpenAI nano.
+    let moderator = match (
+        moderation_text_analyze_client.clone(),
+        moderation_image_analyze_client.clone(),
+        moderation_verify_client.clone(),
+    ) {
+        (
+            Some(text_analyze_client),
+            Some((image_analyze_client, image_analyze_model)),
+            Some((verify_client, verify_model)),
+        ) => {
+            let analyze_text: Arc<dyn dl_ai::TextGenerator> = text_analyze_client;
+            let analyze_vision: Arc<dyn dl_ai::VisionGenerator> = image_analyze_client;
+            let verify_text: Arc<dyn dl_ai::TextGenerator> = verify_client.clone();
+            let verify_vision: Arc<dyn dl_ai::VisionGenerator> = verify_client;
+            let pipeline = dl_moderation::content_analyzer::ContentModerationPipeline::new(
+                dl_moderation::content_analyzer::ContentAnalyzer::new(
+                    analyze_text,
+                    Some(analyze_vision),
+                    dl_moderation::content_analyzer::ContentAnalyzerConfig {
+                        text_model: moderation_text_analyze_model.clone(),
+                        image_model: image_analyze_model,
+                    },
+                ),
+                dl_moderation::content_verifier::ContentVerifier::new(
+                    verify_text,
+                    Some(verify_vision),
+                    dl_moderation::content_verifier::ContentVerifierConfig {
+                        model: verify_model,
+                    },
+                ),
+                env_f64_default("MOD_ANALYZE_FLAG_THRESHOLD", 0.5),
+            );
+            let policy = dl_moderation::action_policy::ActionPolicy::new(
+                dl_moderation::action_policy::ActionPolicyConfig {
+                    auto_execute_verified_confidence: env_f64_default(
+                        "MOD_AUTO_VERIFY_THRESHOLD",
+                        0.85,
+                    ),
+                    proposal_verified_confidence: env_f64_default(
+                        "MOD_PROPOSE_VERIFY_THRESHOLD",
+                        0.60,
+                    ),
+                    timeout_minutes: env_i64_default("MOD_TIMEOUT_MINUTES", 1440),
+                },
+            );
+            let moderator = dl_moderation::ModerationSystem::new(
+                central_pool.clone(),
+                pipeline,
+                policy,
+                Arc::new(modglue::ModGlue {
+                    adapter: adapter.clone(),
+                    tags: tag_service.clone(),
+                }),
+                dl_moderation::moderation_system::ModerationSystemConfig {
+                    scan_channel_ids: moderation_scan_channel_ids.clone(),
+                    moderation_channel_id,
+                },
+            );
+            router.on_prefix(
+                "aimod:",
+                Arc::new(modglue::ReviewHandler::new(moderator.clone())),
+            );
+            Some(moderator)
+        }
+        _ => None,
+    };
 
     let router = Arc::new(router);
     let command_sync_config = master::CommandSyncStartupConfig::from_lookup(env);
@@ -900,7 +989,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             None => tracing::info!("Coaching-Sync inaktiv (kein interner Token)"),
         }
 
-        // AI-Moderator (6): Scan-Kanal-Subscriber
+        // Moderation (6): Scan-Kanal-Subscriber
         // Der automatische Text-Scan ist per Default AUS (AI_MODERATOR_ENABLE),
         // bis der überarbeitete, GPT-verifizierte Moderations-Guard live ist.
         // Das Schema wird weiter angelegt und die aimod:-Review-Buttons bleiben
@@ -911,12 +1000,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 tracing::warn!(%err, "Moderation: Schema-Anlage fehlgeschlagen");
             }
             if env_bool_default("AI_MODERATOR_ENABLE", false) {
-                dl_moderation::spawn(moderator.clone(), &dispatcher);
+                dl_moderation::moderation_system::spawn(moderator.clone(), &dispatcher);
             } else {
                 tracing::info!("AI-Moderator-Scan deaktiviert (AI_MODERATOR_ENABLE nicht gesetzt)");
             }
         } else {
-            tracing::info!("AI-Moderator inaktiv (kein MiniMax-Key)");
+            tracing::info!("AI-Moderator inaktiv (kein MiniMax- oder OpenAI-Key)");
         }
 
         // Aktivitäts-Analyzer (5): Loops starten (Instanz oben gebaut)

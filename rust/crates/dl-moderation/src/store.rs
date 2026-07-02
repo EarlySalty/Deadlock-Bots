@@ -74,21 +74,13 @@ impl ModerationStore {
         Ok(())
     }
 
-    /// Case anlegen → case_id (message_id-basiert, wie das Original mit Zeit-Suffix).
-    pub async fn insert_case(&self, draft: CaseDraft) -> String {
+    /// Case anlegen -> case_id nur bei erfolgreicher Persistenz.
+    pub async fn insert_case(&self, draft: CaseDraft) -> Option<String> {
         let case_id = format!("{}-{}", draft.message_id, chrono::Utc::now().timestamp());
-        let Some(guild_id) = discord_id_to_i64(draft.guild_id, "guild_id") else {
-            return case_id;
-        };
-        let Some(channel_id) = discord_id_to_i64(draft.channel_id, "channel_id") else {
-            return case_id;
-        };
-        let Some(message_id) = discord_id_to_i64(draft.message_id, "message_id") else {
-            return case_id;
-        };
-        let Some(user_id) = discord_id_to_i64(draft.user_id, "user_id") else {
-            return case_id;
-        };
+        let guild_id = discord_id_to_i64(draft.guild_id, "guild_id")?;
+        let channel_id = discord_id_to_i64(draft.channel_id, "channel_id")?;
+        let message_id = discord_id_to_i64(draft.message_id, "message_id")?;
+        let user_id = discord_id_to_i64(draft.user_id, "user_id")?;
         let attachments_json =
             serde_json::to_string(&draft.attachments).unwrap_or_else(|_| "[]".to_string());
         let ai_raw_json = jsonb_text_or_string(&draft.ai_raw_json);
@@ -124,10 +116,13 @@ impl ModerationStore {
         .execute(&self.pool)
         .await;
 
-        if let Err(err) = result {
-            tracing::warn!(%err, "Moderation: Case-Insert fehlgeschlagen");
+        match result {
+            Ok(_) => Some(case_id),
+            Err(err) => {
+                tracing::warn!(%err, "Moderation: Case-Insert fehlgeschlagen");
+                None
+            }
         }
-        case_id
     }
 
     pub async fn set_review_message(&self, case_id: &str, message_id: u64) {
@@ -461,7 +456,7 @@ mod tests {
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn case_lifecycle() -> TestResult {
         let (db, store) = store().await?;
-        let case_id = store.insert_case(draft()).await;
+        let case_id = store.insert_case(draft()).await.expect("case insert");
         store.set_review_message(&case_id, 999).await;
         store
             .update_case_action(&case_id, "auto_delete_failed")
@@ -530,7 +525,7 @@ mod tests {
         draft.ai_raw_json = "{}".into();
         draft.escalated_with_context = false;
 
-        let case_id = store.insert_case(draft).await;
+        let case_id = store.insert_case(draft).await.expect("case insert");
         let case = store.fetch_case(&case_id).await.expect("case");
         assert_eq!(case.action, "proposed");
         assert_eq!(

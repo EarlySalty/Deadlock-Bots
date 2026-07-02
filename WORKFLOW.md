@@ -134,6 +134,37 @@ Phase-1-Fundament fuer Journey-State-Machine, Message-/Voice-/Interaction-Metada
 
 ## Offen
 - Erfolgreiche Steam-Link-/Invite-Statusereignisse kommen weiterhin aus externen Steam-Bot-/Invite-Flows; Phase-1 stellt Eventtypen und `record_journey_event` bereit, verdrahtet aber nur die heute im dl-bot vorhandenen Gateway-Handler direkt.
+# Mod-Guard Rework (2026-07-02)
+
+## Adversarial Critic Härtung 1-4,6 (2026-07-02)
+
+## Ziel
+Fail-safe-Fixes fuer die Kritiker-Findings 1-4 und 6 im bestehenden Mod-Guard-Umbau. TDD mit roten Regressionstests zuerst, kein Commit/Push, kein Service-Neustart.
+
+## Fortschritt
+- Worktree/Branch geprueft: `/home/naniadm/.worktrees/deadlock-bots-mod-guard`, `feat/mod-guard-rework`.
+- `origin/main` gefetcht; kein Rebase ausgefuehrt, weil der Worktree uncommitted/untracked Mod-Guard-Code enthaelt.
+- Relevante Dateien gelesen: `moderation_verdict.rs`, `action_policy.rs`, `content_analyzer.rs`, `content_verifier.rs`, `moderation_system.rs`, `store.rs`.
+- Rote Regressionstests ergaenzt und ausgefuehrt: `SQLX_OFFLINE=true cargo test -p dl-moderation` faellt erwartungsgemaess bei Verify-ohne-Category, Bare-`nsfw`, NaN-Confidence, Mixed-Text+Bild-Routing/Verify und Persist-Fail-safe.
+- Fixes umgesetzt: Verify ohne eigene Kategorie wird `Other`, nur `nsfw_explicit` ist high-damage, NaN/Inf-Confidence wird 0.0, Text+Bild wird modal getrennt analysiert, `insert_case` liefert nur bei erfolgreicher Persistenz eine Case-ID und Auto/Review-Pfade brechen sonst fail-safe ab.
+- Regressionstestlauf gruen: `SQLX_OFFLINE=true cargo test -p dl-moderation` (38 Tests).
+- Finale Verifikation gruen: `cargo fmt --all -- --check`; `git diff --check`; `SQLX_OFFLINE=true cargo test -p dl-moderation`; `SQLX_OFFLINE=true cargo clippy -p dl-moderation --all-targets -- -D warnings`; `SQLX_OFFLINE=true cargo clippy -p dl-bot -- -D warnings`; `SQLX_OFFLINE=true cargo build --release`.
+- Kein Rebase auf `origin/main`, kein `./scripts/check.sh`, kein Service-Neustart, kein Commit/Push.
+
+## Ziel
+Zwei getrennte Discord-Moderationspfade in ein einheitliches, modular benanntes System ueberfuehren: Text-Analyze ueber MiniMax, Bild-Analyze und Verify ueber OpenAI nano, gestufte Policy, kompakte Embeds, ein Moderationskanal, Case-Store. Kein Service-Neustart, kein Commit/Push.
+
+## Fortschritt
+- Worktree/Branch geprueft: `/home/naniadm/.worktrees/deadlock-bots-mod-guard`, `feat/mod-guard-rework`.
+- Bestand gelesen: alter `AiModerator` in `dl-moderation/src/lib.rs`, `SecurityGuard` in `guard.rs`, Discord-Glue in `modglue.rs`, Wiring in `main.rs`, OpenAI-/MiniMax-Clients in `dl-ai`.
+- Rote Tests zuerst ergaenzt fuer Verdict-Parsing, Analyze->Verify-Gating, Policy-Matrix, Embed-Bau und Kanal-Konfig; danach gruen implementiert.
+- Neue sprechende Module in `dl-moderation`: `moderation_verdict`, `content_analyzer`, `content_verifier`, `action_policy`, `case_embed`, `moderation_channel`, `moderation_system`.
+- Neuer Content-Pfad in `main.rs` hinter `AI_MODERATOR_ENABLE` verdrahtet: Text-Analyze ueber MiniMax mit `MOD_TEXT_ANALYZE_MODEL` (Default `MiniMax-M3`), Bild-Analyze ueber OpenAI-Vision mit `MOD_IMAGE_ANALYZE_MODEL` (Default `gpt-5.4-nano`), Verify ueber OpenAI mit `MOD_VERIFY_MODEL` (Default `gpt-5.4-nano`). MiniMax bleibt im Text-Moderationspfad; SecurityGuard-Textcheck nutzt wieder MiniMax; Mod-Kanal ist zentral `MODERATION_CHANNEL_ID`.
+- Reine Bild-Flags ueberspringen den redundanten Verify-Aufruf, wenn Bild-Analyze-Modell und Verify-Modell identisch sind; die synthetische Verification uebernimmt Kategorie/Confidence/Reason der Bildanalyse und markiert den Skip im Raw-JSON.
+- Discord-Glue ergaenzt: kompakter neuer Case-Post in einen Kanal, `aimod:`-Reviewhandler fuer Accept/Ban/Deny/Timeout-Reversal, Platzhaltertexte fuer neue user-sichtbare Texte.
+- Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-moderation`; `SQLX_OFFLINE=true cargo clippy -p dl-moderation --all-targets -- -D warnings`; `SQLX_OFFLINE=true cargo clippy -p dl-bot --bin dl-bot -- -D warnings`; `SQLX_OFFLINE=true cargo build --release`; `cargo fmt --all -- --check`.
+- Blockiert/bestehend: `SQLX_OFFLINE=true cargo clippy --all-targets -- -D warnings`, `SQLX_OFFLINE=true cargo test --workspace`, `SQLX_OFFLINE=true cargo test -p dl-bot aimod_ -- --nocapture` und `./scripts/check.sh` scheitern im `dl-bot`-Testtarget an 22 fehlenden SQLx-Offline-Caches in `bin/dl-bot/src/build_publisher.rs` (erste Stelle `:644`), nicht an den Mod-Guard-Aenderungen.
+- Offen: Verhalten-Guard ist noch nicht voll in denselben `ai_moderation_cases`-Case-Store/kompakten Embed-Vertrag migriert; Kanal ist konsolidiert, Rich-Embed/Incident-Store bleiben Legacy.
 
 # Rework core.users Upsert Nonblocking (2026-07-02)
 

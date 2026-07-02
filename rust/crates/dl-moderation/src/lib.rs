@@ -1,6 +1,6 @@
-//! dl-moderation — Port des Kerns von `cogs/ai_moderator.py`.
+//! dl-moderation — Moderationslogik fuer Discord-Faelle.
 //!
-//! Pipeline: Nachricht im Scan-Kanal → MiniMax-Klassifikation
+//! Legacy-Pipeline: Nachricht im Scan-Kanal → Text-Klassifikation
 //! (System-Prompt wortgleich) → Schwellen-Routing:
 //! - `delete` + Auto-Kategorie + confidence ≥ 0.90 → Auto-Delete + Case
 //! - `delete`/`propose` + confidence ≥ 0.78 → Mod-Review-Case (Buttons
@@ -8,6 +8,10 @@
 //! - `ragebait_ok` → Fenster-Zählung (4 Treffer / 120 min → Eskalation
 //!   als `persistent_ragebait`-Vorschlag)
 //! - `needs_context`/`ok` → nichts
+//!
+//! Der neue aktive Scanner sitzt in den sprechenden Modulen
+//! `content_analyzer`, `content_verifier`, `moderation_verdict`,
+//! `action_policy`, `case_embed` und `moderation_system`.
 //!
 //! Der Ragebaiter-Free-Warnhinweis ist portiert: in Kanälen mit
 //! `required_tone_tag = "ragebaiter_free"` (aus `tempvoice_lane_tag_filter`)
@@ -30,8 +34,17 @@ use std::sync::Arc;
 use serde_json::Value;
 use sqlx::PgPool;
 
+pub mod action_policy;
+pub mod case_embed;
+pub mod content_analyzer;
+pub mod content_verifier;
 pub mod guard;
+pub mod moderation_channel;
+pub mod moderation_system;
+pub mod moderation_verdict;
 pub mod store;
+
+pub use moderation_system::ModerationSystem;
 
 pub const SCAN_CHANNEL_IDS: [u64; 1] = [1289721245281292291];
 pub const MOD_REVIEW_CHANNEL_ID: u64 = 1315684135175716978;
@@ -596,7 +609,7 @@ impl AiModerator {
         match decide_action(&verdict, PROPOSE_CONFIDENCE) {
             ModAction::Ignore => {}
             ModAction::AutoDelete => {
-                let case_id = self
+                let Some(case_id) = self
                     .store
                     .insert_case(self.draft(
                         guild_id,
@@ -605,7 +618,17 @@ impl AiModerator {
                         "auto_delete",
                         escalated_with_context,
                     ))
-                    .await;
+                    .await
+                else {
+                    tracing::warn!(
+                        guild_id,
+                        channel_id = event.channel_id,
+                        message_id = event.message_id,
+                        user_id = event.author_id,
+                        "AI-Moderation: Auto-Delete wegen fehlgeschlagener Case-Persistenz uebersprungen"
+                    );
+                    return;
+                };
                 let deleted = self
                     .port
                     .delete_message(
@@ -855,7 +878,17 @@ impl AiModerator {
         action: &str,
     ) {
         let draft = self.draft(guild_id, event, verdict, action, escalated_with_context);
-        let case_id = self.store.insert_case(draft.clone()).await;
+        let Some(case_id) = self.store.insert_case(draft.clone()).await else {
+            tracing::warn!(
+                guild_id,
+                channel_id = event.channel_id,
+                message_id = event.message_id,
+                user_id = event.author_id,
+                action,
+                "AI-Moderation: Proposal wegen fehlgeschlagener Case-Persistenz uebersprungen"
+            );
+            return;
+        };
         if let Some(message_id) = self.port.post_review(&draft, &case_id).await {
             self.store.set_review_message(&case_id, message_id).await;
         }
