@@ -462,11 +462,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }));
     // Verifikations-Abschluss: RoleEvent::Gained(Verified) → Abschluss-Nachricht.
     dl_community::onboarding::spawn_verify_completion(wizard.clone(), &dispatcher);
-    dl_community::onboarding::spawn_screening_auto_start(
-        wizard.clone(),
-        &dispatcher,
-        onboardglue::MAIN_GUILD_ID,
-    );
     dl_community::onboarding::register(&mut router, wizard);
 
     // AI-Onboarding (H6): legacy `aiob:*` buttons, modal submit, MiniMax tour.
@@ -940,6 +935,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
         let _journey_role_events =
             journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
+        let _journey_native_onboarding_completed = journeyglue::spawn_native_onboarding_completed(
+            central_pool.clone(),
+            adapter.clone(),
+            &dispatcher,
+            onboardglue::MAIN_GUILD_ID,
+        );
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),

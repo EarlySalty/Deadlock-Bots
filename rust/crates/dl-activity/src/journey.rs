@@ -1186,7 +1186,8 @@ pub async fn handle_member_journey(
         }
         dl_discord::MemberEvent::Remove { .. }
         | dl_discord::MemberEvent::Ban { .. }
-        | dl_discord::MemberEvent::Unban { .. } => Ok(false),
+        | dl_discord::MemberEvent::Unban { .. }
+        | dl_discord::MemberEvent::NativeOnboardingCompleted { .. } => Ok(false),
     }
 }
 

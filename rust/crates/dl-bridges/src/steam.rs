@@ -874,7 +874,8 @@ pub fn spawn_member_remove_listener(
                 Ok(MemberEvent::Join { .. })
                 | Ok(MemberEvent::Ban { .. })
                 | Ok(MemberEvent::Unban { .. })
-                | Ok(MemberEvent::ScreeningCompleted { .. }) => {}
+                | Ok(MemberEvent::ScreeningCompleted { .. })
+                | Ok(MemberEvent::NativeOnboardingCompleted { .. }) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "steam-bridge: Member-Events verpasst");
                 }

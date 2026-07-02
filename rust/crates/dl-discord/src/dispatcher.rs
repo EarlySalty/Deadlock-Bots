@@ -160,6 +160,11 @@ pub enum MemberEvent {
     },
     /// Discord Member Screening wurde abgeschlossen (`pending: true -> false`).
     ScreeningCompleted { guild_id: u64, user_id: u64 },
+    /// Native Discord-Onboarding wurde abgeschlossen (`GuildMemberFlags::COMPLETED_ONBOARDING`).
+    ///
+    /// Discord liefert kein vorheriges Flag im Gateway-Payload; Dedupe muss
+    /// deshalb persistent in der konsumierenden Domäne passieren.
+    NativeOnboardingCompleted { guild_id: u64, user_id: u64 },
 }
 
 /// Rollenänderung eines Mitglieds (aus `guild_member_update` diffiert) —

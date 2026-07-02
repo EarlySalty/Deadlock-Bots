@@ -804,6 +804,7 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
 
 const USER_CO_PLAYERS_REL: &str = "activity.user_co_players";
 const KV_REL: &str = "bot.kv_store";
+const KV_NATIVE_ONBOARDING_COMPLETED_NS: &str = "native_onboarding:completed";
 const USER_PRIVACY_REL: &str = "core.user_privacy";
 const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
@@ -1239,6 +1240,21 @@ pub async fn delete_user_data(
             nudge += rows_to_i64(result.rows_affected());
         }
         counts.insert("kv_voice_nudge".to_string(), nudge);
+
+        let native_onboarding = sqlx::query(
+            "DELETE FROM bot.kv_store
+              WHERE ns = $1
+                AND (k = $2 OR k LIKE $3)",
+        )
+        .bind(KV_NATIVE_ONBOARDING_COMPLETED_NS)
+        .bind(&uid_key)
+        .bind(format!("%:{uid_key}"))
+        .execute(&mut *tx)
+        .await?;
+        counts.insert(
+            "kv_native_onboarding_completed".to_string(),
+            rows_to_i64(native_onboarding.rows_affected()),
+        );
     }
 
     if relations.contains(USER_PRIVACY_REL) {
@@ -1392,6 +1408,29 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
                 "done": kv_value(pool, "voice_nudge_done", &uid_key).await?,
             }),
         );
+        let rows = sqlx::query(
+            "SELECT k, v
+               FROM bot.kv_store
+              WHERE ns = $1
+                AND (k = $2 OR k LIKE $3)",
+        )
+        .bind(KV_NATIVE_ONBOARDING_COMPLETED_NS)
+        .bind(&uid_key)
+        .bind(format!("%:{uid_key}"))
+        .fetch_all(pool)
+        .await?;
+        let values = rows
+            .into_iter()
+            .filter_map(|row| {
+                let key: String = row.try_get("k").ok()?;
+                let raw: String = row.try_get("v").ok()?;
+                Some(serde_json::json!({
+                    "key": key,
+                    "value": serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw)),
+                }))
+            })
+            .collect::<Vec<_>>();
+        kv_out.insert("native_onboarding_completed".into(), Value::Array(values));
     }
 
     let user_privacy = if relations.contains(USER_PRIVACY_REL) {
@@ -1779,7 +1818,8 @@ mod tests {
               ('ai_onboarding:sessions','42','{}'),
               ('ai_onboarding:persistent_views','viewA','{"user_id":42}'),
               ('ai_onboarding:persistent_views','viewB','{"user_id":99}'),
-              ('voice_nudge_done','42','1')
+              ('voice_nudge_done','42','1'),
+              ('native_onboarding:completed','1:42','{"guild_id":1,"user_id":42}')
             "#
         )
         .execute(db.pool())
@@ -1817,6 +1857,10 @@ mod tests {
         assert_eq!(s.counts.get("kv_ai_onboarding_sessions").copied(), Some(1));
         assert_eq!(s.counts.get("kv_ai_onboarding_views").copied(), Some(1));
         assert_eq!(s.counts.get("kv_voice_nudge").copied(), Some(1));
+        assert_eq!(
+            s.counts.get("kv_native_onboarding_completed").copied(),
+            Some(1)
+        );
         assert_eq!(s.counts.get("user_privacy_updated").copied(), Some(1));
 
         let vs_self = sqlx::query_scalar!(

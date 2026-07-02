@@ -1,6 +1,6 @@
 #![allow(clippy::result_large_err)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -13,14 +13,14 @@ use axum::routing::post;
 use axum::{Json, Router};
 use chrono::{SecondsFormat, Utc};
 use dl_discord::{BridgeAttachment, BridgeInteraction, BridgeReply, CommandSpec};
-use dl_server_as_code::diff::ServerDiff;
+use dl_server_as_code::diff::{DiffAction, DiffChange, FieldDiff, ServerDiff};
 use dl_server_as_code::{
-    ApplyOptions, ApplyReport, BotMessageSpec, CategorySpec, ChannelSpec, GuildModel,
-    PermissionOverwriteSpec, RoleSpec, SnapshotImportReport,
+    ApplyOptions, ApplyReport, BotMessageSpec, CategorySpec, ChannelSpec, GuildModel, ObjectKind,
+    ObjectRef, PermissionOverwriteSpec, RoleSpec, SnapshotImportReport, TargetKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use serenity::all::GuildId;
+use serenity::all::{GuildId, Permissions};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
@@ -30,11 +30,26 @@ pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
 pub const PORT: u16 = 8901;
 pub const TOKEN_HEADER: &str = "X-Internal-Token";
 const AUDIT_LOG_REASON: &str = "Onboarding-Redesign Welle 2a (Rechte-Sanierung)";
+const ONBOARDING_AUDIT_LOG_REASON: &str = "serversync welle2b";
 const ROLLBACK_VERSION: &str = "serversync.rollback_export.v2";
 const ROLLBACK_VERSION_V1: &str = "serversync.rollback_export.v1";
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const MAX_DISCORD_CONTENT_CHARS: usize = 1800;
 const MAX_BRIDGE_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const ONBOARDING_DIFF_MESSAGE_KEY: &str = "native-onboarding";
+const ONBOARDING_DIFF_OBJECT_ID: u64 = GUILD_ID;
+
+const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
+    "allgemein",
+    "frag-die-community",
+    "spieler-suche",
+    "memes",
+    "rank-ups",
+    "patchnotes",
+    "deadlock-rang",
+    "deadlock-invite",
+    "server-support",
+];
 
 pub type SharedServerSync = Arc<dyn ServerSyncOps>;
 type ServerSyncResult<T> = Result<T, ServerSyncError>;
@@ -267,6 +282,65 @@ pub struct ApplyOutput {
     pub details: Value,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeOnboardingConfig {
+    pub prompts: Vec<NativeOnboardingPrompt>,
+    pub default_channel_ids: Vec<String>,
+    pub enabled: bool,
+    pub mode: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeOnboardingPrompt {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(rename = "type")]
+    pub prompt_type: u8,
+    pub title: String,
+    pub options: Vec<NativeOnboardingOption>,
+    pub single_select: bool,
+    pub required: bool,
+    pub in_onboarding: bool,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NativeOnboardingOption {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub emoji: Option<Value>,
+    #[serde(default)]
+    pub role_ids: Vec<String>,
+    #[serde(default)]
+    pub channel_ids: Vec<String>,
+    #[serde(flatten, default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub extra: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OnboardingBuildOutput {
+    pub config: NativeOnboardingConfig,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct OnboardingPreviewOutput {
+    pub preview_id: Option<i64>,
+    pub guild_id: u64,
+    pub diff_hash: Option<String>,
+    pub human_summary: String,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub diff_text: String,
+    pub desired_config: Option<Value>,
+}
+
 #[async_trait]
 pub trait ServerSyncOps: Send + Sync {
     fn guild_id(&self) -> u64;
@@ -283,6 +357,17 @@ pub trait ServerSyncOps: Send + Sync {
         requested_by_user_id: Option<u64>,
     ) -> ServerSyncResult<RestoreOutput>;
     async fn apply(
+        &self,
+        preview_id: i64,
+        hash: String,
+        confirm: bool,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ApplyOutput>;
+    async fn onboarding_preview(
+        &self,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<OnboardingPreviewOutput>;
+    async fn onboarding_apply(
         &self,
         preview_id: i64,
         hash: String,
@@ -368,6 +453,33 @@ impl ServerSyncService {
             )));
         }
         Ok(response.json::<Value>().await?)
+    }
+
+    async fn put_native_onboarding_config(
+        &self,
+        config: &NativeOnboardingConfig,
+    ) -> ServerSyncResult<()> {
+        let url = format!("{DISCORD_API_BASE}/guilds/{}/onboarding", self.guild_id);
+        let response = self
+            .http_client
+            .put(url)
+            .header("Authorization", format!("Bot {}", self.discord_token))
+            .header("Content-Type", "application/json")
+            .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+            .json(config)
+            .send()
+            .await?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            let body_preview: String = body.chars().take(300).collect();
+            return Err(ServerSyncError::internal(format!(
+                "Discord onboarding PUT fehlgeschlagen: HTTP {}: {}",
+                status.as_u16(),
+                body_preview
+            )));
+        }
+        Ok(())
     }
 
     async fn load_rollback_artifact(
@@ -627,6 +739,181 @@ impl ServerSyncOps for ServerSyncService {
         .await?;
         apply_output(report)
     }
+
+    async fn onboarding_preview(
+        &self,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<OnboardingPreviewOutput> {
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let snapshot =
+            dl_server_as_code::db::persist_snapshot_model(&self.pool, &live, "onboarding_preview")
+                .await?;
+        let live_onboarding = self.fetch_native_onboarding_config().await?;
+        let built = build_welle2b_onboarding_config(&live_onboarding, &live)?;
+        if !built.blockers.is_empty() {
+            return Ok(OnboardingPreviewOutput {
+                preview_id: None,
+                guild_id: self.guild_id,
+                diff_hash: None,
+                human_summary: onboarding_blocker_summary(&built.blockers),
+                blockers: built.blockers,
+                warnings: built.warnings,
+                diff_text: "{}".to_string(),
+                desired_config: Some(serde_json::to_value(&built.config)?),
+            });
+        }
+
+        let diff = onboarding_diff(self.guild_id, &live_onboarding, &built.config)?;
+        let human_summary = onboarding_human_summary(&diff, &built.config);
+        let preview = persist_onboarding_preview(
+            &self.pool,
+            Some(snapshot.snapshot_id),
+            &diff,
+            &human_summary,
+            requested_by_user_id,
+        )
+        .await?;
+        Ok(OnboardingPreviewOutput {
+            preview_id: Some(preview.preview_id),
+            guild_id: self.guild_id,
+            diff_hash: Some(preview.diff_hash),
+            human_summary,
+            blockers: Vec::new(),
+            warnings: built.warnings,
+            diff_text: serde_json::to_string_pretty(&diff)?,
+            desired_config: Some(serde_json::to_value(&built.config)?),
+        })
+    }
+
+    async fn onboarding_apply(
+        &self,
+        preview_id: i64,
+        hash: String,
+        confirm: bool,
+        requested_by_user_id: Option<u64>,
+    ) -> ServerSyncResult<ApplyOutput> {
+        if hash.trim().is_empty() {
+            return Err(ServerSyncError::bad_request("hash fehlt"));
+        }
+        let preview = load_onboarding_preview(&self.pool, preview_id).await?;
+        let confirmed = hash.trim();
+        if preview.diff_hash != confirmed {
+            let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+                pool: &self.pool,
+                preview_id,
+                guild_id: preview.guild_id,
+                confirmed_hash: confirmed,
+                requested_by_user_id,
+                dry_run: confirm,
+                status: "hash_mismatch",
+                result: json!({
+                    "stored": preview.diff_hash,
+                    "confirmed": confirmed,
+                }),
+                error_text: Some("diff hash binding mismatch"),
+            })
+            .await?;
+            return Err(ServerSyncError::bad_request(format!(
+                "Diff-Hash stimmt nicht: apply_run_id {apply_run_id}, erwartet {}, bekommen {}",
+                preview.diff_hash, confirmed
+            )));
+        }
+
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        validate_default_channels_7_5(&live, &preview.config.default_channel_ids)
+            .map_err(ServerSyncError::bad_request)?;
+
+        if !confirm {
+            let details = json!({
+                "preview_id": preview_id,
+                "dry_run": true,
+                "planned_changes": 1,
+                "onboarding": preview.config,
+            });
+            let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+                pool: &self.pool,
+                preview_id,
+                guild_id: preview.guild_id,
+                confirmed_hash: confirmed,
+                requested_by_user_id,
+                dry_run: true,
+                status: "dry_run",
+                result: details.clone(),
+                error_text: None,
+            })
+            .await?;
+            return Ok(ApplyOutput {
+                apply_run_id,
+                preview_id,
+                dry_run: true,
+                applied: 0,
+                skipped: 1,
+                failed: 0,
+                details_text: serde_json::to_string_pretty(&details)?,
+                details,
+            });
+        }
+
+        let apply_run_id = insert_onboarding_apply_run(OnboardingApplyRunInsert {
+            pool: &self.pool,
+            preview_id,
+            guild_id: preview.guild_id,
+            confirmed_hash: confirmed,
+            requested_by_user_id,
+            dry_run: false,
+            status: "running",
+            result: json!({}),
+            error_text: None,
+        })
+        .await?;
+        if let Err(err) = self.put_native_onboarding_config(&preview.config).await {
+            let details = json!({
+                "preview_id": preview_id,
+                "applied": 0,
+            });
+            finish_onboarding_apply_run(
+                &self.pool,
+                apply_run_id,
+                "failed",
+                details,
+                Some(&err.to_string()),
+            )
+            .await?;
+            return Err(err);
+        }
+
+        let details = json!({
+            "preview_id": preview_id,
+            "dry_run": false,
+            "applied": 1,
+        });
+        finish_onboarding_apply_run(&self.pool, apply_run_id, "applied", details.clone(), None)
+            .await?;
+        sqlx::query(
+            "UPDATE server_config.diff_previews SET applied_at = now() WHERE preview_id = $1",
+        )
+        .bind(preview_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(ApplyOutput {
+            apply_run_id,
+            preview_id,
+            dry_run: false,
+            applied: 1,
+            skipped: 0,
+            failed: 0,
+            details_text: serde_json::to_string_pretty(&details)?,
+            details,
+        })
+    }
 }
 
 fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
@@ -675,6 +962,605 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
     })
 }
 
+fn build_welle2b_onboarding_config(
+    live_config: &Value,
+    model: &GuildModel,
+) -> ServerSyncResult<OnboardingBuildOutput> {
+    let live = parse_live_onboarding_config(live_config)?;
+    let mut blockers = Vec::new();
+    let mut warnings = Vec::new();
+    let mut ids = PlaceholderIds::from_live(live_config);
+
+    let default_channel_ids = resolve_default_channel_ids(model, &mut blockers);
+    if !default_channel_ids.is_empty() {
+        if let Err(err) = validate_default_channels_7_5(model, &default_channel_ids) {
+            blockers.push(err);
+        }
+    }
+
+    let spieler_suche = resolve_channel_id(model, "spieler-suche");
+    let invite_role = require_role_id(model, &["Invite-Gast"], "Invite-Gast", &mut blockers);
+    let frischling_role = require_role_id(model, &["Frischling"], "Frischling", &mut blockers);
+
+    let rank_prompt = find_rank_prompt(&live, model);
+    if rank_prompt.is_none() {
+        blockers.push(
+            "Rang-Prompt mit 12 Optionen auf `(unverifiziert)`-Rollen wurde in der Live-Onboarding-Config nicht gefunden"
+                .to_string(),
+        );
+    }
+
+    let mut prompts = vec![weiche_prompt(
+        &mut ids,
+        invite_role,
+        frischling_role,
+        spieler_suche,
+    )];
+    prompts.push(ping_prompt(&mut ids, model, &mut blockers));
+    if let Some(prompt) = rank_prompt {
+        prompts.push(prompt);
+    }
+
+    if spieler_suche.is_some() {
+        warnings.push(
+            "`Ich spiele Deadlock und suche Mitspieler` nutzt `spieler-suche` als channel_id-Fallback, damit Discord Optionen ohne Rollen/Kanaele sicher akzeptiert."
+                .to_string(),
+        );
+    }
+
+    Ok(OnboardingBuildOutput {
+        config: NativeOnboardingConfig {
+            prompts,
+            default_channel_ids,
+            enabled: true,
+            mode: live_config.get("mode").cloned().unwrap_or(live.mode),
+        },
+        blockers,
+        warnings,
+    })
+}
+
+fn parse_live_onboarding_config(live_config: &Value) -> ServerSyncResult<NativeOnboardingConfig> {
+    serde_json::from_value(live_config.clone()).map_err(|err| {
+        ServerSyncError::bad_request(format!(
+            "Live-Onboarding-Config konnte nicht gelesen werden: {err}"
+        ))
+    })
+}
+
+fn weiche_prompt(
+    ids: &mut PlaceholderIds,
+    invite_role: Option<u64>,
+    frischling_role: Option<u64>,
+    spieler_suche: Option<u64>,
+) -> NativeOnboardingPrompt {
+    NativeOnboardingPrompt {
+        id: Some(ids.next()),
+        prompt_type: 0,
+        title: "Wo stehst du gerade?".to_string(),
+        options: vec![
+            NativeOnboardingOption {
+                id: Some(ids.next()),
+                title: "Ich spiele Deadlock und suche Mitspieler".to_string(),
+                description: None,
+                emoji: Some(json!({ "name": "🎮" })),
+                role_ids: Vec::new(),
+                // Discord lehnt je nach Guild-Validierung Optionen ohne role_ids
+                // UND channel_ids ab; diese neutrale Option zeigt deshalb auf
+                // den ohnehin vorgesehenen Default-Kanal `spieler-suche`.
+                channel_ids: spieler_suche
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                extra: BTreeMap::new(),
+            },
+            NativeOnboardingOption {
+                id: Some(ids.next()),
+                title: "Ich hab Deadlock noch nicht — ich brauche einen Invite".to_string(),
+                description: None,
+                emoji: Some(json!({ "name": "🔑" })),
+                role_ids: invite_role
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                channel_ids: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+            NativeOnboardingOption {
+                id: Some(ids.next()),
+                title: "Ich bin ganz neu und will's lernen — nehmt mich an die Hand".to_string(),
+                description: None,
+                emoji: Some(json!({ "name": "🌱" })),
+                role_ids: frischling_role
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                channel_ids: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+        ],
+        single_select: true,
+        required: true,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn ping_prompt(
+    ids: &mut PlaceholderIds,
+    model: &GuildModel,
+    blockers: &mut Vec<String>,
+) -> NativeOnboardingPrompt {
+    let options = [
+        (
+            "Patchnotes",
+            &["Patchnotes Ping Rolle", "Patchnotes"] as &[&str],
+        ),
+        (
+            "Spielersuche",
+            &[
+                "Spieler-Suche Ping Rolle",
+                "Spielersuche Ping Rolle",
+                "Spielersuche",
+                "Spieler-Suche",
+            ],
+        ),
+        (
+            "Events & Turniere",
+            &[
+                "Events & Turniere Ping Rolle",
+                "Events und Turniere Ping Rolle",
+                "Events & Turniere",
+                "Events Turniere",
+                "Turniere",
+                "Events",
+            ],
+        ),
+        ("Custom Games", &["Custom Games Ping Rolle", "Custom Games"]),
+        ("Streams", &["Streams"]),
+    ]
+    .into_iter()
+    .map(|(title, aliases)| NativeOnboardingOption {
+        id: Some(ids.next()),
+        title: title.to_string(),
+        description: None,
+        emoji: None,
+        role_ids: require_role_id(model, aliases, title, blockers)
+            .map(|id| vec![id.to_string()])
+            .unwrap_or_default(),
+        channel_ids: Vec::new(),
+        extra: BTreeMap::new(),
+    })
+    .collect();
+
+    NativeOnboardingPrompt {
+        id: Some(ids.next()),
+        prompt_type: 0,
+        title: "Wofür willst du Pings bekommen?".to_string(),
+        options,
+        single_select: false,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn find_rank_prompt(
+    live: &NativeOnboardingConfig,
+    model: &GuildModel,
+) -> Option<NativeOnboardingPrompt> {
+    live.prompts
+        .iter()
+        .find(|prompt| {
+            prompt.options.len() == 12
+                && prompt
+                    .options
+                    .iter()
+                    .filter(|option| option_points_to_unverified_role(option, model))
+                    .count()
+                    >= 10
+        })
+        .cloned()
+}
+
+fn option_points_to_unverified_role(option: &NativeOnboardingOption, model: &GuildModel) -> bool {
+    option.role_ids.iter().any(|role_id| {
+        role_id
+            .parse::<u64>()
+            .ok()
+            .and_then(|id| model.roles.get(&id))
+            .is_some_and(|role| role.name.contains("(unverifiziert)"))
+    })
+}
+
+fn resolve_default_channel_ids(model: &GuildModel, blockers: &mut Vec<String>) -> Vec<String> {
+    DEFAULT_ONBOARDING_CHANNEL_NAMES
+        .iter()
+        .filter_map(|name| {
+            let id = resolve_channel_id(model, name);
+            if id.is_none() {
+                blockers.push(format!(
+                    "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
+                ));
+            }
+            id.map(|id| id.to_string())
+        })
+        .collect()
+}
+
+fn resolve_channel_id(model: &GuildModel, name: &str) -> Option<u64> {
+    let expected = normalized_name(name);
+    model
+        .channels
+        .values()
+        .find(|channel| normalized_name(&channel.name) == expected)
+        .map(|channel| channel.channel_id)
+}
+
+fn require_role_id(
+    model: &GuildModel,
+    aliases: &[&str],
+    label: &str,
+    blockers: &mut Vec<String>,
+) -> Option<u64> {
+    let id = resolve_role_id(model, aliases);
+    if id.is_none() {
+        blockers.push(format!(
+            "Rolle `{label}` wurde im Live-Guild-Modell nicht gefunden"
+        ));
+    }
+    id
+}
+
+fn resolve_role_id(model: &GuildModel, aliases: &[&str]) -> Option<u64> {
+    let normalized_aliases = aliases
+        .iter()
+        .map(|alias| normalized_name(alias))
+        .collect::<Vec<_>>();
+    let mut candidates = model
+        .roles
+        .values()
+        .filter(|role| {
+            let role_name = normalized_name(&role.name);
+            normalized_aliases.iter().any(|alias| {
+                role_name == *alias
+                    || alias
+                        .split_whitespace()
+                        .all(|token| role_name.split_whitespace().any(|part| part == token))
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|role| (role.managed, !role.mentionable, role.position));
+    candidates.first().map(|role| role.role_id)
+}
+
+fn normalized_name(name: &str) -> String {
+    name.chars()
+        .flat_map(char::to_lowercase)
+        .map(|ch| if ch.is_alphanumeric() { ch } else { ' ' })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+struct PlaceholderIds {
+    used: BTreeSet<String>,
+    next_id: u64,
+}
+
+impl PlaceholderIds {
+    fn from_live(live: &Value) -> Self {
+        let mut used = BTreeSet::new();
+        if let Some(prompts) = live.get("prompts").and_then(Value::as_array) {
+            for prompt in prompts {
+                if let Some(id) = prompt.get("id").and_then(Value::as_str) {
+                    used.insert(id.to_string());
+                }
+                if let Some(options) = prompt.get("options").and_then(Value::as_array) {
+                    for option in options {
+                        if let Some(id) = option.get("id").and_then(Value::as_str) {
+                            used.insert(id.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        Self { used, next_id: 0 }
+    }
+
+    fn next(&mut self) -> String {
+        loop {
+            let candidate = self.next_id.to_string();
+            self.next_id += 1;
+            if self.used.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+    }
+}
+
+fn validate_default_channels_7_5(
+    model: &GuildModel,
+    default_channel_ids: &[String],
+) -> Result<(), String> {
+    if default_channel_ids.len() < 7 {
+        return Err(format!(
+            "Native Onboarding braucht mindestens 7 Default-Kanaele, gefunden {}",
+            default_channel_ids.len()
+        ));
+    }
+
+    let writable = default_channel_ids
+        .iter()
+        .filter_map(|id| id.parse::<u64>().ok())
+        .filter(|channel_id| everyone_can_view_and_send(model, *channel_id))
+        .count();
+    if writable < 5 {
+        return Err(format!(
+            "Native Onboarding braucht mindestens 5 Default-Kanaele mit @everyone VIEW+SEND, gefunden {writable}"
+        ));
+    }
+    Ok(())
+}
+
+fn everyone_can_view_and_send(model: &GuildModel, channel_id: u64) -> bool {
+    let mut permissions = model
+        .roles
+        .get(&model.guild_id)
+        .or_else(|| model.roles.values().find(|role| role.name == "@everyone"))
+        .map(|role| Permissions::from_bits_truncate(role.permissions_bitmask))
+        .unwrap_or_default();
+
+    if let Some(parent_id) = model
+        .channels
+        .get(&channel_id)
+        .and_then(|channel| channel.parent_category_id)
+    {
+        apply_everyone_overwrite(model, parent_id, &mut permissions);
+    }
+    apply_everyone_overwrite(model, channel_id, &mut permissions);
+    permissions.contains(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+}
+
+fn apply_everyone_overwrite(model: &GuildModel, channel_id: u64, permissions: &mut Permissions) {
+    let key = dl_server_as_code::OverwriteKey {
+        channel_id,
+        target_kind: TargetKind::Role,
+        target_id: model.guild_id,
+    };
+    if let Some(overwrite) = model.overwrites.get(&key) {
+        *permissions &= !Permissions::from_bits_truncate(overwrite.deny_bits);
+        *permissions |= Permissions::from_bits_truncate(overwrite.allow_bits);
+    }
+}
+
+fn onboarding_diff(
+    guild_id: u64,
+    live_config: &Value,
+    desired_config: &NativeOnboardingConfig,
+) -> ServerSyncResult<ServerDiff> {
+    let actual_config = parse_live_onboarding_config(live_config)?;
+    let desired_value = json!({
+        "name": ONBOARDING_DIFF_MESSAGE_KEY,
+        "config": desired_config,
+    });
+    let actual_value = json!({
+        "name": ONBOARDING_DIFF_MESSAGE_KEY,
+        "config": actual_config,
+    });
+    let mut fields = Vec::new();
+    for field in ["prompts", "default_channel_ids", "enabled", "mode"] {
+        let desired = serde_json::to_value(desired_config)?
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        let actual = serde_json::to_value(&actual_config)?
+            .get(field)
+            .cloned()
+            .unwrap_or(Value::Null);
+        if desired != actual {
+            fields.push(FieldDiff {
+                field: field.to_string(),
+                desired,
+                actual,
+            });
+        }
+    }
+    let changes = vec![DiffChange {
+        object: ObjectRef {
+            kind: ObjectKind::BotMessage,
+            guild_id,
+            object_id: ONBOARDING_DIFF_OBJECT_ID,
+            channel_id: None,
+            target_kind: None,
+            target_id: None,
+            message_key: Some(ONBOARDING_DIFF_MESSAGE_KEY.to_string()),
+        },
+        action: DiffAction::Update,
+        fields,
+        desired: Some(desired_value),
+        actual: Some(actual_value),
+    }];
+    Ok(ServerDiff {
+        guild_id,
+        changes,
+        filtered: Vec::new(),
+    })
+}
+
+fn onboarding_human_summary(diff: &ServerDiff, config: &NativeOnboardingConfig) -> String {
+    let prompt_titles = config
+        .prompts
+        .iter()
+        .map(|prompt| prompt.title.as_str())
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "Onboarding-Diff fuer Guild {}: {} Aenderung(en). Prompts: {}",
+        diff.guild_id,
+        diff.changes.len(),
+        prompt_titles
+    )
+}
+
+fn onboarding_blocker_summary(blockers: &[String]) -> String {
+    format!(
+        "Onboarding-Preview blockiert: {} Blocker.\n- {}",
+        blockers.len(),
+        blockers.join("\n- ")
+    )
+}
+
+struct StoredOnboardingPreview {
+    guild_id: u64,
+    diff_hash: String,
+    config: NativeOnboardingConfig,
+}
+
+async fn persist_onboarding_preview(
+    pool: &PgPool,
+    snapshot_id: Option<i64>,
+    diff: &ServerDiff,
+    human_summary: &str,
+    created_by_user_id: Option<u64>,
+) -> ServerSyncResult<dl_server_as_code::db::DiffPreview> {
+    let diff_json = serde_json::to_string(diff)?;
+    let diff_hash = sha256_hex(&serde_json::to_vec(diff)?);
+    let (preview_id, created_snapshot_id): (i64, Option<i64>) = sqlx::query_as(
+        "INSERT INTO server_config.diff_previews
+         (guild_id, snapshot_id, diff_hash, diff_json, human_summary, created_by_user_id)
+         VALUES ($1, $2, $3, $4::text::jsonb, $5, $6)
+         ON CONFLICT (guild_id, diff_hash)
+         DO UPDATE SET snapshot_id = EXCLUDED.snapshot_id,
+                       diff_json = EXCLUDED.diff_json,
+                       human_summary = EXCLUDED.human_summary
+         RETURNING preview_id, snapshot_id",
+    )
+    .bind(id_to_i64(diff.guild_id)?)
+    .bind(snapshot_id)
+    .bind(&diff_hash)
+    .bind(diff_json)
+    .bind(human_summary)
+    .bind(created_by_user_id.map(id_to_i64).transpose()?)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(dl_server_as_code::db::DiffPreview {
+        preview_id,
+        guild_id: diff.guild_id,
+        snapshot_id: created_snapshot_id,
+        diff_hash,
+        human_summary: human_summary.to_string(),
+        diff: diff.clone(),
+    })
+}
+
+async fn load_onboarding_preview(
+    pool: &PgPool,
+    preview_id: i64,
+) -> ServerSyncResult<StoredOnboardingPreview> {
+    let row = sqlx::query(
+        "SELECT guild_id, diff_hash, diff_json::text AS diff_json
+           FROM server_config.diff_previews
+          WHERE preview_id = $1",
+    )
+    .bind(preview_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| {
+        ServerSyncError::bad_request(format!("Diff-Preview {preview_id} nicht gefunden"))
+    })?;
+
+    let diff_json: String = row.try_get("diff_json")?;
+    let diff: ServerDiff = serde_json::from_str(&diff_json)?;
+    let stored_hash: String = row.try_get("diff_hash")?;
+    let recomputed = sha256_hex(&serde_json::to_vec(&diff)?);
+    if stored_hash != recomputed {
+        return Err(ServerSyncError::bad_request(format!(
+            "Onboarding-Preview {preview_id} Hash-Mismatch: gespeichert {stored_hash}, berechnet {recomputed}"
+        )));
+    }
+    let config = extract_onboarding_config_from_diff(&diff)?;
+    Ok(StoredOnboardingPreview {
+        guild_id: i64_to_u64(row.try_get::<i64, _>("guild_id")?)?,
+        diff_hash: stored_hash,
+        config,
+    })
+}
+
+fn extract_onboarding_config_from_diff(
+    diff: &ServerDiff,
+) -> ServerSyncResult<NativeOnboardingConfig> {
+    let desired = diff
+        .changes
+        .iter()
+        .find(|change| {
+            change.object.kind == ObjectKind::BotMessage
+                && change.object.message_key.as_deref() == Some(ONBOARDING_DIFF_MESSAGE_KEY)
+        })
+        .and_then(|change| change.desired.as_ref())
+        .ok_or_else(|| {
+            ServerSyncError::bad_request("Preview enthaelt keine Native-Onboarding-Zielconfig")
+        })?;
+    serde_json::from_value(desired["config"].clone()).map_err(|err| {
+        ServerSyncError::bad_request(format!("Native-Onboarding-Zielconfig ist ungueltig: {err}"))
+    })
+}
+
+struct OnboardingApplyRunInsert<'a> {
+    pool: &'a PgPool,
+    preview_id: i64,
+    guild_id: u64,
+    confirmed_hash: &'a str,
+    requested_by_user_id: Option<u64>,
+    dry_run: bool,
+    status: &'a str,
+    result: Value,
+    error_text: Option<&'a str>,
+}
+
+async fn insert_onboarding_apply_run(input: OnboardingApplyRunInsert<'_>) -> ServerSyncResult<i64> {
+    let apply_run_id: i64 = sqlx::query_scalar(
+        "INSERT INTO server_config.apply_runs
+         (preview_id, guild_id, confirmed_diff_hash, requested_by_user_id, dry_run, status, result_json, error_text, finished_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7::text::jsonb, $8, CASE WHEN $6 = 'running' THEN NULL ELSE now() END)
+         RETURNING apply_run_id",
+    )
+    .bind(input.preview_id)
+    .bind(id_to_i64(input.guild_id)?)
+    .bind(input.confirmed_hash)
+    .bind(input.requested_by_user_id.map(id_to_i64).transpose()?)
+    .bind(input.dry_run)
+    .bind(input.status)
+    .bind(input.result.to_string())
+    .bind(input.error_text)
+    .fetch_one(input.pool)
+    .await?;
+    Ok(apply_run_id)
+}
+
+async fn finish_onboarding_apply_run(
+    pool: &PgPool,
+    apply_run_id: i64,
+    status: &str,
+    result: Value,
+    error_text: Option<&str>,
+) -> ServerSyncResult<()> {
+    sqlx::query(
+        "UPDATE server_config.apply_runs
+            SET status = $2,
+                result_json = $3::text::jsonb,
+                error_text = $4,
+                finished_at = now()
+          WHERE apply_run_id = $1",
+    )
+    .bind(apply_run_id)
+    .bind(status)
+    .bind(result.to_string())
+    .bind(error_text)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 fn collect_unique_by<T, K, F>(
     specs: &[T],
     label: &str,
@@ -714,6 +1600,11 @@ fn ensure_spec_guild(
 fn id_to_i64(value: u64) -> ServerSyncResult<i64> {
     i64::try_from(value)
         .map_err(|_| ServerSyncError::bad_request("Discord-ID passt nicht in BIGINT"))
+}
+
+fn i64_to_u64(value: i64) -> ServerSyncResult<u64> {
+    u64::try_from(value)
+        .map_err(|_| ServerSyncError::bad_request("BIGINT passt nicht in Discord-ID"))
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -827,6 +1718,36 @@ pub fn command_spec() -> CommandSpec {
                 },
                 {
                     "type": 1,
+                    "name": "onboarding-preview",
+                    "description": "Native-Onboarding-Diff erzeugen"
+                },
+                {
+                    "type": 1,
+                    "name": "onboarding-apply",
+                    "description": "Native-Onboarding-Preview hash-gated anwenden; ohne confirm nur Dry-Run",
+                    "options": [
+                        {
+                            "type": 4,
+                            "name": "preview_id",
+                            "description": "Diff-Preview-ID",
+                            "required": true
+                        },
+                        {
+                            "type": 3,
+                            "name": "hash",
+                            "description": "Bestaetigter diff_hash",
+                            "required": true
+                        },
+                        {
+                            "type": 5,
+                            "name": "confirm",
+                            "description": "true = echter Apply; fehlt/false = Dry-Run",
+                            "required": false
+                        }
+                    ]
+                },
+                {
+                    "type": 1,
                     "name": "apply",
                     "description": "Preview hash-gated anwenden; ohne confirm nur Dry-Run",
                     "options": [
@@ -866,6 +1787,12 @@ pub fn register_commands(
     router.on_command("serversync rollback-export", spec.clone(), handler.clone());
     router.on_command("serversync diff", spec.clone(), handler.clone());
     router.on_command("serversync restore", spec.clone(), handler.clone());
+    router.on_command(
+        "serversync onboarding-preview",
+        spec.clone(),
+        handler.clone(),
+    );
+    router.on_command("serversync onboarding-apply", spec.clone(), handler.clone());
     router.on_command("serversync apply", spec, handler);
 }
 
@@ -892,6 +1819,12 @@ impl dl_discord::InteractionHandler for ServerSyncCommand {
             }
             "serversync diff" => command_diff(self.service.as_ref(), interaction.user_id).await,
             "serversync restore" => command_restore(self.service.as_ref(), &interaction).await,
+            "serversync onboarding-preview" => {
+                command_onboarding_preview(self.service.as_ref(), interaction.user_id).await
+            }
+            "serversync onboarding-apply" => {
+                command_onboarding_apply(self.service.as_ref(), &interaction).await
+            }
             "serversync apply" => command_apply(self.service.as_ref(), &interaction).await,
             _ => BridgeReply::ephemeral_text("Unbekannter Server-Sync-Befehl."),
         }
@@ -992,6 +1925,88 @@ async fn command_restore(
             );
             BridgeReply {
                 content: Some(truncate_discord(&(text + &notice))),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_onboarding_preview(service: &dyn ServerSyncOps, user_id: u64) -> BridgeReply {
+    match service.onboarding_preview(Some(user_id)).await {
+        Ok(output) => {
+            let warnings = warning_text(&output.warnings);
+            let blockers = warning_text(&output.blockers);
+            let hash_text = output
+                .diff_hash
+                .as_deref()
+                .map(|hash| format!("diff_hash: {hash}\n"))
+                .unwrap_or_default();
+            let preview_text = output
+                .preview_id
+                .map(|id| format!("preview_id: {id}\n"))
+                .unwrap_or_default();
+            let text = format!(
+                "Onboarding-Preview.\n{}{}{}{}{}",
+                preview_text, hash_text, blockers, warnings, output.human_summary
+            );
+            let (attachments, notice) = attachment_or_db_notice(
+                format!(
+                    "serversync-onboarding-diff-{}.json",
+                    output.preview_id.unwrap_or_default()
+                ),
+                output.diff_text.into_bytes(),
+                "Diff",
+                output.preview_id.unwrap_or_default(),
+            );
+            BridgeReply {
+                content: Some(truncate_discord(&(text + &notice))),
+                ephemeral: true,
+                attachments,
+                ..BridgeReply::default()
+            }
+        }
+        Err(err) => command_error(err),
+    }
+}
+
+async fn command_onboarding_apply(
+    service: &dyn ServerSyncOps,
+    interaction: &BridgeInteraction,
+) -> BridgeReply {
+    let preview_id = match option_i64(&interaction.options, "preview_id") {
+        Ok(value) => value,
+        Err(err) => return command_error(err),
+    };
+    let hash = match option_string(&interaction.options, "hash") {
+        Ok(value) => value,
+        Err(err) => return command_error(err),
+    };
+    let confirm = option_bool(&interaction.options, "confirm").unwrap_or(false);
+    match service
+        .onboarding_apply(preview_id, hash, confirm, Some(interaction.user_id))
+        .await
+    {
+        Ok(output) => {
+            let (attachments, notice) = attachment_or_db_notice(
+                format!("serversync-onboarding-apply-{}.json", output.apply_run_id),
+                output.details_text.into_bytes(),
+                "Apply-Report",
+                output.apply_run_id,
+            );
+            let content = format!(
+                "Onboarding-Apply.\npreview_id: {}\napply_run_id: {}\nModus: {}\napplied: {} | skipped: {} | failed: {}",
+                output.preview_id,
+                output.apply_run_id,
+                if output.dry_run { "dry-run" } else { "live" },
+                output.applied,
+                output.skipped,
+                output.failed
+            );
+            BridgeReply {
+                content: Some(content + &notice),
                 ephemeral: true,
                 attachments,
                 ..BridgeReply::default()
@@ -1148,6 +2163,11 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
         .route("/serversync/rollback-export", post(http_rollback_export))
         .route("/serversync/diff", post(http_diff))
         .route("/serversync/restore", post(http_restore))
+        .route(
+            "/serversync/onboarding-preview",
+            post(http_onboarding_preview),
+        )
+        .route("/serversync/onboarding-apply", post(http_onboarding_apply))
         .route("/serversync/apply", post(http_apply))
         .with_state(HttpState { service, token })
 }
@@ -1296,6 +2316,43 @@ async fn http_restore(
     }
 }
 
+async fn http_onboarding_preview(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    match state.service.onboarding_preview(None).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+async fn http_onboarding_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = match parse_json_body::<ApplyRequest>(body) {
+        Ok(body) => body,
+        Err(error) => return json_error(error),
+    };
+    match state
+        .service
+        .onboarding_apply(body.preview_id, body.hash, body.confirm, None)
+        .await
+    {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ApplyRequest {
     preview_id: i64,
@@ -1334,6 +2391,7 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
     use std::sync::Mutex;
 
     use axum::body::Body;
@@ -1341,16 +2399,19 @@ mod tests {
     use dl_server_as_code::{
         BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, OverwriteKey, RoleSpec, TargetKind,
     };
+    use serenity::all::Permissions;
     use tower::ServiceExt;
 
     use super::*;
 
     type ApplyCall = (i64, String, bool, Option<u64>);
+    type OnboardingApplyCall = (i64, String, bool, Option<u64>);
     type RestoreCall = (Option<i64>, Option<u64>);
 
     #[derive(Default)]
     struct MockServerSync {
         apply_calls: Mutex<Vec<ApplyCall>>,
+        onboarding_apply_calls: Mutex<Vec<OnboardingApplyCall>>,
         restore_calls: Mutex<Vec<RestoreCall>>,
     }
 
@@ -1442,6 +2503,45 @@ mod tests {
             ));
             Ok(ApplyOutput {
                 apply_run_id: 12,
+                preview_id,
+                dry_run: !confirm,
+                applied: usize::from(confirm),
+                skipped: usize::from(!confirm),
+                failed: 0,
+                details_text: "{}".to_string(),
+                details: json!({}),
+            })
+        }
+
+        async fn onboarding_preview(
+            &self,
+            _requested_by_user_id: Option<u64>,
+        ) -> ServerSyncResult<OnboardingPreviewOutput> {
+            Ok(OnboardingPreviewOutput {
+                preview_id: Some(21),
+                guild_id: GUILD_ID,
+                diff_hash: Some("onboarding-hash".to_string()),
+                human_summary: "Onboarding-Diff: 1 Änderung(en).".to_string(),
+                blockers: Vec::new(),
+                warnings: vec!["onboarding warn".to_string()],
+                diff_text: "{\"onboarding\":true}".to_string(),
+                desired_config: Some(json!({"enabled": true})),
+            })
+        }
+
+        async fn onboarding_apply(
+            &self,
+            preview_id: i64,
+            hash: String,
+            confirm: bool,
+            requested_by_user_id: Option<u64>,
+        ) -> ServerSyncResult<ApplyOutput> {
+            self.onboarding_apply_calls
+                .lock()
+                .expect("onboarding apply calls")
+                .push((preview_id, hash, confirm, requested_by_user_id));
+            Ok(ApplyOutput {
+                apply_run_id: 22,
                 preview_id,
                 dry_run: !confirm,
                 applied: usize::from(confirm),
@@ -1620,6 +2720,268 @@ mod tests {
             },
         );
         model
+    }
+
+    fn onboarding_role(id: u64, name: &str, mentionable: bool) -> RoleSpec {
+        RoleSpec {
+            guild_id: GUILD_ID,
+            role_id: id,
+            name: name.to_string(),
+            color: 0,
+            hoist: false,
+            mentionable,
+            managed: false,
+            permissions_bitmask: 0,
+            position: 1,
+        }
+    }
+
+    fn onboarding_channel(id: u64, name: &str) -> ChannelSpec {
+        ChannelSpec {
+            guild_id: GUILD_ID,
+            channel_id: id,
+            name: name.to_string(),
+            kind: ChannelKind::Text,
+            topic: None,
+            position: 1,
+            parent_category_id: None,
+            nsfw: false,
+            bitrate: None,
+            user_limit: None,
+            rate_limit_per_user: None,
+            status: None,
+        }
+    }
+
+    fn onboarding_model() -> GuildModel {
+        let mut model = GuildModel::new(GUILD_ID);
+        model.roles.insert(
+            GUILD_ID,
+            RoleSpec {
+                guild_id: GUILD_ID,
+                role_id: GUILD_ID,
+                name: "@everyone".to_string(),
+                color: 0,
+                hoist: false,
+                mentionable: false,
+                managed: false,
+                permissions_bitmask: (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES)
+                    .bits(),
+                position: 0,
+            },
+        );
+        for (id, name, mentionable) in [
+            (5001, "Invite-Gast", false),
+            (5002, "Frischling", false),
+            (5003, "Patchnotes Ping Rolle", true),
+            (5004, "Spieler-Suche Ping Rolle", true),
+            (5005, "Events & Turniere Ping Rolle", true),
+            (5006, "Custom Games Ping Rolle", true),
+            (5007, "Streams", true),
+        ] {
+            model
+                .roles
+                .insert(id, onboarding_role(id, name, mentionable));
+        }
+        for id in 5100..5112 {
+            model.roles.insert(
+                id,
+                onboarding_role(id, &format!("Rank {} (unverifiziert)", id - 5099), false),
+            );
+        }
+        for (id, name) in [
+            (6001, "allgemein"),
+            (6002, "frag-die-community"),
+            (6003, "spieler-suche"),
+            (6004, "memes"),
+            (6005, "rank-ups"),
+            (6006, "patchnotes"),
+            (6007, "deadlock-rang"),
+            (6008, "deadlock-invite"),
+            (6009, "server-support"),
+        ] {
+            model.channels.insert(id, onboarding_channel(id, name));
+        }
+        for channel_id in [6006, 6007] {
+            let overwrite = PermissionOverwriteSpec {
+                guild_id: GUILD_ID,
+                key: OverwriteKey {
+                    channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                },
+                allow_bits: Permissions::VIEW_CHANNEL.bits(),
+                deny_bits: Permissions::SEND_MESSAGES.bits(),
+            };
+            model.overwrites.insert(overwrite.key.clone(), overwrite);
+        }
+        model
+    }
+
+    fn rank_live_onboarding_config() -> Value {
+        let rank_options = (0..12)
+            .map(|idx| {
+                json!({
+                    "id": format!("rank-option-{idx}"),
+                    "title": format!("Rank {idx}"),
+                    "role_ids": [format!("{}", 5100 + idx)],
+                    "channel_ids": [],
+                })
+            })
+            .collect::<Vec<_>>();
+        json!({
+            "enabled": false,
+            "mode": 1,
+            "default_channel_ids": ["1"],
+            "prompts": [
+                {
+                    "id": "old-meta",
+                    "type": 0,
+                    "title": "Alter Prompt",
+                    "options": [{"id": "old-meta-opt", "title": "Alt", "role_ids": [], "channel_ids": []}],
+                    "single_select": true,
+                    "required": false,
+                    "in_onboarding": true
+                },
+                {
+                    "id": "rank-prompt",
+                    "type": 0,
+                    "title": "Dein Rang",
+                    "options": rank_options,
+                    "single_select": true,
+                    "required": false,
+                    "in_onboarding": true
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn onboarding_builder_baut_drei_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+
+        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+
+        assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
+        assert!(built.config.enabled);
+        assert_eq!(built.config.mode, json!(1));
+        assert_eq!(built.config.default_channel_ids.len(), 9);
+        assert_eq!(built.config.prompts.len(), 3);
+        assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
+        assert!(built.config.prompts[0].single_select);
+        assert!(built.config.prompts[0].required);
+        assert!(built.config.prompts[0].in_onboarding);
+        assert_eq!(
+            built.config.prompts[1].title,
+            "Wofür willst du Pings bekommen?"
+        );
+        assert!(!built.config.prompts[1].single_select);
+        assert!(!built.config.prompts[1].required);
+        assert_eq!(built.config.prompts[2].title, "Dein Rang");
+        assert_eq!(built.config.prompts[2].id.as_deref(), Some("rank-prompt"));
+        assert_eq!(built.config.prompts[2].options.len(), 12);
+        assert_eq!(
+            serde_json::to_value(&built.config.prompts[2]).expect("rank prompt"),
+            live["prompts"][1]
+        );
+    }
+
+    #[test]
+    fn onboarding_payload_nutzt_eindeutige_placeholder_ids_und_name_resolved_ids() {
+        let model = onboarding_model();
+        let live = rank_live_onboarding_config();
+
+        let built = build_welle2b_onboarding_config(&live, &model).expect("build");
+        let payload = serde_json::to_value(&built.config).expect("payload");
+
+        let ids = payload["prompts"]
+            .as_array()
+            .expect("prompts")
+            .iter()
+            .flat_map(|prompt| {
+                std::iter::once(prompt["id"].as_str().expect("prompt id").to_string()).chain(
+                    prompt["options"]
+                        .as_array()
+                        .expect("options")
+                        .iter()
+                        .map(|option| option["id"].as_str().expect("option id").to_string()),
+                )
+            })
+            .collect::<Vec<_>>();
+        let unique = ids.iter().collect::<BTreeSet<_>>();
+        assert_eq!(ids.len(), unique.len(), "IDs muessen eindeutig sein");
+
+        let weiche = &payload["prompts"][0]["options"];
+        assert_eq!(
+            weiche[0]["title"],
+            "Ich spiele Deadlock und suche Mitspieler"
+        );
+        assert_eq!(weiche[0]["role_ids"], json!([]));
+        assert_eq!(weiche[0]["channel_ids"], json!(["6003"]));
+        assert_eq!(weiche[1]["role_ids"], json!(["5001"]));
+        assert_eq!(weiche[2]["role_ids"], json!(["5002"]));
+
+        let ping_options = payload["prompts"][1]["options"]
+            .as_array()
+            .expect("ping options");
+        assert_eq!(ping_options[0]["title"], "Patchnotes");
+        assert_eq!(ping_options[0]["role_ids"], json!(["5003"]));
+        assert_eq!(ping_options[4]["title"], "Streams");
+        assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
+    }
+
+    #[test]
+    fn onboarding_builder_listet_fehlende_rollen_und_kanaele_als_blocker() {
+        let mut model = onboarding_model();
+        model.roles.retain(|_, role| role.name != "Invite-Gast");
+        model
+            .channels
+            .retain(|_, channel| channel.name != "server-support");
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("builder returns blockers");
+
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Rolle `Invite-Gast`")));
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Kanal `server-support`")));
+    }
+
+    #[test]
+    fn onboarding_default_channel_validation_prueft_sieben_und_fuenf_sendefaehige() {
+        let mut model = onboarding_model();
+        let defaults = ["6001", "6002", "6003", "6004", "6005", "6006", "6007"]
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        validate_default_channels_7_5(&model, &defaults).expect("five writable defaults");
+
+        for channel_id in [6001, 6002, 6003] {
+            let overwrite = PermissionOverwriteSpec {
+                guild_id: GUILD_ID,
+                key: OverwriteKey {
+                    channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                },
+                allow_bits: Permissions::VIEW_CHANNEL.bits(),
+                deny_bits: Permissions::SEND_MESSAGES.bits(),
+            };
+            model.overwrites.insert(overwrite.key.clone(), overwrite);
+        }
+        let err = validate_default_channels_7_5(&model, &defaults)
+            .expect_err("less than five writable defaults must fail");
+        assert!(err.contains("mindestens 5"));
+
+        let too_few = defaults.into_iter().take(6).collect::<Vec<_>>();
+        let err = validate_default_channels_7_5(&onboarding_model(), &too_few)
+            .expect_err("less than seven defaults must fail");
+        assert!(err.contains("mindestens 7"));
     }
 
     #[test]
@@ -1825,6 +3187,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn onboarding_preview_http_liefert_hash_und_blockerstruktur() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service, Some("secret".to_string()));
+        let response = app
+            .oneshot(request(
+                "/serversync/onboarding-preview",
+                Some("secret"),
+                json!({}),
+            ))
+            .await
+            .expect("response");
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["preview_id"], 21);
+        assert_eq!(body["result"]["diff_hash"], "onboarding-hash");
+        assert!(body["result"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn onboarding_apply_http_parst_confirm_und_hash() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+        let response = app
+            .oneshot(request(
+                "/serversync/onboarding-apply",
+                Some("secret"),
+                json!({"preview_id": 21, "hash": "onboarding-hash", "confirm": true}),
+            ))
+            .await
+            .expect("response");
+        let (status, body) = response_json(response).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["apply_run_id"], 22);
+        assert_eq!(
+            service
+                .onboarding_apply_calls
+                .lock()
+                .expect("onboarding apply calls")
+                .as_slice(),
+            &[(21, "onboarding-hash".to_string(), true, None)]
+        );
+    }
+
+    #[tokio::test]
     async fn slash_command_ist_owner_und_guild_gegated() {
         let service = Arc::new(MockServerSync::default());
         let handler = ServerSyncCommand {
@@ -1882,5 +3291,32 @@ mod tests {
             .as_deref()
             .unwrap_or_default()
             .contains("snapshot_id: 10"));
+    }
+
+    #[tokio::test]
+    async fn slash_onboarding_preview_owner_bekommt_hash() {
+        let service = Arc::new(MockServerSync::default());
+        let handler = ServerSyncCommand {
+            service,
+            owner_id: Some(10),
+        };
+
+        let reply = dl_discord::InteractionHandler::handle(
+            &handler,
+            BridgeInteraction {
+                command: "serversync onboarding-preview".to_string(),
+                guild_id: GUILD_ID,
+                user_id: 10,
+                ..BridgeInteraction::default()
+            },
+        )
+        .await;
+
+        assert!(reply.ephemeral);
+        assert!(reply
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("diff_hash: onboarding-hash"));
     }
 }

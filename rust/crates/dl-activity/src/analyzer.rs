@@ -509,7 +509,7 @@ async fn handle_member_event(
             }
             insert_simple_event(pool, guild_id, user_id, "unban", Some(display_name)).await
         }
-        M::ScreeningCompleted { .. } => Ok(()),
+        M::ScreeningCompleted { .. } | M::NativeOnboardingCompleted { .. } => Ok(()),
     }
 }
 

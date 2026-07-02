@@ -7,8 +7,9 @@ use std::sync::Arc;
 
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
-    GuildId, GuildMemberUpdateEvent, Interaction, InviteCreateEvent, InviteDeleteEvent, Member,
-    Message, Permissions, Reaction, ReactionType, Ready, User, UserId, VoiceState,
+    GuildId, GuildMemberFlags, GuildMemberUpdateEvent, Interaction, InviteCreateEvent,
+    InviteDeleteEvent, Member, Message, Permissions, Reaction, ReactionType, Ready, User, UserId,
+    VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -56,6 +57,16 @@ fn screening_completed_from_member_update(
     // nur die Auto-Start-Guard-Schicht in `dl-community` als Schadensbegrenzung.
     let after_pending = after_pending?;
     member_screening_completed_event(guild_id, user_id, before_pending, after_pending)
+}
+
+fn completed_onboarding_from_member_update(
+    guild_id: u64,
+    user_id: u64,
+    flags: Option<GuildMemberFlags>,
+) -> Option<MemberEvent> {
+    flags
+        .is_some_and(|flags| flags.contains(GuildMemberFlags::COMPLETED_ONBOARDING))
+        .then_some(MemberEvent::NativeOnboardingCompleted { guild_id, user_id })
 }
 
 fn is_self_reaction_user(
@@ -410,13 +421,18 @@ impl EventHandler for Handler {
             CoreUserEventKind::GuildMemberUpdate,
             profile_from_user(&event.user),
         );
+        let guild_id = event.guild_id.get();
+        let user_id = event.user.id.get();
+        if let Some(event) = completed_onboarding_from_member_update(guild_id, user_id, event.flags)
+        {
+            self.dispatcher.publish_member(event);
+        }
+
         // Rollen und Member-Screening diffen. Vorher-Zustand kommt aus dem
         // Cache (old); ohne Cache kein sicherer Übergang möglich.
         let Some(old) = old else {
             return;
         };
-        let guild_id = event.guild_id.get();
-        let user_id = event.user.id.get();
         if let Some(event) = screening_completed_from_member_update(
             guild_id,
             user_id,
@@ -612,6 +628,24 @@ mod tests {
                 user_id: 2,
             })
         ));
+    }
+
+    #[test]
+    fn completed_onboarding_flag_liefert_event_ohne_cache_altzustand() {
+        let event = completed_onboarding_from_member_update(
+            1,
+            2,
+            Some(serenity::all::GuildMemberFlags::COMPLETED_ONBOARDING),
+        );
+
+        assert!(matches!(
+            event,
+            Some(MemberEvent::NativeOnboardingCompleted {
+                guild_id: 1,
+                user_id: 2,
+            })
+        ));
+        assert!(completed_onboarding_from_member_update(1, 2, None).is_none());
     }
 
     #[test]

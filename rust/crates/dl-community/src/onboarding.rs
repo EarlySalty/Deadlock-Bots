@@ -1,10 +1,11 @@
 //! Onboarding-Wizard — Port von `cogs/rules_channel.py` + `cogs/onboarding.py`
 //! (StaticOnboarding).
 //!
-//! „Hier starten ➜" (`rp:panel:start`, Vertrag) öffnet einen privaten Thread
-//! im Regelkanal und führt durch 10 Schritte (Texte byte-genau aus dem
-//! Original extrahiert, eingebettet als JSON). Schritt 2 (Streamer) sehen
-//! nur Content-Creator; Schritt 7/8 setzen optionale Tone-/Age-Tags über
+//! Native Discord-Onboarding ersetzt ab Welle 2b den alten Einstieg ueber
+//! `rp:panel:start` und `/publish_rules_panel`. Die Wizard-Schritte bleiben
+//! fuer Legacy-Threads und Datenschutz-Loeschpfade erhalten (Texte byte-genau
+//! aus dem Original extrahiert, eingebettet als JSON). Schritt 2 (Streamer)
+//! sehen nur Content-Creator; Schritt 7/8 setzen optionale Tone-/Age-Tags ueber
 //! das Tag-System; Schritt 9 bietet den Steam-Link an.
 //!
 //! Bewusste Annäherungen (dokumentiert):
@@ -19,9 +20,7 @@
 
 use std::sync::Arc;
 
-use dl_discord::{
-    BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
-};
+use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use serde_json::{json, Value};
 
 pub const RULES_CHANNEL_ID: u64 = 1315684135175716975;
@@ -35,6 +34,10 @@ pub const AGE_STEP: usize = 8;
 pub const ACCOUNT_STEP: usize = 9;
 pub const ONBOARDING_TRANSIENT_START_HINT: &str =
     "⚠️ Discord hat gerade Serverprobleme. Bitte versuche es in ein paar Sekunden erneut.";
+/// Welle 2b: Antwort auf Alt-Panel-Interaktionen nach der Wizard-Stilllegung.
+pub const LEGACY_PANEL_RETIRED_HINT: &str = "Der alte Einstiegs-Assistent ist Geschichte — den \
+Einstieg übernimmt jetzt das Discord-Onboarding. Alles Wichtige findest du in <#1315684135175716975>, \
+Fragen beantwortet dir gern die Community in #frag-die-community.";
 pub const ONBOARDING_RECHECK_UNVERIFIED_HINT: &str =
     "Du hast die **Verified**-Rolle noch nicht. Bitte stelle sicher, dass du deinen Account verknüpft hast \
 und dem Steam-Bot (Freundescode 820142646) eine Freundschaftsanfrage geschickt und angenommen hast. \
@@ -136,8 +139,9 @@ pub fn next_step_index(current: usize, is_streamer: bool) -> usize {
     next.min(steps().len() - 1)
 }
 
-/// Regelwerk-/Onboarding-Panel-Embed (Text byte-genau aus
-/// `cogs/rules_channel.py::publish_rules_panel`).
+/// Legacy-Regelwerk-/Onboarding-Panel-Embed (Text byte-genau aus
+/// `cogs/rules_channel.py::publish_rules_panel`); wird nur noch fuer
+/// Kompatibilitaetstests/Alt-Daten vorgehalten.
 pub fn build_panel_embed() -> Value {
     json!({
         "title": "📜 Regelwerk · Deutsche Deadlock Community",
@@ -160,7 +164,8 @@ pub fn build_panel_embed() -> Value {
     })
 }
 
-/// Action-Row mit dem persistenten „Hier starten"-Button (`rp:panel:start`).
+/// Legacy-Action-Row mit dem persistenten „Hier starten"-Button
+/// (`rp:panel:start`).
 pub fn build_panel_components() -> Value {
     json!([{ "type": 1, "components": [{
         "type": 2, "style": 1, "label": "Hier starten ➜",
@@ -209,12 +214,6 @@ impl std::fmt::Display for OnboardingThreadError {
         match self {
             Self::Transient(message) | Self::Permanent(message) => f.write_str(message),
         }
-    }
-}
-
-impl OnboardingThreadError {
-    fn is_transient(&self) -> bool {
-        matches!(self, Self::Transient(_))
     }
 }
 
@@ -317,16 +316,6 @@ impl OnboardingWizard {
         self.start_for_user(guild_id, user_id).await.map(Some)
     }
 
-    /// Postet das Regelwerk-Panel (Embed + „Hier starten"-Button) in einen
-    /// Kanal — Port von `publish_rules_panel`. Das Original editiert eine feste
-    /// Panel-Message in RULES_CHANNEL_ID; hier wird stattdessen frisch dorthin
-    /// gepostet (kein hartkodierter Message-ID-Edit nötig).
-    async fn publish_panel(&self, channel_id: u64) {
-        self.port
-            .send_step(channel_id, build_panel_embed(), build_panel_components())
-            .await;
-    }
-
     /// Reagiert auf einen Rollen-Zugewinn: kam die Verified-Rolle dazu und ist
     /// ein Onboarding-Channel gemerkt, kommt die Abschluss-Nachricht.
     pub async fn handle_role_gained(&self, user_id: u64, role_ids: &[u64]) {
@@ -365,21 +354,15 @@ pub fn spawn_verify_completion(
 
 /// Subscriber: Discord-Member-Screening abgeschlossen → Onboarding auto-starten.
 pub fn spawn_screening_auto_start(
-    wizard: Arc<OnboardingWizard>,
+    _wizard: Arc<OnboardingWizard>,
     dispatcher: &dl_discord::Dispatcher,
-    guild_id_filter: u64,
+    _guild_id_filter: u64,
 ) -> tokio::task::JoinHandle<()> {
     let mut events = dispatcher.subscribe_members();
     tokio::spawn(async move {
         loop {
             match events.recv().await {
-                Ok(dl_discord::MemberEvent::ScreeningCompleted { guild_id, user_id })
-                    if guild_id == guild_id_filter =>
-                {
-                    if let Err(err) = wizard.start_after_screening(guild_id, user_id).await {
-                        tracing::warn!(%err, guild_id, user_id, "Auto-Onboarding konnte nicht starten");
-                    }
-                }
+                Ok(dl_discord::MemberEvent::ScreeningCompleted { .. }) => continue,
                 Ok(_) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
@@ -398,33 +381,14 @@ struct OnboardingHandler {
 impl InteractionHandler for OnboardingHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let wizard = &self.wizard;
-        // /publish_rules_panel (Admin): Panel in den festen Regelwerk-Kanal posten
-        // (wie das Python-Original, das immer RULES_CHANNEL_ID bedient).
+        // Welle 2b: Der Alt-Panel-Command ist deregistriert; falls Discord noch
+        // eine alte Interaktion zustellt, bleibt der Einstieg deaktiviert.
         if interaction.command == "publish_rules_panel" {
-            if interaction.guild_id == 0 {
-                return BridgeReply::ephemeral_text("❌ Das funktioniert nur auf dem Server.");
-            }
-            wizard.publish_panel(RULES_CHANNEL_ID).await;
-            return BridgeReply::ephemeral_text("✅ Panel gepostet.");
+            return BridgeReply::ephemeral_text(LEGACY_PANEL_RETIRED_HINT);
         }
         if interaction.custom_id == "rp:panel:start" {
-            let thread = match wizard
-                .start_for_user(interaction.guild_id, interaction.user_id)
-                .await
-            {
-                Ok(id) => id,
-                Err(err) => {
-                    if err.is_transient() {
-                        return BridgeReply::ephemeral_text(ONBOARDING_TRANSIENT_START_HINT);
-                    }
-                    return BridgeReply::ephemeral_text(format!(
-                        "❌ Konnte dein Onboarding nicht starten: {err}"
-                    ));
-                }
-            };
-            return BridgeReply::ephemeral_text(format!(
-                "✅ Dein Onboarding wartet hier auf dich: <#{thread}>"
-            ));
+            // Welle 2b: Native Discord-Onboarding ersetzt den alten Panel-Einstieg.
+            return BridgeReply::ephemeral_text(LEGACY_PANEL_RETIRED_HINT);
         }
 
         let parts: Vec<&str> = interaction.custom_id.split(':').collect();
@@ -518,19 +482,6 @@ impl InteractionHandler for OnboardingHandler {
 
 pub fn register(router: &mut InteractionRouter, wizard: Arc<OnboardingWizard>) {
     let handler = Arc::new(OnboardingHandler { wizard });
-    router.on_command(
-        "publish_rules_panel",
-        CommandSpec {
-            definition: json!({
-                "name": "publish_rules_panel",
-                "description": "(Admin) Regelwerk-Panel posten",
-                "type": 1,
-                "dm_permission": false,
-                "default_member_permissions": "8", // Administrator
-            }),
-        },
-        handler.clone(),
-    );
     router.on_custom_id("rp:panel:start", handler.clone());
     router.on_prefix("ob:", handler);
 }
@@ -717,9 +668,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screening_subscriber_startet_onboarding_automatisch() {
+    async fn screening_subscriber_startet_onboarding_nicht_mehr_automatisch() {
         let port = Arc::new(TestPort::default());
-        port.create_results.lock().await.push(Ok(778));
         let wizard = OnboardingWizard::new(port.clone());
         let dispatcher = dl_discord::Dispatcher::new();
         let task = spawn_screening_auto_start(wizard, &dispatcher, 1);
@@ -729,16 +679,9 @@ mod tests {
             user_id: 42,
         });
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if !port.sent_steps.lock().await.is_empty() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("auto start");
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(port.created.lock().await.is_empty());
+        assert!(port.sent_steps.lock().await.is_empty());
         task.abort();
     }
 
@@ -819,9 +762,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn screening_subscriber_startet_pro_user_nur_einmal() {
+    async fn screening_subscriber_startet_auch_bei_duplikaten_nicht_mehr() {
         let port = Arc::new(TestPort::default());
-        port.create_results.lock().await.push(Ok(778));
         let wizard = OnboardingWizard::new(port.clone());
         let dispatcher = dl_discord::Dispatcher::new();
         let task = spawn_screening_auto_start(wizard, &dispatcher, 1);
@@ -833,30 +775,16 @@ mod tests {
             });
         }
 
-        tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            loop {
-                if port.sent_steps.lock().await.len() == 1 {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("auto start");
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        assert_eq!(port.created.lock().await.len(), 1);
-        assert_eq!(port.sent_steps.lock().await.len(), 1);
+        assert!(port.created.lock().await.is_empty());
+        assert!(port.sent_steps.lock().await.is_empty());
         task.abort();
     }
 
     #[tokio::test]
-    async fn transienter_startfehler_nutzt_placeholder_hinweis() {
+    async fn legacy_panel_start_antwortet_nur_noch_mit_placeholder_hinweis() {
         let port = Arc::new(TestPort::default());
-        port.create_results
-            .lock()
-            .await
-            .push(Err(OnboardingThreadError::Transient("discord 500".into())));
-        let wizard = OnboardingWizard::new(port);
+        let wizard = OnboardingWizard::new(port.clone());
         let handler = OnboardingHandler { wizard };
 
         let reply = handler
@@ -868,11 +796,44 @@ mod tests {
             })
             .await;
 
-        assert_eq!(
-            reply.content.as_deref(),
-            Some(ONBOARDING_TRANSIENT_START_HINT)
-        );
+        assert_eq!(reply.content.as_deref(), Some(LEGACY_PANEL_RETIRED_HINT));
         assert!(reply.ephemeral);
+        assert!(port.created.lock().await.is_empty());
+        assert!(port.sent_steps.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn publish_rules_panel_handler_postet_nicht_mehr() {
+        let port = Arc::new(TestPort::default());
+        let wizard = OnboardingWizard::new(port.clone());
+        let handler = OnboardingHandler { wizard };
+
+        let reply = handler
+            .handle(dl_discord::BridgeInteraction {
+                command: "publish_rules_panel".into(),
+                guild_id: 1,
+                user_id: 42,
+                ..dl_discord::BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(LEGACY_PANEL_RETIRED_HINT));
+        assert!(reply.ephemeral);
+        assert!(port.created.lock().await.is_empty());
+        assert!(port.sent_steps.lock().await.is_empty());
+    }
+
+    #[test]
+    fn register_deregistriert_publish_rules_panel_aber_behaelt_legacy_ob_buttons() {
+        let port = Arc::new(TestPort::default());
+        let wizard = OnboardingWizard::new(port);
+        let mut router = dl_discord::InteractionRouter::new();
+
+        register(&mut router, wizard);
+
+        assert!(router.resolve_command("publish_rules_panel").is_none());
+        assert!(router.resolve_component("rp:panel:start").is_some());
+        assert!(router.resolve_component("ob:next:0:42").is_some());
     }
 
     #[tokio::test]

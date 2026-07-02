@@ -1,3 +1,16 @@
+# Welle2b W1 Onboarding-Fundament (2026-07-02)
+
+## Ziel
+Native Discord-Onboarding-Welle 2b lokal vorbereiten: neue Soll-Rollen, hash-gated Onboarding-Preview/Apply, `COMPLETED_ONBOARDING`-Journey-Event mit persistentem Dedupe, Legacy-Wizard-Einstiege deaktivieren. Kein Commit/Push; `CHANGELOG.md` bleibt unberuehrt.
+
+## Fortschritt
+- Pflichtkontext gelesen: Konzept §3, `serversync.rs`, `dl-server-as-code::rules`, `dl-discord` Gateway/Dispatcher, `dl-activity::journey`, `journeyglue.rs`, `dl-community::onboarding` und Privacy-KV-Pfade.
+- Umsetzungsrichtung: Onboarding-Diff als `ServerDiff`-Preview mit kuenstlichem `native-onboarding`-Objekt in `server_config.diff_previews`; Apply laedt die gebundene Ziel-Config und schreibt per Discord-REST-PUT nur bei Hash-Match. Dedupe fuer Completed-Onboarding ueber `bot.kv_store`.
+- TDD gestartet: rote Tests fuer neue Rollen, Onboarding-Payload/7-5-Validierung, Completed-Onboarding-Klassifikation/Dedupe und deaktivierte Legacy-Wizard-Einstiege werden angelegt.
+- Implementiert: neue Soll-Rollen `Invite-Gast`, `Frischling`, `Streams`; Native-Onboarding-Preview/Apply fuer Slash und HTTP mit 7/5-Pruefung, Platzhalter-Snowflakes und Rang-Prompt-Uebernahme; `COMPLETED_ONBOARDING`-Event mit Nachlese, weicher Klassifikation und persistentem KV-Dedupe; Alt-Wizard-Auto-Start sowie `/publish_rules_panel`/`rp:panel:start` deaktiviert, Legacy-Wizard/Privacy-Pfade bleiben erhalten.
+- Platzhalterstelle aus dieser Welle: `rust/crates/dl-community/src/onboarding.rs` antwortet fuer alte Panel-/Command-Einstiege exakt mit `"Platzhalter"`, bis Claude den finalen Text liefert.
+- Verifikation gruen: `cargo fmt --all`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `./scripts/central_test_db.sh cargo test --workspace`; `./scripts/central_test_db.sh cargo test -p dl-bot --bin dl-bot journeyglue::tests::native_onboarding_dedupe_marker_ist_persistent_und_einmalig -- --ignored`; `git diff --check`.
+
 # Soll-Modell-Regeltransformation dl-server-as-code (2026-07-02)
 
 ## Fix Server-Sync Live-Findings (Rollback-Serialisierung + Namens-Matching)

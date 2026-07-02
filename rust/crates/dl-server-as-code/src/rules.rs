@@ -4,7 +4,7 @@ use serenity::all::Permissions;
 
 use crate::model::{
     ChannelKind, DiscordId, DocumentedException, DynamicNamespace, GuildModel, NamespaceMatch,
-    ObjectKind, OverwriteKey, PermissionOverwriteSpec, TargetKind,
+    ObjectKind, OverwriteKey, PermissionOverwriteSpec, RoleSpec, TargetKind,
 };
 use crate::Result;
 
@@ -22,6 +22,22 @@ const ROLE_STREAMER: &str = "Streamer";
 const ROLE_STREAMER_VC_ZUGRIFF: &str = "Streamer VC Zugriff";
 const ROLE_VC_MOVE_RECHTE: &str = "VC Move Rechte";
 const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
+const ROLE_INVITE_GAST: &str = "Invite-Gast";
+const ROLE_FRISCHLING: &str = "Frischling";
+const ROLE_STREAMS: &str = "Streams";
+
+const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING];
+const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
+    "Patchnotes Ping Rolle",
+    "Spieler-Suche Ping Rolle",
+    "Events & Turniere Ping Rolle",
+    "Events und Turniere Ping Rolle",
+    "Custom Games Ping Rolle",
+    "Patchnotes",
+    "Spielersuche",
+    "Events & Turniere",
+    "Custom Games",
+];
 
 const USER_BAN_X3_COACHING_VIEW_ONLY: DiscordId = 364_796_363_709_349_912;
 
@@ -176,6 +192,7 @@ pub fn derive_desired_model(actual: &GuildModel) -> Result<DesiredDerivation> {
     apply_documented_renames(&mut desired);
     apply_documented_structure_moves(&mut desired, &mut ctx);
     apply_everyone_basis(&mut desired, &mut ctx);
+    apply_welle2b_roles(&mut desired);
 
     for category_name in EXPECTED_CATEGORIES {
         if ctx.category_id(category_name).is_none() {
@@ -380,6 +397,94 @@ fn apply_everyone_basis(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
         "@everyone",
         "@everyone-Rolle wurde im Ist-Modell nicht gefunden; Guild-Level-Basisrechte bleiben unveraendert".to_string(),
     );
+}
+
+fn apply_welle2b_roles(desired: &mut GuildModel) {
+    let mut next_role_id = next_synthetic_role_id(desired);
+    let mut next_position = desired
+        .roles
+        .values()
+        .map(|role| role.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+
+    for role_name in WELLE2B_MARKER_ROLES {
+        if desired.roles.values().any(|role| role.name == *role_name) {
+            continue;
+        }
+        let role = RoleSpec {
+            guild_id: desired.guild_id,
+            role_id: next_role_id,
+            name: (*role_name).to_string(),
+            color: 0,
+            hoist: false,
+            mentionable: false,
+            managed: false,
+            permissions_bitmask: 0,
+            position: next_position,
+        };
+        desired.roles.insert(role.role_id, role);
+        next_role_id += 1;
+        next_position += 1;
+    }
+
+    if desired.roles.values().any(|role| role.name == ROLE_STREAMS) {
+        return;
+    }
+
+    let template = ping_role_template(desired);
+    let role = RoleSpec {
+        guild_id: desired.guild_id,
+        role_id: next_role_id,
+        name: ROLE_STREAMS.to_string(),
+        color: template.map_or(0, |role| role.color),
+        hoist: template.is_some_and(|role| role.hoist),
+        mentionable: template.is_some_and(|role| role.mentionable),
+        managed: false,
+        permissions_bitmask: template.map_or(0, |role| role.permissions_bitmask),
+        position: next_position,
+    };
+    desired.roles.insert(role.role_id, role);
+}
+
+fn ping_role_template(model: &GuildModel) -> Option<&RoleSpec> {
+    WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES
+        .iter()
+        .filter_map(|candidate| role_by_normalized_name(model, candidate))
+        .find(|role| !role.managed)
+        .or_else(|| {
+            model
+                .roles
+                .values()
+                .filter(|role| !role.managed)
+                .find(|role| {
+                    let key = matching_key(&role.name);
+                    key.contains("ping") && key != matching_key(ROLE_STREAMS)
+                })
+        })
+}
+
+fn role_by_normalized_name<'a>(model: &'a GuildModel, name: &str) -> Option<&'a RoleSpec> {
+    let expected = matching_key(name);
+    model
+        .roles
+        .values()
+        .find(|role| matching_key(&role.name) == expected)
+}
+
+fn next_synthetic_role_id(model: &GuildModel) -> DiscordId {
+    let mut candidate = model
+        .roles
+        .keys()
+        .copied()
+        .max()
+        .unwrap_or(model.guild_id)
+        .saturating_add(1);
+    while model.roles.contains_key(&candidate) {
+        candidate = candidate.saturating_add(1);
+    }
+    candidate
 }
 
 fn apply_documented_renames(desired: &mut GuildModel) {
@@ -1450,6 +1555,32 @@ mod tests {
         }
     }
 
+    fn role_with_flags(
+        id: u64,
+        name: &str,
+        bits: u64,
+        color: i32,
+        hoist: bool,
+        mentionable: bool,
+        position: i32,
+    ) -> RoleSpec {
+        RoleSpec {
+            guild_id: GUILD_ID,
+            role_id: id,
+            name: name.to_string(),
+            color,
+            hoist,
+            mentionable,
+            managed: false,
+            permissions_bitmask: bits,
+            position,
+        }
+    }
+
+    fn role_by_name<'a>(model: &'a GuildModel, name: &str) -> Option<&'a RoleSpec> {
+        model.roles.values().find(|role| role.name == name)
+    }
+
     fn overwrite(
         channel_id: u64,
         target_kind: TargetKind,
@@ -1718,6 +1849,60 @@ mod tests {
         assert!(permissions.contains(Permissions::SEND_MESSAGES_IN_THREADS));
         assert!(!permissions.contains(Permissions::SEND_TTS_MESSAGES));
         assert!(!permissions.contains(Permissions::CREATE_PRIVATE_THREADS));
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_marker_und_streams_rollen_werden_create_if_missing_angelegt() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        actual.roles.insert(
+            400,
+            role_with_flags(400, "Patchnotes Ping Rolle", 0, 0x66ccff, false, true, 8),
+        );
+
+        let derived = derive_desired_model(&actual)?;
+
+        for role_name in ["Invite-Gast", "Frischling"] {
+            let role = role_by_name(&derived.desired, role_name).expect("marker role");
+            assert_eq!(role.permissions_bitmask, 0);
+            assert!(!role.hoist);
+            assert!(!role.mentionable);
+            assert!(!role.managed);
+        }
+
+        let streams = role_by_name(&derived.desired, "Streams").expect("streams role");
+        assert_eq!(streams.permissions_bitmask, 0);
+        assert!(streams.mentionable);
+        assert_eq!(streams.color, 0x66ccff);
+        Ok(())
+    }
+
+    #[test]
+    fn welle2b_vorhandene_rollen_bleiben_id_stabil_und_werden_nicht_dupliziert(
+    ) -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        actual
+            .roles
+            .insert(401, role(401, "Invite-Gast", Permissions::empty().bits()));
+        actual
+            .roles
+            .insert(402, role(402, "Frischling", Permissions::empty().bits()));
+        actual
+            .roles
+            .insert(403, role_with_flags(403, "Streams", 0, 7, false, true, 4));
+
+        let derived = derive_desired_model(&actual)?;
+
+        for (name, id) in [("Invite-Gast", 401), ("Frischling", 402), ("Streams", 403)] {
+            let matches = derived
+                .desired
+                .roles
+                .values()
+                .filter(|role| role.name == name)
+                .collect::<Vec<_>>();
+            assert_eq!(matches.len(), 1, "{name} darf nicht dupliziert werden");
+            assert_eq!(matches[0].role_id, id);
+        }
         Ok(())
     }
 
@@ -2078,10 +2263,29 @@ mod tests {
             derived.desired.channels.keys().collect::<BTreeSet<_>>(),
             actual.channels.keys().collect::<BTreeSet<_>>()
         );
-        assert_eq!(
-            derived.desired.roles.keys().collect::<BTreeSet<_>>(),
-            actual.roles.keys().collect::<BTreeSet<_>>()
-        );
+        let actual_role_names = actual
+            .roles
+            .values()
+            .map(|role| role.name.as_str())
+            .collect::<BTreeSet<_>>();
+        let desired_role_names = derived
+            .desired
+            .roles
+            .values()
+            .map(|role| role.name.as_str())
+            .collect::<BTreeSet<_>>();
+        for role_name in actual_role_names {
+            assert!(
+                desired_role_names.contains(role_name),
+                "bestehende Rolle {role_name} muss erhalten bleiben"
+            );
+        }
+        for role_name in ["Invite-Gast", "Frischling", "Streams"] {
+            assert!(
+                desired_role_names.contains(role_name),
+                "Welle2b-Rolle {role_name} muss im Soll-Modell existieren"
+            );
+        }
         assert_eq!(
             derived.desired.bot_messages.keys().collect::<BTreeSet<_>>(),
             actual.bot_messages.keys().collect::<BTreeSet<_>>()
