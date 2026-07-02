@@ -51,7 +51,8 @@ const SOURCE_SEED: &str = "seed";
 const RANK_SOURCE_SELF: &str = "self";
 const MATCH_STATUS_PLANNED: &str = "planned";
 
-const PARTICIPANTS_LOCK: i64 = 42_060_004_001;
+/// Shared with the live reaction hook and website web signup for scrim participants.
+pub const PARTICIPANTS_LOCK: i64 = 0x4451_0008_0004_0001;
 const TEAMS_LOCK: i64 = 42_060_004_002;
 const MATCHES_LOCK: i64 = 42_060_004_003;
 

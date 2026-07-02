@@ -8,6 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_squads::store::PARTICIPANTS_LOCK;
 use serenity::all::{EmojiId, ReactionType};
 use sqlx::PgPool;
 
@@ -472,7 +473,7 @@ async fn upsert_scrim_participant_by_discord(
     let display_name = display_name.trim().to_string();
     let now = chrono::Utc::now();
     let mut tx = pool.begin().await?;
-    advisory_lock(&mut tx, 0x4451_0008_0004_0001).await?;
+    advisory_lock(&mut tx, PARTICIPANTS_LOCK).await?;
 
     let existing_id = sqlx::query_scalar!(
         r#"
