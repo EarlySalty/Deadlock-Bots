@@ -647,6 +647,7 @@ pub async fn handle_public_rank_history(
 mod tests {
     use super::*;
     use axum::body::to_bytes;
+    #[cfg(feature = "testing")]
     use std::collections::HashSet;
 
     fn ts(raw: &str) -> Result<DateTime<Utc>, chrono::ParseError> {

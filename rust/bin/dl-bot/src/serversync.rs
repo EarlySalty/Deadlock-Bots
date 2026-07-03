@@ -1,5 +1,7 @@
 #![allow(clippy::result_large_err)]
 
+mod welcome_publish;
+
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -27,6 +29,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
 use crate::master;
+pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
 pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
 pub const PORT: u16 = 8901;
@@ -424,6 +427,13 @@ struct DiscordMessageAuthor {
 #[derive(Debug, Deserialize)]
 struct DiscordMessageEmbed {
     title: Option<String>,
+    #[serde(default)]
+    footer: Option<DiscordMessageEmbedFooter>,
+}
+
+#[derive(Debug, Deserialize)]
+struct DiscordMessageEmbedFooter {
+    text: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -580,6 +590,8 @@ pub trait ServerSyncOps: Send + Sync {
     async fn archive_enable(&self) -> ServerSyncResult<ArchiveFlagOutput>;
     async fn archive_disable(&self) -> ServerSyncResult<ArchiveFlagOutput>;
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput>;
+    async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput>;
+    async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput>;
     async fn serverguide_preview(
         &self,
         requested_by_user_id: Option<u64>,
@@ -1022,6 +1034,218 @@ impl ServerSyncService {
             )
             .await?;
         parse_discord_id("Message-ID", &message.id)
+    }
+
+    async fn fetch_welcome_team_members(&self) -> ServerSyncResult<Vec<WelcomeTeamMember>> {
+        let guild_id = GuildId::new(self.guild_id);
+        let mut after = None;
+        let mut members = Vec::new();
+        loop {
+            let page = self
+                .adapter
+                .http
+                .get_guild_members(guild_id, Some(1000), after)
+                .await
+                .map_err(|err| ServerSyncError::internal(err.to_string()))?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|member| member.user.id.get());
+            members.extend(page.into_iter().map(|member| {
+                let mut role_ids: Vec<u64> = member.roles.iter().map(|role| role.get()).collect();
+                role_ids.sort_unstable();
+                WelcomeTeamMember {
+                    user_id: member.user.id.get(),
+                    role_ids,
+                    bot: member.user.bot,
+                }
+            }));
+            if members.last().is_none() || after.is_none() {
+                break;
+            }
+            if members.len() % 1000 != 0 {
+                break;
+            }
+        }
+        members.sort_unstable_by_key(|entry| entry.user_id);
+        Ok(members)
+    }
+
+    async fn load_welcome_message_ids(&self) -> ServerSyncResult<BTreeMap<String, u64>> {
+        let mut ids = BTreeMap::new();
+        for section in welcome_publish::welcome_sections() {
+            if let Some(raw) = self
+                .load_serversync_kv(&welcome_publish::welcome_message_id_key(section.id))
+                .await?
+            {
+                ids.insert(
+                    section.id.to_string(),
+                    parse_discord_id(&welcome_publish::welcome_message_id_key(section.id), &raw)?,
+                );
+            }
+        }
+        Ok(ids)
+    }
+
+    async fn store_welcome_message_id(
+        &self,
+        section_id: &str,
+        message_id: u64,
+    ) -> ServerSyncResult<()> {
+        self.store_serversync_kv(
+            &welcome_publish::welcome_message_id_key(section_id),
+            &message_id.to_string(),
+        )
+        .await
+    }
+
+    async fn fetch_welcome_marker_message_ids(
+        &self,
+        channel_id: u64,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<BTreeMap<String, u64>> {
+        let mut messages = BTreeMap::new();
+        let mut before: Option<u64> = None;
+        loop {
+            let mut url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages?limit=100");
+            if let Some(before) = before {
+                url.push_str("&before=");
+                url.push_str(&before.to_string());
+            }
+            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
+            if page.is_empty() {
+                break;
+            }
+            for message in &page {
+                let message_id = parse_discord_id("Message-ID", &message.id)?;
+                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                if author_id != bot_user_id {
+                    continue;
+                }
+                for embed in &message.embeds {
+                    let Some(marker) = embed
+                        .footer
+                        .as_ref()
+                        .and_then(|footer| footer.text.as_deref())
+                    else {
+                        continue;
+                    };
+                    if let Some(section_id) =
+                        welcome_publish::welcome_section_id_from_marker(marker)
+                    {
+                        messages.entry(section_id.to_string()).or_insert(message_id);
+                    }
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+        }
+        Ok(messages)
+    }
+
+    async fn edit_welcome_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        section: &welcome_publish::WelcomeSectionOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let response = self
+            .send_welcome_message_payload("PATCH", url, &section.payload, section.banner.as_ref())
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let message: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "PATCH")?;
+        parse_discord_id("Message-ID", &message.id).map(Some)
+    }
+
+    async fn post_welcome_message(
+        &self,
+        channel_id: u64,
+        section: &welcome_publish::WelcomeSectionOutput,
+    ) -> ServerSyncResult<u64> {
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let response = self
+            .send_welcome_message_payload("POST", url, &section.payload, section.banner.as_ref())
+            .await?;
+        let message: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "POST")?;
+        parse_discord_id("Message-ID", &message.id)
+    }
+
+    async fn send_welcome_message_payload(
+        &self,
+        method: &'static str,
+        url: String,
+        payload: &welcome_publish::WelcomeMessagePayload,
+        banner: Option<&welcome_publish::WelcomeBannerOutput>,
+    ) -> ServerSyncResult<DiscordRestResponse> {
+        let payload = serde_json::to_value(payload)?;
+        let banner = banner.filter(|banner| banner.present);
+        if let Some(banner) = banner {
+            let payload_text = serde_json::to_string(&payload)?;
+            let path = welcome_publish::welcome_repo_root().join(&banner.relative_path);
+            let bytes = std::fs::read(&path).map_err(|err| {
+                ServerSyncError::internal(format!(
+                    "Welcome-Banner `{}` konnte nicht gelesen werden: {err}",
+                    path.display()
+                ))
+            })?;
+            let filename = banner.filename.clone();
+            return discord_regelwerk_send_with_retry(
+                || {
+                    let request = match method {
+                        "POST" => self.http_client.post(url.clone()),
+                        "PATCH" => self.http_client.patch(url.clone()),
+                        other => unreachable!("unsupported Discord method {other}"),
+                    }
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
+                    let payload_text = payload_text.clone();
+                    let bytes = bytes.clone();
+                    let filename = filename.clone();
+                    async move {
+                        let part = reqwest::multipart::Part::bytes(bytes)
+                            .file_name(filename)
+                            .mime_str("image/png")?;
+                        let form = reqwest::multipart::Form::new()
+                            .text("payload_json", payload_text)
+                            .part("files[0]", part);
+                        let response = request.multipart(form).send().await?;
+                        DiscordRestResponse::from_response(response).await
+                    }
+                },
+                method,
+            )
+            .await;
+        }
+
+        discord_regelwerk_send_with_retry(
+            || {
+                let request = match method {
+                    "POST" => self.http_client.post(url.clone()),
+                    "PATCH" => self.http_client.patch(url.clone()),
+                    other => unreachable!("unsupported Discord method {other}"),
+                }
+                .header("Authorization", format!("Bot {}", self.discord_token))
+                .header("Content-Type", "application/json")
+                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                .json(&payload);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            method,
+        )
+        .await
     }
 
     async fn load_rollback_artifact(
@@ -1735,6 +1959,101 @@ impl ServerSyncOps for ServerSyncService {
             posted_message_id,
             edited_message_id,
         }))
+    }
+
+    async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let team_members = self.fetch_welcome_team_members().await?;
+        let stored_message_ids = self.load_welcome_message_ids().await?;
+        welcome_publish::build_welcome_publish_output(
+            &live,
+            &team_members,
+            &welcome_publish::welcome_repo_root(),
+            &stored_message_ids,
+            true,
+        )
+        .map_err(ServerSyncError::bad_request)
+    }
+
+    async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
+        let live = dl_server_as_code::import::fetch_live_guild_model(
+            self.adapter.http.as_ref(),
+            self.guild_id,
+        )
+        .await?;
+        let team_members = self.fetch_welcome_team_members().await?;
+        let stored_message_ids = self.load_welcome_message_ids().await?;
+        let mut output = welcome_publish::build_welcome_publish_output(
+            &live,
+            &team_members,
+            &welcome_publish::welcome_repo_root(),
+            &stored_message_ids,
+            !confirm,
+        )
+        .map_err(ServerSyncError::bad_request)?;
+
+        let bot_user_id = self.fetch_current_bot_user_id().await?;
+        let discovered_message_ids = self
+            .fetch_welcome_marker_message_ids(output.channel_id, bot_user_id)
+            .await?;
+
+        if !confirm {
+            for section in &mut output.sections {
+                if section.stored_message_id.is_none() {
+                    if let Some(discovered) = discovered_message_ids.get(&section.section_id) {
+                        section.action = "planned_edit".to_string();
+                        section.message_id = Some(*discovered);
+                    }
+                }
+            }
+            return Ok(output);
+        }
+
+        for section in &mut output.sections {
+            let discovered_message_id = discovered_message_ids.get(&section.section_id).copied();
+            let candidates = welcome_publish::welcome_candidate_message_ids(
+                section.stored_message_id,
+                discovered_message_id,
+            );
+            let mut edited_message_id = None;
+            for candidate in candidates {
+                if let Some(message_id) = self
+                    .edit_welcome_message(output.channel_id, candidate, section)
+                    .await?
+                {
+                    edited_message_id = Some(message_id);
+                    break;
+                }
+            }
+
+            if let Some(message_id) = edited_message_id {
+                self.store_welcome_message_id(&section.section_id, message_id)
+                    .await?;
+                section.action = "edited".to_string();
+                section.message_id = Some(message_id);
+                output
+                    .edited_message_ids
+                    .insert(section.section_id.clone(), message_id);
+            } else {
+                let message_id = self
+                    .post_welcome_message(output.channel_id, section)
+                    .await?;
+                self.store_welcome_message_id(&section.section_id, message_id)
+                    .await?;
+                section.action = "posted".to_string();
+                section.message_id = Some(message_id);
+                output
+                    .posted_message_ids
+                    .insert(section.section_id.clone(), message_id);
+            }
+        }
+
+        output.dry_run = false;
+        Ok(output)
     }
 }
 
@@ -4028,6 +4347,8 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
             "/serversync/regelwerk-publish",
             post(http_regelwerk_publish),
         )
+        .route("/serversync/welcome-preview", post(http_welcome_preview))
+        .route("/serversync/welcome-apply", post(http_welcome_apply))
         .route("/serversync/onboarding-apply", post(http_onboarding_apply))
         .route(
             "/serversync/serverguide-apply",
@@ -4266,6 +4587,43 @@ async fn http_regelwerk_publish(
     }
 }
 
+async fn http_welcome_preview(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    match state.service.welcome_preview().await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
+async fn http_welcome_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        ConfirmRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.welcome_apply(body.confirm).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 async fn http_onboarding_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -4350,6 +4708,7 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
@@ -4367,6 +4726,7 @@ mod tests {
     type ServerGuideApplyCall = (i64, String, bool, Option<u64>);
     type RestoreCall = (Option<i64>, Option<u64>);
     type ConfirmCall = bool;
+    type WelcomeApplyCall = bool;
 
     #[derive(Default)]
     struct MockServerSync {
@@ -4376,6 +4736,7 @@ mod tests {
         restore_calls: Mutex<Vec<RestoreCall>>,
         archive_calls: Mutex<Vec<bool>>,
         regelwerk_calls: Mutex<Vec<ConfirmCall>>,
+        welcome_apply_calls: Mutex<Vec<WelcomeApplyCall>>,
     }
 
     #[async_trait]
@@ -4595,6 +4956,18 @@ mod tests {
                 edited_message_id: confirm.then_some(7003),
             })
         }
+
+        async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput> {
+            Ok(mock_welcome_output(true))
+        }
+
+        async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput> {
+            self.welcome_apply_calls
+                .lock()
+                .expect("welcome apply calls")
+                .push(confirm);
+            Ok(mock_welcome_output(!confirm))
+        }
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -4625,6 +4998,53 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    fn mock_welcome_output(dry_run: bool) -> WelcomePublishOutput {
+        WelcomePublishOutput {
+            guild_id: GUILD_ID,
+            channel_id: 9001,
+            channel_name: "🧭willkommen".to_string(),
+            dry_run,
+            warnings: vec!["banner fehlt".to_string()],
+            team_roles: vec![welcome_publish::WelcomeTeamRoleOutput {
+                key: "moderator".to_string(),
+                aliases: vec!["Moderator".to_string(), "Community Moderator".to_string()],
+                matched_role_id: Some(42),
+                matched_role_name: Some("Community Moderator".to_string()),
+                member_ids: vec![100],
+                member_mentions: vec!["<@100>".to_string()],
+            }],
+            sections: vec![welcome_publish::WelcomeSectionOutput {
+                section_id: "hero".to_string(),
+                message_key: "welcome:hero".to_string(),
+                marker: welcome_publish::welcome_marker("hero"),
+                action: if dry_run { "planned_edit" } else { "edited" }.to_string(),
+                stored_message_id: Some(7001),
+                message_id: Some(7001),
+                banner: Some(welcome_publish::WelcomeBannerOutput {
+                    filename: "hero.png".to_string(),
+                    relative_path: "assets/welcome-banners/hero.png".to_string(),
+                    present: false,
+                }),
+                payload: welcome_publish::WelcomeMessagePayload {
+                    content: "Platzhalter".to_string(),
+                    embeds: vec![json!({
+                        "title": "Platzhalter",
+                        "footer": { "text": welcome_publish::welcome_marker("hero") },
+                    })],
+                    components: Vec::new(),
+                    attachments: Vec::new(),
+                },
+            }],
+            stored_message_ids: BTreeMap::from([("hero".to_string(), 7001)]),
+            posted_message_ids: BTreeMap::new(),
+            edited_message_ids: if dry_run {
+                BTreeMap::new()
+            } else {
+                BTreeMap::from([("hero".to_string(), 7001)])
+            },
+        }
     }
 
     fn v2_artifact_value() -> Value {
@@ -5842,6 +6262,78 @@ mod tests {
                 .regelwerk_calls
                 .lock()
                 .expect("regelwerk calls")
+                .as_slice(),
+            &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn welcome_preview_http_liefert_komplette_payload_shape() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service, Some("secret".to_string()));
+
+        let response = app
+            .oneshot(request_raw(
+                "/serversync/welcome-preview",
+                Some("secret"),
+                "",
+            ))
+            .await
+            .expect("welcome preview response");
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["channel_name"], "🧭willkommen");
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["sections"][0]["section_id"], "hero");
+        assert_eq!(
+            body["result"]["sections"][0]["payload"]["content"],
+            "Platzhalter"
+        );
+        assert_eq!(
+            body["result"]["sections"][0]["payload"]["embeds"][0]["footer"]["text"],
+            "serversync:welcome:hero"
+        );
+        assert_eq!(
+            body["result"]["team_roles"][0]["matched_role_name"],
+            "Community Moderator"
+        );
+        assert_eq!(body["result"]["sections"][0]["banner"]["present"], false);
+    }
+
+    #[tokio::test]
+    async fn welcome_apply_http_ist_dry_run_default_und_parst_confirm() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let dry_run = app
+            .clone()
+            .oneshot(request_raw("/serversync/welcome-apply", Some("secret"), ""))
+            .await
+            .expect("welcome dry-run response");
+        let (status, body) = response_json(dry_run).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["sections"][0]["action"], "planned_edit");
+
+        let confirmed = app
+            .oneshot(request(
+                "/serversync/welcome-apply",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("welcome confirm response");
+        let (status, body) = response_json(confirmed).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], false);
+        assert_eq!(body["result"]["sections"][0]["action"], "edited");
+        assert_eq!(body["result"]["edited_message_ids"]["hero"], 7001);
+        assert_eq!(
+            service
+                .welcome_apply_calls
+                .lock()
+                .expect("welcome apply calls")
                 .as_slice(),
             &[false, true]
         );
