@@ -1,3 +1,11 @@
+## #199 — Steam verknüpfen: neue Schritt-für-Schritt-Anleitung
+
+**Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich, und die neue offizielle Discord-Verknüpfung „Steam Verifiziert✅" kam darin noch gar nicht vor.
+
+**Was wurde geändert:** Der Kanal hat jetzt eine Anleitung im Server-Look mit Banner, die dich in vier Schritten durchführt: Steam verknüpfen (kurzer Steam-Login, kein Passwort nötig), Freundschaftsanfrage annehmen, Rang-Rollen kommen automatisch — und als Abschluss holst du dir per Button das offizielle Discord-Siegel „Steam Verifiziert✅", das Discord selbst vergibt und das niemand von Hand verteilen kann. Dazu stehen klar drin, was wir nicht machen (keine Passwörter, keine Freundesliste, keine Daten an Dritte), was wir speichern und was du tust, wenn's hakt.
+
+**Wie es jetzt läuft:** Einmal durch die vier Schritte, danach hält der Server deinen Rang von selbst aktuell — und mit dem Siegel siehst du die Verknüpfung auch in deinem Discord-Profil.
+
 ## #198 — Voice-Lanes per Klick: das neue Router-Panel
 
 **Ausgangslage:** Eigene Voice-Lanes gab es bisher nur über die ➕-Kanäle, verwaltet wurde in separaten Verwaltungs-Kanälen, und im Router-Kanal erklärten zwei alte Nachrichten einen Vorlieben-Flow, den kaum jemand genutzt hat.
