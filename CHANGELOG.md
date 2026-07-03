@@ -1,3 +1,11 @@
+## #197 — 🧭willkommen ist da: der Server auf einen Blick
+
+**Ausgangslage:** Nach dem Struktur-Umbau (#195) fehlte noch der versprochene Startpunkt — ein Ort, der Neuen wie alten Hasen zeigt, wo was ist.
+
+**Was wurde geändert:** 🧭willkommen ist jetzt befüllt: Banner im Look unserer Website, jede Kategorie mit eigenem Header und kurzen Beschreibungen aller Kanäle, das Community-Team inklusive unseres Bots, Links zu Website, Twitch und Coaching — und ein Schnellstart mit den drei wichtigsten Klicks.
+
+**Wie es jetzt läuft:** Einfach reinschauen und durchklicken — jeder Kanal-Link bringt dich direkt hin, der Button am Ende wieder nach oben. Und wenn sich am Server etwas ändert, ziehen die Texte in Sekunden nach, ohne dass jemand neue Nachrichten posten muss.
+
 ## #196 — Text-Moderation reagiert entspannter auf Gaming-Trash-Talk
 
 **Ausgangslage:** Der Moderationsbot hat einzelne Sprüche über Helden- oder Spielergruppen zu schnell als Belästigung vorgeschlagen. Selbst wenn die erste Einschätzung nur schwach war, reichte eine zweite Bestätigung schon für eine Mod-Karte.
