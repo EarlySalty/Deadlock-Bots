@@ -43,49 +43,64 @@ pub const LFG_EDIT_MIN_INTERVAL_SECONDS: i64 = 5;
 pub const LFG_EDIT_429_BACKOFF_SECONDS: f64 = 1.0;
 pub const LFG_STREET_BRAWL_CAP: i64 = 4;
 
-pub const LFG_PANEL_BODY: &str = "Platzhalter: panel body";
-pub const LFG_PANEL_BUTTON: &str = "Platzhalter: panel button";
-pub const LFG_MODE_PROMPT: &str = "Platzhalter: mode prompt";
-pub const LFG_MODE_BUTTON_CASUAL: &str = "Platzhalter: mode casual";
-pub const LFG_MODE_BUTTON_RANKED: &str = "Platzhalter: mode ranked";
-pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "Platzhalter: mode street brawl";
-pub const LFG_MODAL_TITEL: &str = "Platzhalter: modal titel";
-pub const LFG_MODAL_FELD_RANG_LABEL: &str = "Platzhalter: modal rang label";
-pub const LFG_MODAL_FELD_RANG_PLACEHOLDER: &str = "Platzhalter: modal rang placeholder";
-pub const LFG_MODAL_FELD_PLAETZE_LABEL: &str = "Platzhalter: modal plaetze label";
-pub const LFG_MODAL_FELD_PLAETZE_PLACEHOLDER: &str = "Platzhalter: modal plaetze placeholder";
-pub const LFG_ERR_KEIN_RANKED_RANG: &str = "Platzhalter: kein ranked rang";
-pub const LFG_ERR_RANG_UNBEKANNT: &str = "Platzhalter: rang unbekannt";
-pub const LFG_ERR_PLAETZE_UNGUELTIG: &str = "Platzhalter: plaetze ungueltig";
-pub const LFG_ERR_SCHON_AKTIVE_SUCHE: &str = "Platzhalter: schon aktive suche";
-pub const LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN: &str = "Platzhalter: erstellung fehlgeschlagen";
-pub const LFG_ERFOLG_POST_ERSTELLT: &str = "Platzhalter: post erstellt";
-pub const LFG_BTN_LANE_AUFMACHEN: &str = "Platzhalter: lane aufmachen";
-pub const LFG_POST_TITEL_SCHEMA: &str = "Platzhalter: post titel";
-pub const LFG_POST_BODY_HEADER: &str = "Platzhalter: post body";
-pub const LFG_POST_BODY_VON: &str = "Platzhalter: post von";
-pub const LFG_POST_BODY_MODUS: &str = "Platzhalter: post modus";
-pub const LFG_POST_BODY_RANG: &str = "Platzhalter: post rang";
-pub const LFG_POST_BODY_PLAETZE: &str = "Platzhalter: post plaetze";
-pub const LFG_POST_STATUS_OFFEN: &str = "Platzhalter: status offen";
-pub const LFG_POST_STATUS_VOLL: &str = "Platzhalter: status voll";
-pub const LFG_BTN_BEITRETEN: &str = "Platzhalter: beitreten";
-pub const LFG_ERR_JOIN_LANE_TOT: &str = "Platzhalter: join lane tot";
-pub const LFG_ERR_JOIN_LANE_VOLL: &str = "Platzhalter: join lane voll";
-pub const LFG_ERR_JOIN_KEIN_RANG: &str = "Platzhalter: join kein rang";
-pub const LFG_ERR_JOIN_NICHT_IN_VOICE: &str = "Platzhalter: join nicht in voice";
-pub const LFG_ERR_JOIN_EIGENER_POST: &str = "Platzhalter: join eigener post";
-pub const LFG_ERR_JOIN_SCHON_DRIN: &str = "Platzhalter: join schon drin";
-pub const LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN: &str = "Platzhalter: join move fehlgeschlagen";
-pub const LFG_ERR_OPEN_NICHT_DEIN_POST: &str = "Platzhalter: open nicht dein post";
-pub const LFG_ERR_OPEN_NICHT_IN_VOICE: &str = "Platzhalter: open nicht in voice";
-pub const LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT: &str = "Platzhalter: open lane schon verknuepft";
-pub const LFG_BTN_PUBLISH_LANE: &str = "Platzhalter: publish lane";
+pub const LFG_PANEL_BODY: &str = "**Mitspieler finden**\nModus wählen, Rang-Bereich und Plätze angeben — fertig ist dein Gesuch als eigener Post. Der Post zeigt live, wie viele Plätze in der Lane frei sind, und mit **Beitreten** landest du direkt im Voice.\n\nGesuche räumen sich selbst weg, sobald die Lane schließt.\nWer regelmäßig dabei ist, taucht im [Rank-Leaderboard](https://deutsche-deadlock-community.de/aktivitaet/#rank-leaderboard-card) der Community auf.";
+pub const LFG_PANEL_BUTTON: &str = "🔎 Mitspieler suchen";
+pub const LFG_MODE_PROMPT: &str = "Wofür suchst du Leute?";
+pub const LFG_MODE_BUTTON_CASUAL: &str = "Normale Lane";
+pub const LFG_MODE_BUTTON_RANKED: &str = "🏆 Ranked";
+pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "👊 Street Brawl";
+pub const LFG_MODAL_TITEL: &str = "Mitspieler suchen";
+pub const LFG_MODAL_FELD_RANG_LABEL: &str = "Rang-Bereich (optional)";
+pub const LFG_MODAL_FELD_RANG_PLACEHOLDER: &str =
+    "z. B. Archon oder Archon bis Phantom — leer lassen = alle Ränge";
+pub const LFG_MODAL_FELD_PLAETZE_LABEL: &str = "Wie viele Mitspieler suchst du?";
+pub const LFG_MODAL_FELD_PLAETZE_PLACEHOLDER: &str = "z. B. 3";
+pub const LFG_ERR_KEIN_RANKED_RANG: &str = "Für Ranked brauchst du einen verifizierten Rang. Verknüpf dein Steam-Konto in <#1398021105339334666>, dann geht's hier weiter.";
+pub const LFG_ERR_RANG_UNBEKANNT: &str = "Den Rang kenne ich nicht. Schreib z. B. „Archon“ oder „Archon bis Phantom“ — oder lass das Feld leer.";
+pub const LFG_ERR_PLAETZE_UNGUELTIG: &str = "Gib bei den Plätzen eine Zahl an, z. B. 3.";
+pub const LFG_ERR_SCHON_AKTIVE_SUCHE: &str =
+    "Du hast schon ein laufendes Gesuch. Schließ das erst, bevor du ein neues aufmachst.";
+pub const LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN: &str =
+    "Da ist was schiefgelaufen — dein Gesuch wurde nicht erstellt. Probier's gleich nochmal.";
+pub const LFG_ERFOLG_POST_ERSTELLT: &str = "Dein Gesuch ist online.";
+pub const LFG_ERFOLG_LANE_AUFGEMACHT: &str =
+    "Lane ist offen und mit deinem Gesuch verknüpft — der Post zählt jetzt live mit.";
+pub const LFG_ERFOLG_JOIN_MOVED: &str = "Ab in die Lane mit dir — viel Spaß!";
+pub const LFG_BTN_LANE_AUFMACHEN: &str = "🚀 Lane gleich aufmachen";
+pub const LFG_POST_TITEL_SCHEMA: &str = "LFG:";
+pub const LFG_POST_BODY_HEADER: &str = "## Mitspieler gesucht";
+pub const LFG_POST_BODY_VON: &str = "Suche von";
+pub const LFG_POST_BODY_MODUS: &str = "Modus";
+pub const LFG_POST_BODY_RANG: &str = "Rang";
+pub const LFG_POST_BODY_PLAETZE: &str = "Plätze frei";
+pub const LFG_POST_RANG_EGAL: &str = "Alle Ränge";
+pub const LFG_POST_STATUS_OFFEN: &str =
+    "Klick auf **Beitreten**, dann ziehen wir dich direkt in die Lane.";
+pub const LFG_POST_STATUS_VOLL: &str =
+    "Aktuell voll — schau später nochmal rein oder mach ein eigenes Gesuch auf.";
+pub const LFG_BTN_BEITRETEN: &str = "➡️ Beitreten";
+pub const LFG_ERR_JOIN_LANE_TOT: &str =
+    "Die Lane gibt's nicht mehr — das Gesuch wird gerade geschlossen.";
+pub const LFG_ERR_JOIN_LANE_VOLL: &str = "Die Lane ist gerade voll.";
+pub const LFG_ERR_JOIN_KEIN_RANG: &str = "Für Ranked-Lanes brauchst du einen verifizierten Rang. Verknüpf dein Steam-Konto in <#1398021105339334666>.";
+pub const LFG_ERR_JOIN_NICHT_IN_VOICE: &str =
+    "Geh erst in irgendeinen Voice-Kanal — dann können wir dich direkt rüberziehen.";
+pub const LFG_ERR_JOIN_EIGENER_POST: &str =
+    "Das ist dein eigenes Gesuch — nutz den Lane-Button aus der Bestätigung.";
+pub const LFG_ERR_JOIN_SCHON_DRIN: &str = "Du bist schon in der Lane.";
+pub const LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN: &str =
+    "Konnte dich nicht verschieben — probier's nochmal oder join die Lane manuell.";
+pub const LFG_ERR_OPEN_NICHT_DEIN_POST: &str =
+    "Nur wer das Gesuch erstellt hat, kann die Lane dazu aufmachen.";
+pub const LFG_ERR_OPEN_NICHT_IN_VOICE: &str =
+    "Geh erst in einen Voice-Kanal (z. B. über den Router), dann machen wir deine Lane auf.";
+pub const LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT: &str = "Zu dem Gesuch läuft schon eine Lane.";
+pub const LFG_BTN_PUBLISH_LANE: &str = "🔎 Mitspieler suchen";
 pub const LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT: &str =
-    "Platzhalter: publish lane schon veroeffentlicht";
-pub const LFG_PRESETS_SUBMENU_TEXT: &str = "Platzhalter: presets submenu";
-pub const LFG_PRESETS_BTN_SAVE: &str = "Platzhalter: presets save";
-pub const LFG_PRESETS_BTN_LOAD: &str = "Platzhalter: presets load";
+    "Für diese Lane läuft schon ein Gesuch.";
+pub const LFG_PRESETS_SUBMENU_TEXT: &str = "Was willst du mit deinen Presets machen?";
+pub const LFG_PRESETS_BTN_SAVE: &str = "💾 Preset speichern";
+pub const LFG_PRESETS_BTN_LOAD: &str = "📂 Preset laden";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LfgMode {
@@ -109,6 +124,14 @@ impl LfgMode {
             "ranked" => Some(Self::Ranked),
             "street_brawl" => Some(Self::StreetBrawl),
             _ => None,
+        }
+    }
+
+    fn display_name(self) -> &'static str {
+        match self {
+            Self::Casual => "Normale Lane",
+            Self::Ranked => "Ranked",
+            Self::StreetBrawl => "Street Brawl",
         }
     }
 
@@ -807,7 +830,7 @@ fn rank_range_label(range: LfgRankRange) -> String {
     match (range.min, range.max) {
         (Some(min), Some(max)) if min == max => rank_name(min),
         (Some(min), Some(max)) => format!("{} bis {}", rank_name(min), rank_name(max)),
-        _ => LFG_ERR_RANG_UNBEKANNT.to_string(),
+        _ => LFG_POST_RANG_EGAL.to_string(),
     }
 }
 
@@ -874,20 +897,17 @@ fn lfg_post_body(
     [
         LFG_POST_BODY_HEADER.to_string(),
         format!("{LFG_POST_BODY_VON}: <@{owner_id}>"),
-        format!("{LFG_POST_BODY_MODUS}: {}", mode.as_str()),
+        format!("{LFG_POST_BODY_MODUS}: {}", mode.display_name()),
         format!("{LFG_POST_BODY_RANG}: {rank_label}"),
         format!(
             "{LFG_POST_BODY_PLAETZE}: {}/{}",
             capacity.free, capacity.total
         ),
-        format!(
-            "{LFG_POST_BODY_PLAETZE}: {}",
-            if capacity.full {
-                LFG_POST_STATUS_VOLL
-            } else {
-                LFG_POST_STATUS_OFFEN
-            }
-        ),
+        if capacity.full {
+            LFG_POST_STATUS_VOLL.to_string()
+        } else {
+            LFG_POST_STATUS_OFFEN.to_string()
+        },
     ]
     .join("\n")
 }
@@ -908,8 +928,8 @@ fn lfg_post_draft(
 ) -> LfgForumPostDraft {
     let rank_label = rank_range_label(rank_range);
     let title = format!(
-        "{LFG_POST_TITEL_SCHEMA} | {} | {rank_label} | {requested_slots}",
-        mode.as_str()
+        "{LFG_POST_TITEL_SCHEMA} {} · {rank_label} · sucht {requested_slots}",
+        mode.display_name()
     );
     let body = lfg_post_body(owner_id, mode, rank_range, requested_slots, occupancy);
     LfgForumPostDraft {
@@ -1591,7 +1611,7 @@ impl LfgPanelInterface {
                 match self.link_post_lane(post_id, lane_id).await {
                     Ok(true) => {
                         self.enqueue_render(post_id).await;
-                        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+                        BridgeReply::ephemeral_text(LFG_ERFOLG_LANE_AUFGEMACHT)
                     }
                     Ok(false) => {
                         self.cleanup_created_lane(spawner.as_ref(), post.guild_id, lane_id)
@@ -1683,7 +1703,7 @@ impl LfgPanelInterface {
             return BridgeReply::ephemeral_text(LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN);
         }
         self.enqueue_render(post_id).await;
-        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+        BridgeReply::ephemeral_text(LFG_ERFOLG_JOIN_MOVED)
     }
 
     pub async fn enqueue_render(&self, post_id: i64) {
@@ -2467,7 +2487,7 @@ mod tests {
             (posts[0].0, posts[0].1.title.clone())
         };
         assert_eq!(posted_channel_id, 777);
-        assert!(posted_title.contains("casual"));
+        assert!(posted_title.contains("Normale Lane"));
         assert!(posted_title.contains("Ritualist bis Phantom"));
 
         type LfgPostRow = (
