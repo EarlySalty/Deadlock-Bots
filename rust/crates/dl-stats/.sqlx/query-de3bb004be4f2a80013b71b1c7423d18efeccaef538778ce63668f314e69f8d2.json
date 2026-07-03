@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        INSERT INTO bot.kv_store (ns, k, v)\n        VALUES ($1, $2, $3)\n        ON CONFLICT (ns, k) DO UPDATE\n        SET v = EXCLUDED.v\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "de3bb004be4f2a80013b71b1c7423d18efeccaef538778ce63668f314e69f8d2"
+}

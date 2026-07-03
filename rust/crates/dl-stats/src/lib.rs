@@ -11,6 +11,7 @@
 mod auth;
 mod me;
 mod public;
+mod rank_history;
 mod ranks;
 mod timeutil;
 
@@ -22,7 +23,7 @@ use axum::extract::{Request, State};
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::Router;
 use dl_webcore::{DashboardClient, SessionCodec, WebConfig};
 use sqlx::PgPool;
@@ -91,8 +92,24 @@ pub fn router(app: SharedApp) -> Router {
             "/api/public/leaderboard/text",
             get(public::handle_text_leaderboard),
         )
+        .route(
+            "/api/public/leaderboard/rank",
+            get(rank_history::handle_rank_leaderboard),
+        )
+        .route(
+            "/api/public/rank-history/{user_id}",
+            get(rank_history::handle_public_rank_history),
+        )
         .route("/api/public/me", get(me::handle_me))
         .route("/api/public/me/stats", get(me::handle_me_stats))
+        .route(
+            "/api/public/me/rank-history",
+            get(rank_history::handle_me_rank_history),
+        )
+        .route(
+            "/api/public/me/rank-visibility",
+            put(rank_history::handle_me_rank_visibility),
+        )
         .route(
             "/api/public/me/voice-history",
             get(me::handle_me_voice_history),
@@ -179,7 +196,7 @@ async fn security_mw(State(app): State<SharedApp>, request: Request, next: Next)
                 );
                 headers.insert(
                     header::ACCESS_CONTROL_ALLOW_METHODS,
-                    HeaderValue::from_static("GET,POST,OPTIONS"),
+                    HeaderValue::from_static("GET,POST,PUT,OPTIONS"),
                 );
                 let allow = acr_headers.unwrap_or_else(|| "Content-Type".to_string());
                 if let Ok(allow) = HeaderValue::from_str(&allow) {

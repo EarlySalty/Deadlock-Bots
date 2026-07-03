@@ -2031,18 +2031,28 @@ mod tests {
         let plan = steam_rank_history_plan();
         let (_original_file, original) = sqlite_source(
             r#"
-            CREATE TABLE steam_rank_history(user_id INTEGER NOT NULL, captured_at TEXT NOT NULL, rank_name TEXT);
-            INSERT INTO steam_rank_history(user_id, captured_at, rank_name)
-            VALUES (7, '2026-07-01T00:00:00Z', 'Old');
+            CREATE TABLE steam_rank_history(
+                user_id INTEGER NOT NULL,
+                badge_level INTEGER,
+                captured_at INTEGER NOT NULL,
+                rank_name TEXT
+            );
+            INSERT INTO steam_rank_history(user_id, badge_level, captured_at, rank_name)
+            VALUES (7, 10, 1782864000, 'Old');
             "#,
         );
         let (_current_file, current) = sqlite_source(
             r#"
-            CREATE TABLE steam_rank_history(user_id INTEGER NOT NULL, captured_at TEXT NOT NULL, rank_name TEXT);
-            INSERT INTO steam_rank_history(user_id, captured_at, rank_name)
+            CREATE TABLE steam_rank_history(
+                user_id INTEGER NOT NULL,
+                badge_level INTEGER,
+                captured_at INTEGER NOT NULL,
+                rank_name TEXT
+            );
+            INSERT INTO steam_rank_history(user_id, badge_level, captured_at, rank_name)
             VALUES
-                (7, '2026-07-01T00:00:00Z', 'Changed'),
-                (7, '2026-07-02T00:00:00Z', 'Fresh');
+                (7, 11, 1782864000, 'Changed'),
+                (7, 12, 1782950400, 'Fresh');
             "#,
         );
         let original_rows = source_hashes(&original, &plan, "original").expect("original hashes");
@@ -2082,6 +2092,52 @@ mod tests {
             )
             .decision,
             MergeDecision::InsertAllowed
+        );
+    }
+
+    #[test]
+    fn steam_rank_history_plan_mappt_badge_level_und_captured_at_typen() {
+        let plan = steam_rank_history_plan();
+        let badge_level = plan
+            .columns
+            .iter()
+            .find(|column| column.target_column == "badge_level")
+            .expect("badge_level mapping");
+        let captured_at = plan
+            .columns
+            .iter()
+            .find(|column| column.target_column == "captured_at")
+            .expect("captured_at mapping");
+        let (_file, source) = sqlite_source(
+            r#"
+            CREATE TABLE steam_rank_history(
+                user_id INTEGER NOT NULL,
+                badge_level INTEGER,
+                captured_at INTEGER NOT NULL,
+                rank_name TEXT
+            );
+            INSERT INTO steam_rank_history(user_id, badge_level, captured_at, rank_name)
+            VALUES (7, 42, 1782864000, 'Oracle');
+            "#,
+        );
+        let row = source
+            .read_rows("steam_rank_history")
+            .expect("rank history rows")
+            .into_iter()
+            .next()
+            .expect("one row");
+        let target = transform_source_row(&plan.source_db, &plan.source_table, &plan, &row)
+            .expect("transform rank history row");
+
+        assert_eq!(badge_level.source_affinity, "INTEGER");
+        assert_eq!(badge_level.target_pg_type, "int4");
+        assert_eq!(badge_level.converter, Converter::IntegerToInt4);
+        assert_eq!(captured_at.source_affinity, "INTEGER");
+        assert_eq!(captured_at.target_pg_type, "timestamptz");
+        assert_eq!(captured_at.converter, Converter::IntegerToTimestamptz);
+        assert_eq!(
+            target.values.get("badge_level"),
+            Some(&TargetValue::Int4(Some(42)))
         );
     }
 
@@ -2228,11 +2284,18 @@ mod tests {
                     Converter::IntegerToInt8,
                 ),
                 column(
+                    "badge_level",
+                    "badge_level",
+                    "INTEGER",
+                    "int4",
+                    Converter::IntegerToInt4,
+                ),
+                column(
                     "captured_at",
                     "captured_at",
-                    "TEXT",
+                    "INTEGER",
                     "timestamptz",
-                    Converter::TextToTimestamptz,
+                    Converter::IntegerToTimestamptz,
                 ),
                 column(
                     "rank_name",

@@ -1,0 +1,21 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO voice.voice_stats (user_id, total_seconds, total_points, last_update)\n            VALUES ($1, $2, $3, $4), ($5, $6, $7, $8)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz",
+        "Int8",
+        "Int8",
+        "Int8",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "b4e635ac6a75e5d06fa3ea22ce00c497f58f18e6c6f7e5ca0a94c3f0fd8c53ef"
+}

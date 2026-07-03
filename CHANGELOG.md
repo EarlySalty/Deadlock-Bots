@@ -1,3 +1,11 @@
+## #194 — Rangverlauf fürs Aktivitäts-Dashboard, Sichtbarkeit bestimmst du
+
+**Ausgangslage:** Wir speichern die Rangdaten verknüpfter Accounts schon lange, aber es gab keinen Weg, sie auf der Website zu sehen — und keine Kontrolle darüber, wer sie sehen dürfte.
+
+**Was wurde geändert:** Das Aktivitäts-Dashboard kann jetzt deinen Rangverlauf als Kurve zeigen und führt ein Rang-Leaderboard mit Top-Aufsteigern und Top-Rängen. Jeder entscheidet selbst per Schalter, ob der eigene Verlauf privat bleibt (Standard), nur für Server-Mitglieder sichtbar ist oder öffentlich.
+
+**Wie es jetzt läuft:** Ohne dein Zutun sieht niemand deine Kurve — auch nicht per Direktlink, und die Server-Antwort verrät nicht mal, ob es dich gibt. Die Mitglieder-Stufe prüft echte Server-Zugehörigkeit; wer den Server verlässt oder gebannt wird, fällt sofort raus.
+
 ## #193 — FAQ-Bot mit frischem Wissen + Invite-Lounge mit Bot-Aufpasser
 
 **Ausgangslage:** Die Wissensbasis unseres FAQ-Bots war an vielen Stellen veraltet — alte Kanalnamen, ein Invite-Ablauf, den es so nicht mehr gibt, und sogar falsche Preise beim Streamer-Dashboard. Wer den Bot gefragt hat, bekam teils Anleitungen für einen Server von gestern.
