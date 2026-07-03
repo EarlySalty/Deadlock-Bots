@@ -57,7 +57,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["fs"] }
 tower = "0.5"
 # HTTP-Client (Dashboard-Relay, deadlock-api.com)
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls"] }
 # Serde
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
