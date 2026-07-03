@@ -750,11 +750,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070330))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 17);
+    assert_eq!(migration_count_after_first, 18);
     let journey_migration_count_after_first = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -797,6 +797,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070311, "steam rank history account scope").await;
     let migration_2026070312_signature_after_first =
         migration_row_signature(&pool, 2026070312, "steam friend requests task link").await;
+    let migration_2026070330_signature_after_first =
+        migration_row_signature(&pool, 2026070330, "discord role connections").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -804,11 +806,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070330))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 17);
+    assert_eq!(migration_count_after_second, 18);
     let journey_migration_count_after_second = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -886,6 +888,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070312, "steam friend requests task link").await,
         migration_2026070312_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070312"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070330, "discord role connections").await,
+        migration_2026070330_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070330"
     );
 
     let schema_count = scalar_i64(
@@ -1459,10 +1466,13 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         vec![
             "trg_steam_links_owner_guard_insert".to_string(),
             "trg_steam_links_owner_guard_update".to_string(),
+            "trg_steam_links_role_connection_sync_delete".to_string(),
+            "trg_steam_links_role_connection_sync_insert".to_string(),
+            "trg_steam_links_role_connection_sync_update".to_string(),
             "trg_steam_links_user_guard_insert".to_string(),
             "trg_steam_links_user_guard_update".to_string()
         ],
-        "core.steam_links keeps owner guard and nonzero-user guard triggers"
+        "core.steam_links keeps owner/user guards and linked-role sync triggers"
     );
 
     assert_eq!(
@@ -1668,6 +1678,110 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "timestamp with time zone",
         "timestamptz",
         "YES",
+        Some("now()"),
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "discord_role_connection_tokens").await,
+        vec![
+            "discord_id",
+            "access_token",
+            "refresh_token",
+            "token_type",
+            "scope",
+            "expires_at",
+            "token_version",
+            "active",
+            "invalidated_at",
+            "invalidation_reason",
+            "last_refresh_at",
+            "last_push_at",
+            "last_push_error",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "discord_role_connection_tokens").await,
+        vec!["discord_id"]
+    );
+    assert_column(
+        &pool,
+        "discord_role_connection_tokens",
+        "discord_id",
+        "bigint",
+        "int8",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "discord_role_connection_tokens",
+        "access_token",
+        "bytea",
+        "bytea",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "discord_role_connection_tokens",
+        "refresh_token",
+        "bytea",
+        "bytea",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "discord_role_connection_tokens",
+        "active",
+        "boolean",
+        "bool",
+        "NO",
+        Some("true"),
+    )
+    .await;
+
+    assert_eq!(
+        table_columns(&pool, "discord_role_connection_sync_state").await,
+        vec![
+            "discord_id",
+            "pending",
+            "reason",
+            "attempts",
+            "next_attempt_at",
+            "locked_at",
+            "last_error",
+            "created_at",
+            "updated_at"
+        ]
+    );
+    assert_eq!(
+        primary_key_columns(&pool, "discord_role_connection_sync_state").await,
+        vec!["discord_id"]
+    );
+    assert_column(
+        &pool,
+        "discord_role_connection_sync_state",
+        "pending",
+        "boolean",
+        "bool",
+        "NO",
+        Some("true"),
+    )
+    .await;
+    assert_column(
+        &pool,
+        "discord_role_connection_sync_state",
+        "next_attempt_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "NO",
         Some("now()"),
     )
     .await;
