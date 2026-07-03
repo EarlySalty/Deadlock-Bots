@@ -1031,7 +1031,23 @@ fn is_welle2b_archive_channel_name(name: &str) -> bool {
 }
 
 fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
-    let Some(parent_category_id) = kreativ_source_category_id(ctx) else {
+    let parent_category_id = kreativ_source_category_id(ctx);
+
+    if let Some(channel) = desired
+        .channels
+        .values_mut()
+        .find(|channel| channel_matches(&channel.name, &[CHANNEL_KREATIV_ECKE]))
+    {
+        // Nach der Archivierung liegen die Quellkanaele im Archiv und liefern
+        // keine Kategorie mehr — ein bestehender Kanal behaelt dann seine.
+        if let Some(parent_category_id) = parent_category_id {
+            channel.parent_category_id = Some(parent_category_id);
+        }
+        channel.topic = Some(KREATIV_ECKE_TOPIC.to_string());
+        return;
+    }
+
+    let Some(parent_category_id) = parent_category_id else {
         ctx.warn_once(
             "missing_kreativ_source",
             CHANNEL_KREATIV_ECKE,
@@ -1039,16 +1055,6 @@ fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
         );
         return;
     };
-
-    if let Some(channel) = desired
-        .channels
-        .values_mut()
-        .find(|channel| channel_matches(&channel.name, &[CHANNEL_KREATIV_ECKE]))
-    {
-        channel.parent_category_id = Some(parent_category_id);
-        channel.topic = Some(KREATIV_ECKE_TOPIC.to_string());
-        return;
-    }
 
     let channel_id = next_synthetic_discord_id(desired);
     let position = desired
@@ -1079,12 +1085,22 @@ fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
 }
 
 fn kreativ_source_category_id(ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
+    // Bereits archivierte Quellkanaele zaehlen nicht als Herkunft — sonst
+    // wuerde `kreativ-ecke` selbst ins Archiv gezogen.
+    let archive_category_ids: BTreeSet<DiscordId> = ctx
+        .actual
+        .categories
+        .values()
+        .filter(|category| category_matches_expected(&category.name, CATEGORY_ARCHIV))
+        .map(|category| category.category_id)
+        .collect();
     let mut parents = ctx
         .actual
         .channels
         .values()
         .filter(|channel| channel_matches(&channel.name, WELLE2B_KREATIV_SOURCE_CHANNEL_NAMES))
         .filter_map(|channel| channel.parent_category_id)
+        .filter(|parent_id| !archive_category_ids.contains(parent_id))
         .collect::<BTreeSet<_>>();
     let first = parents.pop_first();
     if !parents.is_empty() {
@@ -2061,6 +2077,43 @@ mod tests {
             target_kind: TargetKind::Role,
             target_id: GUILD_ID,
         }));
+        Ok(())
+    }
+
+    #[test]
+    fn kreativ_ecke_bleibt_nach_archivierung_in_ihrer_kategorie() -> anyhow::Result<()> {
+        // Post-Archiv-Zustand: Quellkanaele liegen bereits im Archiv,
+        // kreativ-ecke existiert ausserhalb — sie darf NICHT nachgezogen werden.
+        let mut actual = archive_candidate_model();
+        const ARCHIV_CATEGORY: u64 = 999_001;
+        const KREATIV_ECKE: u64 = 999_002;
+        actual
+            .categories
+            .insert(ARCHIV_CATEGORY, category(ARCHIV_CATEGORY, "📦 Archiv"));
+        for source_id in [MOVEMENT, DEADLOCK_ART, MODS, FOOD] {
+            actual
+                .channels
+                .get_mut(&source_id)
+                .expect("source channel")
+                .parent_category_id = Some(ARCHIV_CATEGORY);
+        }
+        actual.channels.insert(
+            KREATIV_ECKE,
+            channel(KREATIV_ECKE, "kreativ-ecke", Some(CHAT_CATEGORY)),
+        );
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: true,
+            },
+        )?;
+
+        assert_eq!(
+            derived.desired.channels[&KREATIV_ECKE].parent_category_id,
+            Some(CHAT_CATEGORY),
+            "kreativ-ecke darf nicht ins Archiv gezogen werden"
+        );
         Ok(())
     }
 
