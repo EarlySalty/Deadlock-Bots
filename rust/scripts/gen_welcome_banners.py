@@ -122,27 +122,68 @@ def render(fname: str, line1: str, line2: str, logo: Image.Image) -> None:
 
     sora_big = load_font("sora-latin.woff2", 64)
     sora_small = load_font("sora-latin.woff2", 30)
-    manrope = load_font("manrope-latin.woff2", 17)
 
     x = 72
     draw.text((x, 74), spaced(line1, " "), font=sora_small, fill=GOLD + (255,))
     draw.text((x, 118), spaced(line2, " "), font=sora_big, fill=GOLD_BRIGHT + (255,))
 
-    # Unterzeile + Zierlinie
-    y_rule = 216
+    # Zierlinie unter der Headline
+    y_rule = 222
     draw.line([(x, y_rule), (x + 340, y_rule)], fill=GOLD + (200,), width=2)
     draw.line([(x + 348, y_rule), (x + 420, y_rule)], fill=GOLD_DARK + (160,), width=2)
-    draw.text((x, y_rule + 14), "DEADLOCK — KOMPLETT AUF DEUTSCH", font=manrope, fill=(214, 205, 189, 220))
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     img.convert("RGB").save(OUT_DIR / fname, "PNG")
     print(f"{fname}: {OUT_DIR / fname}")
 
 
+
+DIVIDERS = [
+    ("divider-information.png", "INFORMATION"),
+    ("divider-community.png", "COMMUNITY"),
+    ("divider-deadlock.png", "DEADLOCK"),
+    ("divider-coaching.png", "COACHING"),
+    ("divider-router.png", "VOICE & LANES"),
+    ("divider-custom.png", "CUSTOM GAMES"),
+    ("divider-quickstart.png", "SCHNELLSTART"),
+]
+
+DIVIDER_H = 110
+
+
+def render_divider(fname: str, label: str, logo: Image.Image) -> None:
+    img = Image.new("RGBA", (W, DIVIDER_H), INK + (255,))
+    draw = ImageDraw.Draw(img, "RGBA")
+    badge = logo.resize((64, 64))
+    badge.putalpha(badge.getchannel("A").point(lambda a: a * 80 // 100))
+    img.alpha_composite(badge, (W - 110, DIVIDER_H // 2 - 32))
+    draw.line([(36, DIVIDER_H - 18), (W - 36, DIVIDER_H - 18)], fill=GOLD_DARK + (150,), width=1)
+    draw.line([(36, DIVIDER_H - 18), (186, DIVIDER_H - 18)], fill=GOLD + (255,), width=3)
+    sora = load_font("sora-latin.woff2", 34)
+    text = "  ".join(label)
+    draw.text((44, DIVIDER_H // 2 - 26), text, font=sora, fill=GOLD_BRIGHT + (255,))
+    tw = draw.textlength(text, font=sora)
+    draw.line([(44 + tw + 26, DIVIDER_H // 2), (W - 140, DIVIDER_H // 2)], fill=GOLD_DARK + (120,), width=1)
+    img.convert("RGB").save(OUT_DIR / fname, "PNG")
+    print(f"{fname}: {OUT_DIR / fname}")
+
+
+def render_badge(logo: Image.Image) -> None:
+    badge = Image.new("RGBA", (256, 256), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(badge)
+    draw.ellipse([4, 4, 252, 252], fill=INK + (255,), outline=GOLD + (255,), width=5)
+    draw.ellipse([16, 16, 240, 240], outline=GOLD_DARK + (140,), width=2)
+    badge.alpha_composite(logo.resize((196, 196)), (30, 30))
+    badge.save(OUT_DIR / "logo-badge.png", "PNG")
+    print(f"logo-badge.png: {OUT_DIR / 'logo-badge.png'}")
+
 def main() -> None:
     logo = key_out_background(Image.open(BRAND / "logo" / "deadlock-d-logo.png"))
     for fname, line1, line2 in BANNERS:
         render(fname, line1, line2, logo)
+    for fname, label in DIVIDERS:
+        render_divider(fname, label, logo)
+    render_badge(logo)
 
 
 if __name__ == "__main__":
