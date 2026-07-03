@@ -32,7 +32,9 @@ const FIELD_STYLE: &str = "style";
 pub const AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 700;
 const TEMPERATURE: f64 = 0.45;
 
-const LFG_CHANNEL_ID: u64 = 1376335502919335936;
+const LFG_LEGACY_CHANNEL_ID: u64 = 1376335502919335936;
+const LFG_PANEL_CHANNEL_ID_ENV: &str = "DL_LFG_PANEL_CHANNEL_ID";
+const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 const TEMPVOICE_PANEL_CHANNEL_ID: u64 = 1371927143537315890;
 const FEEDBACK_CHANNEL_ID: u64 = 1289721245281292291;
 const RULES_CHANNEL_ID: u64 = 1315684135175716975;
@@ -698,7 +700,7 @@ fn quick_actions_components(guild_id: u64) -> Value {
     let url = |channel_id: u64| format!("https://discord.com/channels/{guild_id}/{channel_id}");
     json!([
         { "type": 1, "components": [
-            { "type": 2, "style": 5, "label": AI_ONBOARDING_QUICK_LFG_BUTTON_LABEL, "emoji": { "name": "🎮" }, "url": url(LFG_CHANNEL_ID) },
+            { "type": 2, "style": 5, "label": AI_ONBOARDING_QUICK_LFG_BUTTON_LABEL, "emoji": { "name": "🎮" }, "url": url(lfg_target_channel_id()) },
             { "type": 2, "style": 5, "label": AI_ONBOARDING_QUICK_TEMPVOICE_BUTTON_LABEL, "emoji": { "name": "🛠️" }, "url": url(TEMPVOICE_PANEL_CHANNEL_ID) },
             { "type": 2, "style": 5, "label": AI_ONBOARDING_QUICK_FEEDBACK_BUTTON_LABEL, "emoji": { "name": "💬" }, "url": url(FEEDBACK_CHANNEL_ID) },
             { "type": 2, "style": 5, "label": AI_ONBOARDING_QUICK_RULES_BUTTON_LABEL, "emoji": { "name": "📜" }, "url": url(RULES_CHANNEL_ID) }
@@ -710,6 +712,37 @@ fn quick_actions_components(guild_id: u64) -> Value {
             "custom_id": CUSTOM_ID_RULES_CONFIRM,
         }]}
     ])
+}
+
+fn lfg_target_channel_id() -> u64 {
+    lfg_target_channel_id_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn lfg_target_channel_id_from_lookup<F>(lookup: F) -> u64
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lfg_cutover_target_channel_id_from_lookup(lookup).unwrap_or(LFG_LEGACY_CHANNEL_ID)
+}
+
+fn lfg_cutover_target_channel_id_from_lookup<F>(lookup: F) -> Option<u64>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let cutover_enabled = lookup(LFG_FORUM_CUTOVER_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !cutover_enabled {
+        return None;
+    }
+    lookup(LFG_PANEL_CHANNEL_ID_ENV)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|id| *id > 0)
 }
 
 pub fn build_role_context_block(
@@ -814,6 +847,43 @@ fn sanitize_prompt_fragment(value: &str) -> String {
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[cfg(test)]
+mod pure_tests {
+    use super::*;
+
+    #[test]
+    fn lfg_quick_action_target_respektiert_effektiven_forum_cutover() {
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|_| None),
+            LFG_LEGACY_CHANNEL_ID
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("0".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("222".to_string()),
+                _ => None,
+            }),
+            LFG_LEGACY_CHANNEL_ID
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("1".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("222".to_string()),
+                _ => None,
+            }),
+            222
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("1".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("0".to_string()),
+                _ => None,
+            }),
+            LFG_LEGACY_CHANNEL_ID
+        );
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]

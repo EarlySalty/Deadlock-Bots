@@ -5,9 +5,10 @@ use std::{collections::HashMap, sync::Arc};
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, GuildId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
+    AutoArchiveDuration, ChannelId, CreateAllowedMentions, CreateForumPost, CreateMessage, GuildId,
+    MessageId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
 };
-use serenity::builder::GetMessages;
+use serenity::builder::{EditThread, GetMessages};
 
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
@@ -1732,6 +1733,64 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
                 }
             })
             .collect())
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .and_then(|g| {
+                g.members
+                    .get(&UserId::new(user_id))
+                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
+            })
+            .unwrap_or_default()
+    }
+
+    async fn create_forum_post(
+        &self,
+        forum_channel_id: u64,
+        draft: crate::lfg_panel::LfgForumPostDraft,
+    ) -> Result<crate::lfg_panel::LfgCreatedForumPost, String> {
+        let message = CreateMessage::new()
+            .content(draft.body)
+            .allowed_mentions(CreateAllowedMentions::new());
+        let builder = CreateForumPost::new(draft.title, message)
+            .auto_archive_duration(AutoArchiveDuration::OneDay)
+            .audit_log_reason("LFG: Forum-Post");
+        let channel = ChannelId::new(forum_channel_id)
+            .create_forum_post(&self.adapter.http, builder)
+            .await
+            .map_err(|err| err.to_string())?;
+        Ok(crate::lfg_panel::LfgCreatedForumPost {
+            thread_id: channel.id.get(),
+        })
+    }
+
+    async fn first_thread_message_id(&self, thread_id: u64) -> Result<Option<u64>, String> {
+        let mut messages = ChannelId::new(thread_id)
+            .messages(
+                &self.adapter.http,
+                GetMessages::new().after(MessageId::new(0)).limit(1),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+        messages.sort_by_key(|message| message.id.get());
+        Ok(messages.first().map(|message| message.id.get()))
+    }
+
+    async fn archive_and_lock_thread(&self, thread_id: u64) -> Result<(), String> {
+        ChannelId::new(thread_id)
+            .edit_thread(
+                &self.adapter.http,
+                EditThread::new()
+                    .archived(true)
+                    .locked(true)
+                    .audit_log_reason("LFG: Persistenzfehler-Cleanup"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
     }
 }
 

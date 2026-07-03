@@ -1,3 +1,113 @@
+# W3.4b W2 - LFG-Persistenz + Formular-Flow (2026-07-03)
+
+## Fortschritt
+- Pflichtkontext gelesen: W3.4b Phase 1, W1 Kritiker und W1 Rework inkl. W2-Cutover-Checkliste.
+- Migration `2026070320_lfg_posts.sql` angelegt: `voice.lfg_posts` ohne FK auf `voice.tempvoice_lanes`, mit Unique auf `thread_id` und nullable Unique auf `lane_id`.
+- Fresh-Migrations-Vertrag um `2026070320` sowie Spalten-/Unique-Checks fuer `voice.lfg_posts` erweitert.
+- Privacy-Vertrag um `voice.lfg_posts.owner_id` erweitert; Contract-Test gezielt gruen.
+- LFG-Panel-Flow umgesetzt: `lfg:create:start` -> ephemere Moduswahl -> `lfg:create:modal:<mode>` -> Validierung -> Forum-Post-Port -> Persistenz mit `expires_at = now() + 24 hours`.
+- Ranked-Gate nutzt `VERIFIED_RANK_ROLE_IDS`; Casual und Street-Brawl bleiben ungegated.
+- Serenity-Port nutzt lokal geprueftes `ChannelId::create_forum_post`; `starter_message_id` wird per kontrolliertem ersten Thread-Message-Fetch gesetzt oder bleibt `NULL`.
+- Alter Text-LFG-Responder startet nur noch, wenn `DL_LFG_FORUM_CUTOVER` aus ist. AI-Onboarding und statischer Onboarding-Wizard repointen LFG-Ziele bei Cutover auf `DL_LFG_PANEL_CHANNEL_ID`.
+- W3 bewusst nicht umgesetzt: keine Post-Lane-Live-Kopplung, kein Join-/Lane-Open-Button, kein Expiry-Enforcement-Ticker.
+
+## Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-server-as-code -- --ignored --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`
+- Gruen: `cargo test -p dl-community`
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- Gruen: `cargo fmt --all -- --check`
+
+# W3.4b W2 Kritiker (2026-07-03)
+
+Scope: adversarialer Review des uncommitted Diff gegen `729cef06`. Keine Source-Aenderungen ausser diesem Report, kein Commit/Push.
+
+## Befunde
+
+### DEPLOY-BREAKER
+1. Flag-aus-Invariante ist verletzt: Das neue LFG-Panel kann vor Cutover sichtbar gepostet werden.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/main.rs:483`, `:497`, `:1221-1233`; `rust/bin/dl-bot/src/serversync.rs:2312-2320`, `:4918-4936`.
+   - Szenario: `DL_LFG_FORUM_CUTOVER` ist unset/false, aber `DL_LFG_PANEL_CHANNEL_ID` ist fuer den spaeteren Cutover bereits gesetzt. Beim Gateway-Ready postet `lfg_panel_interface_ready.ensure_panel()` trotzdem das Components-V2-LFG-Panel; zusaetzlich kann `/serversync/lfg-panel-apply` mit `confirm=true` das Panel unter Flag-aus posten. User sehen damit neues `lfg:create:*`-Verhalten, waehrend der alte Text-Responder noch laeuft.
+   - Fix: `cutover_enabled` in `LfgPanelInterface`/ServerSync durchreichen und `ensure_panel`, `apply_panel(confirm=true)` sowie `lfg:create:*`-Handling bei Flag-aus hart blocken. Dry-Run darf einen `blocked_reason` liefern.
+
+### HIGH
+2. Kein Spam-/Doppelpost-Schutz fuer offene LFG-Posts.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:656-690`, `:708-748`; `rust/crates/dl-central-db/migrations/2026070320_lfg_posts.sql:24-28`.
+   - Szenario: Ein User submitet das Formular 20-mal oder klickt zweimal schnell. Jeder erfolgreiche Submit erstellt erst einen neuen Discord-Forum-Thread und schreibt danach eine weitere `status='open'`-Row. Die DB hat nur einen normalen `owner_id`-Index, keinen Race-Schutz.
+   - Fix: App-seitig vor dem Discord-Post max. 1 offenen Post pro `owner_id` erzwingen und DB-seitig `CREATE UNIQUE INDEX ... ON voice.lfg_posts(owner_id) WHERE status='open'` ergaenzen; bei Treffer ephemer blocken oder bestehenden Post ersetzen/schliessen.
+
+3. Discord-Thread wird vor DB-Persistenz erstellt; Insert-Fehler erzeugt Zombie-Posts.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:656-663`, `:676-690`; Cleanup-Port fehlt in `rust/crates/dl-voice/src/lfg_panel.rs:133-141`.
+   - Szenario: `create_forum_post` succeeded, danach schlaegt `INSERT INTO voice.lfg_posts` wegen DB-Ausfall, fehlender Migration oder Constraint-Verletzung fehl. Der User bekommt nur eine ephemere Fehlermeldung, aber im Forum existiert ein sichtbarer Thread ohne DB-Row und damit ohne spaetere Verwaltung/Close/Reconcile-Basis.
+   - Fix: Erst eine DB-Reservation (`creating`) mit Race-Constraints schreiben und danach den Thread aktualisieren, oder bei Insert-Fehler den Thread ueber Port `delete/archive/lock` aufraeumen und mit `thread_id`/`owner_id` strukturiert loggen. Ein Reconcile fuer orphan Threads ergaenzen.
+
+4. Rang-Validierung akzeptiert gemischten Muell, sobald ein bekannter Rang vorkommt.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:524-542`; Referenz `rank_index` in `rust/crates/dl-voice/src/tempvoice/logic.rs:41-44`.
+   - Szenario: `Phantom bis Kartoffel` wird zu `[Phantom]` gefiltert und als gueltiger Single-Rank-Post persistiert; `Kartoffel bis Ritualist` wird als `Ritualist` akzeptiert. Unbekannte Tokens verschwinden still statt ephemerem Fehler.
+   - Fix: Parser als kleine Grammatik bauen: erlaubte Trenner (`bis`, `-`, `to`) separat behandeln, alle nicht-leeren Rang-Tokens muessen bekannt sein; Tests fuer unbekannt, gemischt-unbekannt, vertauscht, gross/klein, Leerzeichen/Umlaute.
+
+### MEDIUM
+5. Cutover-true mit fehlender/ungueltiger Panel-ID schaltet altes LFG ab, ohne neuen Einstieg bereitzustellen.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/main.rs:483-492`, `:1139-1149`, `:1231-1233`; Fallbacks in `rust/crates/dl-community/src/onboarding.rs:91-105` und `rust/crates/dl-community/src/ai_onboarding.rs:725-739`.
+   - Szenario: Operator setzt `DL_LFG_FORUM_CUTOVER=true`, vergisst aber `DL_LFG_PANEL_CHANNEL_ID` oder setzt `0`. Startup warnt nur, der alte Text-Responder wird deaktiviert, kein Panel wird gepostet, und Onboarding faellt auf die alte Kanal-ID zurueck.
+   - Fix: Bei Cutover=true eine valide positive Panel-/Forum-ID als Startup-Precondition erzwingen oder den alten Responder aktiv lassen, bis die neue Ziel-ID valide ist.
+
+### LOW
+6. AI-Onboarding-Flag-Test laeuft nicht in der dokumentierten Default-Verifikation.
+   - Datei/Zeilen: Testmodul-Gate `rust/crates/dl-community/src/ai_onboarding.rs:846`; Test `:986-1008`.
+   - Szenario: `cargo test -p dl-community` listet nur den statischen Onboarding-LFG-Test; der AI-Quick-Action-Test ist hinter `feature="testing"`. `SQLX_OFFLINE=true cargo test -p dl-community --features testing ...` scheitert lokal an fehlendem SQLx-Cache fuer einen bestehenden Privacy-Testquery (`privacy.rs:1843`), bevor der reine Flag-Test laufen kann.
+   - Fix: Reinen `lfg_target_channel_id_from_lookup`-Test aus dem `testing`-Feature herausziehen oder SQLx-Cache/CI-Kommando fuer `--features testing` nachziehen.
+
+## Sauber-Befunde je Linse
+- Flag-aus: Alter Text-Responder bleibt bei `DL_LFG_FORUM_CUTOVER=false` aktiv (`main.rs:97-99`, `:1139-1149`), AI-Onboarding und statischer Wizard fallen bei Flag-aus auf `1376335502919335936` zurueck. Aber Panel-Apply/Auto-Ensure ist nicht gegated, siehe DEPLOY-BREAKER.
+- Flow: `dispatch_modal` routet Modal-Submits ueber `router.resolve_component` (`dl-discord/src/dispatch.rs:179-252`), und `router.on_prefix("lfg:create:", ...)` deckt Button- und Modal-IDs ab (`lfg_panel.rs:777-778`). Start-Antworten sind ephemer (`lfg_panel.rs:601-606`).
+- Validierung: Slots `0`, `6`, `-1`, `abc`, leer werden app-seitig abgelehnt (`lfg_panel.rs:508-512`); DB hat `requested_slots BETWEEN 1 AND 5` (`2026070320_lfg_posts.sql:11`). Vertauschte Rangbereiche werden abgelehnt (`lfg_panel.rs:537-542`).
+- Ranked-Gate: `mode=ranked` wird vor Modal und beim Modal-Submit erneut geprueft (`lfg_panel.rs:610-638`); `casual` und `street_brawl` laufen durch `mode != Ranked` ungegated (`lfg_panel.rs:594-598`).
+- Migration/DB/Privacy: Nur neue Migration `2026070320_lfg_posts.sql` liegt untracked vor; keine Alt-Migration geaendert. Fresh-Schema prueft Spalten sowie `thread_id`/`lane_id` Unique. Privacy-Vertrag registriert `voice.lfg_posts.owner_id` und der Contract-Test scannt `owner_id` aus Migrationen, keine Gruenwasch-Allowlist.
+- Serenity: `CreateForumPost::new`, `auto_archive_duration`, `audit_log_reason`, `CreateMessage::allowed_mentions` und `ChannelId::create_forum_post` existieren in lokaler `serenity-0.12.5`-Quelle; `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-community -p dl-bot` ist gruen.
+- Orphan-Fetch: Fehler beim Starter-Message-Fetch werden geloggt und `starter_message_id` bleibt `NULL` (`lfg_panel.rs:664-673`); der kritischere Insert-nach-Post-Pfad bleibt offen, siehe HIGH.
+
+## Kritiker-Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-community -p dl-bot`
+- Gruen: `git diff --check`
+- Gruen: `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `./scripts/central_test_db.sh cargo test -p dl-voice lfg_panel -- --nocapture` (11 passed; TestDb-Pool-Close-Timeouts nur Cleanup-Warnungen)
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot lfg -- --nocapture`
+- Rot/Umgebung: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_ -- --nocapture` ohne Test-DB scheitert an fehlender `CENTRAL_TEST_DSN`/`DATABASE_URL`/`DEADLOCK_CENTRAL_DSN`.
+- Rot/Tooling: `SQLX_OFFLINE=true cargo test -p dl-community --features testing lfg_quick_action_target -- --nocapture` scheitert vor Testlauf an fehlendem SQLx-Offline-Cache fuer `privacy.rs:1843`.
+
+# W3.4b W2 Rework (2026-07-03)
+
+## Fix-Status
+- Fix 1 DEPLOY-BREAKER: Effektives `lfg_cutover_active = DL_LFG_FORUM_CUTOVER && valide DL_LFG_PANEL_CHANNEL_ID` in `main.rs` eingefuehrt und an Panel-Interface, Gateway-Ready, alten LFG-Responder und LFG-Interactions gekoppelt. `apply_panel(confirm=true)` blockt bei inaktivem Cutover; Dry-Run liefert `blocked_reason="cutover_disabled"`.
+- Fix 2+3 HIGH: `voice.lfg_posts` auf Reservation-first umgestellt: `creating`-Row vor Discord-Post, partieller Unique-Index auf `owner_id WHERE status IN ('creating','open')`, danach Update auf `open`. Fehler bei Discord-Post/DB-Update loeschen die Reservation; DB-Update-Fehler archivieren/locken den erstellten Thread per Port und loggen strukturiert.
+- Fix 4 HIGH: Rangbereich-Parser ist jetzt eine Grammatik fuer leer, Einzelrang, `<rang> bis <rang>` und `<rang>-<rang>`; unbekannte oder vertauschte Tokens werden abgelehnt.
+- Fix 5 MEDIUM: `DL_LFG_FORUM_CUTOVER=true` ohne valide Panel-ID ist effektiv inaktiv, warnt laut und laesst den alten Text-Responder sowie Onboarding-Ziele auf dem Legacy-Kanal.
+- Fix 6 LOW: Reiner AI-Onboarding-LFG-Ziel-Test liegt in normalem `#[cfg(test)]` und laeuft ohne `feature="testing"`.
+
+## W3-Reconcile-Hinweis
+- W3-Reconcile soll stale `voice.lfg_posts` mit `status='creating'` und `created_at < now() - interval '5 minutes'` aufraeumen, damit abgebrochene Reservations nicht dauerhaft Owner blockieren.
+
+## Rework-Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo check -p dl-bot -p dl-community -p dl-voice -p dl-central-db`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community lfg_quick_action_target -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot lfg -- --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community`
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- Gruen: `cargo fmt --all -- --check`
+
 # W3.4b W1 Kritiker (2026-07-03)
 
 ## Report

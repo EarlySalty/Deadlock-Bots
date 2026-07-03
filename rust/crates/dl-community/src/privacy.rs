@@ -566,6 +566,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "lfg_posts",
+        "owner_id",
+        "voice.lfg_posts",
+        "owner_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "steam_quick_invites",
         "reserved_by",
         "steam.steam_quick_invites",

@@ -24,6 +24,7 @@ use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, Interaction
 use serde_json::{json, Value};
 
 pub const RULES_CHANNEL_ID: u64 = 1315684135175716975;
+pub const LFG_LEGACY_CHANNEL_ID: u64 = 1376335502919335936;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
 pub const ONBOARD_COMPLETE_ROLE_ID: u64 = 1304216250649415771;
 pub const CONTENT_CREATOR_ROLE_ID: u64 = 1466630749255106590;
@@ -42,6 +43,9 @@ pub const ONBOARDING_RECHECK_UNVERIFIED_HINT: &str =
     "Du hast die **Verified**-Rolle noch nicht. Bitte stelle sicher, dass du deinen Account verknüpft hast \
 und dem Steam-Bot (Freundescode 820142646) eine Freundschaftsanfrage geschickt und angenommen hast. \
 (Es kann ein paar Minuten dauern)";
+const LFG_PANEL_CHANNEL_ID_ENV: &str = "DL_LFG_PANEL_CHANNEL_ID";
+const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
+const LFG_TARGET_CHANNEL_ID_TOKEN: &str = "{{DL_LFG_TARGET_CHANNEL_ID}}";
 
 /// Schritt-Texte, byte-genau aus `cogs/onboarding.py::STEPS` extrahiert.
 const STEPS_JSON: &str = include_str!("onboarding_steps.json");
@@ -70,10 +74,54 @@ pub fn build_step_embed(step_index: usize, is_streamer: bool) -> Value {
     }
     json!({
         "title": step.title,
-        "description": step.description,
+        "description": render_lfg_step_description(&step.description),
         "color": step.color,
         "footer": { "text": format!("Deutsche Deadlock Community · Schritt {display} / {total}") },
     })
+}
+
+fn lfg_target_channel_id() -> u64 {
+    lfg_target_channel_id_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn lfg_target_channel_id_from_lookup<F>(lookup: F) -> u64
+where
+    F: Fn(&str) -> Option<String>,
+{
+    lfg_cutover_target_channel_id_from_lookup(lookup).unwrap_or(LFG_LEGACY_CHANNEL_ID)
+}
+
+fn lfg_cutover_target_channel_id_from_lookup<F>(lookup: F) -> Option<u64>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let cutover_enabled = lookup(LFG_FORUM_CUTOVER_ENV)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false);
+    if !cutover_enabled {
+        return None;
+    }
+    lookup(LFG_PANEL_CHANNEL_ID_ENV)
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .filter(|id| *id > 0)
+}
+
+fn render_lfg_step_description(description: &str) -> String {
+    render_lfg_step_description_for_target(description, lfg_target_channel_id())
+}
+
+fn render_lfg_step_description_for_target(description: &str, target_channel_id: u64) -> String {
+    description
+        .replace(
+            &format!("<#{LFG_LEGACY_CHANNEL_ID}>"),
+            &format!("<#{target_channel_id}>"),
+        )
+        .replace(LFG_TARGET_CHANNEL_ID_TOKEN, &target_channel_id.to_string())
 }
 
 /// Buttons je Schritt (custom_ids tragen Schritt + Besitzer).
@@ -596,6 +644,44 @@ mod tests {
         assert_eq!(next_step_index(1, true), 2);
         // letzter Schritt bleibt letzter
         assert_eq!(next_step_index(9, false), 9);
+    }
+
+    #[test]
+    fn lfg_step_channel_target_ist_cutover_abhaengig() {
+        let description =
+            format!("alt <#{LFG_LEGACY_CHANNEL_ID}> token <#{{{{DL_LFG_TARGET_CHANNEL_ID}}}}>");
+        assert_eq!(
+            render_lfg_step_description_for_target(&description, 222),
+            "alt <#222> token <#222>"
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|_| None),
+            LFG_LEGACY_CHANNEL_ID
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("false".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("333".to_string()),
+                _ => None,
+            }),
+            LFG_LEGACY_CHANNEL_ID
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("true".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("333".to_string()),
+                _ => None,
+            }),
+            333
+        );
+        assert_eq!(
+            lfg_target_channel_id_from_lookup(|key| match key {
+                LFG_FORUM_CUTOVER_ENV => Some("true".to_string()),
+                LFG_PANEL_CHANNEL_ID_ENV => Some("0".to_string()),
+                _ => None,
+            }),
+            LFG_LEGACY_CHANNEL_ID
+        );
     }
 
     #[test]

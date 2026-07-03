@@ -94,6 +94,14 @@ fn lfg_panel_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<St
     }
 }
 
+fn lfg_cutover_active(lfg_forum_cutover_enabled: bool, lfg_panel_channel_id: Option<u64>) -> bool {
+    lfg_forum_cutover_enabled && lfg_panel_channel_id.is_some()
+}
+
+fn legacy_lfg_responder_enabled(lfg_cutover_active: bool) -> bool {
+    !lfg_cutover_active
+}
+
 fn env_i64_default(name: &str, default: i64) -> i64 {
     env(name)
         .and_then(|value| value.parse::<i64>().ok())
@@ -471,14 +479,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Some(activity.clone()),
     );
     dl_voice::router::register(&mut router, lane_router.clone());
-    dl_voice::lfg_panel::register(&mut router);
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
     serversync_concrete
         .set_router_interface(router_interface.clone())
         .await;
+    let lfg_forum_cutover_enabled = env_bool_default("DL_LFG_FORUM_CUTOVER", false);
     let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
-    if let Some(reason) = &lfg_panel_channel_reason {
+    let lfg_cutover_active = lfg_cutover_active(lfg_forum_cutover_enabled, lfg_panel_channel_id);
+    if lfg_forum_cutover_enabled && !lfg_cutover_active {
+        let reason = lfg_panel_channel_reason
+            .as_deref()
+            .unwrap_or("DL_LFG_PANEL_CHANNEL_ID fehlt oder ist ungueltig");
         tracing::warn!(%reason, "LFG-Panel deaktiviert: ungueltige Zielkanal-Konfiguration");
     }
     let lfg_panel_interface = dl_voice::lfg_panel::LfgPanelInterface::new_with_channel_config(
@@ -486,10 +498,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         router_glue.clone(),
         lfg_panel_channel_id,
         lfg_panel_channel_reason,
+        lfg_cutover_active,
     );
     serversync_concrete
         .set_lfg_panel_interface(lfg_panel_interface.clone())
         .await;
+    dl_voice::lfg_panel::register(&mut router, lfg_panel_interface.clone());
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
@@ -1131,14 +1145,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // !fhub-Panel-Listener (Admin postet/editiert das Feedback-Panel)
         dl_community::feedback_hub::spawn(feedback_hub.clone(), &dispatcher);
 
-        // LFG-Lobby-Finder (5): Antworten im Suche-Kanal
-        let lfg_responder = dl_activity::lfg::LfgResponder::new(
-            central_pool.clone(),
-            Arc::new(modglue::LfgGlue {
-                adapter: adapter.clone(),
-            }),
-        );
-        dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
+        // LFG-Lobby-Finder (5): Antworten im alten Suche-Kanal bis zum Forum-Cutover.
+        if legacy_lfg_responder_enabled(lfg_cutover_active) {
+            let lfg_responder = dl_activity::lfg::LfgResponder::new(
+                central_pool.clone(),
+                Arc::new(modglue::LfgGlue {
+                    adapter: adapter.clone(),
+                }),
+            );
+            dl_activity::lfg::spawn_responder(lfg_responder, &dispatcher);
+        } else {
+            tracing::info!("Alter LFG-Text-Responder wegen DL_LFG_FORUM_CUTOVER deaktiviert");
+        }
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
@@ -1219,7 +1237,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .await;
             tempvoice_interface_ready.refresh_all_interfaces().await;
             router_interface_ready.ensure_panel().await;
-            if lfg_panel_interface_ready.target_channel_id().is_some() {
+            if lfg_panel_interface_ready.cutover_active() {
                 lfg_panel_interface_ready.ensure_panel().await;
             }
         });
@@ -1275,7 +1293,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{lfg_panel_channel_id_from_value, moderation_enforce_from_lookup};
+    use super::{
+        legacy_lfg_responder_enabled, lfg_cutover_active, lfg_panel_channel_id_from_value,
+        moderation_enforce_from_lookup,
+    };
     use std::collections::HashMap;
 
     fn lookup<'a>(vars: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
@@ -1325,5 +1346,18 @@ mod tests {
                 "reason fehlt fuer {raw:?}: {reason:?}"
             );
         }
+    }
+
+    #[test]
+    fn alter_lfg_responder_laeuft_nur_ohne_forum_cutover() {
+        assert!(legacy_lfg_responder_enabled(lfg_cutover_active(
+            false,
+            Some(123)
+        )));
+        assert!(legacy_lfg_responder_enabled(lfg_cutover_active(true, None)));
+        assert!(!legacy_lfg_responder_enabled(lfg_cutover_active(
+            true,
+            Some(123)
+        )));
     }
 }

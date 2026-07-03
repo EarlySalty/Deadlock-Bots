@@ -611,6 +611,84 @@ async fn rank_history_visibility_index_count(pool: &PgPool) -> i64 {
     .expect("rank_history_visibility visibility index count")
 }
 
+async fn lfg_posts_unique_index_count(pool: &PgPool, column: &str) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT array_agg(a.attname::text ORDER BY k.ord) AS columns
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'voice'
+                   AND t.relname = 'lfg_posts'
+                   AND i.indisunique
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid
+           ) indexes
+          WHERE columns = ARRAY[$1]::text[]",
+    )
+    .bind(column)
+    .fetch_one(pool)
+    .await
+    .expect("lfg_posts unique index count")
+}
+
+async fn lfg_posts_owner_active_unique_index_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT idx.relname AS index_name,
+                       pg_get_expr(i.indpred, i.indrelid) AS predicate,
+                       array_agg(a.attname::text ORDER BY k.ord) AS columns
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN pg_class idx ON idx.oid = i.indexrelid
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'voice'
+                   AND t.relname = 'lfg_posts'
+                   AND i.indisunique
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, idx.relname, i.indpred, i.indrelid
+           ) indexes
+          WHERE index_name = 'lfg_posts_owner_active_uidx'
+            AND columns = ARRAY['owner_id']::text[]
+            AND predicate LIKE '%status%'
+            AND predicate LIKE '%creating%'
+            AND predicate LIKE '%open%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("lfg_posts owner active unique index count")
+}
+
+async fn lfg_posts_status_check_constraint_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = 'voice'
+            AND t.relname = 'lfg_posts'
+            AND c.contype = 'c'
+            AND pg_get_constraintdef(c.oid) LIKE '%status%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''creating''%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''open''%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''closed''%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''expired''%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("lfg_posts status check constraint count")
+}
+
 async fn steam_rank_history_covering_index_count(pool: &PgPool) -> i64 {
     sqlx::query_scalar(
         "SELECT count(*)
@@ -842,11 +920,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070330))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 18);
+    assert_eq!(migration_count_after_first, 19);
     let journey_migration_count_after_first = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -889,6 +967,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070311, "steam rank history account scope").await;
     let migration_2026070312_signature_after_first =
         migration_row_signature(&pool, 2026070312, "steam friend requests task link").await;
+    let migration_2026070320_signature_after_first =
+        migration_row_signature(&pool, 2026070320, "lfg posts").await;
     let migration_2026070330_signature_after_first =
         migration_row_signature(&pool, 2026070330, "discord role connections").await;
 
@@ -898,11 +978,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070330))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 18);
+    assert_eq!(migration_count_after_second, 19);
     let journey_migration_count_after_second = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -980,6 +1060,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070312, "steam friend requests task link").await,
         migration_2026070312_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070312"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070320, "lfg posts").await,
+        migration_2026070320_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070320"
     );
     assert_eq!(
         migration_row_signature(&pool, 2026070330, "discord role connections").await,
@@ -1622,6 +1707,104 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         None,
     )
     .await;
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "voice", "lfg_posts").await,
+        vec![
+            "guild_id",
+            "forum_channel_id",
+            "thread_id",
+            "starter_message_id",
+            "lane_id",
+            "owner_id",
+            "mode",
+            "rank_min",
+            "rank_max",
+            "requested_slots",
+            "status",
+            "created_at",
+            "updated_at",
+            "expires_at",
+            "closed_at",
+            "last_render_hash",
+            "last_post_edit_at",
+        ]
+    );
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "thread_id",
+        "bigint",
+        "int8",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "status",
+        "text",
+        "text",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "starter_message_id",
+        "bigint",
+        "int8",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "lane_id",
+        "bigint",
+        "int8",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "expires_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "NO",
+        None,
+    )
+    .await;
+    assert_eq!(
+        lfg_posts_unique_index_count(&pool, "thread_id").await,
+        1,
+        "voice.lfg_posts.thread_id remains unique"
+    );
+    assert_eq!(
+        lfg_posts_unique_index_count(&pool, "lane_id").await,
+        1,
+        "voice.lfg_posts.lane_id remains unique without FK to tempvoice_lanes"
+    );
+    assert_eq!(
+        lfg_posts_owner_active_unique_index_count(&pool).await,
+        1,
+        "voice.lfg_posts.owner_id has partial unique index for creating/open posts"
+    );
+    assert_eq!(
+        lfg_posts_status_check_constraint_count(&pool).await,
+        1,
+        "voice.lfg_posts.status keeps creating/open/closed/expired CHECK"
+    );
 
     assert_eq!(
         table_columns_in_schema(&pool, "steam", "rank_history_visibility").await,
