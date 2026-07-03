@@ -21,6 +21,9 @@ const STATUS_SKIPPED_MANUAL_ARCHIVE: &str =
     "skipped: manueller Schritt / Archivierung erforderlich";
 const STATUS_SKIPPED_NOT_IMPLEMENTED: &str = "skipped: not implemented";
 const STATUS_SKIPPED_TARGET_GONE: &str = "skipped: Objekt weg — übersprungen";
+const STATUS_SKIPPED_ONBOARDING_REF: &str =
+    "skipped: Kanal in Onboarding/Server-Guide referenziert — Discord verweigert Sichtbarkeits-Entzug (Code 350003)";
+const DISCORD_ONBOARDING_READABLE_CODE: isize = 350_003;
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -324,6 +327,10 @@ pub(crate) async fn apply_preview_with_port<P: DiscordApplyPort + Sync>(
                 change_results.push(change_result(change, STATUS_SKIPPED_TARGET_GONE));
                 continue;
             }
+            Err(err) if is_onboarding_readable_refusal(&err) => {
+                change_results.push(change_result(change, STATUS_SKIPPED_ONBOARDING_REF));
+                continue;
+            }
             Err(err) => {
                 finish_apply_run(
                     pool,
@@ -422,6 +429,21 @@ fn overwrite_denies_view(change: &DiffChange) -> bool {
         .is_some_and(|overwrite| {
             Permissions::from_bits_truncate(overwrite.deny_bits).contains(Permissions::VIEW_CHANNEL)
         })
+}
+
+/// Discord lehnt Sichtbarkeits-Entzug auf Kanälen ab, die Onboarding ODER
+/// Server Guide referenzieren (Code 350003). Das ist deterministisch, kein
+/// transienter Fehler — der Change wird als skipped protokolliert, damit der
+/// restliche Apply-Lauf nicht abbricht (analog skip-on-404, §0).
+fn is_onboarding_readable_refusal(error: &ServerAsCodeError) -> bool {
+    let ServerAsCodeError::Serenity(source) = error else {
+        return false;
+    };
+    matches!(
+        source.as_ref(),
+        serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp))
+            if resp.error.code == DISCORD_ONBOARDING_READABLE_CODE
+    )
 }
 
 fn is_target_gone(error: &ServerAsCodeError) -> bool {
@@ -757,6 +779,31 @@ mod unit_tests {
         };
 
         assert!(is_target_gone(&err));
+    }
+
+    #[tokio::test]
+    async fn onboarding_readable_refusal_wird_als_skip_klassifiziert() {
+        let body =
+            r#"{"message": "Onboarding channels must be readable by everyone", "code": 350003}"#;
+        let response = reqwest::Response::from(
+            http::Response::builder()
+                .status(400)
+                .body(body)
+                .expect("http response"),
+        );
+        let error_response =
+            serenity::http::ErrorResponse::from_response(response, reqwest::Method::PUT).await;
+        let err = ServerAsCodeError::Serenity(Box::new(serenity::Error::Http(
+            serenity::http::HttpError::UnsuccessfulRequest(error_response),
+        )));
+
+        assert!(is_onboarding_readable_refusal(&err));
+        assert!(!is_target_gone(&err));
+
+        let other = ServerAsCodeError::TargetGone {
+            object: overwrite_change(DiffAction::Delete, Permissions::empty()).object,
+        };
+        assert!(!is_onboarding_readable_refusal(&other));
     }
 }
 
