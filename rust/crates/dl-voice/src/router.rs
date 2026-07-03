@@ -57,18 +57,32 @@ pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Wähle zuerst einen Spielm
 pub const ROUTER_PANEL_INTRO: &str =
     "Wähle deinen Modus — der Bot erstellt dir eine eigene Voice-Lane in der passenden Kategorie und zieht dich direkt rüber. Dafür musst du in einem Sprachkanal sitzen, zum Beispiel im Deadlock Router.";
 pub const ROUTER_PANEL_MANAGE_INTRO: &str =
-    "Die Buttons wirken auf die Lane, in der du gerade sitzt. Verwalten kann sie nur ihr Owner — ist der weg, holst du sie dir mit 👑 Owner übernehmen.";
-pub const ROUTER_BUTTON_CASUAL: &str = "🎮 Casual";
-pub const ROUTER_BUTTON_RANKED: &str = "🏆 Ranked";
-pub const ROUTER_BUTTON_STREET_BRAWL: &str = "⚡ Street Brawl";
-pub const ROUTER_BUTTON_CLAIM: &str = "👑 Owner übernehmen";
-pub const ROUTER_BUTTON_LIMIT: &str = "🎚️ Limit setzen";
-pub const ROUTER_BUTTON_RENAME: &str = "✏️ Umbenennen";
-pub const ROUTER_BUTTON_KICK: &str = "👢 Kick";
-pub const ROUTER_BUTTON_BAN: &str = "🚫 Ban";
-pub const ROUTER_BUTTON_UNBAN: &str = "♻️ Unban";
-pub const ROUTER_BUTTON_MODE: &str = "🔄 Modus wechseln";
-pub const ROUTER_PANEL_GUIDE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für 🏆 Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung. Nach jeder erstellten Lane gilt eine kurze Abklingzeit von 30 Sekunden.\n\n**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit 👑 Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.\n\n**Die Buttons im Detail**\n👑 Owner übernehmen — macht dich zum Owner, wenn der bisherige weg ist\n🎚️ Limit setzen — legt fest, wie viele Leute in die Lane passen\n✏️ Umbenennen — gibt deiner Lane einen eigenen Namen\n👢 Kick / 🚫 Ban / ♻️ Unban — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane\n🔄 Modus wechseln — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)";
+    "Die Buttons wirken auf die Lane, in der du gerade sitzt. Verwalten kann sie nur ihr Owner — ist der weg, holst du sie dir mit <:dl_crown:1522518265421631538> Owner übernehmen.";
+pub const ROUTER_BUTTON_CASUAL: &str = "Casual";
+pub const ROUTER_BUTTON_RANKED: &str = "Ranked";
+pub const ROUTER_BUTTON_STREET_BRAWL: &str = "Street Brawl";
+pub const ROUTER_BUTTON_CLAIM: &str = "Owner übernehmen";
+pub const ROUTER_BUTTON_LIMIT: &str = "Limit setzen";
+pub const ROUTER_BUTTON_RENAME: &str = "Umbenennen";
+pub const ROUTER_BUTTON_KICK: &str = "Kick";
+pub const ROUTER_BUTTON_BAN: &str = "Ban";
+pub const ROUTER_BUTTON_UNBAN: &str = "Unban";
+pub const ROUTER_BUTTON_MODE: &str = "Modus wechseln";
+
+// Server-Emojis im Brand-Look: gold getönte Lucide-Icons (gen_router_emojis.py),
+// einmalig als Guild-Emojis hochgeladen — (Name, ID) sind stabil.
+pub const ROUTER_EMOJI_CASUAL: (&str, &str) = ("dl_casual", "1522518264088100995");
+pub const ROUTER_EMOJI_RANKED: (&str, &str) = ("dl_ranked", "1522518271306366996");
+pub const ROUTER_EMOJI_BRAWL: (&str, &str) = ("dl_brawl", "1522518262708174928");
+pub const ROUTER_EMOJI_CROWN: (&str, &str) = ("dl_crown", "1522518265421631538");
+pub const ROUTER_EMOJI_LIMIT: (&str, &str) = ("dl_limit", "1522518268345192588");
+pub const ROUTER_EMOJI_RENAME: (&str, &str) = ("dl_rename", "1522518272497418250");
+pub const ROUTER_EMOJI_KICK: (&str, &str) = ("dl_kick", "1522518266298368073");
+pub const ROUTER_EMOJI_BAN: (&str, &str) = ("dl_ban", "1522518261290369034");
+pub const ROUTER_EMOJI_UNBAN: (&str, &str) = ("dl_unban", "1522518273827143751");
+pub const ROUTER_EMOJI_MODE: (&str, &str) = ("dl_mode", "1522518269456547962");
+
+pub const ROUTER_PANEL_GUIDE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für <:dl_ranked:1522518271306366996> Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung. Nach jeder erstellten Lane gilt eine kurze Abklingzeit von 30 Sekunden.\n\n**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit <:dl_crown:1522518265421631538> Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.\n\n**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
 pub const ROUTER_REPLY_NOT_IN_VOICE: &str =
     "Du bist gerade in keinem Sprachkanal — geh zuerst in Voice, dann klappt's. Einstieg:";
 pub const ROUTER_REPLY_RANKED_VERIFY: &str =
@@ -79,7 +93,7 @@ pub const ROUTER_REPLY_CREATED_PREFIX: &str = "Deine Lane steht:";
 pub const ROUTER_REPLY_NOT_CREATED: &str =
     "Das hat gerade nicht geklappt — versuch es in ein paar Sekunden nochmal.";
 pub const ROUTER_REPLY_ALREADY_OWN_LANE: &str =
-    "Du hast schon eine eigene Lane. Modus oder Name änderst du über 🔄 Modus wechseln und ✏️ Umbenennen:";
+    "Du hast schon eine eigene Lane. Modus oder Name änderst du über <:dl_mode:1522518269456547962> Modus wechseln und <:dl_rename:1522518272497418250> Umbenennen:";
 pub const ROUTER_REPLY_COOLDOWN_PREFIX: &str =
     "Kurz durchatmen — die nächste Lane gibt's gleich wieder.";
 const ROUTER_SPAWN_COOLDOWN: Duration = Duration::from_secs(ROUTER_SPAWN_COOLDOWN_SECS);
@@ -91,6 +105,7 @@ pub struct RouterMode {
     pub category_id: u64,
     pub staging_id: u64,
     pub style: u8,
+    pub emoji: (&'static str, &'static str),
 }
 
 pub const ROUTER_MODES: [RouterMode; 3] = [
@@ -100,6 +115,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
         category_id: 1289721245281292290,
         staging_id: 1501089974093873232,
         style: 1,
+        emoji: ROUTER_EMOJI_CASUAL,
     },
     RouterMode {
         id: "ranked",
@@ -107,6 +123,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
         category_id: 1412804540994162789,
         staging_id: 1412804671432818890,
         style: 3,
+        emoji: ROUTER_EMOJI_RANKED,
     },
     RouterMode {
         id: "street_brawl",
@@ -114,6 +131,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
         category_id: 1357422957017698478,
         staging_id: 1357422958544420944,
         style: 2,
+        emoji: ROUTER_EMOJI_BRAWL,
     },
 ];
 
@@ -257,22 +275,37 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
                 ROUTER_MODES
                     .iter()
                     .map(|mode| {
-                        router_button(mode.label, mode.style, &format!("router_spawn_{}", mode.id))
+                        router_emoji_button(
+                            mode.label,
+                            mode.style,
+                            &format!("router_spawn_{}", mode.id),
+                            mode.emoji,
+                        )
                     })
                     .collect(),
             ),
             router_media_gallery(ROUTER_MANAGE_BANNER_FILENAME),
             router_text_display(ROUTER_PANEL_MANAGE_INTRO.to_string()),
             router_action_row(vec![
-                router_button(ROUTER_BUTTON_CLAIM, 3, "tv_owner_claim"),
-                router_button(ROUTER_BUTTON_LIMIT, 2, "tv_limit_btn"),
-                router_button(ROUTER_BUTTON_RENAME, 2, "tv_rename_btn"),
-                router_button(ROUTER_BUTTON_KICK, 4, "tv_kick"),
-                router_button(ROUTER_BUTTON_BAN, 4, "tv_ban"),
+                router_emoji_button(ROUTER_BUTTON_CLAIM, 3, "tv_owner_claim", ROUTER_EMOJI_CROWN),
+                router_emoji_button(
+                    ROUTER_BUTTON_RENAME,
+                    2,
+                    "tv_rename_btn",
+                    ROUTER_EMOJI_RENAME
+                ),
+                router_emoji_button(ROUTER_BUTTON_LIMIT, 2, "tv_limit_btn", ROUTER_EMOJI_LIMIT),
+                router_emoji_button(
+                    ROUTER_BUTTON_MODE,
+                    2,
+                    "tv_mode_switch_btn",
+                    ROUTER_EMOJI_MODE
+                ),
             ]),
             router_action_row(vec![
-                router_button(ROUTER_BUTTON_UNBAN, 1, "tv_unban"),
-                router_button(ROUTER_BUTTON_MODE, 2, "tv_mode_switch_btn"),
+                router_emoji_button(ROUTER_BUTTON_KICK, 4, "tv_kick", ROUTER_EMOJI_KICK),
+                router_emoji_button(ROUTER_BUTTON_BAN, 4, "tv_ban", ROUTER_EMOJI_BAN),
+                router_emoji_button(ROUTER_BUTTON_UNBAN, 2, "tv_unban", ROUTER_EMOJI_UNBAN),
             ]),
             router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME),
             router_text_display(ROUTER_PANEL_GUIDE.to_string()),
@@ -315,12 +348,13 @@ fn router_action_row(components: Vec<Value>) -> Value {
     })
 }
 
-fn router_button(label: &str, style: u8, custom_id: &str) -> Value {
+fn router_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &str)) -> Value {
     json!({
         "type": 2,
         "style": style,
         "label": label,
         "custom_id": custom_id,
+        "emoji": { "name": emoji.0, "id": emoji.1 },
     })
 }
 
@@ -1088,12 +1122,12 @@ mod tests {
                 "router_spawn_ranked",
                 "router_spawn_street_brawl",
                 "tv_owner_claim",
-                "tv_limit_btn",
                 "tv_rename_btn",
+                "tv_limit_btn",
+                "tv_mode_switch_btn",
                 "tv_kick",
                 "tv_ban",
                 "tv_unban",
-                "tv_mode_switch_btn",
             ]
         );
     }
