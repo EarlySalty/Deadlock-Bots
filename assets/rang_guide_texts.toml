@@ -7,23 +7,22 @@
 
 [texts]
 hero_intro = """**Steam verknüpfen — hol dir deinen Rang auf den Server**
-Deine Rang-Rolle, der Zugang zu den Ranked-Lanes und die Mitspieler-Suche hängen alle an einer Sache: Der Server muss wissen, wer du in Deadlock bist. Genau das erledigt die Steam-Verknüpfung — vier kurze Schritte, danach läuft alles von selbst.
+Deine Rang-Rolle, der Zugang zu den Ranked-Lanes und die Mitspieler-Suche hängen alle an einer Sache: Der Server muss wissen, wer du in Deadlock bist. Genau das erledigt die Steam-Verknüpfung — drei kurze Schritte, danach läuft alles von selbst.
 
 Das bekommst du damit:
 <:eternus:1316457737621868574> Deine Rang-Rolle — dein In-Game-Rang wird erkannt und als Rolle angezeigt, immer aktuell
 <:dl_ranked:1522518271306366996> Zugang zum Ranked-Bereich — die Ranked-Lanes stehen dir offen
-<:dl_casual:1522518264088100995> Bessere Mitspieler-Suche — du findest Leute auf deinem Skill-Level, und in den Voice-Lanes sieht man live, wer gerade im Match ist
-✅ Zum Abschluss: das offizielle Discord-Siegel „Steam Verifiziert“ für dein Profil"""
+<:dl_casual:1522518264088100995> Bessere Mitspieler-Suche — du findest Leute auf deinem Skill-Level, und in den Voice-Lanes sieht man live, wer gerade im Match ist"""
 step1_title = ""
 step1_body = """Drück unten auf „Steam verknüpfen“. Du meldest dich kurz bei Steam an (offizieller Steam-Login — wir sehen dein Passwort nie) und gibst danach deinen Steam-Freundescode ein.
 
 Zur Sicherheit: Wir speichern nur, was für die Zuordnung nötig ist — deine Discord-ID, deine SteamID und deine Rang-Daten. Keine Passwörter, keine Freundesliste, keine Spielstände, nichts geht an Dritte."""
 step2_body = """Nimm die Freundschaftsanfrage an. Unser Bot <:bebot:1371194884547023080> schickt dir in Steam eine Anfrage — sobald du sie annimmst, kann er deinen Rang abrufen. Alternativ schickst du selbst eine Anfrage an den Freundescode 820142646, wir nehmen automatisch an.
 Bleib danach mit dem Bot befreundet — nur so kann er deinen Rang aktuell halten."""
-step3_body = """Das war's schon: Dein Rang wird erkannt, du bekommst deine Rang-Rolle <:eternus:1316457737621868574> und die Ranked-Lanes <:dl_ranked:1522518271306366996> öffnen sich für dich. Ab jetzt bleibt alles automatisch aktuell — auch wenn du auf- oder absteigst."""
+step3_body = """Das war's schon: Dein Rang wird erkannt, du bekommst deine Rang-Rolle <:eternus:1316457737621868574> und die Ranked-Lanes <:dl_ranked:1522518271306366996> öffnen sich für dich. Ab jetzt bleibt alles automatisch aktuell — auch wenn du auf- oder absteigst.
+-# Bonus: Über den Servernamen oben links → Verknüpfte Rollen kannst du dir zusätzlich das offizielle Discord-Siegel „Steam Verifiziert“ für dein Profil holen."""
 step4_title = ""
-step4_body = """Steht deine Verknüpfung aus Schritt 1–3, holst du dir zum Abschluss das offizielle Siegel: Die Rolle „Steam Verifiziert“ vergibt Discord selbst — niemand kann sie von Hand verteilen. Drück auf „Discord-Verknüpfung herstellen“, melde dich kurz mit Discord an, fertig.
-Alternativ findest du das auch über den Servernamen oben links → Verknüpfte Rollen."""
+step4_body = ""
 extras_title = ""
 extras_body = """- Verknüpft, aber nichts passiert? Drück einmal auf „Rang prüfen“ — sonst läuft der Abgleich automatisch alle paar Minuten.
 - Klappt es trotzdem nicht? Prüf die Steam-Freundschaft mit dem Bot (Freundescode 820142646) oder sag den Mods Bescheid.

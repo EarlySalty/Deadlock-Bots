@@ -1,10 +1,10 @@
-## #199 — Steam verknüpfen: ein klarer Weg in vier Schritten
+## #199 — Steam verknüpfen: ein klarer Weg in drei Schritten
 
 **Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich: viel Fettdruck, gleich aussehende Textblöcke und ein verwirrendes Nebeneinander von Bot-Verknüpfung und der offiziellen Discord-Verknüpfung „Steam Verifiziert✅".
 
-**Was wurde geändert:** Die Anleitung ist jetzt ein einziger Weg in vier Schritten, jeder mit eigenem Banner im Server-Look: Steam anmelden, Freunde werden, Rang aktiv — und als Abschluss das offizielle Discord-Siegel „Steam Verifiziert✅", das niemand von Hand vergeben kann. Der Text startet mit dem, was du davon hast (Rang-Rolle, Ranked-Zugang, Mitspieler-Suche), nutzt unsere Server-Emojis und ist deutlich ruhiger formatiert. Auch die Erinnerung per DM an Voice-Stammgäste ohne Verknüpfung erzählt jetzt dieselbe Geschichte statt der alten Text-Wand.
+**Was wurde geändert:** Die Anleitung ist jetzt ein einziger Weg in drei Schritten, jeder mit eigenem Banner im Server-Look: Steam anmelden, Freunde werden, Rang aktiv. Der Text startet mit dem, was du davon hast (Rang-Rolle, Ranked-Zugang, Mitspieler-Suche), nutzt unsere Server-Emojis und ist deutlich ruhiger formatiert. Das offizielle Discord-Siegel „Steam Verifiziert✅" ist nur noch ein kurzer Bonus-Hinweis statt eines eigenen Schritts. Auch die Erinnerung per DM an Voice-Stammgäste ohne Verknüpfung erzählt jetzt dieselbe Geschichte statt der alten Text-Wand.
 
-**Wie es jetzt läuft:** Vier Schritte durchklicken, danach hält der Server deinen Rang von selbst aktuell — und mit dem Siegel siehst du die Verknüpfung auch in deinem Discord-Profil.
+**Wie es jetzt läuft:** Drei Schritte durchklicken, danach hält der Server deinen Rang von selbst aktuell.
 
 ## #198 — Voice-Lanes per Klick: das neue Router-Panel
 

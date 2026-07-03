@@ -658,14 +658,24 @@ fn rang_guide_messages(
         ],
     ));
 
-    let components = vec![
+    let mut components = vec![
         container(RANG_GUIDE_COMPONENT_ID_HERO_CONTAINER, hero_components),
         container(RANG_GUIDE_COMPONENT_ID_STEP1_CONTAINER, step1_children),
         container(RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER, step2_children),
         container(RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER, step3_children),
-        container(RANG_GUIDE_COMPONENT_ID_STEP4_CONTAINER, step4_children),
-        container(RANG_GUIDE_COMPONENT_ID_EXTRAS_CONTAINER, extras_children),
     ];
+    // Siegel-Abschnitt (Linked Role) ist per leerem step4_body abschaltbar —
+    // Re-Aktivierung ist damit reine TOML-Aenderung ohne Deploy.
+    if !config.texts.step4_body.trim().is_empty() {
+        components.push(container(
+            RANG_GUIDE_COMPONENT_ID_STEP4_CONTAINER,
+            step4_children,
+        ));
+    }
+    components.push(container(
+        RANG_GUIDE_COMPONENT_ID_EXTRAS_CONTAINER,
+        extras_children,
+    ));
 
     chunk_rang_guide_components(components, &banner_candidates, hero_banner)
 }
@@ -1202,6 +1212,30 @@ step3_body = "{long_step3}"
         }
         assert!(output.messages[0].banner.is_some());
         assert!(output.messages[1..].iter().all(|m| m.banner.is_none()));
+    }
+
+    #[test]
+    fn rang_guide_leerer_step4_body_laesst_siegel_abschnitt_weg() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_banners(temp.path());
+        write_rang_guide_texts_file(temp.path(), "[texts]\nstep4_body = \"\"\n");
+        let output =
+            build_rang_guide_publish_output(temp.path(), &[], None, None, true).expect("output");
+        assert_eq!(output.messages.len(), 1);
+        let payload = &output.messages[0].payload;
+        assert_eq!(payload.components.len(), 5);
+        let blob = serde_json::to_string(&payload.components).expect("json");
+        assert!(!blob.contains(LINKED_ROLE_LOGIN_URL_DEFAULT));
+        assert!(!blob.contains("rang-guide-schritt-4.png"));
+        assert_eq!(payload.attachments.len(), 5);
+        assert_eq!(
+            all_custom_ids(&output),
+            vec![
+                STEAM_LINK_OPEN_CUSTOM_ID.to_string(),
+                STEAM_LINK_FRIEND_CODE_CUSTOM_ID.to_string(),
+                STEAM_LINK_RANKCHECK_CUSTOM_ID.to_string(),
+            ]
+        );
     }
 
     #[test]
