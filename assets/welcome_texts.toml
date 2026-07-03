@@ -30,7 +30,7 @@ bot_description = "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coachin
 website = "https://earlysalty.com"
 twitch = "https://www.twitch.tv/earlysalty"
 coaching = "https://earlysalty.com/coaching"
-server_invite = "https://discord.com/channels/1289721245281292288/1464736918951432222"
+server_invite = "https://discord.gg/z5TfVHuQq2"
 
 # Button-Beschriftungen fuer Socials und Schnellstart.
 [buttons]
