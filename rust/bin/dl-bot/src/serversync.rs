@@ -49,6 +49,7 @@ const SERVER_GUIDE_DIFF_OBJECT_ID: u64 = GUILD_ID;
 const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
     "Server Guide per API nicht verfügbar — manuelle Owner-Konfiguration nötig";
 // docs.discord.food/resources/guild New Member Action Type: 0=VIEW, 1=CHAT.
+const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
@@ -396,6 +397,8 @@ struct DiscordThreadPage {
 #[derive(Debug, Deserialize)]
 struct DiscordThread {
     id: String,
+    #[serde(default)]
+    parent_id: Option<String>,
     #[serde(default)]
     thread_metadata: Option<DiscordThreadMetadata>,
 }
@@ -877,12 +880,21 @@ impl ServerSyncService {
 
     async fn fetch_regelwerk_threads(&self) -> ServerSyncResult<Vec<u64>> {
         let mut ids = Vec::new();
+        // API v10 kennt aktive Threads nur noch guild-weit (der Kanal-Endpoint
+        // liefert 404); daher guild-weit holen und auf den Regelwerk-Kanal filtern.
         let active: DiscordThreadPage = self
             .discord_get_json(format!(
-                "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/active"
+                "{DISCORD_API_BASE}/guilds/{}/threads/active",
+                self.guild_id
             ))
             .await?;
-        ids.extend(thread_ids(active.threads)?);
+        let rules_channel_id = RULES_CHANNEL_ID.to_string();
+        let active_in_rules = active
+            .threads
+            .into_iter()
+            .filter(|thread| thread.parent_id.as_deref() == Some(rules_channel_id.as_str()))
+            .collect::<Vec<_>>();
+        ids.extend(thread_ids(active_in_rules)?);
 
         for endpoint in ["archived/public", "archived/private"] {
             let mut before: Option<String> = None;
@@ -892,7 +904,9 @@ impl ServerSyncService {
                 );
                 if let Some(before) = before.as_deref() {
                     url.push_str("&before=");
-                    url.push_str(before);
+                    // archive_timestamp enthaelt `+00:00` — das `+` muss
+                    // percent-encodiert werden, sonst liest Discord ein Leerzeichen.
+                    url.push_str(&before.replace('+', "%2B"));
                 }
                 let page: DiscordThreadPage = self.discord_get_json(url).await?;
                 let next_before = page
@@ -2028,7 +2042,8 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
             },
             ServerGuideAction {
                 channel_id: deadlock_rang.to_string(),
-                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                // Rang-Wahl laeuft ueber das Panel, nicht per Chat — Kanal ist nicht @everyone-sendbar.
+                action_type: SERVER_GUIDE_ACTION_TYPE_VIEW,
                 title: "Steam verknüpfen & Rang eintragen".to_string(),
                 description: Some(String::new()),
             },
@@ -2125,7 +2140,9 @@ fn validate_server_guide_config(
                         action.title
                     ));
                 }
-                if !everyone_can_view_and_send(model, channel_id) {
+                if action.action_type == SERVER_GUIDE_ACTION_TYPE_CHAT
+                    && !everyone_can_view_and_send(model, channel_id)
+                {
                     missing.push(format!(
                         "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sendbar",
                         action.title
@@ -2235,11 +2252,16 @@ fn parse_live_onboarding_config(live_config: &Value) -> ServerSyncResult<NativeO
 }
 
 fn native_onboarding_put_payload(config: &NativeOnboardingConfig) -> NativeOnboardingPutConfig {
+    // Discord verlangt das id-Feld auch fuer NEUE Prompts/Optionen
+    // (BASE_TYPE_REQUIRED, live verifiziert 2026-07-03); neue Objekte
+    // bekommen eindeutige Platzhalter-IDs ("0", "1", ...), die Discord
+    // beim PUT durch echte Snowflakes ersetzt.
+    let mut placeholder = PlaceholderIdCounter::default();
     NativeOnboardingPutConfig {
         prompts: config
             .prompts
             .iter()
-            .map(native_onboarding_put_prompt)
+            .map(|prompt| native_onboarding_put_prompt(prompt, &mut placeholder))
             .collect(),
         default_channel_ids: config.default_channel_ids.clone(),
         enabled: config.enabled,
@@ -2247,15 +2269,31 @@ fn native_onboarding_put_payload(config: &NativeOnboardingConfig) -> NativeOnboa
     }
 }
 
-fn native_onboarding_put_prompt(prompt: &NativeOnboardingPrompt) -> NativeOnboardingPutPrompt {
+#[derive(Default)]
+struct PlaceholderIdCounter(u64);
+
+impl PlaceholderIdCounter {
+    fn fill(&mut self, id: &Option<String>) -> Option<String> {
+        id.clone().or_else(|| {
+            let next = self.0.to_string();
+            self.0 += 1;
+            Some(next)
+        })
+    }
+}
+
+fn native_onboarding_put_prompt(
+    prompt: &NativeOnboardingPrompt,
+    placeholder: &mut PlaceholderIdCounter,
+) -> NativeOnboardingPutPrompt {
     NativeOnboardingPutPrompt {
-        id: prompt.id.clone(),
+        id: placeholder.fill(&prompt.id),
         prompt_type: prompt.prompt_type,
         title: prompt.title.clone(),
         options: prompt
             .options
             .iter()
-            .map(native_onboarding_put_option)
+            .map(|option| native_onboarding_put_option(option, placeholder))
             .collect(),
         single_select: prompt.single_select,
         required: prompt.required,
@@ -2264,10 +2302,13 @@ fn native_onboarding_put_prompt(prompt: &NativeOnboardingPrompt) -> NativeOnboar
     }
 }
 
-fn native_onboarding_put_option(option: &NativeOnboardingOption) -> NativeOnboardingPutOption {
+fn native_onboarding_put_option(
+    option: &NativeOnboardingOption,
+    placeholder: &mut PlaceholderIdCounter,
+) -> NativeOnboardingPutOption {
     let (emoji_id, emoji_name, emoji_animated) = put_emoji_fields(option.emoji.as_ref());
     NativeOnboardingPutOption {
-        id: option.id.clone(),
+        id: placeholder.fill(&option.id),
         title: option.title.clone(),
         description: option.description.clone(),
         emoji_id,
@@ -4927,11 +4968,33 @@ mod tests {
             without_live_actions.blockers
         );
 
+        // deadlock-rang (6007) ist eine VIEW-Action: read-only darf NICHT blocken.
+        let mut rang_read_only = serverguide_model();
+        let rang_overwrite = PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: 6007,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            },
+            allow_bits: Permissions::VIEW_CHANNEL.bits(),
+            deny_bits: Permissions::SEND_MESSAGES.bits(),
+        };
+        rang_read_only
+            .overwrites
+            .insert(rang_overwrite.key.clone(), rang_overwrite);
+        let view_ok = build_server_guide_config(
+            &live_serverguide_config_with_action_type(0),
+            &rang_read_only,
+        );
+        assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
+
+        // spieler-suche (6003) ist eine CHAT-Action: read-only MUSS blocken.
         let mut read_only = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6007,
+                channel_id: 6003,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
@@ -5144,14 +5207,10 @@ mod tests {
         assert_eq!(prompts[0]["options"][0]["emoji_animated"], false);
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
-        assert!(!prompts[0]
-            .as_object()
-            .expect("weiche prompt")
-            .contains_key("id"));
-        assert!(!prompts[1]
-            .as_object()
-            .expect("ping prompt")
-            .contains_key("id"));
+        // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
+        // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
+        assert_eq!(prompts[0]["id"], "0");
+        assert!(prompts[1]["id"].is_string());
 
         let rank_option = &prompts[2]["options"][0];
         assert_eq!(rank_option["id"], "rank-option-0");

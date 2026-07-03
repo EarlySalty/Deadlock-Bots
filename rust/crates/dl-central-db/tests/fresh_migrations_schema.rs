@@ -750,11 +750,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 15
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 15);
+    assert_eq!(migration_count_after_first, 17);
     let journey_migration_count_after_first = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -793,6 +793,10 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070220, "journey ingestion analytics").await;
     let migration_2026070260_signature_after_first =
         migration_row_signature(&pool, 2026070260, "rank history visibility").await;
+    let migration_2026070311_signature_after_first =
+        migration_row_signature(&pool, 2026070311, "steam rank history account scope").await;
+    let migration_2026070312_signature_after_first =
+        migration_row_signature(&pool, 2026070312, "steam friend requests task link").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -800,11 +804,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE version BETWEEN 1 AND 15
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 15);
+    assert_eq!(migration_count_after_second, 17);
     let journey_migration_count_after_second = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -872,6 +876,16 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070260, "rank history visibility").await,
         migration_2026070260_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070260"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070311, "steam rank history account scope").await,
+        migration_2026070311_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070311"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070312, "steam friend requests task link").await,
+        migration_2026070312_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070312"
     );
 
     let schema_count = scalar_i64(
@@ -1472,6 +1486,29 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         1,
         "expected one partial unique primary index on discord_id where primary_account and discord_id != 0"
     );
+
+    assert_column_in_schema(
+        &pool,
+        "steam",
+        "steam_rank_history",
+        "steam_id",
+        "bigint",
+        "int8",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "steam",
+        "steam_friend_requests",
+        "task_id",
+        "bigint",
+        "int8",
+        "YES",
+        None,
+    )
+    .await;
 
     assert_eq!(
         table_columns_in_schema(&pool, "steam", "rank_history_visibility").await,

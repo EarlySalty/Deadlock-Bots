@@ -1,10 +1,11 @@
-## #190 — FAQ-Bot mit frischem Wissen + Invite-Lounge mit Bot-Aufpasser
+## #193 — FAQ-Bot mit frischem Wissen + Invite-Lounge mit Bot-Aufpasser
 
 **Ausgangslage:** Die Wissensbasis unseres FAQ-Bots war an vielen Stellen veraltet — alte Kanalnamen, ein Invite-Ablauf, den es so nicht mehr gibt, und sogar falsche Preise beim Streamer-Dashboard. Wer den Bot gefragt hat, bekam teils Anleitungen für einen Server von gestern.
 
 **Was wurde geändert:** Wir haben die komplette Server-Doku gegen den echten Stand abgeglichen und neu geschrieben — inklusive einer neuen Ehrlichkeits-Seite, auf der steht, was es bei uns bewusst NICHT gibt (damit der Bot dort nicht rät). Kanäle werden jetzt überall rename-fest verlinkt. Außerdem: Der /betainvite-Befehl ist weg — im Invite-Kanal fragst du einfach nett nach einem Invite und postest deinen Steam-Freundescode, ein Community-Mitglied lädt dich ein.
 
 **Wie es jetzt läuft:** Der FAQ-Bot antwortet ab sofort mit aktuellem Wissen. Und in der Invite-Lounge passt der Bot mit auf: Fragst du nach einem Invite und vergisst den Freundescode, erinnert er dich einmal freundlich daran — mehr macht er dort nicht.
+
 ## #192 — Neuer Einstieg: 3 Fragen statt 10-Schritte-Assistent, Regelwerk neu, tote Kanäle ins Archiv
 
 **Ausgangslage:** Der Einstieg auf den Server war ein Hindernislauf — erst Discord-Fragen, dann noch ein 10-Schritte-Assistent im Regelkanal, der fast 200 verwaiste Threads hinterlassen hat. Dazu ein Haufen Kanäle, in denen seit Monaten nichts mehr passiert.
@@ -12,6 +13,7 @@
 **Was wurde geändert:** Der Einstieg läuft jetzt komplett über das native Discord-Onboarding mit drei kurzen Fragen: Wo stehst du gerade (spielst du schon, brauchst du einen Invite, oder bist du ganz neu), welche Pings willst du, und wo stehst du im Rang. Der alte Assistent ist Geschichte, das Regelwerk wurde neu geschrieben und ist jetzt ein reines Nachschlagewerk. Tote Kanäle wandern ins Archiv — gelöscht wird nichts; movement, deadlock-art, mods und food ziehen zusammen in die neue kreativ-ecke. Neue Mitglieder bekommen außerdem einen Server Guide mit den ersten Schritten.
 
 **Wie es jetzt läuft:** Wer neu joint, beantwortet die drei Fragen und ist drin — wer angibt, noch keinen Invite zu haben, wird direkt zum Invite-Kanal geführt, und wer ganz neu ist, dem nehmen wir uns besonders an. Für Bestandsmitglieder ändert sich nichts, außer dass es aufgeräumter aussieht.
+
 ## #191 — Scam-Bilder bleiben auch in der Mod-Karte sichtbar
 
 **Ausgangslage:** Beim Nachtesten mit echten Discord-Bildern war die Erkennung jetzt korrekt, aber ein Folgefehler blieb: Wenn Discord ein Bild mit ungenauem Dateityp meldet, konnte es in der Moderationskarte nur als normaler Anhang statt direkt als Beweisbild auftauchen.

@@ -1031,7 +1031,23 @@ fn is_welle2b_archive_channel_name(name: &str) -> bool {
 }
 
 fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
-    let Some(parent_category_id) = kreativ_source_category_id(ctx) else {
+    let parent_category_id = kreativ_source_category_id(ctx);
+
+    if let Some(channel) = desired
+        .channels
+        .values_mut()
+        .find(|channel| channel_matches(&channel.name, &[CHANNEL_KREATIV_ECKE]))
+    {
+        // Nach der Archivierung liegen die Quellkanaele im Archiv und liefern
+        // keine Kategorie mehr — ein bestehender Kanal behaelt dann seine.
+        if let Some(parent_category_id) = parent_category_id {
+            channel.parent_category_id = Some(parent_category_id);
+        }
+        channel.topic = Some(KREATIV_ECKE_TOPIC.to_string());
+        return;
+    }
+
+    let Some(parent_category_id) = parent_category_id else {
         ctx.warn_once(
             "missing_kreativ_source",
             CHANNEL_KREATIV_ECKE,
@@ -1039,16 +1055,6 @@ fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
         );
         return;
     };
-
-    if let Some(channel) = desired
-        .channels
-        .values_mut()
-        .find(|channel| channel_matches(&channel.name, &[CHANNEL_KREATIV_ECKE]))
-    {
-        channel.parent_category_id = Some(parent_category_id);
-        channel.topic = Some(KREATIV_ECKE_TOPIC.to_string());
-        return;
-    }
 
     let channel_id = next_synthetic_discord_id(desired);
     let position = desired
@@ -1079,12 +1085,22 @@ fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
 }
 
 fn kreativ_source_category_id(ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
+    // Bereits archivierte Quellkanaele zaehlen nicht als Herkunft — sonst
+    // wuerde `kreativ-ecke` selbst ins Archiv gezogen.
+    let archive_category_ids: BTreeSet<DiscordId> = ctx
+        .actual
+        .categories
+        .values()
+        .filter(|category| category_matches_expected(&category.name, CATEGORY_ARCHIV))
+        .map(|category| category.category_id)
+        .collect();
     let mut parents = ctx
         .actual
         .channels
         .values()
         .filter(|channel| channel_matches(&channel.name, WELLE2B_KREATIV_SOURCE_CHANNEL_NAMES))
         .filter_map(|channel| channel.parent_category_id)
+        .filter(|parent_id| !archive_category_ids.contains(parent_id))
         .collect::<BTreeSet<_>>();
     let first = parents.pop_first();
     if !parents.is_empty() {
@@ -1100,9 +1116,10 @@ fn kreativ_source_category_id(ctx: &mut RuleContext<'_>) -> Option<DiscordId> {
 fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
     let channel_ids: Vec<_> = desired.channels.keys().copied().collect();
     for channel_id in channel_ids {
-        let Some(name) = desired.channel_name(channel_id) else {
+        let Some(name) = desired.channel_name(channel_id).map(str::to_string) else {
             continue;
         };
+        let name = name.as_str();
         if channel_matches(name, &["AFK"]) && desired.channel_parent(channel_id).is_none() {
             set_exact_overwrites(
                 desired,
@@ -1112,6 +1129,24 @@ fn apply_global_channel_overrides(desired: &mut GuildModel, ctx: &mut RuleContex
                     desired.guild_id,
                     channel_id,
                     deny(Permissions::SPEAK | Permissions::STREAM | Permissions::SEND_MESSAGES),
+                )],
+            );
+        }
+        // §4.4 offene Invite-Lounge: Der Ist-Zustand traegt ein @everyone
+        // -VIEW/-SEND-Gate (Rollback-Stand vom alten `beta-zugang`). Eine
+        // Oeffnung nur ueber Overwrite-LOESCHUNG wuerde der Effektiv-Rechte-
+        // Guard (§0.1) zu Recht blocken — die gewollte Oeffnung steht deshalb
+        // EXPLIZIT im Soll (Update statt Delete) und ist zusaetzlich robust
+        // gegen kuenftige Basis-Aenderungen.
+        if channel_matches(name, &["deadlock-invite", "beta-zugang"]) {
+            set_exact_overwrites(
+                desired,
+                ctx,
+                channel_id,
+                vec![everyone_overwrite(
+                    desired.guild_id,
+                    channel_id,
+                    allow(Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES),
                 )],
             );
         }
@@ -2046,6 +2081,43 @@ mod tests {
     }
 
     #[test]
+    fn kreativ_ecke_bleibt_nach_archivierung_in_ihrer_kategorie() -> anyhow::Result<()> {
+        // Post-Archiv-Zustand: Quellkanaele liegen bereits im Archiv,
+        // kreativ-ecke existiert ausserhalb — sie darf NICHT nachgezogen werden.
+        let mut actual = archive_candidate_model();
+        const ARCHIV_CATEGORY: u64 = 999_001;
+        const KREATIV_ECKE: u64 = 999_002;
+        actual
+            .categories
+            .insert(ARCHIV_CATEGORY, category(ARCHIV_CATEGORY, "📦 Archiv"));
+        for source_id in [MOVEMENT, DEADLOCK_ART, MODS, FOOD] {
+            actual
+                .channels
+                .get_mut(&source_id)
+                .expect("source channel")
+                .parent_category_id = Some(ARCHIV_CATEGORY);
+        }
+        actual.channels.insert(
+            KREATIV_ECKE,
+            channel(KREATIV_ECKE, "kreativ-ecke", Some(CHAT_CATEGORY)),
+        );
+
+        let derived = derive_desired_model_with_options(
+            &actual,
+            DesiredModelOptions {
+                welle2b_archive_enabled: true,
+            },
+        )?;
+
+        assert_eq!(
+            derived.desired.channels[&KREATIV_ECKE].parent_category_id,
+            Some(CHAT_CATEGORY),
+            "kreativ-ecke darf nicht ins Archiv gezogen werden"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn welle2b_archivregeln_erstellen_archiv_und_kreativ_ecke() -> anyhow::Result<()> {
         let actual = archive_candidate_model();
 
@@ -2403,16 +2475,24 @@ mod tests {
                 .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
             Some(("🔑deadlock-invite", Some(CHAT_CATEGORY)))
         );
-        assert!(derived
-            .desired
-            .overwrites
-            .keys()
-            .all(|key| key.channel_id != BETA_ZUGANG));
-        assert!(derived
-            .desired
-            .overwrites
-            .keys()
-            .all(|key| key.channel_id != BETA_ZUGANG_EMOJI));
+        for invite_channel in [BETA_ZUGANG, BETA_ZUGANG_EMOJI] {
+            let invite_overwrites: Vec<_> = derived
+                .desired
+                .overwrites
+                .values()
+                .filter(|overwrite| overwrite.key.channel_id == invite_channel)
+                .collect();
+            assert_eq!(
+                invite_overwrites.len(),
+                1,
+                "offene Invite-Lounge steht explizit im Soll (§0.1-Guard-kompatibel)"
+            );
+            assert_eq!(
+                invite_overwrites[0].allow_bits,
+                (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).bits()
+            );
+            assert_eq!(invite_overwrites[0].deny_bits, Permissions::empty().bits());
+        }
         Ok(())
     }
 
@@ -2626,13 +2706,20 @@ mod tests {
         let invite = derived.desired.channels.get(&BETA_ZUGANG).expect("invite");
         assert_eq!(invite.name, "deadlock-invite");
         assert_eq!(invite.parent_category_id, Some(CHAT_CATEGORY));
-        assert!(
-            derived
-                .desired
-                .overwrites
-                .keys()
-                .all(|key| key.channel_id != BETA_ZUGANG),
-            "Chat-P0-Regel entfernt alte Beta-Gates nach dem Umzug"
+        let invite_overwrites: Vec<_> = derived
+            .desired
+            .overwrites
+            .values()
+            .filter(|overwrite| overwrite.key.channel_id == BETA_ZUGANG)
+            .collect();
+        assert_eq!(
+            invite_overwrites.len(),
+            1,
+            "alte Beta-Gates entfernt, offene Invite-Lounge explizit im Soll"
+        );
+        assert_eq!(
+            invite_overwrites[0].allow_bits,
+            (Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES).bits()
         );
         Ok(())
     }
