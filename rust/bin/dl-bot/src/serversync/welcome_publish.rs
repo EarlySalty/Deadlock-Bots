@@ -62,8 +62,12 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
             description: "Was sich an unseren Bots und der Website tut.",
         },
         WelcomeChannelDescription {
-            channel_key: "stream-updates",
+            channel_key: "streamer-updates",
             description: "Wer aus der Community gerade live ist.",
+        },
+        WelcomeChannelDescription {
+            channel_key: "twitch",
+            description: "Live-Alerts und News von unserem Twitch-Kanal.",
         },
         WelcomeChannelDescription {
             channel_key: "allgemein",
@@ -241,7 +245,7 @@ const WELCOME_SECTION_DEFINITIONS: &[WelcomeSectionDefinition] = &[
     WelcomeSectionDefinition {
         id: "navigation",
         message_key: "welcome:navigation",
-        banner_filename: None,
+        banner_filename: Some("navigation.png"),
     },
     WelcomeSectionDefinition {
         id: "team",
