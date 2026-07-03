@@ -807,6 +807,31 @@ impl ServerSyncService {
         Ok(())
     }
 
+    async fn load_serversync_kv_prefix(
+        &self,
+        prefix: &str,
+    ) -> ServerSyncResult<BTreeMap<String, String>> {
+        let rows = sqlx::query(
+            "SELECT k, v
+               FROM bot.kv_store
+              WHERE ns = $1
+                AND k LIKE $2
+              ORDER BY k",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(format!("{prefix}%"))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .map(|row| {
+                let key: String = row.get("k");
+                let value: String = row.get("v");
+                (key, value)
+            })
+            .collect())
+    }
+
     async fn discord_get_json<T: serde::de::DeserializeOwned>(
         &self,
         url: String,
@@ -1071,17 +1096,44 @@ impl ServerSyncService {
         Ok(members)
     }
 
-    async fn load_welcome_message_ids(&self) -> ServerSyncResult<BTreeMap<String, u64>> {
+    async fn load_welcome_payload_format(&self) -> ServerSyncResult<Option<String>> {
+        self.load_serversync_kv(welcome_publish::WELCOME_PAYLOAD_FORMAT_KEY)
+            .await
+    }
+
+    async fn store_welcome_payload_format(&self) -> ServerSyncResult<()> {
+        self.store_serversync_kv(
+            welcome_publish::WELCOME_PAYLOAD_FORMAT_KEY,
+            welcome_publish::WELCOME_PAYLOAD_FORMAT,
+        )
+        .await
+    }
+
+    async fn load_welcome_message_ids(&self) -> ServerSyncResult<BTreeMap<String, Vec<u64>>> {
+        let indexed = self
+            .load_serversync_kv_prefix("welcome_message_id_")
+            .await?;
         let mut ids = BTreeMap::new();
         for section in welcome_publish::welcome_sections() {
-            if let Some(raw) = self
-                .load_serversync_kv(&welcome_publish::welcome_message_id_key(section.id))
-                .await?
+            let mut by_index = BTreeMap::<usize, u64>::new();
+            let legacy_key = welcome_publish::welcome_legacy_message_id_key(section.id);
+            if let Some(raw) = indexed.get(&legacy_key) {
+                by_index.insert(0, parse_discord_id(&legacy_key, raw)?);
+            }
+
+            let prefix = welcome_publish::welcome_message_id_key_prefix(section.id);
+            for (key, raw) in indexed
+                .iter()
+                .filter(|(key, _)| key.starts_with(prefix.as_str()))
             {
-                ids.insert(
-                    section.id.to_string(),
-                    parse_discord_id(&welcome_publish::welcome_message_id_key(section.id), &raw)?,
-                );
+                let raw_index = key.trim_start_matches(prefix.as_str());
+                let Ok(message_index) = raw_index.parse::<usize>() else {
+                    continue;
+                };
+                by_index.insert(message_index, parse_discord_id(key, raw)?);
+            }
+            if !by_index.is_empty() {
+                ids.insert(section.id.to_string(), by_index.into_values().collect());
             }
         }
         Ok(ids)
@@ -1090,20 +1142,69 @@ impl ServerSyncService {
     async fn store_welcome_message_id(
         &self,
         section_id: &str,
+        message_index: usize,
         message_id: u64,
     ) -> ServerSyncResult<()> {
         self.store_serversync_kv(
-            &welcome_publish::welcome_message_id_key(section_id),
+            &welcome_publish::welcome_message_id_key(section_id, message_index),
             &message_id.to_string(),
         )
-        .await
+        .await?;
+        if message_index == 0 {
+            self.delete_serversync_kv(&welcome_publish::welcome_legacy_message_id_key(section_id))
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn clear_welcome_message_id_keys(
+        &self,
+        _stored_message_ids: &BTreeMap<String, Vec<u64>>,
+    ) -> ServerSyncResult<()> {
+        let keys = self
+            .load_serversync_kv_prefix("welcome_message_id_")
+            .await?
+            .into_keys()
+            .collect::<Vec<_>>();
+        for key in keys {
+            self.delete_serversync_kv(&key).await?;
+        }
+        Ok(())
+    }
+
+    async fn delete_welcome_messages(
+        &self,
+        channel_id: u64,
+        stored_message_ids: &BTreeMap<String, Vec<u64>>,
+        discovered_message_ids: &BTreeMap<String, Vec<u64>>,
+    ) -> ServerSyncResult<Vec<u64>> {
+        let mut message_ids = stored_message_ids
+            .values()
+            .chain(discovered_message_ids.values())
+            .flat_map(|ids| ids.iter().copied())
+            .collect::<Vec<_>>();
+        message_ids.sort_unstable();
+        message_ids.dedup();
+
+        let mut deleted = Vec::new();
+        for message_id in message_ids {
+            if self
+                .discord_delete(format!(
+                    "{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}"
+                ))
+                .await?
+            {
+                deleted.push(message_id);
+            }
+        }
+        Ok(deleted)
     }
 
     async fn fetch_welcome_marker_message_ids(
         &self,
         channel_id: u64,
         bot_user_id: u64,
-    ) -> ServerSyncResult<BTreeMap<String, u64>> {
+    ) -> ServerSyncResult<BTreeMap<String, Vec<u64>>> {
         let mut messages = BTreeMap::new();
         let mut before: Option<u64> = None;
         loop {
@@ -1131,7 +1232,10 @@ impl ServerSyncService {
                         if let Some(section_id) =
                             welcome_publish::welcome_section_id_from_marker(marker)
                         {
-                            messages.entry(section_id.to_string()).or_insert(message_id);
+                            messages
+                                .entry(section_id.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(message_id);
                             continue;
                         }
                     }
@@ -1140,7 +1244,10 @@ impl ServerSyncService {
                         .as_deref()
                         .and_then(welcome_publish::welcome_section_id_from_title)
                     {
-                        messages.entry(section_id.to_string()).or_insert(message_id);
+                        messages
+                            .entry(section_id.to_string())
+                            .or_insert_with(Vec::new)
+                            .push(message_id);
                     }
                 }
             }
@@ -1151,6 +1258,10 @@ impl ServerSyncService {
             if page.len() < 100 {
                 break;
             }
+        }
+        for ids in messages.values_mut() {
+            ids.sort_unstable();
+            ids.dedup();
         }
         Ok(messages)
     }
@@ -1978,12 +2089,16 @@ impl ServerSyncOps for ServerSyncService {
         .await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
+        let stored_payload_format = self.load_welcome_payload_format().await?;
+        let bot_user_id = self.fetch_current_bot_user_id().await.ok();
         welcome_publish::build_welcome_publish_output(
             &live,
             &team_members,
             &welcome_publish::welcome_repo_root(),
             &stored_message_ids,
+            stored_payload_format.as_deref(),
             true,
+            bot_user_id,
         )
         .map_err(ServerSyncError::bad_request)
     }
@@ -1996,16 +2111,19 @@ impl ServerSyncOps for ServerSyncService {
         .await?;
         let team_members = self.fetch_welcome_team_members().await?;
         let stored_message_ids = self.load_welcome_message_ids().await?;
+        let stored_payload_format = self.load_welcome_payload_format().await?;
+        let bot_user_id = self.fetch_current_bot_user_id().await?;
         let mut output = welcome_publish::build_welcome_publish_output(
             &live,
             &team_members,
             &welcome_publish::welcome_repo_root(),
             &stored_message_ids,
+            stored_payload_format.as_deref(),
             !confirm,
+            Some(bot_user_id),
         )
         .map_err(ServerSyncError::bad_request)?;
 
-        let bot_user_id = self.fetch_current_bot_user_id().await?;
         let discovered_message_ids = self
             .fetch_welcome_marker_message_ids(output.channel_id, bot_user_id)
             .await?;
@@ -2014,77 +2132,147 @@ impl ServerSyncOps for ServerSyncService {
             .iter()
             .find(|section| section.section_id == "hero")
             .and_then(|section| section.message_id)
-            .or_else(|| discovered_message_ids.get("hero").copied());
+            .or_else(|| {
+                discovered_message_ids
+                    .get("hero")
+                    .and_then(|ids| ids.first())
+                    .copied()
+            });
 
         if !confirm {
-            for section in &mut output.sections {
-                if section.stored_message_id.is_none() {
-                    if let Some(discovered) = discovered_message_ids.get(&section.section_id) {
-                        section.action = "planned_edit".to_string();
-                        section.message_id = Some(*discovered);
+            if !output.repost_required {
+                for section in &mut output.sections {
+                    if section.stored_message_id.is_none() {
+                        if let Some(discovered) = discovered_message_ids
+                            .get(&section.section_id)
+                            .and_then(|ids| ids.get(section.message_index))
+                        {
+                            section.action = "planned_edit".to_string();
+                            section.message_id = Some(*discovered);
+                        }
                     }
                 }
+                hero_message_id = output
+                    .sections
+                    .iter()
+                    .find(|section| section.section_id == "hero")
+                    .and_then(|section| section.message_id);
+            } else {
+                for section in &mut output.sections {
+                    let discovered = discovered_message_ids
+                        .get(&section.section_id)
+                        .and_then(|ids| ids.get(section.message_index))
+                        .copied();
+                    section.message_id = section.stored_message_id.or(discovered);
+                    section.action = if section.message_id.is_some() {
+                        "planned_repost".to_string()
+                    } else {
+                        "planned_post".to_string()
+                    };
+                }
             }
-            hero_message_id = output
-                .sections
-                .iter()
-                .find(|section| section.section_id == "hero")
-                .and_then(|section| section.message_id);
             welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
             return Ok(output);
         }
 
-        for section_index in 0..output.sections.len() {
-            if output.sections[section_index].section_id == "quickstart" {
-                welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
-            }
-            let section = &mut output.sections[section_index];
-            let section_id = section.section_id.clone();
-            let discovered_message_id = discovered_message_ids.get(&section_id).copied();
-            let candidates = welcome_publish::welcome_candidate_message_ids(
-                section.stored_message_id,
-                discovered_message_id,
-            );
-            let mut edited_message_id = None;
-            for candidate in candidates {
-                if let Some(message_id) = self
-                    .edit_welcome_message(output.channel_id, candidate, section)
-                    .await?
-                {
-                    edited_message_id = Some(message_id);
-                    break;
-                }
-            }
+        if output.repost_required {
+            self.delete_welcome_messages(
+                output.channel_id,
+                &stored_message_ids,
+                &discovered_message_ids,
+            )
+            .await?;
+            self.clear_welcome_message_id_keys(&stored_message_ids)
+                .await?;
+            hero_message_id = None;
 
-            if let Some(message_id) = edited_message_id {
-                self.store_welcome_message_id(&section.section_id, message_id)
-                    .await?;
-                section.action = "edited".to_string();
-                section.message_id = Some(message_id);
-                output
-                    .edited_message_ids
-                    .insert(section_id.clone(), message_id);
-                if section_id == "hero" {
-                    hero_message_id = Some(message_id);
+            for section_index in 0..output.sections.len() {
+                if output.sections[section_index].section_id == "quickstart" {
+                    welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
                 }
-            } else {
+                let section = &mut output.sections[section_index];
+                let section_id = section.section_id.clone();
+                let message_index = section.message_index;
                 let message_id = self
                     .post_welcome_message(output.channel_id, section)
                     .await?;
-                self.store_welcome_message_id(&section_id, message_id)
+                self.store_welcome_message_id(&section_id, message_index, message_id)
                     .await?;
                 section.action = "posted".to_string();
                 section.message_id = Some(message_id);
                 output
                     .posted_message_ids
-                    .insert(section_id.clone(), message_id);
+                    .entry(section_id.clone())
+                    .or_default()
+                    .push(message_id);
                 if section_id == "hero" {
                     hero_message_id = Some(message_id);
                 }
             }
+            self.store_welcome_payload_format().await?;
+        } else {
+            for section_index in 0..output.sections.len() {
+                if output.sections[section_index].section_id == "quickstart" {
+                    welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
+                }
+                let section = &mut output.sections[section_index];
+                let section_id = section.section_id.clone();
+                let message_index = section.message_index;
+                let discovered_message_id = discovered_message_ids
+                    .get(&section_id)
+                    .and_then(|ids| ids.get(message_index))
+                    .copied();
+                let candidates = welcome_publish::welcome_candidate_message_ids(
+                    section.stored_message_id,
+                    discovered_message_id,
+                );
+                let mut edited_message_id = None;
+                for candidate in candidates {
+                    if let Some(message_id) = self
+                        .edit_welcome_message(output.channel_id, candidate, section)
+                        .await?
+                    {
+                        edited_message_id = Some(message_id);
+                        break;
+                    }
+                }
+
+                if let Some(message_id) = edited_message_id {
+                    self.store_welcome_message_id(&section.section_id, message_index, message_id)
+                        .await?;
+                    section.action = "edited".to_string();
+                    section.message_id = Some(message_id);
+                    output
+                        .edited_message_ids
+                        .entry(section_id.clone())
+                        .or_default()
+                        .push(message_id);
+                    if section_id == "hero" {
+                        hero_message_id = Some(message_id);
+                    }
+                } else {
+                    let message_id = self
+                        .post_welcome_message(output.channel_id, section)
+                        .await?;
+                    self.store_welcome_message_id(&section_id, message_index, message_id)
+                        .await?;
+                    section.action = "posted".to_string();
+                    section.message_id = Some(message_id);
+                    output
+                        .posted_message_ids
+                        .entry(section_id.clone())
+                        .or_default()
+                        .push(message_id);
+                    if section_id == "hero" {
+                        hero_message_id = Some(message_id);
+                    }
+                }
+            }
+            self.store_welcome_payload_format().await?;
         }
 
         output.dry_run = false;
+        output.repost_required = false;
         Ok(output)
     }
 }
@@ -5038,6 +5226,9 @@ mod tests {
             channel_id: 9001,
             channel_name: "🧭willkommen".to_string(),
             dry_run,
+            payload_format: welcome_publish::WELCOME_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: Some(welcome_publish::WELCOME_PAYLOAD_FORMAT.to_string()),
+            repost_required: false,
             warnings: vec!["banner fehlt".to_string()],
             team_roles: vec![welcome_publish::WelcomeTeamRoleOutput {
                 key: "community-moderator".to_string(),
@@ -5050,8 +5241,17 @@ mod tests {
                 member_ids: vec![100],
                 member_mentions: vec!["<@100>".to_string()],
             }],
+            bot_team: Some(welcome_publish::WelcomeTeamBotOutput {
+                user_id: 999,
+                mention: "<@999>".to_string(),
+                group_title: "🤖 Server-Management".to_string(),
+                description:
+                    "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub."
+                        .to_string(),
+            }),
             sections: vec![welcome_publish::WelcomeSectionOutput {
                 section_id: "hero".to_string(),
+                message_index: 0,
                 message_key: "welcome:hero".to_string(),
                 marker: welcome_publish::welcome_marker("hero"),
                 action: if dry_run { "planned_edit" } else { "edited" }.to_string(),
@@ -5063,20 +5263,25 @@ mod tests {
                     present: false,
                 }),
                 payload: welcome_publish::WelcomeMessagePayload {
-                    content: "Platzhalter".to_string(),
-                    embeds: vec![json!({
-                        "title": "Platzhalter",
+                    flags: welcome_publish::WELCOME_COMPONENTS_V2_FLAG,
+                    allowed_mentions: welcome_publish::WelcomeAllowedMentions { parse: Vec::new() },
+                    components: vec![json!({
+                        "type": 17,
+                        "accent_color": welcome_publish::WELCOME_ACCENT_GOLD,
+                        "components": [{
+                            "type": 10,
+                            "content": "Platzhalter",
+                        }],
                     })],
-                    components: Vec::new(),
                     attachments: Vec::new(),
                 },
             }],
-            stored_message_ids: BTreeMap::from([("hero".to_string(), 7001)]),
+            stored_message_ids: BTreeMap::from([("hero".to_string(), vec![7001])]),
             posted_message_ids: BTreeMap::new(),
             edited_message_ids: if dry_run {
                 BTreeMap::new()
             } else {
-                BTreeMap::from([("hero".to_string(), 7001)])
+                BTreeMap::from([("hero".to_string(), vec![7001])])
             },
         }
     }
@@ -6321,10 +6526,22 @@ mod tests {
         assert_eq!(body["result"]["dry_run"], true);
         assert_eq!(body["result"]["sections"][0]["section_id"], "hero");
         assert_eq!(
-            body["result"]["sections"][0]["payload"]["content"],
+            body["result"]["sections"][0]["payload"]["flags"],
+            welcome_publish::WELCOME_COMPONENTS_V2_FLAG
+        );
+        assert!(body["result"]["sections"][0]["payload"]["content"].is_null());
+        assert!(body["result"]["sections"][0]["payload"]["embeds"].is_null());
+        assert_eq!(
+            body["result"]["sections"][0]["payload"]["allowed_mentions"]["parse"]
+                .as_array()
+                .expect("parse")
+                .len(),
+            0
+        );
+        assert_eq!(
+            body["result"]["sections"][0]["payload"]["components"][0]["components"][0]["content"],
             "Platzhalter"
         );
-        assert!(body["result"]["sections"][0]["payload"]["embeds"][0]["footer"].is_null());
         assert_eq!(
             body["result"]["team_roles"][0]["matched_role_name"],
             "Community Moderator"
@@ -6359,7 +6576,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["dry_run"], false);
         assert_eq!(body["result"]["sections"][0]["action"], "edited");
-        assert_eq!(body["result"]["edited_message_ids"]["hero"], 7001);
+        assert_eq!(body["result"]["edited_message_ids"]["hero"][0], 7001);
         assert_eq!(
             service
                 .welcome_apply_calls

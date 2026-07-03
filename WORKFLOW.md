@@ -1,3 +1,40 @@
+# W3.2e Components-V2-Hub (2026-07-03)
+
+## Ziel
+Welcome-Hub von Embeds auf Discord Components V2 umbauen, Team-Dedupe ergaenzen, Bot als Team-Mitglied darstellen und Storage fuer Message-Listen/Repost-Semantik erweitern. Kein Commit/Push; keine Live-Discord-Calls durch diesen Worker ausserhalb bestehender Codepfade/Tests.
+
+## Fortschritt
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-hub-polish`; Pflichtkontext `WORKFLOW.md`, `welcome_publish.rs` und Welcome-Preview-/Apply-Pfad inklusive rohem `payload_json`-Multipart gelesen.
+- Befund: Renderer ist noch Embed-basiert; Apply patcht pro Sektion anhand eines einzelnen KV-Keys und nutzt Marker-/Titel-Fallback fuer alte Embeds. REST-Pfad serialisiert aber bereits kontrolliertes JSON und Multipart-Dateien, daher fuer Components V2 geeignet.
+- Umsetzungsplan: Payload-Struct auf `flags=32768`, `allowed_mentions.parse=[]`, Components/Attachments ohne `content`/`embeds` umbauen; Navigation an Kategoriegrenzen chunkingfaehig machen; KV-Storage auf `welcome_message_id_<section>_<index>` plus `welcome_payload_format=2`; Format-/Count-Wechsel als Delete+Repost mit Quickstart-Neu-Hero-ID behandeln.
+- Implementiert im Zwischenstand: Components-V2-Renderer fuer Hero/Navigation/Team/Socials/Quickstart, Navigation-Chunking, Team-Dedupe, Bot-Team-Block aus `[team]` TOML/Defaults, indexierter KV-Storage und Repost/Patch-Entscheidung nach Format+Messageanzahl.
+- Zieltests bisher gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot welcome_publish`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`.
+- Abschluss-Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`; `SQLX_OFFLINE=true cargo clippy -p dl-bot --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`. Kein Commit/Push.
+
+# W3.2c Runtime-Texte TOML (2026-07-03)
+
+## Ziel
+Welcome-Hub-Texte und Link-URLs zur Publish-Zeit aus `assets/welcome_texts.toml` laden. Kein Commit/Push; Aenderungen bleiben uncommitted fuer Claude-Review.
+
+## Fortschritt
+- Implementierungsworker gestartet; Pflichtkontext `WORKFLOW.md`, `welcome_publish.rs`, Welcome-Preview-/Apply-Pfade und vorhandene Tests gelesen.
+- Befund: Payloads nutzen bisher direkt `WELCOME_TEXTS`/`WELCOME_LINK_URLS`; `toml` ist im Workspace vorhanden, aber `dl-bot` referenziert es noch nicht.
+- Implementiert: `assets/welcome_texts.toml` als Seed mit heutigen Texten, Runtime-Loader mit Missing-File-Fallback/Warnung, hartem Parse-Fehler und Merge-Semantik; Welcome-Payloads verwenden die geladene Konfiguration.
+- Neue Unit-Tests fuer Seed-Parse gegen Defaults, Parse-Fehler, fehlende Datei und Teil-Merge sind gruen (`SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot welcome_texts`).
+- Abschluss-Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`; `SQLX_OFFLINE=true cargo clippy -p dl-bot --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`. Kein Commit/Push.
+
+# W3.2b Hub-Polish + Struktur-Delta (2026-07-03)
+
+## Ziel
+Owner-Feedback fuer Welcome-Hub und Soll-Modell v2 umsetzen. Kein Commit/Push; Aenderungen bleiben uncommitted fuer Claude-Review.
+
+## Fortschritt
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-hub-polish` auf Branch `feat/welle3-hub-polish`. Pflichtkontext gelesen: `WORKFLOW.md`, Welle-3-Konzept, `rules.rs`, `welcome_publish.rs` und Welcome-Apply-Pfad in `serversync.rs`.
+- Befund: Soll-Modell nutzt dokumentierte Rename-/Move-Tabellen und Welle2b-Archiv-Deny-Muster; Welcome-Hub setzt sichtbare Marker zentral ueber Embed-Footer und sendet bisher maximal ein Banner-Attachment pro Message.
+- Soll-Modell-Deltas umgesetzt: NEWS-Kanaele nach INFORMATION, `deadlock-invite` nach COMMUNITY, `twitch` -> `deadlock-streamer`, leere NEWS-Kategorie entfernt, Legacy-Lane-Hilfskanaele mit Archiv-Deny ins Archiv. `SQLX_OFFLINE=true cargo test -p dl-server-as-code` gruen.
+- Welcome-Hub-Deltas umgesetzt: markerlose Embeds, Divider-Attachments, Team-Ausschluss/Mehrfach-Aliase, Quickstart-Jump und Navigation-Filtertests. `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot welcome_publish` gruen.
+- Abschluss-Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `cargo test -p dl-server-as-code`; `cargo test -p dl-bot --bin dl-bot serversync`; `./scripts/central_test_db.sh cargo test --workspace`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`. Kein Commit/Push.
+
 # Rank-History Backend dl-stats (2026-07-03)
 
 ## Ziel
