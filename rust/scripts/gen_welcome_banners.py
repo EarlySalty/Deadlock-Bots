@@ -96,7 +96,18 @@ def spaced(text: str, tracking: str = "  ") -> str:
     return tracking.join(text)
 
 
-def render(fname: str, line1: str, line2: str, logo: Image.Image) -> None:
+def fitted_font(draw: ImageDraw.ImageDraw, text: str, start_size: int, max_width: int) -> ImageFont.FreeTypeFont:
+    """Skaliert die Fontgröße runter, bis der Text in max_width passt."""
+    size = start_size
+    while size > 24:
+        font = load_font("sora-latin.woff2", size)
+        if draw.textlength(text, font=font) <= max_width:
+            return font
+        size -= 4
+    return load_font("sora-latin.woff2", size)
+
+
+def render(fname: str, line1: str | None, line2: str, logo: Image.Image) -> None:
     img = Image.new("RGBA", (W, H), INK + (255,))
 
     img.alpha_composite(grid_layer())
@@ -120,15 +131,27 @@ def render(fname: str, line1: str, line2: str, logo: Image.Image) -> None:
         draw.line([(cx, cy), (cx + 18 * dx, cy)], fill=GOLD + (255,), width=3)
         draw.line([(cx, cy), (cx, cy + 18 * dy)], fill=GOLD + (255,), width=3)
 
-    sora_big = load_font("sora-latin.woff2", 64)
-    sora_small = load_font("sora-latin.woff2", 30)
-
     x = 72
-    draw.text((x, 74), spaced(line1, " "), font=sora_small, fill=GOLD + (255,))
-    draw.text((x, 118), spaced(line2, " "), font=sora_big, fill=GOLD_BRIGHT + (255,))
+    max_text_w = W - x - 320  # rechts Platz fürs Logo-Wasserzeichen lassen
+
+    if line1 is not None:
+        big = spaced(line2, " ")
+        sora_big = fitted_font(draw, big, 64, max_text_w)
+        sora_small = load_font("sora-latin.woff2", 30)
+        draw.text((x, 74), spaced(line1, " "), font=sora_small, fill=GOLD + (255,))
+        draw.text((x, 118), big, font=sora_big, fill=GOLD_BRIGHT + (255,))
+        y_rule = 222
+    else:
+        # Ein-Zeilen-Banner (Sektions-Header): Headline vertikal zentriert
+        big = spaced(line2, " ")
+        sora_big = fitted_font(draw, big, 64, max_text_w)
+        bbox = draw.textbbox((0, 0), big, font=sora_big)
+        text_h = bbox[3] - bbox[1]
+        y_text = (H - text_h) // 2 - bbox[1] - 14
+        draw.text((x, y_text), big, font=sora_big, fill=GOLD_BRIGHT + (255,))
+        y_rule = y_text + bbox[3] + 26
 
     # Zierlinie unter der Headline
-    y_rule = 222
     draw.line([(x, y_rule), (x + 340, y_rule)], fill=GOLD + (200,), width=2)
     draw.line([(x + 348, y_rule), (x + 420, y_rule)], fill=GOLD_DARK + (160,), width=2)
 
@@ -149,24 +172,9 @@ DIVIDERS = [
     ("divider-quickstart.png", "SCHNELLSTART"),
 ]
 
-DIVIDER_H = 110
-
-
 def render_divider(fname: str, label: str, logo: Image.Image) -> None:
-    img = Image.new("RGBA", (W, DIVIDER_H), INK + (255,))
-    draw = ImageDraw.Draw(img, "RGBA")
-    badge = logo.resize((64, 64))
-    badge.putalpha(badge.getchannel("A").point(lambda a: a * 80 // 100))
-    img.alpha_composite(badge, (W - 110, DIVIDER_H // 2 - 32))
-    draw.line([(36, DIVIDER_H - 18), (W - 36, DIVIDER_H - 18)], fill=GOLD_DARK + (150,), width=1)
-    draw.line([(36, DIVIDER_H - 18), (186, DIVIDER_H - 18)], fill=GOLD + (255,), width=3)
-    sora = load_font("sora-latin.woff2", 34)
-    text = "  ".join(label)
-    draw.text((44, DIVIDER_H // 2 - 26), text, font=sora, fill=GOLD_BRIGHT + (255,))
-    tw = draw.textlength(text, font=sora)
-    draw.line([(44 + tw + 26, DIVIDER_H // 2), (W - 140, DIVIDER_H // 2)], fill=GOLD_DARK + (120,), width=1)
-    img.convert("RGB").save(OUT_DIR / fname, "PNG")
-    print(f"{fname}: {OUT_DIR / fname}")
+    """Sektions-Header in voller Banner-Größe (gleicher Look wie hero.png)."""
+    render(fname, None, label, logo)
 
 
 def render_badge(logo: Image.Image) -> None:
