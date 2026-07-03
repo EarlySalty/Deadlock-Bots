@@ -142,6 +142,7 @@ DIVIDERS = [
     ("divider-information.png", "INFORMATION"),
     ("divider-community.png", "COMMUNITY"),
     ("divider-deadlock.png", "DEADLOCK"),
+    ("divider-medien.png", "MEDIEN"),
     ("divider-coaching.png", "COACHING"),
     ("divider-router.png", "VOICE & LANES"),
     ("divider-custom.png", "CUSTOM GAMES"),
