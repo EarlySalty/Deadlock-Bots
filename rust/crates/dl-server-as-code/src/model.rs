@@ -162,6 +162,7 @@ pub struct ChannelSpec {
     pub bitrate: Option<i32>,
     pub user_limit: Option<i32>,
     pub rate_limit_per_user: Option<i32>,
+    pub default_auto_archive_duration: Option<i32>,
     pub status: Option<String>,
 }
 

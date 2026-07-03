@@ -60,8 +60,9 @@ pub async fn persist_snapshot_model(
         sqlx::query(
             "INSERT INTO server_config.live_snapshot_channels
              (snapshot_id, captured_at, guild_id, channel_id, name, channel_type, topic,
-              position, parent_category_id, nsfw, bitrate, user_limit, rate_limit_per_user, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+              position, parent_category_id, nsfw, bitrate, user_limit, rate_limit_per_user,
+              default_auto_archive_duration, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
         )
         .bind(snapshot_id)
         .bind(captured_at)
@@ -76,6 +77,7 @@ pub async fn persist_snapshot_model(
         .bind(channel.bitrate)
         .bind(channel.user_limit)
         .bind(channel.rate_limit_per_user)
+        .bind(channel.default_auto_archive_duration)
         .bind(&channel.status)
         .execute(&mut *tx)
         .await?;
@@ -192,7 +194,7 @@ pub async fn load_desired_model(pool: &PgPool, guild_id: DiscordId) -> Result<Gu
 
     for row in sqlx::query(
         "SELECT guild_id, channel_id, name, channel_type, topic, position, parent_category_id,
-                nsfw, bitrate, user_limit, rate_limit_per_user, status
+                nsfw, bitrate, user_limit, rate_limit_per_user, default_auto_archive_duration, status
            FROM server_config.desired_channels
           WHERE guild_id = $1
           ORDER BY channel_id",
@@ -292,7 +294,7 @@ pub async fn load_snapshot_model(pool: &PgPool, snapshot_id: i64) -> Result<Guil
 
     for row in sqlx::query(
         "SELECT guild_id, channel_id, name, channel_type, topic, position, parent_category_id,
-                nsfw, bitrate, user_limit, rate_limit_per_user, status
+                nsfw, bitrate, user_limit, rate_limit_per_user, default_auto_archive_duration, status
            FROM server_config.live_snapshot_channels
           WHERE snapshot_id = $1
           ORDER BY channel_id",
@@ -919,8 +921,8 @@ async fn upsert_desired_channel(
     sqlx::query(
         "INSERT INTO server_config.desired_channels
          (guild_id, channel_id, name, channel_type, topic, position, parent_category_id,
-          nsfw, bitrate, user_limit, rate_limit_per_user, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+          nsfw, bitrate, user_limit, rate_limit_per_user, default_auto_archive_duration, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (guild_id, channel_id)
          DO UPDATE SET name = EXCLUDED.name,
                        channel_type = EXCLUDED.channel_type,
@@ -931,6 +933,7 @@ async fn upsert_desired_channel(
                        bitrate = EXCLUDED.bitrate,
                        user_limit = EXCLUDED.user_limit,
                        rate_limit_per_user = EXCLUDED.rate_limit_per_user,
+                       default_auto_archive_duration = EXCLUDED.default_auto_archive_duration,
                        status = EXCLUDED.status,
                        updated_at = now()",
     )
@@ -945,6 +948,7 @@ async fn upsert_desired_channel(
     .bind(spec.bitrate)
     .bind(spec.user_limit)
     .bind(spec.rate_limit_per_user)
+    .bind(spec.default_auto_archive_duration)
     .bind(&spec.status)
     .execute(&mut **tx)
     .await?;
@@ -1242,6 +1246,7 @@ fn channel_from_row(row: &sqlx::postgres::PgRow) -> Result<ChannelSpec> {
         bitrate: row.try_get("bitrate")?,
         user_limit: row.try_get("user_limit")?,
         rate_limit_per_user: row.try_get("rate_limit_per_user")?,
+        default_auto_archive_duration: row.try_get("default_auto_archive_duration")?,
         status: row.try_get("status")?,
     })
 }

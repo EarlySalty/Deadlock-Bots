@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
 use crate::master;
+pub use dl_voice::lfg_panel::LfgPanelApplyOutput;
 pub use dl_voice::router::RouterApplyOutput;
 pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
@@ -594,6 +595,7 @@ pub trait ServerSyncOps: Send + Sync {
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput>;
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput>;
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput>;
+    async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput>;
     async fn serverguide_preview(
         &self,
         requested_by_user_id: Option<u64>,
@@ -614,6 +616,7 @@ pub struct ServerSyncService {
     guild_id: u64,
     http_client: reqwest::Client,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
+    lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
 }
 
 impl ServerSyncService {
@@ -630,11 +633,19 @@ impl ServerSyncService {
             guild_id,
             http_client: reqwest::Client::new(),
             router_interface: tokio::sync::RwLock::new(None),
+            lfg_panel_interface: tokio::sync::RwLock::new(None),
         })
     }
 
     pub async fn set_router_interface(&self, interface: Arc<dl_voice::router::RouterInterface>) {
         *self.router_interface.write().await = Some(interface);
+    }
+
+    pub async fn set_lfg_panel_interface(
+        &self,
+        interface: Arc<dl_voice::lfg_panel::LfgPanelInterface>,
+    ) {
+        *self.lfg_panel_interface.write().await = Some(interface);
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
@@ -1464,6 +1475,7 @@ impl ServerSyncOps for ServerSyncService {
             &model,
             dl_server_as_code::DesiredModelOptions {
                 welle2b_archive_enabled: archive_enabled,
+                ..dl_server_as_code::DesiredModelOptions::default()
             },
         )?;
         let member_role_assignments = self.fetch_member_role_assignments().await?;
@@ -1540,6 +1552,7 @@ impl ServerSyncOps for ServerSyncService {
             &live,
             dl_server_as_code::DesiredModelOptions {
                 welle2b_archive_enabled: archive_enabled,
+                ..dl_server_as_code::DesiredModelOptions::default()
             },
         )?;
         dl_server_as_code::persist_desired_model(
@@ -2295,6 +2308,18 @@ impl ServerSyncOps for ServerSyncService {
             .await
             .map_err(ServerSyncError::internal)
     }
+
+    async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput> {
+        let Some(interface) = self.lfg_panel_interface.read().await.clone() else {
+            return Err(ServerSyncError::internal(
+                "LfgPanelInterface ist im ServerSyncService nicht verdrahtet",
+            ));
+        };
+        interface
+            .apply_panel(confirm)
+            .await
+            .map_err(ServerSyncError::internal)
+    }
 }
 
 fn snapshot_output(report: SnapshotImportReport) -> SnapshotOutput {
@@ -2609,7 +2634,8 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
             },
             ServerGuideAction {
                 channel_id: mitspieler_suche.to_string(),
-                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                // LFG laeuft ueber das Forum-/Panel-Entry, nicht per freiem Chat.
+                action_type: SERVER_GUIDE_ACTION_TYPE_VIEW,
                 title: "Such dir Mitspieler".to_string(),
                 description: Some(String::new()),
             },
@@ -4590,6 +4616,7 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
         .route("/serversync/welcome-preview", post(http_welcome_preview))
         .route("/serversync/welcome-apply", post(http_welcome_apply))
         .route("/serversync/router-apply", post(http_router_apply))
+        .route("/serversync/lfg-panel-apply", post(http_lfg_panel_apply))
         .route("/serversync/onboarding-apply", post(http_onboarding_apply))
         .route(
             "/serversync/serverguide-apply",
@@ -4888,6 +4915,29 @@ async fn http_router_apply(
     }
 }
 
+async fn http_lfg_panel_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        ConfirmRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.lfg_panel_apply(body.confirm).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 async fn http_onboarding_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -5003,6 +5053,7 @@ mod tests {
         regelwerk_calls: Mutex<Vec<ConfirmCall>>,
         welcome_apply_calls: Mutex<Vec<WelcomeApplyCall>>,
         router_apply_calls: Mutex<Vec<RouterApplyCall>>,
+        lfg_panel_apply_calls: Mutex<Vec<ConfirmCall>>,
     }
 
     #[async_trait]
@@ -5242,6 +5293,14 @@ mod tests {
                 .push(confirm);
             Ok(mock_router_output(!confirm))
         }
+
+        async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput> {
+            self.lfg_panel_apply_calls
+                .lock()
+                .expect("lfg panel apply calls")
+                .push(confirm);
+            Ok(mock_lfg_panel_output(!confirm))
+        }
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -5377,6 +5436,51 @@ mod tests {
         }
     }
 
+    fn mock_lfg_panel_output(dry_run: bool) -> LfgPanelApplyOutput {
+        LfgPanelApplyOutput {
+            guild_id: GUILD_ID,
+            channel_id: Some(8101),
+            dry_run,
+            payload_format: dl_voice::lfg_panel::LFG_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: Some(dl_voice::lfg_panel::LFG_PAYLOAD_FORMAT.to_string()),
+            stored_message_id: Some(8102),
+            action: if dry_run { "planned_edit" } else { "edited" }.to_string(),
+            message_id: Some(8102),
+            blocked_reason: None,
+            warnings: Vec::new(),
+            payload: json!({
+                "flags": dl_voice::lfg_panel::LFG_COMPONENTS_V2_FLAG,
+                "allowed_mentions": {"parse": []},
+                "components": [{
+                    "type": 17,
+                    "accent_color": dl_voice::lfg_panel::LFG_ACCENT_GOLD,
+                    "components": [
+                        {
+                            "type": 12,
+                            "items": [{"media": {"url": "attachment://router-hero.png"}}],
+                        },
+                        {
+                            "type": 10,
+                            "content": dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT,
+                        },
+                        {
+                            "type": 1,
+                            "components": [{
+                                "type": 2,
+                                "style": 1,
+                                "label": dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT,
+                                "custom_id": dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
+                            }],
+                        },
+                    ],
+                }],
+                "attachments": [
+                    {"id": 0, "filename": dl_voice::lfg_panel::LFG_PANEL_BANNER_FILENAME},
+                ],
+            }),
+        }
+    }
+
     fn v2_artifact_value() -> Value {
         serde_json::to_value(RollbackArtifact {
             version: ROLLBACK_VERSION.to_string(),
@@ -5420,6 +5524,7 @@ mod tests {
                 bitrate: None,
                 user_limit: None,
                 rate_limit_per_user: None,
+                default_auto_archive_duration: None,
                 status: None,
             },
         );
@@ -5437,6 +5542,7 @@ mod tests {
                 bitrate: Some(64_000),
                 user_limit: Some(5),
                 rate_limit_per_user: None,
+                default_auto_archive_duration: None,
                 status: Some("offen".to_string()),
             },
         );
@@ -5543,6 +5649,7 @@ mod tests {
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         }
     }
@@ -5713,7 +5820,7 @@ mod tests {
     }
 
     #[test]
-    fn serverguide_builder_baut_sollconfig_mit_dokumentiertem_chat_action_type() {
+    fn serverguide_builder_baut_sollconfig_mit_dokumentiertem_action_type() {
         let model = serverguide_model();
         let built = build_server_guide_config(&live_serverguide_config_with_action_type(0), &model);
         let config = built.config.expect("serverguide config");
@@ -5741,6 +5848,11 @@ mod tests {
         );
         assert_eq!(config.new_member_actions[1].channel_id, "6007");
         assert_eq!(config.new_member_actions[2].title, "Such dir Mitspieler");
+        assert_eq!(config.new_member_actions[2].channel_id, "6003");
+        assert_eq!(
+            config.new_member_actions[2].action_type,
+            SERVER_GUIDE_ACTION_TYPE_VIEW
+        );
         assert_eq!(config.resource_channels[0].title, "Regelwerk");
         assert_eq!(
             config.resource_channels[0].channel_id,
@@ -5783,8 +5895,13 @@ mod tests {
         );
         assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
 
-        // mitspieler-suche (6003) ist eine CHAT-Action: read-only MUSS blocken.
-        let mut read_only = serverguide_model();
+        // mitspieler-suche (6003) ist eine VIEW-Action: Forum mit Post-Deny darf NICHT blocken.
+        let mut lfg_forum_read_only = serverguide_model();
+        lfg_forum_read_only
+            .channels
+            .get_mut(&6003)
+            .expect("lfg channel")
+            .kind = ChannelKind::Forum;
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
@@ -5795,11 +5912,38 @@ mod tests {
             allow_bits: Permissions::VIEW_CHANNEL.bits(),
             deny_bits: Permissions::SEND_MESSAGES.bits(),
         };
-        read_only
+        lfg_forum_read_only
             .overwrites
             .insert(overwrite.key.clone(), overwrite);
-        let blocked =
-            build_server_guide_config(&live_serverguide_config_with_action_type(0), &read_only);
+        let lfg_view_ok = build_server_guide_config(
+            &live_serverguide_config_with_action_type(0),
+            &lfg_forum_read_only,
+        );
+        assert!(
+            lfg_view_ok.config.is_some(),
+            "blockers: {:?}",
+            lfg_view_ok.blockers
+        );
+
+        // Eine CHAT-Action auf einem read-only-Kanal blockt weiter.
+        let mut read_only_chat = serverguide_model();
+        let overwrite = PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: 6002,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            },
+            allow_bits: Permissions::VIEW_CHANNEL.bits(),
+            deny_bits: Permissions::SEND_MESSAGES.bits(),
+        };
+        read_only_chat
+            .overwrites
+            .insert(overwrite.key.clone(), overwrite);
+        let blocked = build_server_guide_config(
+            &live_serverguide_config_with_action_type(0),
+            &read_only_chat,
+        );
         assert!(blocked.config.is_none());
         assert!(blocked
             .blockers
@@ -6737,6 +6881,67 @@ mod tests {
                 .router_apply_calls
                 .lock()
                 .expect("router apply calls")
+                .as_slice(),
+            &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_panel_apply_http_ist_dry_run_default_und_liefert_shell_payload() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let dry_run = app
+            .clone()
+            .oneshot(request_raw(
+                "/serversync/lfg-panel-apply",
+                Some("secret"),
+                "",
+            ))
+            .await
+            .expect("lfg dry-run response");
+        let (status, body) = response_json(dry_run).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["action"], "planned_edit");
+        assert_eq!(
+            body["result"]["payload"]["flags"],
+            dl_voice::lfg_panel::LFG_COMPONENTS_V2_FLAG
+        );
+        assert_eq!(
+            body["result"]["payload"]["allowed_mentions"]["parse"]
+                .as_array()
+                .expect("parse")
+                .len(),
+            0
+        );
+        assert_eq!(
+            body["result"]["payload"]["components"][0]["components"][1]["content"],
+            dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT
+        );
+        assert_eq!(
+            body["result"]["payload"]["components"][0]["components"][2]["components"][0]
+                ["custom_id"],
+            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
+        );
+
+        let confirmed = app
+            .oneshot(request(
+                "/serversync/lfg-panel-apply",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("lfg confirm response");
+        let (status, body) = response_json(confirmed).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], false);
+        assert_eq!(body["result"]["action"], "edited");
+        assert_eq!(
+            service
+                .lfg_panel_apply_calls
+                .lock()
+                .expect("lfg panel apply calls")
                 .as_slice(),
             &[false, true]
         );

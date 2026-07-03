@@ -13,6 +13,7 @@ pub mod adaptive;
 mod db;
 pub mod feedback;
 pub mod glue;
+pub mod lfg_panel;
 pub mod nudge;
 pub mod rank;
 pub mod rename_queue;

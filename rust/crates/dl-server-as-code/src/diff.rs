@@ -340,6 +340,12 @@ fn channel_fields(desired: &ChannelSpec, actual: &ChannelSpec) -> Vec<FieldDiff>
         desired.rate_limit_per_user,
         actual.rate_limit_per_user,
     );
+    push_diff(
+        &mut fields,
+        "default_auto_archive_duration",
+        desired.default_auto_archive_duration,
+        actual.default_auto_archive_duration,
+    );
     push_diff(&mut fields, "status", &desired.status, &actual.status);
     fields
 }
@@ -938,6 +944,7 @@ mod tests {
                 bitrate: None,
                 user_limit: None,
                 rate_limit_per_user: None,
+                default_auto_archive_duration: None,
                 status: None,
             },
         );

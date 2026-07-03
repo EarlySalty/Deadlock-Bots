@@ -39,6 +39,8 @@ const CATEGORY_NEUE_SPIELER: &str = "Neue Spieler";
 const CATEGORY_SUPPORT: &str = "🎟️ ─ SUPPORT ─";
 const CATEGORY_ARCHIV: &str = "📦 ─ ARCHIV ─";
 const CHANNEL_KREATIV_ECKE: &str = "kreativ-ecke";
+const CHANNEL_LFG_FORUM: &str = "🎯mitspieler-suche";
+const CHANNEL_LFG_ARCHIVE: &str = "archiv-mitspieler-suche";
 const CHANNEL_WILLKOMMEN: &str = "willkommen";
 const CHANNEL_SCRIM_PLANUNG: &str = "scrim-planung";
 const TOPIC_WILLKOMMEN: &str =
@@ -46,6 +48,9 @@ const TOPIC_WILLKOMMEN: &str =
 const TOPIC_KREATIV_ECKE: &str =
     "Alles Selbstgemachte rund um Deadlock: Art, Edits, Mods, Movement-Clips.";
 const TOPIC_SCRIM_PLANUNG: &str = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread.";
+const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
+const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
+const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
 const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
@@ -184,9 +189,19 @@ pub struct DesiredDerivation {
     pub warnings: Vec<String>,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DesiredModelOptions {
     pub welle2b_archive_enabled: bool,
+    pub lfg_forum_cutover_enabled: bool,
+}
+
+impl Default for DesiredModelOptions {
+    fn default() -> Self {
+        Self {
+            welle2b_archive_enabled: false,
+            lfg_forum_cutover_enabled: env_flag_enabled(LFG_FORUM_CUTOVER_ENV),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -273,7 +288,7 @@ pub fn derive_desired_model_with_options(
     actual: &GuildModel,
     options: DesiredModelOptions,
 ) -> Result<DesiredDerivation> {
-    let mut ctx = RuleContext::new(actual);
+    let mut ctx = RuleContext::new(actual, options);
     let mut desired = actual.clone();
 
     apply_documented_renames(&mut desired)?;
@@ -282,6 +297,9 @@ pub fn derive_desired_model_with_options(
     apply_welle2b_roles(&mut desired);
     ensure_welle3_static_channels(&mut desired, &mut ctx);
     apply_documented_structure_moves(&mut desired, &mut ctx);
+    if options.lfg_forum_cutover_enabled {
+        apply_welle34b_lfg_structure_delta(&mut desired, &mut ctx);
+    }
 
     for category_name in EXPECTED_CATEGORIES {
         if ctx.category_id(category_name).is_none() {
@@ -374,6 +392,7 @@ pub fn derive_desired_model_with_options(
 
 struct RuleContext<'a> {
     actual: &'a GuildModel,
+    lfg_forum_cutover_enabled: bool,
     category_ids: BTreeMap<String, DiscordId>,
     role_ids: BTreeMap<String, DiscordId>,
     role_prefix_ids: Vec<(String, DiscordId)>,
@@ -382,7 +401,7 @@ struct RuleContext<'a> {
 }
 
 impl<'a> RuleContext<'a> {
-    fn new(actual: &'a GuildModel) -> Self {
+    fn new(actual: &'a GuildModel, options: DesiredModelOptions) -> Self {
         let mut category_ids = BTreeMap::new();
         let mut role_ids = BTreeMap::new();
         let mut role_prefix_ids = Vec::new();
@@ -420,6 +439,7 @@ impl<'a> RuleContext<'a> {
 
         Self {
             actual,
+            lfg_forum_cutover_enabled: options.lfg_forum_cutover_enabled,
             category_ids,
             role_ids,
             role_prefix_ids,
@@ -676,6 +696,7 @@ fn ensure_text_channel(
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         },
     );
@@ -913,8 +934,21 @@ fn apply_community(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category
 fn apply_deadlock(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category_id: DiscordId) {
     apply_public_channel(desired, ctx, category_id);
     for channel_id in child_channel_ids(desired, category_id) {
-        apply_public_channel(desired, ctx, channel_id);
+        if ctx.lfg_forum_cutover_enabled && is_lfg_forum_channel(desired, channel_id) {
+            apply_lfg_forum_channel(desired, ctx, channel_id);
+        } else {
+            apply_public_channel(desired, ctx, channel_id);
+        }
     }
+}
+
+fn env_flag_enabled(name: &str) -> bool {
+    std::env::var(name).is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        )
+    })
 }
 
 fn apply_public_channel(
@@ -1258,6 +1292,167 @@ fn apply_welle3_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'_
     }
 }
 
+fn apply_welle34b_lfg_structure_delta(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let Some(deadlock_category_id) = ctx.category_id(CATEGORY_DEADLOCK) else {
+        ctx.warn_once(
+            "missing_lfg_forum_parent",
+            CATEGORY_DEADLOCK,
+            format!("Ziel-Kategorie `{CATEGORY_DEADLOCK}` fuer `{CHANNEL_LFG_FORUM}` wurde im Ist-Modell nicht gefunden"),
+        );
+        return;
+    };
+
+    archive_legacy_lfg_text_channels(desired, ctx);
+    ensure_lfg_forum_channel(desired, deadlock_category_id);
+}
+
+fn archive_legacy_lfg_text_channels(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let channel_ids = ctx
+        .actual
+        .channels
+        .values()
+        .filter(|channel| {
+            channel.kind != ChannelKind::Forum
+                && channel_matches(&channel.name, LFG_CHANNEL_ALIASES)
+        })
+        .map(|channel| channel.channel_id)
+        .collect::<Vec<_>>();
+    if channel_ids.is_empty() {
+        return;
+    }
+
+    let archive_category_id = ensure_archive_category(desired, ctx);
+    set_exact_overwrites_without_retained(
+        desired,
+        archive_category_id,
+        vec![everyone_overwrite(
+            desired.guild_id,
+            archive_category_id,
+            f_everyone_hidden_profile(),
+        )],
+    );
+
+    for channel_id in channel_ids {
+        if let Some(channel) = desired.channels.get_mut(&channel_id) {
+            channel.name = CHANNEL_LFG_ARCHIVE.to_string();
+            channel.parent_category_id = Some(archive_category_id);
+            channel.default_auto_archive_duration = None;
+        }
+        set_exact_overwrites_without_retained(
+            desired,
+            channel_id,
+            vec![everyone_overwrite(
+                desired.guild_id,
+                channel_id,
+                f_everyone_hidden_profile(),
+            )],
+        );
+    }
+}
+
+fn ensure_lfg_forum_channel(
+    desired: &mut GuildModel,
+    deadlock_category_id: DiscordId,
+) -> DiscordId {
+    if let Some(channel) = desired.channels.values_mut().find(|channel| {
+        channel.kind == ChannelKind::Forum && channel_matches(&channel.name, LFG_CHANNEL_ALIASES)
+    }) {
+        channel.name = CHANNEL_LFG_FORUM.to_string();
+        channel.parent_category_id = Some(deadlock_category_id);
+        channel.topic = None;
+        channel.default_auto_archive_duration = Some(LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION);
+        return channel.channel_id;
+    }
+
+    let channel_id = next_synthetic_discord_id(desired);
+    let position = desired
+        .channels
+        .values()
+        .filter(|channel| channel.parent_category_id == Some(deadlock_category_id))
+        .map(|channel| channel.position)
+        .max()
+        .unwrap_or(0)
+        + 1;
+    desired.channels.insert(
+        channel_id,
+        crate::model::ChannelSpec {
+            guild_id: desired.guild_id,
+            channel_id,
+            name: CHANNEL_LFG_FORUM.to_string(),
+            kind: ChannelKind::Forum,
+            topic: None,
+            position,
+            parent_category_id: Some(deadlock_category_id),
+            nsfw: false,
+            bitrate: None,
+            user_limit: None,
+            rate_limit_per_user: None,
+            default_auto_archive_duration: Some(LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION),
+            status: None,
+        },
+    );
+    channel_id
+}
+
+fn is_lfg_forum_channel(model: &GuildModel, channel_id: DiscordId) -> bool {
+    model.channels.get(&channel_id).is_some_and(|channel| {
+        channel.kind == ChannelKind::Forum && channel_matches(&channel.name, LFG_CHANNEL_ALIASES)
+    })
+}
+
+fn apply_lfg_forum_channel(
+    desired: &mut GuildModel,
+    ctx: &mut RuleContext<'_>,
+    channel_id: DiscordId,
+) {
+    let forum_manage_profile = allow(
+        Permissions::VIEW_CHANNEL
+            | Permissions::READ_MESSAGE_HISTORY
+            | Permissions::SEND_MESSAGES
+            | Permissions::CREATE_PUBLIC_THREADS
+            | Permissions::CREATE_PRIVATE_THREADS
+            | Permissions::SEND_MESSAGES_IN_THREADS
+            | Permissions::MANAGE_THREADS
+            | Permissions::MANAGE_MESSAGES
+            | Permissions::EMBED_LINKS
+            | Permissions::ATTACH_FILES,
+    );
+    let mut overwrites = vec![everyone_overwrite(
+        desired.guild_id,
+        channel_id,
+        PermissionOverwriteProfile::new(
+            Permissions::SEND_MESSAGES_IN_THREADS,
+            Permissions::SEND_MESSAGES
+                | Permissions::CREATE_PUBLIC_THREADS
+                | Permissions::CREATE_PRIVATE_THREADS,
+        ),
+    )];
+    push_role_overwrite(
+        &mut overwrites,
+        desired.guild_id,
+        channel_id,
+        ctx,
+        ROLE_TICKET_TOOL,
+        forum_manage_profile,
+    );
+    for role_name in [
+        ROLE_COMMUNITY_MODERATOR,
+        ROLE_TURNIER_MODERATION,
+        ROLE_COACH,
+        ROLE_VC_MOVE_RECHTE,
+    ] {
+        push_role_overwrite_if_present(
+            &mut overwrites,
+            desired.guild_id,
+            channel_id,
+            ctx,
+            role_name,
+            forum_manage_profile,
+        );
+    }
+    set_exact_overwrites(desired, ctx, channel_id, overwrites);
+}
+
 fn ensure_archive_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> DiscordId {
     if let Some(category_id) = desired
         .categories
@@ -1392,6 +1587,7 @@ fn ensure_kreativ_ecke(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         },
     );
@@ -2043,6 +2239,19 @@ fn push_role_overwrite(
     }
 }
 
+fn push_role_overwrite_if_present(
+    overwrites: &mut Vec<PermissionOverwriteSpec>,
+    guild_id: DiscordId,
+    channel_id: DiscordId,
+    ctx: &RuleContext<'_>,
+    role_name: &str,
+    profile: PermissionOverwriteProfile,
+) {
+    if let Some(role_id) = ctx.role_ids.get(role_name).copied() {
+        overwrites.push(role_overwrite(guild_id, channel_id, role_id, profile));
+    }
+}
+
 fn channel_matches(name: &str, candidates: &[&str]) -> bool {
     let name = matching_key(name);
     candidates
@@ -2181,6 +2390,8 @@ mod tests {
     const OLD_ARCHIVE_ROLE: u64 = 304;
     const FUNNY_CUSTOM_PING_ROLE: u64 = 305;
     const GRIND_CUSTOM_PING_ROLE: u64 = 306;
+    const COMMUNITY_MOD_ROLE: u64 = 307;
+    const BOT_ROLE: u64 = 308;
 
     fn category(id: u64, name: &str) -> CategorySpec {
         CategorySpec {
@@ -2204,6 +2415,7 @@ mod tests {
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         }
     }
@@ -2264,6 +2476,16 @@ mod tests {
             },
             allow_bits,
             deny_bits,
+        }
+    }
+
+    fn desired_options(
+        welle2b_archive_enabled: bool,
+        lfg_forum_cutover_enabled: bool,
+    ) -> DesiredModelOptions {
+        DesiredModelOptions {
+            welle2b_archive_enabled,
+            lfg_forum_cutover_enabled,
         }
     }
 
@@ -2398,6 +2620,7 @@ mod tests {
             &actual,
             DesiredModelOptions {
                 welle2b_archive_enabled: false,
+                lfg_forum_cutover_enabled: false,
             },
         )?;
 
@@ -2449,6 +2672,7 @@ mod tests {
             &actual,
             DesiredModelOptions {
                 welle2b_archive_enabled: true,
+                lfg_forum_cutover_enabled: false,
             },
         )?;
 
@@ -2468,6 +2692,7 @@ mod tests {
             &actual,
             DesiredModelOptions {
                 welle2b_archive_enabled: true,
+                lfg_forum_cutover_enabled: false,
             },
         )?;
         let archive_id = derived
@@ -2585,6 +2810,7 @@ mod tests {
             &actual,
             DesiredModelOptions {
                 welle2b_archive_enabled: true,
+                lfg_forum_cutover_enabled: false,
             },
         )?;
         let archive_id = derived
@@ -2645,6 +2871,7 @@ mod tests {
             &actual,
             DesiredModelOptions {
                 welle2b_archive_enabled: true,
+                lfg_forum_cutover_enabled: false,
             },
         )?;
 
@@ -3160,7 +3387,7 @@ mod tests {
             channel(RANK_UPS, "rank-ups", Some(DEADLOCK_CATEGORY)),
         );
 
-        let derived = derive_desired_model(&actual)?;
+        let derived = derive_desired_model_with_options(&actual, desired_options(false, true))?;
 
         let rang = derived.desired.channels.get(&RANG_AUSWAHL).expect("rang");
         assert_eq!(rang.name, "🔗deadlock-rang");
@@ -3205,14 +3432,37 @@ mod tests {
             invite_overwrites.is_empty(),
             "P0 deadlock-invite darf keine @everyone-Allows materialisieren"
         );
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == CATEGORY_ARCHIV)
+            .expect("archive category")
+            .category_id;
         assert_eq!(
             derived
                 .desired
                 .channels
                 .get(&MITSPIELER_SUCHE)
-                .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
-            Some(("🎯mitspieler-suche", Some(DEADLOCK_CATEGORY)))
+                .map(|channel| (
+                    channel.name.as_str(),
+                    channel.kind.clone(),
+                    channel.parent_category_id
+                )),
+            Some((
+                "archiv-mitspieler-suche",
+                ChannelKind::Text,
+                Some(archive_id)
+            ))
         );
+        let lfg_forum = derived
+            .desired
+            .channels
+            .values()
+            .find(|channel| channel.name == "🎯mitspieler-suche")
+            .expect("lfg forum");
+        assert_eq!(lfg_forum.kind, ChannelKind::Forum);
+        assert_eq!(lfg_forum.parent_category_id, Some(DEADLOCK_CATEGORY));
         assert_eq!(
             derived
                 .desired
@@ -3324,6 +3574,294 @@ mod tests {
             Some(DEADLOCK_ROUTER_CATEGORY),
             "Router-Verwaltungskanal bleibt aktiv"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn welle34b_lfg_cutover_aus_laesst_textkanal_ohne_lfg_delta() -> anyhow::Result<()> {
+        let mut actual = documented_categories_model();
+        actual.channels.insert(
+            MITSPIELER_SUCHE,
+            channel(
+                MITSPIELER_SUCHE,
+                "🎯mitspieler-suche",
+                Some(DEADLOCK_CATEGORY),
+            ),
+        );
+
+        let derived = derive_desired_model_with_options(&actual, desired_options(false, false))?;
+
+        let lfg = derived
+            .desired
+            .channels
+            .get(&MITSPIELER_SUCHE)
+            .expect("lfg text channel");
+        assert_eq!(lfg.kind, ChannelKind::Text);
+        assert_eq!(lfg.name, "🎯mitspieler-suche");
+        assert_eq!(lfg.parent_category_id, Some(DEADLOCK_CATEGORY));
+        assert!(derived
+            .desired
+            .channels
+            .values()
+            .all(|channel| channel.name != CHANNEL_LFG_ARCHIVE));
+        assert!(!derived.desired.channels.values().any(|channel| {
+            channel.kind == ChannelKind::Forum && channel.name == CHANNEL_LFG_FORUM
+        }));
+
+        let diff = diff_models(
+            &derived.desired,
+            &actual,
+            &derived.dynamic_namespaces,
+            &derived.exceptions,
+        )?;
+        assert!(
+            !diff.changes.iter().any(|change| {
+                change.object.kind == ObjectKind::Channel
+                    && (change.object.object_id == MITSPIELER_SUCHE
+                        || change
+                            .desired
+                            .as_ref()
+                            .and_then(|desired| desired.get("name"))
+                            == Some(&serde_json::json!(CHANNEL_LFG_FORUM))
+                        || change
+                            .desired
+                            .as_ref()
+                            .and_then(|desired| desired.get("name"))
+                            == Some(&serde_json::json!(CHANNEL_LFG_ARCHIVE)))
+            }),
+            "Cutover aus darf kein LFG-Strukturdelta erzeugen: {:#?}",
+            diff.changes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn welle34b_lfg_forum_wird_neu_angelegt_und_altkanal_archiviert() -> anyhow::Result<()> {
+        let mut actual = documented_categories_model();
+        actual.roles.insert(
+            COMMUNITY_MOD_ROLE,
+            role(COMMUNITY_MOD_ROLE, ROLE_COMMUNITY_MODERATOR, 0),
+        );
+        actual
+            .roles
+            .insert(BOT_ROLE, role(BOT_ROLE, ROLE_TICKET_TOOL, 0));
+        actual.channels.insert(
+            MITSPIELER_SUCHE,
+            channel(MITSPIELER_SUCHE, "spieler-suche", Some(DEADLOCK_CATEGORY)),
+        );
+
+        let derived = derive_desired_model_with_options(&actual, desired_options(false, true))?;
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == CATEGORY_ARCHIV)
+            .expect("archive category")
+            .category_id;
+        let lfg_forum = derived
+            .desired
+            .channels
+            .values()
+            .find(|channel| channel.name == "🎯mitspieler-suche")
+            .expect("lfg forum");
+
+        assert_ne!(
+            lfg_forum.channel_id, MITSPIELER_SUCHE,
+            "das neue Forum darf nicht die ID des alten Textkanals wiederverwenden"
+        );
+        assert_eq!(lfg_forum.kind, ChannelKind::Forum);
+        assert_eq!(lfg_forum.parent_category_id, Some(DEADLOCK_CATEGORY));
+        assert_eq!(lfg_forum.default_auto_archive_duration, Some(1440));
+
+        let old = derived
+            .desired
+            .channels
+            .get(&MITSPIELER_SUCHE)
+            .expect("old lfg text channel");
+        assert_eq!(old.kind, ChannelKind::Text);
+        assert_eq!(old.name, "archiv-mitspieler-suche");
+        assert_eq!(old.parent_category_id, Some(archive_id));
+        let archive_overwrite = derived
+            .desired
+            .overwrites
+            .get(&OverwriteKey {
+                channel_id: MITSPIELER_SUCHE,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            })
+            .expect("old lfg archive deny");
+        assert_eq!(archive_overwrite.allow_bits, 0);
+        assert_eq!(
+            archive_overwrite.deny_bits,
+            Permissions::VIEW_CHANNEL.bits()
+        );
+
+        let diff = diff_models(
+            &derived.desired,
+            &actual,
+            &derived.dynamic_namespaces,
+            &derived.exceptions,
+        )?;
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Create
+                && change.object.kind == ObjectKind::Channel
+                && change
+                    .desired
+                    .as_ref()
+                    .and_then(|desired| desired.get("kind"))
+                    == Some(&serde_json::json!("forum"))
+        }));
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Update
+                && change.object.kind == ObjectKind::Channel
+                && change.object.object_id == MITSPIELER_SUCHE
+                && change
+                    .fields
+                    .iter()
+                    .any(|field| field.field == "parent_category_id")
+        }));
+        assert!(
+            !diff.changes.iter().any(|change| {
+                change.action == crate::diff::DiffAction::Update
+                    && change.object.kind == ObjectKind::Channel
+                    && change.object.object_id == MITSPIELER_SUCHE
+                    && change.fields.iter().any(|field| field.field == "kind")
+            }),
+            "der alte Textkanal darf niemals als Text->Forum-Typupdate geplant werden: {:#?}",
+            diff.changes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn welle34b_lfg_cutover_mit_exakter_namenskollision_erstellt_forum_und_archiviert_text(
+    ) -> anyhow::Result<()> {
+        let mut actual = documented_categories_model();
+        actual.channels.insert(
+            MITSPIELER_SUCHE,
+            channel(
+                MITSPIELER_SUCHE,
+                "🎯mitspieler-suche",
+                Some(DEADLOCK_CATEGORY),
+            ),
+        );
+
+        let derived = derive_desired_model_with_options(&actual, desired_options(false, true))?;
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == CATEGORY_ARCHIV)
+            .expect("archive category")
+            .category_id;
+        let old = derived
+            .desired
+            .channels
+            .get(&MITSPIELER_SUCHE)
+            .expect("old lfg text channel");
+        assert_eq!(old.kind, ChannelKind::Text);
+        assert_eq!(old.name, CHANNEL_LFG_ARCHIVE);
+        assert_eq!(old.parent_category_id, Some(archive_id));
+        let lfg_forum = derived
+            .desired
+            .channels
+            .values()
+            .find(|channel| channel.name == CHANNEL_LFG_FORUM && channel.kind == ChannelKind::Forum)
+            .expect("lfg forum");
+        assert_ne!(lfg_forum.channel_id, MITSPIELER_SUCHE);
+
+        let diff = diff_models(
+            &derived.desired,
+            &actual,
+            &derived.dynamic_namespaces,
+            &derived.exceptions,
+        )?;
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Create
+                && change.object.kind == ObjectKind::Channel
+                && change
+                    .desired
+                    .as_ref()
+                    .and_then(|desired| desired.get("kind"))
+                    == Some(&serde_json::json!("forum"))
+        }));
+        assert!(diff.changes.iter().any(|change| {
+            change.action == crate::diff::DiffAction::Update
+                && change.object.kind == ObjectKind::Channel
+                && change.object.object_id == MITSPIELER_SUCHE
+                && change.fields.iter().any(|field| field.field == "name")
+        }));
+        assert!(
+            !diff.changes.iter().any(|change| {
+                change.action == crate::diff::DiffAction::Update
+                    && change.object.kind == ObjectKind::Channel
+                    && change.object.object_id == MITSPIELER_SUCHE
+                    && change.fields.iter().any(|field| field.field == "kind")
+            }),
+            "exakte Namenskollision darf kein Text->Forum-Typupdate planen: {:#?}",
+            diff.changes
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn welle34b_lfg_forum_rechte_blocken_freie_posts_aber_erlauben_antworten() -> anyhow::Result<()>
+    {
+        let mut actual = documented_categories_model();
+        actual.roles.insert(
+            COMMUNITY_MOD_ROLE,
+            role(COMMUNITY_MOD_ROLE, ROLE_COMMUNITY_MODERATOR, 0),
+        );
+        actual
+            .roles
+            .insert(BOT_ROLE, role(BOT_ROLE, ROLE_TICKET_TOOL, 0));
+        actual.channels.insert(
+            MITSPIELER_SUCHE,
+            channel(MITSPIELER_SUCHE, "spieler-suche", Some(DEADLOCK_CATEGORY)),
+        );
+
+        let derived = derive_desired_model_with_options(&actual, desired_options(false, true))?;
+        let lfg_forum = derived
+            .desired
+            .channels
+            .values()
+            .find(|channel| channel.name == "🎯mitspieler-suche")
+            .expect("lfg forum");
+        let everyone = derived
+            .desired
+            .overwrites
+            .get(&OverwriteKey {
+                channel_id: lfg_forum.channel_id,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            })
+            .expect("@everyone overwrite");
+        let everyone_allow = Permissions::from_bits_truncate(everyone.allow_bits);
+        let everyone_deny = Permissions::from_bits_truncate(everyone.deny_bits);
+        assert!(everyone_allow.contains(Permissions::SEND_MESSAGES_IN_THREADS));
+        assert!(everyone_deny.contains(Permissions::SEND_MESSAGES));
+        assert!(everyone_deny.contains(Permissions::CREATE_PUBLIC_THREADS));
+        assert!(everyone_deny.contains(Permissions::CREATE_PRIVATE_THREADS));
+        assert!(!everyone_deny.contains(Permissions::SEND_MESSAGES_IN_THREADS));
+
+        for (role_id, role_name) in [
+            (COMMUNITY_MOD_ROLE, ROLE_COMMUNITY_MODERATOR),
+            (BOT_ROLE, ROLE_TICKET_TOOL),
+        ] {
+            let overwrite = derived
+                .desired
+                .overwrites
+                .get(&OverwriteKey {
+                    channel_id: lfg_forum.channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: role_id,
+                })
+                .unwrap_or_else(|| panic!("{role_name} overwrite"));
+            let allow = Permissions::from_bits_truncate(overwrite.allow_bits);
+            assert!(allow.contains(Permissions::SEND_MESSAGES));
+            assert!(allow.contains(Permissions::CREATE_PUBLIC_THREADS));
+            assert!(allow.contains(Permissions::MANAGE_THREADS));
+        }
         Ok(())
     }
 

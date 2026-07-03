@@ -64,6 +64,10 @@ pub async fn fetch_live_guild_model(http: &Http, guild_id: u64) -> Result<GuildM
                         .user_limit
                         .and_then(|value| i32::try_from(value).ok()),
                     rate_limit_per_user: channel.rate_limit_per_user.map(i32::from),
+                    default_auto_archive_duration: channel
+                        .default_auto_archive_duration
+                        .map(u16::from)
+                        .map(i32::from),
                     status: channel.status.clone(),
                 },
             );

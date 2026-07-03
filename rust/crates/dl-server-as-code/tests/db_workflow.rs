@@ -40,6 +40,7 @@ fn model(role_bits: u64) -> GuildModel {
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: Some(0),
+            default_auto_archive_duration: None,
             status: None,
         },
     );
@@ -194,6 +195,7 @@ async fn desired_bulk_persist_ist_idempotent_und_schreibt_registries() -> anyhow
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         },
     );

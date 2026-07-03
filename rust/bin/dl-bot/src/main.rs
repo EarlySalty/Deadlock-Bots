@@ -13,7 +13,7 @@ mod modglue;
 mod onboardglue;
 mod serversync;
 
-use std::sync::Arc;
+use std::{num::NonZeroU64, sync::Arc};
 
 use anyhow::Context;
 use dl_webcore::WebConfig;
@@ -58,6 +58,40 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
     env(name)
         .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(default)
+}
+
+fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
+    const NAME: &str = "DL_LFG_PANEL_CHANNEL_ID";
+    match std::env::var(NAME) {
+        Ok(raw) => lfg_panel_channel_id_from_value(Some(raw.as_str())),
+        Err(std::env::VarError::NotPresent) => lfg_panel_channel_id_from_value(None),
+        Err(err) => (
+            None,
+            Some(format!("{NAME} konnte nicht gelesen werden: {err}")),
+        ),
+    }
+}
+
+fn lfg_panel_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<String>) {
+    const NAME: &str = "DL_LFG_PANEL_CHANNEL_ID";
+    let Some(raw) = raw else {
+        return (None, Some(format!("{NAME} ist nicht gesetzt")));
+    };
+    let value = raw.trim();
+    if value.is_empty() {
+        return (None, Some(format!("{NAME} ist leer")));
+    }
+    match value.parse::<u64>() {
+        Ok(0) => (None, Some(format!("{NAME} darf nicht 0 sein"))),
+        Ok(id) => (
+            Some(NonZeroU64::new(id).expect("checked non-zero").get()),
+            None,
+        ),
+        Err(_) => (
+            None,
+            Some(format!("{NAME} ist keine gueltige positive Discord-ID")),
+        ),
+    }
 }
 
 fn env_i64_default(name: &str, default: i64) -> i64 {
@@ -437,10 +471,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Some(activity.clone()),
     );
     dl_voice::router::register(&mut router, lane_router.clone());
+    dl_voice::lfg_panel::register(&mut router);
     let router_interface =
-        dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue);
+        dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
     serversync_concrete
         .set_router_interface(router_interface.clone())
+        .await;
+    let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
+    if let Some(reason) = &lfg_panel_channel_reason {
+        tracing::warn!(%reason, "LFG-Panel deaktiviert: ungueltige Zielkanal-Konfiguration");
+    }
+    let lfg_panel_interface = dl_voice::lfg_panel::LfgPanelInterface::new_with_channel_config(
+        central_pool.clone(),
+        router_glue.clone(),
+        lfg_panel_channel_id,
+        lfg_panel_channel_reason,
+    );
+    serversync_concrete
+        .set_lfg_panel_interface(lfg_panel_interface.clone())
         .await;
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
@@ -1161,6 +1209,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let mut panel_cache_ready = dispatcher.subscribe_gateway();
         let tempvoice_interface_ready = tempvoice_interface.clone();
         let router_interface_ready = router_interface.clone();
+        let lfg_panel_interface_ready = lfg_panel_interface.clone();
         tokio::spawn(async move {
             wait_for_gateway_cache_ready(
                 &mut panel_cache_ready,
@@ -1170,6 +1219,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .await;
             tempvoice_interface_ready.refresh_all_interfaces().await;
             router_interface_ready.ensure_panel().await;
+            if lfg_panel_interface_ready.target_channel_id().is_some() {
+                lfg_panel_interface_ready.ensure_panel().await;
+            }
         });
         dl_bridges::steam::spawn_panel_restore(
             steam_client.clone(),
@@ -1223,7 +1275,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::moderation_enforce_from_lookup;
+    use super::{lfg_panel_channel_id_from_value, moderation_enforce_from_lookup};
     use std::collections::HashMap;
 
     fn lookup<'a>(vars: &'a HashMap<&'a str, &'a str>) -> impl Fn(&str) -> Option<String> + 'a {
@@ -1254,5 +1306,24 @@ mod tests {
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn lfg_panel_channel_id_parst_nur_positive_nonzero_ids() {
+        assert_eq!(
+            lfg_panel_channel_id_from_value(Some("12345")),
+            (Some(12345), None)
+        );
+
+        for raw in [None, Some(""), Some("0"), Some("abc")] {
+            let (channel_id, reason) = lfg_panel_channel_id_from_value(raw);
+            assert_eq!(channel_id, None);
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("DL_LFG_PANEL_CHANNEL_ID")),
+                "reason fehlt fuer {raw:?}: {reason:?}"
+            );
+        }
     }
 }

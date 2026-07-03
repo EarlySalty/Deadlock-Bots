@@ -1,3 +1,110 @@
+# W3.4b W1 Kritiker (2026-07-03)
+
+## Report
+Scope: uncommitted Diff im Worktree `Deadlock-Bots-w34-router`. Keine Source-Aenderungen ausser diesem Report, kein Commit/Push.
+
+### DEPLOY-BREAKER
+1. Befund #0, von Claude bestaetigt und im Diff verifiziert: Eine bereits live applizierte Migration wurde inline geaendert.
+   - Datei/Zeilen: `rust/crates/dl-central-db/migrations/2026070210_server_config_schema.sql:14-27`, `:104-119`; Runner `rust/bin/dl-central-migrate/src/main.rs:12`.
+   - Szenario: Prod hat `2026070210_server_config_schema.sql` bereits in `_sqlx_migrations`. Naechster Deploy startet `dl-central-migrate`, `sqlx::migrate!` vergleicht die Checksum und bricht mit sinngemaess "previously applied but has been modified" ab.
+   - Fix: Die beiden Inline-Spalten aus `2026070210` komplett zuruecknehmen. Die neue Migration `rust/crates/dl-central-db/migrations/2026070310_server_config_forum_metadata.sql:1-5` reicht, weil sie lexikografisch danach laeuft und `ADD COLUMN IF NOT EXISTS` nutzt.
+   - Zusatzcheck: Code/Tests haengen nicht sinnvoll von der Inline-Aenderung ab; die betroffenen Queries in `dl-server-as-code/src/db.rs` sind dynamische `sqlx::query`/`Row`-Zugriffe, und `SQLX_OFFLINE=true cargo build --workspace` ist gruen.
+
+### HIGH
+2. Fresh-Migrations-Contract ist rot.
+   - Datei/Zeilen: Erwartung ohne neue Spalten in `rust/crates/dl-central-db/tests/fresh_migrations_schema.rs:104-120` und `:205-220`; Assertion bei `:1107-1112`.
+   - Szenario: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture` baut eine frische DB mit der neuen Spalte, der Test erwartet aber die alte Spaltenliste und faellt auf `server_config.desired_channels columns` durch.
+   - Fix: `server_config_table_contracts()` fuer `desired_channels` und `live_snapshot_channels` um `default_auto_archive_duration` erweitern. Danach Fresh-Test erneut laufen lassen.
+
+3. ServerGuide wird nach dem LFG-Forum-Cutover blockiert.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/serversync.rs:2581-2584` resolved `mitspieler-suche`; `:2633-2636` baut daraus weiter eine `SERVER_GUIDE_ACTION_TYPE_CHAT`-Action; `:2711-2738` blockiert CHAT-Actions ohne @everyone `SEND_MESSAGES`; `:3309-3312` definiert die Pruefung.
+   - Gegenlaeufiger W3.4b-Zustand: Das LFG-Forum verweigert @everyone `SEND_MESSAGES` absichtlich in `rust/crates/dl-server-as-code/src/rules.rs:1396-1404`.
+   - Szenario: Nach ServerSync-Apply existiert `🎯mitspieler-suche` als Forum mit Deny fuer freie Posts. `serversync serverguide-preview` / HTTP `/serversync/serverguide-preview` resolved den Forum-Kanal und blockiert mit "Action `Such dir Mitspieler`: Kanal `<id>` ist nicht @everyone-sendbar".
+   - Fix: ServerGuide-Aktion fuer LFG auf `SERVER_GUIDE_ACTION_TYPE_VIEW` umstellen oder auf einen sendbaren Einstieg verweisen, der das Formular/Panel oeffnet. Einen Regressionstest mit Forum + LFG-Overwrite ergaenzen.
+
+### MEDIUM
+4. Runtime-Referenzen zeigen weiter auf die alte Textkanal-ID, die W3.4b archiviert/versteckt.
+   - Datei/Zeilen: Alter Textkanal wird umbenannt/versteckt in `rust/crates/dl-server-as-code/src/rules.rs:1285-1325`; neues Forum bekommt eine neue synthetische ID in `:1329-1369`. Statische Alt-ID bleibt in `rust/crates/dl-community/src/ai_onboarding.rs:35` und Quick-Action `:697-702`; alter LFG-Responder hoert weiter auf `rust/crates/dl-activity/src/lfg.rs:712-713` und wird in `rust/bin/dl-bot/src/main.rs:1097-1104` gestartet; `rust/crates/dl-community/src/onboarding_steps.json:33-34` nennt ebenfalls die alte ID.
+   - Szenario: Nach Apply fuehrt AI-Onboarding "Spieler-Suche" auf `1376335502919335936`, also den archivierten/hidden Textkanal, nicht auf das neue Forum. Der alte LFG-Responder verarbeitet nur Nachrichten im alten Kanal; Forum-Threads/Formular-Interaktionen erreichen ihn nicht.
+   - Fix: Alt-ID-Referenzen konfigurieren/auflosen statt hart codieren, nach Forum-Create die neue Forum-ID setzen, oder W1-Struktur hinter einem Cutover-Flag lassen, bis W2 den vollstaendigen LFG-Flow uebernimmt.
+
+5. W1 ist live nicht als alleiniger Cutover nutzbar: alter Schreibkanal weg, neuer Button nur Platzhalter.
+   - Datei/Zeilen: Altes LFG wird archiviert/versteckt `rules.rs:1285-1325`; Forum blockt freie Posts `rules.rs:1396-1404`; Button-Handler antwortet nur `Platzhalter` in `rust/crates/dl-voice/src/lfg_panel.rs:274-284`.
+   - Szenario: Owner applied W1 vor W2. Normale User koennen im Forum keinen Post erstellen, der Panel-Button erzeugt keinen LFG-Post, und der bisherige Textkanal ist nicht mehr sichtbar/sendbar. Ergebnis: LFG ist fuer User praktisch aus.
+   - Fix: Struktur-Delta erst mit funktionsfaehigem Formular/Post-Service aktivieren, oder altes Text-LFG sichtbar/sendbar lassen, bis der neue Flow produktionsbereit ist.
+
+6. LFG-Panel-KV-Idempotenz hat keinen Stale-Message-Recovery-Pfad.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:89-135` entscheidet nur anhand der KV-Message-ID zwischen Edit/Post; es gibt keinen History-Scan und keinen 404-Repost-Fallback. Der robustere Router-Pfad scannt/adoptiert History in `rust/crates/dl-voice/src/router.rs:443-558`.
+   - Szenario: KV enthaelt `components_v2_message_id`, die Discord-Message wurde manuell geloescht. Naechster Restart/Apply versucht nur `PATCH /messages/<alte_id>`, scheitert, und postet kein neues Panel. User sehen keinen LFG-Einstieg.
+   - Fix: Wie Router History scannen und vorhandenes V2-Panel adoptieren; bei edit-404 KV loeschen und nach erfolgreichem Scan neu posten.
+
+### LOW
+7. `DL_LFG_PANEL_CHANNEL_ID` validiert `0`/Muell nicht hart.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/main.rs:446-447`; Missing-Channel-Handling in `rust/crates/dl-voice/src/lfg_panel.rs:108-116`.
+   - Szenario: Unset oder nicht-numerisch wird still zu `None`; Dry-Run meldet `blocked_missing_channel`, Confirm liefert Fehler. `0` wird als Some(0) akzeptiert und fuehrt erst beim Discord-REST-Call zu einem Fehler auf `/channels/0/messages`.
+   - Fix: `NonZeroU64` parsen, ungueltige Werte warnen/blocken und in Dry-Run/Startup eindeutig ausgeben.
+
+### Geprueft und sauber befunden
+- Struktur-Delta: Code archiviert alte Nicht-Forum-Kanaele per Alias (`rules.rs:1285-1325`) und erstellt/findet das Forum separat (`rules.rs:1329-1369`). Durch `matching_key` (`rules.rs:2270-2275`) matched auch ein Live-Altkanal namens `🎯mitspieler-suche`; zweiter Apply ist logisch idempotent, weil `archiv-mitspieler-suche` nicht mehr als LFG-Alias matched und das existierende Forum gefunden wird. Der vorhandene Test deckt nur `spieler-suche`, nicht diese Kollisionsvariante.
+- Rechte: Desired-Modell enthaelt @everyone Deny fuer `SEND_MESSAGES`, `CREATE_PUBLIC_THREADS`, `CREATE_PRIVATE_THREADS` plus Allow fuer `SEND_MESSAGES_IN_THREADS` (`rules.rs:1396-1404`). Bot-/Teamrollen bekommen Send/Create/Manage-Threads (`rules.rs:1384-1428`). Apply remappt synthetische IDs und schreibt Overwrites generisch korrekt (`rust/crates/dl-server-as-code/src/apply.rs:526-600`).
+- DB-Persistenz: `dl-server-as-code/src/db.rs` liest/schreibt `default_auto_archive_duration` symmetrisch in Snapshot und Desired; die neue ALTER-Migration ist nullable/idempotent. SQLx-Offline-Cache musste dafuer nicht aktualisiert werden; Build ist gruen.
+- Panel-Wiring: `dl_voice::lfg_panel::register` ist in `main.rs:439-440` verdrahtet, ServerSync setzt das Interface `main.rs:448-455`, Startup applyt bei gesetztem Channel `main.rs:1175-1187`, HTTP `/serversync/lfg-panel-apply` nutzt dieselbe Auth wie die anderen Endpoints `serversync.rs:4915-4935`, und Multipart geht ueber reqwest `files[{id}]` in `dl-voice/src/glue.rs:234-267`.
+- Gruenwasch-Check: `welcome_publish.rs`, `db_workflow.rs` und `diff_engine.rs` wurden nur mechanisch um `default_auto_archive_duration: None` erweitert; keine erkennbare Fixture-Aenderung versteckt das LFG-Verhalten.
+
+### Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code welle34b_lfg -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot lfg_panel_apply_http_ist_dry_run_default_und_liefert_shell_payload -- --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serverguide_builder_blockt_nur_bei_nicht_sendbarem_chat -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `git diff --check`
+- Rot: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture` wegen fehlender neuer Spalte im Testvertrag.
+
+# W3.4b W1 Rework (2026-07-03)
+
+## Fix-Status
+- Fix 1 DEPLOY-BREAKER: `2026070210_server_config_schema.sql` per `git checkout --` auf HEAD zurueckgenommen; `2026070310_server_config_forum_metadata.sql` bleibt alleinige neue Spaltenquelle.
+- Fix 2 HIGH: Fresh-Migrations-Contract fuer `desired_channels` und `live_snapshot_channels` um `default_auto_archive_duration` in realer ALTER-Reihenfolge erweitert. Gezielter Fresh-Test danach gruen.
+- Fix 3 HIGH: ServerGuide-Aktion `Such dir Mitspieler` auf `SERVER_GUIDE_ACTION_TYPE_VIEW` umgestellt; Regressionstest mit Forum/@everyone-SEND_MESSAGES-Deny gruen.
+- Fix 4+5 MEDIUM: `DL_LFG_FORUM_CUTOVER` als Default-aus-Flag im Desired-Modell eingefuehrt. Cutover aus erzeugt kein LFG-Strukturdelta; Cutover an erzeugt Forum + Archiv, ohne `kind`-Update. Exakte Namenskollision `🎯mitspieler-suche` getestet.
+- Fix 6 MEDIUM: LFG-Panel-Publisher bekommt Router-artige Recovery: History-Scan, Adoption nur von Components-V2-Messages ohne Embeds mit `lfg:create:`-Custom-ID, KV-Edit-404 loescht stale Message-ID und repostet/adoptiert.
+- Fix 7 LOW: `DL_LFG_PANEL_CHANNEL_ID` wird als positive NonZero-ID geparst; unset/leer/0/ungueltig ergibt `None`, Startup-Warnung und `blocked_reason` im Dry-Run.
+
+## W2-Cutover-Checkliste
+- AI-Onboarding-Alt-ID `1376335502919335936` in `rust/crates/dl-community/src/ai_onboarding.rs` fuer W2 auf die neue LFG-Forum-/Panel-Ziel-ID repointen.
+- `rust/crates/dl-community/src/onboarding_steps.json` fuer W2 auf die neue LFG-Forum-/Panel-Ziel-ID repointen.
+- Alten LFG-Responder aus `rust/bin/dl-bot/src/main.rs` fuer W2 abschalten oder eindeutig auf den neuen Formular/Post-Service umhaengen.
+
+## Rework-Verifikation
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serverguide_builder_blockt_nur_bei_nicht_sendbarem_chat -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code welle34b_lfg -- --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot lfg_panel_apply_http_ist_dry_run_default_und_liefert_shell_payload -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot lfg_panel_channel_id_parst_nur_positive_nonzero_ids -- --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- Gruen: `cargo fmt --all -- --check`
+
+# W3.4b W1 Struktur-Delta + Panel-Shell (2026-07-03)
+
+## Ziel
+`🎯mitspieler-suche` wird als neues Forum im Desired-Modell angelegt; der alte Textkanal bleibt als archivierter History-Kanal erhalten. Freies Posten im Forum wird per Overwrite verhindert, Thread-Antworten bleiben erlaubt. LFG-Panel-Publisher wird als Shell analog Router verdrahtet. Kein Commit/Push.
+
+## Fortschritt
+- Pflichtkontext gelesen: W3.4b Phase 1 Zeilen 1-89 und Konzept C (`docs/onboarding-redesign/welle3-modernisierung-konzept.md:56-64`).
+- Befund: Existing Apply sendet Channel-`type` nur beim Create; Diff wuerde `kind` als Update-Feld erkennen. W1 braucht daher Tests fuer Create-Forum plus Archiv-Update statt Text->Forum-Update.
+- TDD gestartet: Red-Tests fuer Forum-Desired-Modell, Archivierung des Altkanals, LFG-Forum-Rechte und Guard gegen `kind`-Update werden ergaenzt.
+- Implementiert: `ChannelSpec.default_auto_archive_duration` inkl. Import/Diff/Apply/DB-Spalte; neues Forum `🎯mitspieler-suche` wird als Create modelliert, alter Textkanal wird zu `archiv-mitspieler-suche` ins Archiv verschoben.
+- Implementiert: LFG-Forum-Overwrites blocken fuer `@everyone` freie Posts/Public-/Private-Threads und erlauben Thread-Antworten; Bot-/Teamrollen erhalten Erstellen/Thread-Verwaltung.
+- Implementiert: LFG-Panel-Shell in `dl_voice::lfg_panel` mit Components-V2-Payload, Button `lfg:create:start`, Platzhalter-Antwort, KV-idempotentem ServerSync-Publisher und reqwest-Multipart-Glue ueber `files[{id}]`.
+- Verifikation gruen aus `rust/`: `SQLX_OFFLINE=true cargo build --workspace`; `SQLX_OFFLINE=true cargo test -p dl-server-as-code`; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`.
+- Hinweis: Im Worktree liegt `central_test_db.sh` unter `rust/scripts/`, nicht unter Root-`scripts/`; Cargo-Kommandos wurden aus `rust/` ausgefuehrt.
+
 # W3.4b Phase 1 - LFG v2 + Leaderboard (2026-07-03)
 
 ## Scope

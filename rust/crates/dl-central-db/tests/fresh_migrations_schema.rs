@@ -118,6 +118,7 @@ fn server_config_table_contracts() -> Vec<(&'static str, Vec<&'static str>)> {
                 "note",
                 "created_at",
                 "updated_at",
+                "default_auto_archive_duration",
             ],
         ),
         (
@@ -218,6 +219,7 @@ fn server_config_table_contracts() -> Vec<(&'static str, Vec<&'static str>)> {
                 "user_limit",
                 "rate_limit_per_user",
                 "status",
+                "default_auto_archive_duration",
             ],
         ),
         (

@@ -37,6 +37,7 @@ fn channel(id: u64, name: &str, parent: Option<u64>) -> ChannelSpec {
         bitrate: None,
         user_limit: None,
         rate_limit_per_user: None,
+        default_auto_archive_duration: None,
         status: None,
     }
 }

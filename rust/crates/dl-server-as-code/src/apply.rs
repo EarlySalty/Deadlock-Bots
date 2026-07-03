@@ -675,6 +675,10 @@ fn channel_payload(spec: &ChannelSpec, include_type: bool) -> Value {
         "rate_limit_per_user".to_string(),
         json!(spec.rate_limit_per_user),
     );
+    payload.insert(
+        "default_auto_archive_duration".to_string(),
+        json!(spec.default_auto_archive_duration),
+    );
     payload.insert("status".to_string(), json!(spec.status));
     if include_type {
         payload.insert("type".to_string(), json!(spec.kind.discord_type_code()));
@@ -920,6 +924,7 @@ mod tests {
             bitrate: None,
             user_limit: None,
             rate_limit_per_user: None,
+            default_auto_archive_duration: None,
             status: None,
         }
     }

@@ -198,6 +198,29 @@ fn router_panel_files(
         .collect()
 }
 
+fn lfg_panel_files(
+    attachments: &[crate::lfg_panel::LfgPanelAttachment],
+) -> Result<Vec<RouterPanelFile>, String> {
+    let repo_root = crate::lfg_panel::lfg_repo_root();
+    attachments
+        .iter()
+        .map(|attachment| {
+            let path = repo_root.join(&attachment.relative_path);
+            let bytes = std::fs::read(&path).map_err(|err| {
+                format!(
+                    "LFG-Banner `{}` konnte nicht gelesen werden: {err}",
+                    path.display()
+                )
+            })?;
+            Ok(RouterPanelFile {
+                id: attachment.id,
+                filename: attachment.filename.clone(),
+                bytes,
+            })
+        })
+        .collect()
+}
+
 #[derive(Debug, serde::Deserialize)]
 struct DiscordMessageWriteResponse {
     id: String,
@@ -1637,6 +1660,71 @@ impl crate::router::RouterInterfacePort for RouterGlue {
                     collect_component_custom_ids(&components, &mut custom_ids);
                 }
                 crate::router::RouterPanelMessage {
+                    message_id: message.id.get(),
+                    has_embeds: !message.embeds.is_empty(),
+                    has_components: !message.components.is_empty(),
+                    custom_ids,
+                }
+            })
+            .collect())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::lfg_panel::LfgPanelPort for RouterGlue {
+    async fn post_rich(
+        &self,
+        channel_id: u64,
+        body: Map<String, Value>,
+        attachments: &[crate::lfg_panel::LfgPanelAttachment],
+    ) -> Result<u64, String> {
+        let files = lfg_panel_files(attachments)?;
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let response = send_router_message_payload(&self.adapter, "POST", url, body, files).await?;
+        let message: DiscordMessageWriteResponse = router_discord_json_response(response, "POST")?;
+        parse_router_message_id(&message.id)
+    }
+
+    async fn edit_rich(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        body: Map<String, Value>,
+        attachments: &[crate::lfg_panel::LfgPanelAttachment],
+    ) -> Result<(), String> {
+        let files = lfg_panel_files(attachments)?;
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let response =
+            send_router_message_payload(&self.adapter, "PATCH", url, body, files).await?;
+        router_discord_success(response, "PATCH")
+    }
+
+    async fn recent_bot_messages(
+        &self,
+        channel_id: u64,
+        limit: u8,
+    ) -> Result<Vec<crate::lfg_panel::LfgPanelMessage>, String> {
+        let bot_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id;
+        let mut messages = ChannelId::new(channel_id)
+            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
+            .await
+            .map_err(|err| err.to_string())?;
+        messages.sort_by_key(|message| message.id.get());
+        Ok(messages
+            .into_iter()
+            .filter(|message| message.author.id == bot_id)
+            .map(|message| {
+                let mut custom_ids = Vec::new();
+                if let Ok(components) = serde_json::to_value(&message.components) {
+                    collect_component_custom_ids(&components, &mut custom_ids);
+                }
+                crate::lfg_panel::LfgPanelMessage {
                     message_id: message.id.get(),
                     has_embeds: !message.embeds.is_empty(),
                     has_components: !message.components.is_empty(),
