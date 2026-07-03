@@ -35,6 +35,8 @@ pub const RANG_GUIDE_COMPONENT_ID_EXTRAS_TEXT: u64 = 31_015;
 pub const RANG_GUIDE_COMPONENT_ID_EXTRAS_ACTION_ROW: u64 = 31_016;
 pub const RANG_GUIDE_COMPONENT_ID_FRIEND_CODE_BUTTON: u64 = 31_017;
 pub const RANG_GUIDE_COMPONENT_ID_RANKCHECK_BUTTON: u64 = 31_018;
+pub const RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER: u64 = 31_019;
+pub const RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER: u64 = 31_020;
 pub const RANG_GUIDE_MARKER_COMPONENT_IDS: &[u64] = &[
     RANG_GUIDE_COMPONENT_ID_HERO_CONTAINER,
     RANG_GUIDE_COMPONENT_ID_HERO_TEXT,
@@ -64,8 +66,8 @@ pub const RANG_GUIDE_STEP1_TITLE: &str = "1️⃣ Verifizierung starten";
 pub const RANG_GUIDE_STEP1_BODY: &str = "Drück auf **Steam verknüpfen** — es folgt ein kurzer Steam-Login (OpenID, kein Passwort nötig), danach gibst du deinen Steam-Freundescode ein.\n\n**Was wir NICHT machen:** keine Passwörter oder Zugangsdaten, keine Steam-Freundesliste auslesen, keine Spielstände oder Profile einsehen, keine Daten an Dritte, keine Werbung oder Tracking.\n**Was wir speichern:** Discord-ID, SteamID64 und Rang-Daten — nur für die Server-Zuordnung. Der Code ist offen: https://github.com/NaniDerEchte2/Deadlock-Bots";
 pub const RANG_GUIDE_STEP2_BODY: &str = "2️⃣ **Freundschaftsanfrage annehmen.** Wir schicken dir eine Anfrage in Steam — einfach annehmen, die Verifikation läuft dann automatisch. Alternativ schickst du selbst eine an den Freundescode **820142646**, wir nehmen automatisch an.\n⚠️ Bleib mit dem Bot befreundet — nur so können wir deinen Rang aktuell halten.";
 pub const RANG_GUIDE_STEP3_BODY: &str = "3️⃣ **Fertig — Rang-Rollen kommen von selbst.** Dein In-Game-Rang wird erkannt, als Rolle zugeordnet und ab da automatisch aktuell gehalten.";
-pub const RANG_GUIDE_STEP4_TITLE: &str = "4️⃣ Das offizielle Discord-Siegel: Steam Verifiziert✅";
-pub const RANG_GUIDE_STEP4_BODY: &str = "Hol dir zum Schluss die Rolle **Steam Verifiziert✅** — die vergibt **Discord selbst**, niemand kann sie von Hand verteilen. Klick auf **Discord-Verknüpfung herstellen**, kurzer Discord-Login, fertig.\nAlternativ geht's auch über den Servernamen oben links → **Verknüpfte Rollen**.";
+pub const RANG_GUIDE_STEP4_TITLE: &str = "4️⃣ Das offizielle Discord-Siegel: Steam Verifiziert";
+pub const RANG_GUIDE_STEP4_BODY: &str = "Hol dir zum Schluss die Rolle **Steam Verifiziert** — die vergibt **Discord selbst**, niemand kann sie von Hand verteilen. Klick auf **Discord-Verknüpfung herstellen**, kurzer Discord-Login, fertig.\nAlternativ geht's auch über den Servernamen oben links → **Verknüpfte Rollen**.";
 pub const RANG_GUIDE_EXTRAS_TITLE: &str = "Wenn's mal hakt";
 pub const RANG_GUIDE_EXTRAS_BODY: &str = "- Verknüpft, aber nichts passiert? Drück einmal auf **Rang prüfen** — der Abgleich läuft sonst automatisch alle paar Minuten.\n- Rolle da, aber es klappt trotzdem nicht? Prüf die Freundschaft mit dem Bot (Freundescode **820142646**) oder sag den Mods Bescheid.\n- Mit **Freundescode eingeben** kannst du deinen Steam-Freundescode jederzeit nachtragen oder korrigieren.";
 pub const RANG_GUIDE_STEAM_OPEN_BUTTON_LABEL: &str = "🔗 Steam verknüpfen";
@@ -262,7 +264,7 @@ pub fn build_rang_guide_publish_output(
             message_index,
             message_key: rang_guide_message_key(message_index),
             action: if dry_run {
-                planned_rang_guide_action(stored_message_id, false)
+                planned_rang_guide_action(stored_message_id, false, false)
             } else {
                 "pending".to_string()
             },
@@ -280,9 +282,11 @@ pub fn build_rang_guide_publish_output(
     let payload_hash = rang_guide_payload_hash(repo_root, &messages)?;
     let repost_required =
         !rang_guide_storage_matches(stored_payload_format, stored_message_ids, messages.len());
+    let hash_matches = stored_payload_hash == Some(payload_hash.as_str());
     if dry_run {
         for message in &mut messages {
-            message.action = planned_rang_guide_action(message.stored_message_id, repost_required);
+            message.action =
+                planned_rang_guide_action(message.stored_message_id, repost_required, hash_matches);
         }
     }
 
@@ -577,13 +581,19 @@ fn rang_guide_messages(
                 ),
             ],
         ),
-        text_display(
-            RANG_GUIDE_COMPONENT_ID_STEP2_TEXT,
-            config.texts.step2_body.clone(),
+        container(
+            RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER,
+            vec![text_display(
+                RANG_GUIDE_COMPONENT_ID_STEP2_TEXT,
+                config.texts.step2_body.clone(),
+            )],
         ),
-        text_display(
-            RANG_GUIDE_COMPONENT_ID_STEP3_TEXT,
-            config.texts.step3_body.clone(),
+        container(
+            RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER,
+            vec![text_display(
+                RANG_GUIDE_COMPONENT_ID_STEP3_TEXT,
+                config.texts.step3_body.clone(),
+            )],
         ),
         container(
             RANG_GUIDE_COMPONENT_ID_STEP4_CONTAINER,
@@ -706,9 +716,15 @@ fn rang_guide_banner(
     })
 }
 
-fn planned_rang_guide_action(stored_message_id: Option<u64>, repost_required: bool) -> String {
+fn planned_rang_guide_action(
+    stored_message_id: Option<u64>,
+    repost_required: bool,
+    hash_matches: bool,
+) -> String {
     if repost_required && stored_message_id.is_some() {
         "planned_repost".to_string()
+    } else if stored_message_id.is_some() && hash_matches {
+        "planned_no_op".to_string()
     } else if stored_message_id.is_some() {
         "planned_edit".to_string()
     } else {
@@ -1175,7 +1191,7 @@ step3_body = "{long_step3}"
         .expect("unchanged");
 
         assert!(!unchanged.repost_required);
-        assert_eq!(unchanged.messages[0].action, "planned_edit");
+        assert_eq!(unchanged.messages[0].action, "planned_no_op");
         assert!(rang_guide_payload_is_unchanged(&unchanged));
 
         let wrong_format =
