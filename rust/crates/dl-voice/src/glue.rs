@@ -5,7 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, GuildId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
+    ChannelId, CreateAttachment, GuildId, PermissionOverwrite, PermissionOverwriteType,
+    PremiumTier, RoleId, UserId,
 };
 use serenity::builder::GetMessages;
 
@@ -140,6 +141,46 @@ fn build_connect_batch_payload(
         }
     }
     Err("Channel nicht im Cache".to_string())
+}
+
+fn collect_component_custom_ids(value: &Value, custom_ids: &mut Vec<String>) {
+    match value {
+        Value::Object(map) => {
+            if let Some(custom_id) = map.get("custom_id").and_then(Value::as_str) {
+                custom_ids.push(custom_id.to_string());
+            }
+            if let Some(components) = map.get("components").and_then(Value::as_array) {
+                for component in components {
+                    collect_component_custom_ids(component, custom_ids);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                collect_component_custom_ids(item, custom_ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn router_panel_files(
+    attachments: &[crate::router::RouterPanelAttachment],
+) -> Result<Vec<CreateAttachment>, String> {
+    let repo_root = crate::router::router_repo_root();
+    attachments
+        .iter()
+        .map(|attachment| {
+            let path = repo_root.join(&attachment.relative_path);
+            let bytes = std::fs::read(&path).map_err(|err| {
+                format!(
+                    "Router-Banner `{}` konnte nicht gelesen werden: {err}",
+                    path.display()
+                )
+            })?;
+            Ok(CreateAttachment::bytes(bytes, attachment.filename.clone()))
+        })
+        .collect()
 }
 
 fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
@@ -1431,8 +1472,19 @@ impl crate::router::RouterPort for RouterGlue {
 
 #[async_trait::async_trait]
 impl crate::router::RouterInterfacePort for RouterGlue {
-    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String> {
-        self.adapter.send_raw_public(channel_id, &body).await
+    async fn post_rich(
+        &self,
+        channel_id: u64,
+        body: Map<String, Value>,
+        attachments: &[crate::router::RouterPanelAttachment],
+    ) -> Result<u64, String> {
+        let files = router_panel_files(attachments)?;
+        self.adapter
+            .http
+            .send_message(ChannelId::new(channel_id), files, &body)
+            .await
+            .map(|message| message.id.get())
+            .map_err(|err| err.to_string())
     }
 
     async fn edit_rich(
@@ -1440,17 +1492,36 @@ impl crate::router::RouterInterfacePort for RouterGlue {
         channel_id: u64,
         message_id: u64,
         body: Map<String, Value>,
+        attachments: &[crate::router::RouterPanelAttachment],
     ) -> Result<(), String> {
+        let files = router_panel_files(attachments)?;
         self.adapter
             .http
             .edit_message(
                 ChannelId::new(channel_id),
                 serenity::all::MessageId::new(message_id),
                 &body,
-                Vec::new(),
+                files,
             )
             .await
             .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn delete_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                serenity::all::MessageId::new(message_id),
+                Some(reason),
+            )
+            .await
             .map_err(|err| err.to_string())
     }
 
@@ -1474,10 +1545,17 @@ impl crate::router::RouterInterfacePort for RouterGlue {
         Ok(messages
             .into_iter()
             .filter(|message| message.author.id == bot_id)
-            .map(|message| crate::router::RouterPanelMessage {
-                message_id: message.id.get(),
-                has_embeds: !message.embeds.is_empty(),
-                has_components: !message.components.is_empty(),
+            .map(|message| {
+                let mut custom_ids = Vec::new();
+                if let Ok(components) = serde_json::to_value(&message.components) {
+                    collect_component_custom_ids(&components, &mut custom_ids);
+                }
+                crate::router::RouterPanelMessage {
+                    message_id: message.id.get(),
+                    has_embeds: !message.embeds.is_empty(),
+                    has_components: !message.components.is_empty(),
+                    custom_ids,
+                }
             })
             .collect())
     }

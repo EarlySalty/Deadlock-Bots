@@ -302,12 +302,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
     }
-    let serversync_service: serversync::SharedServerSync = serversync::ServerSyncService::new(
+    let serversync_concrete = serversync::ServerSyncService::new(
         central_pool.clone(),
         adapter.clone(),
         discord_token.clone(),
         serversync::GUILD_ID,
     );
+    let serversync_service: serversync::SharedServerSync = serversync_concrete.clone();
     let dispatcher = Arc::new(dl_discord::Dispatcher::new());
     let reaction_roles = dl_community::reaction_roles::ReactionRoleService::new(
         central_pool.clone(),
@@ -438,6 +439,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::router::register(&mut router, lane_router.clone());
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue);
+    serversync_concrete
+        .set_router_interface(router_interface.clone())
+        .await;
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(

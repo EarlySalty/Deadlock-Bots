@@ -13,12 +13,18 @@
 //! New-Player-Routing-Hook (eigene Anfänger-Kategorie) — das Original
 //! behandelt einen fehlenden Hook identisch (kein Reroute).
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
@@ -26,19 +32,119 @@ use crate::db::u64_to_i64;
 use crate::tempvoice::TempVoiceEngine;
 
 pub const ROUTER_VC_ID: u64 = 1513468587195633674;
+pub const ROUTER_GUILD_ID: u64 = 1289721245281292288;
 pub const ROUTER_TEXT_CHANNEL_ID: u64 = 1513468476365209670;
 pub const RANKED_INFO_CHANNEL_ID: u64 = 1474827277610254570;
 pub const MAX_LANE_MEMBERS: usize = 6;
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
-pub const ROUTER_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
-pub const ROUTER_INTERFACE_MESSAGE_KEY: &str = "interface_message_id";
+pub const ROUTER_PANEL_MESSAGE_KEY: &str = "components_v2_message_id";
+pub const ROUTER_LEGACY_GUIDE_MESSAGE_KEY: &str = "guide_message_id";
+pub const ROUTER_LEGACY_INTERFACE_MESSAGE_KEY: &str = "interface_message_id";
+const ROUTER_LEGACY_MESSAGE_KEYS: [&str; 2] = [
+    ROUTER_LEGACY_GUIDE_MESSAGE_KEY,
+    ROUTER_LEGACY_INTERFACE_MESSAGE_KEY,
+];
+pub const ROUTER_PAYLOAD_FORMAT_KEY: &str = "payload_format";
+pub const ROUTER_PAYLOAD_FORMAT: &str = "components_v2";
+pub const ROUTER_COMPONENTS_V2_FLAG: u64 = 1 << 15;
+pub const ROUTER_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const ROUTER_BANNER_DIR: &str = "assets/welcome-banners";
+pub const ROUTER_HERO_BANNER_FILENAME: &str = "router-hero.png";
+pub const ROUTER_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
+pub const ROUTER_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
+pub const ROUTER_SPAWN_COOLDOWN_SECS: u64 = 30;
 pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Wähle zuerst einen Spielmodus.";
+pub const ROUTER_PANEL_INTRO: &str =
+    "Wähle deinen Modus — der Bot erstellt dir eine eigene Voice-Lane in der passenden Kategorie und zieht dich direkt rüber. Dafür musst du in einem Sprachkanal sitzen, zum Beispiel im Deadlock Router.";
+pub const ROUTER_PANEL_MANAGE_INTRO: &str =
+    "Die Buttons wirken auf die Lane, in der du gerade sitzt. Verwalten kann sie nur ihr Owner — ist der weg, holst du sie dir mit 👑 Owner übernehmen.";
+pub const ROUTER_BUTTON_CASUAL: &str = "🎮 Casual";
+pub const ROUTER_BUTTON_RANKED: &str = "🏆 Ranked";
+pub const ROUTER_BUTTON_STREET_BRAWL: &str = "⚡ Street Brawl";
+pub const ROUTER_BUTTON_CLAIM: &str = "👑 Owner übernehmen";
+pub const ROUTER_BUTTON_LIMIT: &str = "🎚️ Limit setzen";
+pub const ROUTER_BUTTON_RENAME: &str = "✏️ Umbenennen";
+pub const ROUTER_BUTTON_KICK: &str = "👢 Kick";
+pub const ROUTER_BUTTON_BAN: &str = "🚫 Ban";
+pub const ROUTER_BUTTON_UNBAN: &str = "♻️ Unban";
+pub const ROUTER_BUTTON_MODE: &str = "🔄 Modus wechseln";
+pub const ROUTER_PANEL_GUIDE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für 🏆 Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung. Nach jeder erstellten Lane gilt eine kurze Abklingzeit von 30 Sekunden.\n\n**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit 👑 Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.\n\n**Die Buttons im Detail**\n👑 Owner übernehmen — macht dich zum Owner, wenn der bisherige weg ist\n🎚️ Limit setzen — legt fest, wie viele Leute in die Lane passen\n✏️ Umbenennen — gibt deiner Lane einen eigenen Namen\n👢 Kick / 🚫 Ban / ♻️ Unban — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane\n🔄 Modus wechseln — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)";
+pub const ROUTER_REPLY_NOT_IN_VOICE: &str =
+    "Du bist gerade in keinem Sprachkanal — geh zuerst in Voice, dann klappt's. Einstieg:";
+pub const ROUTER_REPLY_RANKED_VERIFY: &str =
+    "Für Ranked-Lanes brauchst du einen verifizierten Rang. Wie du den bekommst, steht hier:";
+pub const ROUTER_REPLY_UNKNOWN_MODE: &str =
+    "Diesen Modus kennt der Bot nicht — nimm einen der Buttons im Panel.";
+pub const ROUTER_REPLY_CREATED_PREFIX: &str = "Deine Lane steht:";
+pub const ROUTER_REPLY_NOT_CREATED: &str =
+    "Das hat gerade nicht geklappt — versuch es in ein paar Sekunden nochmal.";
+pub const ROUTER_REPLY_ALREADY_OWN_LANE: &str =
+    "Du hast schon eine eigene Lane. Modus oder Name änderst du über 🔄 Modus wechseln und ✏️ Umbenennen:";
+pub const ROUTER_REPLY_COOLDOWN_PREFIX: &str =
+    "Kurz durchatmen — die nächste Lane gibt's gleich wieder.";
+const ROUTER_SPAWN_COOLDOWN: Duration = Duration::from_secs(ROUTER_SPAWN_COOLDOWN_SECS);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RouterMode {
+    pub id: &'static str,
+    pub label: &'static str,
+    pub category_id: u64,
+    pub staging_id: u64,
+    pub style: u8,
+}
+
+pub const ROUTER_MODES: [RouterMode; 3] = [
+    RouterMode {
+        id: "casual",
+        label: ROUTER_BUTTON_CASUAL,
+        category_id: 1289721245281292290,
+        staging_id: 1501089974093873232,
+        style: 1,
+    },
+    RouterMode {
+        id: "ranked",
+        label: ROUTER_BUTTON_RANKED,
+        category_id: 1412804540994162789,
+        staging_id: 1412804671432818890,
+        style: 3,
+    },
+    RouterMode {
+        id: "street_brawl",
+        label: ROUTER_BUTTON_STREET_BRAWL,
+        category_id: 1357422957017698478,
+        staging_id: 1357422958544420944,
+        style: 2,
+    },
+];
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RouterApplyOutput {
+    pub guild_id: u64,
+    pub channel_id: u64,
+    pub dry_run: bool,
+    pub payload_format: String,
+    pub stored_payload_format: Option<String>,
+    pub stored_message_id: Option<u64>,
+    pub action: String,
+    pub message_id: Option<u64>,
+    pub warnings: Vec<String>,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RouterPanelAttachment {
+    pub id: u8,
+    pub filename: String,
+    #[serde(skip)]
+    pub relative_path: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouterPanelMessage {
     pub message_id: u64,
     pub has_embeds: bool,
     pub has_components: bool,
+    pub custom_ids: Vec<String>,
 }
 
 /// Die 11 Haupt-Rang-Rollen (wie VERIFIED_RANK_ROLE_IDS).
@@ -56,20 +162,47 @@ pub const VERIFIED_RANK_ROLE_IDS: [u64; 11] = [
     1331458087349129296,
 ];
 
+pub fn router_modes() -> &'static [RouterMode] {
+    &ROUTER_MODES
+}
+
+pub fn router_repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../..")
+}
+
+pub fn router_panel_attachments() -> Vec<RouterPanelAttachment> {
+    [
+        ROUTER_HERO_BANNER_FILENAME,
+        ROUTER_MANAGE_BANNER_FILENAME,
+        ROUTER_GUIDE_BANNER_FILENAME,
+    ]
+    .into_iter()
+    .enumerate()
+    .map(|(id, filename)| RouterPanelAttachment {
+        id: u8::try_from(id).unwrap_or(u8::MAX),
+        filename: filename.to_string(),
+        relative_path: format!("{ROUTER_BANNER_DIR}/{filename}"),
+    })
+    .collect()
+}
+
+pub fn router_mode(mode: &str) -> Option<RouterMode> {
+    ROUTER_MODES
+        .iter()
+        .copied()
+        .find(|candidate| candidate.id == mode)
+}
+
 pub fn mode_to_category(mode: &str) -> u64 {
-    match mode {
-        "ranked" => 1412804540994162789,
-        "street_brawl" => 1357422957017698478,
-        _ => 1289721245281292290, // casual
-    }
+    router_mode(mode)
+        .map(|mode| mode.category_id)
+        .unwrap_or(ROUTER_MODES[0].category_id)
 }
 
 pub fn mode_to_staging(mode: &str) -> u64 {
-    match mode {
-        "ranked" => 1412804671432818890,
-        "street_brawl" => 1357422958544420944,
-        _ => 1501089974093873232,
-    }
+    router_mode(mode)
+        .map(|mode| mode.staging_id)
+        .unwrap_or(ROUTER_MODES[0].staging_id)
 }
 
 const STAGING_IDS: [u64; 3] = [
@@ -103,105 +236,76 @@ pub fn pick_lane(
     suitable.first().map(|(channel_id, _)| *channel_id)
 }
 
-fn router_guide_embed() -> Value {
-    json!({
-        "title": "📖 Router — Wie funktioniert das?",
-        "color": 0x2B2D31,
-        "fields": [
-            {
-                "name": "1️⃣  Modus wählen",
-                "value": concat!(
-                    "Klick unten auf **Casual**, **Ranked** oder **Street Brawl**. ",
-                    "Deine Wahl wird gespeichert und gilt für alle zukünftigen Joins."
-                ),
-                "inline": false,
-            },
-            {
-                "name": "2️⃣  Auto-Join",
-                "value": concat!(
-                    "**Aus (grau)** → du bekommst immer eine eigene, leere Lane.\n",
-                    "**An (grün)** → der Bot sucht eine passende Lane mit freien Plätzen (<6 Personen). ",
-                    "Bekannte Mitspieler werden dabei bevorzugt. ",
-                    "Gibt es keine freie Lane, wird eine neue für dich erstellt."
-                ),
-                "inline": false,
-            },
-            {
-                "name": "3️⃣  Router-VC betreten",
-                "value": concat!(
-                    "Sobald du den **Deadlock Router**-Sprachkanal betrittst, passiert alles automatisch:\n",
-                    "• Neuer Spieler → New-Player-Lane\n",
-                    "• Kein Modus gesetzt → du bleibst im Router-VC bis du unten einen wählst\n",
-                    "• Modus gesetzt, Auto-Join aus → sofort eigene Lane\n",
-                    "• Modus gesetzt, Auto-Join an → Smart Routing"
-                ),
-                "inline": false,
-            },
-            {
-                "name": "🏆  Ranked",
-                "value": concat!(
-                    "Ranked-Lanes erfordern einen **verifizierten Rang** (Steam-Verknüpfung). ",
-                    "Ohne Rang bekommst du eine DM mit dem Link zur Verifizierung — ",
-                    "du bleibst dann im Router-VC und kannst danach Casual oder Street Brawl wählen."
-                ),
-                "inline": false,
-            },
-            {
-                "name": "🔄  Lane-Modus wechseln",
-                "value": concat!(
-                    "Als Lane-Owner kannst du deinen aktiven Kanal nachträglich umstellen: ",
-                    "im Lane-Control-Interface gibt es **Modus wechseln** (Casual / Ranked / Street Brawl / Off Topic) ",
-                    "und **Umbenennen**. ",
-                    "Der Kanal zieht dabei physisch in die passende Kategorie um."
-                ),
-                "inline": false,
-            },
-        ],
-        "footer": {
-            "text": "Die alten Staging-Kanäle (Casual / Comp / Street Brawl) laufen weiterhin parallel."
-        },
-    })
+pub fn router_panel_body() -> Map<String, Value> {
+    let attachments = router_panel_attachments();
+    router_panel_body_for_attachments(&attachments)
 }
 
-fn router_interface_embed() -> Value {
-    json!({
-        "title": "🎮 Spielmodus wählen",
-        "description": concat!(
-            "Wähle deinen **Standard-Spielmodus** und stelle den Auto-Join-Toggle ein.\n\n",
-            "**Auto-Join aus** → eigene Lane wird für dich erstellt\n",
-            "**Auto-Join an** → Smart Routing in eine passende Lane"
-        ),
-        "color": 0x5865F2,
-    })
-}
-
-fn router_guide_body() -> Map<String, Value> {
+fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> Map<String, Value> {
     let mut body = Map::new();
-    body.insert("embeds".to_string(), json!([router_guide_embed()]));
-    body
-}
-
-fn router_interface_body() -> Map<String, Value> {
-    let mut body = Map::new();
-    body.insert("embeds".to_string(), json!([router_interface_embed()]));
+    body.insert("flags".to_string(), json!(ROUTER_COMPONENTS_V2_FLAG));
+    body.insert(
+        "allowed_mentions".to_string(),
+        json!({ "parse": Vec::<String>::new() }),
+    );
     body.insert(
         "components".to_string(),
-        json!([
+        json!([router_container(vec![
+            router_media_gallery(ROUTER_HERO_BANNER_FILENAME),
+            router_text_display(ROUTER_PANEL_INTRO.to_string()),
+            router_action_row(
+                ROUTER_MODES
+                    .iter()
+                    .map(|mode| {
+                        router_button(mode.label, mode.style, &format!("router_spawn_{}", mode.id))
+                    })
+                    .collect(),
+            ),
+            router_media_gallery(ROUTER_MANAGE_BANNER_FILENAME),
+            router_text_display(ROUTER_PANEL_MANAGE_INTRO.to_string()),
             router_action_row(vec![
-                router_button("🎮 Casual", 2, "router_mode_casual"),
-                router_button("🏆 Ranked", 2, "router_mode_ranked"),
-                router_button("⚡ Street Brawl", 2, "router_mode_street_brawl"),
+                router_button(ROUTER_BUTTON_CLAIM, 3, "tv_owner_claim"),
+                router_button(ROUTER_BUTTON_LIMIT, 2, "tv_limit_btn"),
+                router_button(ROUTER_BUTTON_RENAME, 2, "tv_rename_btn"),
+                router_button(ROUTER_BUTTON_KICK, 4, "tv_kick"),
+                router_button(ROUTER_BUTTON_BAN, 4, "tv_ban"),
             ]),
-            router_action_row(vec![json!({
-                "type": 2,
-                "style": 2,
-                "label": "Auto-Join",
-                "emoji": {"name": "⬜"},
-                "custom_id": "router_autojoin_toggle",
-            })]),
-        ]),
+            router_action_row(vec![
+                router_button(ROUTER_BUTTON_UNBAN, 1, "tv_unban"),
+                router_button(ROUTER_BUTTON_MODE, 2, "tv_mode_switch_btn"),
+            ]),
+            router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME),
+            router_text_display(ROUTER_PANEL_GUIDE.to_string()),
+        ])]),
     );
+    body.insert("attachments".to_string(), json!(attachments));
     body
+}
+
+fn router_container(components: Vec<Value>) -> Value {
+    json!({
+        "type": 17,
+        "accent_color": ROUTER_ACCENT_GOLD,
+        "components": components,
+    })
+}
+
+fn router_text_display(content: String) -> Value {
+    json!({
+        "type": 10,
+        "content": content,
+    })
+}
+
+fn router_media_gallery(filename: &str) -> Value {
+    json!({
+        "type": 12,
+        "items": [{
+            "media": {
+                "url": format!("attachment://{filename}"),
+            },
+        }],
+    })
 }
 
 fn router_action_row(components: Vec<Value>) -> Value {
@@ -235,12 +339,24 @@ pub trait RouterPort: Send + Sync {
 
 #[async_trait::async_trait]
 pub trait RouterInterfacePort: Send + Sync {
-    async fn post_rich(&self, channel_id: u64, body: Map<String, Value>) -> Result<u64, String>;
+    async fn post_rich(
+        &self,
+        channel_id: u64,
+        body: Map<String, Value>,
+        attachments: &[RouterPanelAttachment],
+    ) -> Result<u64, String>;
     async fn edit_rich(
         &self,
         channel_id: u64,
         message_id: u64,
         body: Map<String, Value>,
+        attachments: &[RouterPanelAttachment],
+    ) -> Result<(), String>;
+    async fn delete_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        reason: &str,
     ) -> Result<(), String>;
     async fn recent_bot_messages(
         &self,
@@ -260,6 +376,14 @@ impl RouterInterface {
     }
 
     pub async fn ensure_panel(&self) {
+        if let Err(err) = self.apply_panel(true).await {
+            tracing::warn!(%err, "RouterInterface: Panel konnte nicht angewendet werden");
+        }
+    }
+
+    pub async fn apply_panel(&self, confirm: bool) -> Result<RouterApplyOutput, String> {
+        let attachments = router_panel_attachments();
+        let body = router_panel_body_for_attachments(&attachments);
         let recent = match self
             .port
             .recent_bot_messages(ROUTER_TEXT_CHANNEL_ID, 15)
@@ -272,83 +396,116 @@ impl RouterInterface {
             }
         };
         let history_checked = recent.is_some();
-        let guide_message_id = recent.as_deref().and_then(find_existing_router_guide);
-        let interface_message_id = recent.as_deref().and_then(find_existing_router_interface);
-        self.upsert_panel_message(
-            ROUTER_GUIDE_MESSAGE_KEY,
-            router_guide_body(),
-            guide_message_id,
-            history_checked,
-        )
-        .await;
-        self.upsert_panel_message(
-            ROUTER_INTERFACE_MESSAGE_KEY,
-            router_interface_body(),
-            interface_message_id,
-            history_checked,
-        )
-        .await;
-    }
+        let history_message_id = recent.as_deref().and_then(find_existing_router_v2_panel);
+        let kv_message_id = self.panel_message_id(ROUTER_PANEL_MESSAGE_KEY).await;
+        let stored_payload_format = self.panel_payload_format().await;
+        let planned_message_id = kv_message_id.or(history_message_id);
+        let planned_action = if planned_message_id.is_some() {
+            "planned_edit"
+        } else {
+            "planned_post"
+        };
+        let mut output = RouterApplyOutput {
+            guild_id: self.guild_id(),
+            channel_id: ROUTER_TEXT_CHANNEL_ID,
+            dry_run: !confirm,
+            payload_format: ROUTER_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format,
+            stored_message_id: kv_message_id,
+            action: planned_action.to_string(),
+            message_id: planned_message_id,
+            warnings: Vec::new(),
+            payload: Value::Object(body.clone()),
+        };
+        if !confirm {
+            if !history_checked {
+                output.warnings.push(
+                    "Router-Panel: History-Scan fehlgeschlagen; Dry-Run ohne Adoption.".to_string(),
+                );
+            }
+            self.add_legacy_cleanup_dry_run_warnings(planned_message_id, &mut output)
+                .await;
+            return Ok(output);
+        }
 
-    async fn upsert_panel_message(
-        &self,
-        key: &str,
-        body: Map<String, Value>,
-        history_message_id: Option<u64>,
-        history_checked: bool,
-    ) {
-        let kv_message_id = self.panel_message_id(key).await;
+        validate_router_panel_attachments(&attachments)?;
+
         if let Some(message_id) = kv_message_id {
             if self
                 .port
-                .edit_rich(ROUTER_TEXT_CHANNEL_ID, message_id, body.clone())
+                .edit_rich(
+                    ROUTER_TEXT_CHANNEL_ID,
+                    message_id,
+                    body.clone(),
+                    &attachments,
+                )
                 .await
                 .is_ok()
             {
-                return;
+                self.store_panel_metadata(message_id).await;
+                output.dry_run = false;
+                output.action = "edited".to_string();
+                output.message_id = Some(message_id);
+                self.cleanup_legacy_panels(message_id, &mut output).await;
+                return Ok(output);
             }
             if history_message_id == Some(message_id) {
-                tracing::warn!(
-                    key,
-                    message_id,
-                    "RouterInterface: vorhandenes Panel konnte nicht editiert werden"
-                );
-                return;
+                return Err(format!(
+                    "RouterInterface: vorhandenes Panel {message_id} konnte nicht editiert werden"
+                ));
             }
         }
 
         if !history_checked {
-            tracing::warn!(
-                key,
+            return Err(
                 "RouterInterface: ohne erfolgreichen History-Scan wird kein neues Panel gepostet"
+                    .to_string(),
             );
-            return;
         }
 
         if let Some(message_id) = history_message_id {
             match self
                 .port
-                .edit_rich(ROUTER_TEXT_CHANNEL_ID, message_id, body.clone())
+                .edit_rich(
+                    ROUTER_TEXT_CHANNEL_ID,
+                    message_id,
+                    body.clone(),
+                    &attachments,
+                )
                 .await
             {
                 Ok(()) => {
-                    self.store_panel_message_id(key, message_id).await;
-                    return;
+                    self.store_panel_metadata(message_id).await;
+                    output.dry_run = false;
+                    output.action = "adopted_edit".to_string();
+                    output.message_id = Some(message_id);
+                    self.cleanup_legacy_panels(message_id, &mut output).await;
+                    return Ok(output);
                 }
                 Err(err) => {
-                    tracing::warn!(%err, key, message_id, "RouterInterface: adoptiertes Panel konnte nicht editiert werden");
-                    return;
+                    return Err(format!(
+                        "RouterInterface: adoptiertes Panel {message_id} konnte nicht editiert werden: {err}"
+                    ));
                 }
             }
         }
 
-        match self.port.post_rich(ROUTER_TEXT_CHANNEL_ID, body).await {
+        match self
+            .port
+            .post_rich(ROUTER_TEXT_CHANNEL_ID, body, &attachments)
+            .await
+        {
             Ok(message_id) => {
-                self.store_panel_message_id(key, message_id).await;
+                self.store_panel_metadata(message_id).await;
+                output.dry_run = false;
+                output.action = "posted".to_string();
+                output.message_id = Some(message_id);
+                self.cleanup_legacy_panels(message_id, &mut output).await;
+                Ok(output)
             }
-            Err(err) => {
-                tracing::warn!(%err, key, "RouterInterface: Panel konnte nicht gepostet werden")
-            }
+            Err(err) => Err(format!(
+                "RouterInterface: Panel konnte nicht gepostet werden: {err}"
+            )),
         }
     }
 
@@ -360,6 +517,28 @@ impl RouterInterface {
             .and_then(|value| value.parse::<u64>().ok())
     }
 
+    async fn panel_payload_format(&self) -> Option<String> {
+        kv::get(&self.pool, ROUTER_PANEL_KV_NS, ROUTER_PAYLOAD_FORMAT_KEY)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    async fn store_panel_metadata(&self, message_id: u64) {
+        self.store_panel_message_id(ROUTER_PANEL_MESSAGE_KEY, message_id)
+            .await;
+        if let Err(err) = kv::set(
+            &self.pool,
+            ROUTER_PANEL_KV_NS,
+            ROUTER_PAYLOAD_FORMAT_KEY,
+            ROUTER_PAYLOAD_FORMAT,
+        )
+        .await
+        {
+            tracing::warn!(%err, "RouterInterface: Payload-Format konnte nicht gespeichert werden");
+        }
+    }
+
     async fn store_panel_message_id(&self, key: &str, message_id: u64) {
         if let Err(err) =
             kv::set(&self.pool, ROUTER_PANEL_KV_NS, key, &message_id.to_string()).await
@@ -367,19 +546,90 @@ impl RouterInterface {
             tracing::warn!(%err, key, "RouterInterface: Message-ID konnte nicht gespeichert werden");
         }
     }
+
+    async fn legacy_panel_message_ids(&self) -> Vec<(&'static str, u64)> {
+        let mut ids = Vec::new();
+        for key in ROUTER_LEGACY_MESSAGE_KEYS {
+            if let Some(message_id) = self.panel_message_id(key).await {
+                ids.push((key, message_id));
+            }
+        }
+        ids
+    }
+
+    async fn add_legacy_cleanup_dry_run_warnings(
+        &self,
+        current_message_id: Option<u64>,
+        output: &mut RouterApplyOutput,
+    ) {
+        for (key, message_id) in self.legacy_panel_message_ids().await {
+            if Some(message_id) == current_message_id {
+                output.warnings.push(format!(
+                    "Router-Panel: Legacy-KV-Key {key} zeigt auf aktuelles Panel {message_id}; Dry-Run würde nur den Key entfernen."
+                ));
+            } else {
+                output.warnings.push(format!(
+                    "Router-Panel: Legacy-Message {message_id} aus {key} würde gelöscht."
+                ));
+            }
+        }
+    }
+
+    async fn cleanup_legacy_panels(&self, current_message_id: u64, output: &mut RouterApplyOutput) {
+        for (key, message_id) in self.legacy_panel_message_ids().await {
+            if message_id != current_message_id {
+                if let Err(err) = self
+                    .port
+                    .delete_message(
+                        ROUTER_TEXT_CHANNEL_ID,
+                        message_id,
+                        "Router: Legacy-Panel nach Components-V2-Cutover bereinigen",
+                    )
+                    .await
+                {
+                    output.warnings.push(format!(
+                        "Router-Panel: Legacy-Message {message_id} aus {key} konnte nicht gelöscht werden: {err}"
+                    ));
+                }
+            }
+            if let Err(err) = kv::delete(&self.pool, ROUTER_PANEL_KV_NS, key).await {
+                output.warnings.push(format!(
+                    "Router-Panel: Legacy-KV-Key {key} konnte nicht entfernt werden: {err}"
+                ));
+            }
+        }
+    }
+
+    fn guild_id(&self) -> u64 {
+        ROUTER_GUILD_ID
+    }
 }
 
-fn find_existing_router_guide(messages: &[RouterPanelMessage]) -> Option<u64> {
-    messages
-        .iter()
-        .find(|message| message.has_embeds && !message.has_components)
-        .map(|message| message.message_id)
+fn validate_router_panel_attachments(attachments: &[RouterPanelAttachment]) -> Result<(), String> {
+    let repo_root = router_repo_root();
+    for attachment in attachments {
+        let path = repo_root.join(&attachment.relative_path);
+        if !path.is_file() {
+            return Err(format!(
+                "Router-Banner `{}` fehlt; Router-Panel wird nicht gepostet/editiert",
+                path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
-fn find_existing_router_interface(messages: &[RouterPanelMessage]) -> Option<u64> {
+fn find_existing_router_v2_panel(messages: &[RouterPanelMessage]) -> Option<u64> {
     messages
         .iter()
-        .find(|message| message.has_embeds && message.has_components)
+        .find(|message| {
+            !message.has_embeds
+                && message.has_components
+                && message
+                    .custom_ids
+                    .iter()
+                    .any(|custom_id| custom_id.starts_with("router_spawn_"))
+        })
         .map(|message| message.message_id)
 }
 
@@ -388,6 +638,18 @@ pub struct LaneRouter {
     pub port: Arc<dyn RouterPort>,
     pub engine: Arc<TempVoiceEngine>,
     pub analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
+    spawn_cooldowns: tokio::sync::Mutex<HashMap<u64, Instant>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouterSpawnOutcome {
+    Created { lane_id: u64 },
+    AlreadyOwnLane { lane_id: u64 },
+    Cooldown { remaining_secs: u64 },
+    NotInVoice,
+    RankedVerifyRequired,
+    NotCreated,
+    UnknownMode,
 }
 
 impl LaneRouter {
@@ -402,6 +664,7 @@ impl LaneRouter {
             port,
             engine,
             analyzer,
+            spawn_cooldowns: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -485,6 +748,89 @@ impl LaneRouter {
         self.smart_route(guild_id, user_id, &mode).await;
     }
 
+    pub async fn spawn_lane_from_current_voice(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+    ) -> RouterSpawnOutcome {
+        if router_mode(mode).is_none() {
+            return RouterSpawnOutcome::UnknownMode;
+        }
+        if let Some(remaining_secs) = self.spawn_cooldown_remaining(user_id).await {
+            return RouterSpawnOutcome::Cooldown { remaining_secs };
+        }
+        let Some(current_channel_id) = self.port.member_voice_channel(guild_id, user_id).await
+        else {
+            return RouterSpawnOutcome::NotInVoice;
+        };
+        if self
+            .user_owns_tempvoice_lane(guild_id, current_channel_id, user_id)
+            .await
+        {
+            return RouterSpawnOutcome::AlreadyOwnLane {
+                lane_id: current_channel_id,
+            };
+        }
+        if mode == "ranked" {
+            let roles = self.port.member_role_ids(guild_id, user_id).await;
+            if !roles
+                .iter()
+                .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
+            {
+                return RouterSpawnOutcome::RankedVerifyRequired;
+            }
+        }
+        match self
+            .engine
+            .create_router_lane(guild_id, user_id, mode, current_channel_id)
+            .await
+        {
+            Some(lane_id) => {
+                self.mark_spawn_created(user_id).await;
+                RouterSpawnOutcome::Created { lane_id }
+            }
+            None => RouterSpawnOutcome::NotCreated,
+        }
+    }
+
+    async fn spawn_cooldown_remaining(&self, user_id: u64) -> Option<u64> {
+        let now = Instant::now();
+        let mut cooldowns = self.spawn_cooldowns.lock().await;
+        let last_created = cooldowns.get(&user_id).copied()?;
+        let elapsed = now.saturating_duration_since(last_created);
+        if elapsed >= ROUTER_SPAWN_COOLDOWN {
+            cooldowns.remove(&user_id);
+            return None;
+        }
+        let remaining = ROUTER_SPAWN_COOLDOWN - elapsed;
+        Some(remaining.as_secs().max(1))
+    }
+
+    async fn mark_spawn_created(&self, user_id: u64) {
+        self.spawn_cooldowns
+            .lock()
+            .await
+            .insert(user_id, Instant::now());
+    }
+
+    async fn user_owns_tempvoice_lane(&self, guild_id: u64, channel_id: u64, user_id: u64) -> bool {
+        if let Some(owner_id) = self.engine.lane_owner(channel_id).await {
+            return owner_id == user_id;
+        }
+        match self.engine.store.all_lanes().await {
+            Ok(lanes) => lanes.iter().any(|lane| {
+                lane.guild_id == guild_id
+                    && lane.channel_id == channel_id
+                    && lane.owner_id == user_id
+            }),
+            Err(err) => {
+                tracing::warn!(%err, channel_id, user_id, "Router: TempVoice-Lane konnte nicht geprüft werden");
+                false
+            }
+        }
+    }
+
     /// Wie `_smart_route`: Ranked-Gate → Co-Spieler-Lane → erste passende
     /// → neue Lane über die TempVoice-Engine.
     pub async fn smart_route(self: &Arc<Self>, guild_id: u64, user_id: u64, mode: &str) {
@@ -534,6 +880,35 @@ struct RouterPanelHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for RouterPanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if let Some(mode) = interaction.custom_id.strip_prefix("router_spawn_") {
+            return match self
+                .router
+                .spawn_lane_from_current_voice(interaction.guild_id, interaction.user_id, mode)
+                .await
+            {
+                RouterSpawnOutcome::Created { lane_id } => BridgeReply::ephemeral_text(format!(
+                    "{ROUTER_REPLY_CREATED_PREFIX} <#{lane_id}>"
+                )),
+                RouterSpawnOutcome::AlreadyOwnLane { lane_id } => BridgeReply::ephemeral_text(
+                    format!("{ROUTER_REPLY_ALREADY_OWN_LANE} <#{lane_id}>"),
+                ),
+                RouterSpawnOutcome::Cooldown { remaining_secs } => BridgeReply::ephemeral_text(
+                    format!("{ROUTER_REPLY_COOLDOWN_PREFIX} ({remaining_secs}s)"),
+                ),
+                RouterSpawnOutcome::NotInVoice => BridgeReply::ephemeral_text(format!(
+                    "{ROUTER_REPLY_NOT_IN_VOICE} <#{ROUTER_VC_ID}>"
+                )),
+                RouterSpawnOutcome::RankedVerifyRequired => BridgeReply::ephemeral_text(format!(
+                    "{ROUTER_REPLY_RANKED_VERIFY} <#{RANKED_INFO_CHANNEL_ID}>"
+                )),
+                RouterSpawnOutcome::UnknownMode => {
+                    BridgeReply::ephemeral_text(ROUTER_REPLY_UNKNOWN_MODE)
+                }
+                RouterSpawnOutcome::NotCreated => {
+                    BridgeReply::ephemeral_text(ROUTER_REPLY_NOT_CREATED)
+                }
+            };
+        }
         if interaction.custom_id == "router_autojoin_toggle" {
             let Some((mode, auto_join)) = self.router.user_pref(interaction.user_id).await else {
                 return BridgeReply::ephemeral_text(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN);
@@ -551,9 +926,9 @@ impl InteractionHandler for RouterPanelHandler {
         let Some(mode) = interaction.custom_id.strip_prefix("router_mode_") else {
             return BridgeReply::ephemeral_text("Unbekannte Aktion.");
         };
-        let mode = match mode {
-            "ranked" | "casual" | "street_brawl" => mode.to_string(),
-            _ => return BridgeReply::ephemeral_text("Unbekannter Modus."),
+        let mode = match router_mode(mode) {
+            Some(mode) => mode.id.to_string(),
+            None => return BridgeReply::ephemeral_text("Unbekannter Modus."),
         };
         let auto_join = self
             .router
@@ -587,6 +962,7 @@ impl InteractionHandler for RouterPanelHandler {
 
 pub fn register(router_panel: &mut InteractionRouter, router: Arc<LaneRouter>) {
     let handler = Arc::new(RouterPanelHandler { router });
+    router_panel.on_prefix("router_spawn_", handler.clone());
     router_panel.on_prefix("router_mode_", handler.clone());
     router_panel.on_custom_id("router_autojoin_toggle", handler);
 }
@@ -644,58 +1020,102 @@ mod tests {
     }
 
     #[test]
-    fn router_texte_sind_final() {
-        assert_ne!(ROUTER_SELECT_MODE_BEFORE_AUTOJOIN, "Platzhalter");
-        assert!(!ROUTER_SELECT_MODE_BEFORE_AUTOJOIN.is_empty());
-    }
-
-    #[test]
-    fn router_panel_body_enthaelt_python_texte_und_buttons() {
-        let guide = router_guide_embed();
-        assert_eq!(guide["title"], "📖 Router — Wie funktioniert das?");
-        assert_eq!(guide["fields"][0]["name"], "1️⃣  Modus wählen");
-        assert!(guide["fields"][1]["value"]
-            .as_str()
-            .expect("value")
-            .contains("**Aus (grau)** → du bekommst immer eine eigene, leere Lane."));
-        assert!(guide["fields"][2]["value"]
-            .as_str()
-            .expect("value")
-            .contains("• Modus gesetzt, Auto-Join an → Smart Routing"));
-
-        let body = router_interface_body();
-        let embed = &body
-            .get("embeds")
-            .and_then(serde_json::Value::as_array)
-            .expect("embeds")[0];
-        assert_eq!(embed["title"], "🎮 Spielmodus wählen");
-        assert!(embed["description"]
-            .as_str()
-            .expect("description")
-            .contains("**Auto-Join aus** → eigene Lane wird für dich erstellt"));
-        let custom_ids: Vec<&str> = body
+    fn router_panel_body_ist_components_v2_mit_router_und_tv_buttons() {
+        let body = router_panel_body();
+        assert_eq!(body.get("flags"), Some(&json!(ROUTER_COMPONENTS_V2_FLAG)));
+        assert!(body
+            .get("allowed_mentions")
+            .and_then(|value| value["parse"].as_array())
+            .expect("allowed mentions")
+            .is_empty());
+        assert!(body.get("embeds").is_none());
+        let container = &body
             .get("components")
             .and_then(serde_json::Value::as_array)
-            .expect("components")
+            .expect("components")[0];
+        assert_eq!(container["type"], 17);
+        assert_eq!(container["accent_color"], ROUTER_ACCENT_GOLD);
+        let container_components = container["components"]
+            .as_array()
+            .expect("container components");
+        let media_urls: Vec<&str> = container_components
+            .iter()
+            .filter(|component| component["type"] == 12)
+            .filter_map(|component| component["items"][0]["media"]["url"].as_str())
+            .collect();
+        assert_eq!(
+            media_urls,
+            vec![
+                "attachment://router-hero.png",
+                "attachment://divider-lane-verwalten.png",
+                "attachment://divider-anleitung.png",
+            ]
+        );
+        let text_displays: Vec<&str> = container_components
+            .iter()
+            .filter(|component| component["type"] == 10)
+            .filter_map(|component| component["content"].as_str())
+            .collect();
+        assert_eq!(
+            text_displays,
+            vec![
+                ROUTER_PANEL_INTRO,
+                ROUTER_PANEL_MANAGE_INTRO,
+                ROUTER_PANEL_GUIDE,
+            ]
+        );
+        assert!(!container_components
+            .iter()
+            .any(|component| component["type"] == 14));
+        assert_eq!(
+            body.get("attachments").expect("attachments"),
+            &json!([
+                {"id": 0, "filename": "router-hero.png"},
+                {"id": 1, "filename": "divider-lane-verwalten.png"},
+                {"id": 2, "filename": "divider-anleitung.png"},
+            ])
+        );
+        let custom_ids: Vec<&str> = container_components
             .iter()
             .flat_map(|row| row["components"].as_array().into_iter().flatten())
             .filter_map(|component| component["custom_id"].as_str())
             .collect();
+        assert!(!custom_ids.contains(&"tv_tag_filter"));
         assert_eq!(
             custom_ids,
             vec![
-                "router_mode_casual",
-                "router_mode_ranked",
-                "router_mode_street_brawl",
-                "router_autojoin_toggle"
+                "router_spawn_casual",
+                "router_spawn_ranked",
+                "router_spawn_street_brawl",
+                "tv_owner_claim",
+                "tv_limit_btn",
+                "tv_rename_btn",
+                "tv_kick",
+                "tv_ban",
+                "tv_unban",
+                "tv_mode_switch_btn",
             ]
         );
     }
 
     #[derive(Default)]
     struct MockRouterInterfacePort {
-        posts: StdMutex<Vec<(u64, Map<String, serde_json::Value>)>>,
-        edits: StdMutex<Vec<(u64, u64, Map<String, serde_json::Value>)>>,
+        posts: StdMutex<
+            Vec<(
+                u64,
+                Map<String, serde_json::Value>,
+                Vec<RouterPanelAttachment>,
+            )>,
+        >,
+        edits: StdMutex<
+            Vec<(
+                u64,
+                u64,
+                Map<String, serde_json::Value>,
+                Vec<RouterPanelAttachment>,
+            )>,
+        >,
+        deletes: StdMutex<Vec<(u64, u64, String)>>,
         fail_edits: StdMutex<bool>,
         fail_recent: StdMutex<bool>,
         recent: StdMutex<Vec<RouterPanelMessage>>,
@@ -707,8 +1127,12 @@ mod tests {
             &self,
             channel_id: u64,
             body: Map<String, serde_json::Value>,
+            attachments: &[RouterPanelAttachment],
         ) -> Result<u64, String> {
-            self.posts.lock().expect("posts").push((channel_id, body));
+            self.posts
+                .lock()
+                .expect("posts")
+                .push((channel_id, body, attachments.to_vec()));
             Ok(9000 + self.posts.lock().expect("posts").len() as u64)
         }
 
@@ -717,14 +1141,31 @@ mod tests {
             channel_id: u64,
             message_id: u64,
             body: Map<String, serde_json::Value>,
+            attachments: &[RouterPanelAttachment],
         ) -> Result<(), String> {
             if *self.fail_edits.lock().expect("fail") {
                 return Err("missing".to_string());
             }
-            self.edits
-                .lock()
-                .expect("edits")
-                .push((channel_id, message_id, body));
+            self.edits.lock().expect("edits").push((
+                channel_id,
+                message_id,
+                body,
+                attachments.to_vec(),
+            ));
+            Ok(())
+        }
+
+        async fn delete_message(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            reason: &str,
+        ) -> Result<(), String> {
+            self.deletes.lock().expect("deletes").push((
+                channel_id,
+                message_id,
+                reason.to_string(),
+            ));
             Ok(())
         }
 
@@ -761,6 +1202,38 @@ mod tests {
         ) -> Result<(), String> {
             Ok(())
         }
+        async fn send_dm(&self, _user_id: u64, _text: String) {}
+    }
+
+    #[derive(Default)]
+    struct StaticRouterPort {
+        voice_channel: StdMutex<Option<u64>>,
+        role_ids: StdMutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RouterPort for StaticRouterPort {
+        async fn category_lanes(&self, _guild_id: u64, _category_id: u64) -> Vec<(u64, Vec<u64>)> {
+            Vec::new()
+        }
+
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            self.role_ids.lock().expect("roles").clone()
+        }
+
+        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
+            *self.voice_channel.lock().expect("voice")
+        }
+
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: u64,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
         async fn send_dm(&self, _user_id: u64, _text: String) {}
     }
 
@@ -956,33 +1429,79 @@ mod tests {
         let interface = RouterInterface::new(pool.clone(), port.clone());
 
         interface.ensure_panel().await;
-        assert_eq!(port.posts.lock().expect("posts").len(), 2);
+        {
+            let posts = port.posts.lock().expect("posts");
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0].2, router_panel_attachments());
+        }
         assert_eq!(
-            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
             Some("9001")
         );
         assert_eq!(
-            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PAYLOAD_FORMAT_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
-            Some("9002")
+            Some(ROUTER_PAYLOAD_FORMAT)
         );
 
         interface.ensure_panel().await;
-        assert_eq!(port.posts.lock().expect("posts").len(), 2);
-        assert_eq!(port.edits.lock().expect("edits").len(), 2);
+        assert_eq!(port.posts.lock().expect("posts").len(), 1);
+        {
+            let edits = port.edits.lock().expect("edits");
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].3, router_panel_attachments());
+        }
 
         *port.fail_edits.lock().expect("fail") = true;
         interface.ensure_panel().await;
-        assert_eq!(port.posts.lock().expect("posts").len(), 4);
+        assert_eq!(port.posts.lock().expect("posts").len(), 2);
     }
 
     #[tokio::test]
-    async fn router_interface_adoptiert_python_panels_aus_history_bei_leerer_kv() {
+    async fn router_interface_adoptiert_v2_panel_aus_history_bei_leerer_kv() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockRouterInterfacePort::default());
+        *port.recent.lock().expect("recent") = vec![RouterPanelMessage {
+            message_id: 7002,
+            has_embeds: false,
+            has_components: true,
+            custom_ids: vec!["router_spawn_casual".to_string()],
+        }];
+        let interface = RouterInterface::new(pool.clone(), port.clone());
+
+        interface.ensure_panel().await;
+
+        assert_eq!(port.posts.lock().expect("posts").len(), 0);
+        let edits = port.edits.lock().expect("edits");
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].1, 7002);
+        assert_eq!(edits[0].3, router_panel_attachments());
+        assert_eq!(
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some("7002")
+        );
+        assert_eq!(
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PAYLOAD_FORMAT_KEY)
+                .await
+                .expect("kv")
+                .as_deref(),
+            Some(ROUTER_PAYLOAD_FORMAT)
+        );
+    }
+
+    #[tokio::test]
+    async fn router_interface_adoptiert_nur_panel_mit_router_spawn_custom_id() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -990,38 +1509,155 @@ mod tests {
         let port = Arc::new(MockRouterInterfacePort::default());
         *port.recent.lock().expect("recent") = vec![
             RouterPanelMessage {
-                message_id: 7001,
-                has_embeds: true,
-                has_components: false,
+                message_id: 7002,
+                has_embeds: false,
+                has_components: true,
+                custom_ids: vec!["tv_owner_claim".to_string()],
             },
             RouterPanelMessage {
-                message_id: 7002,
+                message_id: 7003,
                 has_embeds: true,
                 has_components: true,
+                custom_ids: vec!["router_mode_casual".to_string()],
             },
         ];
         let interface = RouterInterface::new(pool.clone(), port.clone());
 
         interface.ensure_panel().await;
 
-        assert_eq!(port.posts.lock().expect("posts").len(), 0);
-        let edits = port.edits.lock().expect("edits");
-        assert_eq!(edits.len(), 2);
-        assert_eq!(edits[0].1, 7001);
-        assert_eq!(edits[1].1, 7002);
+        assert_eq!(port.edits.lock().expect("edits").len(), 0);
+        {
+            let posts = port.posts.lock().expect("posts");
+            assert_eq!(posts.len(), 1);
+            assert_eq!(posts[0].2, router_panel_attachments());
+        }
         assert_eq!(
-            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_GUIDE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
-            Some("7001")
+            Some("9001")
+        );
+    }
+
+    #[tokio::test]
+    async fn router_interface_cleanup_loescht_legacy_panels_und_kv_nach_apply() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        dl_central_db::kv::set(
+            &pool,
+            ROUTER_PANEL_KV_NS,
+            ROUTER_LEGACY_GUIDE_MESSAGE_KEY,
+            "7101",
+        )
+        .await
+        .expect("guide kv");
+        dl_central_db::kv::set(
+            &pool,
+            ROUTER_PANEL_KV_NS,
+            ROUTER_LEGACY_INTERFACE_MESSAGE_KEY,
+            "7102",
+        )
+        .await
+        .expect("interface kv");
+        let port = Arc::new(MockRouterInterfacePort::default());
+        let interface = RouterInterface::new(pool.clone(), port.clone());
+
+        let output = interface.apply_panel(true).await.expect("apply");
+
+        assert_eq!(output.action, "posted");
+        assert!(output.warnings.is_empty());
+        assert_eq!(
+            port.deletes.lock().expect("deletes").clone(),
+            vec![
+                (
+                    ROUTER_TEXT_CHANNEL_ID,
+                    7101,
+                    "Router: Legacy-Panel nach Components-V2-Cutover bereinigen".to_string(),
+                ),
+                (
+                    ROUTER_TEXT_CHANNEL_ID,
+                    7102,
+                    "Router: Legacy-Panel nach Components-V2-Cutover bereinigen".to_string(),
+                ),
+            ]
         );
         assert_eq!(
-            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_INTERFACE_MESSAGE_KEY)
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_LEGACY_GUIDE_MESSAGE_KEY)
                 .await
-                .expect("kv")
+                .expect("guide kv"),
+            None
+        );
+        assert_eq!(
+            dl_central_db::kv::get(
+                &pool,
+                ROUTER_PANEL_KV_NS,
+                ROUTER_LEGACY_INTERFACE_MESSAGE_KEY,
+            )
+            .await
+            .expect("interface kv"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn router_interface_dry_run_kuendigt_legacy_cleanup_an_ohne_zu_loeschen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        dl_central_db::kv::set(
+            &pool,
+            ROUTER_PANEL_KV_NS,
+            ROUTER_LEGACY_GUIDE_MESSAGE_KEY,
+            "7201",
+        )
+        .await
+        .expect("guide kv");
+        dl_central_db::kv::set(
+            &pool,
+            ROUTER_PANEL_KV_NS,
+            ROUTER_LEGACY_INTERFACE_MESSAGE_KEY,
+            "7202",
+        )
+        .await
+        .expect("interface kv");
+        let port = Arc::new(MockRouterInterfacePort::default());
+        let interface = RouterInterface::new(pool.clone(), port.clone());
+
+        let output = interface.apply_panel(false).await.expect("dry run");
+
+        assert!(output.dry_run);
+        assert_eq!(port.posts.lock().expect("posts").len(), 0);
+        assert_eq!(port.edits.lock().expect("edits").len(), 0);
+        assert_eq!(port.deletes.lock().expect("deletes").len(), 0);
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Legacy-Message 7201")));
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("Legacy-Message 7202")));
+        assert_eq!(
+            dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_LEGACY_GUIDE_MESSAGE_KEY)
+                .await
+                .expect("guide kv")
                 .as_deref(),
-            Some("7002")
+            Some("7201")
+        );
+        assert_eq!(
+            dl_central_db::kv::get(
+                &pool,
+                ROUTER_PANEL_KV_NS,
+                ROUTER_LEGACY_INTERFACE_MESSAGE_KEY,
+            )
+            .await
+            .expect("interface kv")
+            .as_deref(),
+            Some("7202")
         );
     }
 
@@ -1038,6 +1674,20 @@ mod tests {
 
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         assert_eq!(port.edits.lock().expect("edits").len(), 0);
+    }
+
+    #[test]
+    fn router_panel_attachment_validation_meldet_fehlende_banner_datei() {
+        let err = validate_router_panel_attachments(&[RouterPanelAttachment {
+            id: 0,
+            filename: "fehlt.png".to_string(),
+            relative_path: format!("{ROUTER_BANNER_DIR}/fehlt.png"),
+        }])
+        .expect_err("missing banner");
+
+        assert!(err.contains("Router-Banner"));
+        assert!(err.contains("fehlt.png"));
+        assert!(err.contains("nicht gepostet/editiert"));
     }
 
     #[tokio::test]
@@ -1064,5 +1714,123 @@ mod tests {
             router.user_pref(42).await,
             Some(("casual".to_string(), false))
         );
+    }
+
+    #[tokio::test]
+    async fn router_spawn_blockt_wenn_user_bereits_owner_der_aktuellen_lane_ist() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(StaticRouterPort::default());
+        *port.voice_channel.lock().expect("voice") = Some(777);
+        let engine = test_engine(pool.clone());
+        engine
+            .store
+            .upsert_lane(crate::tempvoice::store::LaneRecord {
+                channel_id: 777,
+                guild_id: 1,
+                owner_id: 42,
+                initial_owner_id: Some(42),
+                base_name: "Chill Lane".to_string(),
+                category_id: mode_to_category("casual"),
+                source_staging_id: Some(ROUTER_VC_ID),
+            })
+            .await
+            .expect("lane");
+        let router = LaneRouter::new(pool, port, engine.clone(), None);
+
+        let outcome = router.spawn_lane_from_current_voice(1, 42, "casual").await;
+
+        assert_eq!(outcome, RouterSpawnOutcome::AlreadyOwnLane { lane_id: 777 });
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn router_spawn_setzt_cooldown_nur_nach_created() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(StaticRouterPort::default());
+        *port.voice_channel.lock().expect("voice") = Some(555);
+        let engine = test_engine(pool.clone());
+        let router = LaneRouter::new(pool, port, engine.clone(), None);
+
+        let first = router.spawn_lane_from_current_voice(1, 42, "casual").await;
+        let second = router.spawn_lane_from_current_voice(1, 42, "casual").await;
+
+        assert_eq!(first, RouterSpawnOutcome::Created { lane_id: 1 });
+        match second {
+            RouterSpawnOutcome::Cooldown { remaining_secs } => {
+                assert!(remaining_secs > 0);
+                assert!(remaining_secs <= ROUTER_SPAWN_COOLDOWN_SECS);
+            }
+            other => panic!("expected cooldown, got {other:?}"),
+        }
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn router_spawn_handler_user_ohne_voice_liefert_ephemeren_link() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let router = LaneRouter::new(
+            pool.clone(),
+            Arc::new(StaticRouterPort::default()),
+            test_engine(pool),
+            None,
+        );
+        let handler = RouterPanelHandler { router };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "router_spawn_casual".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        let content = reply.content.expect("content");
+        assert!(content.contains(ROUTER_REPLY_NOT_IN_VOICE));
+        assert!(content.contains(&format!("<#{ROUTER_VC_ID}>")));
+    }
+
+    #[tokio::test]
+    async fn router_spawn_handler_happy_path_erstellt_lane_ueber_tempvoice() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(StaticRouterPort::default());
+        *port.voice_channel.lock().expect("voice") = Some(555);
+        let engine = test_engine(pool.clone());
+        let router = LaneRouter::new(pool, port, engine.clone(), None);
+        let handler = RouterPanelHandler { router };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "router_spawn_casual".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>").as_str())
+        );
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].channel_id, 1);
+        assert_eq!(lanes[0].owner_id, 42);
     }
 }

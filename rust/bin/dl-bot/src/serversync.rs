@@ -29,6 +29,7 @@ use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
 
 use crate::master;
+pub use dl_voice::router::RouterApplyOutput;
 pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
 pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
@@ -592,6 +593,7 @@ pub trait ServerSyncOps: Send + Sync {
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput>;
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput>;
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput>;
+    async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput>;
     async fn serverguide_preview(
         &self,
         requested_by_user_id: Option<u64>,
@@ -611,6 +613,7 @@ pub struct ServerSyncService {
     discord_token: String,
     guild_id: u64,
     http_client: reqwest::Client,
+    router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
 }
 
 impl ServerSyncService {
@@ -626,7 +629,12 @@ impl ServerSyncService {
             discord_token,
             guild_id,
             http_client: reqwest::Client::new(),
+            router_interface: tokio::sync::RwLock::new(None),
         })
+    }
+
+    pub async fn set_router_interface(&self, interface: Arc<dl_voice::router::RouterInterface>) {
+        *self.router_interface.write().await = Some(interface);
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
@@ -2274,6 +2282,18 @@ impl ServerSyncOps for ServerSyncService {
         output.dry_run = false;
         output.repost_required = false;
         Ok(output)
+    }
+
+    async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
+        let Some(interface) = self.router_interface.read().await.clone() else {
+            return Err(ServerSyncError::internal(
+                "RouterInterface ist im ServerSyncService nicht verdrahtet",
+            ));
+        };
+        interface
+            .apply_panel(confirm)
+            .await
+            .map_err(ServerSyncError::internal)
     }
 }
 
@@ -4569,6 +4589,7 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
         )
         .route("/serversync/welcome-preview", post(http_welcome_preview))
         .route("/serversync/welcome-apply", post(http_welcome_apply))
+        .route("/serversync/router-apply", post(http_router_apply))
         .route("/serversync/onboarding-apply", post(http_onboarding_apply))
         .route(
             "/serversync/serverguide-apply",
@@ -4844,6 +4865,29 @@ async fn http_welcome_apply(
     }
 }
 
+async fn http_router_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        ConfirmRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.router_apply(body.confirm).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 async fn http_onboarding_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -4947,6 +4991,7 @@ mod tests {
     type RestoreCall = (Option<i64>, Option<u64>);
     type ConfirmCall = bool;
     type WelcomeApplyCall = bool;
+    type RouterApplyCall = bool;
 
     #[derive(Default)]
     struct MockServerSync {
@@ -4957,6 +5002,7 @@ mod tests {
         archive_calls: Mutex<Vec<bool>>,
         regelwerk_calls: Mutex<Vec<ConfirmCall>>,
         welcome_apply_calls: Mutex<Vec<WelcomeApplyCall>>,
+        router_apply_calls: Mutex<Vec<RouterApplyCall>>,
     }
 
     #[async_trait]
@@ -5188,6 +5234,14 @@ mod tests {
                 .push(confirm);
             Ok(mock_welcome_output(!confirm))
         }
+
+        async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
+            self.router_apply_calls
+                .lock()
+                .expect("router apply calls")
+                .push(confirm);
+            Ok(mock_router_output(!confirm))
+        }
     }
 
     fn request(path: &str, token: Option<&str>, body: Value) -> Request<Body> {
@@ -5283,6 +5337,43 @@ mod tests {
             } else {
                 BTreeMap::from([("hero".to_string(), vec![7001])])
             },
+        }
+    }
+
+    fn mock_router_output(dry_run: bool) -> RouterApplyOutput {
+        RouterApplyOutput {
+            guild_id: GUILD_ID,
+            channel_id: dl_voice::router::ROUTER_TEXT_CHANNEL_ID,
+            dry_run,
+            payload_format: dl_voice::router::ROUTER_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: Some(dl_voice::router::ROUTER_PAYLOAD_FORMAT.to_string()),
+            stored_message_id: Some(8001),
+            action: if dry_run { "planned_edit" } else { "edited" }.to_string(),
+            message_id: Some(8001),
+            warnings: Vec::new(),
+            payload: json!({
+                "flags": dl_voice::router::ROUTER_COMPONENTS_V2_FLAG,
+                "allowed_mentions": {"parse": []},
+                "components": [{
+                    "type": 17,
+                    "accent_color": dl_voice::router::ROUTER_ACCENT_GOLD,
+                    "components": [
+                        {
+                            "type": 12,
+                            "items": [{"media": {"url": "attachment://router-hero.png"}}],
+                        },
+                        {
+                            "type": 10,
+                            "content": dl_voice::router::ROUTER_PANEL_INTRO,
+                        },
+                    ],
+                }],
+                "attachments": [
+                    {"id": 0, "filename": "router-hero.png"},
+                    {"id": 1, "filename": "divider-lane-verwalten.png"},
+                    {"id": 2, "filename": "divider-anleitung.png"},
+                ],
+            }),
         }
     }
 
@@ -6582,6 +6673,70 @@ mod tests {
                 .welcome_apply_calls
                 .lock()
                 .expect("welcome apply calls")
+                .as_slice(),
+            &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_apply_http_ist_dry_run_default_und_liefert_v2_payload() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let dry_run = app
+            .clone()
+            .oneshot(request_raw("/serversync/router-apply", Some("secret"), ""))
+            .await
+            .expect("router dry-run response");
+        let (status, body) = response_json(dry_run).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["action"], "planned_edit");
+        assert_eq!(
+            body["result"]["payload"]["flags"],
+            dl_voice::router::ROUTER_COMPONENTS_V2_FLAG
+        );
+        assert_eq!(
+            body["result"]["payload"]["allowed_mentions"]["parse"]
+                .as_array()
+                .expect("parse")
+                .len(),
+            0
+        );
+        assert_eq!(
+            body["result"]["payload"]["components"][0]["components"][0]["items"][0]["media"]["url"],
+            "attachment://router-hero.png"
+        );
+        assert_eq!(
+            body["result"]["payload"]["components"][0]["components"][1]["content"],
+            dl_voice::router::ROUTER_PANEL_INTRO
+        );
+        assert_eq!(
+            body["result"]["payload"]["attachments"],
+            json!([
+                {"id": 0, "filename": "router-hero.png"},
+                {"id": 1, "filename": "divider-lane-verwalten.png"},
+                {"id": 2, "filename": "divider-anleitung.png"},
+            ])
+        );
+
+        let confirmed = app
+            .oneshot(request(
+                "/serversync/router-apply",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("router confirm response");
+        let (status, body) = response_json(confirmed).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], false);
+        assert_eq!(body["result"]["action"], "edited");
+        assert_eq!(
+            service
+                .router_apply_calls
+                .lock()
+                .expect("router apply calls")
                 .as_slice(),
             &[false, true]
         );

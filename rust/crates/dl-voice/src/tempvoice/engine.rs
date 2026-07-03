@@ -733,19 +733,23 @@ impl TempVoiceEngine {
         user_id: u64,
         mode: &str,
         expected_channel_id: u64,
-    ) {
+    ) -> Option<u64> {
         {
             let mut state = self.state.lock().await;
             if !state.creating.insert(user_id) {
-                return;
+                return None;
             }
         }
         let result = self
             .create_router_lane_inner(guild_id, user_id, mode, expected_channel_id)
             .await;
         self.state.lock().await.creating.remove(&user_id);
-        if let Err(err) = result {
-            tracing::warn!(%err, user_id, mode, "TempVoice: Router-Lane-Erstellung fehlgeschlagen");
+        match result {
+            Ok(lane_id) => lane_id,
+            Err(err) => {
+                tracing::warn!(%err, user_id, mode, "TempVoice: Router-Lane-Erstellung fehlgeschlagen");
+                None
+            }
         }
     }
 
@@ -755,12 +759,12 @@ impl TempVoiceEngine {
         user_id: u64,
         mode: &str,
         expected_channel_id: u64,
-    ) -> Result<(), String> {
+    ) -> Result<Option<u64>, String> {
         if matches!(
             self.port.member_voice_channel(guild_id, user_id).await,
             Some(c) if c != expected_channel_id
         ) {
-            return Ok(());
+            return Ok(None);
         }
         let category_id = match mode {
             "ranked" => 1412804540994162789,
@@ -824,7 +828,7 @@ impl TempVoiceEngine {
         ) {
             self.cleanup_lane(lane_id, "TempVoice: Router-Owner nicht mehr im VC")
                 .await;
-            return Ok(());
+            return Ok(None);
         }
         if let Err(err) = self
             .port
@@ -837,7 +841,7 @@ impl TempVoiceEngine {
         }
         self.apply_owner_settings(guild_id, lane_id, user_id).await;
         self.refresh_name(guild_id, lane_id).await;
-        Ok(())
+        Ok(Some(lane_id))
     }
 
     async fn create_lane_inner(

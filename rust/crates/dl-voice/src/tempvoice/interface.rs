@@ -1362,6 +1362,10 @@ pub fn spawn_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tempvoice::store::LaneRecord;
+    use crate::tempvoice::{TempVoiceConfig, TempVoiceEngine, TempVoiceStore};
+    use std::collections::{HashMap, HashSet};
+    use std::sync::Arc;
 
     #[test]
     fn global_panel_body_enthaelt_python_embed_und_buttons() {
@@ -1488,5 +1492,247 @@ mod tests {
         ];
 
         assert_eq!(find_existing_tempvoice_global_panel(&messages), Some(11));
+    }
+
+    struct ForeignLanePort;
+
+    #[async_trait::async_trait]
+    impl crate::tempvoice::LanePort for ForeignLanePort {
+        async fn create_voice_channel(
+            &self,
+            _guild_id: u64,
+            _category_id: Option<u64>,
+            _name: &str,
+            _user_limit: i64,
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
+
+        async fn delete_channel(&self, _channel_id: u64, _reason: &str) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn move_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _channel_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn rename_channel(
+            &self,
+            _channel_id: u64,
+            _name: &str,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn set_member_connect(
+            &self,
+            _channel_id: u64,
+            _user_id: u64,
+            _connect: Option<bool>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn apply_member_connect_batch(
+            &self,
+            _channel_id: u64,
+            _denied_user_ids: &HashSet<u64>,
+            _clear_user_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn set_role_connect(
+            &self,
+            _channel_id: u64,
+            _role_id: u64,
+            _connect: Option<bool>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn apply_role_connect_batch(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+            _allowed_role_ids: &HashSet<u64>,
+            _clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn set_user_limit(
+            &self,
+            _channel_id: u64,
+            _limit: i64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn disconnect_member(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn member_display_name(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            None
+        }
+
+        async fn add_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn remove_role(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _role_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn set_nick(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _nick: Option<&str>,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn member_nick(&self, _guild_id: u64, _user_id: u64) -> Option<String> {
+            None
+        }
+
+        async fn channel_user_limit(&self, _guild_id: u64, _channel_id: u64) -> Option<i64> {
+            None
+        }
+
+        async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+
+        async fn set_channel_category(
+            &self,
+            _channel_id: u64,
+            _category_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
+            Some(4242)
+        }
+
+        async fn member_role_names(&self, _guild_id: u64, _user_id: u64) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+
+        async fn channel_members(&self, _guild_id: u64, _channel_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
+
+        async fn channel_name(&self, _guild_id: u64, _channel_id: u64) -> Option<String> {
+            Some("Lane 1".to_string())
+        }
+
+        async fn channel_category(&self, _guild_id: u64, _channel_id: u64) -> Option<u64> {
+            Some(1289721245281292290)
+        }
+
+        async fn category_voice_channel_names(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+        ) -> Vec<String> {
+            Vec::new()
+        }
+
+        async fn category_voice_channels(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+        ) -> Vec<(u64, String)> {
+            Vec::new()
+        }
+
+        async fn channel_created_at(&self, _channel_id: u64) -> Option<i64> {
+            None
+        }
+    }
+
+    #[tokio::test]
+    async fn verwaltungs_handler_fremde_lane_liefert_owner_fehler() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let engine = TempVoiceEngine::new(
+            TempVoiceConfig {
+                guild_id_hint: 1,
+                staging_channels: HashSet::new(),
+                fixed_lane_ids: HashSet::new(),
+                tempvoice_categories: HashSet::new(),
+                minrank_categories: HashSet::new(),
+                ranked_category_id: 0,
+                staging_rules: HashMap::new(),
+            },
+            TempVoiceStore::new(db.pool().clone()),
+            Arc::new(ForeignLanePort),
+        );
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: 4242,
+                guild_id: 1,
+                owner_id: 99,
+                initial_owner_id: Some(99),
+                base_name: "Lane 1".to_string(),
+                category_id: 1289721245281292290,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        engine.rehydrate().await;
+        let handler = PanelHandler {
+            engine,
+            pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_rename_btn".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some(NOT_OWNER));
     }
 }

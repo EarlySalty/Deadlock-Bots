@@ -15,6 +15,7 @@ dl-bridges.workspace = true
 dl-community.workspace = true
 dl-central-db.workspace = true
 dl-discord.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 serenity.workspace = true
 sqlx.workspace = true

@@ -1,3 +1,11 @@
+## #198 — Voice-Lanes per Klick: das neue Router-Panel
+
+**Ausgangslage:** Eigene Voice-Lanes gab es bisher nur über die ➕-Kanäle, verwaltet wurde in separaten Verwaltungs-Kanälen, und im Router-Kanal erklärten zwei alte Nachrichten einen Vorlieben-Flow, den kaum jemand genutzt hat.
+
+**Was wurde geändert:** Im Router-Kanal steht jetzt ein einziges Panel im Server-Look mit Bannern: Drei Modus-Buttons (Casual, Ranked, Street Brawl) erstellen dir sofort eine eigene Lane in der passenden Kategorie und ziehen dich automatisch rüber — für Ranked brauchst du wie gewohnt einen verifizierten Rang. Direkt darunter verwaltest du deine Lane per Button (Owner übernehmen, Limit, Umbenennen, Kick/Ban/Unban, Modus wechseln), und eine ausführliche Anleitung erklärt alles im Detail. Gegen Klick-Spam gibt es eine kurze Abklingzeit, und wer schon eine eigene Lane hat, wird auf Modus wechseln und Umbenennen verwiesen statt eine zweite zu bekommen.
+
+**Wie es jetzt läuft:** In einen Sprachkanal setzen (am einfachsten in den Deadlock Router), Modus klicken, fertig. Die ➕-Kanäle laufen übergangsweise parallel weiter, bis sich der neue Flow bewährt hat.
+
 ## #197 — 🧭willkommen ist da: der Server auf einen Blick
 
 **Ausgangslage:** Nach dem Struktur-Umbau (#195) fehlte noch der versprochene Startpunkt — ein Ort, der Neuen wie alten Hasen zeigt, wo was ist.
@@ -5,7 +13,6 @@
 **Was wurde geändert:** 🧭willkommen ist jetzt befüllt: Banner im Look unserer Website, jede Kategorie mit eigenem Header und kurzen Beschreibungen aller Kanäle, das Community-Team inklusive unseres Bots, Links zu Website, Twitch und Coaching — und ein Schnellstart mit den drei wichtigsten Klicks.
 
 **Wie es jetzt läuft:** Einfach reinschauen und durchklicken — jeder Kanal-Link bringt dich direkt hin, der Button am Ende wieder nach oben. Und wenn sich am Server etwas ändert, ziehen die Texte in Sekunden nach, ohne dass jemand neue Nachrichten posten muss.
-
 ## #196 — Text-Moderation reagiert entspannter auf Gaming-Trash-Talk
 
 **Ausgangslage:** Der Moderationsbot hat einzelne Sprüche über Helden- oder Spielergruppen zu schnell als Belästigung vorgeschlagen. Selbst wenn die erste Einschätzung nur schwach war, reichte eine zweite Bestätigung schon für eine Mod-Karte.

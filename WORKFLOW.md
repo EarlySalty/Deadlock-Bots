@@ -1,3 +1,32 @@
+# W3.4a Router-Flow + TempVoice-Panel (2026-07-03)
+
+## Ziel
+Router-Auswahl-Flow im Kanal `deadlock-router` als idempotentes Components-V2-Panel plus TempVoice-Verwaltungs-Panel umsetzen. Keine Strukturänderungen in `rules.rs`, keine Live-Discord-Calls, kein Commit/Push.
+
+## Phase 1 Ist-Analyse
+- Konzept C/D gelesen: LFG v2 bleibt Folgebaustein; Router-Flow spawnt Lanes in Modus-Kategorien und soll die Creator erst nach Owner-Test ersetzen.
+- TempVoice-Spawn: `TempVoiceEngine` verarbeitet Join-Events auf Staging-IDs Casual `1501089974093873232`, Ranked `1412804671432818890`, Street Brawl `1357422958544420944`; `create_lane_inner` erstellt Voice-Kanal, persistiert `voice.tempvoice_lanes`, moved den User und wendet Owner-Settings an. Zusätzlich existiert `create_router_lane` für Router-Lanes.
+- Modi aus bestehender Engine: `casual`/Chill -> Kategorie `1289721245281292290`, `ranked` -> `1412804540994162789`, `street_brawl` -> `1357422957017698478`. Neue-Spieler ist nur Adaptive-Routing-Hook, Custom Game hat keine bestehende TempVoice-Spawn-Regel; deshalb kein neuer Button ohne separate Engine-Erweiterung.
+- TempVoice-Verwaltung: bestehende `tv_*`-Handler bieten u. a. Region DE/EU, Owner Claim, Limit, Kick, Ban, Unban, Duo/Trio/Reset, Presets, Rang-Präferenz, Rename, Lurker, Moduswechsel, Min-Rank und Tag-Filter. Guards laufen über `lane_of`/`owned_lane_of`; Fehler ohne Lane/ohne Owner sind ephemer.
+- `rules.rs`: Kategorien/DynamicNamespaces enthalten Chill, Deadlock Router und Street Brawl als `tempvoice_*`; alte Creator-/Join-Trigger-Kanäle bleiben im Modell. Auftrag bestätigt: keine `rules.rs`-Strukturänderung.
+- `welcome_publish.rs`: Components V2 nutzt `flags=32768`, Container `accent_color=13150315`, `allowed_mentions.parse=[]`, KV-Message-ID-Storage und HTTP-Apply über `/serversync/welcome-apply`. Router übernimmt dieses Muster, aber ohne Welcome-Textloader.
+
+## Fortschritt
+- Rework nach Kritiker-Review gestartet: Scope strikt auf Router-Spawn-Spam/Lane-Hopping, History-Adoption über `router_spawn_`-IDs und Legacy-Panel-Cleanup. Kein Commit/Push; bestehender W3.4a-Diff bleibt erhalten.
+- Rework umgesetzt: `router_spawn_*` blockt Owner in eigener TempVoice-Lane mit neuem `AlreadyOwnLane`-Outcome und setzt pro User einen 30s-In-Memory-Cooldown nur nach `Created`; Cooldown-Klicks liefern `Cooldown`.
+- Rework umgesetzt: `RouterPanelMessage` enthält rekursiv extrahierte `custom_ids`; History-Adoption matcht nur noch V2-Messages ohne Embeds mit `router_spawn_`-Custom-ID.
+- Rework umgesetzt: `apply_panel(confirm=true)` löscht nach erfolgreichem Apply Legacy-Panel-Messages aus `guide_message_id`/`interface_message_id` und entfernt die KV-Keys; Dry-Run kündigt geplante Löschungen nur als Warnings an.
+- Ist-Analyse abgeschlossen; Umsetzung startet scoped in `dl-voice` Router/TempVoice-Engine und `dl-bot` ServerSync-HTTP.
+- Implementiert: Router-Panel als eine Components-V2-Message im `deadlock-router`-Kanal mit `flags=32768`, Gold-Container, leerem `allowed_mentions.parse`, KV-Message-ID und Payload-Format-Key. Zweiter Containerabschnitt im selben Panel nutzt bestehende `tv_*`-Verwaltungsaktionen.
+- Implementiert: neue `router_spawn_*`-Buttons erstellen per bestehender `TempVoiceEngine::create_router_lane` Lanes fuer Casual/Ranked/Street Brawl aus dem aktuellen Voice-State des klickenden Users; User ohne Voice bzw. Ranked ohne Rang erhalten ephemere Antworten. Alte `router_mode_*`-/Autojoin-Interaktionen bleiben registriert.
+- Implementiert: interner HTTP-Trigger `POST /serversync/router-apply` mit Dry-Run-Default analog Welcome-Apply; `ServerSyncService` verdrahtet das bestehende `RouterInterface`.
+- Platzhaltertexte liegen in `rust/crates/dl-voice/src/router.rs` als `Platzhalter: ...`-Konstanten; Claude ersetzt final.
+- Verifikation bisher: `SQLX_OFFLINE=true cargo build --workspace` gruen; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot` gruen; `./scripts/central_test_db.sh cargo test -p dl-voice` gruen; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings` gruen; `cargo fmt --all -- --check` gruen; `git diff --check` gruen.
+- Rework-Verifikation gruen: `./scripts/central_test_db.sh cargo test -p dl-voice router_ -- --nocapture`; `SQLX_OFFLINE=true cargo build --workspace`; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`; `./scripts/central_test_db.sh cargo test -p dl-voice`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`.
+- Hinweis: direkte DB-Harness-Tests ohne `CENTRAL_TEST_DSN`/`DATABASE_URL` schlagen in bestehenden `dl-bot`/`dl-voice`-Tests fehl; mit dem Projekt-Wrapper laufen sie gruen.
+- W3.4a-Nachtrag gestartet: Router-Panel nutzt jetzt die fertigen Banner aus `assets/welcome-banners/` als Components-V2-Media-Galleries und fuehrt Attachment-Metadaten analog Welcome-Payload. Erste Zieltests gruen: `SQLX_OFFLINE=true cargo test -p dl-voice router_panel_body_ist_components_v2_mit_router_und_tv_buttons -- --nocapture`; `./scripts/central_test_db.sh cargo test -p dl-voice router_interface_ -- --nocapture`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot router_apply_http_ist_dry_run_default_und_liefert_v2_payload -- --nocapture`; `SQLX_OFFLINE=true cargo check -p dl-voice`.
+- W3.4a-Nachtrag abgeschlossen: Router-Apply validiert Banner vor POST/PATCH, uebergibt dieselben Attachments bei neuem Post und Edit erneut an die Glue-Schicht; Dry-Run zeigt nur Payload/Attachment-Metadaten. Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`; `./scripts/central_test_db.sh cargo test -p dl-voice`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`.
+
 # W3.2e Components-V2-Hub (2026-07-03)
 
 ## Ziel

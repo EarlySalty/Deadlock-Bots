@@ -35,6 +35,7 @@ BANNERS = [
     ("navigation.png", "KANAL", "NAVIGATION"),
     ("team.png", "COMMUNITY", "TEAM"),
     ("socials.png", "LINKS &", "SOCIALS"),
+    ("router-hero.png", "DEADLOCK", "ROUTER"),
 ]
 
 
@@ -170,6 +171,8 @@ DIVIDERS = [
     ("divider-router.png", "VOICE & LANES"),
     ("divider-custom.png", "CUSTOM GAMES"),
     ("divider-quickstart.png", "SCHNELLSTART"),
+    ("divider-lane-verwalten.png", "LANE VERWALTEN"),
+    ("divider-anleitung.png", "ANLEITUNG"),
 ]
 
 def render_divider(fname: str, label: str, logo: Image.Image) -> None:
