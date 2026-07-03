@@ -39,6 +39,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
     },
     hero_intro: "Willkommen bei der Deutschen Deadlock Community — Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist.",
     empty_navigation: "Die Navigation wird gerade neu aufgebaut — schau gleich nochmal rein.",
+    navigation_intro: "Alle Bereiche des Servers im Überblick — ein Klick auf den Kanal bringt dich direkt hin.",
     default_channel_description: "Beschreibung folgt.",
     channel_descriptions: &[
         WelcomeChannelDescription {
@@ -307,6 +308,7 @@ pub struct WelcomeTextTable {
     pub section_titles: WelcomeSectionTitles,
     pub hero_intro: &'static str,
     pub empty_navigation: &'static str,
+    pub navigation_intro: &'static str,
     pub default_channel_description: &'static str,
     pub channel_descriptions: &'static [WelcomeChannelDescription],
     pub empty_team_role_members: &'static str,
@@ -367,6 +369,7 @@ struct ResolvedWelcomeTextTable {
     section_titles: ResolvedWelcomeSectionTitles,
     hero_intro: String,
     empty_navigation: String,
+    navigation_intro: String,
     default_channel_description: String,
     channel_descriptions: Vec<ResolvedWelcomeChannelDescription>,
     empty_team_role_members: String,
@@ -440,6 +443,7 @@ struct WelcomeTitlesToml {
 struct WelcomeBodyTextsToml {
     hero_intro: Option<String>,
     empty_navigation: Option<String>,
+    navigation_intro: Option<String>,
     default_channel_description: Option<String>,
     empty_team_role_members: Option<String>,
     socials_intro: Option<String>,
@@ -640,6 +644,10 @@ impl ResolvedWelcomeConfig {
             file.texts.empty_navigation,
         );
         apply_optional(
+            &mut self.texts.navigation_intro,
+            file.texts.navigation_intro,
+        );
+        apply_optional(
             &mut self.texts.default_channel_description,
             file.texts.default_channel_description,
         );
@@ -714,6 +722,7 @@ impl ResolvedWelcomeTextTable {
             },
             hero_intro: WELCOME_TEXTS.hero_intro.to_string(),
             empty_navigation: WELCOME_TEXTS.empty_navigation.to_string(),
+            navigation_intro: WELCOME_TEXTS.navigation_intro.to_string(),
             default_channel_description: WELCOME_TEXTS.default_channel_description.to_string(),
             channel_descriptions: WELCOME_TEXTS
                 .channel_descriptions
@@ -1198,13 +1207,17 @@ impl NavigationChunk {
                 <= NAVIGATION_ATTACHMENT_BUDGET
     }
 
-    fn push_header(&mut self, banner: Option<&WelcomeBannerOutput>, title: &str) {
+    fn push_header(&mut self, banner: Option<&WelcomeBannerOutput>, title: &str, intro: &str) {
         let mut container_components = Vec::new();
         push_media_gallery_for_banner(&mut container_components, &mut self.attachments, banner);
         if container_components.is_empty() {
             let content = format!("## {title}");
             self.text_chars += content.chars().count();
             container_components.push(text_display(content));
+        }
+        if !intro.is_empty() {
+            self.text_chars += intro.chars().count();
+            container_components.push(text_display(intro.to_string()));
         }
         let component = container(container_components);
         self.component_count += count_component(&component);
@@ -1276,7 +1289,11 @@ fn navigation_messages(
     let header_banner = Some(welcome_banner(repo_root, "navigation.png", warnings));
     let categories = navigation_category_messages(model, repo_root, texts, warnings);
     let mut first = NavigationChunk::new();
-    first.push_header(header_banner.as_ref(), &texts.section_titles.navigation);
+    first.push_header(
+        header_banner.as_ref(),
+        &texts.section_titles.navigation,
+        &texts.navigation_intro,
+    );
 
     if categories.is_empty() {
         warnings.push("Welcome-Navigation enthaelt keine oeffentlichen Kanaele".to_string());
