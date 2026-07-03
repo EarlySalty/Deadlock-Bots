@@ -904,7 +904,9 @@ impl ServerSyncService {
                 );
                 if let Some(before) = before.as_deref() {
                     url.push_str("&before=");
-                    url.push_str(before);
+                    // archive_timestamp enthaelt `+00:00` — das `+` muss
+                    // percent-encodiert werden, sonst liest Discord ein Leerzeichen.
+                    url.push_str(&before.replace('+', "%2B"));
                 }
                 let page: DiscordThreadPage = self.discord_get_json(url).await?;
                 let next_before = page
