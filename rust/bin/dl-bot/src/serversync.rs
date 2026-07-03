@@ -49,6 +49,7 @@ const SERVER_GUIDE_DIFF_OBJECT_ID: u64 = GUILD_ID;
 const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
     "Server Guide per API nicht verfügbar — manuelle Owner-Konfiguration nötig";
 // docs.discord.food/resources/guild New Member Action Type: 0=VIEW, 1=CHAT.
+const SERVER_GUIDE_ACTION_TYPE_VIEW: i64 = 0;
 const SERVER_GUIDE_ACTION_TYPE_CHAT: i64 = 1;
 const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
@@ -2028,7 +2029,8 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
             },
             ServerGuideAction {
                 channel_id: deadlock_rang.to_string(),
-                action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
+                // Rang-Wahl laeuft ueber das Panel, nicht per Chat — Kanal ist nicht @everyone-sendbar.
+                action_type: SERVER_GUIDE_ACTION_TYPE_VIEW,
                 title: "Steam verknüpfen & Rang eintragen".to_string(),
                 description: Some(String::new()),
             },
