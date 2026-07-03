@@ -53,12 +53,14 @@ Scripted, kein Midjourney: SVG-Templates im Website-Look (Anthrazit, Grid-Textur
 - **Stufe 2 — Vertrauens-Gate:** Posten in Mitspieler-Suche/LFG-Forum nur mit Verknüpfung (Anti-Scam: Hürde für Wegwerf-Accounts). Auch für Coaching-Zuordnung genutzt (Coach sieht echten Rang; Website-Anfragen ↔ Discord-Account).
 - **Stufe 3 — kein Lese-/Chat-Gate:** Server bleibt ohne Verknüpfung voll nutzbar.
 
-## C — LFG v2
+## C — LFG v2 (präzisiert 2026-07-03, Owner-Review)
 
-- `🎯mitspieler-suche` wird Forum: Posten **nur per Formular** (Modus, Rang-Bereich, freie Plätze, Mikro) → sauber strukturierter Post. **Keine Tag-Pillen** (Owner-Entscheid; Region entfällt, DE-Community).
-- Auto-Expiry: Posts laufen nach 24 h Inaktivität ab.
-- Router-Integration: „Lane erstellen"-Button am Post spawnt die passende Voice-Lane **in der zum Modus passenden Kategorie** und verlinkt sie im Post.
-- Posten nur mit Steam-Verknüpfung (B Stufe 2); lesen/antworten für alle.
+Kernidee — **besser als das Rivals-Vorbild**: Der LFG-Post ist kein toter Formular-Zettel, sondern das **Live-Schaufenster einer Lane**. Rivals-Posts veralten sofort („noch aktuell?"-Friedhof); bei uns kommt der Zustand aus der echten Voice-Belegung.
+
+- `🎯mitspieler-suche` wird Forum: Posten **nur per Formular** (Modus, Rang-Bereich, freie Plätze). **Kein Mikro-Feld** (Owner-Entscheid: entweder Voice oder SoloQ). **Keine Tag-Pillen**, Region entfällt (DE-Community). Bewusst ≤4 Felder — die Hürde muss minimal sein, die Magie liegt im Live-Zustand, nicht in Metadaten.
+- **Zwei Wege zum Post:** (a) Formular im Forum, optional mit „Lane gleich aufmachen?"; (b) aus einer bestehenden eigenen Lane per „Mitspieler suchen"-Button (TempVoice-Panel).
+- **Live-Kopplung Post⇄Lane:** freie Plätze aus echter Voice-Belegung; „Beitreten"-Button zieht per Router-Mechanik (W3.4a) direkt in die Lane; Lane voll → Post zeigt es; Lane stirbt → Post schließt sich selbst. 24h-Inaktivitäts-Expiry bleibt nur als Fallback für Posts ohne Lane.
+- **Steam-Gate nur für Ranked** (Owner-Entscheid 2026-07-03, ersetzt „Posten nur mit Verknüpfung"): Ranked-Posts und Ranked-Lanes brauchen den verifizierten Rang (Rang-Rollen-Gate wie im Router); Casual/Street-Brawl-Posts für alle. Verknüpfungsweg für User: nativer Onboarding-Screen über die Linked Role (B) — Aktivierung siehe W3.3-Restpunkte.
 - **Kein Punkte-/Season-System** (bewusst gegen Rivals-Vorbild: Engagement-Theater bei unserer Größe). Stattdessen: bestehendes Rank-Leaderboard (eigene Berechnungen, Sichtbarkeits-Opt-in) öffentlich machen. Optionales Nice-to-have später: „zuverlässiger Mitspieler"-Badge nach N erfolgreichen LFG-Runden — ohne Punktezähler.
 
 ## D — Router-Auswahl-Flow (mit C verschmolzen)
