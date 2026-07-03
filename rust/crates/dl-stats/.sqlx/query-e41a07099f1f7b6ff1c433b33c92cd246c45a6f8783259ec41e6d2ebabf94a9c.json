@@ -1,0 +1,34 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT badge_level AS \"badge_level!\",\n               rank_name AS \"rank_name!\",\n               captured_at AS \"captured_at!\"\n        FROM steam.steam_rank_history\n        WHERE user_id = $1\n          AND badge_level IS NOT NULL\n          AND rank_name IS NOT NULL\n        ORDER BY captured_at DESC, badge_level DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "badge_level!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 1,
+        "name": "rank_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "captured_at!",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      true,
+      true,
+      false
+    ]
+  },
+  "hash": "e41a07099f1f7b6ff1c433b33c92cd246c45a6f8783259ec41e6d2ebabf94a9c"
+}

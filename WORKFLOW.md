@@ -1,3 +1,26 @@
+# Rank-History Backend dl-stats (2026-07-03)
+
+## Ziel
+Rank-History-Migration und dl-stats-API fuer `/aktivitaet/api/*` implementieren. Kein Commit/Push und keine Git-Kommandos durch diesen Worker.
+
+## Fortschritt
+- Rework nach Kritiker-Pass gestartet: Scope strikt auf `dl-stats` Rank-History, `dl-central-etl` Replay-Mapping, Migration/Fresh-Schema und SQLx-Cache. Keine Git-Kommandos, kein Commit/Push.
+- Rework umgesetzt: Membership ist jetzt exakt "neuestes Guild-member_event ist join"; `unban`/alle anderen neuesten Events zaehlen nicht. `days=0` ist dokumentiert und getestet als All-Time, Days werden bis 3650 geklemmt, negative/nicht-numerische Werte liefern 400.
+- Rework umgesetzt: Rank-Leaderboard filtert Sichtbarkeit zuerst und holt current/baseline per LATERAL aus SQL; History-Tie-Breaker nutzen konsistent `badge_level DESC` bei gleichem `captured_at`. Migration `2026070260_rank_history_visibility.sql` enthaelt den partial covering Index auf `steam.steam_rank_history`.
+- Rework umgesetzt: `dl-central-etl` Steam-Rank-History-Testplan mappt `badge_level` und bildet den Inventory-Typ `captured_at INTEGER -> timestamptz` ab; Ledger hatte `badge_level` bereits gemappt.
+- EXPLAIN-Beleg gegen Wegwerf-DB mit 105000 History-Zeilen: Leaderboard-Plan nutzt fuer current, oldest baseline und cutoff baseline jeweils `Index Only Scan using steam_rank_history_user_captured_visible_cover_idx`; kein Full-Read von `steam_rank_history` im sichtbaren Teil.
+- Rework-Verifikation gruen: `SQLX_OFFLINE=true cargo test -p dl-stats --features testing`; `./scripts/central_test_db.sh cargo test -p dl-stats --features testing -- --include-ignored`; `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`; `cargo test -p dl-central-etl`; `cargo fmt -p dl-stats -p dl-central-etl -p dl-central-db -- --check`; `SQLX_OFFLINE=true cargo clippy -p dl-stats -p dl-central-db --all-targets --features testing -- -D warnings`; `SQLX_OFFLINE=true cargo clippy -p dl-central-etl --all-targets -- -D warnings`.
+- Pflichtkontext gelesen: `dl-stats/src/lib.rs`, `me.rs`, `public.rs`, `ranks.rs`, zentrale Migrationen und `fresh_migrations_schema.rs`.
+- Befund: naechste freie Migration ist `2026070260`; Display-Namen werden wie Voice/Text-Leaderboards ueber `activity.member_events` aufgeloest.
+- Membership-Befund: keine dedizierte persistente Current-Member-Tabelle gefunden; `activity.member_events` enthaelt Join/Leave/Backfill-Events und wird als konservative DB-Quelle fuer aktuelle Mitgliedschaft geprueft/weiterverwendet, falls eindeutig genug.
+- TDD-Red: `SQLX_OFFLINE=true cargo test -p dl-stats --features testing rank_history` scheitert erwartungsgemaess an fehlender `not_found_response`/Stub-Logik.
+- Implementiert: Migration `2026070260_rank_history_visibility.sql`, `dl-stats::rank_history` mit Me-History, Visibility-Upsert, Rank-Leaderboard und zieluserbezogener History. IDs werden in JSON als Strings ausgegeben.
+- SQLx-Cache fuer `dl-stats` gegen Wegwerf-Postgres aktualisiert; erster DB-Lauf zeigte stale `sqlx::migrate!`-Artefakte, danach `cargo clean -p dl-central-db -p dl-central-migrate` und erneuter Lauf gruen.
+- Zieltests gruen: `SQLX_OFFLINE=true cargo test -p dl-stats --features testing rank_history` (4 passed, 2 ignored) und `./scripts/central_test_db.sh cargo test -p dl-stats --features testing rank_history -- --include-ignored` (6 passed).
+- Privacy-Vertrag nachgezogen: `steam.rank_history_visibility` ist in `dl-community::privacy::USER_TABLES` aufgenommen; Vertragstest gruen.
+- Abschluss-Verifikation gruen: `cargo fmt -p dl-stats -p dl-central-db -p dl-community -- --check`; `SQLX_OFFLINE=true cargo clippy -p dl-stats -p dl-central-db --all-targets --features testing -- -D warnings`; `SQLX_OFFLINE=true cargo clippy -p dl-community --lib -- -D warnings`; `SQLX_OFFLINE=true cargo test -p dl-stats --features testing`; `SQLX_OFFLINE=true cargo test -p dl-central-db --features testing`; `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`; `./scripts/central_test_db.sh cargo test -p dl-stats --features testing -- --include-ignored`; `SQLX_OFFLINE=true cargo test -p dl-community privacy_contract_tests::alle_migration_user_id_spalten_sind_im_privacy_vertrag`.
+- Hinweis: `SQLX_OFFLINE=true cargo clippy -p dl-stats -p dl-central-db -p dl-community --all-targets --features testing -- -D warnings` scheitert an einem bestehenden fehlenden SQLx-Cache fuer `dl-community/src/privacy.rs` Test-Query bei Zeile 1822; nicht durch die Rank-History-Aenderung verursacht.
+
 # Invite-Lounge-Watcher deadlock-invite (2026-07-02)
 
 ## Ziel

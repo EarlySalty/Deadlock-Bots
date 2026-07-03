@@ -563,6 +563,88 @@ async fn steam_links_one_primary_unique_index_count(pool: &PgPool) -> i64 {
     .expect("steam_links one-primary unique index count")
 }
 
+async fn rank_history_visibility_check_constraint_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM pg_constraint c
+           JOIN pg_class t ON t.oid = c.conrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = 'steam'
+            AND t.relname = 'rank_history_visibility'
+            AND c.contype = 'c'
+            AND pg_get_constraintdef(c.oid) LIKE '%visibility%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''private''%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''members''%'
+            AND pg_get_constraintdef(c.oid) LIKE '%''public''%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("rank_history_visibility visibility check constraint count")
+}
+
+async fn rank_history_visibility_index_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT idx.relname AS index_name,
+                       array_agg(a.attname::text ORDER BY k.ord) AS columns
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN pg_class idx ON idx.oid = i.indexrelid
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'steam'
+                   AND t.relname = 'rank_history_visibility'
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, idx.relname
+           ) indexes
+          WHERE index_name = 'rank_history_visibility_visibility_idx'
+            AND columns = ARRAY['visibility']::text[]",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("rank_history_visibility visibility index count")
+}
+
+async fn steam_rank_history_covering_index_count(pool: &PgPool) -> i64 {
+    sqlx::query_scalar(
+        "SELECT count(*)
+           FROM (
+                SELECT idx.relname AS index_name,
+                       pg_get_indexdef(i.indexrelid) AS definition,
+                       pg_get_expr(i.indpred, i.indrelid) AS predicate,
+                       array_agg(a.attname::text ORDER BY k.ord)
+                           FILTER (WHERE k.ord <= i.indnkeyatts) AS key_columns,
+                       array_agg(a.attname::text ORDER BY k.ord)
+                           FILTER (WHERE k.ord > i.indnkeyatts) AS include_columns
+                  FROM pg_index i
+                  JOIN pg_class t ON t.oid = i.indrelid
+                  JOIN pg_namespace n ON n.oid = t.relnamespace
+                  JOIN pg_class idx ON idx.oid = i.indexrelid
+                  JOIN unnest(i.indkey) WITH ORDINALITY AS k(attnum, ord) ON true
+                  JOIN pg_attribute a
+                    ON a.attrelid = t.oid
+                   AND a.attnum = k.attnum
+                 WHERE n.nspname = 'steam'
+                   AND t.relname = 'steam_rank_history'
+                   AND NOT i.indisprimary
+                 GROUP BY i.indexrelid, i.indrelid, i.indpred, i.indnkeyatts, idx.relname
+           ) indexes
+          WHERE index_name = 'steam_rank_history_user_captured_visible_cover_idx'
+            AND key_columns = ARRAY['user_id', 'captured_at']::text[]
+            AND include_columns = ARRAY['badge_level', 'rank_name']::text[]
+            AND definition LIKE '%captured_at DESC%'
+            AND predicate LIKE '%badge_level IS NOT NULL%'
+            AND predicate LIKE '%rank_name IS NOT NULL%'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("steam_rank_history covering index count")
+}
+
 async fn trigger_names(pool: &PgPool, table: &str) -> Vec<String> {
     sqlx::query_scalar(
         "SELECT tg.tgname
@@ -682,6 +764,15 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(journey_migration_count_after_first, 1);
+    let rank_history_visibility_migration_count_after_first = scalar_i64(
+        &pool,
+        "SELECT count(*)
+           FROM _sqlx_migrations
+          WHERE version = 2026070260
+            AND success",
+    )
+    .await;
+    assert_eq!(rank_history_visibility_migration_count_after_first, 1);
     let migration_1_signature_after_first =
         migration_row_signature(&pool, 1, "core and schemas").await;
     let migration_2_signature_after_first =
@@ -700,6 +791,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070210, "server config schema").await;
     let migration_2026070220_signature_after_first =
         migration_row_signature(&pool, 2026070220, "journey ingestion analytics").await;
+    let migration_2026070260_signature_after_first =
+        migration_row_signature(&pool, 2026070260, "rank history visibility").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -721,6 +814,15 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
     )
     .await;
     assert_eq!(journey_migration_count_after_second, 1);
+    let rank_history_visibility_migration_count_after_second = scalar_i64(
+        &pool,
+        "SELECT count(*)
+           FROM _sqlx_migrations
+          WHERE version = 2026070260
+            AND success",
+    )
+    .await;
+    assert_eq!(rank_history_visibility_migration_count_after_second, 1);
     assert_eq!(
         migration_row_signature(&pool, 1, "core and schemas").await,
         migration_1_signature_after_first,
@@ -765,6 +867,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070220, "journey ingestion analytics").await,
         migration_2026070220_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070220"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070260, "rank history visibility").await,
+        migration_2026070260_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070260"
     );
 
     let schema_count = scalar_i64(
@@ -1365,6 +1472,63 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         1,
         "expected one partial unique primary index on discord_id where primary_account and discord_id != 0"
     );
+
+    assert_eq!(
+        table_columns_in_schema(&pool, "steam", "rank_history_visibility").await,
+        vec!["user_id", "visibility", "updated_at"]
+    );
+    assert_eq!(
+        primary_key_columns_in_schema(&pool, "steam", "rank_history_visibility").await,
+        vec!["user_id"]
+    );
+    assert_eq!(
+        rank_history_visibility_check_constraint_count(&pool).await,
+        1,
+        "rank_history_visibility.visibility keeps the private/members/public CHECK"
+    );
+    assert_eq!(
+        rank_history_visibility_index_count(&pool).await,
+        1,
+        "rank_history_visibility visibility index exists"
+    );
+    assert_eq!(
+        steam_rank_history_covering_index_count(&pool).await,
+        1,
+        "steam_rank_history has the partial covering index for visible leaderboard lookups"
+    );
+    assert_column_in_schema(
+        &pool,
+        "steam",
+        "rank_history_visibility",
+        "user_id",
+        "bigint",
+        "int8",
+        "NO",
+        None,
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "steam",
+        "rank_history_visibility",
+        "visibility",
+        "text",
+        "text",
+        "NO",
+        Some("'private'::text"),
+    )
+    .await;
+    assert_column_in_schema(
+        &pool,
+        "steam",
+        "rank_history_visibility",
+        "updated_at",
+        "timestamp with time zone",
+        "timestamptz",
+        "NO",
+        Some("now()"),
+    )
+    .await;
 
     assert_eq!(
         table_columns(&pool, "meta_users").await,

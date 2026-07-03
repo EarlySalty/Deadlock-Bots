@@ -314,6 +314,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "rank_history_visibility",
+        "user_id",
+        "steam.rank_history_visibility",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "customgames_tournament_signups",
         "user_id",
         "bot.customgames_tournament_signups",
