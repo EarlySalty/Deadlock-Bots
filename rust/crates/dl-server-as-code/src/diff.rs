@@ -8,7 +8,8 @@ use crate::model::{
 };
 use crate::Result;
 
-const ARCHIVE_CATEGORY_NAME: &str = "📦 Archiv";
+const ARCHIVE_CATEGORY_NAME: &str = "📦 ─ ARCHIV ─";
+const EXPLICIT_VISIBILITY_OPENING_ALLOWLIST: &[(DiscordId, TargetKind, DiscordId)] = &[];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -634,40 +635,60 @@ fn effective_rights_block_reason(
     desired: &GuildModel,
     actual: &GuildModel,
 ) -> Result<Option<String>> {
-    if change.object.kind != ObjectKind::PermissionOverwrite || change.action != DiffAction::Delete
-    {
+    if change.object.kind != ObjectKind::PermissionOverwrite {
         return Ok(None);
     }
-    let Some(actual_value) = change.actual.as_ref() else {
+
+    let desired_spec: Option<PermissionOverwriteSpec> = change
+        .desired
+        .as_ref()
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?;
+    let actual_spec: Option<PermissionOverwriteSpec> = change
+        .actual
+        .as_ref()
+        .map(|value| serde_json::from_value(value.clone()))
+        .transpose()?;
+    let Some(reference_spec) = desired_spec.as_ref().or(actual_spec.as_ref()) else {
         return Ok(None);
     };
-    let actual_spec: PermissionOverwriteSpec = serde_json::from_value(actual_value.clone())?;
-    let channel_id = actual_spec.key.channel_id;
-    if !actual.channels.contains_key(&channel_id) && !desired.channels.contains_key(&channel_id) {
+    let channel_id = reference_spec.key.channel_id;
+    if !model_has_permission_container(actual, channel_id)
+        && !model_has_permission_container(desired, channel_id)
+    {
         return Ok(None);
     }
-    if actual_spec.key.target_kind == TargetKind::Member
-        && actual_spec.deny_bits != 0
-        && !desired_member_deny_covers(desired, &actual_spec)
-    {
-        return Ok(Some(
-            "Member-Deny-Löschung nicht automatisch verifizierbar".to_string(),
-        ));
+
+    if let Some(actual_spec) = actual_spec.as_ref() {
+        if actual_spec.key.target_kind == TargetKind::Member
+            && actual_spec.deny_bits != 0
+            && !desired_member_deny_covers_spec(desired_spec.as_ref(), actual_spec)
+        {
+            return Ok(Some(
+                "Member-Deny-Löschung nicht automatisch verifizierbar".to_string(),
+            ));
+        }
     }
 
     let before = effective_channel_permissions(
         actual,
         channel_id,
-        actual_spec.key.target_kind,
-        actual_spec.key.target_id,
+        reference_spec.key.target_kind,
+        reference_spec.key.target_id,
     );
     let after = effective_channel_permissions(
         desired,
         channel_id,
-        actual_spec.key.target_kind,
-        actual_spec.key.target_id,
+        reference_spec.key.target_kind,
+        reference_spec.key.target_id,
     );
     if after & !before == 0 {
+        return Ok(None);
+    }
+    if desired_spec
+        .as_ref()
+        .is_some_and(explicit_visibility_opening_allowed)
+    {
         return Ok(None);
     }
 
@@ -675,17 +696,31 @@ fn effective_rights_block_reason(
         "effektive Rechte würden sich öffnen: {}: {before:#x} -> {after:#x}",
         subject_label(
             actual,
-            actual_spec.key.target_kind,
-            actual_spec.key.target_id
+            reference_spec.key.target_kind,
+            reference_spec.key.target_id
         )
     )))
 }
 
-fn desired_member_deny_covers(model: &GuildModel, actual_spec: &PermissionOverwriteSpec) -> bool {
-    model
-        .overwrites
-        .get(&actual_spec.key)
-        .is_some_and(|desired_spec| actual_spec.deny_bits & !desired_spec.deny_bits == 0)
+fn model_has_permission_container(model: &GuildModel, channel_id: DiscordId) -> bool {
+    model.channels.contains_key(&channel_id) || model.categories.contains_key(&channel_id)
+}
+
+fn desired_member_deny_covers_spec(
+    desired_spec: Option<&PermissionOverwriteSpec>,
+    actual_spec: &PermissionOverwriteSpec,
+) -> bool {
+    desired_spec.is_some_and(|desired_spec| actual_spec.deny_bits & !desired_spec.deny_bits == 0)
+}
+
+fn explicit_visibility_opening_allowed(spec: &PermissionOverwriteSpec) -> bool {
+    EXPLICIT_VISIBILITY_OPENING_ALLOWLIST
+        .iter()
+        .any(|(channel_id, target_kind, target_id)| {
+            spec.key.channel_id == *channel_id
+                && spec.key.target_kind == *target_kind
+                && spec.key.target_id == *target_id
+        })
 }
 
 fn effective_channel_permissions(
@@ -944,6 +979,64 @@ mod tests {
 
         assert!(diff.changes.is_empty(), "{:?}", diff.changes);
         assert_eq!(diff.blocked.len(), 1);
+        assert!(diff.blocked[0]
+            .reason
+            .contains("effektive Rechte würden sich öffnen: @everyone"));
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_create_der_sichtbarkeit_oeffnet_wird_geblockt() -> anyhow::Result<()> {
+        let mut actual = model_with_channel();
+        actual
+            .roles
+            .get_mut(&GUILD_ID)
+            .expect("@everyone")
+            .permissions_bitmask = 0;
+        let mut desired = actual.clone();
+        let opening = overwrite(
+            TargetKind::Role,
+            GUILD_ID,
+            Permissions::VIEW_CHANNEL,
+            Permissions::empty(),
+        );
+        desired.overwrites.insert(opening.key.clone(), opening);
+
+        let diff = diff_models(&desired, &actual, &[], &[])?;
+
+        assert!(diff.changes.is_empty(), "{:?}", diff.changes);
+        assert_eq!(diff.blocked.len(), 1);
+        assert_eq!(diff.blocked[0].change.action, DiffAction::Create);
+        assert!(diff.blocked[0]
+            .reason
+            .contains("effektive Rechte würden sich öffnen: @everyone"));
+        Ok(())
+    }
+
+    #[test]
+    fn overwrite_update_der_sichtbarkeit_oeffnet_wird_geblockt() -> anyhow::Result<()> {
+        let mut actual = model_with_channel();
+        let hidden = overwrite(
+            TargetKind::Role,
+            GUILD_ID,
+            Permissions::empty(),
+            Permissions::VIEW_CHANNEL,
+        );
+        actual.overwrites.insert(hidden.key.clone(), hidden);
+        let mut desired = model_with_channel();
+        let opening = overwrite(
+            TargetKind::Role,
+            GUILD_ID,
+            Permissions::VIEW_CHANNEL,
+            Permissions::empty(),
+        );
+        desired.overwrites.insert(opening.key.clone(), opening);
+
+        let diff = diff_models(&desired, &actual, &[], &[])?;
+
+        assert!(diff.changes.is_empty(), "{:?}", diff.changes);
+        assert_eq!(diff.blocked.len(), 1);
+        assert_eq!(diff.blocked[0].change.action, DiffAction::Update);
         assert!(diff.blocked[0]
             .reason
             .contains("effektive Rechte würden sich öffnen: @everyone"));

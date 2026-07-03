@@ -58,8 +58,8 @@ const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
     "frag-die-community",
-    "spieler-suche",
-    "memes-channel",
+    "mitspieler-suche",
+    "memes",
     "rank-ups",
     "patchnotes",
     "deadlock-rang",
@@ -1987,6 +1987,7 @@ Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's di
 
 fn require_channel_mention(model: &GuildModel, name: &str) -> ServerSyncResult<String> {
     resolve_channel_id(model, name)
+        .map_err(ServerSyncError::bad_request)?
         .map(|id| format!("<#{id}>"))
         .ok_or_else(|| ServerSyncError::bad_request(format!("Kanal `{name}` wurde nicht gefunden")))
 }
@@ -1998,7 +1999,7 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
     let frag_die_community =
         require_serverguide_channel_id(model, "frag-die-community", &mut blockers);
     let deadlock_rang = require_serverguide_channel_id(model, "deadlock-rang", &mut blockers);
-    let spieler_suche = require_serverguide_channel_id(model, "spieler-suche", &mut blockers);
+    let mitspieler_suche = require_serverguide_channel_id(model, "mitspieler-suche", &mut blockers);
     let patchnotes = require_serverguide_channel_id(model, "patchnotes", &mut blockers);
     let server_support = require_serverguide_channel_id(model, "server-support", &mut blockers);
     let regelwerk =
@@ -2007,14 +2008,14 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
     let (
         Some(frag_die_community),
         Some(deadlock_rang),
-        Some(spieler_suche),
+        Some(mitspieler_suche),
         Some(patchnotes),
         Some(server_support),
         Some(regelwerk),
     ) = (
         frag_die_community,
         deadlock_rang,
-        spieler_suche,
+        mitspieler_suche,
         patchnotes,
         server_support,
         regelwerk,
@@ -2048,7 +2049,7 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
                 description: Some(String::new()),
             },
             ServerGuideAction {
-                channel_id: spieler_suche.to_string(),
+                channel_id: mitspieler_suche.to_string(),
                 action_type: SERVER_GUIDE_ACTION_TYPE_CHAT,
                 title: "Such dir Mitspieler".to_string(),
                 description: Some(String::new()),
@@ -2094,13 +2095,19 @@ fn require_serverguide_channel_id(
     name: &str,
     blockers: &mut Vec<String>,
 ) -> Option<u64> {
-    let id = resolve_channel_id(model, name);
-    if id.is_none() {
-        blockers.push(format!(
-            "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-        ));
+    match resolve_channel_id(model, name) {
+        Ok(Some(id)) => Some(id),
+        Ok(None) => {
+            blockers.push(format!(
+                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
+            ));
+            None
+        }
+        Err(err) => {
+            blockers.push(err);
+            None
+        }
     }
-    id
 }
 
 fn require_serverguide_channel_id_by_id(
@@ -2205,7 +2212,13 @@ fn build_welle2b_onboarding_config(
         }
     }
 
-    let spieler_suche = resolve_channel_id(model, "spieler-suche");
+    let mitspieler_suche = match resolve_channel_id(model, "mitspieler-suche") {
+        Ok(id) => id,
+        Err(err) => {
+            blockers.push(err);
+            None
+        }
+    };
     let invite_role = require_role_id(model, &["Invite-Gast"], "Invite-Gast", &mut blockers);
     let frischling_role = require_role_id(model, &["Frischling"], "Frischling", &mut blockers);
 
@@ -2217,16 +2230,20 @@ fn build_welle2b_onboarding_config(
         );
     }
 
-    let mut prompts = vec![weiche_prompt(invite_role, frischling_role, spieler_suche)];
+    let mut prompts = vec![weiche_prompt(
+        invite_role,
+        frischling_role,
+        mitspieler_suche,
+    )];
     prompts.push(ping_prompt(model, &mut blockers));
     if let Some(mut prompt) = rank_prompt {
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
     }
 
-    if spieler_suche.is_some() {
+    if mitspieler_suche.is_some() {
         warnings.push(
-            "`Ich spiele Deadlock und suche Mitspieler` nutzt `spieler-suche` als channel_id-Fallback, damit Discord Optionen ohne Rollen/Kanaele sicher akzeptiert."
+            "`Ich spiele Deadlock und suche Mitspieler` nutzt `mitspieler-suche` als channel_id-Fallback, damit Discord Optionen ohne Rollen/Kanaele sicher akzeptiert."
                 .to_string(),
         );
     }
@@ -2378,7 +2395,7 @@ fn weiche_prompt(
                 role_ids: Vec::new(),
                 // Discord lehnt je nach Guild-Validierung Optionen ohne role_ids
                 // UND channel_ids ab; diese neutrale Option zeigt deshalb auf
-                // den ohnehin vorgesehenen Default-Kanal `spieler-suche`.
+                // den ohnehin vorgesehenen Default-Kanal `mitspieler-suche`.
                 channel_ids: spieler_suche
                     .map(|id| vec![id.to_string()])
                     .unwrap_or_default(),
@@ -2547,27 +2564,39 @@ fn option_points_to_unverified_role(option: &NativeOnboardingOption, model: &Gui
 }
 
 fn resolve_default_channel_ids(model: &GuildModel, blockers: &mut Vec<String>) -> Vec<String> {
-    DEFAULT_ONBOARDING_CHANNEL_NAMES
-        .iter()
-        .filter_map(|name| {
-            let id = resolve_channel_id(model, name);
-            if id.is_none() {
-                blockers.push(format!(
-                    "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
-                ));
-            }
-            id.map(|id| id.to_string())
-        })
-        .collect()
+    let mut ids = Vec::new();
+    for name in DEFAULT_ONBOARDING_CHANNEL_NAMES {
+        match resolve_channel_id(model, name) {
+            Ok(Some(id)) => ids.push(id.to_string()),
+            Ok(None) => blockers.push(format!(
+                "Kanal `{name}` wurde im Live-Guild-Modell nicht gefunden"
+            )),
+            Err(err) => blockers.push(err),
+        }
+    }
+    ids
 }
 
-fn resolve_channel_id(model: &GuildModel, name: &str) -> Option<u64> {
+fn resolve_channel_id(model: &GuildModel, name: &str) -> Result<Option<u64>, String> {
     let expected = normalized_name(name);
-    model
+    let mut candidates = model
         .channels
         .values()
-        .find(|channel| normalized_name(&channel.name) == expected)
-        .map(|channel| channel.channel_id)
+        .filter(|channel| normalized_name(&channel.name) == expected)
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|channel| channel.channel_id);
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [channel] => Ok(Some(channel.channel_id)),
+        _ => Err(format!(
+            "Kanal `{name}` ist im Live-Guild-Modell mehrdeutig: {}",
+            candidates
+                .iter()
+                .map(|channel| format!("{}:{}", channel.channel_id, channel.name))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
 }
 
 fn require_role_id(
@@ -4807,8 +4836,8 @@ mod tests {
         for (id, name) in [
             (6001, "allgemein"),
             (6002, "frag-die-community"),
-            (6003, "spieler-suche"),
-            (6004, "memes-channel"),
+            (6003, "🎯mitspieler-suche"),
+            (6004, "💀memes"),
             (6005, "rank-ups"),
             (6006, "patchnotes"),
             (6007, "deadlock-rang"),
@@ -4845,6 +4874,21 @@ mod tests {
         assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
         assert!(!text.contains("#deadlock-rang"));
         assert!(!text.contains("<@&"));
+    }
+
+    #[test]
+    fn channel_resolver_meldet_deadlock_invite_duplikat_statt_ersten_treffer() {
+        let mut model = onboarding_model();
+        model
+            .channels
+            .insert(6010, onboarding_channel(6010, "💌deadlock-invite"));
+
+        let err = require_channel_mention(&model, "deadlock-invite")
+            .expect_err("duplicate channel names must fail");
+
+        assert!(err.to_string().contains("mehrdeutig"));
+        assert!(err.to_string().contains("6008:deadlock-invite"));
+        assert!(err.to_string().contains("6010:💌deadlock-invite"));
     }
 
     fn serverguide_model() -> GuildModel {
@@ -4989,7 +5033,7 @@ mod tests {
         );
         assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
 
-        // spieler-suche (6003) ist eine CHAT-Action: read-only MUSS blocken.
+        // mitspieler-suche (6003) ist eine CHAT-Action: read-only MUSS blocken.
         let mut read_only = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
