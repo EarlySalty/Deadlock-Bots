@@ -1123,15 +1123,22 @@ impl ServerSyncService {
                     continue;
                 }
                 for embed in &message.embeds {
-                    let Some(marker) = embed
+                    if let Some(marker) = embed
                         .footer
                         .as_ref()
                         .and_then(|footer| footer.text.as_deref())
-                    else {
-                        continue;
-                    };
-                    if let Some(section_id) =
-                        welcome_publish::welcome_section_id_from_marker(marker)
+                    {
+                        if let Some(section_id) =
+                            welcome_publish::welcome_section_id_from_marker(marker)
+                        {
+                            messages.entry(section_id.to_string()).or_insert(message_id);
+                            continue;
+                        }
+                    }
+                    if let Some(section_id) = embed
+                        .title
+                        .as_deref()
+                        .and_then(welcome_publish::welcome_section_id_from_title)
                     {
                         messages.entry(section_id.to_string()).or_insert(message_id);
                     }
@@ -1156,7 +1163,7 @@ impl ServerSyncService {
     ) -> ServerSyncResult<Option<u64>> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
         let response = self
-            .send_welcome_message_payload("PATCH", url, &section.payload, section.banner.as_ref())
+            .send_welcome_message_payload("PATCH", url, &section.payload)
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -1173,7 +1180,7 @@ impl ServerSyncService {
     ) -> ServerSyncResult<u64> {
         let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
         let response = self
-            .send_welcome_message_payload("POST", url, &section.payload, section.banner.as_ref())
+            .send_welcome_message_payload("POST", url, &section.payload)
             .await?;
         let message: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -1185,20 +1192,21 @@ impl ServerSyncService {
         method: &'static str,
         url: String,
         payload: &welcome_publish::WelcomeMessagePayload,
-        banner: Option<&welcome_publish::WelcomeBannerOutput>,
     ) -> ServerSyncResult<DiscordRestResponse> {
-        let payload = serde_json::to_value(payload)?;
-        let banner = banner.filter(|banner| banner.present);
-        if let Some(banner) = banner {
-            let payload_text = serde_json::to_string(&payload)?;
-            let path = welcome_publish::welcome_repo_root().join(&banner.relative_path);
-            let bytes = std::fs::read(&path).map_err(|err| {
-                ServerSyncError::internal(format!(
-                    "Welcome-Banner `{}` konnte nicht gelesen werden: {err}",
-                    path.display()
-                ))
-            })?;
-            let filename = banner.filename.clone();
+        let payload_value = serde_json::to_value(payload)?;
+        if !payload.attachments.is_empty() {
+            let payload_text = serde_json::to_string(&payload_value)?;
+            let mut files = Vec::new();
+            for attachment in &payload.attachments {
+                let path = welcome_publish::welcome_repo_root().join(&attachment.relative_path);
+                let bytes = std::fs::read(&path).map_err(|err| {
+                    ServerSyncError::internal(format!(
+                        "Welcome-Attachment `{}` konnte nicht gelesen werden: {err}",
+                        path.display()
+                    ))
+                })?;
+                files.push((attachment.id, attachment.filename.clone(), bytes));
+            }
             return discord_regelwerk_send_with_retry(
                 || {
                     let request = match method {
@@ -1209,15 +1217,16 @@ impl ServerSyncService {
                     .header("Authorization", format!("Bot {}", self.discord_token))
                     .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
                     let payload_text = payload_text.clone();
-                    let bytes = bytes.clone();
-                    let filename = filename.clone();
+                    let files = files.clone();
                     async move {
-                        let part = reqwest::multipart::Part::bytes(bytes)
-                            .file_name(filename)
-                            .mime_str("image/png")?;
-                        let form = reqwest::multipart::Form::new()
-                            .text("payload_json", payload_text)
-                            .part("files[0]", part);
+                        let mut form =
+                            reqwest::multipart::Form::new().text("payload_json", payload_text);
+                        for (id, filename, bytes) in files {
+                            let part = reqwest::multipart::Part::bytes(bytes)
+                                .file_name(filename)
+                                .mime_str("image/png")?;
+                            form = form.part(format!("files[{id}]"), part);
+                        }
                         let response = request.multipart(form).send().await?;
                         DiscordRestResponse::from_response(response).await
                     }
@@ -1237,7 +1246,7 @@ impl ServerSyncService {
                 .header("Authorization", format!("Bot {}", self.discord_token))
                 .header("Content-Type", "application/json")
                 .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
-                .json(&payload);
+                .json(&payload_value);
                 async move {
                     let response = request.send().await?;
                     DiscordRestResponse::from_response(response).await
@@ -2000,6 +2009,12 @@ impl ServerSyncOps for ServerSyncService {
         let discovered_message_ids = self
             .fetch_welcome_marker_message_ids(output.channel_id, bot_user_id)
             .await?;
+        let mut hero_message_id = output
+            .sections
+            .iter()
+            .find(|section| section.section_id == "hero")
+            .and_then(|section| section.message_id)
+            .or_else(|| discovered_message_ids.get("hero").copied());
 
         if !confirm {
             for section in &mut output.sections {
@@ -2010,11 +2025,22 @@ impl ServerSyncOps for ServerSyncService {
                     }
                 }
             }
+            hero_message_id = output
+                .sections
+                .iter()
+                .find(|section| section.section_id == "hero")
+                .and_then(|section| section.message_id);
+            welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
             return Ok(output);
         }
 
-        for section in &mut output.sections {
-            let discovered_message_id = discovered_message_ids.get(&section.section_id).copied();
+        for section_index in 0..output.sections.len() {
+            if output.sections[section_index].section_id == "quickstart" {
+                welcome_publish::refresh_quickstart_jump_button(&mut output, hero_message_id);
+            }
+            let section = &mut output.sections[section_index];
+            let section_id = section.section_id.clone();
+            let discovered_message_id = discovered_message_ids.get(&section_id).copied();
             let candidates = welcome_publish::welcome_candidate_message_ids(
                 section.stored_message_id,
                 discovered_message_id,
@@ -2037,18 +2063,24 @@ impl ServerSyncOps for ServerSyncService {
                 section.message_id = Some(message_id);
                 output
                     .edited_message_ids
-                    .insert(section.section_id.clone(), message_id);
+                    .insert(section_id.clone(), message_id);
+                if section_id == "hero" {
+                    hero_message_id = Some(message_id);
+                }
             } else {
                 let message_id = self
                     .post_welcome_message(output.channel_id, section)
                     .await?;
-                self.store_welcome_message_id(&section.section_id, message_id)
+                self.store_welcome_message_id(&section_id, message_id)
                     .await?;
                 section.action = "posted".to_string();
                 section.message_id = Some(message_id);
                 output
                     .posted_message_ids
-                    .insert(section.section_id.clone(), message_id);
+                    .insert(section_id.clone(), message_id);
+                if section_id == "hero" {
+                    hero_message_id = Some(message_id);
+                }
             }
         }
 
@@ -5008,8 +5040,11 @@ mod tests {
             dry_run,
             warnings: vec!["banner fehlt".to_string()],
             team_roles: vec![welcome_publish::WelcomeTeamRoleOutput {
-                key: "moderator".to_string(),
-                aliases: vec!["Moderator".to_string(), "Community Moderator".to_string()],
+                key: "community-moderator".to_string(),
+                aliases: vec![
+                    "Community Moderator".to_string(),
+                    "Community Mod".to_string(),
+                ],
                 matched_role_id: Some(42),
                 matched_role_name: Some("Community Moderator".to_string()),
                 member_ids: vec![100],
@@ -5031,7 +5066,6 @@ mod tests {
                     content: "Platzhalter".to_string(),
                     embeds: vec![json!({
                         "title": "Platzhalter",
-                        "footer": { "text": welcome_publish::welcome_marker("hero") },
                     })],
                     components: Vec::new(),
                     attachments: Vec::new(),
@@ -6290,10 +6324,7 @@ mod tests {
             body["result"]["sections"][0]["payload"]["content"],
             "Platzhalter"
         );
-        assert_eq!(
-            body["result"]["sections"][0]["payload"]["embeds"][0]["footer"]["text"],
-            "serversync:welcome:hero"
-        );
+        assert!(body["result"]["sections"][0]["payload"]["embeds"][0]["footer"].is_null());
         assert_eq!(
             body["result"]["team_roles"][0]["matched_role_name"],
             "Community Moderator"

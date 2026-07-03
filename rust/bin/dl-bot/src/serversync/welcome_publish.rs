@@ -66,8 +66,8 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
             description: "Wer aus der Community gerade live ist.",
         },
         WelcomeChannelDescription {
-            channel_key: "twitch",
-            description: "Live-Alerts und News von unserem Twitch-Kanal.",
+            channel_key: "deadlock-streamer",
+            description: "Unsere Twitch-Streamer: Live-Alerts und Highlights.",
         },
         WelcomeChannelDescription {
             channel_key: "allgemein",
@@ -219,13 +219,22 @@ pub const WELCOME_TEAM_ROLE_GROUPS: &[WelcomeTeamRoleGroupSpec] = &[
     },
     WelcomeTeamRoleGroupSpec {
         key: "moderator",
-        aliases: &["Moderator", "Community Moderator"],
+        aliases: &["Moderator", "Mod"],
+    },
+    WelcomeTeamRoleGroupSpec {
+        key: "community-moderator",
+        aliases: &["Community Moderator", "Community Mod"],
     },
     WelcomeTeamRoleGroupSpec {
         key: "coach",
         aliases: &["Coach"],
     },
 ];
+
+pub const WELCOME_TEAM_EXCLUDED_MEMBER_IDS: &[u64] = &[793_214_097_013_080_095];
+const WELCOME_QUICKSTART_JUMP_LABEL: &str = "⬆️ Zum Anfang";
+const WELCOME_QUICKSTART_JUMP_WARNING: &str =
+    "Hero-Message-ID fuer Welcome-Schnellstart-Link fehlt; Button `Zum Anfang` wird weggelassen";
 
 const NON_PUBLIC_CATEGORY_KEYS: &[&str] = &[
     "moderation",
@@ -390,6 +399,8 @@ pub struct WelcomeMessagePayload {
 pub struct WelcomePayloadAttachment {
     pub id: u8,
     pub filename: String,
+    #[serde(skip)]
+    pub relative_path: String,
 }
 
 pub fn welcome_repo_root() -> PathBuf {
@@ -414,6 +425,19 @@ pub fn welcome_section_id_from_marker(marker: &str) -> Option<&'static str> {
         .iter()
         .find(|section| section.id == section_id)
         .map(|section| section.id)
+}
+
+pub fn welcome_section_id_from_title(title: &str) -> Option<&'static str> {
+    [
+        ("hero", WELCOME_TEXTS.section_titles.hero),
+        ("navigation", WELCOME_TEXTS.section_titles.navigation),
+        ("team", WELCOME_TEXTS.section_titles.team),
+        ("socials", WELCOME_TEXTS.section_titles.socials),
+        ("quickstart", WELCOME_TEXTS.section_titles.quickstart),
+    ]
+    .into_iter()
+    .find(|(_, section_title)| *section_title == title)
+    .map(|(section_id, _)| section_id)
 }
 
 pub fn welcome_candidate_message_ids(
@@ -448,8 +472,15 @@ pub fn build_welcome_publish_output(
         })?;
     let mut warnings = Vec::new();
     let team_roles = resolve_team_roles(model, team_members, &mut warnings);
-    let navigation_embeds = navigation_embeds(model, &mut warnings);
+    let (navigation_embeds, navigation_attachments) =
+        navigation_embeds(model, repo_root, &mut warnings);
     let quickstart_buttons = quickstart_buttons(model)?;
+    let hero_message_id = stored_message_ids.get("hero").copied();
+    let hero_jump_url = hero_message_id
+        .map(|message_id| hero_message_url(model.guild_id, welcome_channel.channel_id, message_id));
+    if hero_jump_url.is_none() {
+        warnings.push(WELCOME_QUICKSTART_JUMP_WARNING.to_string());
+    }
 
     let mut sections = Vec::new();
     for definition in WELCOME_SECTION_DEFINITIONS {
@@ -469,7 +500,7 @@ pub fn build_welcome_publish_output(
                 content: String::new(),
                 embeds: navigation_embeds.clone(),
                 components: Vec::new(),
-                attachments: Vec::new(),
+                attachments: navigation_attachments.clone(),
             },
             "team" => team_payload(&team_roles, &marker, banner.as_ref()),
             "socials" => payload_with_optional_banner(
@@ -495,7 +526,10 @@ pub fn build_welcome_publish_output(
                     &marker,
                     None,
                 )],
-                components: vec![button_row(quickstart_buttons.clone())],
+                components: quickstart_components(
+                    quickstart_buttons.clone(),
+                    hero_jump_url.as_deref(),
+                ),
                 attachments: Vec::new(),
             },
             other => return Err(format!("Unbekannte Welcome-Sektion `{other}`")),
@@ -535,6 +569,50 @@ pub fn build_welcome_publish_output(
     })
 }
 
+pub fn refresh_quickstart_jump_button(
+    output: &mut WelcomePublishOutput,
+    hero_message_id: Option<u64>,
+) {
+    let hero_jump_url = hero_message_id
+        .map(|message_id| hero_message_url(output.guild_id, output.channel_id, message_id));
+    if hero_jump_url.is_some() {
+        output
+            .warnings
+            .retain(|warning| warning != WELCOME_QUICKSTART_JUMP_WARNING);
+    } else if !output
+        .warnings
+        .iter()
+        .any(|warning| warning == WELCOME_QUICKSTART_JUMP_WARNING)
+    {
+        output
+            .warnings
+            .push(WELCOME_QUICKSTART_JUMP_WARNING.to_string());
+    }
+    for section in &mut output.sections {
+        if section.section_id != "quickstart" {
+            continue;
+        }
+        let Some(first_row) = section.payload.components.first() else {
+            continue;
+        };
+        let Some(components) = first_row
+            .get("components")
+            .and_then(Value::as_array)
+            .cloned()
+        else {
+            continue;
+        };
+        let primary_buttons = components
+            .into_iter()
+            .filter(|button| {
+                button.get("label").and_then(Value::as_str) != Some(WELCOME_QUICKSTART_JUMP_LABEL)
+            })
+            .collect::<Vec<_>>();
+        section.payload.components =
+            quickstart_components(primary_buttons, hero_jump_url.as_deref());
+    }
+}
+
 fn welcome_banner(
     repo_root: &Path,
     filename: &str,
@@ -551,6 +629,41 @@ fn welcome_banner(
         filename: filename.to_string(),
         relative_path,
         present,
+    }
+}
+
+fn divider_attachment_for_category(
+    repo_root: &Path,
+    category_name: &str,
+    attachment_id: usize,
+    warnings: &mut Vec<String>,
+) -> Option<WelcomePayloadAttachment> {
+    let filename = divider_filename_for_category(category_name)?;
+    let relative_path = format!("{WELCOME_BANNER_DIR}/{filename}");
+    if !repo_root.join(&relative_path).is_file() {
+        warnings.push(format!(
+            "Welcome-Divider `{relative_path}` fehlt; Kategorie `{category_name}` wird ohne Bild gebaut"
+        ));
+        return None;
+    }
+    let id = u8::try_from(attachment_id).unwrap_or(u8::MAX);
+    Some(WelcomePayloadAttachment {
+        id,
+        filename: filename.to_string(),
+        relative_path,
+    })
+}
+
+fn divider_filename_for_category(category_name: &str) -> Option<&'static str> {
+    match normalized_name(category_name).as_str() {
+        "information" => Some("divider-information.png"),
+        "medien" => Some("divider-medien.png"),
+        "community" => Some("divider-community.png"),
+        "deadlock" => Some("divider-deadlock.png"),
+        "coaching" => Some("divider-coaching.png"),
+        "deadlock router" => Some("divider-router.png"),
+        "custom game" => Some("divider-custom.png"),
+        _ => None,
     }
 }
 
@@ -614,8 +727,13 @@ fn team_payload(
     }
 }
 
-fn navigation_embeds(model: &GuildModel, warnings: &mut Vec<String>) -> Vec<Value> {
+fn navigation_embeds(
+    model: &GuildModel,
+    repo_root: &Path,
+    warnings: &mut Vec<String>,
+) -> (Vec<Value>, Vec<WelcomePayloadAttachment>) {
     let mut embeds = Vec::new();
+    let mut attachments = Vec::new();
     let mut categories = model.categories.values().collect::<Vec<_>>();
     categories.sort_by_key(|category| (category.position, category.category_id));
     for category in categories {
@@ -642,22 +760,14 @@ fn navigation_embeds(model: &GuildModel, warnings: &mut Vec<String>) -> Vec<Valu
                 })
             })
             .collect::<Vec<_>>();
-        let marker = if embeds.is_empty() {
-            welcome_marker("navigation")
-        } else {
-            String::new()
-        };
-        let mut embed = embed_base(
-            &category.name,
-            None,
-            if marker.is_empty() {
-                WELCOME_TEXTS.section_titles.navigation
-            } else {
-                &marker
-            },
-        );
-        if marker.is_empty() {
-            embed["footer"] = json!({ "text": WELCOME_TEXTS.section_titles.navigation });
+        let mut embed = embed_base(&category.name, None, "");
+        if let Some(attachment) =
+            divider_attachment_for_category(repo_root, &category.name, attachments.len(), warnings)
+        {
+            embed["image"] = json!({
+                "url": format!("attachment://{}", attachment.filename),
+            });
+            attachments.push(attachment);
         }
         embed["fields"] = Value::Array(fields);
         embeds.push(embed);
@@ -665,14 +775,17 @@ fn navigation_embeds(model: &GuildModel, warnings: &mut Vec<String>) -> Vec<Valu
 
     if embeds.is_empty() {
         warnings.push("Welcome-Navigation enthaelt keine oeffentlichen Kanaele".to_string());
-        return vec![text_embed(
-            WELCOME_TEXTS.section_titles.navigation,
-            Some(WELCOME_TEXTS.empty_navigation),
-            &welcome_marker("navigation"),
-            None,
-        )];
+        return (
+            vec![text_embed(
+                WELCOME_TEXTS.section_titles.navigation,
+                Some(WELCOME_TEXTS.empty_navigation),
+                &welcome_marker("navigation"),
+                None,
+            )],
+            Vec::new(),
+        );
     }
-    embeds
+    (embeds, attachments)
 }
 
 fn quickstart_buttons(model: &GuildModel) -> Result<Vec<Value>, String> {
@@ -695,6 +808,21 @@ fn quickstart_buttons(model: &GuildModel) -> Result<Vec<Value>, String> {
     ])
 }
 
+fn quickstart_components(primary_buttons: Vec<Value>, hero_jump_url: Option<&str>) -> Vec<Value> {
+    let mut rows = vec![button_row(primary_buttons)];
+    if let Some(url) = hero_jump_url {
+        rows.push(button_row(vec![link_button(
+            WELCOME_QUICKSTART_JUMP_LABEL,
+            url,
+        )]));
+    }
+    rows
+}
+
+fn hero_message_url(guild_id: u64, channel_id: u64, message_id: u64) -> String {
+    format!("https://discord.com/channels/{guild_id}/{channel_id}/{message_id}")
+}
+
 fn resolve_team_roles(
     model: &GuildModel,
     team_members: &[WelcomeTeamMember],
@@ -703,16 +831,15 @@ fn resolve_team_roles(
     WELCOME_TEAM_ROLE_GROUPS
         .iter()
         .map(|group| {
-            let matched = resolve_role(model, group.aliases);
-            if matched.is_none() {
+            let matched = resolve_roles(model, group.aliases);
+            if matched.is_empty() {
                 warnings.push(format!(
                     "Team-Rolle `{}` wurde im Live-Guild-Modell nicht gefunden",
                     group.key
                 ));
             }
-            let member_ids = matched
-                .map(|role| members_for_role(team_members, role.role_id))
-                .unwrap_or_default();
+            let role_ids = matched.iter().map(|role| role.role_id).collect::<Vec<_>>();
+            let member_ids = members_for_roles(team_members, &role_ids);
             let member_mentions = member_ids
                 .iter()
                 .map(|id| format!("<@{id}>"))
@@ -724,8 +851,8 @@ fn resolve_team_roles(
                     .iter()
                     .map(|alias| (*alias).to_string())
                     .collect(),
-                matched_role_id: matched.map(|role| role.role_id),
-                matched_role_name: matched.map(|role| role.name.clone()),
+                matched_role_id: matched.first().map(|role| role.role_id),
+                matched_role_name: matched.first().map(|role| role.name.clone()),
                 member_ids,
                 member_mentions,
             }
@@ -733,7 +860,7 @@ fn resolve_team_roles(
         .collect()
 }
 
-fn resolve_role<'a>(model: &'a GuildModel, aliases: &[&str]) -> Option<&'a RoleSpec> {
+fn resolve_roles<'a>(model: &'a GuildModel, aliases: &[&str]) -> Vec<&'a RoleSpec> {
     let normalized_aliases = aliases
         .iter()
         .map(|alias| normalized_name(alias))
@@ -744,13 +871,20 @@ fn resolve_role<'a>(model: &'a GuildModel, aliases: &[&str]) -> Option<&'a RoleS
         .filter(|role| normalized_aliases.contains(&normalized_name(&role.name)))
         .collect::<Vec<_>>();
     candidates.sort_by_key(|role| (role.managed, -role.position, role.role_id));
-    candidates.first().copied()
+    candidates
 }
 
-fn members_for_role(team_members: &[WelcomeTeamMember], role_id: u64) -> Vec<u64> {
+fn members_for_roles(team_members: &[WelcomeTeamMember], role_ids: &[u64]) -> Vec<u64> {
     let mut member_ids = team_members
         .iter()
-        .filter(|member| !member.bot && member.role_ids.contains(&role_id))
+        .filter(|member| {
+            !member.bot
+                && !WELCOME_TEAM_EXCLUDED_MEMBER_IDS.contains(&member.user_id)
+                && member
+                    .role_ids
+                    .iter()
+                    .any(|role_id| role_ids.contains(role_id))
+        })
         .map(|member| member.user_id)
         .collect::<Vec<_>>();
     member_ids.sort_unstable();
@@ -831,10 +965,9 @@ fn text_embed(
     embed
 }
 
-fn embed_base(title: &str, description: Option<&str>, marker: &str) -> Value {
+fn embed_base(title: &str, description: Option<&str>, _marker: &str) -> Value {
     let mut embed = json!({
         "title": title,
-        "footer": { "text": marker },
     });
     if let Some(description) = description.filter(|value| !value.is_empty()) {
         embed["description"] = json!(description);
@@ -855,6 +988,7 @@ fn payload_attachments(banner: Option<&WelcomeBannerOutput>) -> Vec<WelcomePaylo
         .map(|banner| WelcomePayloadAttachment {
             id: 0,
             filename: banner.filename.clone(),
+            relative_path: banner.relative_path.clone(),
         })
         .into_iter()
         .collect()
@@ -1027,6 +1161,10 @@ mod tests {
         model
             .channels
             .insert(27, channel(27, "ticket-eröffnen", 12, 1));
+        let mut voice = channel(28, "dynamische-lane", 11, 4);
+        voice.kind = ChannelKind::Voice;
+        model.channels.insert(28, voice);
+        model.categories.insert(13, category(13, "Street Brawl", 4));
         model.overwrites.insert(
             OverwriteKey {
                 channel_id: 12,
@@ -1065,6 +1203,8 @@ mod tests {
         assert!(!text.contains("<#25>"));
         assert!(!text.contains("<#26>"));
         assert!(!text.contains("<#27>"));
+        assert!(!text.contains("<#28>"));
+        assert!(!text.contains("Street Brawl"));
     }
 
     #[test]
@@ -1092,6 +1232,82 @@ mod tests {
     }
 
     #[test]
+    fn welcome_payloads_haben_keine_sichtbaren_marker_footer() {
+        let model = base_model();
+        let output = build_welcome_publish_output(
+            &model,
+            &[],
+            tempfile::tempdir().expect("tempdir").path(),
+            &BTreeMap::new(),
+            true,
+        )
+        .expect("welcome output");
+
+        for section in &output.sections {
+            for embed in &section.payload.embeds {
+                assert!(
+                    embed.get("footer").is_none(),
+                    "Sektion {} darf keinen sichtbaren Marker-Footer haben",
+                    section.section_id
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn welcome_navigation_divider_nutzen_attachment_urls() {
+        let model = base_model();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let banner_dir = temp.path().join(WELCOME_BANNER_DIR);
+        std::fs::create_dir_all(&banner_dir).expect("banner dir");
+        for filename in ["divider-information.png", "divider-community.png"] {
+            std::fs::write(banner_dir.join(filename), b"png").expect("divider");
+        }
+
+        let output = build_welcome_publish_output(
+            &model,
+            &[],
+            temp.path(),
+            &BTreeMap::from([("hero".to_string(), 7001)]),
+            true,
+        )
+        .expect("welcome output");
+        let navigation = output
+            .sections
+            .iter()
+            .find(|section| section.section_id == "navigation")
+            .expect("navigation");
+
+        assert_eq!(
+            navigation
+                .payload
+                .attachments
+                .iter()
+                .map(|attachment| (attachment.id, attachment.filename.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(0, "divider-information.png"), (1, "divider-community.png")]
+        );
+        let images = navigation
+            .payload
+            .embeds
+            .iter()
+            .filter_map(|embed| {
+                embed
+                    .get("image")
+                    .and_then(|image| image.get("url"))
+                    .and_then(Value::as_str)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            images,
+            vec![
+                "attachment://divider-information.png",
+                "attachment://divider-community.png"
+            ]
+        );
+    }
+
+    #[test]
     fn welcome_idempotenz_priorisiert_storage_und_nutzt_marker_fallback() {
         assert_eq!(
             welcome_candidate_message_ids(Some(10), Some(11)),
@@ -1099,10 +1315,14 @@ mod tests {
         );
         assert_eq!(welcome_candidate_message_ids(None, Some(11)), vec![11]);
         assert_eq!(welcome_candidate_message_ids(Some(10), Some(10)), vec![10]);
+        assert_eq!(
+            welcome_section_id_from_title(WELCOME_TEXTS.section_titles.hero),
+            Some("hero")
+        );
     }
 
     #[test]
-    fn welcome_team_rollen_werden_in_hierarchie_aufgeloest() {
+    fn welcome_team_rollen_sammeln_aliase_und_filtern_ausschluesse() {
         let mut model = base_model();
         model.roles.insert(
             30,
@@ -1111,6 +1331,12 @@ mod tests {
         model
             .roles
             .insert(31, role(31, "Coach", Permissions::empty(), 10));
+        model
+            .roles
+            .insert(32, role(32, "Community Mod", Permissions::empty(), 20));
+        model
+            .roles
+            .insert(33, role(33, "Moderator", Permissions::empty(), 40));
         let members = vec![
             WelcomeTeamMember {
                 user_id: 100,
@@ -1126,6 +1352,21 @@ mod tests {
                 user_id: 102,
                 role_ids: vec![30],
                 bot: true,
+            },
+            WelcomeTeamMember {
+                user_id: 103,
+                role_ids: vec![33],
+                bot: false,
+            },
+            WelcomeTeamMember {
+                user_id: 104,
+                role_ids: vec![32],
+                bot: false,
+            },
+            WelcomeTeamMember {
+                user_id: WELCOME_TEAM_EXCLUDED_MEMBER_IDS[0],
+                role_ids: vec![30, 31, 33],
+                bot: false,
             },
         ];
 
@@ -1143,16 +1384,80 @@ mod tests {
             .iter()
             .find(|role| role.key == "moderator")
             .expect("moderator");
+        assert_eq!(moderator.matched_role_name.as_deref(), Some("Moderator"));
+        assert_eq!(moderator.member_mentions, vec!["<@103>"]);
+        let community_moderator = output
+            .team_roles
+            .iter()
+            .find(|role| role.key == "community-moderator")
+            .expect("community moderator");
         assert_eq!(
-            moderator.matched_role_name.as_deref(),
-            Some("Community Moderator")
+            community_moderator.member_mentions,
+            vec!["<@100>", "<@104>"]
         );
-        assert_eq!(moderator.member_mentions, vec!["<@100>"]);
         let coach = output
             .team_roles
             .iter()
             .find(|role| role.key == "coach")
             .expect("coach");
         assert_eq!(coach.member_mentions, vec!["<@101>"]);
+    }
+
+    #[test]
+    fn welcome_quickstart_jump_button_nutzt_hero_message_id() {
+        let model = base_model();
+        let temp = tempfile::tempdir().expect("tempdir");
+        let output = build_welcome_publish_output(
+            &model,
+            &[],
+            temp.path(),
+            &BTreeMap::from([("hero".to_string(), 7001)]),
+            true,
+        )
+        .expect("welcome output");
+        let quickstart = output
+            .sections
+            .iter()
+            .find(|section| section.section_id == "quickstart")
+            .expect("quickstart");
+        assert_eq!(quickstart.payload.components.len(), 2);
+        assert_eq!(
+            quickstart.payload.components[1]["components"][0]["label"],
+            WELCOME_QUICKSTART_JUMP_LABEL
+        );
+        assert_eq!(
+            quickstart.payload.components[1]["components"][0]["url"],
+            "https://discord.com/channels/1/20/7001"
+        );
+
+        let mut without_hero =
+            build_welcome_publish_output(&model, &[], temp.path(), &BTreeMap::new(), true)
+                .expect("welcome output");
+        assert!(without_hero
+            .warnings
+            .iter()
+            .any(|warning| warning == WELCOME_QUICKSTART_JUMP_WARNING));
+        refresh_quickstart_jump_button(&mut without_hero, Some(7002));
+        let quickstart = without_hero
+            .sections
+            .iter()
+            .find(|section| section.section_id == "quickstart")
+            .expect("quickstart");
+        assert_eq!(
+            quickstart.payload.components[1]["components"][0]["url"],
+            "https://discord.com/channels/1/20/7002"
+        );
+        assert!(!without_hero
+            .warnings
+            .iter()
+            .any(|warning| warning == WELCOME_QUICKSTART_JUMP_WARNING));
+    }
+
+    #[test]
+    fn welcome_deadlock_streamer_beschreibung_ist_gesetzt() {
+        assert_eq!(
+            channel_description("🎥deadlock-streamer"),
+            "Unsere Twitch-Streamer: Live-Alerts und Highlights."
+        );
     }
 }

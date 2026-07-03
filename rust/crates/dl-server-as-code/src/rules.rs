@@ -27,7 +27,7 @@ const ROLE_FRISCHLING: &str = "Frischling";
 const ROLE_STREAMS: &str = "Streams";
 const CATEGORY_MODERATION: &str = "🛡️ ─ MODERATION ─";
 const CATEGORY_INFORMATION: &str = "🏛️ ─ INFORMATION ─";
-const CATEGORY_NEUIGKEITEN: &str = "📣 ─ NEUIGKEITEN ─";
+const CATEGORY_MEDIEN: &str = "📺 ─ MEDIEN ─";
 const CATEGORY_COMMUNITY: &str = "💬 ─ COMMUNITY ─";
 const CATEGORY_DEADLOCK: &str = "🎮 ─ DEADLOCK ─";
 const CATEGORY_COACHING: &str = "🎓 ─ COACHING ─";
@@ -65,7 +65,7 @@ const USER_BAN_X3_COACHING_VIEW_ONLY: DiscordId = 364_796_363_709_349_912;
 const EXPECTED_CATEGORIES: &[&str] = &[
     CATEGORY_MODERATION,
     CATEGORY_INFORMATION,
-    CATEGORY_NEUIGKEITEN,
+    CATEGORY_MEDIEN,
     CATEGORY_COMMUNITY,
     CATEGORY_DEADLOCK,
     CATEGORY_COACHING,
@@ -93,25 +93,28 @@ const DOCUMENTED_STRUCTURE_MOVES: &[(&str, &str)] = &[
     ("willkommen", CATEGORY_INFORMATION),
     ("deadlock-rang", CATEGORY_INFORMATION),
     ("server-support", CATEGORY_INFORMATION),
-    ("deadlock-invite", CATEGORY_INFORMATION),
-    ("ankündigungen", CATEGORY_NEUIGKEITEN),
-    ("patchnotes", CATEGORY_NEUIGKEITEN),
-    ("dev-updates", CATEGORY_NEUIGKEITEN),
-    ("stream-updates", CATEGORY_NEUIGKEITEN),
+    ("ankündigungen", CATEGORY_INFORMATION),
+    ("patchnotes", CATEGORY_INFORMATION),
+    ("dev-updates", CATEGORY_INFORMATION),
+    ("stream-updates", CATEGORY_INFORMATION),
+    ("twitch", CATEGORY_INFORMATION),
+    ("deadlock-streamer", CATEGORY_MEDIEN),
+    ("guides-und-tipps", CATEGORY_INFORMATION),
+    ("game-guides-und-tipps", CATEGORY_INFORMATION),
     ("allgemein", CATEGORY_COMMUNITY),
     ("off-topic", CATEGORY_COMMUNITY),
+    ("deadlock-invite", CATEGORY_COMMUNITY),
     ("frag-die-community", CATEGORY_COMMUNITY),
     ("memes", CATEGORY_COMMUNITY),
     ("leaks", CATEGORY_COMMUNITY),
     ("kreativ-ecke", CATEGORY_COMMUNITY),
-    ("gameplay-clips", CATEGORY_COMMUNITY),
-    ("yt-videos", CATEGORY_COMMUNITY),
+    ("gameplay-clips", CATEGORY_MEDIEN),
+    ("yt-videos", CATEGORY_MEDIEN),
     ("feedback", CATEGORY_COMMUNITY),
     ("bot-spam", CATEGORY_COMMUNITY),
     ("rage-room", CATEGORY_COMMUNITY),
     ("nsfw", CATEGORY_COMMUNITY),
     ("mitspieler-suche", CATEGORY_DEADLOCK),
-    ("guides-und-tipps", CATEGORY_DEADLOCK),
     ("custom-games", CATEGORY_DEADLOCK),
     ("rank-ups", CATEGORY_DEADLOCK),
     ("scrim-planung", CATEGORY_COACHING),
@@ -120,6 +123,7 @@ const DOCUMENTED_STRUCTURE_MOVES: &[(&str, &str)] = &[
 const WELLE2B_ARCHIVE_CHANNEL_NAMES: &[&str] =
     &["server-faq", "movement", "deadlock-art", "mods", "food"];
 const WELLE2B_KREATIV_SOURCE_CHANNEL_NAMES: &[&str] = &["movement", "deadlock-art", "mods", "food"];
+const WELLE3_ARCHIVE_CHANNEL_NAMES: &[&str] = &["sprach-kanal-verwalten", "anleitung"];
 
 // Matching-only Alias-Tabelle fuer Live-Namen, die nicht 1:1 aus Dekoration/Case
 // ableitbar sind. Keine dieser Aliases schreibt Namen ins Soll-Modell.
@@ -129,8 +133,8 @@ const CATEGORY_MATCH_ALIASES: &[(&str, &str)] = &[
     ("moderation", CATEGORY_MODERATION),
     ("eingangsbereich", CATEGORY_INFORMATION),
     ("information", CATEGORY_INFORMATION),
-    ("medien", CATEGORY_NEUIGKEITEN),
-    ("neuigkeiten", CATEGORY_NEUIGKEITEN),
+    ("medien", CATEGORY_MEDIEN),
+    ("neuigkeiten", CATEGORY_MEDIEN),
     ("chat", CATEGORY_COMMUNITY),
     ("community", CATEGORY_COMMUNITY),
     ("sonstiges", CATEGORY_DEADLOCK),
@@ -315,12 +319,6 @@ pub fn derive_desired_model_with_options(
         CATEGORY_INFORMATION,
         apply_information,
     );
-    apply_category_if_present(
-        &mut desired,
-        &mut ctx,
-        CATEGORY_NEUIGKEITEN,
-        apply_neuigkeiten,
-    );
     apply_category_if_present(&mut desired, &mut ctx, CATEGORY_COMMUNITY, apply_community);
     apply_category_if_present(&mut desired, &mut ctx, CATEGORY_DEADLOCK, apply_deadlock);
     apply_category_if_present(&mut desired, &mut ctx, CATEGORY_COACHING, apply_coaching);
@@ -359,6 +357,7 @@ pub fn derive_desired_model_with_options(
         apply_category_if_present(&mut desired, &mut ctx, "Beta Zugang", apply_alt_category);
         apply_welle2b_archive_rules(&mut desired, &mut ctx);
     }
+    apply_welle3_archive_rules(&mut desired, &mut ctx);
     apply_global_channel_overrides(&mut desired, &mut ctx);
     remove_empty_resolved_categories(&mut desired, &mut ctx);
 
@@ -738,6 +737,7 @@ fn canonical_rename_source(target: &str) -> &str {
         "rage-room" => "rage-room",
         "mitspieler-suche" => "mitspieler-suche",
         "guides-und-tipps" => "guides-und-tipps",
+        "deadlock-streamer" => "twitch",
         _ => target,
     }
 }
@@ -776,6 +776,7 @@ fn documented_channel_rename(name: &str) -> Option<&'static str> {
         "patchnotes" => Some("📝patchnotes"),
         "dev-updates" => Some("🐛dev-updates"),
         "stream-updates" => Some("🎥stream-updates"),
+        "twitch" | "deadlock-streamer" => Some("🎥deadlock-streamer"),
         "allgemein" => Some("🌐allgemein"),
         "off-topic" => Some("🎲off-topic"),
         "community-fragen" | "frag-die-community" => Some("💬frag-die-community"),
@@ -858,6 +859,24 @@ fn apply_information(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, catego
             apply_deadlock_rang_channel(desired, ctx, channel_id);
         } else if channel_matches(name, &["deadlock-invite", "beta-zugang"]) {
             apply_public_channel(desired, ctx, channel_id);
+        } else if channel_matches(name, &["ankündigungen", "ankundigungen"]) {
+            // §6.3: Sender-Rollen bleiben wie im Ist, @everyone-Sichtbarkeit wird explizit.
+            set_everyone_overwrite_retaining_others(desired, channel_id, p1_announcement_profile());
+        } else if channel_matches(name, &["patchnotes"]) {
+            let mut overwrites = vec![everyone_overwrite(
+                desired.guild_id,
+                channel_id,
+                p1_announcement_profile(),
+            )];
+            push_role_overwrite(
+                &mut overwrites,
+                desired.guild_id,
+                channel_id,
+                ctx,
+                ROLE_DEADLOCK_PATCHNOTES,
+                allow(Permissions::SEND_MESSAGES),
+            );
+            set_exact_overwrites(desired, ctx, channel_id, overwrites);
         } else if channel_matches(
             name,
             &[
@@ -880,53 +899,6 @@ fn apply_information(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, catego
             );
         } else {
             apply_public_channel(desired, ctx, channel_id);
-        }
-    }
-}
-
-fn apply_neuigkeiten(desired: &mut GuildModel, ctx: &mut RuleContext<'_>, category_id: DiscordId) {
-    set_exact_overwrites(
-        desired,
-        ctx,
-        category_id,
-        vec![everyone_overwrite(
-            desired.guild_id,
-            category_id,
-            p1_announcement_profile(),
-        )],
-    );
-
-    for channel_id in child_channel_ids(desired, category_id) {
-        let name = desired.channel_name(channel_id).unwrap_or_default();
-        if channel_matches(name, &["ankündigungen", "ankundigungen"]) {
-            // §6.3: Sender-Rollen bleiben wie im Ist, @everyone-Sichtbarkeit wird explizit.
-            set_everyone_overwrite_retaining_others(desired, channel_id, p1_announcement_profile());
-        } else if channel_matches(name, &["patchnotes"]) {
-            let mut overwrites = vec![everyone_overwrite(
-                desired.guild_id,
-                channel_id,
-                p1_announcement_profile(),
-            )];
-            push_role_overwrite(
-                &mut overwrites,
-                desired.guild_id,
-                channel_id,
-                ctx,
-                ROLE_DEADLOCK_PATCHNOTES,
-                allow(Permissions::SEND_MESSAGES),
-            );
-            set_exact_overwrites(desired, ctx, channel_id, overwrites);
-        } else {
-            set_exact_overwrites(
-                desired,
-                ctx,
-                channel_id,
-                vec![everyone_overwrite(
-                    desired.guild_id,
-                    channel_id,
-                    p1_announcement_profile(),
-                )],
-            );
         }
     }
 }
@@ -1254,6 +1226,38 @@ fn apply_welle2b_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'
     ensure_kreativ_ecke(desired, ctx);
 }
 
+fn apply_welle3_archive_rules(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) {
+    let channel_ids = welle3_archive_channel_ids(ctx);
+    if channel_ids.is_empty() {
+        return;
+    }
+    let archive_category_id = ensure_archive_category(desired, ctx);
+    set_exact_overwrites_without_retained(
+        desired,
+        archive_category_id,
+        vec![everyone_overwrite(
+            desired.guild_id,
+            archive_category_id,
+            f_everyone_hidden_profile(),
+        )],
+    );
+
+    for channel_id in channel_ids {
+        if let Some(channel) = desired.channels.get_mut(&channel_id) {
+            channel.parent_category_id = Some(archive_category_id);
+        }
+        set_exact_overwrites_without_retained(
+            desired,
+            channel_id,
+            vec![everyone_overwrite(
+                desired.guild_id,
+                channel_id,
+                f_everyone_hidden_profile(),
+            )],
+        );
+    }
+}
+
 fn ensure_archive_category(desired: &mut GuildModel, ctx: &mut RuleContext<'_>) -> DiscordId {
     if let Some(category_id) = desired
         .categories
@@ -1308,6 +1312,24 @@ fn welle2b_archive_channel_ids(
         }
     }
     channel_ids
+}
+
+fn welle3_archive_channel_ids(ctx: &RuleContext<'_>) -> BTreeSet<DiscordId> {
+    let parent_category_ids = ["Street Brawl", CATEGORY_RANKED, CATEGORY_CHILL]
+        .into_iter()
+        .filter_map(|category_name| ctx.category_id(category_name))
+        .collect::<BTreeSet<_>>();
+    ctx.actual
+        .channels
+        .values()
+        .filter(|channel| {
+            channel
+                .parent_category_id
+                .is_some_and(|parent_id| parent_category_ids.contains(&parent_id))
+        })
+        .filter(|channel| channel_matches(&channel.name, WELLE3_ARCHIVE_CHANNEL_NAMES))
+        .map(|channel| channel.channel_id)
+        .collect()
 }
 
 fn is_welle2b_archive_channel_name(name: &str) -> bool {
@@ -2135,10 +2157,20 @@ mod tests {
     const EXISTING_ARCHIVE_CATEGORY: u64 = 231;
     const ALREADY_ARCHIVED_CHANNEL: u64 = 232;
     const DEADLOCK_CATEGORY: u64 = 233;
+    const TWITCH: u64 = 234;
+    const DEADLOCK_STREAMER: u64 = 235;
     const MITSPIELER_SUCHE: u64 = 236;
     const GAME_GUIDES: u64 = 237;
     const CUSTOM_GAMES: u64 = 238;
     const RANK_UPS: u64 = 239;
+    const STREET_BRAWL_CATEGORY: u64 = 240;
+    const RANKED_CATEGORY: u64 = 241;
+    const CHILL_CATEGORY: u64 = 242;
+    const STREET_BRAWL_PANEL: u64 = 243;
+    const RANKED_PANEL: u64 = 244;
+    const CHILL_PANEL: u64 = 245;
+    const RANKED_ANLEITUNG: u64 = 246;
+    const ROUTER_PANEL: u64 = 247;
     const BANNED_USER: u64 = 685_573_558_281_175_043;
     const BANNED_X2: u64 = 496_268_533_496_545_283;
     const BANNED_X4: u64 = 601_742_833_438_818_357;
@@ -2345,6 +2377,8 @@ mod tests {
             ("haatteee", "😡rage-room"),
             ("spieler-suche", "🎯mitspieler-suche"),
             ("game-guides", "📖guides-und-tipps"),
+            ("twitch", "🎥deadlock-streamer"),
+            ("🎥twitch", "🎥deadlock-streamer"),
             ("beta-zugang", "💌deadlock-invite"),
             ("🔑beta-zugang", "💌deadlock-invite"),
         ] {
@@ -2806,7 +2840,7 @@ mod tests {
                 .channels
                 .get(&BETA_ZUGANG)
                 .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
-            Some(("💌deadlock-invite", Some(EINGANGSBEREICH_CATEGORY)))
+            Some(("💌deadlock-invite", Some(CHAT_CATEGORY)))
         );
         let invite_overwrites: Vec<_> = derived
             .desired
@@ -2842,6 +2876,28 @@ mod tests {
         assert!(err.to_string().contains("Kanal-Rename-Kollision"));
         assert!(err.to_string().contains("deadlock-invite"));
         assert!(err.to_string().contains("beta-zugang"));
+    }
+
+    #[test]
+    fn dokumentierte_rename_kollision_twitch_und_deadlock_streamer_wird_abgelehnt() {
+        let mut actual = documented_categories_model();
+        actual
+            .channels
+            .insert(TWITCH, channel(TWITCH, "🎥twitch", Some(MEDIEN_CATEGORY)));
+        actual.channels.insert(
+            DEADLOCK_STREAMER,
+            channel(
+                DEADLOCK_STREAMER,
+                "🎥deadlock-streamer",
+                Some(MEDIEN_CATEGORY),
+            ),
+        );
+
+        let err = derive_desired_model(&actual).expect_err("rename collision must fail");
+
+        assert!(err.to_string().contains("Kanal-Rename-Kollision"));
+        assert!(err.to_string().contains("deadlock-streamer"));
+        assert!(err.to_string().contains("twitch"));
     }
 
     #[test]
@@ -3092,6 +3148,9 @@ mod tests {
             GAME_GUIDES,
             channel(GAME_GUIDES, "game-guides", Some(MEDIEN_CATEGORY)),
         );
+        actual
+            .channels
+            .insert(TWITCH, channel(TWITCH, "twitch", Some(MEDIEN_CATEGORY)));
         actual.channels.insert(
             CUSTOM_GAMES,
             channel(CUSTOM_GAMES, "custom-games", Some(CHAT_CATEGORY)),
@@ -3123,23 +3182,19 @@ mod tests {
             .get(&STREAM_UPDATES)
             .expect("stream");
         assert_eq!(stream.name, "🎥stream-updates");
-        assert_eq!(stream.parent_category_id, Some(MEDIEN_CATEGORY));
-        assert_eq!(
-            derived
-                .desired
-                .overwrites
-                .get(&OverwriteKey {
-                    channel_id: STREAM_UPDATES,
-                    target_kind: TargetKind::Role,
-                    target_id: actual.guild_id,
-                })
-                .map(|overwrite| overwrite.deny_bits),
-            Some(p1_announcement_profile().deny_bits)
+        assert_eq!(stream.parent_category_id, Some(EINGANGSBEREICH_CATEGORY));
+        assert!(
+            !derived.desired.overwrites.contains_key(&OverwriteKey {
+                channel_id: STREAM_UPDATES,
+                target_kind: TargetKind::Role,
+                target_id: actual.guild_id,
+            }),
+            "stream-updates erbt die P1-Rechte aus INFORMATION"
         );
 
         let invite = derived.desired.channels.get(&BETA_ZUGANG).expect("invite");
         assert_eq!(invite.name, "💌deadlock-invite");
-        assert_eq!(invite.parent_category_id, Some(EINGANGSBEREICH_CATEGORY));
+        assert_eq!(invite.parent_category_id, Some(CHAT_CATEGORY));
         let invite_overwrites: Vec<_> = derived
             .desired
             .overwrites
@@ -3164,7 +3219,15 @@ mod tests {
                 .channels
                 .get(&GAME_GUIDES)
                 .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
-            Some(("📖guides-und-tipps", Some(DEADLOCK_CATEGORY)))
+            Some(("📖guides-und-tipps", Some(EINGANGSBEREICH_CATEGORY)))
+        );
+        assert_eq!(
+            derived
+                .desired
+                .channels
+                .get(&TWITCH)
+                .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
+            Some(("🎥deadlock-streamer", Some(MEDIEN_CATEGORY)))
         );
         assert_eq!(
             derived
@@ -3181,6 +3244,85 @@ mod tests {
                 .get(&RANK_UPS)
                 .map(|channel| (channel.name.as_str(), channel.parent_category_id)),
             Some(("🏆rank-ups", Some(DEADLOCK_CATEGORY)))
+        );
+        assert_eq!(
+            derived.desired.categories[&MEDIEN_CATEGORY].name, CATEGORY_MEDIEN,
+            "Medien-Kategorie bleibt erhalten und wird umbenannt"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn welle3_legacy_lane_hilfskanaele_wandern_ins_archiv() -> anyhow::Result<()> {
+        let mut actual = actual_model();
+        actual.categories.insert(
+            STREET_BRAWL_CATEGORY,
+            category(STREET_BRAWL_CATEGORY, "Street Brawl"),
+        );
+        actual
+            .categories
+            .insert(RANKED_CATEGORY, category(RANKED_CATEGORY, "Ranked"));
+        actual
+            .categories
+            .insert(CHILL_CATEGORY, category(CHILL_CATEGORY, "Chill"));
+        actual.categories.insert(
+            DEADLOCK_ROUTER_CATEGORY,
+            category(DEADLOCK_ROUTER_CATEGORY, "Deadlock Router"),
+        );
+        for (id, name, parent) in [
+            (
+                STREET_BRAWL_PANEL,
+                "🚧sprach-kanal-verwalten",
+                STREET_BRAWL_CATEGORY,
+            ),
+            (RANKED_PANEL, "🚧sprach-kanal-verwalten", RANKED_CATEGORY),
+            (CHILL_PANEL, "🚧sprach-kanal-verwalten", CHILL_CATEGORY),
+            (RANKED_ANLEITUNG, "🧾anleitung", RANKED_CATEGORY),
+            (
+                ROUTER_PANEL,
+                "📖sprachkanal-verwalten",
+                DEADLOCK_ROUTER_CATEGORY,
+            ),
+        ] {
+            actual.channels.insert(id, channel(id, name, Some(parent)));
+        }
+
+        let derived = derive_desired_model(&actual)?;
+        let archive_id = derived
+            .desired
+            .categories
+            .values()
+            .find(|category| category.name == CATEGORY_ARCHIV)
+            .expect("archive category")
+            .category_id;
+
+        for channel_id in [
+            STREET_BRAWL_PANEL,
+            RANKED_PANEL,
+            CHILL_PANEL,
+            RANKED_ANLEITUNG,
+        ] {
+            assert_eq!(
+                derived.desired.channels[&channel_id].parent_category_id,
+                Some(archive_id),
+                "legacy lane helper {channel_id} muss ins Archiv"
+            );
+            let overwrite = derived
+                .desired
+                .overwrites
+                .get(&OverwriteKey {
+                    channel_id,
+                    target_kind: TargetKind::Role,
+                    target_id: GUILD_ID,
+                })
+                .expect("archive deny");
+            assert_eq!(overwrite.allow_bits, 0);
+            assert_eq!(overwrite.deny_bits, Permissions::VIEW_CHANNEL.bits());
+        }
+        assert_eq!(
+            derived.desired.channels[&ROUTER_PANEL].parent_category_id,
+            Some(DEADLOCK_ROUTER_CATEGORY),
+            "Router-Verwaltungskanal bleibt aktiv"
         );
         Ok(())
     }
@@ -3228,7 +3370,7 @@ mod tests {
         );
         assert_eq!(
             derived.desired.categories[&MEDIEN_CATEGORY].name,
-            CATEGORY_NEUIGKEITEN
+            CATEGORY_MEDIEN
         );
         assert_eq!(
             derived.desired.categories[&CHAT_CATEGORY].name,
@@ -3619,9 +3761,10 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
+        let expected_categories = actual.categories.keys().collect::<BTreeSet<_>>();
         assert_eq!(
             derived.desired.categories.keys().collect::<BTreeSet<_>>(),
-            actual.categories.keys().collect::<BTreeSet<_>>()
+            expected_categories
         );
         for channel_id in actual.channels.keys() {
             assert!(
