@@ -14,7 +14,7 @@ pub const WELCOME_LINK_URLS: WelcomeLinkUrls = WelcomeLinkUrls {
     website: "https://earlysalty.com",
     twitch: "https://www.twitch.tv/earlysalty",
     coaching: "https://earlysalty.com/coaching",
-    server_invite: "https://example.invalid/platzhalter/server-invite",
+    server_invite: "https://discord.com/channels/1289721245281292288/1464736918951432222",
 };
 
 pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
