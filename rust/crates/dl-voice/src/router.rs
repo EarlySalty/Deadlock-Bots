@@ -82,7 +82,12 @@ pub const ROUTER_EMOJI_BAN: (&str, &str) = ("dl_ban", "1522518261290369034");
 pub const ROUTER_EMOJI_UNBAN: (&str, &str) = ("dl_unban", "1522518273827143751");
 pub const ROUTER_EMOJI_MODE: (&str, &str) = ("dl_mode", "1522518269456547962");
 
-pub const ROUTER_PANEL_GUIDE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für <:dl_ranked:1522518271306366996> Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung. Nach jeder erstellten Lane gilt eine kurze Abklingzeit von 30 Sekunden.\n\n**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit <:dl_crown:1522518265421631538> Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.\n\n**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
+pub const ROUTER_PANEL_MODE_HINT: &str = "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang · nach jeder Lane 30 Sekunden Abklingzeit";
+pub const ROUTER_PANEL_LANE_CAPTION: &str = "-# Deine Lane";
+pub const ROUTER_PANEL_MOD_CAPTION: &str = "-# Moderation";
+pub const ROUTER_PANEL_GUIDE_CREATE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für <:dl_ranked:1522518271306366996> Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung.";
+pub const ROUTER_PANEL_GUIDE_OWNER: &str = "**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit <:dl_crown:1522518265421631538> Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.";
+pub const ROUTER_PANEL_GUIDE_BUTTONS: &str = "**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
 pub const ROUTER_REPLY_NOT_IN_VOICE: &str =
     "Du bist gerade in keinem Sprachkanal — geh zuerst in Voice, dann klappt's. Einstieg:";
 pub const ROUTER_REPLY_RANKED_VERIFY: &str =
@@ -284,8 +289,11 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
                     })
                     .collect(),
             ),
+            router_text_display(ROUTER_PANEL_MODE_HINT.to_string()),
+            router_separator(false, 2),
             router_media_gallery(ROUTER_MANAGE_BANNER_FILENAME),
             router_text_display(ROUTER_PANEL_MANAGE_INTRO.to_string()),
+            router_text_display(ROUTER_PANEL_LANE_CAPTION.to_string()),
             router_action_row(vec![
                 router_emoji_button(ROUTER_BUTTON_CLAIM, 3, "tv_owner_claim", ROUTER_EMOJI_CROWN),
                 router_emoji_button(
@@ -302,17 +310,31 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
                     ROUTER_EMOJI_MODE
                 ),
             ]),
+            router_text_display(ROUTER_PANEL_MOD_CAPTION.to_string()),
             router_action_row(vec![
                 router_emoji_button(ROUTER_BUTTON_KICK, 4, "tv_kick", ROUTER_EMOJI_KICK),
                 router_emoji_button(ROUTER_BUTTON_BAN, 4, "tv_ban", ROUTER_EMOJI_BAN),
                 router_emoji_button(ROUTER_BUTTON_UNBAN, 2, "tv_unban", ROUTER_EMOJI_UNBAN),
             ]),
+            router_separator(false, 2),
             router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME),
-            router_text_display(ROUTER_PANEL_GUIDE.to_string()),
+            router_text_display(ROUTER_PANEL_GUIDE_CREATE.to_string()),
+            router_separator(true, 1),
+            router_text_display(ROUTER_PANEL_GUIDE_OWNER.to_string()),
+            router_separator(true, 1),
+            router_text_display(ROUTER_PANEL_GUIDE_BUTTONS.to_string()),
         ])]),
     );
     body.insert("attachments".to_string(), json!(attachments));
     body
+}
+
+fn router_separator(divider: bool, spacing: u8) -> Value {
+    json!({
+        "type": 14,
+        "divider": divider,
+        "spacing": spacing,
+    })
 }
 
 fn router_container(components: Vec<Value>) -> Value {
@@ -1094,13 +1116,22 @@ mod tests {
             text_displays,
             vec![
                 ROUTER_PANEL_INTRO,
+                ROUTER_PANEL_MODE_HINT,
                 ROUTER_PANEL_MANAGE_INTRO,
-                ROUTER_PANEL_GUIDE,
+                ROUTER_PANEL_LANE_CAPTION,
+                ROUTER_PANEL_MOD_CAPTION,
+                ROUTER_PANEL_GUIDE_CREATE,
+                ROUTER_PANEL_GUIDE_OWNER,
+                ROUTER_PANEL_GUIDE_BUTTONS,
             ]
         );
-        assert!(!container_components
-            .iter()
-            .any(|component| component["type"] == 14));
+        assert_eq!(
+            container_components
+                .iter()
+                .filter(|component| component["type"] == 14)
+                .count(),
+            4
+        );
         assert_eq!(
             body.get("attachments").expect("attachments"),
             &json!([
