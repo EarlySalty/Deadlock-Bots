@@ -1,3 +1,11 @@
+## #195 — Neue Server-Struktur: klare Bereiche statt Kanal-Wildwuchs
+
+**Ausgangslage:** Der Server war über die Zeit auf 17 Kategorien gewuchert — Sammelbecken wie „Sonstiges", leere Alt-Kategorien und uneinheitliche Namen machten es gerade Neuen schwer, sich zurechtzufinden.
+
+**Was wurde geändert:** Der Server ist jetzt in klare Bereiche sortiert — Information, Neuigkeiten, Community, Deadlock, Coaching — mit einheitlichen Emojis und Trenner-Optik. Einige Kanäle sind umgezogen oder umbenannt (die Mitspieler-Suche heißt jetzt 🎯mitspieler-suche, das Ventil 😡rage-room); alle Verläufe sind erhalten geblieben.
+
+**Wie es jetzt läuft:** Neu dazu sind 🧭willkommen als künftiger Startpunkt mit Server-Überblick und 🗓️scrim-planung fürs Coaching — beide werden in den nächsten Tagen befüllt. Der Umbau lief vollautomatisch über unsere Server-Verwaltung, mit Rechte-Prüfung und Backup vorab.
+
 ## #194 — Rangverlauf fürs Aktivitäts-Dashboard, Sichtbarkeit bestimmst du
 
 **Ausgangslage:** Wir speichern die Rangdaten verknüpfter Accounts schon lange, aber es gab keinen Weg, sie auf der Website zu sehen — und keine Kontrolle darüber, wer sie sehen dürfte.
