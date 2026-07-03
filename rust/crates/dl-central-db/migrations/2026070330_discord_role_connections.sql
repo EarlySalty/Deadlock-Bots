@@ -45,6 +45,28 @@ BEGIN
     IF TG_OP = 'DELETE' THEN
         target_discord_id := OLD.discord_id;
         sync_reason := 'steam_link_removed';
+    ELSIF TG_OP = 'UPDATE' AND NEW.discord_id IS DISTINCT FROM OLD.discord_id THEN
+        INSERT INTO core.discord_role_connection_sync_state (
+            discord_id, pending, reason, attempts, next_attempt_at, locked_at, last_error, updated_at
+        )
+        SELECT target.target_discord_id, TRUE, target.sync_reason, 0, now(), NULL, NULL, now()
+          FROM (
+              VALUES
+                  (OLD.discord_id, 'steam_link_removed'::TEXT),
+                  (NEW.discord_id, 'steam_link_changed'::TEXT)
+          ) AS target(target_discord_id, sync_reason)
+         WHERE target.target_discord_id IS NOT NULL
+           AND target.target_discord_id <> 0
+        ON CONFLICT (discord_id) DO UPDATE SET
+            pending = TRUE,
+            reason = EXCLUDED.reason,
+            attempts = 0,
+            next_attempt_at = now(),
+            locked_at = NULL,
+            last_error = NULL,
+            updated_at = now();
+
+        RETURN NEW;
     ELSE
         target_discord_id := NEW.discord_id;
         IF TG_OP = 'UPDATE'
@@ -96,7 +118,7 @@ CREATE TRIGGER trg_steam_links_role_connection_sync_insert
 
 DROP TRIGGER IF EXISTS trg_steam_links_role_connection_sync_update ON core.steam_links;
 CREATE TRIGGER trg_steam_links_role_connection_sync_update
-    AFTER UPDATE OF verified, primary_account, deadlock_rank, deadlock_subrank,
+    AFTER UPDATE OF discord_id, verified, primary_account, deadlock_rank, deadlock_subrank,
                     deadlock_badge_level, deadlock_rank_name, deadlock_rank_updated_at
     ON core.steam_links
     FOR EACH ROW

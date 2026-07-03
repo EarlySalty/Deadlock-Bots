@@ -662,6 +662,96 @@ async fn trigger_names(pool: &PgPool, table: &str) -> Vec<String> {
     .unwrap_or_else(|err| panic!("trigger names for core.{table}: {err}"))
 }
 
+async fn trigger_definition(pool: &PgPool, table: &str, trigger: &str) -> String {
+    sqlx::query_scalar(
+        "SELECT pg_get_triggerdef(tg.oid)
+           FROM pg_trigger tg
+           JOIN pg_class t ON t.oid = tg.tgrelid
+           JOIN pg_namespace n ON n.oid = t.relnamespace
+          WHERE n.nspname = 'core'
+            AND t.relname = $1
+            AND tg.tgname = $2
+            AND NOT tg.tgisinternal",
+    )
+    .bind(table)
+    .bind(trigger)
+    .fetch_one(pool)
+    .await
+    .unwrap_or_else(|err| panic!("trigger definition for core.{table}.{trigger}: {err}"))
+}
+
+async fn assert_steam_link_reassign_enqueues_old_and_new_discord_ids(pool: &PgPool) {
+    let old_discord_id = 9_960_001_i64;
+    let new_discord_id = 9_960_002_i64;
+    let steam_id = "fresh-reassign-linked-role";
+    let steam_id64 = 9_960_001_i64;
+
+    sqlx::query(
+        "INSERT INTO core.users(discord_id, username)
+         VALUES ($1, 'linked-role-old'), ($2, 'linked-role-new')
+         ON CONFLICT(discord_id) DO NOTHING",
+    )
+    .bind(old_discord_id)
+    .bind(new_discord_id)
+    .execute(pool)
+    .await
+    .expect("seed reassign core users");
+    sqlx::query(
+        "INSERT INTO core.steam_links
+             (discord_id, steam_id, steam_id64, verified, primary_account, updated_at)
+         VALUES ($1, $2, $3, TRUE, TRUE, now())",
+    )
+    .bind(old_discord_id)
+    .bind(steam_id)
+    .bind(steam_id64)
+    .execute(pool)
+    .await
+    .expect("seed reassign steam link");
+    sqlx::query(
+        "DELETE FROM core.discord_role_connection_sync_state
+          WHERE discord_id IN ($1, $2)",
+    )
+    .bind(old_discord_id)
+    .bind(new_discord_id)
+    .execute(pool)
+    .await
+    .expect("clear initial trigger rows");
+
+    sqlx::query(
+        "UPDATE core.steam_links
+            SET discord_id=$2
+          WHERE discord_id=$1
+            AND steam_id=$3",
+    )
+    .bind(old_discord_id)
+    .bind(new_discord_id)
+    .bind(steam_id)
+    .execute(pool)
+    .await
+    .expect("reassign steam link");
+
+    let rows: Vec<(i64, bool, String)> = sqlx::query_as(
+        "SELECT discord_id, pending, reason
+           FROM core.discord_role_connection_sync_state
+          WHERE discord_id IN ($1, $2)
+          ORDER BY discord_id",
+    )
+    .bind(old_discord_id)
+    .bind(new_discord_id)
+    .fetch_all(pool)
+    .await
+    .expect("reassign sync rows");
+
+    assert_eq!(
+        rows,
+        vec![
+            (old_discord_id, true, "steam_link_removed".to_string()),
+            (new_discord_id, true, "steam_link_changed".to_string())
+        ],
+        "steam_links.discord_id reassignment enqueues old and new linked-role sync targets"
+    );
+}
+
 async fn migration_row_signature(pool: &PgPool, version: i64, description: &str) -> String {
     sqlx::query_scalar(
         "SELECT version::text
@@ -1474,6 +1564,17 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         ],
         "core.steam_links keeps owner/user guards and linked-role sync triggers"
     );
+    assert!(
+        trigger_definition(
+            &pool,
+            "steam_links",
+            "trg_steam_links_role_connection_sync_update"
+        )
+        .await
+        .contains("UPDATE OF discord_id, verified, primary_account"),
+        "linked-role sync update trigger must fire on discord_id changes"
+    );
+    assert_steam_link_reassign_enqueues_old_and_new_discord_ids(&pool).await;
 
     assert_eq!(
         trigger_names(&pool, "users").await,
