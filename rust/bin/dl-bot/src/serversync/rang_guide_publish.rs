@@ -37,6 +37,21 @@ pub const RANG_GUIDE_COMPONENT_ID_FRIEND_CODE_BUTTON: u64 = 31_017;
 pub const RANG_GUIDE_COMPONENT_ID_RANKCHECK_BUTTON: u64 = 31_018;
 pub const RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER: u64 = 31_019;
 pub const RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER: u64 = 31_020;
+pub const RANG_GUIDE_COMPONENT_ID_STEP1_MEDIA: u64 = 31_021;
+pub const RANG_GUIDE_COMPONENT_ID_STEP2_MEDIA: u64 = 31_022;
+pub const RANG_GUIDE_COMPONENT_ID_STEP3_MEDIA: u64 = 31_023;
+pub const RANG_GUIDE_COMPONENT_ID_STEP4_MEDIA: u64 = 31_024;
+pub const RANG_GUIDE_COMPONENT_ID_EXTRAS_MEDIA: u64 = 31_025;
+
+/// Schritt-Banner (divider-Stil) je Abschnitt; fehlende Dateien werden mit
+/// Warnung uebersprungen, der Publish laeuft dann ohne das jeweilige Banner.
+pub const RANG_GUIDE_STEP_BANNER_FILENAMES: [&str; 4] = [
+    "rang-guide-schritt-1.png",
+    "rang-guide-schritt-2.png",
+    "rang-guide-schritt-3.png",
+    "rang-guide-schritt-4.png",
+];
+pub const RANG_GUIDE_HELP_BANNER_FILENAME: &str = "rang-guide-hilfe.png";
 pub const RANG_GUIDE_MARKER_COMPONENT_IDS: &[u64] = &[
     RANG_GUIDE_COMPONENT_ID_HERO_CONTAINER,
     RANG_GUIDE_COMPONENT_ID_HERO_TEXT,
@@ -534,20 +549,25 @@ fn rang_guide_messages(
     config: &ResolvedRangGuideConfig,
     warnings: &mut Vec<String>,
 ) -> Vec<RangGuideBuiltMessage> {
-    let banner = rang_guide_banner(repo_root, warnings);
-    let attachments = banner
-        .as_ref()
-        .map(|banner| {
-            vec![RangGuidePayloadAttachment {
-                id: 0,
-                filename: banner.filename.clone(),
-                relative_path: banner.relative_path.clone(),
-            }]
-        })
-        .unwrap_or_default();
+    let hero_banner = optional_rang_guide_banner(repo_root, RANG_GUIDE_HERO_FILENAME, warnings);
+    let step_banners: Vec<Option<RangGuideBannerOutput>> = RANG_GUIDE_STEP_BANNER_FILENAMES
+        .iter()
+        .map(|filename| optional_rang_guide_banner(repo_root, filename, warnings))
+        .collect();
+    let help_banner =
+        optional_rang_guide_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME, warnings);
+
+    let mut banner_candidates: Vec<RangGuideBannerOutput> = Vec::new();
+    for banner in std::iter::once(&hero_banner)
+        .chain(step_banners.iter())
+        .chain(std::iter::once(&help_banner))
+        .flatten()
+    {
+        banner_candidates.push(banner.clone());
+    }
 
     let mut hero_components = Vec::new();
-    if let Some(banner) = &banner {
+    if let Some(banner) = &hero_banner {
         hero_components.push(media_gallery(
             RANG_GUIDE_COMPONENT_ID_HERO_MEDIA,
             &banner.filename,
@@ -558,101 +578,113 @@ fn rang_guide_messages(
         config.texts.hero_intro.clone(),
     ));
 
+    let step_media = |index: usize, component_id: u64| -> Option<Value> {
+        step_banners[index]
+            .as_ref()
+            .map(|banner| media_gallery(component_id, &banner.filename))
+    };
+
+    let mut step1_children = Vec::new();
+    step1_children.extend(step_media(0, RANG_GUIDE_COMPONENT_ID_STEP1_MEDIA));
+    step1_children.push(text_display(
+        RANG_GUIDE_COMPONENT_ID_STEP1_TEXT,
+        section_text(&config.texts.step1_title, &config.texts.step1_body),
+    ));
+    step1_children.push(action_row(
+        RANG_GUIDE_COMPONENT_ID_STEP1_ACTION_ROW,
+        vec![button(
+            RANG_GUIDE_COMPONENT_ID_STEAM_OPEN_BUTTON,
+            &config.buttons.steam_open,
+            1,
+            STEAM_LINK_OPEN_CUSTOM_ID,
+        )],
+    ));
+
+    let mut step2_children = Vec::new();
+    step2_children.extend(step_media(1, RANG_GUIDE_COMPONENT_ID_STEP2_MEDIA));
+    step2_children.push(text_display(
+        RANG_GUIDE_COMPONENT_ID_STEP2_TEXT,
+        config.texts.step2_body.clone(),
+    ));
+
+    let mut step3_children = Vec::new();
+    step3_children.extend(step_media(2, RANG_GUIDE_COMPONENT_ID_STEP3_MEDIA));
+    step3_children.push(text_display(
+        RANG_GUIDE_COMPONENT_ID_STEP3_TEXT,
+        config.texts.step3_body.clone(),
+    ));
+
+    let mut step4_children = Vec::new();
+    step4_children.extend(step_media(3, RANG_GUIDE_COMPONENT_ID_STEP4_MEDIA));
+    step4_children.push(text_display(
+        RANG_GUIDE_COMPONENT_ID_STEP4_TEXT,
+        section_text(&config.texts.step4_title, &config.texts.step4_body),
+    ));
+    step4_children.push(action_row(
+        RANG_GUIDE_COMPONENT_ID_STEP4_ACTION_ROW,
+        vec![link_button(
+            RANG_GUIDE_COMPONENT_ID_LINKED_ROLE_BUTTON,
+            &config.buttons.linked_role,
+            &config.urls.linked_role_login,
+        )],
+    ));
+
+    let mut extras_children = Vec::new();
+    if let Some(banner) = &help_banner {
+        extras_children.push(media_gallery(
+            RANG_GUIDE_COMPONENT_ID_EXTRAS_MEDIA,
+            &banner.filename,
+        ));
+    }
+    extras_children.push(text_display(
+        RANG_GUIDE_COMPONENT_ID_EXTRAS_TEXT,
+        section_text(&config.texts.extras_title, &config.texts.extras_body),
+    ));
+    extras_children.push(action_row(
+        RANG_GUIDE_COMPONENT_ID_EXTRAS_ACTION_ROW,
+        vec![
+            button(
+                RANG_GUIDE_COMPONENT_ID_FRIEND_CODE_BUTTON,
+                &config.buttons.friend_code,
+                2,
+                STEAM_LINK_FRIEND_CODE_CUSTOM_ID,
+            ),
+            button(
+                RANG_GUIDE_COMPONENT_ID_RANKCHECK_BUTTON,
+                &config.buttons.rankcheck,
+                2,
+                STEAM_LINK_RANKCHECK_CUSTOM_ID,
+            ),
+        ],
+    ));
+
     let components = vec![
         container(RANG_GUIDE_COMPONENT_ID_HERO_CONTAINER, hero_components),
-        container(
-            RANG_GUIDE_COMPONENT_ID_STEP1_CONTAINER,
-            vec![
-                text_display(
-                    RANG_GUIDE_COMPONENT_ID_STEP1_TEXT,
-                    format!(
-                        "**{}**\n{}",
-                        config.texts.step1_title, config.texts.step1_body
-                    ),
-                ),
-                action_row(
-                    RANG_GUIDE_COMPONENT_ID_STEP1_ACTION_ROW,
-                    vec![button(
-                        RANG_GUIDE_COMPONENT_ID_STEAM_OPEN_BUTTON,
-                        &config.buttons.steam_open,
-                        1,
-                        STEAM_LINK_OPEN_CUSTOM_ID,
-                    )],
-                ),
-            ],
-        ),
-        container(
-            RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER,
-            vec![text_display(
-                RANG_GUIDE_COMPONENT_ID_STEP2_TEXT,
-                config.texts.step2_body.clone(),
-            )],
-        ),
-        container(
-            RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER,
-            vec![text_display(
-                RANG_GUIDE_COMPONENT_ID_STEP3_TEXT,
-                config.texts.step3_body.clone(),
-            )],
-        ),
-        container(
-            RANG_GUIDE_COMPONENT_ID_STEP4_CONTAINER,
-            vec![
-                text_display(
-                    RANG_GUIDE_COMPONENT_ID_STEP4_TEXT,
-                    format!(
-                        "**{}**\n{}",
-                        config.texts.step4_title, config.texts.step4_body
-                    ),
-                ),
-                action_row(
-                    RANG_GUIDE_COMPONENT_ID_STEP4_ACTION_ROW,
-                    vec![link_button(
-                        RANG_GUIDE_COMPONENT_ID_LINKED_ROLE_BUTTON,
-                        &config.buttons.linked_role,
-                        &config.urls.linked_role_login,
-                    )],
-                ),
-            ],
-        ),
-        container(
-            RANG_GUIDE_COMPONENT_ID_EXTRAS_CONTAINER,
-            vec![
-                text_display(
-                    RANG_GUIDE_COMPONENT_ID_EXTRAS_TEXT,
-                    format!(
-                        "**{}**\n{}",
-                        config.texts.extras_title, config.texts.extras_body
-                    ),
-                ),
-                action_row(
-                    RANG_GUIDE_COMPONENT_ID_EXTRAS_ACTION_ROW,
-                    vec![
-                        button(
-                            RANG_GUIDE_COMPONENT_ID_FRIEND_CODE_BUTTON,
-                            &config.buttons.friend_code,
-                            2,
-                            STEAM_LINK_FRIEND_CODE_CUSTOM_ID,
-                        ),
-                        button(
-                            RANG_GUIDE_COMPONENT_ID_RANKCHECK_BUTTON,
-                            &config.buttons.rankcheck,
-                            2,
-                            STEAM_LINK_RANKCHECK_CUSTOM_ID,
-                        ),
-                    ],
-                ),
-            ],
-        ),
+        container(RANG_GUIDE_COMPONENT_ID_STEP1_CONTAINER, step1_children),
+        container(RANG_GUIDE_COMPONENT_ID_STEP2_CONTAINER, step2_children),
+        container(RANG_GUIDE_COMPONENT_ID_STEP3_CONTAINER, step3_children),
+        container(RANG_GUIDE_COMPONENT_ID_STEP4_CONTAINER, step4_children),
+        container(RANG_GUIDE_COMPONENT_ID_EXTRAS_CONTAINER, extras_children),
     ];
 
-    chunk_rang_guide_components(components, attachments, banner)
+    chunk_rang_guide_components(components, &banner_candidates, hero_banner)
+}
+
+/// `**Titel**\nBody` — oder nur der Body, wenn der Titel leer ist (Ueberschrift
+/// steckt dann im Schritt-Banner).
+fn section_text(title: &str, body: &str) -> String {
+    let title = title.trim();
+    if title.is_empty() {
+        body.to_string()
+    } else {
+        format!("**{title}**\n{body}")
+    }
 }
 
 fn chunk_rang_guide_components(
     components: Vec<Value>,
-    attachments: Vec<RangGuidePayloadAttachment>,
-    banner: Option<RangGuideBannerOutput>,
+    banner_candidates: &[RangGuideBannerOutput],
+    hero_banner: Option<RangGuideBannerOutput>,
 ) -> Vec<RangGuideBuiltMessage> {
     let mut chunks = Vec::<Vec<Value>>::new();
     let mut current = Vec::<Value>::new();
@@ -680,28 +712,69 @@ fn chunk_rang_guide_components(
 
     chunks
         .into_iter()
-        .enumerate()
-        .map(|(index, components)| RangGuideBuiltMessage {
-            banner: (index == 0).then(|| banner.clone()).flatten(),
-            payload: RangGuideMessagePayload {
-                flags: RANG_GUIDE_COMPONENTS_V2_FLAG,
-                allowed_mentions: RangGuideAllowedMentions { parse: Vec::new() },
-                components,
-                attachments: if index == 0 {
-                    attachments.clone()
-                } else {
-                    Vec::new()
+        .map(|components| {
+            // Attachments gehoeren zu der Nachricht, deren Components sie per
+            // attachment://-URL referenzieren; IDs pro Nachricht ab 0.
+            let mut refs = Vec::new();
+            for component in &components {
+                collect_attachment_refs(component, &mut refs);
+            }
+            let attachments = refs
+                .iter()
+                .filter_map(|name| {
+                    banner_candidates
+                        .iter()
+                        .find(|banner| &banner.filename == name)
+                })
+                .enumerate()
+                .map(|(index, banner)| RangGuidePayloadAttachment {
+                    id: index as u8,
+                    filename: banner.filename.clone(),
+                    relative_path: banner.relative_path.clone(),
+                })
+                .collect();
+            let has_hero = hero_banner
+                .as_ref()
+                .is_some_and(|banner| refs.iter().any(|name| name == &banner.filename));
+            RangGuideBuiltMessage {
+                banner: if has_hero { hero_banner.clone() } else { None },
+                payload: RangGuideMessagePayload {
+                    flags: RANG_GUIDE_COMPONENTS_V2_FLAG,
+                    allowed_mentions: RangGuideAllowedMentions { parse: Vec::new() },
+                    components,
+                    attachments,
                 },
-            },
+            }
         })
         .collect()
 }
 
-fn rang_guide_banner(
+fn collect_attachment_refs(value: &Value, refs: &mut Vec<String>) {
+    if let Some(name) = value
+        .get("media")
+        .and_then(|media| media.get("url"))
+        .and_then(Value::as_str)
+        .and_then(|url| url.strip_prefix("attachment://"))
+    {
+        if !refs.iter().any(|existing| existing == name) {
+            refs.push(name.to_string());
+        }
+    }
+    for key in ["components", "items"] {
+        if let Some(children) = value.get(key).and_then(Value::as_array) {
+            for child in children {
+                collect_attachment_refs(child, refs);
+            }
+        }
+    }
+}
+
+fn optional_rang_guide_banner(
     repo_root: &Path,
+    filename: &str,
     warnings: &mut Vec<String>,
 ) -> Option<RangGuideBannerOutput> {
-    let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{RANG_GUIDE_HERO_FILENAME}");
+    let relative_path = format!("{RANG_GUIDE_BANNER_DIR}/{filename}");
     let path = repo_root.join(&relative_path);
     if !path.is_file() {
         warnings.push(format!(
@@ -710,7 +783,7 @@ fn rang_guide_banner(
         return None;
     }
     Some(RangGuideBannerOutput {
-        filename: RANG_GUIDE_HERO_FILENAME.to_string(),
+        filename: filename.to_string(),
         relative_path,
         present: true,
     })
@@ -902,6 +975,20 @@ mod tests {
         write_banner_bytes(repo_root, b"png");
     }
 
+    fn write_named_banner(repo_root: &Path, filename: &str) {
+        let path = repo_root.join(format!("{RANG_GUIDE_BANNER_DIR}/{filename}"));
+        fs::create_dir_all(path.parent().expect("banner parent")).expect("mkdir banner parent");
+        fs::write(path, filename.as_bytes()).expect("write banner");
+    }
+
+    fn write_all_banners(repo_root: &Path) {
+        write_banner(repo_root);
+        for filename in RANG_GUIDE_STEP_BANNER_FILENAMES {
+            write_named_banner(repo_root, filename);
+        }
+        write_named_banner(repo_root, RANG_GUIDE_HELP_BANNER_FILENAME);
+    }
+
     fn write_banner_bytes(repo_root: &Path, bytes: &[u8]) {
         let path = repo_root.join(format!(
             "{RANG_GUIDE_BANNER_DIR}/{RANG_GUIDE_HERO_FILENAME}"
@@ -1039,6 +1126,82 @@ linked_role_login = "https://example.invalid/linked-role"
         assert!(component_count(&payload.components) <= RANG_GUIDE_COMPONENT_BUDGET);
         assert!(text_display_chars(&payload.components) <= RANG_GUIDE_TEXT_CHAR_BUDGET);
         assert!(has_rang_guide_v2_marker(&payload.components));
+    }
+
+    #[test]
+    fn rang_guide_schritt_banner_media_zuerst_und_leerer_titel_ohne_fettzeile() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_banners(temp.path());
+        write_rang_guide_texts_file(
+            temp.path(),
+            r#"
+[texts]
+step1_title = ""
+"#,
+        );
+        let output =
+            build_rang_guide_publish_output(temp.path(), &[], None, None, true).expect("output");
+        assert_eq!(output.messages.len(), 1);
+        let payload = &output.messages[0].payload;
+        assert_eq!(payload.attachments.len(), 6);
+        for (index, attachment) in payload.attachments.iter().enumerate() {
+            assert_eq!(attachment.id as usize, index);
+        }
+        // Jeder Abschnitts-Container beginnt mit seinem Banner (type 12)
+        for container_index in 0..=5 {
+            assert_eq!(
+                payload.components[container_index]["components"][0]["type"],
+                json!(12),
+                "Container {container_index} ohne Banner-Media"
+            );
+        }
+        // Leerer Titel: Text startet direkt mit dem Body statt einer Fettzeile
+        let step1_text = payload.components[1]["components"][1]["content"]
+            .as_str()
+            .expect("step1 text");
+        assert!(!step1_text.starts_with("**"));
+        validate_rang_guide_message_budget(payload).expect("budget");
+    }
+
+    #[test]
+    fn rang_guide_attachments_haengen_am_referenzierenden_chunk() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_banners(temp.path());
+        let long_step2 = format!("Platzhalter: Schritt 2 lang. {}", "Satz. ".repeat(400));
+        let long_step3 = format!("Platzhalter: Schritt 3 lang. {}", "Satz. ".repeat(400));
+        write_rang_guide_texts_file(
+            temp.path(),
+            &format!(
+                r#"
+[texts]
+step2_body = "{long_step2}"
+step3_body = "{long_step3}"
+"#
+            ),
+        );
+
+        let output =
+            build_rang_guide_publish_output(temp.path(), &[], None, None, true).expect("output");
+        assert!(output.messages.len() > 1);
+        for message in &output.messages {
+            let mut refs = Vec::new();
+            for component in &message.payload.components {
+                collect_attachment_refs(component, &mut refs);
+            }
+            let filenames: Vec<String> = message
+                .payload
+                .attachments
+                .iter()
+                .map(|attachment| attachment.filename.clone())
+                .collect();
+            assert_eq!(refs, filenames, "Attachments passen nicht zu Referenzen");
+            for (index, attachment) in message.payload.attachments.iter().enumerate() {
+                assert_eq!(attachment.id as usize, index);
+            }
+            validate_rang_guide_message_budget(&message.payload).expect("budget");
+        }
+        assert!(output.messages[0].banner.is_some());
+        assert!(output.messages[1..].iter().all(|m| m.banner.is_none()));
     }
 
     #[test]
