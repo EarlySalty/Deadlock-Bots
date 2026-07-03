@@ -1,4 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
 use dl_server_as_code::{ChannelKind, ChannelSpec, GuildModel, OverwriteKey, RoleSpec, TargetKind};
@@ -8,6 +10,7 @@ use serenity::all::Permissions;
 
 pub const WELCOME_CHANNEL_NAME: &str = "willkommen";
 pub const WELCOME_BANNER_DIR: &str = "assets/welcome-banners";
+pub const WELCOME_TEXTS_FILE: &str = "assets/welcome_texts.toml";
 pub const WELCOME_MARKER_PREFIX: &str = "serversync:welcome:";
 
 pub const WELCOME_LINK_URLS: WelcomeLinkUrls = WelcomeLinkUrls {
@@ -324,6 +327,123 @@ pub struct WelcomeButtonLabels {
     pub support: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeConfig {
+    texts: ResolvedWelcomeTextTable,
+    urls: ResolvedWelcomeLinkUrls,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeLinkUrls {
+    website: String,
+    twitch: String,
+    coaching: String,
+    server_invite: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeTextTable {
+    section_titles: ResolvedWelcomeSectionTitles,
+    hero_intro: String,
+    empty_navigation: String,
+    default_channel_description: String,
+    channel_descriptions: Vec<ResolvedWelcomeChannelDescription>,
+    empty_team_role_members: String,
+    socials_intro: String,
+    quickstart_intro: String,
+    buttons: ResolvedWelcomeButtonLabels,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeSectionTitles {
+    hero: String,
+    navigation: String,
+    team: String,
+    socials: String,
+    quickstart: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeChannelDescription {
+    channel_key: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedWelcomeButtonLabels {
+    website: String,
+    twitch: String,
+    coaching: String,
+    server_invite: String,
+    rules: String,
+    rank: String,
+    support: String,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeTextsToml {
+    #[serde(default)]
+    titles: WelcomeTitlesToml,
+    #[serde(default)]
+    texts: WelcomeBodyTextsToml,
+    #[serde(default)]
+    urls: WelcomeUrlsToml,
+    #[serde(default)]
+    buttons: WelcomeButtonsToml,
+    #[serde(default)]
+    channel: Option<Vec<WelcomeChannelToml>>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeTitlesToml {
+    hero: Option<String>,
+    navigation: Option<String>,
+    team: Option<String>,
+    socials: Option<String>,
+    quickstart: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeBodyTextsToml {
+    hero_intro: Option<String>,
+    empty_navigation: Option<String>,
+    default_channel_description: Option<String>,
+    empty_team_role_members: Option<String>,
+    socials_intro: Option<String>,
+    quickstart_intro: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeUrlsToml {
+    website: Option<String>,
+    twitch: Option<String>,
+    coaching: Option<String>,
+    server_invite: Option<String>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeButtonsToml {
+    website: Option<String>,
+    twitch: Option<String>,
+    coaching: Option<String>,
+    server_invite: Option<String>,
+    rules: Option<String>,
+    rank: Option<String>,
+    support: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WelcomeChannelToml {
+    key: String,
+    description: String,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct WelcomeTeamRoleGroupSpec {
     pub key: &'static str,
@@ -411,6 +531,156 @@ pub fn welcome_sections() -> &'static [WelcomeSectionDefinition] {
     WELCOME_SECTION_DEFINITIONS
 }
 
+fn load_welcome_runtime_config(
+    repo_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<ResolvedWelcomeConfig, String> {
+    let path = repo_root.join(WELCOME_TEXTS_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            warnings.push(format!(
+                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` fehlt; Compile-Defaults werden verwendet"
+            ));
+            return Ok(ResolvedWelcomeConfig::from_defaults());
+        }
+        Err(err) => {
+            return Err(format!(
+                "Welcome-Textdatei `{WELCOME_TEXTS_FILE}` konnte nicht gelesen werden: {err}"
+            ));
+        }
+    };
+
+    let file = toml::from_str::<WelcomeTextsToml>(&raw).map_err(|err| {
+        format!("Welcome-Textdatei `{WELCOME_TEXTS_FILE}` konnte nicht geparst werden: {err}")
+    })?;
+    Ok(ResolvedWelcomeConfig::from_defaults().merge(file))
+}
+
+impl ResolvedWelcomeConfig {
+    fn from_defaults() -> Self {
+        Self {
+            texts: ResolvedWelcomeTextTable::from_defaults(),
+            urls: ResolvedWelcomeLinkUrls::from_defaults(),
+        }
+    }
+
+    fn merge(mut self, file: WelcomeTextsToml) -> Self {
+        apply_optional(&mut self.texts.section_titles.hero, file.titles.hero);
+        apply_optional(
+            &mut self.texts.section_titles.navigation,
+            file.titles.navigation,
+        );
+        apply_optional(&mut self.texts.section_titles.team, file.titles.team);
+        apply_optional(&mut self.texts.section_titles.socials, file.titles.socials);
+        apply_optional(
+            &mut self.texts.section_titles.quickstart,
+            file.titles.quickstart,
+        );
+
+        apply_optional(&mut self.texts.hero_intro, file.texts.hero_intro);
+        apply_optional(
+            &mut self.texts.empty_navigation,
+            file.texts.empty_navigation,
+        );
+        apply_optional(
+            &mut self.texts.default_channel_description,
+            file.texts.default_channel_description,
+        );
+        apply_optional(
+            &mut self.texts.empty_team_role_members,
+            file.texts.empty_team_role_members,
+        );
+        apply_optional(&mut self.texts.socials_intro, file.texts.socials_intro);
+        apply_optional(
+            &mut self.texts.quickstart_intro,
+            file.texts.quickstart_intro,
+        );
+
+        apply_optional(&mut self.urls.website, file.urls.website);
+        apply_optional(&mut self.urls.twitch, file.urls.twitch);
+        apply_optional(&mut self.urls.coaching, file.urls.coaching);
+        apply_optional(&mut self.urls.server_invite, file.urls.server_invite);
+
+        apply_optional(&mut self.texts.buttons.website, file.buttons.website);
+        apply_optional(&mut self.texts.buttons.twitch, file.buttons.twitch);
+        apply_optional(&mut self.texts.buttons.coaching, file.buttons.coaching);
+        apply_optional(
+            &mut self.texts.buttons.server_invite,
+            file.buttons.server_invite,
+        );
+        apply_optional(&mut self.texts.buttons.rules, file.buttons.rules);
+        apply_optional(&mut self.texts.buttons.rank, file.buttons.rank);
+        apply_optional(&mut self.texts.buttons.support, file.buttons.support);
+
+        if let Some(channels) = file.channel {
+            self.texts.channel_descriptions = channels
+                .into_iter()
+                .map(|channel| ResolvedWelcomeChannelDescription {
+                    channel_key: channel.key,
+                    description: channel.description,
+                })
+                .collect();
+        }
+
+        self
+    }
+}
+
+impl ResolvedWelcomeLinkUrls {
+    fn from_defaults() -> Self {
+        Self {
+            website: WELCOME_LINK_URLS.website.to_string(),
+            twitch: WELCOME_LINK_URLS.twitch.to_string(),
+            coaching: WELCOME_LINK_URLS.coaching.to_string(),
+            server_invite: WELCOME_LINK_URLS.server_invite.to_string(),
+        }
+    }
+}
+
+impl ResolvedWelcomeTextTable {
+    fn from_defaults() -> Self {
+        Self {
+            section_titles: ResolvedWelcomeSectionTitles {
+                hero: WELCOME_TEXTS.section_titles.hero.to_string(),
+                navigation: WELCOME_TEXTS.section_titles.navigation.to_string(),
+                team: WELCOME_TEXTS.section_titles.team.to_string(),
+                socials: WELCOME_TEXTS.section_titles.socials.to_string(),
+                quickstart: WELCOME_TEXTS.section_titles.quickstart.to_string(),
+            },
+            hero_intro: WELCOME_TEXTS.hero_intro.to_string(),
+            empty_navigation: WELCOME_TEXTS.empty_navigation.to_string(),
+            default_channel_description: WELCOME_TEXTS.default_channel_description.to_string(),
+            channel_descriptions: WELCOME_TEXTS
+                .channel_descriptions
+                .iter()
+                .map(|entry| ResolvedWelcomeChannelDescription {
+                    channel_key: entry.channel_key.to_string(),
+                    description: entry.description.to_string(),
+                })
+                .collect(),
+            empty_team_role_members: WELCOME_TEXTS.empty_team_role_members.to_string(),
+            socials_intro: WELCOME_TEXTS.socials_intro.to_string(),
+            quickstart_intro: WELCOME_TEXTS.quickstart_intro.to_string(),
+            buttons: ResolvedWelcomeButtonLabels {
+                website: WELCOME_TEXTS.buttons.website.to_string(),
+                twitch: WELCOME_TEXTS.buttons.twitch.to_string(),
+                coaching: WELCOME_TEXTS.buttons.coaching.to_string(),
+                server_invite: WELCOME_TEXTS.buttons.server_invite.to_string(),
+                rules: WELCOME_TEXTS.buttons.rules.to_string(),
+                rank: WELCOME_TEXTS.buttons.rank.to_string(),
+                support: WELCOME_TEXTS.buttons.support.to_string(),
+            },
+        }
+    }
+}
+
+fn apply_optional(target: &mut String, value: Option<String>) {
+    if let Some(value) = value {
+        *target = value;
+    }
+}
+
 pub fn welcome_message_id_key(section_id: &str) -> String {
     format!("welcome_message_id_{section_id}")
 }
@@ -471,10 +741,13 @@ pub fn build_welcome_publish_output(
             "Kanal `willkommen` wurde im Live-Guild-Modell nicht gefunden".to_string()
         })?;
     let mut warnings = Vec::new();
+    let config = load_welcome_runtime_config(repo_root, &mut warnings)?;
+    let texts = &config.texts;
+    let urls = &config.urls;
     let team_roles = resolve_team_roles(model, team_members, &mut warnings);
     let (navigation_embeds, navigation_attachments) =
-        navigation_embeds(model, repo_root, &mut warnings);
-    let quickstart_buttons = quickstart_buttons(model)?;
+        navigation_embeds(model, repo_root, texts, &mut warnings);
+    let quickstart_buttons = quickstart_buttons(model, texts)?;
     let hero_message_id = stored_message_ids.get("hero").copied();
     let hero_jump_url = hero_message_id
         .map(|message_id| hero_message_url(model.guild_id, welcome_channel.channel_id, message_id));
@@ -490,8 +763,8 @@ pub fn build_welcome_publish_output(
             .map(|filename| welcome_banner(repo_root, filename, &mut warnings));
         let payload = match definition.id {
             "hero" => payload_with_optional_banner(
-                WELCOME_TEXTS.hero_intro,
-                WELCOME_TEXTS.section_titles.hero,
+                &texts.hero_intro,
+                &texts.section_titles.hero,
                 &marker,
                 banner.as_ref(),
                 Vec::new(),
@@ -502,26 +775,23 @@ pub fn build_welcome_publish_output(
                 components: Vec::new(),
                 attachments: navigation_attachments.clone(),
             },
-            "team" => team_payload(&team_roles, &marker, banner.as_ref()),
+            "team" => team_payload(&team_roles, texts, &marker, banner.as_ref()),
             "socials" => payload_with_optional_banner(
-                WELCOME_TEXTS.socials_intro,
-                WELCOME_TEXTS.section_titles.socials,
+                &texts.socials_intro,
+                &texts.section_titles.socials,
                 &marker,
                 banner.as_ref(),
                 vec![button_row(vec![
-                    link_button(WELCOME_TEXTS.buttons.website, WELCOME_LINK_URLS.website),
-                    link_button(WELCOME_TEXTS.buttons.twitch, WELCOME_LINK_URLS.twitch),
-                    link_button(WELCOME_TEXTS.buttons.coaching, WELCOME_LINK_URLS.coaching),
-                    link_button(
-                        WELCOME_TEXTS.buttons.server_invite,
-                        WELCOME_LINK_URLS.server_invite,
-                    ),
+                    link_button(&texts.buttons.website, &urls.website),
+                    link_button(&texts.buttons.twitch, &urls.twitch),
+                    link_button(&texts.buttons.coaching, &urls.coaching),
+                    link_button(&texts.buttons.server_invite, &urls.server_invite),
                 ])],
             ),
             "quickstart" => WelcomeMessagePayload {
-                content: WELCOME_TEXTS.quickstart_intro.to_string(),
+                content: texts.quickstart_intro.clone(),
                 embeds: vec![text_embed(
-                    WELCOME_TEXTS.section_titles.quickstart,
+                    &texts.section_titles.quickstart,
                     None,
                     &marker,
                     None,
@@ -684,6 +954,7 @@ fn payload_with_optional_banner(
 
 fn team_payload(
     team_roles: &[WelcomeTeamRoleOutput],
+    texts: &ResolvedWelcomeTextTable,
     marker: &str,
     banner: Option<&WelcomeBannerOutput>,
 ) -> WelcomeMessagePayload {
@@ -692,7 +963,7 @@ fn team_payload(
         .filter_map(|role| {
             let name = role.matched_role_name.as_ref()?;
             let value = if role.member_mentions.is_empty() {
-                WELCOME_TEXTS.empty_team_role_members.to_string()
+                texts.empty_team_role_members.clone()
             } else {
                 truncate_embed_field(&role.member_mentions.join(" "))
             };
@@ -706,12 +977,8 @@ fn team_payload(
 
     let description = fields
         .is_empty()
-        .then(|| WELCOME_TEXTS.empty_team_role_members.to_string());
-    let mut embed = embed_base(
-        WELCOME_TEXTS.section_titles.team,
-        description.as_deref(),
-        marker,
-    );
+        .then(|| texts.empty_team_role_members.clone());
+    let mut embed = embed_base(&texts.section_titles.team, description.as_deref(), marker);
     if !fields.is_empty() {
         embed["fields"] = Value::Array(fields);
     }
@@ -730,6 +997,7 @@ fn team_payload(
 fn navigation_embeds(
     model: &GuildModel,
     repo_root: &Path,
+    texts: &ResolvedWelcomeTextTable,
     warnings: &mut Vec<String>,
 ) -> (Vec<Value>, Vec<WelcomePayloadAttachment>) {
     let mut embeds = Vec::new();
@@ -755,7 +1023,7 @@ fn navigation_embeds(
             .map(|channel| {
                 json!({
                     "name": format!("<#{}>", channel.channel_id),
-                    "value": channel_description(&channel.name),
+                    "value": channel_description(texts, &channel.name),
                     "inline": false,
                 })
             })
@@ -777,8 +1045,8 @@ fn navigation_embeds(
         warnings.push("Welcome-Navigation enthaelt keine oeffentlichen Kanaele".to_string());
         return (
             vec![text_embed(
-                WELCOME_TEXTS.section_titles.navigation,
-                Some(WELCOME_TEXTS.empty_navigation),
+                &texts.section_titles.navigation,
+                Some(&texts.empty_navigation),
                 &welcome_marker("navigation"),
                 None,
             )],
@@ -788,20 +1056,23 @@ fn navigation_embeds(
     (embeds, attachments)
 }
 
-fn quickstart_buttons(model: &GuildModel) -> Result<Vec<Value>, String> {
+fn quickstart_buttons(
+    model: &GuildModel,
+    texts: &ResolvedWelcomeTextTable,
+) -> Result<Vec<Value>, String> {
     Ok(vec![
         channel_link_button(
-            WELCOME_TEXTS.buttons.rules,
+            &texts.buttons.rules,
             model.guild_id,
             require_channel_id(model, "regelwerk")?,
         ),
         channel_link_button(
-            WELCOME_TEXTS.buttons.rank,
+            &texts.buttons.rank,
             model.guild_id,
             require_channel_id(model, "deadlock-rang")?,
         ),
         channel_link_button(
-            WELCOME_TEXTS.buttons.support,
+            &texts.buttons.support,
             model.guild_id,
             require_channel_id(model, "server-support")?,
         ),
@@ -941,14 +1212,14 @@ fn is_navigation_channel(model: &GuildModel, model_channel: &ChannelSpec) -> boo
         && everyone_can_view(model, model_channel.channel_id)
 }
 
-fn channel_description(channel_name: &str) -> &'static str {
+fn channel_description<'a>(texts: &'a ResolvedWelcomeTextTable, channel_name: &str) -> &'a str {
     let normalized = normalized_name(channel_name);
-    WELCOME_TEXTS
+    texts
         .channel_descriptions
         .iter()
-        .find(|entry| normalized_name(entry.channel_key) == normalized)
-        .map_or(WELCOME_TEXTS.default_channel_description, |entry| {
-            entry.description
+        .find(|entry| normalized_name(&entry.channel_key) == normalized)
+        .map_or(texts.default_channel_description.as_str(), |entry| {
+            entry.description.as_str()
         })
 }
 
@@ -1149,6 +1420,98 @@ mod tests {
                 .insert(id, channel(id, name, parent, position));
         }
         model
+    }
+
+    fn write_welcome_texts_file(repo_root: &Path, body: &str) {
+        let path = repo_root.join(WELCOME_TEXTS_FILE);
+        std::fs::create_dir_all(path.parent().expect("texts parent")).expect("assets dir");
+        std::fs::write(path, body).expect("welcome texts file");
+    }
+
+    #[test]
+    fn welcome_texts_seed_toml_parst_zu_compile_defaults() {
+        let mut warnings = Vec::new();
+        let config = load_welcome_runtime_config(&welcome_repo_root(), &mut warnings)
+            .expect("welcome texts seed");
+
+        assert_eq!(config, ResolvedWelcomeConfig::from_defaults());
+        assert!(warnings.is_empty(), "unerwartete Warnungen: {warnings:?}");
+    }
+
+    #[test]
+    fn welcome_texts_parse_fehler_schlaegt_hart_fehl() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_welcome_texts_file(temp.path(), "[titles]\nhero = [\n");
+
+        let mut warnings = Vec::new();
+        let err = load_welcome_runtime_config(temp.path(), &mut warnings).expect_err("parse err");
+
+        assert!(err.contains("konnte nicht geparst werden"), "{err}");
+        assert!(warnings.is_empty(), "unerwartete Warnungen: {warnings:?}");
+    }
+
+    #[test]
+    fn welcome_texts_fehlende_datei_nutzt_defaults_mit_warnung() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let mut warnings = Vec::new();
+        let config =
+            load_welcome_runtime_config(temp.path(), &mut warnings).expect("default config");
+
+        assert_eq!(config, ResolvedWelcomeConfig::from_defaults());
+        assert!(warnings
+            .iter()
+            .any(|warning| warning.contains(WELCOME_TEXTS_FILE)));
+    }
+
+    #[test]
+    fn welcome_texts_toml_mergt_teilangaben_und_ersetzt_channel_liste() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_welcome_texts_file(
+            temp.path(),
+            r#"
+[titles]
+hero = "Neuer Hero"
+
+[texts]
+quickstart_intro = "Neue Schnellstart-Zeile"
+
+[urls]
+twitch = "https://example.invalid/twitch"
+
+[buttons]
+rank = "Custom Rank"
+
+[[channel]]
+key = "allgemein"
+description = "Custom allgemein"
+"#,
+        );
+
+        let mut warnings = Vec::new();
+        let config = load_welcome_runtime_config(temp.path(), &mut warnings).expect("merged");
+
+        assert!(warnings.is_empty(), "unerwartete Warnungen: {warnings:?}");
+        assert_eq!(config.texts.section_titles.hero, "Neuer Hero");
+        assert_eq!(
+            config.texts.section_titles.navigation,
+            WELCOME_TEXTS.section_titles.navigation
+        );
+        assert_eq!(config.texts.quickstart_intro, "Neue Schnellstart-Zeile");
+        assert_eq!(
+            config.texts.default_channel_description,
+            WELCOME_TEXTS.default_channel_description
+        );
+        assert_eq!(config.urls.website, WELCOME_LINK_URLS.website);
+        assert_eq!(config.urls.twitch, "https://example.invalid/twitch");
+        assert_eq!(config.texts.buttons.rank, "Custom Rank");
+        assert_eq!(config.texts.buttons.rules, WELCOME_TEXTS.buttons.rules);
+        assert_eq!(
+            config.texts.channel_descriptions,
+            vec![ResolvedWelcomeChannelDescription {
+                channel_key: "allgemein".to_string(),
+                description: "Custom allgemein".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -1455,8 +1818,10 @@ mod tests {
 
     #[test]
     fn welcome_deadlock_streamer_beschreibung_ist_gesetzt() {
+        let texts = ResolvedWelcomeTextTable::from_defaults();
+
         assert_eq!(
-            channel_description("🎥deadlock-streamer"),
+            channel_description(&texts, "🎥deadlock-streamer"),
             "Unsere Twitch-Streamer: Live-Alerts und Highlights."
         );
     }

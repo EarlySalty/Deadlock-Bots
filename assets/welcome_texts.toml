@@ -1,0 +1,203 @@
+# Welcome-Hub-Texte fuer /serversync/welcome-apply.
+# Owner-Workflow: Datei editieren, dann POST /serversync/welcome-apply ausfuehren.
+# Fehlende Felder fallen auf Compile-Defaults zurueck.
+
+# Titel der einzelnen Welcome-Sektionen.
+[titles]
+hero = "Willkommen"
+navigation = "Kanal-Navigation"
+team = "Community-Team"
+socials = "Links & Socials"
+quickstart = "Schnellstart"
+
+# Fliesstexte und Fallback-Texte in den Welcome-Nachrichten.
+[texts]
+hero_intro = "Willkommen bei der Deutschen Deadlock Community — Deutschlands Anlaufstelle für alles rund um Deadlock. Hier findest du Mitspieler, kostenloses Coaching, Turniere und eine Community, die das Spiel genauso ernst oder locker nimmt wie du. Dieser Kanal zeigt dir, wo was ist."
+empty_navigation = "Die Navigation wird gerade neu aufgebaut — schau gleich nochmal rein."
+default_channel_description = "Beschreibung folgt."
+empty_team_role_members = "aktuell unbesetzt"
+socials_intro = "Die Community gibt es auch außerhalb von Discord:"
+quickstart_intro = "Die drei wichtigsten Klicks für den Start:"
+
+# Link-Ziele der Social-Buttons.
+[urls]
+website = "https://earlysalty.com"
+twitch = "https://www.twitch.tv/earlysalty"
+coaching = "https://earlysalty.com/coaching"
+server_invite = "https://discord.com/channels/1289721245281292288/1464736918951432222"
+
+# Button-Beschriftungen fuer Socials und Schnellstart.
+[buttons]
+website = "Website"
+twitch = "Twitch"
+coaching = "Coaching"
+server_invite = "Einladungslink"
+rules = "📜 Regelwerk lesen"
+rank = "🔗 Rang verknüpfen"
+support = "🎫 Support"
+
+# Kanalbeschreibungen fuer die Navigation.
+# Sobald mindestens ein [[channel]]-Eintrag vorhanden ist, ersetzt diese Liste die Compile-Defaults vollstaendig.
+[[channel]]
+key = "regelwerk"
+description = "Die Regeln des Servers. Einmal lesen, dann weißt du Bescheid."
+
+[[channel]]
+key = "willkommen"
+description = "Du bist hier: der Überblick über den ganzen Server."
+
+[[channel]]
+key = "deadlock-rang"
+description = "Steam verknüpfen und deine Rang-Rolle automatisch bekommen."
+
+[[channel]]
+key = "server-support"
+description = "Fragen oder Probleme mit dem Server? Hier entlang."
+
+[[channel]]
+key = "deadlock-invite"
+description = "Unser Einladungslink zum Weitergeben."
+
+[[channel]]
+key = "ankündigungen"
+description = "Alles Wichtige aus der Community, kompakt."
+
+[[channel]]
+key = "patchnotes"
+description = "Deadlock-Patchnotes, aufbereitet auf Deutsch."
+
+[[channel]]
+key = "dev-updates"
+description = "Was sich an unseren Bots und der Website tut."
+
+[[channel]]
+key = "streamer-updates"
+description = "Wer aus der Community gerade live ist."
+
+[[channel]]
+key = "deadlock-streamer"
+description = "Unsere Twitch-Streamer: Live-Alerts und Highlights."
+
+[[channel]]
+key = "allgemein"
+description = "Der Hauptchat für alles rund um Deadlock."
+
+[[channel]]
+key = "off-topic"
+description = "Alles, was nichts mit Deadlock zu tun hat."
+
+[[channel]]
+key = "frag-die-community"
+description = "Deine Frage, die Antworten der Community."
+
+[[channel]]
+key = "memes"
+description = "Memes rein, Niveau egal, Hauptsache lustig."
+
+[[channel]]
+key = "leaks"
+description = "Leaks und Datamining-Fundstücke zu Deadlock."
+
+[[channel]]
+key = "kreativ-ecke"
+description = "Alles Selbstgemachte: Art, Edits, Mods, Movement-Clips."
+
+[[channel]]
+key = "gameplay-clips"
+description = "Deine besten (und schlimmsten) Momente."
+
+[[channel]]
+key = "yt-videos"
+description = "Videos aus der Community und rund um Deadlock."
+
+[[channel]]
+key = "feedback-kanal"
+description = "Ideen und Verbesserungsvorschläge für den Server."
+
+[[channel]]
+key = "bot-spam"
+description = "Bot-Befehle testen, ohne die Chats vollzumüllen."
+
+[[channel]]
+key = "mitspieler-suche"
+description = "Finde Mitspieler für Ranked, Casual oder einfach eine Runde."
+
+[[channel]]
+key = "game-guides-und-tipps"
+description = "Guides, Tricks und Wissenswertes rund ums Spiel."
+
+[[channel]]
+key = "custom-games-chat"
+description = "Organisation rund um Custom Games und Events."
+
+[[channel]]
+key = "rank-ups"
+description = "Automatische Glückwünsche bei Rang-Aufstiegen."
+
+[[channel]]
+key = "scrim-planung"
+description = "Scrim-Termine und Team-Aufstellungen — pro Scrim ein Thread."
+
+[[channel]]
+key = "code-of-conduct"
+description = "Die Spielregeln fürs Coaching-Programm."
+
+[[channel]]
+key = "ich-brauch-einen-coach"
+description = "Hier meldest du dich für kostenloses Coaching an."
+
+[[channel]]
+key = "coaching-chat"
+description = "Austausch zwischen Coaches und Coachees."
+
+[[channel]]
+key = "erfahrungsberichte"
+description = "Was andere aus ihrem Coaching mitgenommen haben."
+
+[[channel]]
+key = "sprachkanal-verwalten"
+description = "Deine eigene Lane per Klick verwalten."
+
+[[channel]]
+key = "sprach-kanal-verwalten"
+description = "Deine eigene Lane per Klick verwalten."
+
+[[channel]]
+key = "anleitung"
+description = "Kurzanleitung für die Ranked-Lanes."
+
+[[channel]]
+key = "lane-eröffnen"
+description = "Beitreten — und deine eigene Lane öffnet sich automatisch."
+
+[[channel]]
+key = "ranked-competitiv-lane-öffnen"
+description = "Beitreten — und deine Ranked-Lane öffnet sich automatisch."
+
+[[channel]]
+key = "street-brawl-lanes"
+description = "Beitreten — und deine Street-Brawl-Lane öffnet sich automatisch."
+
+[[channel]]
+key = "deadlock-router"
+description = "Der Einstieg in alle Voice-Lanes."
+
+[[channel]]
+key = "neue-spieler-lane"
+description = "Voice für alle, die gerade erst anfangen."
+
+[[channel]]
+key = "off-topic-voice"
+description = "Quatschen abseits von Deadlock."
+
+[[channel]]
+key = "sammelpunkt"
+description = "Treffpunkt vor Custom Games."
+
+[[channel]]
+key = "caster-channel"
+description = "Voice für Caster bei Custom Games und Turnieren."
+
+[[channel]]
+key = "afk"
+description = "Kurz weg? Hier parkt dich der Server."
