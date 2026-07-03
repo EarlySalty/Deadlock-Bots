@@ -36,6 +36,7 @@ BANNERS = [
     ("team.png", "COMMUNITY", "TEAM"),
     ("socials.png", "LINKS &", "SOCIALS"),
     ("router-hero.png", "DEADLOCK", "ROUTER"),
+    ("rang-guide-hero.png", "STEAM", "VERKNÜPFEN"),
 ]
 
 

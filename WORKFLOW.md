@@ -1,3 +1,112 @@
+# Rang-Guide V2 (2026-07-03)
+
+## Fortschritt
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-rang-guide` auf Branch `feat/rang-guide-v2`; Pflichtkontext `WORKFLOW.md`, `welcome_publish.rs`, Welcome-/Router-/LFG-Apply-Pfade und `steam_link_panel`-Custom-IDs gelesen.
+- Neues `rang_guide_publish`-Modul fuer den Kanal `deadlock-rang` (`1398021105339334666`) angelegt: Components V2 mit `flags=32768`, Gold-Container `0xC8A86B`, `allowed_mentions.parse=[]`, optionalem Hero-Banner `assets/welcome-banners/rang-guide-hero.png`, festen Steam-Custom-IDs und Linked-Role-URL.
+- Runtime-Texte als Compile-Defaults plus `assets/rang_guide_texts.toml` umgesetzt; Parse-Fehler sind hart, fehlende Datei/Banner liefern Warnungen. Alle sichtbaren Texte bleiben Platzhalter.
+- ServerSync-Pfad `/serversync/rang-guide-apply` angelegt: `confirm=false` Preview, `confirm=true` Apply; KV-Listen-Storage `rang_guide_message_id_<idx>`, `rang_guide_payload_format`, `rang_guide_payload_hash`; Formatwechsel fuehrt zu Repost, KV-Verlust zu Repost, unveraenderter Hash zu `no_op`.
+- Legacy-Cleanup vorbereitet: nach erfolgreichem confirm-Apply werden nur eigene Bot-Nachrichten mit klassischem Embed, ohne Components-V2-Flag und mit `steam_link_panel:`-Custom-ID geloescht; Preview plant nur Kandidaten.
+
+## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide -- --nocapture` (10 passed).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync -- --nocapture` (68 passed, 1 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot` (107 passed, 5 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community`.
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- `assets/welcome-banners/rang-guide-hero.png` fehlt aktuell im Worktree; Publisher warnt und postet ohne Banner, bis Claude/Owner das Asset nachlegt.
+- Die finalen sichtbaren Texte sind absichtlich nur Platzhalter und muessen vor Live-Publish in `assets/rang_guide_texts.toml` ersetzt werden.
+
+# Rang-Guide V2 Kritiker (2026-07-03)
+
+Scope: adversarialer Review des aktuellen uncommitted Diffs auf Branch `feat/rang-guide-v2`. Keine Source-Reworks, kein Commit/Push; nur dieser Report wurde ergänzt. Hinweis: Während des Reviews kamen finale `assets/rang_guide_texts.toml`-Texte und `assets/welcome-banners/rang-guide-hero.png` im Worktree an.
+
+## Befunde
+
+### DEPLOY-BREAKER
+1. Repost löscht gespeicherte Rang-Guide-Messages vor vollständig erfolgreichem Publish.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/serversync.rs:2607-2623`, Delete-Helfer `:1267-1287`.
+   - Fehlszenario: Bei Formatwechsel oder Message-Count-Wechsel läuft `delete_rang_guide_messages()` zuerst, danach `clear_rang_guide_message_id_keys()`, danach werden neue Messages sequenziell gepostet. Wenn Message 1 erfolgreich ist und Message 2 mit Discord/Netz/API-Fehler scheitert, sind die alten Messages schon weg, KV ist teilweise gelöscht/neu geschrieben, Metadaten werden nicht final gespeichert und der Live-Kanal enthält nur einen Teil des Guides. Das verletzt die Lösch-Sicherheitsforderung "Löschung erst nach erfolgreichem Publish".
+   - Fix-Skizze: Repost zweiphasig machen: neue Messages vollständig posten und KV erst nach komplettem Erfolg umschalten; alte Messages erst danach löschen. Bei Teilfehler neu gepostete Messages wieder aufräumen oder Apply abbrechen, ohne alte Messages anzufassen.
+
+2. Aktueller Test-Gate ist rot, sobald die Runtime-TOML echte Texte enthält.
+   - Datei/Zeilen: Test `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs:741-748`; aktuelle Runtime-Datei `assets/rang_guide_texts.toml:6-36`.
+   - Fehlszenario: `rang_guide_texts_seed_toml_parst_zu_compile_defaults` lädt `rang_guide_repo_root()` und erwartet Compile-Defaults/Platzhalter. Die aktuelle untracked TOML enthält finale Texte; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide -- --nocapture` scheitert mit `left: "**Steam verknüpfen ..."` vs. `right: "Platzhalter: Intro deadlock-rang"`.
+   - Fix-Skizze: Test von der Live-Seed-Datei entkoppeln und mit Temp-TOML testen, dass fehlende Felder auf Defaults mergen. Alternativ erwartete Seed-Werte bewusst auf die finale TOML anpassen, aber nicht "Seed == Compile-Defaults" erzwingen.
+
+### HIGH
+3. Zweiter Delete-Pfad löscht gespeicherte IDs ohne Autor-/V2-Revalidierung.
+   - Datei/Zeilen: `rust/bin/dl-bot/src/serversync.rs:1267-1287`, Aufruf `:2607-2610`.
+   - Fehlszenario: Die Legacy-Erkennung schützt Owner-Nachrichten, aber der Repost-Pfad löscht jede ID aus `rang_guide_message_id_<idx>` blind im Live-Kanal. Bei KV-Korruption, manuellem falschem KV-Wert oder Index-Verschiebung kann auch eine Nicht-Bot-Nachricht gelöscht werden. Damit ist "Owner-Nachricht kann niemals gelöscht werden" nicht für alle Delete-Pfade beweisbar.
+   - Fix-Skizze: Vor jedem gespeicherten Delete Message fetchen und hart prüfen: `author.id == bot_user_id`, `flags & 32768 != 0`, erwartete Rang-Guide-Komponenten/Marker vorhanden. Bei Mismatch blocken statt löschen.
+
+4. KV-Verlust erzeugt unerkannte verwaiste V2-Duplikate.
+   - Datei/Zeilen: Storage-Match `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs:249-250`, `:278-285`; Apply `rust/bin/dl-bot/src/serversync.rs:2583-2666`; Legacy-Filter schließt V2 aus `rang_guide_publish.rs:301-312`.
+   - Fehlszenario: Wenn `rang_guide_message_id_<idx>` verloren geht, aber die V2-Messages im Kanal noch existieren, plant der Publisher `planned_post` und postet neue V2-Messages. Die alten V2-Messages haben Flag `32768` und werden vom Legacy-Cleanup absichtlich nie gefunden. Ergebnis: doppelte Guides im Live-Kanal, ohne Warnung im Output.
+   - Fix-Skizze: KV-Verlust als blockierenden Zustand/warnenden Manual-Step behandeln oder eigene V2-Messages über stabilen Marker finden. Formatwechsel/Repost muss gespeicherte und entdeckte eigene V2-Messages kontrolliert behandeln.
+
+### MITTEL
+5. Attachment-Inhalt ist nicht Teil des Payload-Hashes.
+   - Datei/Zeilen: Hash `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs:291-298`; Attachment-Modell `:106-110`; No-op-Entscheid `rust/bin/dl-bot/src/serversync.rs:2624-2631`.
+   - Fehlszenario: `assets/welcome-banners/rang-guide-hero.png` wird später mit gleichem Dateinamen neu generiert. Der serialisierte Payload bleibt gleich, `stored_payload_hash == payload_hash`, Confirm-Apply wird `no_op` und Discord behält das alte Bild.
+   - Fix-Skizze: Attachment-Bytes oder einen Datei-Content-Hash in `payload_hash` einbeziehen; alternativ Banner-Änderungen immer als Edit erzwingen.
+
+6. Testabdeckung prüft kritische Apply-Fehlerpfade nicht.
+   - Datei/Zeilen: Payload-/Banner-/Budget-Tests `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs:796-861`, Storage-/Legacy-Tests `:904-989`; HTTP-Mock-Test `rust/bin/dl-bot/src/serversync.rs:7320-7392`.
+   - Fehlszenario: Fremd-Autor-Nie-Löschen existiert nur als Pure-Function-Test, nicht als Service-Test mit Discord-Message-JSON/leeren Feldern. Es fehlt ein Teilfehlschlag-Test "Message 1 gepostet, Message 2 Fehler", ein KV-Verlust-/Orphan-Test, ein exakter Budget-Grenzfall und ein Test, dass fehlendes Banner im PATCH-Fall alte Attachments entfernt.
+   - Fix-Skizze: ServerSync-Service mit fake Discord/KV für Delete-Reihenfolge, Teilfehler und Preview-No-Side-Effects testen; Budget-Grenzen exakt `3500/35/9` und `3501/36/10` abdecken.
+
+## Pflicht-Linsen
+- 1. LÖSCH-SICHERHEIT: nicht sauber. Legacy-Kandidat selbst ist gegen die Owner-Nachricht geschützt: Message-JSON defaultet `flags/components/embeds` defensiv (`serversync.rs:419-427`), fehlende `id/author.id` brechen vor Delete ab (`:1416-1428`), und `is_legacy_rank_guide_cleanup_candidate()` fordert `author_id == bot_user_id`, Embed, kein V2-Flag und `steam_link_panel:`-Custom-ID (`rang_guide_publish.rs:301-312`). Preview returnt vor jedem Write/Delete (`serversync.rs:2600-2601`), Legacy-Cleanup läuft erst nach erfolgreichem Apply-Zweig (`:2666`). Nicht sauber sind Repost-Delete vor Publish und blindes Löschen gespeicherter IDs, siehe DEPLOY-BREAKER #1 und HIGH #3. Teilfehlschlag im Repost: alte Messages weg, erste neue Message kann stehen bleiben, zweite fehlt, KV/Metadaten teilweise.
+- 2. HANDLER-UNANTASTBARKEIT: geprüft, sauber. `git diff -- rust/crates/dl-bridges/src/steam.rs` ist leer. Bestehende Handler-IDs sind `steam_link_panel:open`, `steam_link_panel:friend_code`, `steam_link_panel:rankcheck` (`rust/crates/dl-bridges/src/steam.rs:24-40`, `:568-574`); neue Konstanten stimmen exakt (`rang_guide_publish.rs:26-28`).
+- 3. V2-KORREKTHEIT: überwiegend sauber. Flag `32768` (`rang_guide_publish.rs:18`, `:522`), Gold `0xC8A86B` (`:19`, `:662-666`), MediaGallery vor Text bei vorhandenem Banner (`:437-442`), `allowed_mentions.parse=[]` pro Message (`:521-524`), Link-Button Style 5 mit URL und ohne `custom_id` (`:704-710`). Budgets werden validiert (`:572-596`) und Payload-/Missing-Banner-Tests laufen grün (`:796-861`). Aktueller Bannerpfad ist korrekt und Datei ist jetzt vorhanden: `assets/welcome-banners/rang-guide-hero.png` (1100x300 PNG). Einschränkung: voller `rang_guide`-Test ist rot wegen Befund #2.
+- 4. MULTIPART-LEHRE: geprüft, sauber. POST und PATCH laufen beide über `send_rang_guide_message_payload()` mit `reqwest::multipart::Form`, `payload_json` und `files[{id}]` (`serversync.rs:1326-1368`); ohne Attachments JSON-Pfad (`:1376-1394`). Das entspricht dem Welcome-Muster (`:1603-1644`), kein Serenity Raw-HTTP.
+- 5. IDEMPOTENZ: nicht sauber. KV-Keys existieren (`rang_guide_publish.rs:15-17`, `serversync.rs:1201-1253`), Re-Apply unverändert wird `no_op` (`serversync.rs:2624-2631`), Textänderung editiert (`:2632-2663`), Formatwechsel repostet (`:2607-2623`), Preview schreibt kein KV. Aber KV-Verlust/Orphans und Attachment-Hash fehlen, siehe HIGH #4 und MITTEL #5.
+- 6. PORTED BUT NEVER WIRED: geprüft, sauber. Modul eingebunden (`serversync.rs:3`), Trait/Export vorhanden (`:35`, `:603`), Route registriert (`:4990`), Handler nutzt dieselbe Token-Kette/Authorize wie Router-Apply (`:5268-5285`, `:5028-5055`). TOML-Pfad läuft über `env!("CARGO_MANIFEST_DIR")/../../..` und ist damit unabhängig vom systemd-WorkingDirectory (`rang_guide_publish.rs:207-209`). Kanal ist hart verdrahtet und stimmt mit der Aufgabe überein: `1398021105339334666` (`:9`).
+- 7. TOML-ROBUSTHEIT: funktional sauber, Test-Gate nicht. Parse-Fehler sind hart (`rang_guide_publish.rs:358-360`), fehlende Datei nutzt Defaults mit Warnung (`:342-350`), Teilangaben mergen auf Defaults (`:390-410`), URL-Override fließt in den Link-Button (`:463-466`). Der aktuelle Seed-Test ist aber falsch gekoppelt, siehe DEPLOY-BREAKER #2.
+- 8. REGRESSIONSFREIHEIT: teilweise sauber. Bestehende ServerSync-Routen bleiben in der Route-Liste unverändert, neue Route ist additiv (`serversync.rs:4988-4993`); Steam-Handler-Diff ist leer. Aber `dl-bot rang_guide` ist aktuell rot, daher kein mergefähiger Teststand.
+- 9. TESTLÜCKEN: nicht sauber. Fremd-Autor-Nie-Löschen-Test vorhanden (`rang_guide_publish.rs:946-989`), Missing-Banner-Test vorhanden (`:851-861`), Budget-Strukturtest vorhanden (`:796-848`). Es fehlen Service-/Teilfehler-/KV-Orphan-/exakte Budget-Grenztests, siehe MITTEL #6.
+
+## Kritiker-Verifikation
+- Rot: `cd rust && SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide -- --nocapture` (9 passed, 1 failed: `rang_guide_texts_seed_toml_parst_zu_compile_defaults`).
+- Grün: `cd rust && SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync::tests::rang_guide_apply_http_ist_dry_run_default_und_liefert_v2_payload -- --nocapture`.
+- Grün: `cd rust && SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide_payload_ -- --nocapture`.
+- Grün: `git diff --check`.
+
+## Gesamturteil
+REWORK-NÖTIG. Nicht merge-/deployfähig wegen Delete-before-publish im Repost-Pfad und rotem Test-Gate mit aktueller Runtime-TOML. Vor Live-Apply außerdem gespeicherte Deletes author-/V2-validieren und KV-Verlust/Orphans explizit behandeln.
+
+# Rang-Guide V2 Rework (2026-07-03)
+
+## Fix-Status
+- Fix 1 DEPLOY-BREAKER Repost-Reihenfolge: Behoben. Repost postet jetzt erst alle neuen Messages, schaltet danach die KV-IDs/Metadaten in einer DB-Transaktion um und loescht alte IDs erst danach revalidiert (`rust/bin/dl-bot/src/serversync.rs:1293-1337`, `:2802-2880`). Bei Post-/KV-Fehlern werden bereits neu gepostete Messages best-effort bereinigt, ohne altes KV/alte Messages anzufassen (`:1419-1437`, `:2850-2873`). Test: `service_v2_repost_teilfehler_laesst_altes_kv_und_alte_messages_stehen`.
+- Fix 2 DEPLOY-BREAKER Test-Gate/Defaults: Behoben. Finale Texte aus `assets/rang_guide_texts.toml` wurden 1:1 als Compile-Defaults uebernommen (`rust/bin/dl-bot/src/serversync/rang_guide_publish.rs:62-80`); der Live-TOML-Seed-Test wurde durch Temp-TOML-Merge ersetzt (`:906-927`). `assets/rang_guide_texts.toml` selbst blieb unveraendert.
+- Fix 3 HIGH Delete-Revalidierung: Behoben. Gespeicherte Deletes fetchen jede Message vorab und pruefen Autor, Components-V2-Flag und Rang-Guide-Komponenten-ID-Signatur; 404 wird nur gewarnt, Fremd-/Mismatch-Messages werden nie geloescht (`serversync.rs:1340-1416`, `rang_guide_publish.rs:386-421`). Test: `service_v2_stored_delete_loescht_fremd_autor_message_nicht` mit Message-JSON inkl. leerer Komponenten/Embeds.
+- Fix 4 HIGH KV-Verlust/Orphans: Behoben. V2-Guide-Messages tragen stabile nicht sichtbare Komponenten-IDs (`rang_guide_publish.rs:20-49`, `:548-632`) und werden aus der Kanal-History gesucht (`serversync.rs:1621-1665`). Bei eindeutigem Count werden sie adoptiert und editiert/KV-neu gesetzt; bei uneindeutiger History blockiert Apply mit Bad Request (`serversync.rs:2818-2838`, `:2927-2929`). Test: `service_v2_kv_verlust_adoptiert_history_statt_neu_post`.
+- Fix 5 MITTEL Attachment-Hash: Behoben. `payload_hash` serialisiert jetzt Payload plus SHA-256 der Attachment-Bytes (`rang_guide_publish.rs:323-371`). Test: `rang_guide_payload_hash_aendert_sich_bei_banner_bytes`.
+- Fix 6 MITTEL Testluecken: Behoben. Neue Service-Level-Tests mit Fake-Discord/KV decken Preview-No-Writes, Repost-Teilfehler, Fremd-Autor-Delete-Schutz und KV-Verlust-Adoption ab (`serversync.rs:5714-6238`, `:7909-8159`). Budget-Grenzen exakt `3500/35/9` gruen und `3501/36/10` rot sind in `rang_guide_budget_grenzen_sind_exakt_inklusiv` abgedeckt (`rang_guide_publish.rs:1057-1091`).
+
+## TDD-Beleg
+- Rot vor Rework laut Kritiker: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide -- --nocapture` scheiterte am Live-TOML-gekoppelten Seed-Test.
+- Rot waehrend Rework: erster Lauf `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot service_v2 -- --nocapture` scheiterte im neuen Teilfehler-Test-Setup; nach Korrektur/Fix gruen.
+
+## Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot rang_guide -- --nocapture` (12 passed).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot service_v2 -- --nocapture` (4 passed).
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot` (113 passed, 5 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community` (55 passed + doc-tests).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
+
+## Offene Punkte
+- Keine bekannten offenen Rework-Punkte. Kein Commit/Push ausgefuehrt.
+
 # W3.4b W3 - Live-Kopplung Post-Lane + Join + Auto-Close (2026-07-03)
 
 ## Fortschritt

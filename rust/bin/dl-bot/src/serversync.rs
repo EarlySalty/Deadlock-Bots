@@ -1,10 +1,12 @@
 #![allow(clippy::result_large_err)]
 
+mod rang_guide_publish;
 mod welcome_publish;
 
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,6 +33,7 @@ use sqlx::{PgPool, Row};
 use crate::master;
 pub use dl_voice::lfg_panel::LfgPanelApplyOutput;
 pub use dl_voice::router::RouterApplyOutput;
+pub use rang_guide_publish::RangGuidePublishOutput;
 pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
 pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
@@ -311,6 +314,12 @@ struct RegelwerkBotMessage {
     embed_titles: Vec<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct RangGuideDeleteOutcome {
+    deleted: Vec<u64>,
+    warnings: Vec<String>,
+}
+
 struct RegelwerkOutputInput<'a> {
     dry_run: bool,
     thread_count: usize,
@@ -418,7 +427,11 @@ struct DiscordMessage {
     id: String,
     author: DiscordMessageAuthor,
     #[serde(default)]
+    flags: u64,
+    #[serde(default)]
     embeds: Vec<DiscordMessageEmbed>,
+    #[serde(default)]
+    components: Vec<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -594,6 +607,7 @@ pub trait ServerSyncOps: Send + Sync {
     async fn regelwerk_publish(&self, confirm: bool) -> ServerSyncResult<RegelwerkPublishOutput>;
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput>;
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput>;
+    async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput>;
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput>;
     async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput>;
     async fn serverguide_preview(
@@ -615,6 +629,8 @@ pub struct ServerSyncService {
     discord_token: String,
     guild_id: u64,
     http_client: reqwest::Client,
+    discord_api_base: String,
+    rang_guide_repo_root: PathBuf,
     router_interface: tokio::sync::RwLock<Option<Arc<dl_voice::router::RouterInterface>>>,
     lfg_panel_interface: tokio::sync::RwLock<Option<Arc<dl_voice::lfg_panel::LfgPanelInterface>>>,
 }
@@ -632,6 +648,27 @@ impl ServerSyncService {
             discord_token,
             guild_id,
             http_client: reqwest::Client::new(),
+            discord_api_base: DISCORD_API_BASE.to_string(),
+            rang_guide_repo_root: rang_guide_publish::rang_guide_repo_root(),
+            router_interface: tokio::sync::RwLock::new(None),
+            lfg_panel_interface: tokio::sync::RwLock::new(None),
+        })
+    }
+
+    #[cfg(test)]
+    fn new_for_test(
+        pool: PgPool,
+        discord_api_base: String,
+        rang_guide_repo_root: PathBuf,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            pool,
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            discord_token: "test-token".to_string(),
+            guild_id: GUILD_ID,
+            http_client: reqwest::Client::new(),
+            discord_api_base,
+            rang_guide_repo_root,
             router_interface: tokio::sync::RwLock::new(None),
             lfg_panel_interface: tokio::sync::RwLock::new(None),
         })
@@ -646,6 +683,10 @@ impl ServerSyncService {
         interface: Arc<dl_voice::lfg_panel::LfgPanelInterface>,
     ) {
         *self.lfg_panel_interface.write().await = Some(interface);
+    }
+
+    fn discord_api_url(&self, path: &str) -> String {
+        format!("{}{}", self.discord_api_base.trim_end_matches('/'), path)
     }
 
     async fn fetch_member_role_assignments(&self) -> ServerSyncResult<Vec<MemberRoleAssignment>> {
@@ -855,7 +896,12 @@ impl ServerSyncService {
         &self,
         url: String,
     ) -> ServerSyncResult<T> {
-        let response = discord_regelwerk_send_with_retry(
+        let response = self.discord_get_response(url).await?;
+        discord_regelwerk_json_response(response, "GET")
+    }
+
+    async fn discord_get_response(&self, url: String) -> ServerSyncResult<DiscordRestResponse> {
+        discord_regelwerk_send_with_retry(
             || {
                 let request = self
                     .http_client
@@ -868,8 +914,7 @@ impl ServerSyncService {
             },
             "GET",
         )
-        .await?;
-        discord_regelwerk_json_response(response, "GET")
+        .await
     }
 
     async fn discord_post_json<T: serde::de::DeserializeOwned>(
@@ -929,7 +974,7 @@ impl ServerSyncService {
 
     async fn fetch_current_bot_user_id(&self) -> ServerSyncResult<u64> {
         let user: DiscordCurrentUser = self
-            .discord_get_json(format!("{DISCORD_API_BASE}/users/@me"))
+            .discord_get_json(self.discord_api_url("/users/@me"))
             .await?;
         parse_discord_id("Bot-User-ID", &user.id)
     }
@@ -1187,6 +1232,463 @@ impl ServerSyncService {
             .collect::<Vec<_>>();
         for key in keys {
             self.delete_serversync_kv(&key).await?;
+        }
+        Ok(())
+    }
+
+    async fn load_rang_guide_payload_format(&self) -> ServerSyncResult<Option<String>> {
+        self.load_serversync_kv(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
+            .await
+    }
+
+    async fn load_rang_guide_payload_hash(&self) -> ServerSyncResult<Option<String>> {
+        self.load_serversync_kv(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+            .await
+    }
+
+    async fn load_rang_guide_message_ids(&self) -> ServerSyncResult<Vec<u64>> {
+        let indexed = self
+            .load_serversync_kv_prefix(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX)
+            .await?;
+        let mut by_index = BTreeMap::<usize, u64>::new();
+        for (key, raw) in indexed {
+            let raw_index =
+                key.trim_start_matches(rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX);
+            let Ok(message_index) = raw_index.parse::<usize>() else {
+                continue;
+            };
+            by_index.insert(message_index, parse_discord_id(&key, &raw)?);
+        }
+        Ok(by_index.into_values().collect())
+    }
+
+    async fn store_rang_guide_message_id(
+        &self,
+        message_index: usize,
+        message_id: u64,
+    ) -> ServerSyncResult<()> {
+        self.store_serversync_kv(
+            &rang_guide_publish::rang_guide_message_id_key(message_index),
+            &message_id.to_string(),
+        )
+        .await
+    }
+
+    async fn store_rang_guide_metadata(
+        &self,
+        output: &rang_guide_publish::RangGuidePublishOutput,
+    ) -> ServerSyncResult<()> {
+        self.store_serversync_kv(
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT,
+        )
+        .await?;
+        self.store_serversync_kv(
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            &output.payload_hash,
+        )
+        .await
+    }
+
+    async fn replace_rang_guide_message_ids_and_metadata(
+        &self,
+        output: &rang_guide_publish::RangGuidePublishOutput,
+        message_ids: &[u64],
+    ) -> ServerSyncResult<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM bot.kv_store
+              WHERE ns = $1
+                AND (k LIKE $2 OR k = $3 OR k = $4)",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(format!(
+            "{}%",
+            rang_guide_publish::RANG_GUIDE_MESSAGE_ID_PREFIX
+        ))
+        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
+        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+        .execute(&mut *tx)
+        .await?;
+
+        for (message_index, message_id) in message_ids.iter().copied().enumerate() {
+            sqlx::query(
+                "INSERT INTO bot.kv_store(ns, k, v)
+                 VALUES($1, $2, $3)",
+            )
+            .bind(SERVERSYNC_KV_NS)
+            .bind(rang_guide_publish::rang_guide_message_id_key(message_index))
+            .bind(message_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO bot.kv_store(ns, k, v)
+             VALUES($1, $2, $3), ($1, $4, $5)",
+        )
+        .bind(SERVERSYNC_KV_NS)
+        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY)
+        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT)
+        .bind(rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+        .bind(&output.payload_hash)
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    async fn delete_rang_guide_messages(
+        &self,
+        stored_message_ids: &[u64],
+        bot_user_id: u64,
+    ) -> ServerSyncResult<RangGuideDeleteOutcome> {
+        let mut message_ids = stored_message_ids.to_vec();
+        message_ids.sort_unstable();
+        message_ids.dedup();
+
+        let mut deleted = Vec::new();
+        let mut warnings = Vec::new();
+        for message_id in message_ids {
+            let fetch_url = self.discord_api_url(&format!(
+                "/channels/{}/messages/{message_id}",
+                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+            ));
+            let response = match self.discord_get_response(fetch_url).await {
+                Ok(response) => response,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Rang-Guide: gespeicherte Message-ID {message_id} konnte vor Delete nicht gelesen werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                warnings.push(format!(
+                    "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
+                continue;
+            }
+            let message: DiscordMessage = match discord_regelwerk_json_response(response, "GET") {
+                Ok(message) => message,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Rang-Guide: gespeicherte Message-ID {message_id} konnte vor Delete nicht validiert werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let author_id = match parse_discord_id("Message-Author-ID", &message.author.id) {
+                Ok(author_id) => author_id,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Rang-Guide: gespeicherte Message-ID {message_id} hat ungueltigen Autor und wird nicht geloescht: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let candidate = rang_guide_publish::RangGuideV2Message {
+                message_id,
+                author_id,
+                flags: message.flags,
+                components: message.components,
+            };
+            if !rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id) {
+                warnings.push(format!(
+                    "Rang-Guide: gespeicherte Message-ID {message_id} passt nicht zur eigenen V2-Signatur und wird nicht geloescht"
+                ));
+                continue;
+            }
+
+            if self
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{message_id}",
+                    rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+                )))
+                .await?
+            {
+                deleted.push(message_id);
+            } else {
+                warnings.push(format!(
+                    "Rang-Guide: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
+            }
+        }
+        Ok(RangGuideDeleteOutcome { deleted, warnings })
+    }
+
+    async fn cleanup_new_rang_guide_posts_best_effort(&self, message_ids: &[u64]) {
+        for &message_id in message_ids {
+            match self
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{message_id}",
+                    rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+                )))
+                .await
+            {
+                Ok(_) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        %err,
+                        message_id,
+                        "Rang-Guide: neu gepostete Message konnte nach Teilfehler nicht bereinigt werden"
+                    );
+                }
+            }
+        }
+    }
+
+    fn adopt_rang_guide_message_ids(
+        output: &mut rang_guide_publish::RangGuidePublishOutput,
+        discovered_message_ids: &[u64],
+        confirm: bool,
+    ) {
+        output.stored_message_ids = discovered_message_ids.to_vec();
+        output.repost_required = false;
+        output.warnings.push(format!(
+            "Rang-Guide: KV-Message-IDs fehlen oder sind unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {:?}",
+            discovered_message_ids
+        ));
+        for (message_index, message_id) in discovered_message_ids.iter().copied().enumerate() {
+            if let Some(message) = output.messages.get_mut(message_index) {
+                message.stored_message_id = Some(message_id);
+                message.message_id = Some(message_id);
+                if !confirm {
+                    message.action = "planned_adopted_edit".to_string();
+                }
+            }
+        }
+    }
+
+    async fn edit_rang_guide_message(
+        &self,
+        message_id: u64,
+        message: &rang_guide_publish::RangGuideMessageOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        let url = self.discord_api_url(&format!(
+            "/channels/{}/messages/{message_id}",
+            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+        ));
+        let response = self
+            .send_rang_guide_message_payload("PATCH", url, &message.payload)
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let written: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "PATCH")?;
+        parse_discord_id("Message-ID", &written.id).map(Some)
+    }
+
+    async fn post_rang_guide_message(
+        &self,
+        message: &rang_guide_publish::RangGuideMessageOutput,
+    ) -> ServerSyncResult<u64> {
+        let url = self.discord_api_url(&format!(
+            "/channels/{}/messages",
+            rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+        ));
+        let response = self
+            .send_rang_guide_message_payload("POST", url, &message.payload)
+            .await?;
+        let written: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "POST")?;
+        parse_discord_id("Message-ID", &written.id)
+    }
+
+    async fn send_rang_guide_message_payload(
+        &self,
+        method: &'static str,
+        url: String,
+        payload: &rang_guide_publish::RangGuideMessagePayload,
+    ) -> ServerSyncResult<DiscordRestResponse> {
+        let payload_value = serde_json::to_value(payload)?;
+        if !payload.attachments.is_empty() {
+            let payload_text = serde_json::to_string(&payload_value)?;
+            let mut files = Vec::new();
+            for attachment in &payload.attachments {
+                let path = self.rang_guide_repo_root.join(&attachment.relative_path);
+                let bytes = std::fs::read(&path).map_err(|err| {
+                    ServerSyncError::internal(format!(
+                        "Rang-Guide-Attachment `{}` konnte nicht gelesen werden: {err}",
+                        path.display()
+                    ))
+                })?;
+                files.push((attachment.id, attachment.filename.clone(), bytes));
+            }
+            return discord_regelwerk_send_with_retry(
+                || {
+                    let request = match method {
+                        "POST" => self.http_client.post(url.clone()),
+                        "PATCH" => self.http_client.patch(url.clone()),
+                        other => unreachable!("unsupported Discord method {other}"),
+                    }
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
+                    let payload_text = payload_text.clone();
+                    let files = files.clone();
+                    async move {
+                        let mut form =
+                            reqwest::multipart::Form::new().text("payload_json", payload_text);
+                        for (id, filename, bytes) in files {
+                            let part = reqwest::multipart::Part::bytes(bytes)
+                                .file_name(filename)
+                                .mime_str("image/png")?;
+                            form = form.part(format!("files[{id}]"), part);
+                        }
+                        let response = request.multipart(form).send().await?;
+                        DiscordRestResponse::from_response(response).await
+                    }
+                },
+                method,
+            )
+            .await;
+        }
+
+        discord_regelwerk_send_with_retry(
+            || {
+                let request = match method {
+                    "POST" => self.http_client.post(url.clone()),
+                    "PATCH" => self.http_client.patch(url.clone()),
+                    other => unreachable!("unsupported Discord method {other}"),
+                }
+                .header("Authorization", format!("Bot {}", self.discord_token))
+                .header("Content-Type", "application/json")
+                .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                .json(&payload_value);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            method,
+        )
+        .await
+    }
+
+    async fn fetch_rang_guide_legacy_cleanup_candidates(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<Vec<rang_guide_publish::RangGuideLegacyCleanupCandidate>> {
+        let mut before: Option<u64> = None;
+        let mut candidates = Vec::new();
+        for _ in 0..5 {
+            let mut url = format!(
+                "{}/channels/{}/messages?limit=100",
+                self.discord_api_base.trim_end_matches('/'),
+                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+            );
+            if let Some(before) = before {
+                url.push_str("&before=");
+                url.push_str(&before.to_string());
+            }
+            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
+            if page.is_empty() {
+                break;
+            }
+            for message in &page {
+                let message_id = parse_discord_id("Message-ID", &message.id)?;
+                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                let custom_ids =
+                    rang_guide_publish::collect_component_custom_ids(&message.components);
+                let legacy = rang_guide_publish::RangGuideLegacyMessage {
+                    message_id,
+                    author_id,
+                    flags: message.flags,
+                    has_embeds: !message.embeds.is_empty(),
+                    custom_ids,
+                };
+                if rang_guide_publish::is_legacy_rank_guide_cleanup_candidate(&legacy, bot_user_id)
+                {
+                    candidates.push(rang_guide_publish::RangGuideLegacyCleanupCandidate {
+                        message_id,
+                        custom_ids: legacy.custom_ids,
+                    });
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+        }
+        candidates.sort_unstable_by_key(|candidate| candidate.message_id);
+        candidates.dedup_by_key(|candidate| candidate.message_id);
+        Ok(candidates)
+    }
+
+    async fn fetch_rang_guide_v2_message_ids(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<Vec<u64>> {
+        let mut before: Option<u64> = None;
+        let mut message_ids = Vec::new();
+        for _ in 0..5 {
+            let mut url = format!(
+                "{}/channels/{}/messages?limit=100",
+                self.discord_api_base.trim_end_matches('/'),
+                rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+            );
+            if let Some(before) = before {
+                url.push_str("&before=");
+                url.push_str(&before.to_string());
+            }
+            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
+            if page.is_empty() {
+                break;
+            }
+            for message in &page {
+                let message_id = parse_discord_id("Message-ID", &message.id)?;
+                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                let candidate = rang_guide_publish::RangGuideV2Message {
+                    message_id,
+                    author_id,
+                    flags: message.flags,
+                    components: message.components.clone(),
+                };
+                if rang_guide_publish::is_rang_guide_v2_message(&candidate, bot_user_id) {
+                    message_ids.push(message_id);
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+        }
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        Ok(message_ids)
+    }
+
+    async fn cleanup_rang_guide_legacy_messages(
+        &self,
+        output: &mut rang_guide_publish::RangGuidePublishOutput,
+    ) -> ServerSyncResult<()> {
+        let candidates = output.legacy_cleanup_candidates.clone();
+        for candidate in candidates {
+            match self
+                .discord_delete(format!(
+                    "{}/channels/{}/messages/{}",
+                    self.discord_api_base.trim_end_matches('/'),
+                    rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+                    candidate.message_id
+                ))
+                .await
+            {
+                Ok(true) => output.deleted_legacy_message_ids.push(candidate.message_id),
+                Ok(false) => output.warnings.push(format!(
+                    "Rang-Guide: Legacy-Message {} war beim Cleanup bereits weg",
+                    candidate.message_id
+                )),
+                Err(err) => output.warnings.push(format!(
+                    "Rang-Guide: Legacy-Message {} konnte nicht geloescht werden: {err}",
+                    candidate.message_id
+                )),
+            }
         }
         Ok(())
     }
@@ -2292,6 +2794,144 @@ impl ServerSyncOps for ServerSyncService {
             self.store_welcome_payload_format().await?;
         }
 
+        output.dry_run = false;
+        output.repost_required = false;
+        Ok(output)
+    }
+
+    async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput> {
+        let stored_message_ids = self.load_rang_guide_message_ids().await?;
+        let stored_payload_format = self.load_rang_guide_payload_format().await?;
+        let stored_payload_hash = self.load_rang_guide_payload_hash().await?;
+        let mut output = rang_guide_publish::build_rang_guide_publish_output(
+            &self.rang_guide_repo_root,
+            &stored_message_ids,
+            stored_payload_format.as_deref(),
+            stored_payload_hash.as_deref(),
+            !confirm,
+        )
+        .map_err(ServerSyncError::bad_request)?;
+        let bot_user_id = self.fetch_current_bot_user_id().await?;
+        output.legacy_cleanup_candidates = self
+            .fetch_rang_guide_legacy_cleanup_candidates(bot_user_id)
+            .await?;
+        let discovered_v2_message_ids = self.fetch_rang_guide_v2_message_ids(bot_user_id).await?;
+        let expected_message_count = output.messages.len();
+        let mut adopted_from_history = false;
+        if stored_message_ids.len() != expected_message_count {
+            match discovered_v2_message_ids.len() {
+                0 => {}
+                count if count == expected_message_count => {
+                    Self::adopt_rang_guide_message_ids(
+                        &mut output,
+                        &discovered_v2_message_ids,
+                        confirm,
+                    );
+                    adopted_from_history = true;
+                }
+                count => {
+                    return Err(ServerSyncError::bad_request(format!(
+                        "Rang-Guide: KV-Message-IDs fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Guide-Messages fuer {expected_message_count} erwartete Messages; Apply blockiert gegen Duplikate."
+                    )));
+                }
+            }
+        }
+
+        if !confirm {
+            return Ok(output);
+        }
+        for warning in &output.warnings {
+            tracing::warn!(%warning, "Rang-Guide-Publish-Warnung");
+        }
+
+        if output.repost_required {
+            let mut posted_message_ids = Vec::new();
+            for message_index in 0..output.messages.len() {
+                let post_result = self
+                    .post_rang_guide_message(&output.messages[message_index])
+                    .await;
+                let message_id = match post_result {
+                    Ok(message_id) => message_id,
+                    Err(err) => {
+                        self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
+                            .await;
+                        return Err(err);
+                    }
+                };
+                posted_message_ids.push(message_id);
+                output.messages[message_index].action = "posted".to_string();
+                output.messages[message_index].message_id = Some(message_id);
+                output.messages[message_index].stored_message_id = Some(message_id);
+                output.posted_message_ids.push(message_id);
+            }
+            if let Err(err) = self
+                .replace_rang_guide_message_ids_and_metadata(&output, &posted_message_ids)
+                .await
+            {
+                self.cleanup_new_rang_guide_posts_best_effort(&posted_message_ids)
+                    .await;
+                return Err(err);
+            }
+            let delete_outcome = self
+                .delete_rang_guide_messages(&stored_message_ids, bot_user_id)
+                .await?;
+            output.deleted_message_ids = delete_outcome.deleted;
+            output.warnings.extend(delete_outcome.warnings);
+        } else if !adopted_from_history
+            && rang_guide_publish::rang_guide_payload_is_unchanged(&output)
+        {
+            for message in &mut output.messages {
+                if let Some(message_id) = message.stored_message_id {
+                    message.action = "no_op".to_string();
+                    message.message_id = Some(message_id);
+                }
+            }
+            self.store_rang_guide_metadata(&output).await?;
+        } else {
+            let mut message_ids = Vec::new();
+            for message_index in 0..output.messages.len() {
+                let stored_message_id = output.messages[message_index].stored_message_id;
+                if let Some(stored_message_id) = stored_message_id {
+                    if let Some(message_id) = self
+                        .edit_rang_guide_message(stored_message_id, &output.messages[message_index])
+                        .await?
+                    {
+                        message_ids.push(message_id);
+                        output.messages[message_index].action = if adopted_from_history {
+                            "adopted_edit".to_string()
+                        } else {
+                            "edited".to_string()
+                        };
+                        output.messages[message_index].message_id = Some(message_id);
+                        output.messages[message_index].stored_message_id = Some(message_id);
+                        output.edited_message_ids.push(message_id);
+                        continue;
+                    }
+                    output.warnings.push(format!(
+                        "Rang-Guide: gespeicherte Message-ID {stored_message_id} ist stale (404); es wird neu gepostet."
+                    ));
+                }
+
+                let message_id = self
+                    .post_rang_guide_message(&output.messages[message_index])
+                    .await?;
+                message_ids.push(message_id);
+                self.store_rang_guide_message_id(message_index, message_id)
+                    .await?;
+                output.messages[message_index].action = "posted".to_string();
+                output.messages[message_index].message_id = Some(message_id);
+                output.messages[message_index].stored_message_id = Some(message_id);
+                output.posted_message_ids.push(message_id);
+            }
+            if adopted_from_history {
+                self.replace_rang_guide_message_ids_and_metadata(&output, &message_ids)
+                    .await?;
+            } else {
+                self.store_rang_guide_metadata(&output).await?;
+            }
+        }
+
+        self.cleanup_rang_guide_legacy_messages(&mut output).await?;
         output.dry_run = false;
         output.repost_required = false;
         Ok(output)
@@ -4615,6 +5255,7 @@ pub fn router(service: SharedServerSync, token: Option<String>) -> Router {
         )
         .route("/serversync/welcome-preview", post(http_welcome_preview))
         .route("/serversync/welcome-apply", post(http_welcome_apply))
+        .route("/serversync/rang-guide-apply", post(http_rang_guide_apply))
         .route("/serversync/router-apply", post(http_router_apply))
         .route("/serversync/lfg-panel-apply", post(http_lfg_panel_apply))
         .route("/serversync/onboarding-apply", post(http_onboarding_apply))
@@ -4892,6 +5533,29 @@ async fn http_welcome_apply(
     }
 }
 
+async fn http_rang_guide_apply(
+    State(state): State<HttpState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(error) = authorize(&state, &peer, &headers) {
+        return json_error(error);
+    }
+    let body = if body.is_empty() {
+        ConfirmRequest::default()
+    } else {
+        match parse_json_body(body) {
+            Ok(body) => body,
+            Err(error) => return json_error(error),
+        }
+    };
+    match state.service.rang_guide_apply(body.confirm).await {
+        Ok(output) => json_ok(json!(output)),
+        Err(error) => json_error(error),
+    }
+}
+
 async fn http_router_apply(
     State(state): State<HttpState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -5022,11 +5686,14 @@ fn _assert_diff_serializable(diff: &ServerDiff) -> serde_json::Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, HashMap, VecDeque};
     use std::sync::{Arc, Mutex};
 
     use axum::body::Body;
+    use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::Request;
+    use axum::response::IntoResponse;
+    use axum::routing::get;
     use dl_server_as_code::{
         BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, OverwriteKey, RoleSpec, TargetKind,
     };
@@ -5043,6 +5710,27 @@ mod tests {
     type WelcomeApplyCall = bool;
     type RouterApplyCall = bool;
 
+    #[derive(Clone)]
+    struct FakeDiscord {
+        base_url: String,
+        state: Arc<FakeDiscordState>,
+    }
+
+    struct FakeDiscordState {
+        bot_user_id: u64,
+        messages: Mutex<BTreeMap<u64, Value>>,
+        post_responses: Mutex<VecDeque<FakePostResponse>>,
+        next_post_id: Mutex<u64>,
+        post_calls: Mutex<Vec<u64>>,
+        patch_calls: Mutex<Vec<u64>>,
+        delete_calls: Mutex<Vec<u64>>,
+    }
+
+    enum FakePostResponse {
+        Ok(u64),
+        Status(StatusCode),
+    }
+
     #[derive(Default)]
     struct MockServerSync {
         apply_calls: Mutex<Vec<ApplyCall>>,
@@ -5052,6 +5740,7 @@ mod tests {
         archive_calls: Mutex<Vec<bool>>,
         regelwerk_calls: Mutex<Vec<ConfirmCall>>,
         welcome_apply_calls: Mutex<Vec<WelcomeApplyCall>>,
+        rang_guide_apply_calls: Mutex<Vec<ConfirmCall>>,
         router_apply_calls: Mutex<Vec<RouterApplyCall>>,
         lfg_panel_apply_calls: Mutex<Vec<ConfirmCall>>,
     }
@@ -5286,6 +5975,17 @@ mod tests {
             Ok(mock_welcome_output(!confirm))
         }
 
+        async fn rang_guide_apply(
+            &self,
+            confirm: bool,
+        ) -> ServerSyncResult<RangGuidePublishOutput> {
+            self.rang_guide_apply_calls
+                .lock()
+                .expect("rang guide apply calls")
+                .push(confirm);
+            Ok(mock_rang_guide_output(!confirm))
+        }
+
         async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
             self.router_apply_calls
                 .lock()
@@ -5331,6 +6031,228 @@ mod tests {
             status,
             serde_json::from_slice(&bytes).unwrap_or(Value::Null),
         )
+    }
+
+    async fn spawn_fake_discord(
+        bot_user_id: u64,
+        messages: Vec<Value>,
+        post_responses: Vec<FakePostResponse>,
+    ) -> FakeDiscord {
+        let state = Arc::new(FakeDiscordState {
+            bot_user_id,
+            messages: Mutex::new(
+                messages
+                    .into_iter()
+                    .map(|message| {
+                        let id = message["id"]
+                            .as_str()
+                            .expect("message id")
+                            .parse::<u64>()
+                            .expect("message id u64");
+                        (id, message)
+                    })
+                    .collect(),
+            ),
+            post_responses: Mutex::new(post_responses.into()),
+            next_post_id: Mutex::new(90_000),
+            post_calls: Mutex::new(Vec::new()),
+            patch_calls: Mutex::new(Vec::new()),
+            delete_calls: Mutex::new(Vec::new()),
+        });
+        let app = Router::new()
+            .route("/api/v10/users/@me", get(fake_discord_current_user))
+            .route(
+                "/api/v10/channels/{channel_id}/messages",
+                get(fake_discord_list_messages).post(fake_discord_post_message),
+            )
+            .route(
+                "/api/v10/channels/{channel_id}/messages/{message_id}",
+                get(fake_discord_get_message)
+                    .patch(fake_discord_patch_message)
+                    .delete(fake_discord_delete_message),
+            )
+            .with_state(state.clone());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake discord bind");
+        let addr = listener.local_addr().expect("fake discord addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app)
+                .await
+                .expect("fake discord serve");
+        });
+        FakeDiscord {
+            base_url: format!("http://{addr}/api/v10"),
+            state,
+        }
+    }
+
+    async fn fake_discord_current_user(State(state): State<Arc<FakeDiscordState>>) -> Json<Value> {
+        Json(json!({"id": state.bot_user_id.to_string()}))
+    }
+
+    async fn fake_discord_list_messages(
+        State(state): State<Arc<FakeDiscordState>>,
+        Query(query): Query<HashMap<String, String>>,
+    ) -> Json<Vec<Value>> {
+        let before = query
+            .get("before")
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(u64::MAX);
+        let limit = query
+            .get("limit")
+            .and_then(|raw| raw.parse::<usize>().ok())
+            .unwrap_or(100);
+        let messages = state.messages.lock().expect("messages");
+        Json(
+            messages
+                .iter()
+                .rev()
+                .filter(|(message_id, _)| **message_id < before)
+                .take(limit)
+                .map(|(_, message)| message.clone())
+                .collect(),
+        )
+    }
+
+    async fn fake_discord_get_message(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
+    ) -> Response {
+        state
+            .messages
+            .lock()
+            .expect("messages")
+            .get(&message_id)
+            .cloned()
+            .map(Json)
+            .map(IntoResponse::into_response)
+            .unwrap_or_else(|| {
+                (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
+            })
+    }
+
+    async fn fake_discord_post_message(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath(channel_id): AxumPath<u64>,
+        _body: Bytes,
+    ) -> Response {
+        state
+            .post_calls
+            .lock()
+            .expect("post calls")
+            .push(channel_id);
+        let response = state
+            .post_responses
+            .lock()
+            .expect("post responses")
+            .pop_front();
+        match response.unwrap_or_else(|| {
+            let mut next = state.next_post_id.lock().expect("next post id");
+            let id = *next;
+            *next += 1;
+            FakePostResponse::Ok(id)
+        }) {
+            FakePostResponse::Ok(message_id) => {
+                Json(json!({"id": message_id.to_string()})).into_response()
+            }
+            FakePostResponse::Status(status) => {
+                (status, Json(json!({"message": "forced failure"}))).into_response()
+            }
+        }
+    }
+
+    async fn fake_discord_patch_message(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
+        _body: Bytes,
+    ) -> Response {
+        state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .push(message_id);
+        if state
+            .messages
+            .lock()
+            .expect("messages")
+            .contains_key(&message_id)
+        {
+            Json(json!({"id": message_id.to_string()})).into_response()
+        } else {
+            (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
+        }
+    }
+
+    async fn fake_discord_delete_message(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
+    ) -> Response {
+        state
+            .delete_calls
+            .lock()
+            .expect("delete calls")
+            .push(message_id);
+        let removed = state
+            .messages
+            .lock()
+            .expect("messages")
+            .remove(&message_id)
+            .is_some();
+        if removed {
+            StatusCode::NO_CONTENT.into_response()
+        } else {
+            (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
+        }
+    }
+
+    fn fake_discord_message(
+        message_id: u64,
+        author_id: u64,
+        flags: u64,
+        components: Vec<Value>,
+        embeds: Vec<Value>,
+    ) -> Value {
+        json!({
+            "id": message_id.to_string(),
+            "author": {"id": author_id.to_string()},
+            "flags": flags,
+            "components": components,
+            "embeds": embeds,
+        })
+    }
+
+    fn write_test_rang_repo(repo_root: &std::path::Path, step2_body: Option<&str>) {
+        let texts_path = repo_root.join(rang_guide_publish::RANG_GUIDE_TEXTS_FILE);
+        std::fs::create_dir_all(texts_path.parent().expect("texts parent"))
+            .expect("mkdir texts parent");
+        if let Some(step2_body) = step2_body {
+            std::fs::write(
+                texts_path,
+                format!("[texts]\nstep2_body = \"{step2_body}\"\n"),
+            )
+            .expect("write texts");
+        }
+        let banner_path = repo_root.join(format!(
+            "{}/{}",
+            rang_guide_publish::RANG_GUIDE_BANNER_DIR,
+            rang_guide_publish::RANG_GUIDE_HERO_FILENAME
+        ));
+        std::fs::create_dir_all(banner_path.parent().expect("banner parent"))
+            .expect("mkdir banner parent");
+        std::fs::write(banner_path, b"banner").expect("write banner");
+    }
+
+    async fn set_serversync_kv(pool: &PgPool, key: &str, value: &str) {
+        dl_central_db::kv::set(pool, SERVERSYNC_KV_NS, key, value)
+            .await
+            .expect("set serversync kv");
+    }
+
+    async fn get_serversync_kv(pool: &PgPool, key: &str) -> Option<String> {
+        dl_central_db::kv::get(pool, SERVERSYNC_KV_NS, key)
+            .await
+            .expect("get serversync kv")
     }
 
     fn mock_welcome_output(dry_run: bool) -> WelcomePublishOutput {
@@ -5396,6 +6318,92 @@ mod tests {
             } else {
                 BTreeMap::from([("hero".to_string(), vec![7001])])
             },
+        }
+    }
+
+    fn mock_rang_guide_output(dry_run: bool) -> RangGuidePublishOutput {
+        let payload = rang_guide_publish::RangGuideMessagePayload {
+            flags: rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+            allowed_mentions: rang_guide_publish::RangGuideAllowedMentions { parse: Vec::new() },
+            components: vec![
+                json!({
+                    "type": 17,
+                    "accent_color": rang_guide_publish::RANG_GUIDE_ACCENT_GOLD,
+                    "components": [
+                        {
+                            "type": 12,
+                            "items": [{"media": {"url": "attachment://rang-guide-hero.png"}}],
+                        },
+                        {
+                            "type": 10,
+                            "content": rang_guide_publish::RANG_GUIDE_HERO_INTRO,
+                        },
+                    ],
+                }),
+                json!({
+                    "type": 17,
+                    "accent_color": rang_guide_publish::RANG_GUIDE_ACCENT_GOLD,
+                    "components": [
+                        {"type": 10, "content": rang_guide_publish::RANG_GUIDE_STEP1_BODY},
+                        {
+                            "type": 1,
+                            "components": [{
+                                "type": 2,
+                                "style": 1,
+                                "label": rang_guide_publish::RANG_GUIDE_STEAM_OPEN_BUTTON_LABEL,
+                                "custom_id": rang_guide_publish::STEAM_LINK_OPEN_CUSTOM_ID,
+                            }],
+                        },
+                    ],
+                }),
+            ],
+            attachments: vec![rang_guide_publish::RangGuidePayloadAttachment {
+                id: 0,
+                filename: rang_guide_publish::RANG_GUIDE_HERO_FILENAME.to_string(),
+                relative_path: format!(
+                    "{}/{}",
+                    rang_guide_publish::RANG_GUIDE_BANNER_DIR,
+                    rang_guide_publish::RANG_GUIDE_HERO_FILENAME
+                ),
+            }],
+        };
+        RangGuidePublishOutput {
+            guild_id: GUILD_ID,
+            channel_id: rang_guide_publish::RANG_GUIDE_CHANNEL_ID,
+            channel_name: rang_guide_publish::RANG_GUIDE_CHANNEL_NAME.to_string(),
+            dry_run,
+            payload_format: rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: Some(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT.to_string()),
+            payload_hash: "rang-guide-hash".to_string(),
+            stored_payload_hash: Some("rang-guide-hash".to_string()),
+            repost_required: false,
+            warnings: Vec::new(),
+            messages: vec![rang_guide_publish::RangGuideMessageOutput {
+                message_index: 0,
+                message_key: "rang-guide".to_string(),
+                action: if dry_run { "planned_edit" } else { "no_op" }.to_string(),
+                stored_message_id: Some(8201),
+                message_id: Some(8201),
+                banner: Some(rang_guide_publish::RangGuideBannerOutput {
+                    filename: rang_guide_publish::RANG_GUIDE_HERO_FILENAME.to_string(),
+                    relative_path: format!(
+                        "{}/{}",
+                        rang_guide_publish::RANG_GUIDE_BANNER_DIR,
+                        rang_guide_publish::RANG_GUIDE_HERO_FILENAME
+                    ),
+                    present: true,
+                }),
+                payload,
+            }],
+            stored_message_ids: vec![8201],
+            posted_message_ids: Vec::new(),
+            edited_message_ids: Vec::new(),
+            deleted_message_ids: Vec::new(),
+            legacy_cleanup_candidates: vec![rang_guide_publish::RangGuideLegacyCleanupCandidate {
+                message_id: 8100,
+                custom_ids: vec![rang_guide_publish::STEAM_LINK_OPEN_CUSTOM_ID.to_string()],
+            }],
+            deleted_legacy_message_ids: if dry_run { Vec::new() } else { vec![8100] },
         }
     }
 
@@ -6819,6 +7827,346 @@ mod tests {
                 .expect("welcome apply calls")
                 .as_slice(),
             &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn rang_guide_apply_http_ist_dry_run_default_und_liefert_v2_payload() {
+        let service = Arc::new(MockServerSync::default());
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let dry_run = app
+            .clone()
+            .oneshot(request_raw(
+                "/serversync/rang-guide-apply",
+                Some("secret"),
+                "",
+            ))
+            .await
+            .expect("rang guide dry-run response");
+        let (status, body) = response_json(dry_run).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], true);
+        assert_eq!(body["result"]["messages"][0]["action"], "planned_edit");
+        assert_eq!(
+            body["result"]["payload_format"],
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT
+        );
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["flags"],
+            rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG
+        );
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["allowed_mentions"]["parse"]
+                .as_array()
+                .expect("parse")
+                .len(),
+            0
+        );
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["components"][0]["components"][0]["items"][0]
+                ["media"]["url"],
+            "attachment://rang-guide-hero.png"
+        );
+        assert_eq!(
+            body["result"]["messages"][0]["payload"]["components"][1]["components"][1]
+                ["components"][0]["custom_id"],
+            rang_guide_publish::STEAM_LINK_OPEN_CUSTOM_ID
+        );
+        assert_eq!(
+            body["result"]["legacy_cleanup_candidates"][0]["message_id"],
+            8100
+        );
+        assert!(body["result"]["deleted_legacy_message_ids"]
+            .as_array()
+            .expect("deleted legacy")
+            .is_empty());
+
+        let confirmed = app
+            .oneshot(request(
+                "/serversync/rang-guide-apply",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("rang guide confirm response");
+        let (status, body) = response_json(confirmed).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["dry_run"], false);
+        assert_eq!(body["result"]["messages"][0]["action"], "no_op");
+        assert_eq!(body["result"]["deleted_legacy_message_ids"][0], 8100);
+        assert_eq!(
+            service
+                .rang_guide_apply_calls
+                .lock()
+                .expect("rang guide apply calls")
+                .as_slice(),
+            &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn service_v2_preview_macht_keine_writes() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_rang_repo(repo.path(), None);
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.rang_guide_apply(false).await.expect("preview");
+
+        assert!(output.dry_run);
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+        assert!(fake
+            .state
+            .delete_calls
+            .lock()
+            .expect("delete calls")
+            .is_empty());
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(0)).await,
+            None
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY).await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn service_v2_repost_teilfehler_laesst_altes_kv_und_alte_messages_stehen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let long_step2 = "x".repeat(2700);
+        write_test_rang_repo(repo.path(), Some(&long_step2));
+        let planned = rang_guide_publish::build_rang_guide_publish_output(
+            repo.path(),
+            &[9101, 9102, 9103],
+            Some("1"),
+            Some("old-hash"),
+            true,
+        )
+        .expect("planned");
+        assert!(
+            planned.messages.len() >= 2,
+            "test setup needs at least two posts"
+        );
+        for (index, message_id) in [9101_u64, 9102, 9103]
+            .into_iter()
+            .take(planned.messages.len())
+            .enumerate()
+        {
+            set_serversync_kv(
+                db.pool(),
+                &rang_guide_publish::rang_guide_message_id_key(index),
+                &message_id.to_string(),
+            )
+            .await;
+        }
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            "1",
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY,
+            "old-hash",
+        )
+        .await;
+        let old_messages = [9101_u64, 9102, 9103]
+            .into_iter()
+            .zip(planned.messages.iter())
+            .map(|(message_id, message)| {
+                fake_discord_message(
+                    message_id,
+                    42,
+                    rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let fake = spawn_fake_discord(
+            42,
+            old_messages,
+            vec![
+                FakePostResponse::Ok(9201),
+                FakePostResponse::Status(StatusCode::INTERNAL_SERVER_ERROR),
+            ],
+        )
+        .await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let err = service
+            .rang_guide_apply(true)
+            .await
+            .expect_err("partial repost must fail");
+
+        assert!(err.to_string().contains("Discord POST fehlgeschlagen"));
+        assert_eq!(
+            fake.state
+                .delete_calls
+                .lock()
+                .expect("delete calls")
+                .as_slice(),
+            &[9201]
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(0))
+                .await
+                .as_deref(),
+            Some("9101")
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(1))
+                .await
+                .as_deref(),
+            Some("9102")
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(2))
+                .await
+                .as_deref(),
+            Some("9103")
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), rang_guide_publish::RANG_GUIDE_PAYLOAD_HASH_KEY)
+                .await
+                .as_deref(),
+            Some("old-hash")
+        );
+    }
+
+    #[tokio::test]
+    async fn service_v2_stored_delete_loescht_fremd_autor_message_nicht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_rang_repo(repo.path(), None);
+        set_serversync_kv(
+            db.pool(),
+            &rang_guide_publish::rang_guide_message_id_key(0),
+            "9101",
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT_KEY,
+            "1",
+        )
+        .await;
+        let fake = spawn_fake_discord(
+            42,
+            vec![fake_discord_message(
+                9101,
+                99,
+                rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+                Vec::new(),
+                Vec::new(),
+            )],
+            vec![FakePostResponse::Ok(9201)],
+        )
+        .await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.rang_guide_apply(true).await.expect("apply");
+
+        assert!(output.deleted_message_ids.is_empty());
+        assert!(output
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("passt nicht zur eigenen V2-Signatur")));
+        assert!(fake
+            .state
+            .delete_calls
+            .lock()
+            .expect("delete calls")
+            .is_empty());
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(0))
+                .await
+                .as_deref(),
+            Some("9201")
+        );
+    }
+
+    #[tokio::test]
+    async fn service_v2_kv_verlust_adoptiert_history_statt_neu_post() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_rang_repo(repo.path(), None);
+        let planned = rang_guide_publish::build_rang_guide_publish_output(
+            repo.path(),
+            &[],
+            Some(rang_guide_publish::RANG_GUIDE_PAYLOAD_FORMAT),
+            None,
+            true,
+        )
+        .expect("planned");
+        assert_eq!(planned.messages.len(), 1);
+        let fake = spawn_fake_discord(
+            42,
+            vec![fake_discord_message(
+                9101,
+                42,
+                rang_guide_publish::RANG_GUIDE_COMPONENTS_V2_FLAG,
+                planned.messages[0].payload.components.clone(),
+                Vec::new(),
+            )],
+            Vec::new(),
+        )
+        .await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.rang_guide_apply(true).await.expect("apply");
+
+        assert_eq!(output.messages[0].action, "adopted_edit");
+        assert_eq!(output.edited_message_ids, vec![9101]);
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        assert_eq!(
+            fake.state
+                .patch_calls
+                .lock()
+                .expect("patch calls")
+                .as_slice(),
+            &[9101]
+        );
+        assert_eq!(
+            get_serversync_kv(db.pool(), &rang_guide_publish::rang_guide_message_id_key(0))
+                .await
+                .as_deref(),
+            Some("9101")
         );
     }
 

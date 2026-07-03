@@ -1,0 +1,36 @@
+# Rang-Guide V2 Texte fuer /serversync/rang-guide-apply.
+# Owner-Workflow: Datei editieren, dann POST /serversync/rang-guide-apply ausfuehren.
+# Fehlende Felder fallen auf Compile-Defaults zurueck.
+
+[texts]
+hero_intro = """**Steam verknüpfen — Rang, Lanes & Spielersuche freischalten**
+Einmal verknüpft, erkennt der Server deinen In-Game-Rang automatisch und hält ihn aktuell — ganz ohne manuelles Nachpflegen.
+
+**Was bringt's?**
+- Dein Rang wird erkannt und als Rolle zugeordnet — und bleibt von selbst aktuell
+- Live-Status in den Voice-Lanes funktioniert
+- Ranked-Lanes und die Mitspieler-Suche stehen dir offen"""
+step1_title = "1️⃣ Verifizierung starten"
+step1_body = """Drück auf **Steam verknüpfen** — es folgt ein kurzer Steam-Login (OpenID, kein Passwort nötig), danach gibst du deinen Steam-Freundescode ein.
+
+**Was wir NICHT machen:** keine Passwörter oder Zugangsdaten, keine Steam-Freundesliste auslesen, keine Spielstände oder Profile einsehen, keine Daten an Dritte, keine Werbung oder Tracking.
+**Was wir speichern:** Discord-ID, SteamID64 und Rang-Daten — nur für die Server-Zuordnung. Der Code ist offen: https://github.com/NaniDerEchte2/Deadlock-Bots"""
+step2_body = """2️⃣ **Freundschaftsanfrage annehmen.** Wir schicken dir eine Anfrage in Steam — einfach annehmen, die Verifikation läuft dann automatisch. Alternativ schickst du selbst eine an den Freundescode **820142646**, wir nehmen automatisch an.
+⚠️ Bleib mit dem Bot befreundet — nur so können wir deinen Rang aktuell halten."""
+step3_body = "3️⃣ **Fertig — Rang-Rollen kommen von selbst.** Dein In-Game-Rang wird erkannt, als Rolle zugeordnet und ab da automatisch aktuell gehalten."
+step4_title = "4️⃣ Das offizielle Discord-Siegel: Steam Verifiziert✅"
+step4_body = """Hol dir zum Schluss die Rolle **Steam Verifiziert✅** — die vergibt **Discord selbst**, niemand kann sie von Hand verteilen. Klick auf **Discord-Verknüpfung herstellen**, kurzer Discord-Login, fertig.
+Alternativ geht's auch über den Servernamen oben links → **Verknüpfte Rollen**."""
+extras_title = "Wenn's mal hakt"
+extras_body = """- Verknüpft, aber nichts passiert? Drück einmal auf **Rang prüfen** — der Abgleich läuft sonst automatisch alle paar Minuten.
+- Rolle da, aber es klappt trotzdem nicht? Prüf die Freundschaft mit dem Bot (Freundescode **820142646**) oder sag den Mods Bescheid.
+- Mit **Freundescode eingeben** kannst du deinen Steam-Freundescode jederzeit nachtragen oder korrigieren."""
+
+[buttons]
+steam_open = "🔗 Steam verknüpfen"
+linked_role = "✅ Discord-Verknüpfung herstellen"
+friend_code = "🔢 Freundescode eingeben"
+rankcheck = "📊 Rang prüfen"
+
+[urls]
+linked_role_login = "https://deutsche-deadlock-community.de/coaching/api/auth/discord/linked-role/login"
