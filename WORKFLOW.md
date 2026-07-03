@@ -12,6 +12,8 @@ Router-Auswahl-Flow im Kanal `deadlock-router` als idempotentes Components-V2-Pa
 - `welcome_publish.rs`: Components V2 nutzt `flags=32768`, Container `accent_color=13150315`, `allowed_mentions.parse=[]`, KV-Message-ID-Storage und HTTP-Apply über `/serversync/welcome-apply`. Router übernimmt dieses Muster, aber ohne Welcome-Textloader.
 
 ## Fortschritt
+- Hotfix Router-Attachment-Multipart gestartet: Ursache in Serenity-`CreateAttachment.id`/`files[0]` bestaetigt; Umsetzung scoped auf `dl-voice`-Transportpfad ohne Router-Payload-Aenderungen.
+- Hotfix umgesetzt: `RouterGlue::post_rich/edit_rich` nutzt jetzt reqwest-Multipart mit `payload_json` und `files[{attachment.id}]`; Token kommt direkt aus `serenity::Http::token()` inklusive Scheme. Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`; `./scripts/central_test_db.sh cargo test -p dl-voice`; `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`.
 - Rework nach Kritiker-Review gestartet: Scope strikt auf Router-Spawn-Spam/Lane-Hopping, History-Adoption über `router_spawn_`-IDs und Legacy-Panel-Cleanup. Kein Commit/Push; bestehender W3.4a-Diff bleibt erhalten.
 - Rework umgesetzt: `router_spawn_*` blockt Owner in eigener TempVoice-Lane mit neuem `AlreadyOwnLane`-Outcome und setzt pro User einen 30s-In-Memory-Cooldown nur nach `Created`; Cooldown-Klicks liefern `Cooldown`.
 - Rework umgesetzt: `RouterPanelMessage` enthält rekursiv extrahierte `custom_ids`; History-Adoption matcht nur noch V2-Messages ohne Embeds mit `router_spawn_`-Custom-ID.

@@ -5,8 +5,7 @@ use std::{collections::HashMap, sync::Arc};
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, CreateAttachment, GuildId, PermissionOverwrite, PermissionOverwriteType,
-    PremiumTier, RoleId, UserId,
+    ChannelId, GuildId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
 };
 use serenity::builder::GetMessages;
 
@@ -15,6 +14,7 @@ use crate::tracker::{VoiceMemberState, VoiceSnapshot};
 
 /// Discord-Permission-Bit CONNECT (Voice).
 const CONNECT_BIT: u64 = 1 << 20;
+const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
 
 pub fn merge_connect_overwrite(
@@ -164,9 +164,20 @@ fn collect_component_custom_ids(value: &Value, custom_ids: &mut Vec<String>) {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RouterPanelFile {
+    id: u8,
+    filename: String,
+    bytes: Vec<u8>,
+}
+
+fn router_file_part_name(id: u8) -> String {
+    format!("files[{id}]")
+}
+
 fn router_panel_files(
     attachments: &[crate::router::RouterPanelAttachment],
-) -> Result<Vec<CreateAttachment>, String> {
+) -> Result<Vec<RouterPanelFile>, String> {
     let repo_root = crate::router::router_repo_root();
     attachments
         .iter()
@@ -178,9 +189,93 @@ fn router_panel_files(
                     path.display()
                 )
             })?;
-            Ok(CreateAttachment::bytes(bytes, attachment.filename.clone()))
+            Ok(RouterPanelFile {
+                id: attachment.id,
+                filename: attachment.filename.clone(),
+                bytes,
+            })
         })
         .collect()
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct DiscordMessageWriteResponse {
+    id: String,
+}
+
+struct RouterDiscordResponse {
+    status: reqwest::StatusCode,
+    body: String,
+}
+
+async fn send_router_message_payload(
+    adapter: &DiscordAdapter,
+    method: &'static str,
+    url: String,
+    body: Map<String, Value>,
+    files: Vec<RouterPanelFile>,
+) -> Result<RouterDiscordResponse, String> {
+    let payload_text = serde_json::to_string(&body).map_err(|err| err.to_string())?;
+    let client = reqwest::Client::new();
+    let request = match method {
+        "POST" => client.post(url),
+        "PATCH" => client.patch(url),
+        other => unreachable!("unsupported Discord method {other}"),
+    }
+    .header(reqwest::header::AUTHORIZATION, adapter.http.token());
+
+    let mut form = reqwest::multipart::Form::new().text("payload_json", payload_text);
+    for file in files {
+        let part = reqwest::multipart::Part::bytes(file.bytes)
+            .file_name(file.filename)
+            .mime_str("image/png")
+            .map_err(|err| err.to_string())?;
+        form = form.part(router_file_part_name(file.id), part);
+    }
+
+    let response = request
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    Ok(RouterDiscordResponse { status, body })
+}
+
+fn router_discord_body_preview(body: &str) -> String {
+    body.chars().take(300).collect()
+}
+
+fn router_discord_json_response<T: serde::de::DeserializeOwned>(
+    response: RouterDiscordResponse,
+    method: &str,
+) -> Result<T, String> {
+    if !response.status.is_success() {
+        return Err(format!(
+            "Discord {method} fehlgeschlagen: HTTP {}: {}",
+            response.status.as_u16(),
+            router_discord_body_preview(&response.body)
+        ));
+    }
+    serde_json::from_str::<T>(&response.body).map_err(|err| err.to_string())
+}
+
+fn router_discord_success(response: RouterDiscordResponse, method: &str) -> Result<(), String> {
+    if !response.status.is_success() {
+        return Err(format!(
+            "Discord {method} fehlgeschlagen: HTTP {}: {}",
+            response.status.as_u16(),
+            router_discord_body_preview(&response.body)
+        ));
+    }
+    Ok(())
+}
+
+fn parse_router_message_id(value: &str) -> Result<u64, String> {
+    value
+        .parse::<u64>()
+        .map_err(|_| "Discord POST lieferte keine gueltige Message-ID".to_string())
 }
 
 fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
@@ -1479,12 +1574,10 @@ impl crate::router::RouterInterfacePort for RouterGlue {
         attachments: &[crate::router::RouterPanelAttachment],
     ) -> Result<u64, String> {
         let files = router_panel_files(attachments)?;
-        self.adapter
-            .http
-            .send_message(ChannelId::new(channel_id), files, &body)
-            .await
-            .map(|message| message.id.get())
-            .map_err(|err| err.to_string())
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages");
+        let response = send_router_message_payload(&self.adapter, "POST", url, body, files).await?;
+        let message: DiscordMessageWriteResponse = router_discord_json_response(response, "POST")?;
+        parse_router_message_id(&message.id)
     }
 
     async fn edit_rich(
@@ -1495,17 +1588,10 @@ impl crate::router::RouterInterfacePort for RouterGlue {
         attachments: &[crate::router::RouterPanelAttachment],
     ) -> Result<(), String> {
         let files = router_panel_files(attachments)?;
-        self.adapter
-            .http
-            .edit_message(
-                ChannelId::new(channel_id),
-                serenity::all::MessageId::new(message_id),
-                &body,
-                files,
-            )
-            .await
-            .map(|_| ())
-            .map_err(|err| err.to_string())
+        let url = format!("{DISCORD_API_BASE}/channels/{channel_id}/messages/{message_id}");
+        let response =
+            send_router_message_payload(&self.adapter, "PATCH", url, body, files).await?;
+        router_discord_success(response, "PATCH")
     }
 
     async fn delete_message(
@@ -1809,5 +1895,12 @@ mod tests {
             Some((view_channel, speak))
         );
         assert_eq!(merge_connect_overwrite(CONNECT_BIT, 0, None), None);
+    }
+
+    #[test]
+    fn router_multipart_part_names_nutzen_attachment_ids() {
+        assert_eq!(router_file_part_name(0), "files[0]");
+        assert_eq!(router_file_part_name(1), "files[1]");
+        assert_eq!(router_file_part_name(2), "files[2]");
     }
 }

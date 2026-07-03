@@ -769,6 +769,7 @@ dependencies = [
  "dl-central-db",
  "dl-community",
  "dl-discord",
+ "reqwest",
  "serde",
  "serde_json",
  "serenity",
