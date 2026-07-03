@@ -75,6 +75,14 @@ pub enum ServerAsCodeError {
         pattern: String,
         source: regex::Error,
     },
+    #[error(
+        "Kanal-Rename-Kollision fuer `{target}`: kanonische Quelle `{canonical_source}`, kollidierende Live-Kanaele: {sources}"
+    )]
+    ChannelRenameCollision {
+        target: String,
+        canonical_source: String,
+        sources: String,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, ServerAsCodeError>;
