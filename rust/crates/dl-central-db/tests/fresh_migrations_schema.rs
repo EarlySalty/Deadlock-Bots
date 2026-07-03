@@ -920,11 +920,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330, 2026070335))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_first, 19);
+    assert_eq!(migration_count_after_first, 20);
     let journey_migration_count_after_first = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -971,6 +971,8 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070320, "lfg posts").await;
     let migration_2026070330_signature_after_first =
         migration_row_signature(&pool, 2026070330, "discord role connections").await;
+    let migration_2026070335_signature_after_first =
+        migration_row_signature(&pool, 2026070335, "lfg post ids").await;
 
     run_migrator(&db_dsn, "second run");
 
@@ -978,11 +980,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         &pool,
         "SELECT count(*)
            FROM _sqlx_migrations
-          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330))
+          WHERE (version BETWEEN 1 AND 15 OR version IN (2026070311, 2026070312, 2026070320, 2026070330, 2026070335))
             AND success",
     )
     .await;
-    assert_eq!(migration_count_after_second, 19);
+    assert_eq!(migration_count_after_second, 20);
     let journey_migration_count_after_second = scalar_i64(
         &pool,
         "SELECT count(*)
@@ -1070,6 +1072,11 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         migration_row_signature(&pool, 2026070330, "discord role connections").await,
         migration_2026070330_signature_after_first,
         "second migrator run must be a no-op for migration version 2026070330"
+    );
+    assert_eq!(
+        migration_row_signature(&pool, 2026070335, "lfg post ids").await,
+        migration_2026070335_signature_after_first,
+        "second migrator run must be a no-op for migration version 2026070335"
     );
 
     let schema_count = scalar_i64(
@@ -1728,8 +1735,20 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "closed_at",
             "last_render_hash",
             "last_post_edit_at",
+            "id",
         ]
     );
+    assert_column_in_schema(
+        &pool,
+        "voice",
+        "lfg_posts",
+        "id",
+        "bigint",
+        "int8",
+        "NO",
+        Some("nextval('voice.lfg_posts_id_seq'::regclass)"),
+    )
+    .await;
     assert_column_in_schema(
         &pool,
         "voice",

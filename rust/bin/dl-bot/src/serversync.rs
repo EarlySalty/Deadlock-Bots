@@ -5461,14 +5461,14 @@ mod tests {
                         },
                         {
                             "type": 10,
-                            "content": dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT,
+                            "content": dl_voice::lfg_panel::LFG_PANEL_BODY,
                         },
                         {
                             "type": 1,
                             "components": [{
                                 "type": 2,
                                 "style": 1,
-                                "label": dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT,
+                                "label": dl_voice::lfg_panel::LFG_PANEL_BUTTON,
                                 "custom_id": dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
                             }],
                         },
@@ -6917,7 +6917,7 @@ mod tests {
         );
         assert_eq!(
             body["result"]["payload"]["components"][0]["components"][1]["content"],
-            dl_voice::lfg_panel::LFG_PLACEHOLDER_TEXT
+            dl_voice::lfg_panel::LFG_PANEL_BODY
         );
         assert_eq!(
             body["result"]["payload"]["components"][0]["components"][2]["components"][0]

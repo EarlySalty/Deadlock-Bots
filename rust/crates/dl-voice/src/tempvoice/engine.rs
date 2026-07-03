@@ -8,7 +8,7 @@
 //! Rang-Permission-Kopplung (kommt mit dem rank_voice_manager-Port in 4c).
 
 use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 
 use chrono::{NaiveDateTime, Utc};
 use dl_discord::{ChannelEvent, Dispatcher, GatewayEvent, VoiceEvent};
@@ -268,6 +268,7 @@ pub struct TempVoiceEngine {
     pub tags: tokio::sync::RwLock<Option<Arc<dl_community::tags::TagService>>>,
     /// Anfänger-Routing-Hook (None = kein Reroute, wie Original ohne Cog).
     pub adaptive: tokio::sync::RwLock<Option<Arc<crate::adaptive::AdaptiveLanes>>>,
+    lfg: tokio::sync::RwLock<Option<Weak<crate::lfg_panel::LfgPanelInterface>>>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -283,8 +284,13 @@ impl TempVoiceEngine {
             port,
             tags: tokio::sync::RwLock::new(None),
             adaptive: tokio::sync::RwLock::new(None),
+            lfg: tokio::sync::RwLock::new(None),
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
+    }
+
+    pub async fn set_lfg_panel(&self, lfg: Arc<crate::lfg_panel::LfgPanelInterface>) {
+        *self.lfg.write().await = Some(Arc::downgrade(&lfg));
     }
 
     fn rules_for_category(&self, category_id: Option<u64>) -> (StagingRules, Option<u64>) {
@@ -1649,6 +1655,10 @@ impl TempVoiceEngine {
         }
         if let Err(err) = self.port.delete_channel(channel_id, reason).await {
             tracing::debug!(%err, channel_id, "TempVoice: Channel-Delete fehlgeschlagen");
+        }
+        let lfg = self.lfg.read().await.as_ref().and_then(Weak::upgrade);
+        if let Some(lfg) = lfg {
+            lfg.on_lane_deleted(channel_id).await;
         }
     }
 

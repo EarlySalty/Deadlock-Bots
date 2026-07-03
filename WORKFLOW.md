@@ -1,3 +1,141 @@
+# W3.4b W3 - Live-Kopplung Post-Lane + Join + Auto-Close (2026-07-03)
+
+## Fortschritt
+- Pflichtkontext W3.4b Phase 1 sowie W2/W2-Rework inkl. stale-`creating`-Hinweis gelesen.
+- Neue additive Migration `2026070335_lfg_post_ids.sql`: `voice.lfg_posts.id` als stabile Post-ID fuer `lfg:open_lane:<id>`, `lfg:join:<id>` und race-sichere `UPDATE ... WHERE id = $1`.
+- Weg A umgesetzt: Formular-Erfolg antwortet ephemer mit `lfg:open_lane:<post_id>`; Klick nutzt Router-Spawn-Semantik ueber `LaneRouter`, verknuepft `lane_id` nur bei `lane_id IS NULL` und queued ein Render-Update.
+- Weg B umgesetzt: TempVoice-Panel registriert `lfg:publish_lane`; Owner-Guard bleibt `owned_lane_of`, Modus wird aus Lane-Kategorie/TempVoice-DB abgeleitet, Modal fragt nur Rangbereich/Platzanzahl, Post wird direkt mit `lane_id` reserviert.
+- LFG-Starter-Message bekommt `lfg:join:<post_id>`; Join prueft Mapping, Lane-Existenz/Belegung, Ranked-Rolle, Voice-Connection, eigener Post und moved targeted ueber Port.
+- Live-Render umgesetzt: freie Plaetze aus Cache-Belegung/User-Limit, `user_limit=0` mit Modus-Default, Street-Brawl 4; Render-Hash verhindert No-op-Edits.
+- Edit-Queue umgesetzt: prozesslokal last-wins, ein Worker, Mindestabstand pro Post, 429-Fallback-Backoff; nutzt `last_render_hash`/`last_post_edit_at`.
+- Auto-Close umgesetzt: TempVoice-`cleanup_lane` informiert LFG per Weak-Sink; Reconcile-Ticker schliesst tote Lane-Posts, expired lane-lose Posts und loescht stale `creating` aelter 5 Minuten. Worker/Subscriptions laufen nur bei `lfg_cutover_active`.
+- Platzhalter-Texte bleiben bewusst Platzhalter: LFG-Buttons/Modal/Replies/Render verwenden `Platzhalter` bzw. `Platzhalter-voll/offen`.
+
+## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true cargo check --workspace --all-targets`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community`
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- Gruen: `cargo fmt --all -- --check`
+
+## Rest-Risiken
+- Ranked-TempVoice-Panel hat bereits das Discord-Limit von 5 Action-Rows; `lfg:publish_lane` belegt dort einen bestehenden Button-Slot. Bestehender `tv_preset_load`-Handler bleibt registriert, hat im Ranked-Panel aber keinen sichtbaren Button mehr.
+
+# W3.4b W3 Kritiker (2026-07-03)
+
+Scope: adversarialer Review des uncommitted W3-Diffs auf Branch `feat/welle34b-lfg`. Keine Source-Aenderungen ausser diesem Report, kein Commit/Push.
+
+## Befunde
+
+### DEPLOY-BREAKER
+1. Flag-aus-Invariante ist verletzt: TempVoice zeigt und verdrahtet LFG-Publish trotz `lfg_cutover_active=false`.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/tempvoice/interface.rs:262-274`, `:334-397`, `:353-363`, `:387-395`, `:1091-1099`; Wiring `rust/bin/dl-bot/src/main.rs:507`, `:511-516`, Ready-Refresh `:1251`; Lane-Sink `rust/crates/dl-voice/src/tempvoice/engine.rs:1659-1662`; Sink-Ziel ohne Cutover-Guard `rust/crates/dl-voice/src/lfg_panel.rs:1757-1767`.
+   - Szenario: `DL_LFG_FORUM_CUTOVER=false`, aber TempVoice-Panels werden beim Gateway-Ready weiter refreshed. `main_view_components()` hat keinen Cutover-Parameter und rendert statisch `lfg:publish_lane`; im Ranked-Panel ist dadurch der alte sichtbare `tv_preset_load`-Button weg. Klicks laufen durch den neuen TempVoice-Handler bis Owner-Check/LFG-Placeholder. Zusaetzlich ist `tempvoice.set_lfg_panel(...)` immer gesetzt und `cleanup_lane()` ruft `on_lane_deleted()` ohne Cutover-Guard auf, also macht ein normaler Lane-Cleanup unter Flag-aus neue LFG-DB/Discord-Close-Arbeit.
+   - Fix-Skizze: Cutover-Flag in `TempVoiceInterface`/Panel-Rendering durchreichen; bei Flag-aus exakt alte Components rendern und `lfg:publish_lane` nicht registrieren/anzeigen. `set_lfg_panel` nur bei aktivem Cutover setzen oder `on_lane_deleted()` hart auf `cutover_active` gaten. Regressionstest: Flag-aus-Panel enthaelt `tv_preset_load` und kein `lfg:publish_lane`.
+
+### HIGH
+2. Ranked-Panel-Slot-Verdraengung bleibt unter Cutover ein Feature-Verlust und braucht Owner-Entscheid.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/tempvoice/interface.rs:337-365`, Handler fuer verdrängtes Feature `:865-896`, Registrierung weiter vorhanden `:1307-1310`; Diff zeigt Ersatz von `button("📂 Preset laden", ..., "tv_preset_load")` durch `LFG_PUBLISH_LANE_CUSTOM_ID`.
+   - Szenario: Ranked hat 5 Action-Rows: Row 1 = 5 Buttons, Row 2 = 5 Buttons, Row 3 = Select, Row 4 = 5 Buttons, Row 5 = Select. Discord erlaubt 5 Rows und Selects nicht gemischt mit Buttons; damit gibt es im Ranked-Panel keinen freien Button-Slot. Non-Ranked hat freie Plaetze (`interface.rs:367-396`) und kann LFG ohne Verlust aufnehmen, Ranked nicht. Aktuell wird Preset-Laden still entfernt.
+   - Fix-Skizze: Nicht als akzeptiertes Risiko mergen. Owner muss entscheiden: eigene Unteransicht/zweite Panel-Message, bestehende Ranked-Funktion bewusst entfernen, oder UI neu gruppieren. Bis dahin Ranked bei Cutover nicht mit LFG-Button rendern oder Preset-Laden priorisieren.
+
+3. `lfg:open_lane:<post_id>` raeumt nach erfolgreicher Lane-Erstellung den Fehlerpfad nicht auf.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:1512-1536`, race-sicheres DB-Update `:1318-1333`; Router-Spawn erstellt und moved vorher `rust/crates/dl-voice/src/router.rs:840-847`, TempVoice erstellt Kanal/DB vor Rueckgabe `rust/crates/dl-voice/src/tempvoice/engine.rs:796-849`.
+   - Szenario: In einem Prozess blockt `TempVoiceEngine` schnelle Doppel-Erstellung weitgehend ueber `state.creating` (`engine.rs:743-752`). Trotzdem: wenn `spawn_lane_from_current_voice()` `Created { lane_id }` liefert und danach `link_post_lane()` wegen DB-Ausfall, bereits geschlossenem/gelinktem Post oder anderer Race `Err`/`false` ergibt, bleibt die neue Voice-Lane bestehen, aber der LFG-Post bleibt lane-los. Der Handler antwortet nur ephemeral `Platzhalter`; kein `cleanup_lane()`, keine alternative Verknuepfung, keine Owner-Anleitung.
+   - Fix-Skizze: Nach `Created` bei `link_post_lane=false/Err` die frisch erstellte Lane kontrolliert loeschen oder eine DB-Reservation/Compare-and-swap vor der Lane-Erstellung einfuehren. Test fuer `link_post_lane` rows_affected=0 und DB-Err mit Cleanup-Mock.
+
+4. Close/Reconcile kann Posts dauerhaft `open` lassen, wenn Thread-Archive/Lock scheitert.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:1731-1754`, Aufrufer `:1757-1764`, `:1786-1823`.
+   - Szenario: `close_post()` ruft erst `archive_and_lock_thread(thread_id).await?` auf und schreibt den DB-Status erst danach. Bei Discord 404 (Thread manuell geloescht), 403 (fehlende Rechte) oder transientem Fehler bleibt `status='open'`. Wegen `lfg_posts_owner_active_uidx` blockiert das den Owner weiter; Reconcile/Lane-Delete wiederholen denselben Fehler endlos.
+   - Fix-Skizze: Discord-Close als best-effort behandeln: 404 als geschlossen werten, DB-Status in jedem Fall kontrolliert auf `closed/expired` setzen und Fehler separat loggen/metricen. Fuer 403 Owner-Alarm statt Owner dauerhaft zu blockieren.
+
+### MITTEL
+5. LFG-Edit-Queue ist nur prozesslokal und wird nach Restart nicht neu aufgebaut.
+   - Datei/Zeilen: Queue-State `rust/crates/dl-voice/src/lfg_panel.rs:256-260`, Enqueue/Worker `:1594-1697`, Spawn `:1878-1905`.
+   - Szenario: Join/Leave/Move enqueue'n nur in einem RAM-`HashSet`. Restart zwischen Move und Edit verliert Pending-Updates; beim Start werden `status='open' AND lane_id IS NOT NULL` nicht initial in die Queue gelegt. Der Post bleibt mit alter Slot-Anzeige, bis ein neues VoiceEvent/Join/Reconcile ihn zufaellig wieder beruehrt.
+   - Fix-Skizze: Beim Worker-Start alle offenen lane-gekoppelten Posts enqueuen oder Reconcile fuer lebende Lane-Posts ebenfalls rendern lassen. Optional persistente Queue analog `rename_queue`. 429-Backoff nutzt aktuell nur festen Fallback aus `glue.rs:2093-2101`; echten Retry-After nutzen, falls Serenity ihn liefert.
+
+6. Join-Validierung ist nicht vollstaendig und Fehlertexte sind live nicht verstaendlich.
+   - Datei/Zeilen: `rust/crates/dl-voice/src/lfg_panel.rs:1550-1591`, Placeholder-Konstante `:31`.
+   - Szenario: `lfg:join` prueft Lane-Mapping, Own-Post, Occupancy, Ranked-Rolle, irgendeine Voice-Connection und faengt Move-Fehler. Es prueft aber nicht `member_voice_channel == lane_id`; ein User in der Ziel-Lane loest einen redundanten Move auf denselben Channel aus. Bei parallel klickenden Usern wird die Kapazitaet vor dem Move aus Cache gelesen; ein gerade joinender User ist bis zum Cache-Event nicht gezaehlt. Alle Fehlerfaelle antworten zwar ephemeral, aber nur mit `Platzhalter`, also nicht verstaendlich fuer Live-User.
+   - Fix-Skizze: Vor Move `current_channel == lane_id` als eigenen Erfolg/Fehler behandeln; fuer knappe Slots pro Lane kurz serialisieren oder nach Move validieren/rendern. Konkrete ephemere Texte fuer Lane tot, voll, Rank fehlt, nicht in Voice, eigener Post, schon drin, Move fehlgeschlagen.
+
+7. Testabdeckung gruenschaetzt kritische W3-Pfade.
+   - Datei/Zeilen: LFG-Tests `rust/crates/dl-voice/src/lfg_panel.rs:2148-2174`, `:2613-2651`, `:2654-2693`, `:2807-2876`; TempVoice-Panel-Test `rust/crates/dl-voice/src/tempvoice/interface.rs:1398-1450`.
+   - Szenario: Die gezielten `lfg_panel`-Tests laufen gruen, decken aber nur schmale Happy-/Einzelfehlerpfade. Es fehlt ein Flag-aus-TempVoice-Panel-Test, der `tv_preset_load` erhaelt und `lfg:publish_lane` ausschliesst. `lfg_open_lane_verknuepft_created_lane_race_sicher` testet nur einen einzelnen erfolgreichen Klick, nicht Doppelklick/`rows_affected=0`/Cleanup. `lfg_join_moved_targeted...` testet nur Happy Path, nicht volle Lane, schon in Ziel-Lane, nicht in Voice, eigener Post, Ranked ohne Rolle oder Move-403/404. Reconcile-Test deckt nicht Archive-Fehler, Ticker-vs-Sink-Doppelclose oder 5-Minuten-Grenzrace ab.
+   - Fix-Skizze: Tests vor Merge nachziehen; insbesondere Regressionstests fuer die beiden Deploy-Breaker und Cleanup-Fehlerpfade.
+
+## Pflicht-Linsen
+- 1. Flag-aus-Invariante: nicht sauber. Alter LFG-Responder bleibt bei inaktivem Cutover korrekt aktiv (`main.rs:1158-1169`), LFG-VoiceEvent-Worker/Ticker starten nur bei Cutover (`main.rs:1173-1175`, `lfg_panel.rs:1878-1905`), Ready-Panel-Ensure ist gegated (`main.rs:1253-1254`), `LfgPanelInterface::handle` blockt direkt bei Flag-aus (`lfg_panel.rs:1833-1838`). Aber TempVoice-Panel-Button und Lane-Delete-Sink sind ungated, siehe DEPLOY-BREAKER.
+- 2. Panel-Slot-Verdraengung: nicht sauber. Inventar siehe HIGH #2. Non-Ranked hat freie Button-Slots; Ranked ist ohne UX-Entscheid hart voll.
+- 3. Race Lane-Verknuepfung: teilweise sauber. Owner-Check vorhanden (`lfg_panel.rs:1513-1517`), `UPDATE ... WHERE lane_id IS NULL` ist DB-seitig race-sicher (`:1318-1333`), `lane_id` unique violation beim Publish wird als `AlreadyOpen` ephemer abgefangen (`:931-935`, `:1452-1471`). Nicht sauber ist Cleanup nach erfolgreicher Lane-Erstellung und fehlgeschlagenem Link, siehe HIGH #3.
+- 4. Edit-Queue/Rate-Limits: teilweise sauber. Last-wins pro Post per `HashSet` (`lfg_panel.rs:1594-1603`), Mindestabstand (`:1677-1685`), Render-Hash-No-op (`:1627-1631`) und 429-Requeue (`:1686-1692`) existieren. Restart-Rebuild fehlt, siehe MITTEL #5.
+- 5. Join-Validierungen: teilweise sauber. Lane tot/Occupancy None schliesst Post best-effort (`lfg_panel.rs:1560-1563`), voll wird vor Move blockiert (`:1564-1567`), Ranked-Gate (`:1568-1573`), User-in-Voice (`:1574-1581`), eigener Post (`:1554-1556`) und Move-Fehler (`:1582-1589`) sind vorhanden. Schon-in-Ziel-Lane und verstaendliche Fehlertexte fehlen, siehe MITTEL #6.
+- 6. Reconcile-Ticker: teilweise sauber. 60s-Tick wird nur im Cutover-Spawn gestartet (`lfg_panel.rs:1878-1905`), stale `creating` nutzt DB-Zeit und 5-Minuten-Schwelle (`:1774-1784`), expired nur lane-los (`:1809-1823`). Nicht sauber: Archive-Fehler verhindern DB-Close, siehe HIGH #4. Ticker-vs-Sink-Doppelclose ist durch `status='open'`-Update weitgehend idempotent, kann aber doppelt archivieren.
+- 7. Ported but never wired: im Kern verdrahtet. VoiceEvent-Subscription real in `lfg_panel::spawn` (`lfg_panel.rs:1882-1894`) und Main nur bei Cutover (`main.rs:1173-1175`), Worker/Ticker real gespawnt (`lfg_panel.rs:1896-1904`), Join-Button wird an Starter-Message gebaut (`glue.rs:1756-1763`), Handler registriert (`lfg_panel.rs:1871-1875`), TempVoice-Publish registriert (`interface.rs:1326`). Problem ist Gating, nicht fehlendes Wiring.
+- 8. Migration 2026070335: sauber. Neue untracked Migration aendert nur `voice.lfg_posts` additiv (`2026070335_lfg_post_ids.sql:1-36`); keine committete Migration wurde editiert. Fresh-Schema-Vertrag enthaelt `id`/Default (`fresh_migrations_schema.rs:1719-1749`) und der Fresh-Migration-Test ist gruen. Reihenfolge ist live-tauglich, weil `2026070320_lfg_posts.sql` die Tabelle vorher anlegt.
+- 9. Serenity-API-Realitaet: sauber. Lokale Serenity 0.12.5 enthaelt `EditThread::archived/locked/audit_log_reason`, `Http::edit_member`, `CreateMessage::components`, `EditMessage`; `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-bot -p dl-central-db` ist gruen.
+- 10. Testluecken/Gruen-Waschen: nicht sauber, siehe MITTEL #7. Die behaupteten gruenen Tests beweisen Compile und mehrere Happy Paths, aber nicht die Deploy-Breaker-/Race-/Restart-Faelle.
+
+## Kritiker-Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-bot -p dl-central-db`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored --nocapture`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture` (22 passed; TestDb-Pool-Close-Timeouts nur Cleanup-Warnungen)
+- Gruen: `git diff --check`
+
+## Gesamturteil
+REWORK-NOETIG. Nicht merge-/deployfaehig, weil die Flag-aus-Invariante erneut verletzt ist und Ranked-User schon vor Cutover den sichtbaren `Preset laden`-Button verlieren. Zusaetzlich muessen Lane-Link-Cleanup, Close-Fehlerpfad und die fehlenden Regressionstests vor Live-Deploy nachgezogen werden.
+
+# W3.4b W3 Rework (2026-07-03)
+
+## Fix-Status
+- Fix 1 DEPLOY-BREAKER: Behoben. `lfg_cutover_active` wird in `TempVoiceInterface` durchgereicht (`rust/bin/dl-bot/src/main.rs:459-517`, `rust/crates/dl-voice/src/tempvoice/interface.rs:58-90`). Flag-aus nutzt das alte TempVoice-Layout mit `tv_preset_load` und ohne `lfg:publish_lane`; LFG-Publish wird nur bei aktivem Cutover registriert (`interface.rs:369-420`, `:1367-1391`). Lane-Delete-LFG-Sink ist doppelt gegatet: `set_lfg_panel` nur bei Cutover (`main.rs:508-509`) und `on_lane_deleted` returnt bei inaktivem Cutover (`lfg_panel.rs:1882-1885`). Tests: `flag_aus_ranked_panel_behaelt_preset_load_und_ohne_lfg_publish`, `flag_aus_lane_delete_sink_macht_keine_lfg_arbeit`.
+- Fix 2 RANKED-PANEL-SLOT: Behoben gemaess Owner-Entscheid. Ranked-Cutover ersetzt `tv_preset_save`/`tv_preset_load` durch `tv_presets` Style 2 und setzt `lfg:publish_lane` in den freien Slot (`interface.rs:369-386`). Das Untermenue antwortet ephemer mit Buttons auf die alten Custom-IDs `tv_preset_save`/`tv_preset_load` (`interface.rs:836-844`). Non-Ranked bekommt LFG im freien letzten Row-Slot (`interface.rs:412-420`). Tests: `cutover_ranked_panel_buendelt_presets_und_zeigt_lfg_publish`, `presets_sammelbutton_oeffnet_save_und_load_untermenue`.
+- Fix 3 HIGH open_lane-Fehlerpfad: Behoben. `LfgLaneSpawner` hat `cleanup_created_lane`; `RouterLfgLaneSpawner` delegiert auf `LaneRouter::cleanup_lfg_created_lane` und damit `TempVoiceEngine::cleanup_lane` (`lfg_panel.rs:265-313`, `router.rs:853-862`). `handle_open_lane` bereinigt frisch erstellte Lanes bei `link_post_lane=false` und bei Link-Fehlern (`lfg_panel.rs:1573-1638`). Tests: `lfg_open_lane_cleanup_bei_rows_affected_race`, `lfg_open_lane_cleanup_bei_db_err_nach_spawn`.
+- Fix 4 HIGH close_post best-effort: Behoben. `close_post` behandelt Discord-Archive/Lock best-effort: 404 debug/geschlossen, andere Fehler warnen, DB-Status wird trotzdem kontrolliert auf `closed`/`expired` gesetzt (`lfg_panel.rs:1848-1879`). Tests: `close_post_setzt_status_trotz_archive_404_und_500`, `reconcile_archive_fehler_schliesst_db_und_retryt_nicht_endlos`, `reconcile_und_lane_delete_doppelclose_bleibt_idempotent`.
+- Fix 5 MITTEL Edit-Queue-Restart: Behoben. Beim Spawn wird ein Initial-Enqueue fuer alle `status='open' AND lane_id IS NOT NULL` gestartet (`lfg_panel.rs:1694-1718`, `:2032-2038`). Der Worker nutzt bereits konkrete `LfgEditError::RateLimited { retry_after_seconds }`; Serenity 0.12.5 reicht im `ErrorResponse` keinen Retry-After-Wert durch, daher bleibt der Glue-Fallback nur dort, wo kein konkreter Wert verfuegbar ist (`glue.rs:2093-2102`). Test: `initial_enqueue_packt_offene_lane_posts_in_render_queue`.
+- Fix 6 MITTEL Join-Validierung + Texte: Behoben. Join prueft `member_voice_channel == lane_id` vor `move_member` und antwortet separat; volle Lane, fehlender Rang, nicht in Voice, eigener Post, tote Lane und Move-Fehler nutzen getrennte Konstanten (`lfg_panel.rs:1640-1688`). Die alte Sammelkonstante `LFG_PLACEHOLDER_TEXT` wurde entfernt; `rg LFG_PLACEHOLDER_TEXT rust` liefert keine Treffer. Tests: `lfg_join_blockt_volle_lane_ohne_move`, `lfg_join_blockt_user_der_schon_in_ziel_lane_ist`, `lfg_join_move_403_bleibt_ephemeral_und_rendert_nicht`.
+- Fix 7 MITTEL Testluecken: Behoben. Neue Regressionen decken Flag-aus-Panel, Flag-aus-Lane-Delete, Ranked-Presets-Untermenue, `open_lane` rows_affected=0/DB-Err-Cleanup, Join voll/schon drin/Move-403, Archive-404/500, Reconcile-Archive-Fehler, Initial-Queue und Ticker-vs-Sink-Doppelclose ab (`lfg_panel.rs:2796-2842`, `:2965-3048`, `:3242-3436`, `interface.rs:1526-1609`).
+
+## Konstanten-Aufspaltung
+- `LFG_PANEL_BODY` -> LFG-Panel-Textdisplay (`lfg_panel.rs:46`, `:599`).
+- `LFG_PANEL_BUTTON` -> LFG-Panel-Startbutton (`lfg_panel.rs:47`, `:601`).
+- `LFG_MODE_PROMPT` -> ephemere Moduswahl (`lfg_panel.rs:48`, `:989`).
+- `LFG_MODE_BUTTON_CASUAL`, `LFG_MODE_BUTTON_RANKED`, `LFG_MODE_BUTTON_STREET_BRAWL` -> Moduswahl-Buttons (`lfg_panel.rs:49-51`, `:682-684`).
+- `LFG_MODAL_TITEL`, `LFG_MODAL_FELD_RANG_LABEL`, `LFG_MODAL_FELD_RANG_PLACEHOLDER`, `LFG_MODAL_FELD_PLAETZE_LABEL`, `LFG_MODAL_FELD_PLAETZE_PLACEHOLDER` -> Create-/Publish-Modal (`lfg_panel.rs:52-56`, `:702-717`).
+- `LFG_ERR_KEIN_RANKED_RANG`, `LFG_ERR_RANG_UNBEKANNT`, `LFG_ERR_PLAETZE_UNGUELTIG`, `LFG_ERR_SCHON_AKTIVE_SUCHE`, `LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN` -> Formular/Open/Publish-Validierung (`lfg_panel.rs:57-61`, `:1006-1103`, `:1456-1568`, `:1589-1623`).
+- `LFG_ERFOLG_POST_ERSTELLT`, `LFG_BTN_LANE_AUFMACHEN` -> Formular-/Open-Erfolg und Lane-Open-Button (`lfg_panel.rs:62-63`, `:734`, `:1125`, `:1594`).
+- `LFG_POST_TITEL_SCHEMA`, `LFG_POST_BODY_HEADER`, `LFG_POST_BODY_VON`, `LFG_POST_BODY_MODUS`, `LFG_POST_BODY_RANG`, `LFG_POST_BODY_PLAETZE`, `LFG_POST_STATUS_OFFEN`, `LFG_POST_STATUS_VOLL` -> Forum-Post-Render (`lfg_panel.rs:64-72`, `:867-884`, `:909-912`).
+- `LFG_BTN_BEITRETEN` -> Starter-Message-Join-Button (`lfg_panel.rs:72`, `rust/crates/dl-voice/src/glue.rs:1762`).
+- `LFG_ERR_JOIN_LANE_TOT`, `LFG_ERR_JOIN_LANE_VOLL`, `LFG_ERR_JOIN_KEIN_RANG`, `LFG_ERR_JOIN_NICHT_IN_VOICE`, `LFG_ERR_JOIN_EIGENER_POST`, `LFG_ERR_JOIN_SCHON_DRIN`, `LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN` -> Join-Antworten (`lfg_panel.rs:73-79`, `:1642-1683`).
+- `LFG_ERR_OPEN_NICHT_DEIN_POST`, `LFG_ERR_OPEN_NICHT_IN_VOICE`, `LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT` -> Open-Lane-Antworten (`lfg_panel.rs:80-82`, `:1575-1620`).
+- `LFG_BTN_PUBLISH_LANE`, `LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT` -> TempVoice-Publish-Button und Publish-Dedupe (`lfg_panel.rs:83-85`, `tempvoice/interface.rs:379-420`, `lfg_panel.rs:1512-1514`).
+- `LFG_PRESETS_SUBMENU_TEXT`, `LFG_PRESETS_BTN_SAVE`, `LFG_PRESETS_BTN_LOAD` -> Ranked-Presets-Untermenue (`lfg_panel.rs:86-88`, `tempvoice/interface.rs:836-844`).
+
+## TDD-Beleg
+- Rot vor Fix: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_ -- --nocapture` scheiterte mit fehlender Cutover-Signatur, fehlenden semantischen Konstanten, fehlendem Cleanup-Port und fehlendem Initial-Enqueue-Helfer.
+- Gruen nach Fix: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_ -- --nocapture` (34 passed) und `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice tempvoice::interface::tests -- --nocapture` (9 passed).
+
+## Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo check --workspace --all-targets`
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice`
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot`
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community`
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`
+- Gruen: `cargo fmt --all -- --check`
+- Gruen: `git diff --check`
+
+## Offene Punkte
+- Keine bekannten offenen Rework-Punkte. Serenity 0.12.5 exponiert im verwendeten `ErrorResponse` keinen konkreten Retry-After-Wert; der LFG-Worker verarbeitet konkrete `LfgEditError::RateLimited`-Werte, der Serenity-Glue nutzt daher weiterhin den vorhandenen Fallback, wenn kein Wert verfuegbar ist.
+
 # W3.4b W2 - LFG-Persistenz + Formular-Flow (2026-07-03)
 
 ## Fortschritt

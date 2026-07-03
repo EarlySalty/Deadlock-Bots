@@ -454,10 +454,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_voice::tempvoice::TempVoiceStore::new(central_pool.clone()),
         cache_snapshot.clone(),
     );
-    dl_voice::tempvoice::interface::register(&mut router, tempvoice.clone());
+    let lfg_forum_cutover_enabled = env_bool_default("DL_LFG_FORUM_CUTOVER", false);
+    let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
+    let lfg_cutover_active = lfg_cutover_active(lfg_forum_cutover_enabled, lfg_panel_channel_id);
     let tempvoice_interface = dl_voice::tempvoice::interface::TempVoiceInterface::new(
         tempvoice.clone(),
         cache_snapshot.clone(),
+        lfg_cutover_active,
     );
 
     // Aktivitäts-Analyzer (5) — auch Co-Spieler-Quelle für den Router
@@ -484,9 +487,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync_concrete
         .set_router_interface(router_interface.clone())
         .await;
-    let lfg_forum_cutover_enabled = env_bool_default("DL_LFG_FORUM_CUTOVER", false);
-    let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
-    let lfg_cutover_active = lfg_cutover_active(lfg_forum_cutover_enabled, lfg_panel_channel_id);
     if lfg_forum_cutover_enabled && !lfg_cutover_active {
         let reason = lfg_panel_channel_reason
             .as_deref()
@@ -500,9 +500,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         lfg_panel_channel_reason,
         lfg_cutover_active,
     );
+    lfg_panel_interface
+        .set_lane_spawner(dl_voice::lfg_panel::RouterLfgLaneSpawner::new(
+            lane_router.clone(),
+        ))
+        .await;
+    if lfg_cutover_active {
+        tempvoice.set_lfg_panel(lfg_panel_interface.clone()).await;
+    }
     serversync_concrete
         .set_lfg_panel_interface(lfg_panel_interface.clone())
         .await;
+    dl_voice::tempvoice::interface::register(
+        &mut router,
+        tempvoice.clone(),
+        lfg_cutover_active.then_some(lfg_panel_interface.clone()),
+    );
     dl_voice::lfg_panel::register(&mut router, lfg_panel_interface.clone());
 
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
@@ -1160,6 +1173,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
         // Lane-Router (4c-Rest): Join auf den Router-VC einsortieren
         dl_voice::router::spawn(lane_router.clone(), &dispatcher);
+        if lfg_cutover_active {
+            dl_voice::lfg_panel::spawn(lfg_panel_interface.clone(), &dispatcher);
+        }
 
         // Adaptive Spezial-Lanes: Anfänger-Routing + Duo + Sortierung
         let adaptive = dl_voice::adaptive::AdaptiveLanes::new(cache_snapshot.clone());

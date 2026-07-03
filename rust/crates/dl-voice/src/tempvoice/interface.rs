@@ -58,11 +58,20 @@ pub trait TempVoiceInterfacePort: Send + Sync {
 pub struct TempVoiceInterface {
     engine: Arc<TempVoiceEngine>,
     port: Arc<dyn TempVoiceInterfacePort>,
+    lfg_cutover_active: bool,
 }
 
 impl TempVoiceInterface {
-    pub fn new(engine: Arc<TempVoiceEngine>, port: Arc<dyn TempVoiceInterfacePort>) -> Arc<Self> {
-        Arc::new(Self { engine, port })
+    pub fn new(
+        engine: Arc<TempVoiceEngine>,
+        port: Arc<dyn TempVoiceInterfacePort>,
+        lfg_cutover_active: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            engine,
+            port,
+            lfg_cutover_active,
+        })
     }
 
     pub async fn ensure_interface_message(
@@ -76,7 +85,7 @@ impl TempVoiceInterface {
             .ensure_interface_schema()
             .await
             .map_err(|err| err.to_string())?;
-        let body = global_panel_body(category_id);
+        let body = global_panel_body_for_cutover(category_id, self.lfg_cutover_active);
         if let Some(row) = self.existing_global_record(guild_id, channel_id).await {
             match self
                 .port
@@ -186,7 +195,7 @@ impl TempVoiceInterface {
             }
         };
         for row in rows {
-            let body = global_panel_body(row.category_id);
+            let body = global_panel_body_for_cutover(row.category_id, self.lfg_cutover_active);
             if let Err(err) = self
                 .port
                 .edit_rich(row.channel_id, row.message_id, body)
@@ -231,7 +240,12 @@ impl TempVoiceInterface {
             };
             let owner_id = self.engine.lane_owner(lane_id).await;
             let category_id = (category_id > 0).then_some(category_id).or(row.category_id);
-            let body = lane_panel_body(&lane_name, owner_id, category_id);
+            let body = lane_panel_body_for_cutover(
+                &lane_name,
+                owner_id,
+                category_id,
+                self.lfg_cutover_active,
+            );
             if let Err(err) = self
                 .port
                 .edit_rich(row.channel_id, row.message_id, body)
@@ -259,18 +273,39 @@ impl TempVoiceInterface {
     }
 }
 
+#[cfg(test)]
 fn global_panel_body(category_id: Option<u64>) -> Map<String, Value> {
-    panel_body(global_panel_embed(), main_view_components(category_id))
+    global_panel_body_for_cutover(category_id, false)
 }
 
+fn global_panel_body_for_cutover(
+    category_id: Option<u64>,
+    lfg_cutover_active: bool,
+) -> Map<String, Value> {
+    panel_body(
+        global_panel_embed(),
+        main_view_components(category_id, lfg_cutover_active),
+    )
+}
+
+#[cfg(test)]
 fn lane_panel_body(
     lane_name: &str,
     owner_id: Option<u64>,
     category_id: Option<u64>,
 ) -> Map<String, Value> {
+    lane_panel_body_for_cutover(lane_name, owner_id, category_id, false)
+}
+
+fn lane_panel_body_for_cutover(
+    lane_name: &str,
+    owner_id: Option<u64>,
+    category_id: Option<u64>,
+    lfg_cutover_active: bool,
+) -> Map<String, Value> {
     panel_body(
         lane_panel_embed(lane_name, owner_id),
-        main_view_components(category_id),
+        main_view_components(category_id, lfg_cutover_active),
     )
 }
 
@@ -331,9 +366,23 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
     })
 }
 
-fn main_view_components(category_id: Option<u64>) -> Value {
+fn main_view_components(category_id: Option<u64>, lfg_cutover_active: bool) -> Value {
     let include_ranked = category_id == Some(RANKED_CATEGORY_ID);
     if include_ranked {
+        let preset_button = if lfg_cutover_active {
+            button("💾 Presets", 2, "tv_presets")
+        } else {
+            button("💾 Preset speichern", 3, "tv_preset_save")
+        };
+        let final_button = if lfg_cutover_active {
+            button(
+                crate::lfg_panel::LFG_BTN_PUBLISH_LANE,
+                1,
+                crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID,
+            )
+        } else {
+            button("📂 Preset laden", 1, "tv_preset_load")
+        };
         json!([
             action_row(vec![
                 button("🇩🇪 DE", 1, "tv_region_de"),
@@ -354,12 +403,23 @@ fn main_view_components(category_id: Option<u64>) -> Value {
                 button("Normale Lane", 2, "tv_tpl_reset"),
                 button("Duo Call (2)", 1, "tv_tpl_duo"),
                 button("Trio Call (3)", 1, "tv_tpl_trio"),
-                button("💾 Preset speichern", 3, "tv_preset_save"),
-                button("📂 Preset laden", 1, "tv_preset_load"),
+                preset_button,
+                final_button,
             ]),
             action_row(vec![subrank_select()]),
         ])
     } else {
+        let mut final_row = vec![
+            button("✏️ Umbenennen", 2, "tv_rename_btn"),
+            button("🔄 Modus wechseln", 2, "tv_mode_switch_btn"),
+        ];
+        if lfg_cutover_active {
+            final_row.push(button(
+                crate::lfg_panel::LFG_BTN_PUBLISH_LANE,
+                1,
+                crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID,
+            ));
+        }
         json!([
             action_row(vec![
                 button("🇩🇪 DE", 1, "tv_region_de"),
@@ -380,10 +440,7 @@ fn main_view_components(category_id: Option<u64>) -> Value {
                 button("Trio Call (3)", 1, "tv_tpl_trio"),
                 button("👻 Lurker", 2, "tv_lurker"),
             ]),
-            action_row(vec![
-                button("✏️ Umbenennen", 2, "tv_rename_btn"),
-                button("🔄 Modus wechseln", 2, "tv_mode_switch_btn"),
-            ]),
+            action_row(final_row),
         ])
     }
 }
@@ -467,6 +524,7 @@ fn subrank_select() -> Value {
 
 struct PanelHandler {
     engine: Arc<TempVoiceEngine>,
+    lfg: Option<Arc<crate::lfg_panel::LfgPanelInterface>>,
     /// Zwischenspeicher für den ① gewählten Haupt-Rang, bis ② der Sub-Rang
     /// kommt (Port von Pythons modul-globalem `_pending_main_rank`). Per-Prozess-
     /// RAM, geht — wie im Original — bei Neustart verloren.
@@ -775,6 +833,15 @@ impl InteractionHandler for PanelHandler {
             }
 
             // ── Presets ───────────────────────────────────────────────
+            "tv_presets" => BridgeReply {
+                content: Some(crate::lfg_panel::LFG_PRESETS_SUBMENU_TEXT.to_string()),
+                components: Some(json!([{ "type": 1, "components": [
+                    button(crate::lfg_panel::LFG_PRESETS_BTN_SAVE, 3, "tv_preset_save"),
+                    button(crate::lfg_panel::LFG_PRESETS_BTN_LOAD, 1, "tv_preset_load"),
+                ]}])),
+                ephemeral: true,
+                ..BridgeReply::default()
+            },
             "tv_preset_save" => {
                 if let Err(reply) = self.owned_lane_of(&interaction).await {
                     return reply;
@@ -1078,6 +1145,19 @@ impl InteractionHandler for PanelHandler {
                 }
             }
 
+            crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(lfg) = &self.lfg else {
+                    return BridgeReply::ephemeral_text(
+                        crate::lfg_panel::LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN,
+                    );
+                };
+                lfg.handle_publish_lane_start(interaction, lane).await
+            }
+
             // ── Mindest-Rang (① Haupt-Rang → ② Sub-Rang) ──────────────
             // Wie MinRankSelect/SubRankSelectPermanent: kein Owner-Check
             // (jedes Lane-Mitglied), aber nur in Comp/Ranked-Kategorien und
@@ -1258,9 +1338,15 @@ impl InteractionHandler for PanelHandler {
 }
 
 /// Alle Panel-custom_ids am Router registrieren.
-pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
+pub fn register(
+    router: &mut InteractionRouter,
+    engine: Arc<TempVoiceEngine>,
+    lfg: Option<Arc<crate::lfg_panel::LfgPanelInterface>>,
+) {
+    let lfg_active = lfg.is_some();
     let handler = Arc::new(PanelHandler {
         engine,
+        lfg,
         pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
     for custom_id in [
@@ -1278,6 +1364,7 @@ pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
         "tv_tpl_duo",
         "tv_tpl_trio",
         "tv_tpl_reset",
+        "tv_presets",
         "tv_preset_save",
         "tv_preset_save_modal",
         "tv_preset_load",
@@ -1299,6 +1386,9 @@ pub fn register(router: &mut InteractionRouter, engine: Arc<TempVoiceEngine>) {
         "tv_subrank",
     ] {
         router.on_custom_id(custom_id, handler.clone());
+    }
+    if lfg_active {
+        router.on_custom_id(crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID, handler);
     }
 }
 
@@ -1430,6 +1520,99 @@ mod tests {
             .filter_map(|option| option["value"].as_str())
             .collect();
         assert_eq!(min_rank_options.first().copied(), Some("initiate"));
+    }
+
+    #[test]
+    fn flag_aus_ranked_panel_behaelt_preset_load_und_ohne_lfg_publish() {
+        let components = main_view_components(Some(RANKED_CATEGORY_ID), false);
+        let custom_ids: Vec<&str> = components
+            .as_array()
+            .expect("components")
+            .iter()
+            .flat_map(|row| row["components"].as_array().into_iter().flatten())
+            .filter_map(|component| component["custom_id"].as_str())
+            .collect();
+
+        assert!(custom_ids.contains(&"tv_preset_save"));
+        assert!(custom_ids.contains(&"tv_preset_load"));
+        assert!(!custom_ids.contains(&crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID));
+    }
+
+    #[test]
+    fn cutover_ranked_panel_buendelt_presets_und_zeigt_lfg_publish() {
+        let components = main_view_components(Some(RANKED_CATEGORY_ID), true);
+        let buttons: Vec<(&str, u64, &str)> = components
+            .as_array()
+            .expect("components")
+            .iter()
+            .flat_map(|row| row["components"].as_array().into_iter().flatten())
+            .filter_map(|component| {
+                Some((
+                    component["label"].as_str()?,
+                    component["style"].as_u64()?,
+                    component["custom_id"].as_str()?,
+                ))
+            })
+            .collect();
+
+        assert!(buttons
+            .iter()
+            .any(|(label, style, custom_id)| *label == "💾 Presets"
+                && *style == 2
+                && *custom_id == "tv_presets"));
+        assert!(buttons
+            .iter()
+            .any(|(_, _, custom_id)| *custom_id == crate::lfg_panel::LFG_PUBLISH_LANE_CUSTOM_ID));
+        assert!(!buttons
+            .iter()
+            .any(|(_, _, custom_id)| *custom_id == "tv_preset_load"));
+    }
+
+    #[tokio::test]
+    async fn presets_sammelbutton_oeffnet_save_und_load_untermenue() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let engine = TempVoiceEngine::new(
+            TempVoiceConfig {
+                guild_id_hint: 1,
+                staging_channels: HashSet::new(),
+                fixed_lane_ids: HashSet::new(),
+                tempvoice_categories: HashSet::new(),
+                minrank_categories: HashSet::new(),
+                ranked_category_id: 0,
+                staging_rules: HashMap::new(),
+            },
+            TempVoiceStore::new(db.pool().clone()),
+            Arc::new(ForeignLanePort),
+        );
+        let handler = PanelHandler {
+            engine,
+            lfg: None,
+            pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_presets".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(crate::lfg_panel::LFG_PRESETS_SUBMENU_TEXT)
+        );
+        let custom_ids: Vec<&str> = reply.components.as_ref().expect("components")[0]["components"]
+            .as_array()
+            .expect("buttons")
+            .iter()
+            .filter_map(|component| component["custom_id"].as_str())
+            .collect();
+        assert_eq!(custom_ids, vec!["tv_preset_save", "tv_preset_load"]);
     }
 
     #[test]
@@ -1720,6 +1903,7 @@ mod tests {
         engine.rehydrate().await;
         let handler = PanelHandler {
             engine,
+            lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
 

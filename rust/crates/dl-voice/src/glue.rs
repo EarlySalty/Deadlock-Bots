@@ -5,10 +5,11 @@ use std::{collections::HashMap, sync::Arc};
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    AutoArchiveDuration, ChannelId, CreateAllowedMentions, CreateForumPost, CreateMessage, GuildId,
-    MessageId, PermissionOverwrite, PermissionOverwriteType, PremiumTier, RoleId, UserId,
+    AutoArchiveDuration, ButtonStyle, ChannelId, CreateAllowedMentions, CreateForumPost,
+    CreateMessage, GuildId, MessageId, PermissionOverwrite, PermissionOverwriteType, PremiumTier,
+    RoleId, UserId,
 };
-use serenity::builder::{EditThread, GetMessages};
+use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread, GetMessages};
 
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
@@ -1754,7 +1755,12 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
     ) -> Result<crate::lfg_panel::LfgCreatedForumPost, String> {
         let message = CreateMessage::new()
             .content(draft.body)
-            .allowed_mentions(CreateAllowedMentions::new());
+            .allowed_mentions(CreateAllowedMentions::new())
+            .components(vec![CreateActionRow::Buttons(vec![CreateButton::new(
+                crate::lfg_panel::lfg_join_custom_id(draft.post_id),
+            )
+            .label(crate::lfg_panel::LFG_BTN_BEITRETEN)
+            .style(ButtonStyle::Success)])]);
         let builder = CreateForumPost::new(draft.title, message)
             .auto_archive_duration(AutoArchiveDuration::OneDay)
             .audit_log_reason("LFG: Forum-Post");
@@ -1791,6 +1797,76 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
             .await
             .map(|_| ())
             .map_err(|err| err.to_string())
+    }
+
+    async fn edit_forum_starter_message(
+        &self,
+        thread_id: u64,
+        starter_message_id: u64,
+        body: String,
+    ) -> Result<(), crate::lfg_panel::LfgEditError> {
+        ChannelId::new(thread_id)
+            .edit_message(
+                &self.adapter.http,
+                MessageId::new(starter_message_id),
+                EditMessage::new().content(body),
+            )
+            .await
+            .map(|_| ())
+            .map_err(lfg_edit_error_from_serenity)
+    }
+
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .voice_states
+            .get(&UserId::new(user_id))?
+            .channel_id
+            .map(|c| c.get())
+    }
+
+    async fn move_member(&self, guild_id: u64, user_id: u64, lane_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .edit_member(
+                GuildId::new(guild_id),
+                UserId::new(user_id),
+                &json!({ "channel_id": lane_id.to_string() }),
+                Some("LFG: Beitreten"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn lane_occupancy(
+        &self,
+        guild_id: u64,
+        lane_id: u64,
+    ) -> Option<crate::lfg_panel::LfgLaneOccupancy> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let channel_id = ChannelId::new(lane_id);
+        let channel = guild.channels.get(&channel_id)?;
+        let member_count = guild
+            .voice_states
+            .values()
+            .filter(|voice_state| voice_state.channel_id == Some(channel_id))
+            .count();
+        Some(crate::lfg_panel::LfgLaneOccupancy {
+            member_count: i64::try_from(member_count).ok()?,
+            user_limit: channel.user_limit.map(i64::from).unwrap_or(0),
+        })
+    }
+
+    async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
+        self.adapter
+            .cache()
+            .guild(GuildId::new(guild_id))?
+            .channels
+            .get(&ChannelId::new(channel_id))?
+            .parent_id
+            .map(|id| id.get())
     }
 }
 
@@ -2012,6 +2088,19 @@ fn rename_error_from_serenity(err: serenity::Error) -> crate::rename_queue::Rena
         }
     }
     crate::rename_queue::RenameError::from(err.to_string())
+}
+
+fn lfg_edit_error_from_serenity(err: serenity::Error) -> crate::lfg_panel::LfgEditError {
+    if let serenity::Error::Http(serenity::http::HttpError::UnsuccessfulRequest(resp)) = &err {
+        return match resp.status_code.as_u16() {
+            429 => crate::lfg_panel::LfgEditError::rate_limited(
+                SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS,
+            ),
+            404 => crate::lfg_panel::LfgEditError::NotFound(err.to_string()),
+            _ => crate::lfg_panel::LfgEditError::Other(err.to_string()),
+        };
+    }
+    crate::lfg_panel::LfgEditError::Other(err.to_string())
 }
 
 #[cfg(test)]

@@ -1,12 +1,22 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+    path::PathBuf,
+    sync::Arc,
+    time::Duration,
+};
 
+use chrono::{DateTime, Utc};
 use dl_central_db::kv;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter, ModalField, ModalSpec,
+    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, ModalField,
+    ModalSpec, VoiceEvent,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
-use sqlx::PgPool;
+use sha2::{Digest, Sha256};
+use sqlx::{PgPool, Row};
+use tokio::sync::{Mutex, Notify, RwLock};
 
 pub const LFG_GUILD_ID: u64 = crate::router::ROUTER_GUILD_ID;
 pub const LFG_PANEL_KV_NS: &str = "lfg_panel";
@@ -18,12 +28,64 @@ pub const LFG_ACCENT_GOLD: u64 = crate::router::ROUTER_ACCENT_GOLD;
 pub const LFG_BANNER_DIR: &str = "assets/welcome-banners";
 pub const LFG_PANEL_BANNER_FILENAME: &str = "router-hero.png";
 pub const LFG_CREATE_START_CUSTOM_ID: &str = "lfg:create:start";
-pub const LFG_PLACEHOLDER_TEXT: &str = "Platzhalter";
 pub const LFG_CREATE_MODE_PREFIX: &str = "lfg:create:mode:";
 pub const LFG_CREATE_MODAL_PREFIX: &str = "lfg:create:modal:";
+pub const LFG_OPEN_LANE_PREFIX: &str = "lfg:open_lane:";
+pub const LFG_JOIN_PREFIX: &str = "lfg:join:";
+pub const LFG_PUBLISH_LANE_CUSTOM_ID: &str = "lfg:publish_lane";
+pub const LFG_PUBLISH_LANE_MODAL_PREFIX: &str = "lfg:publish_lane:modal:";
 pub const LFG_FIELD_RANK_RANGE: &str = "rank_range";
 pub const LFG_FIELD_REQUESTED_SLOTS: &str = "requested_slots";
 pub const LFG_EXPIRY_HOURS: i64 = 24;
+pub const LFG_CREATING_STALE_MINUTES: i64 = 5;
+pub const LFG_RECONCILE_INTERVAL_SECONDS: u64 = 60;
+pub const LFG_EDIT_MIN_INTERVAL_SECONDS: i64 = 5;
+pub const LFG_EDIT_429_BACKOFF_SECONDS: f64 = 1.0;
+pub const LFG_STREET_BRAWL_CAP: i64 = 4;
+
+pub const LFG_PANEL_BODY: &str = "Platzhalter: panel body";
+pub const LFG_PANEL_BUTTON: &str = "Platzhalter: panel button";
+pub const LFG_MODE_PROMPT: &str = "Platzhalter: mode prompt";
+pub const LFG_MODE_BUTTON_CASUAL: &str = "Platzhalter: mode casual";
+pub const LFG_MODE_BUTTON_RANKED: &str = "Platzhalter: mode ranked";
+pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "Platzhalter: mode street brawl";
+pub const LFG_MODAL_TITEL: &str = "Platzhalter: modal titel";
+pub const LFG_MODAL_FELD_RANG_LABEL: &str = "Platzhalter: modal rang label";
+pub const LFG_MODAL_FELD_RANG_PLACEHOLDER: &str = "Platzhalter: modal rang placeholder";
+pub const LFG_MODAL_FELD_PLAETZE_LABEL: &str = "Platzhalter: modal plaetze label";
+pub const LFG_MODAL_FELD_PLAETZE_PLACEHOLDER: &str = "Platzhalter: modal plaetze placeholder";
+pub const LFG_ERR_KEIN_RANKED_RANG: &str = "Platzhalter: kein ranked rang";
+pub const LFG_ERR_RANG_UNBEKANNT: &str = "Platzhalter: rang unbekannt";
+pub const LFG_ERR_PLAETZE_UNGUELTIG: &str = "Platzhalter: plaetze ungueltig";
+pub const LFG_ERR_SCHON_AKTIVE_SUCHE: &str = "Platzhalter: schon aktive suche";
+pub const LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN: &str = "Platzhalter: erstellung fehlgeschlagen";
+pub const LFG_ERFOLG_POST_ERSTELLT: &str = "Platzhalter: post erstellt";
+pub const LFG_BTN_LANE_AUFMACHEN: &str = "Platzhalter: lane aufmachen";
+pub const LFG_POST_TITEL_SCHEMA: &str = "Platzhalter: post titel";
+pub const LFG_POST_BODY_HEADER: &str = "Platzhalter: post body";
+pub const LFG_POST_BODY_VON: &str = "Platzhalter: post von";
+pub const LFG_POST_BODY_MODUS: &str = "Platzhalter: post modus";
+pub const LFG_POST_BODY_RANG: &str = "Platzhalter: post rang";
+pub const LFG_POST_BODY_PLAETZE: &str = "Platzhalter: post plaetze";
+pub const LFG_POST_STATUS_OFFEN: &str = "Platzhalter: status offen";
+pub const LFG_POST_STATUS_VOLL: &str = "Platzhalter: status voll";
+pub const LFG_BTN_BEITRETEN: &str = "Platzhalter: beitreten";
+pub const LFG_ERR_JOIN_LANE_TOT: &str = "Platzhalter: join lane tot";
+pub const LFG_ERR_JOIN_LANE_VOLL: &str = "Platzhalter: join lane voll";
+pub const LFG_ERR_JOIN_KEIN_RANG: &str = "Platzhalter: join kein rang";
+pub const LFG_ERR_JOIN_NICHT_IN_VOICE: &str = "Platzhalter: join nicht in voice";
+pub const LFG_ERR_JOIN_EIGENER_POST: &str = "Platzhalter: join eigener post";
+pub const LFG_ERR_JOIN_SCHON_DRIN: &str = "Platzhalter: join schon drin";
+pub const LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN: &str = "Platzhalter: join move fehlgeschlagen";
+pub const LFG_ERR_OPEN_NICHT_DEIN_POST: &str = "Platzhalter: open nicht dein post";
+pub const LFG_ERR_OPEN_NICHT_IN_VOICE: &str = "Platzhalter: open nicht in voice";
+pub const LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT: &str = "Platzhalter: open lane schon verknuepft";
+pub const LFG_BTN_PUBLISH_LANE: &str = "Platzhalter: publish lane";
+pub const LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT: &str =
+    "Platzhalter: publish lane schon veroeffentlicht";
+pub const LFG_PRESETS_SUBMENU_TEXT: &str = "Platzhalter: presets submenu";
+pub const LFG_PRESETS_BTN_SAVE: &str = "Platzhalter: presets save";
+pub const LFG_PRESETS_BTN_LOAD: &str = "Platzhalter: presets load";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LfgMode {
@@ -67,6 +129,7 @@ pub struct LfgRankRange {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LfgForumPostDraft {
+    pub post_id: i64,
     pub title: String,
     pub body: String,
 }
@@ -107,6 +170,47 @@ pub struct LfgPanelMessage {
     pub custom_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LfgLaneOccupancy {
+    pub member_count: i64,
+    pub user_limit: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum LfgEditError {
+    RateLimited { retry_after_seconds: f64 },
+    NotFound(String),
+    Other(String),
+}
+
+impl LfgEditError {
+    pub fn rate_limited(retry_after_seconds: f64) -> Self {
+        Self::RateLimited {
+            retry_after_seconds,
+        }
+    }
+
+    fn retry_after_seconds(&self) -> Option<f64> {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => Some(*retry_after_seconds),
+            Self::NotFound(_) | Self::Other(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for LfgEditError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RateLimited {
+                retry_after_seconds,
+            } => write!(f, "HTTP 429 (retry_after={retry_after_seconds})"),
+            Self::NotFound(err) | Self::Other(err) => f.write_str(err),
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait LfgPanelPort: Send + Sync {
     async fn post_rich(
@@ -141,6 +245,79 @@ pub trait LfgPanelPort: Send + Sync {
     async fn first_thread_message_id(&self, thread_id: u64) -> Result<Option<u64>, String>;
 
     async fn archive_and_lock_thread(&self, thread_id: u64) -> Result<(), String>;
+
+    async fn edit_forum_starter_message(
+        &self,
+        thread_id: u64,
+        starter_message_id: u64,
+        body: String,
+    ) -> Result<(), LfgEditError>;
+
+    async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
+
+    async fn move_member(&self, guild_id: u64, user_id: u64, lane_id: u64) -> Result<(), String>;
+
+    async fn lane_occupancy(&self, guild_id: u64, lane_id: u64) -> Option<LfgLaneOccupancy>;
+
+    async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
+}
+
+#[async_trait::async_trait]
+pub trait LfgLaneSpawner: Send + Sync {
+    async fn spawn_lane_from_current_voice(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+    ) -> crate::router::RouterSpawnOutcome;
+
+    async fn cleanup_created_lane(
+        &self,
+        guild_id: u64,
+        lane_id: u64,
+        reason: &str,
+    ) -> Result<(), String>;
+}
+
+pub struct RouterLfgLaneSpawner {
+    router: Arc<crate::router::LaneRouter>,
+}
+
+impl RouterLfgLaneSpawner {
+    pub fn new(router: Arc<crate::router::LaneRouter>) -> Arc<Self> {
+        Arc::new(Self { router })
+    }
+}
+
+#[async_trait::async_trait]
+impl LfgLaneSpawner for RouterLfgLaneSpawner {
+    async fn spawn_lane_from_current_voice(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+    ) -> crate::router::RouterSpawnOutcome {
+        self.router
+            .spawn_lane_from_current_voice(guild_id, user_id, mode)
+            .await
+    }
+
+    async fn cleanup_created_lane(
+        &self,
+        guild_id: u64,
+        lane_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.router
+            .cleanup_lfg_created_lane(guild_id, lane_id, reason)
+            .await
+    }
+}
+
+#[derive(Default)]
+struct LfgEditQueue {
+    pending: Mutex<HashSet<i64>>,
+    notify: Notify,
 }
 
 pub struct LfgPanelInterface {
@@ -149,6 +326,8 @@ pub struct LfgPanelInterface {
     channel_id: Option<u64>,
     missing_channel_reason: Option<String>,
     cutover_active: bool,
+    lane_spawner: RwLock<Option<Arc<dyn LfgLaneSpawner>>>,
+    edit_queue: LfgEditQueue,
 }
 
 impl LfgPanelInterface {
@@ -177,7 +356,13 @@ impl LfgPanelInterface {
             channel_id,
             missing_channel_reason,
             cutover_active,
+            lane_spawner: RwLock::new(None),
+            edit_queue: LfgEditQueue::default(),
         })
+    }
+
+    pub async fn set_lane_spawner(&self, spawner: Arc<dyn LfgLaneSpawner>) {
+        *self.lane_spawner.write().await = Some(spawner);
     }
 
     pub async fn ensure_panel(&self) {
@@ -411,9 +596,9 @@ fn lfg_panel_body_for_attachments(attachments: &[LfgPanelAttachment]) -> Map<Str
     if !attachments.is_empty() {
         components.push(lfg_media_gallery(&attachments[0].filename));
     }
-    components.push(lfg_text_display(LFG_PLACEHOLDER_TEXT.to_string()));
+    components.push(lfg_text_display(LFG_PANEL_BODY.to_string()));
     components.push(lfg_action_row(vec![lfg_button(
-        LFG_PLACEHOLDER_TEXT,
+        LFG_PANEL_BUTTON,
         1,
         LFG_CREATE_START_CUSTOM_ID,
     )]));
@@ -495,21 +680,32 @@ fn is_not_found_error(err: &str) -> bool {
 
 fn lfg_mode_selection_components() -> Value {
     json!([{ "type": 1, "components": [
-        lfg_button(LFG_PLACEHOLDER_TEXT, 2, &LfgMode::Casual.mode_custom_id()),
-        lfg_button(LFG_PLACEHOLDER_TEXT, 1, &LfgMode::Ranked.mode_custom_id()),
-        lfg_button(LFG_PLACEHOLDER_TEXT, 2, &LfgMode::StreetBrawl.mode_custom_id()),
+        lfg_button(LFG_MODE_BUTTON_CASUAL, 2, &LfgMode::Casual.mode_custom_id()),
+        lfg_button(LFG_MODE_BUTTON_RANKED, 1, &LfgMode::Ranked.mode_custom_id()),
+        lfg_button(LFG_MODE_BUTTON_STREET_BRAWL, 2, &LfgMode::StreetBrawl.mode_custom_id()),
     ]}])
 }
 
 fn lfg_create_modal(mode: LfgMode) -> ModalSpec {
+    lfg_rank_slots_modal(mode.modal_custom_id())
+}
+
+fn lfg_publish_lane_modal(lane_id: u64, mode: LfgMode) -> ModalSpec {
+    lfg_rank_slots_modal(format!(
+        "{LFG_PUBLISH_LANE_MODAL_PREFIX}{lane_id}:{}",
+        mode.as_str()
+    ))
+}
+
+fn lfg_rank_slots_modal(custom_id: String) -> ModalSpec {
     ModalSpec {
-        custom_id: mode.modal_custom_id(),
-        title: LFG_PLACEHOLDER_TEXT.to_string(),
+        custom_id,
+        title: LFG_MODAL_TITEL.to_string(),
         fields: vec![
             ModalField {
                 custom_id: LFG_FIELD_RANK_RANGE.to_string(),
-                label: LFG_PLACEHOLDER_TEXT.to_string(),
-                placeholder: LFG_PLACEHOLDER_TEXT.to_string(),
+                label: LFG_MODAL_FELD_RANG_LABEL.to_string(),
+                placeholder: LFG_MODAL_FELD_RANG_PLACEHOLDER.to_string(),
                 required: false,
                 min_length: 0,
                 max_length: 80,
@@ -517,8 +713,8 @@ fn lfg_create_modal(mode: LfgMode) -> ModalSpec {
             },
             ModalField {
                 custom_id: LFG_FIELD_REQUESTED_SLOTS.to_string(),
-                label: LFG_PLACEHOLDER_TEXT.to_string(),
-                placeholder: LFG_PLACEHOLDER_TEXT.to_string(),
+                label: LFG_MODAL_FELD_PLAETZE_LABEL.to_string(),
+                placeholder: LFG_MODAL_FELD_PLAETZE_PLACEHOLDER.to_string(),
                 required: true,
                 min_length: 1,
                 max_length: 1,
@@ -526,6 +722,20 @@ fn lfg_create_modal(mode: LfgMode) -> ModalSpec {
             },
         ],
     }
+}
+
+fn lfg_open_lane_custom_id(post_id: i64) -> String {
+    format!("{LFG_OPEN_LANE_PREFIX}{post_id}")
+}
+
+pub fn lfg_join_custom_id(post_id: i64) -> String {
+    format!("{LFG_JOIN_PREFIX}{post_id}")
+}
+
+fn lfg_success_components(post_id: i64) -> Value {
+    json!([{ "type": 1, "components": [
+        lfg_button(LFG_BTN_LANE_AUFMACHEN, 1, &lfg_open_lane_custom_id(post_id))
+    ]}])
 }
 
 fn option_text(options: &HashMap<String, Value>, key: &str) -> String {
@@ -590,38 +800,123 @@ fn rank_name(index: i32) -> String {
     crate::tempvoice::logic::RANK_ORDER
         .get(index as usize)
         .map(|rank| crate::tempvoice::logic::capitalize(rank))
-        .unwrap_or_else(|| LFG_PLACEHOLDER_TEXT.to_string())
+        .unwrap_or_else(|| LFG_ERR_RANG_UNBEKANNT.to_string())
 }
 
 fn rank_range_label(range: LfgRankRange) -> String {
     match (range.min, range.max) {
         (Some(min), Some(max)) if min == max => rank_name(min),
         (Some(min), Some(max)) => format!("{} bis {}", rank_name(min), rank_name(max)),
-        _ => LFG_PLACEHOLDER_TEXT.to_string(),
+        _ => LFG_ERR_RANG_UNBEKANNT.to_string(),
     }
 }
 
-fn lfg_post_draft(
+fn mode_default_capacity(mode: LfgMode) -> i64 {
+    match mode {
+        LfgMode::Ranked => crate::tempvoice::logic::DEFAULT_RANKED_CAP,
+        LfgMode::StreetBrawl => LFG_STREET_BRAWL_CAP,
+        LfgMode::Casual => crate::tempvoice::logic::DEFAULT_CASUAL_CAP,
+    }
+}
+
+fn mode_from_category_id(category_id: u64) -> Option<LfgMode> {
+    if category_id == crate::router::mode_to_category("ranked") {
+        Some(LfgMode::Ranked)
+    } else if category_id == crate::router::mode_to_category("street_brawl") {
+        Some(LfgMode::StreetBrawl)
+    } else if category_id == crate::router::mode_to_category("casual") {
+        Some(LfgMode::Casual)
+    } else {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LfgRenderedCapacity {
+    free: i64,
+    total: i64,
+    full: bool,
+}
+
+fn rendered_capacity(
+    mode: LfgMode,
+    requested_slots: i32,
+    occupancy: Option<LfgLaneOccupancy>,
+) -> LfgRenderedCapacity {
+    let (occupied, total) = match occupancy {
+        Some(occupancy) => {
+            let total = if occupancy.user_limit > 0 {
+                occupancy.user_limit
+            } else {
+                mode_default_capacity(mode)
+            };
+            (occupancy.member_count.max(0), total.max(0))
+        }
+        None => (0, i64::from(requested_slots).max(0)),
+    };
+    let free = total.saturating_sub(occupied);
+    LfgRenderedCapacity {
+        free,
+        total,
+        full: total > 0 && free == 0,
+    }
+}
+
+fn lfg_post_body(
     owner_id: u64,
     mode: LfgMode,
     rank_range: LfgRankRange,
     requested_slots: i32,
+    occupancy: Option<LfgLaneOccupancy>,
+) -> String {
+    let rank_label = rank_range_label(rank_range);
+    let capacity = rendered_capacity(mode, requested_slots, occupancy);
+    [
+        LFG_POST_BODY_HEADER.to_string(),
+        format!("{LFG_POST_BODY_VON}: <@{owner_id}>"),
+        format!("{LFG_POST_BODY_MODUS}: {}", mode.as_str()),
+        format!("{LFG_POST_BODY_RANG}: {rank_label}"),
+        format!(
+            "{LFG_POST_BODY_PLAETZE}: {}/{}",
+            capacity.free, capacity.total
+        ),
+        format!(
+            "{LFG_POST_BODY_PLAETZE}: {}",
+            if capacity.full {
+                LFG_POST_STATUS_VOLL
+            } else {
+                LFG_POST_STATUS_OFFEN
+            }
+        ),
+    ]
+    .join("\n")
+}
+
+fn render_hash(body: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(body.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn lfg_post_draft(
+    post_id: i64,
+    owner_id: u64,
+    mode: LfgMode,
+    rank_range: LfgRankRange,
+    requested_slots: i32,
+    occupancy: Option<LfgLaneOccupancy>,
 ) -> LfgForumPostDraft {
     let rank_label = rank_range_label(rank_range);
     let title = format!(
-        "{LFG_PLACEHOLDER_TEXT} | {} | {rank_label} | {requested_slots}",
+        "{LFG_POST_TITEL_SCHEMA} | {} | {rank_label} | {requested_slots}",
         mode.as_str()
     );
-    let body = [
-        LFG_PLACEHOLDER_TEXT.to_string(),
-        format!("{LFG_PLACEHOLDER_TEXT}: <@{owner_id}>"),
-        format!("{LFG_PLACEHOLDER_TEXT}: {}", mode.as_str()),
-        format!("{LFG_PLACEHOLDER_TEXT}: {rank_label}"),
-        format!("{LFG_PLACEHOLDER_TEXT}: {requested_slots}"),
-        format!("{LFG_PLACEHOLDER_TEXT}: {LFG_EXPIRY_HOURS}h"),
-    ]
-    .join("\n");
-    LfgForumPostDraft { title, body }
+    let body = lfg_post_body(owner_id, mode, rank_range, requested_slots, occupancy);
+    LfgForumPostDraft {
+        post_id,
+        title,
+        body,
+    }
 }
 
 fn has_verified_rank_role(role_ids: &[u64]) -> bool {
@@ -634,10 +929,64 @@ fn discord_id_i64(id: u64, field: &str) -> Result<i64, String> {
     i64::try_from(id).map_err(|_| format!("{field} ist keine gueltige BIGINT-Discord-ID"))
 }
 
+fn db_i64_to_u64(value: i64, field: &str) -> Result<u64, String> {
+    u64::try_from(value).map_err(|_| format!("{field} ist keine gueltige Discord-ID"))
+}
+
+fn parse_i64_suffix(custom_id: &str, prefix: &str) -> Option<i64> {
+    custom_id.strip_prefix(prefix)?.parse::<i64>().ok()
+}
+
+fn parse_publish_lane_modal_id(custom_id: &str) -> Option<(u64, LfgMode)> {
+    let rest = custom_id.strip_prefix(LFG_PUBLISH_LANE_MODAL_PREFIX)?;
+    let (lane_id, mode) = rest.split_once(':')?;
+    Some((lane_id.parse().ok()?, LfgMode::from_str(mode)?))
+}
+
+fn lfg_edit_delay_from_last(now: DateTime<Utc>, last: Option<DateTime<Utc>>) -> Option<Duration> {
+    let last = last?;
+    let elapsed = now.signed_duration_since(last);
+    let min = chrono::Duration::seconds(LFG_EDIT_MIN_INTERVAL_SECONDS);
+    (elapsed < min).then(|| {
+        let remaining = (min - elapsed)
+            .to_std()
+            .unwrap_or_else(|_| Duration::from_secs(0));
+        remaining.max(Duration::from_millis(100))
+    })
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LfgReservationError {
     AlreadyOpen,
     Db(String),
+}
+
+#[derive(Debug, Clone)]
+struct LfgPostRecord {
+    id: i64,
+    guild_id: u64,
+    thread_id: Option<u64>,
+    starter_message_id: Option<u64>,
+    lane_id: Option<u64>,
+    owner_id: u64,
+    mode: LfgMode,
+    rank_range: LfgRankRange,
+    requested_slots: i32,
+    status: String,
+    last_render_hash: Option<String>,
+    last_post_edit_at: Option<DateTime<Utc>>,
+}
+
+impl LfgPostRecord {
+    fn body_with(&self, occupancy: Option<LfgLaneOccupancy>) -> String {
+        lfg_post_body(
+            self.owner_id,
+            self.mode,
+            self.rank_range,
+            self.requested_slots,
+            occupancy,
+        )
+    }
 }
 
 fn is_unique_violation(err: &sqlx::Error) -> bool {
@@ -656,7 +1005,7 @@ impl LfgPanelInterface {
 
     async fn handle_start(&self) -> BridgeReply {
         BridgeReply {
-            content: Some(LFG_PLACEHOLDER_TEXT.to_string()),
+            content: Some(LFG_MODE_PROMPT.to_string()),
             components: Some(lfg_mode_selection_components()),
             ephemeral: true,
             ..BridgeReply::default()
@@ -673,7 +1022,7 @@ impl LfgPanelInterface {
             .ranked_allowed(guild_id, interaction.user_id, mode)
             .await
         {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
         BridgeReply {
             modal: Some(lfg_create_modal(mode)),
@@ -691,25 +1040,25 @@ impl LfgPanelInterface {
             .ranked_allowed(guild_id, interaction.user_id, mode)
             .await
         {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
 
         let Some(forum_channel_id) = self.channel_id else {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         };
         let Some(requested_slots) = parse_requested_slots(&option_text(
             &interaction.options,
             LFG_FIELD_REQUESTED_SLOTS,
         )) else {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
         };
         let Some(rank_range) =
             parse_rank_range(&option_text(&interaction.options, LFG_FIELD_RANK_RANGE))
         else {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
         };
 
-        match self
+        let post_id = match self
             .reserve_lfg_post(
                 guild_id,
                 forum_channel_id,
@@ -717,12 +1066,13 @@ impl LfgPanelInterface {
                 mode,
                 rank_range,
                 requested_slots,
+                None,
             )
             .await
         {
-            Ok(()) => {}
+            Ok(post_id) => post_id,
             Err(LfgReservationError::AlreadyOpen) => {
-                return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+                return BridgeReply::ephemeral_text(LFG_ERR_SCHON_AKTIVE_SUCHE);
             }
             Err(LfgReservationError::Db(err)) => {
                 tracing::error!(
@@ -730,11 +1080,19 @@ impl LfgPanelInterface {
                     owner_id = interaction.user_id,
                     "LFG-Reservation konnte nicht erstellt werden"
                 );
-                return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
             }
-        }
+        };
 
-        let draft = lfg_post_draft(interaction.user_id, mode, rank_range, requested_slots);
+        let draft = lfg_post_draft(
+            post_id,
+            interaction.user_id,
+            mode,
+            rank_range,
+            requested_slots,
+            None,
+        );
+        let render_hash = render_hash(&draft.body);
         let created = match self.port.create_forum_post(forum_channel_id, draft).await {
             Ok(created) => created,
             Err(err) => {
@@ -744,8 +1102,8 @@ impl LfgPanelInterface {
                     thread_id = 0_u64,
                     "LFG-Forum-Post konnte nach DB-Reservation nicht erstellt werden"
                 );
-                self.delete_lfg_reservation(interaction.user_id).await;
-                return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+                self.delete_lfg_reservation(post_id).await;
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
             }
         };
         let starter_message_id = match self.port.first_thread_message_id(created.thread_id).await {
@@ -761,7 +1119,7 @@ impl LfgPanelInterface {
         };
 
         if let Err(err) = self
-            .open_lfg_post_reservation(created.thread_id, starter_message_id, interaction.user_id)
+            .open_lfg_post_reservation(post_id, created.thread_id, starter_message_id, &render_hash)
             .await
         {
             tracing::error!(
@@ -770,7 +1128,7 @@ impl LfgPanelInterface {
                 thread_id = created.thread_id,
                 "LFG-Forum-Post konnte nach Discord-Erstellung nicht persistiert werden"
             );
-            self.delete_lfg_reservation(interaction.user_id).await;
+            self.delete_lfg_reservation(post_id).await;
             if let Err(cleanup_err) = self.port.archive_and_lock_thread(created.thread_id).await {
                 tracing::error!(
                     %cleanup_err,
@@ -779,10 +1137,15 @@ impl LfgPanelInterface {
                     "LFG-Forum-Thread konnte nach Persistenzfehler nicht archiviert/gelockt werden"
                 );
             }
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         }
 
-        BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT)
+        BridgeReply {
+            content: Some(LFG_ERFOLG_POST_ERSTELLT.to_string()),
+            components: Some(lfg_success_components(post_id)),
+            ephemeral: true,
+            ..BridgeReply::default()
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -794,8 +1157,9 @@ impl LfgPanelInterface {
         mode: LfgMode,
         rank_range: LfgRankRange,
         requested_slots: i32,
-    ) -> Result<(), LfgReservationError> {
-        sqlx::query(
+        lane_id: Option<u64>,
+    ) -> Result<i64, LfgReservationError> {
+        let post_id: i64 = sqlx::query_scalar(
             "INSERT INTO voice.lfg_posts (
                  guild_id,
                  forum_channel_id,
@@ -816,9 +1180,10 @@ impl LfgPanelInterface {
                  last_post_edit_at
              )
              VALUES (
-                 $1, $2, NULL, NULL, NULL, $3, $4, $5, $6, $7, 'creating',
+                 $1, $2, NULL, NULL, $8, $3, $4, $5, $6, $7, 'creating',
                  now(), now(), now() + INTERVAL '24 hours', NULL, NULL, NULL
-             )",
+             )
+             RETURNING id",
         )
         .bind(discord_id_i64(guild_id, "guild_id").map_err(LfgReservationError::Db)?)
         .bind(
@@ -830,7 +1195,13 @@ impl LfgPanelInterface {
         .bind(rank_range.min)
         .bind(rank_range.max)
         .bind(requested_slots)
-        .execute(&self.pool)
+        .bind(
+            lane_id
+                .map(|id| discord_id_i64(id, "lane_id"))
+                .transpose()
+                .map_err(LfgReservationError::Db)?,
+        )
+        .fetch_one(&self.pool)
         .await
         .map_err(|err| {
             if is_unique_violation(&err) {
@@ -839,22 +1210,24 @@ impl LfgPanelInterface {
                 LfgReservationError::Db(err.to_string())
             }
         })?;
-        Ok(())
+        Ok(post_id)
     }
 
     async fn open_lfg_post_reservation(
         &self,
+        post_id: i64,
         thread_id: u64,
         starter_message_id: Option<u64>,
-        owner_id: u64,
+        render_hash: &str,
     ) -> Result<(), String> {
         let result = sqlx::query(
             "UPDATE voice.lfg_posts
                 SET thread_id = $1,
                     starter_message_id = $2,
                     status = 'open',
+                    last_render_hash = $4,
                     updated_at = now()
-              WHERE owner_id = $3
+              WHERE id = $3
                 AND status = 'creating'
                 AND thread_id IS NULL",
         )
@@ -864,7 +1237,8 @@ impl LfgPanelInterface {
                 .map(|id| discord_id_i64(id, "starter_message_id"))
                 .transpose()?,
         )
-        .bind(discord_id_i64(owner_id, "owner_id")?)
+        .bind(post_id)
+        .bind(render_hash)
         .execute(&self.pool)
         .await
         .map_err(|err| err.to_string())?;
@@ -877,29 +1251,709 @@ impl LfgPanelInterface {
         Ok(())
     }
 
-    async fn delete_lfg_reservation(&self, owner_id: u64) {
-        let owner_id_i64 = match discord_id_i64(owner_id, "owner_id") {
-            Ok(owner_id) => owner_id,
-            Err(err) => {
-                tracing::error!(%err, owner_id, "LFG-Reservation-Cleanup konnte owner_id nicht binden");
-                return;
-            }
-        };
+    async fn delete_lfg_reservation(&self, post_id: i64) {
         if let Err(err) = sqlx::query(
             "DELETE FROM voice.lfg_posts
-              WHERE owner_id = $1
+              WHERE id = $1
                 AND status = 'creating'
                 AND thread_id IS NULL",
         )
-        .bind(owner_id_i64)
+        .bind(post_id)
         .execute(&self.pool)
         .await
         {
             tracing::error!(
                 %err,
-                owner_id,
+                post_id,
                 "LFG-Reservation-Cleanup konnte Reservation-Row nicht loeschen"
             );
+        }
+    }
+
+    async fn load_lfg_post(&self, post_id: i64) -> Result<Option<LfgPostRecord>, String> {
+        let Some(row) = sqlx::query(
+            "SELECT id,
+                    guild_id,
+                    forum_channel_id,
+                    thread_id,
+                    starter_message_id,
+                    lane_id,
+                    owner_id,
+                    mode,
+                    rank_min,
+                    rank_max,
+                    requested_slots,
+                    status,
+                    last_render_hash,
+                    last_post_edit_at
+               FROM voice.lfg_posts
+              WHERE id = $1",
+        )
+        .bind(post_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        let mode_raw: String = row.try_get("mode").map_err(|err| err.to_string())?;
+        let Some(mode) = LfgMode::from_str(&mode_raw) else {
+            return Err(format!("unbekannter LFG-Modus `{mode_raw}`"));
+        };
+        Ok(Some(LfgPostRecord {
+            id: row.try_get("id").map_err(|err| err.to_string())?,
+            guild_id: db_i64_to_u64(
+                row.try_get("guild_id").map_err(|err| err.to_string())?,
+                "lfg_posts.guild_id",
+            )?,
+            thread_id: row
+                .try_get::<Option<i64>, _>("thread_id")
+                .map_err(|err| err.to_string())?
+                .map(|id| db_i64_to_u64(id, "lfg_posts.thread_id"))
+                .transpose()?,
+            starter_message_id: row
+                .try_get::<Option<i64>, _>("starter_message_id")
+                .map_err(|err| err.to_string())?
+                .map(|id| db_i64_to_u64(id, "lfg_posts.starter_message_id"))
+                .transpose()?,
+            lane_id: row
+                .try_get::<Option<i64>, _>("lane_id")
+                .map_err(|err| err.to_string())?
+                .map(|id| db_i64_to_u64(id, "lfg_posts.lane_id"))
+                .transpose()?,
+            owner_id: db_i64_to_u64(
+                row.try_get("owner_id").map_err(|err| err.to_string())?,
+                "lfg_posts.owner_id",
+            )?,
+            mode,
+            rank_range: LfgRankRange {
+                min: row.try_get("rank_min").map_err(|err| err.to_string())?,
+                max: row.try_get("rank_max").map_err(|err| err.to_string())?,
+            },
+            requested_slots: row
+                .try_get("requested_slots")
+                .map_err(|err| err.to_string())?,
+            status: row.try_get("status").map_err(|err| err.to_string())?,
+            last_render_hash: row
+                .try_get("last_render_hash")
+                .map_err(|err| err.to_string())?,
+            last_post_edit_at: row
+                .try_get("last_post_edit_at")
+                .map_err(|err| err.to_string())?,
+        }))
+    }
+
+    async fn update_starter_message_id(
+        &self,
+        post_id: i64,
+        starter_message_id: u64,
+    ) -> Result<(), String> {
+        sqlx::query(
+            "UPDATE voice.lfg_posts
+                SET starter_message_id = COALESCE(starter_message_id, $2),
+                    updated_at = now()
+              WHERE id = $1",
+        )
+        .bind(post_id)
+        .bind(discord_id_i64(starter_message_id, "starter_message_id")?)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }
+
+    async fn post_ids_for_lane(&self, lane_id: u64) -> Result<Vec<i64>, String> {
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT id
+               FROM voice.lfg_posts
+              WHERE status = 'open'
+                AND lane_id = $1",
+        )
+        .bind(discord_id_i64(lane_id, "lane_id")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(rows)
+    }
+
+    async fn link_post_lane(&self, post_id: i64, lane_id: u64) -> Result<bool, String> {
+        let result = sqlx::query(
+            "UPDATE voice.lfg_posts
+                SET lane_id = $2,
+                    updated_at = now()
+              WHERE id = $1
+                AND status = 'open'
+                AND lane_id IS NULL",
+        )
+        .bind(post_id)
+        .bind(discord_id_i64(lane_id, "lane_id")?)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    async fn lane_mode(&self, guild_id: u64, lane_id: u64) -> Option<LfgMode> {
+        if let Some(category_id) = self.port.channel_category(guild_id, lane_id).await {
+            return mode_from_category_id(category_id);
+        }
+        let category_id: Option<i64> = sqlx::query_scalar(
+            "SELECT category_id FROM voice.tempvoice_lanes WHERE channel_id = $1",
+        )
+        .bind(discord_id_i64(lane_id, "lane_id").ok()?)
+        .fetch_optional(&self.pool)
+        .await
+        .ok()
+        .flatten();
+        category_id
+            .and_then(|id| db_i64_to_u64(id, "tempvoice_lanes.category_id").ok())
+            .and_then(mode_from_category_id)
+    }
+
+    async fn lane_owner_and_mode(&self, lane_id: u64) -> Result<Option<(u64, LfgMode)>, String> {
+        let Some(row) = sqlx::query(
+            "SELECT guild_id, owner_id, category_id
+               FROM voice.tempvoice_lanes
+              WHERE channel_id = $1",
+        )
+        .bind(discord_id_i64(lane_id, "lane_id")?)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        let owner_id = db_i64_to_u64(
+            row.try_get("owner_id").map_err(|err| err.to_string())?,
+            "tempvoice_lanes.owner_id",
+        )?;
+        let guild_id = db_i64_to_u64(
+            row.try_get("guild_id").map_err(|err| err.to_string())?,
+            "tempvoice_lanes.guild_id",
+        )?;
+        let category_id = db_i64_to_u64(
+            row.try_get("category_id").map_err(|err| err.to_string())?,
+            "tempvoice_lanes.category_id",
+        )?;
+        let mode = self
+            .lane_mode(guild_id, lane_id)
+            .await
+            .or_else(|| mode_from_category_id(category_id));
+        Ok(mode.map(|mode| (owner_id, mode)))
+    }
+
+    pub async fn handle_publish_lane_start(
+        &self,
+        interaction: BridgeInteraction,
+        lane_id: u64,
+    ) -> BridgeReply {
+        if !self.cutover_active {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        }
+        let guild_id = if interaction.guild_id == 0 {
+            LFG_GUILD_ID
+        } else {
+            interaction.guild_id
+        };
+        let Some(mode) = self.lane_mode(guild_id, lane_id).await else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        if !self
+            .ranked_allowed(guild_id, interaction.user_id, mode)
+            .await
+        {
+            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
+        }
+        BridgeReply {
+            modal: Some(lfg_publish_lane_modal(lane_id, mode)),
+            ..BridgeReply::default()
+        }
+    }
+
+    async fn handle_publish_lane_modal(
+        &self,
+        interaction: BridgeInteraction,
+        lane_id: u64,
+        mode: LfgMode,
+    ) -> BridgeReply {
+        let Some(forum_channel_id) = self.channel_id else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        let Ok(Some((owner_id, current_mode))) = self.lane_owner_and_mode(lane_id).await else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        if current_mode != mode {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        }
+        if owner_id != interaction.user_id && !interaction.author_can_manage_channels {
+            return BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_DEIN_POST);
+        }
+        let guild_id = if interaction.guild_id == 0 {
+            LFG_GUILD_ID
+        } else {
+            interaction.guild_id
+        };
+        if !self
+            .ranked_allowed(guild_id, interaction.user_id, mode)
+            .await
+        {
+            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
+        }
+        let Some(requested_slots) = parse_requested_slots(&option_text(
+            &interaction.options,
+            LFG_FIELD_REQUESTED_SLOTS,
+        )) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
+        };
+        let Some(rank_range) =
+            parse_rank_range(&option_text(&interaction.options, LFG_FIELD_RANK_RANGE))
+        else {
+            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+        };
+        let post_id = match self
+            .reserve_lfg_post(
+                guild_id,
+                forum_channel_id,
+                owner_id,
+                mode,
+                rank_range,
+                requested_slots,
+                Some(lane_id),
+            )
+            .await
+        {
+            Ok(post_id) => post_id,
+            Err(LfgReservationError::AlreadyOpen) => {
+                return BridgeReply::ephemeral_text(LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT);
+            }
+            Err(LfgReservationError::Db(err)) => {
+                tracing::error!(%err, owner_id, lane_id, "LFG-Lane-Publish-Reservation fehlgeschlagen");
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+        };
+        let occupancy = self.port.lane_occupancy(guild_id, lane_id).await;
+        let draft = lfg_post_draft(
+            post_id,
+            owner_id,
+            mode,
+            rank_range,
+            requested_slots,
+            occupancy,
+        );
+        let body_hash = render_hash(&draft.body);
+        let created = match self.port.create_forum_post(forum_channel_id, draft).await {
+            Ok(created) => created,
+            Err(err) => {
+                tracing::error!(%err, owner_id, lane_id, "LFG-Lane-Publish-Forum-Post fehlgeschlagen");
+                self.delete_lfg_reservation(post_id).await;
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+        };
+        let starter_message_id = match self.port.first_thread_message_id(created.thread_id).await {
+            Ok(message_id) => message_id,
+            Err(err) => {
+                tracing::warn!(%err, thread_id = created.thread_id, "LFG-Starter-Message konnte nicht kontrolliert gefetcht werden");
+                None
+            }
+        };
+        if let Err(err) = self
+            .open_lfg_post_reservation(post_id, created.thread_id, starter_message_id, &body_hash)
+            .await
+        {
+            tracing::error!(%err, owner_id, lane_id, thread_id = created.thread_id, "LFG-Lane-Publish konnte nicht final persistiert werden");
+            self.delete_lfg_reservation(post_id).await;
+            if let Err(cleanup_err) = self.port.archive_and_lock_thread(created.thread_id).await {
+                tracing::error!(%cleanup_err, thread_id = created.thread_id, "LFG-Forum-Thread konnte nach Persistenzfehler nicht archiviert/gelockt werden");
+            }
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        }
+        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+    }
+
+    async fn handle_open_lane(&self, interaction: BridgeInteraction, post_id: i64) -> BridgeReply {
+        let Ok(Some(post)) = self.load_lfg_post(post_id).await else {
+            return BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_DEIN_POST);
+        };
+        if post.status != "open" || post.owner_id != interaction.user_id {
+            return BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_DEIN_POST);
+        }
+        if post.lane_id.is_some() {
+            return BridgeReply::ephemeral_text(LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT);
+        }
+        let Some(spawner) = self.lane_spawner.read().await.clone() else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        match spawner
+            .spawn_lane_from_current_voice(post.guild_id, interaction.user_id, post.mode.as_str())
+            .await
+        {
+            crate::router::RouterSpawnOutcome::Created { lane_id } => {
+                match self.link_post_lane(post_id, lane_id).await {
+                    Ok(true) => {
+                        self.enqueue_render(post_id).await;
+                        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+                    }
+                    Ok(false) => {
+                        self.cleanup_created_lane(spawner.as_ref(), post.guild_id, lane_id)
+                            .await;
+                        BridgeReply::ephemeral_text(LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT)
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, post_id, lane_id, "LFG-Post konnte nicht mit Lane verknuepft werden");
+                        self.cleanup_created_lane(spawner.as_ref(), post.guild_id, lane_id)
+                            .await;
+                        BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
+                    }
+                }
+            }
+            crate::router::RouterSpawnOutcome::NotInVoice => {
+                BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_IN_VOICE)
+            }
+            crate::router::RouterSpawnOutcome::AlreadyOwnLane { .. } => {
+                BridgeReply::ephemeral_text(LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT)
+            }
+            crate::router::RouterSpawnOutcome::RankedVerifyRequired => {
+                BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG)
+            }
+            crate::router::RouterSpawnOutcome::Cooldown { .. }
+            | crate::router::RouterSpawnOutcome::NotCreated
+            | crate::router::RouterSpawnOutcome::UnknownMode => {
+                BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
+            }
+        }
+    }
+
+    async fn cleanup_created_lane(
+        &self,
+        spawner: &dyn LfgLaneSpawner,
+        guild_id: u64,
+        lane_id: u64,
+    ) {
+        if let Err(err) = spawner
+            .cleanup_created_lane(guild_id, lane_id, "LFG: Post-Lane-Link fehlgeschlagen")
+            .await
+        {
+            tracing::warn!(%err, lane_id, "LFG: frisch erstellte Lane konnte nach Link-Fehler nicht bereinigt werden");
+        }
+    }
+
+    async fn handle_join(&self, interaction: BridgeInteraction, post_id: i64) -> BridgeReply {
+        let Ok(Some(post)) = self.load_lfg_post(post_id).await else {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_TOT);
+        };
+        if post.status != "open" {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_TOT);
+        }
+        if post.owner_id == interaction.user_id {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_EIGENER_POST);
+        }
+        let Some(lane_id) = post.lane_id else {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_TOT);
+        };
+        let Some(current_voice_channel) = self
+            .port
+            .member_voice_channel(post.guild_id, interaction.user_id)
+            .await
+        else {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_NICHT_IN_VOICE);
+        };
+        if current_voice_channel == lane_id {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_SCHON_DRIN);
+        };
+        let Some(occupancy) = self.port.lane_occupancy(post.guild_id, lane_id).await else {
+            let _ = self.close_post(post.id, "closed").await;
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_TOT);
+        };
+        let capacity = rendered_capacity(post.mode, post.requested_slots, Some(occupancy));
+        if capacity.full {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_VOLL);
+        }
+        if !self
+            .ranked_allowed(post.guild_id, interaction.user_id, post.mode)
+            .await
+        {
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_KEIN_RANG);
+        }
+        if let Err(err) = self
+            .port
+            .move_member(post.guild_id, interaction.user_id, lane_id)
+            .await
+        {
+            tracing::warn!(%err, post_id, lane_id, user_id = interaction.user_id, "LFG-Join-Move fehlgeschlagen");
+            return BridgeReply::ephemeral_text(LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN);
+        }
+        self.enqueue_render(post_id).await;
+        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+    }
+
+    pub async fn enqueue_render(&self, post_id: i64) {
+        self.edit_queue.pending.lock().await.insert(post_id);
+        self.edit_queue.notify.notify_one();
+    }
+
+    pub async fn enqueue_open_lane_posts_for_initial_render(&self) {
+        if !self.cutover_active {
+            return;
+        }
+        let post_ids = sqlx::query_scalar::<_, i64>(
+            "SELECT id
+               FROM voice.lfg_posts
+              WHERE status = 'open'
+                AND lane_id IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await;
+        match post_ids {
+            Ok(post_ids) => {
+                for post_id in post_ids {
+                    self.enqueue_render(post_id).await;
+                }
+            }
+            Err(err) => tracing::warn!(%err, "LFG-Edit-Queue: Initial-Enqueue fehlgeschlagen"),
+        }
+    }
+
+    async fn pop_pending_render(&self) -> Option<i64> {
+        let mut pending = self.edit_queue.pending.lock().await;
+        let post_id = *pending.iter().next()?;
+        pending.remove(&post_id);
+        Some(post_id)
+    }
+
+    async fn render_update_once_inner(&self, post_id: i64) -> Result<bool, LfgEditError> {
+        let Some(post) = self
+            .load_lfg_post(post_id)
+            .await
+            .map_err(LfgEditError::Other)?
+        else {
+            return Ok(false);
+        };
+        if post.status != "open" {
+            return Ok(false);
+        }
+        let Some(thread_id) = post.thread_id else {
+            return Ok(false);
+        };
+        let occupancy = match post.lane_id {
+            Some(lane_id) => match self.port.lane_occupancy(post.guild_id, lane_id).await {
+                Some(occupancy) => Some(occupancy),
+                None => return Ok(false),
+            },
+            None => None,
+        };
+        let body = post.body_with(occupancy);
+        let body_hash = render_hash(&body);
+        if post.last_render_hash.as_deref() == Some(body_hash.as_str()) {
+            return Ok(false);
+        }
+        let starter_message_id = match post.starter_message_id {
+            Some(message_id) => message_id,
+            None => {
+                let message_id = self
+                    .port
+                    .first_thread_message_id(thread_id)
+                    .await
+                    .map_err(LfgEditError::Other)?
+                    .ok_or_else(|| LfgEditError::Other("LFG-Starter-Message fehlt".to_string()))?;
+                self.update_starter_message_id(post.id, message_id)
+                    .await
+                    .map_err(LfgEditError::Other)?;
+                message_id
+            }
+        };
+        self.port
+            .edit_forum_starter_message(thread_id, starter_message_id, body)
+            .await?;
+        sqlx::query(
+            "UPDATE voice.lfg_posts
+                SET last_render_hash = $2,
+                    last_post_edit_at = now(),
+                    updated_at = now()
+              WHERE id = $1",
+        )
+        .bind(post.id)
+        .bind(body_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|err| LfgEditError::Other(err.to_string()))?;
+        Ok(true)
+    }
+
+    pub async fn render_update_once(&self, post_id: i64) -> Result<bool, String> {
+        self.render_update_once_inner(post_id)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn edit_worker(self: Arc<Self>) {
+        loop {
+            let Some(post_id) = self.pop_pending_render().await else {
+                self.edit_queue.notify.notified().await;
+                continue;
+            };
+            let last_edit = self
+                .load_lfg_post(post_id)
+                .await
+                .ok()
+                .flatten()
+                .and_then(|post| post.last_post_edit_at);
+            if let Some(delay) = lfg_edit_delay_from_last(Utc::now(), last_edit) {
+                tokio::time::sleep(delay).await;
+            }
+            match self.render_update_once_inner(post_id).await {
+                Ok(_) => {}
+                Err(err) => {
+                    if let Some(retry_after) = err.retry_after_seconds() {
+                        self.enqueue_render(post_id).await;
+                        tokio::time::sleep(Duration::from_secs_f64(retry_after.max(0.0))).await;
+                    } else {
+                        tracing::warn!(%err, post_id, "LFG-Render-Update fehlgeschlagen");
+                    }
+                }
+            }
+        }
+    }
+
+    pub async fn handle_voice_event(&self, event: VoiceEvent) {
+        if !self.cutover_active {
+            return;
+        }
+        let mut lanes = HashSet::new();
+        match event {
+            VoiceEvent::Join { channel_id, .. } | VoiceEvent::Leave { channel_id, .. } => {
+                lanes.insert(channel_id);
+            }
+            VoiceEvent::Move {
+                from_channel_id,
+                to_channel_id,
+                ..
+            } => {
+                lanes.insert(from_channel_id);
+                lanes.insert(to_channel_id);
+            }
+            VoiceEvent::Update { .. } => {}
+        }
+        for lane_id in lanes {
+            match self.post_ids_for_lane(lane_id).await {
+                Ok(post_ids) => {
+                    for post_id in post_ids {
+                        self.enqueue_render(post_id).await;
+                    }
+                }
+                Err(err) => tracing::warn!(%err, lane_id, "LFG-VoiceEvent-Mapping fehlgeschlagen"),
+            }
+        }
+    }
+
+    pub async fn close_post(&self, post_id: i64, status: &str) -> Result<(), String> {
+        let Some(post) = self.load_lfg_post(post_id).await? else {
+            return Ok(());
+        };
+        if post.status != "open" {
+            return Ok(());
+        }
+        if let Some(thread_id) = post.thread_id {
+            match self.port.archive_and_lock_thread(thread_id).await {
+                Ok(()) => {}
+                Err(err) if is_not_found_error(&err) => {
+                    tracing::debug!(%err, post_id, thread_id, "LFG-Thread bereits weg; DB-Close wird fortgesetzt");
+                }
+                Err(err) => {
+                    tracing::warn!(%err, post_id, thread_id, "LFG-Thread konnte nicht archiviert/gelockt werden; DB-Close wird fortgesetzt");
+                }
+            }
+        }
+        sqlx::query(
+            "UPDATE voice.lfg_posts
+                SET status = $2,
+                    closed_at = now(),
+                    updated_at = now()
+              WHERE id = $1
+                AND status = 'open'",
+        )
+        .bind(post_id)
+        .bind(status)
+        .execute(&self.pool)
+        .await
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }
+
+    pub async fn on_lane_deleted(&self, lane_id: u64) {
+        if !self.cutover_active {
+            return;
+        }
+        match self.post_ids_for_lane(lane_id).await {
+            Ok(post_ids) => {
+                for post_id in post_ids {
+                    if let Err(err) = self.close_post(post_id, "closed").await {
+                        tracing::warn!(%err, post_id, lane_id, "LFG-Post konnte nach Lane-Delete nicht geschlossen werden");
+                    }
+                }
+            }
+            Err(err) => tracing::warn!(%err, lane_id, "LFG-Lane-Delete-Mapping fehlgeschlagen"),
+        }
+    }
+
+    pub async fn reconcile_once(&self) {
+        if !self.cutover_active {
+            return;
+        }
+        if let Err(err) = sqlx::query(
+            "DELETE FROM voice.lfg_posts
+              WHERE status = 'creating'
+                AND created_at < now() - ($1::text || ' minutes')::interval",
+        )
+        .bind(LFG_CREATING_STALE_MINUTES.to_string())
+        .execute(&self.pool)
+        .await
+        {
+            tracing::warn!(%err, "LFG-Reconcile: stale creating cleanup fehlgeschlagen");
+        }
+
+        let dead_lane_posts = sqlx::query_scalar::<_, i64>(
+            "SELECT p.id
+               FROM voice.lfg_posts p
+               LEFT JOIN voice.tempvoice_lanes l ON l.channel_id = p.lane_id
+              WHERE p.status = 'open'
+                AND p.lane_id IS NOT NULL
+                AND l.channel_id IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await;
+        match dead_lane_posts {
+            Ok(post_ids) => {
+                for post_id in post_ids {
+                    if let Err(err) = self.close_post(post_id, "closed").await {
+                        tracing::warn!(%err, post_id, "LFG-Reconcile: Lane-toter Post konnte nicht geschlossen werden");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "LFG-Reconcile: Lane-tote Posts konnten nicht geladen werden")
+            }
+        }
+
+        let expired_posts = sqlx::query_scalar::<_, i64>(
+            "SELECT id
+               FROM voice.lfg_posts
+              WHERE status = 'open'
+                AND lane_id IS NULL
+                AND expires_at < now()",
+        )
+        .fetch_all(&self.pool)
+        .await;
+        match expired_posts {
+            Ok(post_ids) => {
+                for post_id in post_ids {
+                    if let Err(err) = self.close_post(post_id, "expired").await {
+                        tracing::warn!(%err, post_id, "LFG-Reconcile: expired Post konnte nicht geschlossen werden");
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "LFG-Reconcile: expired Posts konnten nicht geladen werden")
+            }
         }
     }
 }
@@ -908,7 +1962,7 @@ impl LfgPanelInterface {
 impl InteractionHandler for LfgPanelInterface {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         if !self.cutover_active {
-            return BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT);
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         }
         if interaction.custom_id == LFG_CREATE_START_CUSTOM_ID {
             return self.handle_start().await;
@@ -927,12 +1981,62 @@ impl InteractionHandler for LfgPanelInterface {
         {
             return self.handle_modal(interaction, mode).await;
         }
-        BridgeReply::ephemeral_text(LFG_PLACEHOLDER_TEXT)
+        if let Some((lane_id, mode)) = parse_publish_lane_modal_id(&interaction.custom_id) {
+            return self
+                .handle_publish_lane_modal(interaction, lane_id, mode)
+                .await;
+        }
+        if let Some(post_id) = parse_i64_suffix(&interaction.custom_id, LFG_OPEN_LANE_PREFIX) {
+            return self.handle_open_lane(interaction, post_id).await;
+        }
+        if let Some(post_id) = parse_i64_suffix(&interaction.custom_id, LFG_JOIN_PREFIX) {
+            return self.handle_join(interaction, post_id).await;
+        }
+        BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
     }
 }
 
 pub fn register(router: &mut InteractionRouter, interface: Arc<LfgPanelInterface>) {
-    router.on_prefix("lfg:create:", interface);
+    router.on_prefix("lfg:create:", interface.clone());
+    router.on_prefix(LFG_PUBLISH_LANE_MODAL_PREFIX, interface.clone());
+    router.on_prefix(LFG_OPEN_LANE_PREFIX, interface.clone());
+    router.on_prefix(LFG_JOIN_PREFIX, interface);
+}
+
+pub fn spawn(interface: Arc<LfgPanelInterface>, dispatcher: &Dispatcher) {
+    if !interface.cutover_active() {
+        return;
+    }
+    let mut events = dispatcher.subscribe_voice();
+    let event_interface = interface.clone();
+    tokio::spawn(async move {
+        loop {
+            match events.recv().await {
+                Ok(event) => event_interface.handle_voice_event(event).await,
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "LFG: VoiceEvents verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    });
+
+    let reconcile_interface = interface.clone();
+    tokio::spawn(async move {
+        loop {
+            reconcile_interface.reconcile_once().await;
+            tokio::time::sleep(Duration::from_secs(LFG_RECONCILE_INTERVAL_SECONDS)).await;
+        }
+    });
+
+    let initial_enqueue_interface = interface.clone();
+    tokio::spawn(async move {
+        initial_enqueue_interface
+            .enqueue_open_lane_posts_for_initial_render()
+            .await;
+    });
+
+    tokio::spawn(interface.edit_worker());
 }
 
 #[cfg(test)]
@@ -1157,7 +2261,7 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(reply.content.as_deref(), Some(LFG_MODE_PROMPT));
         let custom_ids: Vec<String> = reply.components.as_ref().expect("components")[0]
             ["components"]
             .as_array()
@@ -1199,7 +2303,10 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
+        );
         assert!(reply.components.is_none());
         assert!(reply.modal.is_none());
         assert!(port.forum_posts.lock().expect("forum posts").is_empty());
@@ -1266,7 +2373,7 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERR_KEIN_RANKED_RANG));
         assert!(reply.modal.is_none());
     }
 
@@ -1290,7 +2397,7 @@ mod tests {
 
         let modal = reply.modal.expect("modal");
         assert_eq!(modal.custom_id, LfgMode::Ranked.modal_custom_id());
-        assert_eq!(modal.title, LFG_PLACEHOLDER_TEXT);
+        assert_eq!(modal.title, LFG_MODAL_TITEL);
         assert_eq!(modal.fields.len(), 2);
         assert_eq!(modal.fields[0].custom_id, LFG_FIELD_RANK_RANGE);
         assert_eq!(modal.fields[1].custom_id, LFG_FIELD_REQUESTED_SLOTS);
@@ -1321,7 +2428,7 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERR_PLAETZE_UNGUELTIG));
         assert!(port.forum_posts.lock().expect("forum posts").is_empty());
     }
 
@@ -1353,7 +2460,7 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
         let (posted_channel_id, posted_title) = {
             let posts = port.forum_posts.lock().expect("forum posts");
             assert_eq!(posts.len(), 1);
@@ -1445,7 +2552,7 @@ mod tests {
         let second = interface.handle(interaction()).await;
 
         assert!(second.ephemeral);
-        assert_eq!(second.content.as_deref(), Some(LFG_PLACEHOLDER_TEXT));
+        assert_eq!(second.content.as_deref(), Some(LFG_ERR_SCHON_AKTIVE_SUCHE));
         assert_eq!(port.forum_posts.lock().expect("forum posts").len(), 1);
         let active_count: i64 = sqlx::query_scalar(
             "SELECT count(*)
@@ -1595,19 +2702,826 @@ mod tests {
         assert_eq!(starter_message_id, None);
     }
 
+    async fn insert_open_lfg_post(
+        pool: &PgPool,
+        owner_id: i64,
+        lane_id: Option<i64>,
+        thread_id: i64,
+        starter_message_id: Option<i64>,
+        expires_sql: &str,
+    ) -> i64 {
+        let sql = format!(
+            "INSERT INTO voice.lfg_posts (
+                 guild_id,
+                 forum_channel_id,
+                 thread_id,
+                 starter_message_id,
+                 lane_id,
+                 owner_id,
+                 mode,
+                 rank_min,
+                 rank_max,
+                 requested_slots,
+                 status,
+                 created_at,
+                 updated_at,
+                 expires_at,
+                 closed_at,
+                 last_render_hash,
+                 last_post_edit_at
+             )
+             VALUES (
+                 $1, 777, $2, $3, $4, $5, 'casual', NULL, NULL, 2, 'open',
+                 now(), now(), {expires_sql}, NULL, 'old', NULL
+             )
+             RETURNING id"
+        );
+        sqlx::query_scalar::<_, i64>(&sql)
+            .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+            .bind(thread_id)
+            .bind(starter_message_id)
+            .bind(lane_id)
+            .bind(owner_id)
+            .fetch_one(pool)
+            .await
+            .expect("insert open lfg post")
+    }
+
+    #[tokio::test]
+    async fn lfg_open_lane_verknuepft_created_lane_race_sicher() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let spawner = Arc::new(MockLfgLaneSpawner {
+            outcome: StdMutex::new(crate::router::RouterSpawnOutcome::Created { lane_id: 7777 }),
+            pool: None,
+            race_link: StdMutex::new(None),
+            drop_posts_before_return: StdMutex::new(false),
+            cleaned_lanes: StdMutex::default(),
+        });
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        interface.set_lane_spawner(spawner).await;
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            None,
+            9904,
+            Some(9905),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_open_lane_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        let lane_id: Option<i64> =
+            sqlx::query_scalar("SELECT lane_id FROM voice.lfg_posts WHERE id = $1")
+                .bind(post_id)
+                .fetch_one(&pool)
+                .await
+                .expect("lane_id");
+        assert_eq!(lane_id, Some(7777));
+    }
+
+    #[tokio::test]
+    async fn lfg_open_lane_cleanup_bei_rows_affected_race() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            None,
+            9920,
+            Some(9921),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+        let spawner = Arc::new(MockLfgLaneSpawner {
+            outcome: StdMutex::new(crate::router::RouterSpawnOutcome::Created { lane_id: 7777 }),
+            pool: Some(pool.clone()),
+            race_link: StdMutex::new(Some((post_id, 8888))),
+            drop_posts_before_return: StdMutex::new(false),
+            cleaned_lanes: StdMutex::default(),
+        });
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        interface.set_lane_spawner(spawner.clone()).await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_open_lane_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT)
+        );
+        assert_eq!(
+            spawner.cleaned_lanes.lock().expect("cleaned").as_slice(),
+            &[7777]
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_open_lane_cleanup_bei_db_err_nach_spawn() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            None,
+            9922,
+            Some(9923),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+        let spawner = Arc::new(MockLfgLaneSpawner {
+            outcome: StdMutex::new(crate::router::RouterSpawnOutcome::Created { lane_id: 7778 }),
+            pool: Some(pool.clone()),
+            race_link: StdMutex::new(None),
+            drop_posts_before_return: StdMutex::new(true),
+            cleaned_lanes: StdMutex::default(),
+        });
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        interface.set_lane_spawner(spawner.clone()).await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_open_lane_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
+        );
+        assert_eq!(
+            spawner.cleaned_lanes.lock().expect("cleaned").as_slice(),
+            &[7778]
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_join_moved_targeted_in_gemappte_lane() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.voice_channel.lock().expect("voice channel") = Some(1234);
+        port.occupancy.lock().expect("occupancy").insert(
+            5555,
+            LfgLaneOccupancy {
+                member_count: 2,
+                user_limit: 4,
+            },
+        );
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(5555),
+            9906,
+            Some(9907),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_join_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 99,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            port.moves.lock().expect("moves").as_slice(),
+            &[(LFG_GUILD_ID, 99, 5555)]
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_join_blockt_volle_lane_ohne_move() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.voice_channel.lock().expect("voice channel") = Some(1234);
+        port.occupancy.lock().expect("occupancy").insert(
+            5556,
+            LfgLaneOccupancy {
+                member_count: 4,
+                user_limit: 4,
+            },
+        );
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(5556),
+            9924,
+            Some(9925),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_join_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 99,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERR_JOIN_LANE_VOLL));
+        assert!(port.moves.lock().expect("moves").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lfg_join_blockt_user_der_schon_in_ziel_lane_ist() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.voice_channel.lock().expect("voice channel") = Some(5557);
+        port.occupancy.lock().expect("occupancy").insert(
+            5557,
+            LfgLaneOccupancy {
+                member_count: 2,
+                user_limit: 4,
+            },
+        );
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(5557),
+            9926,
+            Some(9927),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_join_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 99,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERR_JOIN_SCHON_DRIN));
+        assert!(port.moves.lock().expect("moves").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lfg_join_move_403_bleibt_ephemeral_und_rendert_nicht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.voice_channel.lock().expect("voice channel") = Some(1234);
+        *port.move_error.lock().expect("move error") = Some("HTTP 403".to_string());
+        port.occupancy.lock().expect("occupancy").insert(
+            5558,
+            LfgLaneOccupancy {
+                member_count: 2,
+                user_limit: 4,
+            },
+        );
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(5558),
+            9928,
+            Some(9929),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: lfg_join_custom_id(post_id),
+                guild_id: LFG_GUILD_ID,
+                user_id: 99,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(LFG_ERR_JOIN_MOVE_FEHLGESCHLAGEN)
+        );
+        assert_eq!(
+            port.moves.lock().expect("moves").as_slice(),
+            &[(LFG_GUILD_ID, 99, 5558)]
+        );
+        assert!(!interface.edit_queue.pending.lock().await.contains(&post_id));
+    }
+
+    #[tokio::test]
+    async fn lfg_render_update_editiert_nur_bei_hash_diff() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        port.occupancy.lock().expect("occupancy").insert(
+            6666,
+            LfgLaneOccupancy {
+                member_count: 3,
+                user_limit: 4,
+            },
+        );
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(6666),
+            9908,
+            Some(9909),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        assert!(interface.render_update_once(post_id).await.expect("render"));
+        {
+            let edits = port.starter_edits.lock().expect("starter edits");
+            assert_eq!(edits.len(), 1);
+            assert_eq!(edits[0].0, 9908);
+            assert_eq!(edits[0].1, 9909);
+            assert!(edits[0].2.contains("1/4"));
+        }
+
+        assert!(!interface
+            .render_update_once(post_id)
+            .await
+            .expect("second render"));
+        assert_eq!(port.starter_edits.lock().expect("starter edits").len(), 1);
+    }
+
+    #[tokio::test]
+    async fn lfg_publish_lane_modal_erstellt_direkt_verknuepften_post() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        sqlx::query(
+            "INSERT INTO voice.tempvoice_lanes (
+                 channel_id, guild_id, owner_id, base_name, category_id, source_staging_id, initial_owner_id
+             )
+             VALUES ($1, $2, 42, 'Chill Lane 1', $3, NULL, 42)",
+        )
+        .bind(7777_i64)
+        .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+        .bind(i64::try_from(crate::router::mode_to_category("casual")).expect("category"))
+        .execute(&pool)
+        .await
+        .expect("lane");
+        let port = Arc::new(MockLfgPanelPort::default());
+        port.categories
+            .lock()
+            .expect("categories")
+            .insert(7777, crate::router::mode_to_category("casual"));
+        port.occupancy.lock().expect("occupancy").insert(
+            7777,
+            LfgLaneOccupancy {
+                member_count: 1,
+                user_limit: 4,
+            },
+        );
+        *port.next_thread_id.lock().expect("next thread") = 9910;
+        *port.first_message_id.lock().expect("first message") = Ok(Some(9911));
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+
+        let start = interface
+            .handle_publish_lane_start(
+                BridgeInteraction {
+                    guild_id: LFG_GUILD_ID,
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                },
+                7777,
+            )
+            .await;
+        let modal = start.modal.expect("publish modal");
+        assert!(modal.custom_id.starts_with(LFG_PUBLISH_LANE_MODAL_PREFIX));
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: modal.custom_id,
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                options: HashMap::from([
+                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
+                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("2")),
+                ]),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(port.forum_posts.lock().expect("forum posts").len(), 1);
+        let lane_id: Option<i64> =
+            sqlx::query_scalar("SELECT lane_id FROM voice.lfg_posts WHERE thread_id = 9910")
+                .fetch_one(&pool)
+                .await
+                .expect("lane id");
+        assert_eq!(lane_id, Some(7777));
+    }
+
+    #[tokio::test]
+    async fn lfg_reconcile_schliesst_tote_und_expired_posts_und_loescht_stale_creating() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let dead = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(8888),
+            9912,
+            Some(9913),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+        let expired = insert_open_lfg_post(
+            &pool,
+            43,
+            None,
+            9914,
+            Some(9915),
+            "now() - INTERVAL '1 hour'",
+        )
+        .await;
+        let stale: i64 = sqlx::query_scalar(
+            "INSERT INTO voice.lfg_posts (
+                 guild_id, forum_channel_id, thread_id, starter_message_id, lane_id, owner_id,
+                 mode, rank_min, rank_max, requested_slots, status, created_at, updated_at,
+                 expires_at, closed_at, last_render_hash, last_post_edit_at
+             )
+             VALUES (
+                 $1, 777, NULL, NULL, NULL, 44, 'casual', NULL, NULL, 1, 'creating',
+                 now() - INTERVAL '10 minutes', now() - INTERVAL '10 minutes',
+                 now() + INTERVAL '24 hours', NULL, NULL, NULL
+             )
+             RETURNING id",
+        )
+        .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+        .fetch_one(&pool)
+        .await
+        .expect("stale creating");
+
+        interface.reconcile_once().await;
+
+        let dead_status: String =
+            sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+                .bind(dead)
+                .fetch_one(&pool)
+                .await
+                .expect("dead status");
+        let expired_status: String =
+            sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+                .bind(expired)
+                .fetch_one(&pool)
+                .await
+                .expect("expired status");
+        let stale_count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM voice.lfg_posts WHERE id = $1")
+                .bind(stale)
+                .fetch_one(&pool)
+                .await
+                .expect("stale count");
+        assert_eq!(dead_status, "closed");
+        assert_eq!(expired_status, "expired");
+        assert_eq!(stale_count, 0);
+        assert_eq!(
+            port.archived_threads.lock().expect("archives").as_slice(),
+            &[9912, 9914]
+        );
+    }
+
+    #[tokio::test]
+    async fn flag_aus_lane_delete_sink_macht_keine_lfg_arbeit() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new_with_channel_config(
+            pool.clone(),
+            port.clone(),
+            Some(777),
+            None,
+            false,
+        );
+        let post_id = insert_open_lfg_post(
+            &pool,
+            42,
+            Some(8890),
+            9930,
+            Some(9931),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        interface.on_lane_deleted(8890).await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+            .bind(post_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "open");
+        assert!(port
+            .archive_attempts
+            .lock()
+            .expect("archive attempts")
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn close_post_setzt_status_trotz_archive_404_und_500() {
+        for (owner_id, thread_id, err) in [
+            (50_i64, 9932_i64, "HTTP 404: Unknown Channel"),
+            (51_i64, 9934_i64, "HTTP 500: Discord kaputt"),
+        ] {
+            let db = dl_central_db::testing::test_pool()
+                .await
+                .expect("test_pool");
+            let pool = db.pool().clone();
+            let port = Arc::new(MockLfgPanelPort::default());
+            *port.archive_thread_error.lock().expect("archive error") = Some(err.to_string());
+            let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+            let post_id = insert_open_lfg_post(
+                &pool,
+                owner_id,
+                Some(8891),
+                thread_id,
+                Some(thread_id + 1),
+                "now() + INTERVAL '24 hours'",
+            )
+            .await;
+
+            interface
+                .close_post(post_id, "closed")
+                .await
+                .expect("close best effort");
+
+            let status: String =
+                sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+                    .bind(post_id)
+                    .fetch_one(&pool)
+                    .await
+                    .expect("status");
+            assert_eq!(status, "closed");
+            let new_post_id = insert_open_lfg_post(
+                &pool,
+                owner_id,
+                None,
+                thread_id + 100,
+                Some(thread_id + 101),
+                "now() + INTERVAL '24 hours'",
+            )
+            .await;
+            assert!(new_post_id > post_id);
+            assert_eq!(
+                port.archive_attempts
+                    .lock()
+                    .expect("archive attempts")
+                    .as_slice(),
+                &[thread_id as u64]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn reconcile_archive_fehler_schliesst_db_und_retryt_nicht_endlos() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.archive_thread_error.lock().expect("archive error") =
+            Some("HTTP 500: Discord kaputt".to_string());
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            52,
+            Some(8892),
+            9936,
+            Some(9937),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        interface.reconcile_once().await;
+        interface.reconcile_once().await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+            .bind(post_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "closed");
+        assert_eq!(
+            port.archive_attempts
+                .lock()
+                .expect("archive attempts")
+                .as_slice(),
+            &[9936]
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_enqueue_packt_offene_lane_posts_in_render_queue() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        let first = insert_open_lfg_post(
+            &pool,
+            53,
+            Some(8893),
+            9938,
+            Some(9939),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+        let second = insert_open_lfg_post(
+            &pool,
+            54,
+            Some(8894),
+            9940,
+            Some(9941),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+        let lane_loser = insert_open_lfg_post(
+            &pool,
+            55,
+            None,
+            9942,
+            Some(9943),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        interface.enqueue_open_lane_posts_for_initial_render().await;
+
+        let pending = interface.edit_queue.pending.lock().await;
+        assert!(pending.contains(&first));
+        assert!(pending.contains(&second));
+        assert!(!pending.contains(&lane_loser));
+    }
+
+    #[tokio::test]
+    async fn reconcile_und_lane_delete_doppelclose_bleibt_idempotent() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+        let post_id = insert_open_lfg_post(
+            &pool,
+            56,
+            Some(8895),
+            9944,
+            Some(9945),
+            "now() + INTERVAL '24 hours'",
+        )
+        .await;
+
+        interface.reconcile_once().await;
+        interface.on_lane_deleted(8895).await;
+
+        let status: String = sqlx::query_scalar("SELECT status FROM voice.lfg_posts WHERE id = $1")
+            .bind(post_id)
+            .fetch_one(&pool)
+            .await
+            .expect("status");
+        assert_eq!(status, "closed");
+        assert_eq!(
+            port.archive_attempts
+                .lock()
+                .expect("archive attempts")
+                .as_slice(),
+            &[9944]
+        );
+    }
+
     type MockPost = (u64, Map<String, Value>, Vec<LfgPanelAttachment>);
     type MockEdit = (u64, u64, Map<String, Value>, Vec<LfgPanelAttachment>);
+    type MockStarterEdit = (u64, u64, String);
+
+    struct MockLfgLaneSpawner {
+        outcome: StdMutex<crate::router::RouterSpawnOutcome>,
+        pool: Option<PgPool>,
+        race_link: StdMutex<Option<(i64, u64)>>,
+        drop_posts_before_return: StdMutex<bool>,
+        cleaned_lanes: StdMutex<Vec<u64>>,
+    }
+
+    #[async_trait::async_trait]
+    impl LfgLaneSpawner for MockLfgLaneSpawner {
+        async fn spawn_lane_from_current_voice(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _mode: &str,
+        ) -> crate::router::RouterSpawnOutcome {
+            let race_link = self.race_link.lock().expect("race link").take();
+            if let (Some(pool), Some((post_id, lane_id))) = (&self.pool, race_link) {
+                sqlx::query("UPDATE voice.lfg_posts SET lane_id = $2 WHERE id = $1")
+                    .bind(post_id)
+                    .bind(i64::try_from(lane_id).expect("lane id"))
+                    .execute(pool)
+                    .await
+                    .expect("race link");
+            }
+            let drop_posts_before_return = *self
+                .drop_posts_before_return
+                .lock()
+                .expect("drop posts before return");
+            if drop_posts_before_return {
+                if let Some(pool) = &self.pool {
+                    sqlx::query("DROP TABLE voice.lfg_posts")
+                        .execute(pool)
+                        .await
+                        .expect("drop lfg_posts");
+                }
+            }
+            self.outcome.lock().expect("outcome").clone()
+        }
+
+        async fn cleanup_created_lane(
+            &self,
+            _guild_id: u64,
+            lane_id: u64,
+            _reason: &str,
+        ) -> Result<(), String> {
+            self.cleaned_lanes.lock().expect("cleaned").push(lane_id);
+            Ok(())
+        }
+    }
 
     struct MockLfgPanelPort {
         posts: StdMutex<Vec<MockPost>>,
         edits: StdMutex<Vec<MockEdit>>,
+        starter_edits: StdMutex<Vec<MockStarterEdit>>,
         not_found_edits: StdMutex<Vec<u64>>,
         recent: StdMutex<Vec<LfgPanelMessage>>,
         roles: StdMutex<Vec<u64>>,
+        voice_channel: StdMutex<Option<u64>>,
+        moves: StdMutex<Vec<(u64, u64, u64)>>,
+        move_error: StdMutex<Option<String>>,
+        occupancy: StdMutex<HashMap<u64, LfgLaneOccupancy>>,
+        categories: StdMutex<HashMap<u64, u64>>,
         forum_posts: StdMutex<Vec<(u64, LfgForumPostDraft)>>,
         next_thread_id: StdMutex<u64>,
         first_message_id: StdMutex<Result<Option<u64>, String>>,
         create_forum_post_error: StdMutex<Option<String>>,
+        archive_attempts: StdMutex<Vec<u64>>,
         archived_threads: StdMutex<Vec<u64>>,
         archive_thread_error: StdMutex<Option<String>>,
     }
@@ -1617,13 +3531,20 @@ mod tests {
             Self {
                 posts: StdMutex::default(),
                 edits: StdMutex::default(),
+                starter_edits: StdMutex::default(),
                 not_found_edits: StdMutex::default(),
                 recent: StdMutex::default(),
                 roles: StdMutex::default(),
+                voice_channel: StdMutex::default(),
+                moves: StdMutex::default(),
+                move_error: StdMutex::default(),
+                occupancy: StdMutex::default(),
+                categories: StdMutex::default(),
                 forum_posts: StdMutex::default(),
                 next_thread_id: StdMutex::new(910_001),
                 first_message_id: StdMutex::new(Ok(None)),
                 create_forum_post_error: StdMutex::default(),
+                archive_attempts: StdMutex::default(),
                 archived_threads: StdMutex::default(),
                 archive_thread_error: StdMutex::default(),
             }
@@ -1708,6 +3629,10 @@ mod tests {
         }
 
         async fn archive_and_lock_thread(&self, thread_id: u64) -> Result<(), String> {
+            self.archive_attempts
+                .lock()
+                .expect("archive attempts")
+                .push(thread_id);
             if let Some(err) = self
                 .archive_thread_error
                 .lock()
@@ -1721,6 +3646,56 @@ mod tests {
                 .expect("archives")
                 .push(thread_id);
             Ok(())
+        }
+
+        async fn edit_forum_starter_message(
+            &self,
+            thread_id: u64,
+            starter_message_id: u64,
+            body: String,
+        ) -> Result<(), LfgEditError> {
+            self.starter_edits.lock().expect("starter edits").push((
+                thread_id,
+                starter_message_id,
+                body,
+            ));
+            Ok(())
+        }
+
+        async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
+            *self.voice_channel.lock().expect("voice channel")
+        }
+
+        async fn move_member(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            lane_id: u64,
+        ) -> Result<(), String> {
+            self.moves
+                .lock()
+                .expect("moves")
+                .push((guild_id, user_id, lane_id));
+            if let Some(err) = self.move_error.lock().expect("move error").clone() {
+                return Err(err);
+            }
+            Ok(())
+        }
+
+        async fn lane_occupancy(&self, _guild_id: u64, lane_id: u64) -> Option<LfgLaneOccupancy> {
+            self.occupancy
+                .lock()
+                .expect("occupancy")
+                .get(&lane_id)
+                .copied()
+        }
+
+        async fn channel_category(&self, _guild_id: u64, channel_id: u64) -> Option<u64> {
+            self.categories
+                .lock()
+                .expect("categories")
+                .get(&channel_id)
+                .copied()
         }
     }
 }

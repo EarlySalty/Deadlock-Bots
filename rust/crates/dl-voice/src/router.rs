@@ -850,6 +850,16 @@ impl LaneRouter {
         }
     }
 
+    pub async fn cleanup_lfg_created_lane(
+        self: &Arc<Self>,
+        _guild_id: u64,
+        lane_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.engine.cleanup_lane(lane_id, reason).await;
+        Ok(())
+    }
+
     async fn spawn_cooldown_remaining(&self, user_id: u64) -> Option<u64> {
         let now = Instant::now();
         let mut cooldowns = self.spawn_cooldowns.lock().await;
