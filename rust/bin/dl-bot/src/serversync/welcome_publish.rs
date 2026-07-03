@@ -232,10 +232,6 @@ pub const WELCOME_TEAM_ROLE_GROUPS: &[WelcomeTeamRoleGroupSpec] = &[
         aliases: &["Owner", "Server Owner", "Inhaber"],
     },
     WelcomeTeamRoleGroupSpec {
-        key: "admin",
-        aliases: &["Admin", "Administrator"],
-    },
-    WelcomeTeamRoleGroupSpec {
         key: "moderator",
         aliases: &["Moderator", "Mod"],
     },
@@ -1076,18 +1072,14 @@ fn team_message(
 
     let mut role_blocks = team_roles
         .iter()
-        .map(|role| {
-            let name = role
-                .matched_role_name
-                .as_deref()
-                .or_else(|| role.aliases.first().map(String::as_str))
-                .unwrap_or(role.key.as_str());
+        .filter_map(|role| {
+            let name = role.matched_role_name.as_deref()?;
             let members = if role.member_mentions.is_empty() {
                 texts.empty_team_role_members.clone()
             } else {
                 role.member_mentions.join(" ")
             };
-            format!("### {name}\n{members}")
+            Some(format!("### {name}\n{members}"))
         })
         .collect::<Vec<_>>();
     if role_blocks.is_empty() {
@@ -1368,7 +1360,7 @@ fn navigation_category_messages(
             .into_iter()
             .map(|channel| {
                 format!(
-                    "<#{}>\n-# {}",
+                    "<#{}>\n{}",
                     channel.channel_id,
                     channel_description(texts, &channel.name)
                 )
@@ -2357,7 +2349,10 @@ description = "Custom allgemein"
 
     #[test]
     fn welcome_bot_team_block_ist_optional_und_in_payload() {
-        let model = base_model();
+        let mut model = base_model();
+        model
+            .roles
+            .insert(40, role(40, "Owner", Permissions::empty(), 40));
         let temp = tempfile::tempdir().expect("tempdir");
         let output = build_test_output(&model, &[], temp.path(), &BTreeMap::new());
 
@@ -2365,6 +2360,8 @@ description = "Custom allgemein"
         let team = first_section(&output, "team");
         let text = serde_json::to_string(&team.payload.components).expect("team json");
         assert!(text.contains("### Owner"));
+        // Gruppen ohne existierende Live-Rolle werden nicht gerendert
+        assert!(!text.contains("### Moderator"));
         assert!(text.contains("### 🤖 Server-Management"));
         assert!(text.contains("<@999> — unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub."));
 
