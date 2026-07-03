@@ -19,6 +19,11 @@ empty_team_role_members = "aktuell unbesetzt"
 socials_intro = "Die Community gibt es auch außerhalb von Discord:"
 quickstart_intro = "Die drei wichtigsten Klicks für den Start:"
 
+# Bot-Block am Ende der Team-Sektion.
+[team]
+bot_group_title = "🤖 Server-Management"
+bot_description = "unser Bot: verwaltet Rollen, Voice-Lanes, Onboarding, Coaching und diesen Hub."
+
 # Link-Ziele der Social-Buttons.
 [urls]
 website = "https://earlysalty.com"

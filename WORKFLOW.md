@@ -1,3 +1,16 @@
+# W3.2e Components-V2-Hub (2026-07-03)
+
+## Ziel
+Welcome-Hub von Embeds auf Discord Components V2 umbauen, Team-Dedupe ergaenzen, Bot als Team-Mitglied darstellen und Storage fuer Message-Listen/Repost-Semantik erweitern. Kein Commit/Push; keine Live-Discord-Calls durch diesen Worker ausserhalb bestehender Codepfade/Tests.
+
+## Fortschritt
+- Implementierungsworker gestartet im Worktree `Deadlock-Bots-hub-polish`; Pflichtkontext `WORKFLOW.md`, `welcome_publish.rs` und Welcome-Preview-/Apply-Pfad inklusive rohem `payload_json`-Multipart gelesen.
+- Befund: Renderer ist noch Embed-basiert; Apply patcht pro Sektion anhand eines einzelnen KV-Keys und nutzt Marker-/Titel-Fallback fuer alte Embeds. REST-Pfad serialisiert aber bereits kontrolliertes JSON und Multipart-Dateien, daher fuer Components V2 geeignet.
+- Umsetzungsplan: Payload-Struct auf `flags=32768`, `allowed_mentions.parse=[]`, Components/Attachments ohne `content`/`embeds` umbauen; Navigation an Kategoriegrenzen chunkingfaehig machen; KV-Storage auf `welcome_message_id_<section>_<index>` plus `welcome_payload_format=2`; Format-/Count-Wechsel als Delete+Repost mit Quickstart-Neu-Hero-ID behandeln.
+- Implementiert im Zwischenstand: Components-V2-Renderer fuer Hero/Navigation/Team/Socials/Quickstart, Navigation-Chunking, Team-Dedupe, Bot-Team-Block aus `[team]` TOML/Defaults, indexierter KV-Storage und Repost/Patch-Entscheidung nach Format+Messageanzahl.
+- Zieltests bisher gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot welcome_publish`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`.
+- Abschluss-Verifikation gruen: `SQLX_OFFLINE=true cargo build --workspace`; `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`; `SQLX_OFFLINE=true cargo clippy -p dl-bot --all-targets -- -D warnings`; `cargo fmt --all -- --check`; `git diff --check`. Kein Commit/Push.
+
 # W3.2c Runtime-Texte TOML (2026-07-03)
 
 ## Ziel
