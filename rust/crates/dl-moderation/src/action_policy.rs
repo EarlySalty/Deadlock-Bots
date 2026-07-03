@@ -1,5 +1,7 @@
 use crate::behavior_detector::{BehaviorActionHint, BehaviorSignal, BehaviorTriggerType};
-use crate::moderation_verdict::ModerationVerdict;
+use crate::moderation_verdict::{ModerationCategory, ModerationVerdict};
+
+const SOFT_CONTENT_PROPOSAL_CONFIDENCE_FLOOR: f64 = 0.80;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ActionPolicyConfig {
@@ -116,6 +118,10 @@ impl ActionPolicy {
             };
         }
 
+        if !content_involves_high_damage(verdict) && !soft_content_is_actionable(verdict, self) {
+            return PolicyDecision::Ignore;
+        }
+
         PolicyDecision::Proposal {
             timeout_minutes: self.config.timeout_minutes,
         }
@@ -158,6 +164,30 @@ impl ActionPolicy {
             timeout_minutes: self.config.behavior_proposal_timeout_minutes,
         }
     }
+}
+
+fn content_involves_high_damage(verdict: &ModerationVerdict) -> bool {
+    verdict.analysis.category.is_high_damage() || verdict.verification.category.is_high_damage()
+}
+
+fn soft_content_is_actionable(verdict: &ModerationVerdict, policy: &ActionPolicy) -> bool {
+    if !soft_moderation_category(&verdict.analysis.category)
+        || !soft_moderation_category(&verdict.verification.category)
+    {
+        return false;
+    }
+    let threshold = policy
+        .config
+        .proposal_verified_confidence
+        .max(SOFT_CONTENT_PROPOSAL_CONFIDENCE_FLOOR);
+    verdict.analysis.confidence >= threshold && verdict.verification.confidence >= threshold
+}
+
+fn soft_moderation_category(category: &ModerationCategory) -> bool {
+    matches!(
+        category,
+        ModerationCategory::Harassment | ModerationCategory::HateSpeech
+    )
 }
 
 fn choose_strongest_outcome(
@@ -207,10 +237,18 @@ mod tests {
     };
 
     fn verdict(category: ModerationCategory, verify_confidence: f64) -> ModerationVerdict {
+        verdict_with_confidence(category, 0.91, verify_confidence)
+    }
+
+    fn verdict_with_confidence(
+        category: ModerationCategory,
+        analysis_confidence: f64,
+        verify_confidence: f64,
+    ) -> ModerationVerdict {
         ModerationVerdict {
             analysis: ContentAnalysis {
                 category: category.clone(),
-                confidence: 0.91,
+                confidence: analysis_confidence,
                 reason: "Analyzer".to_string(),
                 raw_json: "{}".to_string(),
             },
@@ -260,6 +298,20 @@ mod tests {
             PolicyDecision::Proposal {
                 timeout_minutes: 1440
             }
+        );
+    }
+
+    #[test]
+    fn policy_ignores_weak_soft_content_even_when_verifier_confirms() {
+        let policy = ActionPolicy::new(ActionPolicyConfig::default());
+
+        assert_eq!(
+            policy.decide(&verdict_with_confidence(
+                ModerationCategory::Harassment,
+                0.55,
+                0.78
+            )),
+            PolicyDecision::Ignore
         );
     }
 

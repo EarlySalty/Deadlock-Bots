@@ -990,6 +990,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn weak_hero_player_trash_talk_does_not_create_review_case() {
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"harassment","confidence":0.55,"reason":"Analyzer"}"#],
+            &[r#"{"confirmed":true,"category":"harassment","confidence":0.78,"reason":"Verifier"}"#],
+            None,
+            vec![42],
+            true,
+        )
+        .await;
+
+        moderator
+            .handle_message(&scanned_text_event(
+                103,
+                "haze spieler benutzen nicht viel von ihrem gehirn das passt so",
+            ))
+            .await;
+
+        assert_eq!(moderator.store.drafts.lock().await.len(), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
     async fn takeover_signal_creates_one_case_embed_and_deletes_only_current_message() {
         let analyzer_text = Arc::new(StaticText::default());
         let verifier_text = Arc::new(StaticText::default());

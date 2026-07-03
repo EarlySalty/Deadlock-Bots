@@ -1,3 +1,11 @@
+## #196 — Text-Moderation reagiert entspannter auf Gaming-Trash-Talk
+
+**Ausgangslage:** Der Moderationsbot hat einzelne Sprüche über Helden- oder Spielergruppen zu schnell als Belästigung vorgeschlagen. Selbst wenn die erste Einschätzung nur schwach war, reichte eine zweite Bestätigung schon für eine Mod-Karte.
+
+**Was wurde geändert:** Solche weichen Textfälle brauchen jetzt zwei klare, hohe Einschätzungen, bevor sie überhaupt bei den Mods landen. Außerdem wird dem Prüfer ausdrücklich gesagt, dass Helden-, Rollen-, Rank- und Spielergruppen-Spott im Spielkontext normaler Trash-Talk oder Ragebait ist.
+
+**Wie es jetzt läuft:** Aussagen wie „Haze-Spieler benutzen nicht viel von ihrem Gehirn" lösen keinen Review-Fall mehr aus, solange daraus kein klarer persönlicher Angriff oder echtes Hass-/Belästigungsmuster wird. Harte Fälle wie Scam, CSAM oder explizite Inhalte bleiben weiter streng.
+
 ## #195 — Neue Server-Struktur: klare Bereiche statt Kanal-Wildwuchs
 
 **Ausgangslage:** Der Server war über die Zeit auf 17 Kategorien gewuchert — Sammelbecken wie „Sonstiges", leere Alt-Kategorien und uneinheitliche Namen machten es gerade Neuen schwer, sich zurechtzufinden.
