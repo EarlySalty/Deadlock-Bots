@@ -2127,7 +2127,9 @@ fn validate_server_guide_config(
                         action.title
                     ));
                 }
-                if !everyone_can_view_and_send(model, channel_id) {
+                if action.action_type == SERVER_GUIDE_ACTION_TYPE_CHAT
+                    && !everyone_can_view_and_send(model, channel_id)
+                {
                     missing.push(format!(
                         "Action `{}`: Kanal `{channel_id}` ist nicht @everyone-sendbar",
                         action.title
@@ -4953,11 +4955,33 @@ mod tests {
             without_live_actions.blockers
         );
 
+        // deadlock-rang (6007) ist eine VIEW-Action: read-only darf NICHT blocken.
+        let mut rang_read_only = serverguide_model();
+        let rang_overwrite = PermissionOverwriteSpec {
+            guild_id: GUILD_ID,
+            key: OverwriteKey {
+                channel_id: 6007,
+                target_kind: TargetKind::Role,
+                target_id: GUILD_ID,
+            },
+            allow_bits: Permissions::VIEW_CHANNEL.bits(),
+            deny_bits: Permissions::SEND_MESSAGES.bits(),
+        };
+        rang_read_only
+            .overwrites
+            .insert(rang_overwrite.key.clone(), rang_overwrite);
+        let view_ok = build_server_guide_config(
+            &live_serverguide_config_with_action_type(0),
+            &rang_read_only,
+        );
+        assert!(view_ok.config.is_some(), "blockers: {:?}", view_ok.blockers);
+
+        // spieler-suche (6003) ist eine CHAT-Action: read-only MUSS blocken.
         let mut read_only = serverguide_model();
         let overwrite = PermissionOverwriteSpec {
             guild_id: GUILD_ID,
             key: OverwriteKey {
-                channel_id: 6007,
+                channel_id: 6003,
                 target_kind: TargetKind::Role,
                 target_id: GUILD_ID,
             },
