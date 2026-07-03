@@ -195,6 +195,20 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "discord_role_connection_tokens",
+        "user_id",
+        "core.discord_role_connection_tokens",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "discord_role_connection_sync_state",
+        "user_id",
+        "core.discord_role_connection_sync_state",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "steam_cleanup_poll_state",
         "user_id",
         "steam.steam_cleanup_poll_state",
