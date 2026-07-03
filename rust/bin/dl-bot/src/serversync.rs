@@ -398,6 +398,8 @@ struct DiscordThreadPage {
 struct DiscordThread {
     id: String,
     #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
     thread_metadata: Option<DiscordThreadMetadata>,
 }
 
@@ -878,12 +880,21 @@ impl ServerSyncService {
 
     async fn fetch_regelwerk_threads(&self) -> ServerSyncResult<Vec<u64>> {
         let mut ids = Vec::new();
+        // API v10 kennt aktive Threads nur noch guild-weit (der Kanal-Endpoint
+        // liefert 404); daher guild-weit holen und auf den Regelwerk-Kanal filtern.
         let active: DiscordThreadPage = self
             .discord_get_json(format!(
-                "{DISCORD_API_BASE}/channels/{RULES_CHANNEL_ID}/threads/active"
+                "{DISCORD_API_BASE}/guilds/{}/threads/active",
+                self.guild_id
             ))
             .await?;
-        ids.extend(thread_ids(active.threads)?);
+        let rules_channel_id = RULES_CHANNEL_ID.to_string();
+        let active_in_rules = active
+            .threads
+            .into_iter()
+            .filter(|thread| thread.parent_id.as_deref() == Some(rules_channel_id.as_str()))
+            .collect::<Vec<_>>();
+        ids.extend(thread_ids(active_in_rules)?);
 
         for endpoint in ["archived/public", "archived/private"] {
             let mut before: Option<String> = None;
