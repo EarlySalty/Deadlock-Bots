@@ -96,7 +96,7 @@ const DOCUMENTED_STRUCTURE_MOVES: &[(&str, &str)] = &[
     ("ankündigungen", CATEGORY_INFORMATION),
     ("patchnotes", CATEGORY_INFORMATION),
     ("dev-updates", CATEGORY_INFORMATION),
-    ("stream-updates", CATEGORY_INFORMATION),
+    ("streamer-updates", CATEGORY_MEDIEN),
     ("twitch", CATEGORY_INFORMATION),
     ("deadlock-streamer", CATEGORY_MEDIEN),
     ("guides-und-tipps", CATEGORY_INFORMATION),
@@ -775,7 +775,7 @@ fn documented_channel_rename(name: &str) -> Option<&'static str> {
         "ankündigungen" | "ankundigungen" => Some("📢ankündigungen"),
         "patchnotes" => Some("📝patchnotes"),
         "dev-updates" => Some("🐛dev-updates"),
-        "stream-updates" => Some("🎥stream-updates"),
+        "streamer-updates" => Some("🎥streamer-updates"),
         "twitch" | "deadlock-streamer" => Some("🎥deadlock-streamer"),
         "allgemein" => Some("🌐allgemein"),
         "off-topic" => Some("🎲off-topic"),
@@ -3134,7 +3134,7 @@ mod tests {
         );
         actual.channels.insert(
             STREAM_UPDATES,
-            channel(STREAM_UPDATES, "stream-updates", Some(CHAT_CATEGORY)),
+            channel(STREAM_UPDATES, "streamer-updates", Some(CHAT_CATEGORY)),
         );
         actual.channels.insert(
             BETA_ZUGANG,
@@ -3181,8 +3181,8 @@ mod tests {
             .channels
             .get(&STREAM_UPDATES)
             .expect("stream");
-        assert_eq!(stream.name, "🎥stream-updates");
-        assert_eq!(stream.parent_category_id, Some(EINGANGSBEREICH_CATEGORY));
+        assert_eq!(stream.name, "🎥streamer-updates");
+        assert_eq!(stream.parent_category_id, Some(MEDIEN_CATEGORY));
         assert!(
             !derived.desired.overwrites.contains_key(&OverwriteKey {
                 channel_id: STREAM_UPDATES,
