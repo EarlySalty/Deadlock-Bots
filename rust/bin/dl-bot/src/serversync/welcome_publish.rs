@@ -150,6 +150,10 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
             description: "Deine eigene Lane per Klick verwalten.",
         },
         WelcomeChannelDescription {
+            channel_key: "sprach-kanal-verwalten",
+            description: "Deine eigene Lane per Klick verwalten.",
+        },
+        WelcomeChannelDescription {
             channel_key: "anleitung",
             description: "Kurzanleitung für die Ranked-Lanes.",
         },
