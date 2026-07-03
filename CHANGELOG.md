@@ -1,10 +1,10 @@
-## #199 — Steam verknüpfen: neue Schritt-für-Schritt-Anleitung
+## #199 — Steam verknüpfen: neue Anleitung mit zwei klaren Wegen
 
-**Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich, und die neue offizielle Discord-Verknüpfung „Steam Verifiziert✅" kam darin noch gar nicht vor.
+**Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich: viel Fettdruck, und die Bot-Verknüpfung und die offizielle Discord-Verknüpfung „Steam Verifiziert✅" flossen wie ein einziger Ablauf ineinander, obwohl sie verschiedene Dinge tun.
 
-**Was wurde geändert:** Der Kanal hat jetzt eine Anleitung im Server-Look mit Banner, die dich in vier Schritten durchführt: Steam verknüpfen (kurzer Steam-Login, kein Passwort nötig), Freundschaftsanfrage annehmen, Rang-Rollen kommen automatisch — und als Abschluss holst du dir per Button das offizielle Discord-Siegel „Steam Verifiziert✅", das Discord selbst vergibt und das niemand von Hand verteilen kann. Dazu stehen klar drin, was wir nicht machen (keine Passwörter, keine Freundesliste, keine Daten an Dritte), was wir speichern und was du tust, wenn's hakt.
+**Was wurde geändert:** Die Anleitung im Server-Look mit Banner trennt jetzt sauber zwei Wege: Weg 1 über unseren Bot in drei Schritten (kurzer Steam-Login ohne Passwort, Freundschaftsanfrage annehmen, Rang-Rollen kommen automatisch) — das schaltet Rang, Lanes und Mitspieler-Suche frei. Weg 2 über Discord selbst holt dir zusätzlich das offizielle Siegel „Steam Verifiziert✅", das niemand von Hand vergeben kann. Der Text startet mit dem, was du davon hast, ist deutlich ruhiger formatiert und nutzt unsere Server-Emojis. Auch die Erinnerung per DM an Voice-Stammgäste ohne Verknüpfung erzählt jetzt dieselbe Geschichte statt der alten Text-Wand.
 
-**Wie es jetzt läuft:** Einmal durch die vier Schritte, danach hält der Server deinen Rang von selbst aktuell — und mit dem Siegel siehst du die Verknüpfung auch in deinem Discord-Profil.
+**Wie es jetzt läuft:** Weg 1 einmal durchklicken, danach hält der Server deinen Rang von selbst aktuell — Weg 2 gibt dir obendrauf das Siegel in deinem Discord-Profil.
 
 ## #198 — Voice-Lanes per Klick: das neue Router-Panel
 

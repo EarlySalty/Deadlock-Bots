@@ -3,28 +3,31 @@
 # Fehlende Felder fallen auf Compile-Defaults zurueck.
 
 [texts]
-hero_intro = """**Steam verknüpfen — Rang, Lanes & Spielersuche freischalten**
-Einmal verknüpft, erkennt der Server deinen In-Game-Rang automatisch und hält ihn aktuell — ganz ohne manuelles Nachpflegen.
+hero_intro = """**Steam verknüpfen — hol dir deinen Rang auf den Server**
+Deine Rang-Rolle, der Zugang zu den Ranked-Lanes und die Mitspieler-Suche hängen alle an einer Sache: Der Server muss wissen, wer du in Deadlock bist. Genau das erledigt die Steam-Verknüpfung — einmal einrichten, danach läuft alles von selbst.
 
-**Was bringt's?**
-- Dein Rang wird erkannt und als Rolle zugeordnet — und bleibt von selbst aktuell
-- Live-Status in den Voice-Lanes funktioniert
-- Ranked-Lanes und die Mitspieler-Suche stehen dir offen"""
-step1_title = "1️⃣ Verifizierung starten"
-step1_body = """Drück auf **Steam verknüpfen** — es folgt ein kurzer Steam-Login (OpenID, kein Passwort nötig), danach gibst du deinen Steam-Freundescode ein.
+Das bekommst du damit:
+<:eternus:1316457737621868574> Deine Rang-Rolle — dein In-Game-Rang wird erkannt und als Rolle angezeigt, immer aktuell
+<:dl_ranked:1522518271306366996> Zugang zum Ranked-Bereich — die Ranked-Lanes stehen dir offen
+<:dl_casual:1522518264088100995> Bessere Mitspieler-Suche — du findest Leute auf deinem Skill-Level, und in den Voice-Lanes sieht man live, wer gerade im Match ist
 
-**Was wir NICHT machen:** keine Passwörter oder Zugangsdaten, keine Steam-Freundesliste auslesen, keine Spielstände oder Profile einsehen, keine Daten an Dritte, keine Werbung oder Tracking.
-**Was wir speichern:** Discord-ID, SteamID64 und Rang-Daten — nur für die Server-Zuordnung. Der Code ist offen: https://github.com/NaniDerEchte2/Deadlock-Bots"""
-step2_body = """2️⃣ **Freundschaftsanfrage annehmen.** Wir schicken dir eine Anfrage in Steam — einfach annehmen, die Verifikation läuft dann automatisch. Alternativ schickst du selbst eine an den Freundescode **820142646**, wir nehmen automatisch an.
-⚠️ Bleib mit dem Bot befreundet — nur so können wir deinen Rang aktuell halten."""
-step3_body = "3️⃣ **Fertig — Rang-Rollen kommen von selbst.** Dein In-Game-Rang wird erkannt, als Rolle zugeordnet und ab da automatisch aktuell gehalten."
-step4_title = "4️⃣ Das offizielle Discord-Siegel: Steam Verifiziert"
-step4_body = """Hol dir zum Schluss die Rolle **Steam Verifiziert** — die vergibt **Discord selbst**, niemand kann sie von Hand verteilen. Klick auf **Discord-Verknüpfung herstellen**, kurzer Discord-Login, fertig.
-Alternativ geht's auch über den Servernamen oben links → **Verknüpfte Rollen**."""
+Es gibt zwei Verknüpfungen, die verschiedene Dinge tun:
+<:bebot:1371194884547023080> Weg 1 · über unseren Bot — schaltet alles oben frei. Das ist die wichtige.
+✅ Weg 2 · über Discord selbst — gibt dir zusätzlich das offizielle Siegel „Steam Verifiziert“ für dein Profil."""
+step1_title = "<:bebot:1371194884547023080> Weg 1 · Über den Bot — so bekommst du deine Rang-Rolle"
+step1_body = """Schritt 1: Drück unten auf „Steam verknüpfen“. Du meldest dich kurz bei Steam an (offizieller Steam-Login — wir sehen dein Passwort nie) und gibst danach deinen Steam-Freundescode ein.
+
+Zur Sicherheit: Wir speichern nur, was für die Zuordnung nötig ist — deine Discord-ID, deine SteamID und deine Rang-Daten. Keine Passwörter, keine Freundesliste, keine Spielstände, nichts geht an Dritte."""
+step2_body = """Schritt 2: Nimm die Freundschaftsanfrage an. Unser Bot schickt dir in Steam eine Anfrage — sobald du sie annimmst, kann er deinen Rang abrufen. Alternativ schickst du selbst eine Anfrage an den Freundescode 820142646, wir nehmen automatisch an.
+Bleib danach mit dem Bot befreundet — nur so kann er deinen Rang aktuell halten."""
+step3_body = "Schritt 3: Das war's schon. Dein Rang wird erkannt, du bekommst deine Rang-Rolle und die Ranked-Lanes öffnen sich für dich — ab jetzt bleibt alles automatisch aktuell, auch wenn du auf- oder absteigst."
+step4_title = "✅ Weg 2 · Über Discord — das Siegel „Steam Verifiziert“"
+step4_body = """Unabhängig von Weg 1: Discord selbst vergibt die Rolle „Steam Verifiziert“ — die kann niemand von Hand verteilen, sie ist der offizielle Nachweis, dass dein Steam-Account wirklich dir gehört. Drück auf „Discord-Verknüpfung herstellen“, melde dich kurz mit Discord an, fertig.
+Alternativ findest du das auch über den Servernamen oben links → Verknüpfte Rollen."""
 extras_title = "Wenn's mal hakt"
-extras_body = """- Verknüpft, aber nichts passiert? Drück einmal auf **Rang prüfen** — der Abgleich läuft sonst automatisch alle paar Minuten.
-- Rolle da, aber es klappt trotzdem nicht? Prüf die Freundschaft mit dem Bot (Freundescode **820142646**) oder sag den Mods Bescheid.
-- Mit **Freundescode eingeben** kannst du deinen Steam-Freundescode jederzeit nachtragen oder korrigieren."""
+extras_body = """- Verknüpft, aber nichts passiert? Drück einmal auf „Rang prüfen“ — sonst läuft der Abgleich automatisch alle paar Minuten.
+- Klappt es trotzdem nicht? Prüf die Steam-Freundschaft mit dem Bot (Freundescode 820142646) oder sag den Mods Bescheid.
+- Über „Freundescode eingeben“ kannst du deinen Code jederzeit nachtragen oder korrigieren."""
 
 [buttons]
 steam_open = "🔗 Steam verknüpfen"

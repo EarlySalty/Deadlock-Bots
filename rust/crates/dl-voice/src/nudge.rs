@@ -31,27 +31,16 @@ pub const NUDGE_TEST_TARGET_REQUIRED_TEXT: &str = "Bitte Ziel angeben: `!nudgese
 /// English-Only-Rolle ist ausgenommen (wie _EXEMPT_DEFAULT).
 pub const EXEMPT_ROLE_IDS: [u64; 1] = [1309741866098491479];
 
-const DM_DESCRIPTION: &str = "**Was bringt das?**\n\
-• Rang wird korrekt erkannt und auf dem Server zugeordnet\n\
-• Live-Status in den Voice Lanes funktioniert\n\
-• Spielersuche funktioniert richtig für dich\n\n\
-**So funktioniert's:**\n\
-1. Du meldest dich kurz bei Steam an (OpenID - kein Passwort nötig)\n\
-2. Du gibst deinen Steam-Freundescode ein\n\
-3. Wir schicken dir eine Freundschaftsanfrage - einfach annehmen\n\
-4. Fertig! Du bist verifiziert\n\n\
-**Was wir NICHT machen:**\n\
-❌ Keine Passwörter oder Zugangsdaten\n\
-❌ Keine Steam-Freundschaftsliste auslesen\n\
-❌ Keine Spielstände oder Profile einsehen\n\
-❌ Keine Daten an Dritte weitergeben\n\
-❌ Keine Werbung oder Tracking\n\n\
-**Was wir speichern:**\n\
-✓ Discord-ID (damit wir dich zuordnen können)\n\
-✓ SteamID64 (technische ID von Steam)\n\
-✓ Rang-Daten (nur zur Server-Zuordnung)\n\n\
-**Open Source:**\n\
-<https://github.com/NaniDerEchte2/Deadlock-Bots>";
+const DM_DESCRIPTION: &str = "Du bist öfter in unseren Voice-Lanes unterwegs — sehr nice! Eine Sache fehlt dir noch: die Steam-Verknüpfung. Damit weiß der Server, wer du in Deadlock bist, und du bekommst einiges dazu:\n\n\
+<:eternus:1316457737621868574> Deine Rang-Rolle — dein In-Game-Rang, immer aktuell\n\
+<:dl_ranked:1522518271306366996> Zugang zum Ranked-Bereich — die Ranked-Lanes stehen dir offen\n\
+<:dl_casual:1522518264088100995> Bessere Mitspieler-Suche — du findest Leute auf deinem Skill-Level\n\n\
+So geht's — dauert etwa eine Minute:\n\
+1. Drück unten auf „Mit Steam anmelden“ (offizieller Steam-Login — wir sehen dein Passwort nie)\n\
+2. Gib deinen Steam-Freundescode ein\n\
+3. Nimm unsere Freundschaftsanfrage in Steam an\n\
+4. Fertig — Rang-Rolle und Ranked-Lanes schalten sich automatisch frei\n\n\
+Zur Sicherheit: Wir speichern nur deine Discord-ID, SteamID und Rang-Daten — keine Passwörter, keine Freundesliste, nichts geht an Dritte.";
 
 /// Discord-Seite des Nudges (Tests mocken sie).
 #[async_trait::async_trait]
@@ -282,17 +271,17 @@ impl VoiceNudge {
             );
         }
         let embed = json!({
-            "title": "Steam-Verknüpfung empfohlen 🔗",
+            "title": "Hol dir deinen Rang auf den Server",
             "description": description,
             "color": 0x5865F2,
             "footer": { "text": "Kurzbefehle: /account_verknüpfen · /steam unlink · /steam setprimary" },
         });
         let steam_button = match &steam_url {
             Some(url) => {
-                json!({ "type": 2, "style": 5, "label": "Mit Steam anmelden", "emoji": {"name": "🎮"}, "url": url })
+                json!({ "type": 2, "style": 5, "label": "Mit Steam anmelden", "emoji": {"name": "bebot", "id": "1371194884547023080"}, "url": url })
             }
             None => {
-                json!({ "type": 2, "style": 2, "label": "Mit Steam anmelden", "emoji": {"name": "🎮"}, "disabled": true, "custom_id": "nudge_steam_disabled" })
+                json!({ "type": 2, "style": 2, "label": "Mit Steam anmelden", "emoji": {"name": "bebot", "id": "1371194884547023080"}, "disabled": true, "custom_id": "nudge_steam_disabled" })
             }
         };
         let components = json!([
