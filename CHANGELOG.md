@@ -4,7 +4,7 @@
 
 **Was wurde geändert:** Rang und Plätze wählst du jetzt per Dropdown. Nach dem Modus kommt ein „Von"- und ein „Bis"-Menü mit allen Rängen (samt Rang-Emojis) plus die freien Plätze — kein Tippen mehr, keine Tippfehler. „Von = Bis" heißt genau ein Rang, „Rang egal" lässt's offen.
 
-**Wie es jetzt läuft:** Modus wählen → Von/Bis-Rang und Plätze anklicken → **Gesuch posten**. Die Filter-Tags kommen wie gehabt automatisch aus deiner Auswahl.
+**Wie es jetzt läuft:** Modus wählen → Von/Bis-Rang und Plätze anklicken → **Suche veröffentlichen**. Die Filter-Tags kommen wie gehabt automatisch aus deiner Auswahl.
 
 ## #204 — Ranked-Lanes & -Gesuche erkennen deinen Rang wieder
 

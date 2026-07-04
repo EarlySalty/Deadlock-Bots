@@ -1,3 +1,23 @@
+# LFG Dropdown Polish (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/lfg-dropdown-polish`; Vorgabe aus Claude-Worker-Regeln: kein Commit/Push, Claude reviewt/deployt.
+- Pflichtkontext `WORKFLOW.md` gelesen; relevante Stellen in `rust/crates/dl-voice/src/lfg_panel.rs` identifiziert: Draft-Selects, Draft-Content, `handle_mode`, `handle_post_draft`, KV-Nutzung und bestehende Tests.
+- Umgesetzt: frische Rang-Selects ohne Default-Option, Live-Draft-Zusammenfassung, Buttonlabel `Suche veröffentlichen`, per-User-KV-Preset mit tolerantem Load/Save und Slot-Clamp pro Modus.
+- Tests ergaenzt fuer keine frischen Select-Defaults, Content `Archon → Phantom` und KV-Preset-Roundtrip mit Street-Brawl-Clamp.
+
+## Verifikation aktuell
+- Gruen: `cd rust && cargo fmt --all`.
+- Rot (Befehlsfehler): `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_preset_roundtrip lfg_draft_content_zeigt_live_zusammenfassung_mit_rangrichtung lfg_ranked_mode_mit_rankrolle_rendert_select_draft -- --nocapture` (`cargo test` akzeptiert nur einen Filter).
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_ -- --nocapture` (43 passed, 0 failed, 125 filtered out; bekannte TestDb-Pool-Close-Warnungen).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo clippy -p dl-voice --all-targets` (0 Warnings/Errors).
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice` (168 passed, 0 failed, 0 ignored; Doc-tests 0).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo build --release -p dl-bot`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Keine bekannten offenen Punkte; kein Commit/Push ausgefuehrt.
+
 # LFG Rang-Dropdowns mit Emojis (2026-07-04)
 
 ## Fortschritt

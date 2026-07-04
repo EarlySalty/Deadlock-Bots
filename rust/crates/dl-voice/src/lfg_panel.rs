@@ -11,7 +11,7 @@ use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Row};
@@ -19,6 +19,7 @@ use tokio::sync::{Mutex, Notify, RwLock};
 
 pub const LFG_GUILD_ID: u64 = crate::router::ROUTER_GUILD_ID;
 pub const LFG_PANEL_KV_NS: &str = "lfg_panel";
+pub const LFG_USER_PREF_KV_NS: &str = "lfg_user_pref";
 pub const LFG_PANEL_MESSAGE_KEY: &str = "components_v2_message_id";
 pub const LFG_PAYLOAD_FORMAT_KEY: &str = "payload_format";
 pub const LFG_PAYLOAD_FORMAT: &str = "components_v2";
@@ -68,12 +69,12 @@ pub const LFG_RANK_TO_PLACEHOLDER: &str = "Bis welchem Rang? (optional)";
 pub const LFG_SLOTS_PLACEHOLDER: &str = "Wie viele Plätze frei?";
 pub const LFG_RANK_ANY_LABEL: &str = "Rang egal";
 pub const LFG_RANK_ANY_VALUE: &str = "egal";
-pub const LFG_BTN_POSTEN: &str = "Gesuch posten";
+pub const LFG_BTN_POSTEN: &str = "Suche veröffentlichen";
 pub const LFG_ERR_KEIN_RANKED_RANG: &str = "Für Ranked brauchst du einen verifizierten Rang. Verknüpf dein Steam-Konto in <#1398021105339334666>, dann geht's hier weiter.";
 pub const LFG_ERR_RANG_UNBEKANNT: &str =
     "Wähl deinen Rang oben aus der Liste — oder lass ihn auf „Rang egal“.";
 pub const LFG_ERR_PLAETZE_UNGUELTIG: &str =
-    "Wähl oben aus, wie viele Plätze frei sind, dann klick auf „Gesuch posten“.";
+    "Wähl oben aus, wie viele Plätze frei sind, dann klick auf „Suche veröffentlichen“.";
 pub const LFG_ERR_SCHON_AKTIVE_SUCHE: &str =
     "Du hast schon ein laufendes Gesuch. Schließ das erst, bevor du ein neues aufmachst.";
 pub const LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN: &str =
@@ -180,6 +181,38 @@ impl LfgDraft {
             slots: None,
             lane_id,
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct LfgUserPreset {
+    rank_from: Option<String>,
+    rank_to: Option<String>,
+    slots: Option<i32>,
+}
+
+impl LfgUserPreset {
+    fn from_draft(draft: &LfgDraft) -> Self {
+        Self {
+            rank_from: draft.rank_from.clone(),
+            rank_to: draft.rank_to.clone(),
+            slots: draft.slots,
+        }
+    }
+
+    fn into_draft(self, mode: LfgMode) -> Option<LfgDraft> {
+        let rank_from = normalize_preset_rank(self.rank_from)?;
+        let rank_to = normalize_preset_rank(self.rank_to)?;
+        let slots = self
+            .slots
+            .map(|slots| slots.clamp(1, slot_select_cap(mode)));
+        Some(LfgDraft {
+            mode,
+            rank_from,
+            rank_to,
+            slots,
+            lane_id: None,
+        })
     }
 }
 
@@ -982,14 +1015,13 @@ fn lfg_rank_select_option_json(
 }
 
 fn lfg_rank_select(custom_id: &str, placeholder: &str, current: Option<&str>) -> Value {
-    let current = current.unwrap_or(LFG_RANK_ANY_VALUE);
     let mut options = Vec::with_capacity(LFG_RANK_SELECT_OPTIONS.len() + 1);
     options.push(lfg_rank_select_option_json(
         LFG_RANK_ANY_LABEL,
         LFG_RANK_ANY_VALUE,
         "dl_rang_egal",
         "1522801043803472064",
-        current == LFG_RANK_ANY_VALUE,
+        false,
     ));
     options.extend(LFG_RANK_SELECT_OPTIONS.iter().map(|rank| {
         lfg_rank_select_option_json(
@@ -997,7 +1029,7 @@ fn lfg_rank_select(custom_id: &str, placeholder: &str, current: Option<&str>) ->
             rank.value,
             rank.emoji_name,
             rank.emoji_id,
-            current == rank.value,
+            current == Some(rank.value),
         )
     }));
     json!({
@@ -1067,16 +1099,63 @@ fn lfg_draft_components(draft: &LfgDraft) -> Value {
     ])
 }
 
-fn lfg_draft_content(mode: LfgMode) -> String {
+fn lfg_rank_label_from_index(index: i32) -> String {
+    LFG_RANK_SELECT_OPTIONS
+        .iter()
+        .find(|rank| {
+            i32::try_from(crate::tempvoice::logic::rank_index(rank.value)).ok() == Some(index)
+        })
+        .map(|rank| rank.label.to_string())
+        .unwrap_or_else(|| rank_name(index))
+}
+
+fn lfg_draft_rank_summary(draft: &LfgDraft) -> String {
+    let Some(range) = lfg_rank_range_from_draft(draft) else {
+        return LFG_RANK_ANY_LABEL.to_string();
+    };
+    match (draft.rank_from.as_deref(), draft.rank_to.as_deref()) {
+        (None, None) => LFG_RANK_ANY_LABEL.to_string(),
+        (Some(_), None) => match range.min {
+            Some(min) => format!("ab {}", lfg_rank_label_from_index(min)),
+            None => LFG_RANK_ANY_LABEL.to_string(),
+        },
+        (None, Some(_)) => match range.max {
+            Some(max) => format!("bis {}", lfg_rank_label_from_index(max)),
+            None => LFG_RANK_ANY_LABEL.to_string(),
+        },
+        (Some(_), Some(_)) => match (range.min, range.max) {
+            (Some(min), Some(max)) => format!(
+                "{} → {}",
+                lfg_rank_label_from_index(min),
+                lfg_rank_label_from_index(max)
+            ),
+            (Some(min), None) => format!("ab {}", lfg_rank_label_from_index(min)),
+            (None, Some(max)) => format!("bis {}", lfg_rank_label_from_index(max)),
+            (None, None) => LFG_RANK_ANY_LABEL.to_string(),
+        },
+    }
+}
+
+fn lfg_draft_slots_summary(slots: Option<i32>) -> String {
+    match slots {
+        None => "Plätze offen".to_string(),
+        Some(1) => "1 Platz".to_string(),
+        Some(slots) => format!("{slots} Plätze"),
+    }
+}
+
+fn lfg_draft_content(draft: &LfgDraft) -> String {
     format!(
-        "Modus: {} · wähl Rang-Bereich und freie Plätze, dann **Gesuch posten**.",
-        mode.display_name()
+        "**{}** · {} · {}\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**.",
+        draft.mode.display_name(),
+        lfg_draft_rank_summary(draft),
+        lfg_draft_slots_summary(draft.slots)
     )
 }
 
 fn lfg_draft_reply(draft: &LfgDraft, update_message: bool) -> BridgeReply {
     BridgeReply {
-        content: Some(lfg_draft_content(draft.mode)),
+        content: Some(lfg_draft_content(draft)),
         components: Some(lfg_draft_components(draft)),
         ephemeral: !update_message,
         update_message,
@@ -1097,6 +1176,13 @@ fn normalize_lfg_rank_value(raw: &str) -> Option<Option<String>> {
         return Some(None);
     }
     (crate::tempvoice::logic::rank_index(&normalized) > 0).then_some(Some(normalized))
+}
+
+fn normalize_preset_rank(raw: Option<String>) -> Option<Option<String>> {
+    match raw {
+        Some(raw) => normalize_lfg_rank_value(&raw),
+        None => Some(None),
+    }
 }
 
 fn lfg_rank_value_index(value: Option<&str>) -> Option<Option<i32>> {
@@ -1489,6 +1575,49 @@ impl LfgPanelInterface {
         }
     }
 
+    async fn load_user_preset_draft(&self, user_id: u64, mode: LfgMode) -> LfgDraft {
+        let key = user_id.to_string();
+        let raw = match kv::get(&self.pool, LFG_USER_PREF_KV_NS, &key).await {
+            Ok(Some(raw)) => raw,
+            Ok(None) => return LfgDraft::new(mode, None),
+            Err(err) => {
+                tracing::warn!(%err, user_id, "LFG-Preset konnte nicht geladen werden");
+                return LfgDraft::new(mode, None);
+            }
+        };
+        match serde_json::from_str::<LfgUserPreset>(&raw)
+            .ok()
+            .and_then(|preset| preset.into_draft(mode))
+        {
+            Some(draft) => draft,
+            None => {
+                tracing::warn!(user_id, "LFG-Preset konnte nicht geparst werden");
+                LfgDraft::new(mode, None)
+            }
+        }
+    }
+
+    async fn save_user_preset(&self, user_id: u64, draft: &LfgDraft) {
+        let preset = LfgUserPreset::from_draft(draft);
+        let value = match serde_json::to_string(&preset) {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "LFG-Preset konnte nicht serialisiert werden");
+                return;
+            }
+        };
+        if let Err(err) = kv::set(
+            &self.pool,
+            LFG_USER_PREF_KV_NS,
+            &user_id.to_string(),
+            &value,
+        )
+        .await
+        {
+            tracing::warn!(%err, user_id, "LFG-Preset konnte nicht gespeichert werden");
+        }
+    }
+
     async fn handle_mode(&self, interaction: BridgeInteraction, mode: LfgMode) -> BridgeReply {
         let guild_id = if interaction.guild_id == 0 {
             LFG_GUILD_ID
@@ -1498,7 +1627,7 @@ impl LfgPanelInterface {
         if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
-        let draft = LfgDraft::new(mode, None);
+        let draft = self.load_user_preset_draft(interaction.user_id, mode).await;
         self.pending_drafts
             .lock()
             .await
@@ -1615,6 +1744,9 @@ impl LfgPanelInterface {
                 return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
             }
         };
+        if draft.lane_id.is_none() {
+            self.save_user_preset(interaction.user_id, &draft).await;
+        }
         self.pending_drafts
             .lock()
             .await
@@ -2630,6 +2762,28 @@ mod tests {
         assert!(slots.update_message);
     }
 
+    fn assert_select_has_no_default(row: &Value) {
+        let options = row["components"][0]["options"]
+            .as_array()
+            .expect("select options");
+        assert!(
+            options.iter().all(|option| option["default"] != true),
+            "fresh select must not preselect an option: {options:?}"
+        );
+    }
+
+    fn assert_select_default_value(row: &Value, expected: &str) {
+        let options = row["components"][0]["options"]
+            .as_array()
+            .expect("select options");
+        let defaults = options
+            .iter()
+            .filter_map(|option| (option["default"] == true).then_some(option["value"].as_str()))
+            .flatten()
+            .collect::<Vec<_>>();
+        assert_eq!(defaults, vec![expected]);
+    }
+
     #[test]
     fn lfg_panel_body_ist_components_v2_mit_start_button_und_banner() {
         let attachments = lfg_panel_attachments();
@@ -3186,6 +3340,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lfg_draft_content_zeigt_live_zusammenfassung_mit_rangrichtung() {
+        let mut draft = LfgDraft::new(LfgMode::Ranked, None);
+        draft.rank_from = Some("archon".to_string());
+        draft.rank_to = Some("phantom".to_string());
+        draft.slots = Some(3);
+
+        assert_eq!(
+            lfg_draft_content(&draft),
+            "**Ranked** · Archon → Phantom · 3 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+        );
+    }
+
     #[tokio::test]
     async fn lfg_ranked_mode_ohne_rankrolle_blockt_ephemeral() {
         let db = dl_central_db::testing::test_pool()
@@ -3230,7 +3397,9 @@ mod tests {
         assert!(reply.modal.is_none());
         assert_eq!(
             reply.content.as_deref(),
-            Some("Modus: Ranked · wähl Rang-Bereich und freie Plätze, dann **Gesuch posten**.")
+            Some(
+                "**Ranked** · Rang egal · Plätze offen\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+            )
         );
         let rows = reply
             .components
@@ -3251,6 +3420,9 @@ mod tests {
             rows[2]["components"][0]["placeholder"],
             LFG_SLOTS_PLACEHOLDER
         );
+        assert_select_has_no_default(&rows[0]);
+        assert_select_has_no_default(&rows[1]);
+        assert_select_has_no_default(&rows[2]);
         let rank_options = rows[0]["components"][0]["options"]
             .as_array()
             .expect("rank options");
@@ -3403,6 +3575,75 @@ mod tests {
         .await
         .expect("expires diff");
         assert!((expires_in_hours - LFG_EXPIRY_HOURS as f64).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn lfg_preset_roundtrip_speichert_nach_post_und_laedt_neuen_draft_geclamped() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.next_thread_id.lock().expect("next thread") = 9950;
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        let user_id = 47;
+
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), user_id))
+            .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, user_id, "archon", "phantom", "5").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, user_id).await;
+        assert!(reply.update_message);
+
+        let raw = dl_central_db::kv::get(&pool, LFG_USER_PREF_KV_NS, &user_id.to_string())
+            .await
+            .expect("preset kv")
+            .expect("stored preset");
+        let saved: Value = serde_json::from_str(&raw).expect("preset json");
+        assert_eq!(
+            saved,
+            json!({
+                "rank_from": "archon",
+                "rank_to": "phantom",
+                "slots": 5,
+            })
+        );
+
+        let reopened = interface
+            .handle(lfg_interaction(
+                LfgMode::StreetBrawl.mode_custom_id(),
+                user_id,
+            ))
+            .await;
+        assert!(reopened.update_message);
+        assert_eq!(
+            reopened.content.as_deref(),
+            Some(
+                "**Street Brawl** · Archon → Phantom · 4 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+            )
+        );
+        let rows = reopened
+            .components
+            .as_ref()
+            .expect("components")
+            .as_array()
+            .expect("component rows");
+        assert_select_default_value(&rows[0], "archon");
+        assert_select_default_value(&rows[1], "phantom");
+        assert_select_default_value(&rows[2], "4");
+
+        let stored_draft = interface
+            .pending_drafts
+            .lock()
+            .await
+            .get(&user_id)
+            .cloned()
+            .expect("stored draft");
+        assert_eq!(stored_draft.rank_from.as_deref(), Some("archon"));
+        assert_eq!(stored_draft.rank_to.as_deref(), Some("phantom"));
+        assert_eq!(stored_draft.slots, Some(4));
+        assert_eq!(stored_draft.lane_id, None);
     }
 
     #[tokio::test]
