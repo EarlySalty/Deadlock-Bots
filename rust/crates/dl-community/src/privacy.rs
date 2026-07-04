@@ -188,6 +188,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "lfg_watches",
+        "user_id",
+        "activity.lfg_watches",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "steam_links",
         "user_id",
         "core.steam_links",

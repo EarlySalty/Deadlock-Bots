@@ -1178,6 +1178,26 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         dl_community::faq::spawn(faq.clone(), &dispatcher);
         let _invite_lounge_watcher =
             dl_community::invite_lounge::spawn(central_pool.clone(), adapter.clone(), &dispatcher);
+        let voice_hint_enabled =
+            dl_community::voice_change_hint::enabled_from_lookup(|k| std::env::var(k).ok());
+        let voice_hint_classifier = if voice_hint_enabled {
+            dl_ai::OpenAiClient::text_from_env(|k| std::env::var(k).ok()).map(|client| {
+                let generator: Arc<dyn dl_ai::TextGenerator> = client;
+                Arc::new(dl_community::voice_change_hint::OpenAiVoiceHintClassifier::new(generator))
+                    as Arc<dyn dl_community::voice_change_hint::VoiceHintClassifier>
+            })
+        } else {
+            None
+        };
+        let voice_hint_responder = Arc::new(
+            dl_community::voice_change_hint::VoiceChangeHintResponder::new(
+                voice_hint_enabled,
+                voice_hint_classifier,
+                adapter.clone(),
+            ),
+        );
+        let _voice_change_hint_responder =
+            dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
         // KI-DM-Assistent: beantwortet Freitext-DMs an den Bot (MiniMax + Fallback).
         let dm_assistant = dl_community::dm_assistant::DmAssistant::new(
             dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
