@@ -1,3 +1,11 @@
+## #203 — Voice-Lanes: die alten ➕-Kanäle sind ins Archiv gewandert
+
+**Ausgangslage:** Mit dem Router-Panel gibt es seit Kurzem einen Weg, per Klick eine eigene Voice-Lane zu öffnen. Die alten ➕-Kanäle („Lane eröffnen", „Ranked", „Street Brawl") liefen übergangsweise parallel weiter.
+
+**Was wurde geändert:** Der neue Weg hat sich bewährt — die drei ➕-Kanäle sind jetzt ins Archiv verschoben und gesperrt. Eine Lane machst du ab sofort nur noch über das Router-Panel auf, oder indem du dich in den **Deadlock Router** setzt.
+
+**Wie es jetzt läuft:** Modus im Panel klicken (oder in den Router-Kanal springen) — der Rest ist wie gehabt. Lanes, die gerade offen sind, laufen ganz normal weiter.
+
 ## #202 — Mitspieler-Suche: Filtern nach Modus, Rang und Status
 
 **Ausgangslage:** Im neuen Forum wuchsen die Gesuche, aber es gab keinen schnellen Weg, nur die relevanten zu sehen — etwa „nur Ranked auf meinem Level, das gerade aktiv ist".
