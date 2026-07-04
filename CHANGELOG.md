@@ -1,3 +1,11 @@
+## #202 — Mitspieler-Suche: Filtern nach Modus, Rang und Status
+
+**Ausgangslage:** Im neuen Forum wuchsen die Gesuche, aber es gab keinen schnellen Weg, nur die relevanten zu sehen — etwa „nur Ranked auf meinem Level, das gerade aktiv ist".
+
+**Was wurde geändert:** Jedes Gesuch bekommt jetzt automatisch Tags — abgeleitet aus dem, was du im Formular eh angibst: Modus (Casual/Ranked/Street Brawl), grober Rang-Bereich (Einsteiger/Fortgeschritten/Erfahren/Elite) und ein Status, der live mitläuft (Jetzt aktiv, solange eine Lane offen ist / Sucht noch, wenn nicht). Du tippst nichts extra, der Bot setzt die Tags selbst. Oben im Forum kannst du danach filtern.
+
+**Wie es jetzt läuft:** Gesuch wie gewohnt erstellen — die Tags kommen von allein. Über die Tag-Leiste filterst du auf genau das, was du suchst.
+
 ## #201 — Onboarding zeigt dir den Weg zum echten Rang
 
 **Ausgangslage:** Beim Server-Beitritt erfuhr niemand, dass sich der echte Deadlock-Rang automatisch verknüpfen lässt — die Anleitung im Rang-Kanal musste man zufällig finden. Die offizielle Verknüpfungs-Rolle direkt im Onboarding zu vergeben, erlaubt Discord Bots grundsätzlich nicht.

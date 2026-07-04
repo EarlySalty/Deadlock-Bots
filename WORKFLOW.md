@@ -1,3 +1,27 @@
+# LFG Auto-Tags (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/lfg-auto-tags`; Pflichtkontext `WORKFLOW.md`, `lfg_panel.rs`, `glue.rs`, `rank.rs` und Serenity-ForumPost/EditThread-Builder gelesen.
+- Bestehende LFG-Typen identifiziert: `LfgMode`, `LfgRankRange`, `LfgForumPostDraft`; Serenity 0.12.5 bietet native `CreateForumPost::set_applied_tags` und `EditThread::applied_tags`.
+- Geplante Rang-Brackets auf Basis der realen Rangliste `unknown/initiate/seeker/alchemist/arcanist/ritualist/emissary/archon/oracle/phantom/ascendant/eternus`: Einsteiger `Initiate-Seeker`, Fortgeschritten `Alchemist-Ritualist`, Erfahren `Emissary-Oracle`, Elite `Phantom-Eternus`.
+- TDD rot bestaetigt: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_forum_tags -- --nocapture` scheitert erwartbar wegen fehlender Tag-Konstanten, Ableitungsfunktion, `LfgForumPostDraft.applied_tags` und Mock-Port-Tag-Updates.
+- Implementiert: `LfgForumPostDraft.applied_tags`, reine Ableitung `derive_lfg_forum_tag_ids`, Create-ForumPost-Tags, `EditThread::applied_tags` fuer Status-Wechsel bei Lane-Open, Render-Update und Close.
+
+## Verifikation aktuell
+- Rot: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_forum_tags -- --nocapture` (Compilefehler durch neue Tests).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_forum_tags -- --nocapture` (1 passed).
+- Direkt ohne Test-DB-DSN rot: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture` (33 failed wegen fehlender `CENTRAL_TEST_DSN`/`DATABASE_URL`).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture` (36 passed).
+- Gruen: `cargo fmt`.
+- Direkt ohne Test-DB-DSN rot: `SQLX_OFFLINE=true cargo test -p dl-voice` (55 passed, 107 failed; alle gezeigten Failures wegen fehlender `CENTRAL_TEST_DSN`/`DATABASE_URL`/`DEADLOCK_CENTRAL_DSN`).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice` (162 passed; Doc-tests 0).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `git diff --check`.
+- Nicht ausgefuehrt: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync`, weil `serversync` nicht beruehrt wurde.
+
+## Rest-Risiken
+- Direkter `cargo test -p dl-voice` braucht in dieser Umgebung eine gesetzte Test-DB-DSN; sonst scheitern bestehende DB-Tests vor Ausfuehrung.
+
 # Rang-Guide V2 (2026-07-03)
 
 ## Fortschritt

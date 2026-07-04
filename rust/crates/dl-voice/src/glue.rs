@@ -6,8 +6,8 @@ use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
 use serenity::all::{
     AutoArchiveDuration, ButtonStyle, ChannelId, CreateAllowedMentions, CreateForumPost,
-    CreateMessage, GuildId, MessageId, PermissionOverwrite, PermissionOverwriteType, PremiumTier,
-    RoleId, UserId,
+    CreateMessage, ForumTagId, GuildId, MessageId, PermissionOverwrite, PermissionOverwriteType,
+    PremiumTier, RoleId, UserId,
 };
 use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread, GetMessages};
 
@@ -1777,6 +1777,7 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
             .label(crate::lfg_panel::LFG_BTN_BEITRETEN)
             .style(ButtonStyle::Success)])]);
         let builder = CreateForumPost::new(draft.title, message)
+            .set_applied_tags(draft.applied_tags.into_iter().map(ForumTagId::new))
             .auto_archive_duration(AutoArchiveDuration::OneDay)
             .audit_log_reason("LFG: Forum-Post");
         let channel = ChannelId::new(forum_channel_id)
@@ -1825,6 +1826,23 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
                 &self.adapter.http,
                 MessageId::new(starter_message_id),
                 EditMessage::new().content(body),
+            )
+            .await
+            .map(|_| ())
+            .map_err(lfg_edit_error_from_serenity)
+    }
+
+    async fn edit_forum_post_tags(
+        &self,
+        thread_id: u64,
+        applied_tags: Vec<u64>,
+    ) -> Result<(), crate::lfg_panel::LfgEditError> {
+        ChannelId::new(thread_id)
+            .edit_thread(
+                &self.adapter.http,
+                EditThread::new()
+                    .applied_tags(applied_tags.into_iter().map(ForumTagId::new))
+                    .audit_log_reason("LFG: Forum-Tags aktualisieren"),
             )
             .await
             .map(|_| ())

@@ -42,6 +42,17 @@ pub const LFG_RECONCILE_INTERVAL_SECONDS: u64 = 60;
 pub const LFG_EDIT_MIN_INTERVAL_SECONDS: i64 = 5;
 pub const LFG_EDIT_429_BACKOFF_SECONDS: f64 = 1.0;
 pub const LFG_STREET_BRAWL_CAP: i64 = 4;
+pub const LFG_FORUM_MAX_APPLIED_TAGS: usize = 5;
+pub const LFG_FORUM_TAG_MODE_CASUAL: u64 = 1522799471594045510;
+pub const LFG_FORUM_TAG_MODE_RANKED: u64 = 1522799471594045511;
+pub const LFG_FORUM_TAG_MODE_STREET_BRAWL: u64 = 1522799471594045512;
+pub const LFG_FORUM_TAG_RANK_BEGINNER: u64 = 1522799471594045513;
+pub const LFG_FORUM_TAG_RANK_ADVANCED: u64 = 1522799471594045514;
+pub const LFG_FORUM_TAG_RANK_EXPERIENCED: u64 = 1522799471594045515;
+pub const LFG_FORUM_TAG_RANK_ELITE: u64 = 1522799471594045516;
+pub const LFG_FORUM_TAG_RANK_ANY: u64 = 1522799471594045517;
+pub const LFG_FORUM_TAG_STATUS_ACTIVE: u64 = 1522799471594045518;
+pub const LFG_FORUM_TAG_STATUS_LOOKING: u64 = 1522799471594045519;
 
 pub const LFG_PANEL_BODY: &str = "**Mitspieler finden**\nModus wählen, Rang-Bereich und Plätze angeben — fertig ist dein Gesuch als eigener Post. Der Post zeigt live, wie viele Plätze in der Lane frei sind, und mit **Beitreten** landest du direkt im Voice.\n\nGesuche räumen sich selbst weg, sobald die Lane schließt.\nWer regelmäßig dabei ist, taucht im [Rank-Leaderboard](https://deutsche-deadlock-community.de/aktivitaet/#rank-leaderboard-card) der Community auf.";
 pub const LFG_PANEL_BUTTON: &str = "🔎 Mitspieler suchen";
@@ -155,6 +166,7 @@ pub struct LfgForumPostDraft {
     pub post_id: i64,
     pub title: String,
     pub body: String,
+    pub applied_tags: Vec<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -305,6 +317,12 @@ pub trait LfgPanelPort: Send + Sync {
         thread_id: u64,
         starter_message_id: u64,
         body: String,
+    ) -> Result<(), LfgEditError>;
+
+    async fn edit_forum_post_tags(
+        &self,
+        thread_id: u64,
+        applied_tags: Vec<u64>,
     ) -> Result<(), LfgEditError>;
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
@@ -936,6 +954,77 @@ fn rank_range_label(range: LfgRankRange) -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+struct LfgForumRankBracket {
+    min: i32,
+    max: i32,
+    tag_id: u64,
+}
+
+const LFG_FORUM_RANK_BRACKETS: [LfgForumRankBracket; 4] = [
+    LfgForumRankBracket {
+        min: 1,
+        max: 2,
+        tag_id: LFG_FORUM_TAG_RANK_BEGINNER,
+    },
+    LfgForumRankBracket {
+        min: 3,
+        max: 5,
+        tag_id: LFG_FORUM_TAG_RANK_ADVANCED,
+    },
+    LfgForumRankBracket {
+        min: 6,
+        max: 8,
+        tag_id: LFG_FORUM_TAG_RANK_EXPERIENCED,
+    },
+    LfgForumRankBracket {
+        min: 9,
+        max: 11,
+        tag_id: LFG_FORUM_TAG_RANK_ELITE,
+    },
+];
+
+fn ranges_overlap(left_min: i32, left_max: i32, right_min: i32, right_max: i32) -> bool {
+    left_min <= right_max && right_min <= left_max
+}
+
+fn derive_lfg_forum_tag_ids(
+    mode: LfgMode,
+    rank_range: LfgRankRange,
+    lane_attached: bool,
+) -> Vec<u64> {
+    let mode_tag = match mode {
+        LfgMode::Casual => LFG_FORUM_TAG_MODE_CASUAL,
+        LfgMode::Ranked => LFG_FORUM_TAG_MODE_RANKED,
+        LfgMode::StreetBrawl => LFG_FORUM_TAG_MODE_STREET_BRAWL,
+    };
+    let status_tag = if lane_attached {
+        LFG_FORUM_TAG_STATUS_ACTIVE
+    } else {
+        LFG_FORUM_TAG_STATUS_LOOKING
+    };
+    let mut rank_tags = match (mode, rank_range.min, rank_range.max) {
+        (LfgMode::Ranked, Some(min), Some(max)) if min <= max => LFG_FORUM_RANK_BRACKETS
+            .iter()
+            .filter_map(|bracket| {
+                ranges_overlap(min, max, bracket.min, bracket.max).then_some(bracket.tag_id)
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    if rank_tags.is_empty() {
+        rank_tags.push(LFG_FORUM_TAG_RANK_ANY);
+    }
+
+    let rank_slot_count = LFG_FORUM_MAX_APPLIED_TAGS.saturating_sub(2);
+    let mut tags = Vec::with_capacity(LFG_FORUM_MAX_APPLIED_TAGS);
+    tags.push(mode_tag);
+    tags.extend(rank_tags.into_iter().take(rank_slot_count));
+    tags.push(status_tag);
+    tags.truncate(LFG_FORUM_MAX_APPLIED_TAGS);
+    tags
+}
+
 fn mode_default_capacity(mode: LfgMode) -> i64 {
     match mode {
         LfgMode::Ranked => crate::tempvoice::logic::DEFAULT_RANKED_CAP,
@@ -1027,6 +1116,7 @@ fn lfg_post_draft(
     rank_range: LfgRankRange,
     requested_slots: i32,
     occupancy: Option<LfgLaneOccupancy>,
+    lane_attached: bool,
 ) -> LfgForumPostDraft {
     let rank_label = rank_range_label(rank_range);
     let title = format!(
@@ -1034,10 +1124,12 @@ fn lfg_post_draft(
         mode.display_name()
     );
     let body = lfg_post_body(owner_id, mode, rank_range, requested_slots, occupancy);
+    let applied_tags = derive_lfg_forum_tag_ids(mode, rank_range, lane_attached);
     LfgForumPostDraft {
         post_id,
         title,
         body,
+        applied_tags,
     }
 }
 
@@ -1108,6 +1200,10 @@ impl LfgPostRecord {
             self.requested_slots,
             occupancy,
         )
+    }
+
+    fn forum_tag_ids(&self, lane_attached: bool) -> Vec<u64> {
+        derive_lfg_forum_tag_ids(self.mode, self.rank_range, lane_attached)
     }
 }
 
@@ -1213,6 +1309,7 @@ impl LfgPanelInterface {
             rank_range,
             requested_slots,
             None,
+            false,
         );
         let render_hash = render_hash(&draft.body);
         let created = match self.port.create_forum_post(forum_channel_id, draft).await {
@@ -1661,6 +1758,7 @@ impl LfgPanelInterface {
             rank_range,
             requested_slots,
             occupancy,
+            true,
         );
         let body_hash = render_hash(&draft.body);
         let created = match self.port.create_forum_post(forum_channel_id, draft).await {
@@ -1712,6 +1810,20 @@ impl LfgPanelInterface {
             crate::router::RouterSpawnOutcome::Created { lane_id } => {
                 match self.link_post_lane(post_id, lane_id).await {
                     Ok(true) => {
+                        if let Some(thread_id) = post.thread_id {
+                            if let Err(err) = self
+                                .port
+                                .edit_forum_post_tags(thread_id, post.forum_tag_ids(true))
+                                .await
+                            {
+                                tracing::warn!(
+                                    %err,
+                                    post_id,
+                                    thread_id,
+                                    "LFG-Forum-Tags konnten nach Lane-Open nicht aktualisiert werden"
+                                );
+                            }
+                        }
                         self.enqueue_render(post_id).await;
                         BridgeReply::ephemeral_text(LFG_ERFOLG_LANE_AUFGEMACHT)
                     }
@@ -1886,6 +1998,9 @@ impl LfgPanelInterface {
         self.port
             .edit_forum_starter_message(thread_id, starter_message_id, body)
             .await?;
+        self.port
+            .edit_forum_post_tags(thread_id, post.forum_tag_ids(post.lane_id.is_some()))
+            .await?;
         sqlx::query(
             "UPDATE voice.lfg_posts
                 SET last_render_hash = $2,
@@ -1975,6 +2090,18 @@ impl LfgPanelInterface {
             return Ok(());
         }
         if let Some(thread_id) = post.thread_id {
+            if let Err(err) = self
+                .port
+                .edit_forum_post_tags(thread_id, post.forum_tag_ids(false))
+                .await
+            {
+                tracing::warn!(
+                    %err,
+                    post_id,
+                    thread_id,
+                    "LFG-Forum-Tags konnten beim Schliessen nicht aktualisiert werden"
+                );
+            }
             match self.port.archive_and_lock_thread(thread_id).await {
                 Ok(()) => {}
                 Err(err) if is_not_found_error(&err) => {
@@ -2641,6 +2768,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn lfg_forum_tags_werden_aus_modus_rang_und_lane_status_abgeleitet() {
+        let range = |min, max| LfgRankRange {
+            min: Some(min),
+            max: Some(max),
+        };
+
+        assert_eq!(
+            derive_lfg_forum_tag_ids(
+                LfgMode::Casual,
+                LfgRankRange {
+                    min: None,
+                    max: None
+                },
+                false,
+            ),
+            vec![
+                LFG_FORUM_TAG_MODE_CASUAL,
+                LFG_FORUM_TAG_RANK_ANY,
+                LFG_FORUM_TAG_STATUS_LOOKING,
+            ]
+        );
+        assert_eq!(
+            derive_lfg_forum_tag_ids(LfgMode::Ranked, range(1, 2), false),
+            vec![
+                LFG_FORUM_TAG_MODE_RANKED,
+                LFG_FORUM_TAG_RANK_BEGINNER,
+                LFG_FORUM_TAG_STATUS_LOOKING,
+            ]
+        );
+        assert_eq!(
+            derive_lfg_forum_tag_ids(LfgMode::Ranked, range(2, 3), false),
+            vec![
+                LFG_FORUM_TAG_MODE_RANKED,
+                LFG_FORUM_TAG_RANK_BEGINNER,
+                LFG_FORUM_TAG_RANK_ADVANCED,
+                LFG_FORUM_TAG_STATUS_LOOKING,
+            ]
+        );
+        assert_eq!(
+            derive_lfg_forum_tag_ids(LfgMode::StreetBrawl, range(9, 11), true),
+            vec![
+                LFG_FORUM_TAG_MODE_STREET_BRAWL,
+                LFG_FORUM_TAG_RANK_ANY,
+                LFG_FORUM_TAG_STATUS_ACTIVE,
+            ]
+        );
+        assert_eq!(
+            derive_lfg_forum_tag_ids(LfgMode::Ranked, range(9, 11), true),
+            vec![
+                LFG_FORUM_TAG_MODE_RANKED,
+                LFG_FORUM_TAG_RANK_ELITE,
+                LFG_FORUM_TAG_STATUS_ACTIVE,
+            ]
+        );
+
+        let capped = derive_lfg_forum_tag_ids(LfgMode::Ranked, range(1, 11), true);
+        assert_eq!(capped.len(), LFG_FORUM_MAX_APPLIED_TAGS);
+        assert!(capped.contains(&LFG_FORUM_TAG_MODE_RANKED));
+        assert!(capped.contains(&LFG_FORUM_TAG_STATUS_ACTIVE));
+    }
+
     #[tokio::test]
     async fn lfg_ranked_mode_ohne_rankrolle_blockt_ephemeral() {
         let db = dl_central_db::testing::test_pool()
@@ -2750,6 +2939,14 @@ mod tests {
         let (posted_channel_id, posted_title) = {
             let posts = port.forum_posts.lock().expect("forum posts");
             assert_eq!(posts.len(), 1);
+            assert_eq!(
+                posts[0].1.applied_tags,
+                vec![
+                    LFG_FORUM_TAG_MODE_CASUAL,
+                    LFG_FORUM_TAG_RANK_ANY,
+                    LFG_FORUM_TAG_STATUS_LOOKING,
+                ]
+            );
             (posts[0].0, posts[0].1.title.clone())
         };
         assert_eq!(posted_channel_id, 777);
@@ -3373,6 +3570,17 @@ mod tests {
             assert_eq!(edits[0].1, 9909);
             assert!(edits[0].2.contains("1/4"));
         }
+        assert_eq!(
+            port.tag_edits.lock().expect("tag edits").as_slice(),
+            &[(
+                9908,
+                vec![
+                    LFG_FORUM_TAG_MODE_CASUAL,
+                    LFG_FORUM_TAG_RANK_ANY,
+                    LFG_FORUM_TAG_STATUS_ACTIVE,
+                ]
+            )]
+        );
 
         assert!(!interface
             .render_update_once(post_id)
@@ -3442,7 +3650,18 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(port.forum_posts.lock().expect("forum posts").len(), 1);
+        {
+            let posts = port.forum_posts.lock().expect("forum posts");
+            assert_eq!(posts.len(), 1);
+            assert_eq!(
+                posts[0].1.applied_tags,
+                vec![
+                    LFG_FORUM_TAG_MODE_CASUAL,
+                    LFG_FORUM_TAG_RANK_ANY,
+                    LFG_FORUM_TAG_STATUS_ACTIVE,
+                ]
+            );
+        }
         let lane_id: Option<i64> =
             sqlx::query_scalar("SELECT lane_id FROM voice.lfg_posts WHERE thread_id = 9910")
                 .fetch_one(&pool)
@@ -3739,6 +3958,7 @@ mod tests {
     type MockPost = (u64, Map<String, Value>, Vec<LfgPanelAttachment>);
     type MockEdit = (u64, u64, Map<String, Value>, Vec<LfgPanelAttachment>);
     type MockStarterEdit = (u64, u64, String);
+    type MockTagEdit = (u64, Vec<u64>);
 
     struct MockLfgLaneSpawner {
         outcome: StdMutex<crate::router::RouterSpawnOutcome>,
@@ -3795,6 +4015,7 @@ mod tests {
         posts: StdMutex<Vec<MockPost>>,
         edits: StdMutex<Vec<MockEdit>>,
         starter_edits: StdMutex<Vec<MockStarterEdit>>,
+        tag_edits: StdMutex<Vec<MockTagEdit>>,
         not_found_edits: StdMutex<Vec<u64>>,
         recent: StdMutex<Vec<LfgPanelMessage>>,
         roles: StdMutex<Vec<u64>>,
@@ -3819,6 +4040,7 @@ mod tests {
                 posts: StdMutex::default(),
                 edits: StdMutex::default(),
                 starter_edits: StdMutex::default(),
+                tag_edits: StdMutex::default(),
                 not_found_edits: StdMutex::default(),
                 recent: StdMutex::default(),
                 roles: StdMutex::default(),
@@ -3958,6 +4180,18 @@ mod tests {
                 starter_message_id,
                 body,
             ));
+            Ok(())
+        }
+
+        async fn edit_forum_post_tags(
+            &self,
+            thread_id: u64,
+            applied_tags: Vec<u64>,
+        ) -> Result<(), LfgEditError> {
+            self.tag_edits
+                .lock()
+                .expect("tag edits")
+                .push((thread_id, applied_tags));
             Ok(())
         }
 
