@@ -1312,3 +1312,65 @@ Phase-1-Backend fuer deklarative Discord-Serverstruktur: Central-DB-Schema, Ist-
 - Migration `2026070210_server_config_schema.sql` angelegt: `server_config`-Schema fuer Soll/Ist-Struktur, dynamische Namespaces, dokumentierte Ausnahmen, Diff-Previews, Apply-Runs, Auto-Revert-Whitelist, Drift- und Adoption-Events.
 - Tests umgesetzt: 5 pure Diff-Tests plus 4 ignored DB-Workflow-Tests gegen `dl_central_db::testing`; Fresh-Migration-Schema-Test in `dl-central-db` erweitert.
 - Verifikation gruen: `cargo build -p dl-server-as-code`; `cargo clippy -p dl-server-as-code --all-targets -- -D warnings`; `cargo clippy -p dl-central-db --features testing --all-targets -- -D warnings`; `cargo test -p dl-server-as-code`; `./scripts/central_test_db.sh cargo test -p dl-server-as-code --features testing -- --include-ignored`; `cargo test -p dl-central-db`; `./scripts/central_test_db.sh cargo test -p dl-central-db --features testing --test fresh_migrations_schema -- --ignored`; `cargo fmt -p dl-server-as-code -p dl-central-db -- --check`; `git diff --check`.
+
+# Onboarding-Bruecke (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/onboarding-bruecke`; `WORKFLOW.md`, Konzeptstellen, ServerSync-Onboarding, WELLE2B-Rollen, NativeOnboarding-Event und Journey-/Onboard-Glue gelesen.
+- TDD rot gesehen: `dl-server-as-code welle2b_marker`, `dl-bot onboarding_builder`, `dl-bot onboarding_payload` scheiterten vor Implementierung an fehlender `Rang-Verknüpfung`/Prompt 4.
+- Marker-Rolle `Rang-Verknüpfung` im WELLE2B-Sollmodell ergänzt; ServerSync-Onboarding baut jetzt Prompt 4 mit exakt spezifizierten Texten/Emoji/Rollen-ID und blockt fehlende Marker-Rolle.
+- Neues `dl-community::onboarding_bridge` mit Port-Trait, reiner Entscheidungsfunktion, bytegenauem DM-Text und Unit-Tests umgesetzt; `dl-bot`-Glue an `NativeOnboardingCompleted`-Fanout verdrahtet.
+
+## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-server-as-code welle2b_marker -- --nocapture` (1 passed).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot onboarding_builder -- --nocapture` (3 passed).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot onboarding_payload -- --nocapture` (1 passed).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot onboarding_put_payload -- --nocapture` (1 passed).
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community onboarding_bridge -- --nocapture` (8 passed).
+- Gruen: `SQLX_OFFLINE=true cargo check -p dl-bot --bin dl-bot`.
+- Gruen: `cargo fmt -- --check`.
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community -p dl-server-as-code` (116 passed, 8 ignored).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync -- --nocapture` (78 passed, 1 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test --workspace` (Workspace-Suite Exit 0; 755 Tests gelistet).
+- Gruen: `git diff --check`.
+
+## Offene Punkte
+- Keine SQLX-Offline-Cache-Aenderung noetig; neue DB-Zugriffe nutzen `sqlx::query`/`query_scalar`, keine neue `query!`-Shape.
+- Kein Commit/Push ausgefuehrt; Aenderungen bleiben fuer Claude-Review uncommitted.
+
+# Onboarding-Bruecke Kritiker (2026-07-04)
+
+Scope: adversarialer Review des uncommitted Diffs auf Branch `feat/onboarding-bruecke`. Keine Source-Aenderungen, kein Commit/Push; nur dieser Review-Stand wurde ergaenzt.
+
+## Befund
+- MITTEL: Wenn `remove_marker_role` nach gesendeter oder 50007-blockierter DM fehlschlaegt, bleibt die Marker-Rolle dauerhaft haengen, weil spaetere Events wegen `BridgeClaimResult::AlreadyClaimed` vor jedem Cleanup returnen. Fix: bereits beanspruchte Nutzer mit Marker weiterhin nur rollenbereinigen oder separaten Cleanup-State speichern, ohne die DM erneut zu senden.
+
+## Verifikation
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community -p dl-server-as-code` (dl-community 63 passed; dl-server-as-code 42 passed; diff_engine 11 passed; db_workflow 8 ignored).
+- Gruen: `cd rust && ./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync` (78 passed, 1 ignored).
+- Hinweis: Der wortwoertliche Root-Pfad `./scripts/central_test_db.sh ...` existiert in diesem Worktree nicht; der Wrapper liegt unter `rust/scripts/central_test_db.sh`.
+- Gruen: `git diff --check`.
+
+## Gesamturteil
+MERGE-BLOCKIERT bis der Marker-Cleanup nach Rollenentfernungsfehlern retryfaehig ist.
+
+# Onboarding-Bruecke Rework Marker-Cleanup Retry (2026-07-04)
+
+## Fortschritt
+- Zwei-Zustands-Claim umgesetzt: `Acquired`, `AlreadyClaimedInFlight`, `AlreadyClaimedDmDone`.
+- `dm_done` wird nach `Sent` oder Discord 50007 vor dem Marker-Cleanup markiert; Markierungsfehler werden gewarnt, Cleanup wird weiter versucht.
+- Retry-Cleanup-Pfad ergaenzt: Event mit Marker und `AlreadyClaimedDmDone` entfernt nur die Marker-Rolle, ohne DM und ohne erneutes `dm_done`.
+- Restrisiko Crash zwischen DM-Ausgang und `dm_done` im Modul-Doc-Kommentar dokumentiert.
+
+## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community onboarding_bridge -- --nocapture` (10 passed).
+- Gruen: `cargo fmt`.
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-community -p dl-server-as-code` (dl-community 65 passed; dl-server-as-code lib 42 passed; db_workflow 8 ignored; diff_engine 11 passed; Doc-tests 0/0).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync` (78 passed, 1 ignored).
+- Gruen: `git diff --check`.
+
+## Offen
+- Keine bekannten offenen Rework-Punkte. Kein Commit/Push ausgefuehrt.

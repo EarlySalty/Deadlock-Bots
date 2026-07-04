@@ -1,3 +1,11 @@
+## #201 — Onboarding zeigt dir den Weg zum echten Rang
+
+**Ausgangslage:** Beim Server-Beitritt erfuhr niemand, dass sich der echte Deadlock-Rang automatisch verknüpfen lässt — die Anleitung im Rang-Kanal musste man zufällig finden. Die offizielle Verknüpfungs-Rolle direkt im Onboarding zu vergeben, erlaubt Discord Bots grundsätzlich nicht.
+
+**Was wurde geändert:** Das Onboarding hat jetzt eine vierte, optionale Frage: ob du deinen echten Rang automatisch bekommen willst. Wer sie ankreuzt, bekommt nach dem Start eine kurze DM von uns mit dem direkten Sprung zur Drei-Schritte-Anleitung im Rang-Kanal — die Erinnerungs-Markierung räumen wir danach automatisch wieder ab.
+
+**Wie es jetzt läuft:** Frage ankreuzen, Onboarding abschließen, DM aufmachen, drei Schritte durchklicken — ab dann hält der Server deinen Rang von selbst aktuell. Wer keine DMs zulässt, findet den Weg weiterhin direkt im Rang-Kanal.
+
 ## #199 — Steam verknüpfen: ein klarer Weg in drei Schritten
 
 **Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich: viel Fettdruck, gleich aussehende Textblöcke und ein verwirrendes Nebeneinander von Bot-Verknüpfung und der offiziellen Discord-Verknüpfung „Steam Verifiziert✅".

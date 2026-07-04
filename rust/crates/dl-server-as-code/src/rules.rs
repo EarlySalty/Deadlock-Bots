@@ -24,6 +24,7 @@ const ROLE_VC_MOVE_RECHTE: &str = "VC Move Rechte";
 const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
 const ROLE_INVITE_GAST: &str = "Invite-Gast";
 const ROLE_FRISCHLING: &str = "Frischling";
+const ROLE_RANG_VERKNUEPFUNG: &str = "Rang-Verknüpfung";
 const ROLE_STREAMS: &str = "Streams";
 const CATEGORY_MODERATION: &str = "🛡️ ─ MODERATION ─";
 const CATEGORY_INFORMATION: &str = "🏛️ ─ INFORMATION ─";
@@ -52,7 +53,7 @@ const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
 const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
-const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING];
+const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING, ROLE_RANG_VERKNUEPFUNG];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Patchnotes Ping Rolle",
     "Spieler-Suche Ping Rolle",
@@ -3262,7 +3263,7 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
-        for role_name in ["Invite-Gast", "Frischling"] {
+        for role_name in ["Invite-Gast", "Frischling", "Rang-Verknüpfung"] {
             let role = role_by_name(&derived.desired, role_name).expect("marker role");
             assert_eq!(role.permissions_bitmask, 0);
             assert!(!role.hoist);
@@ -3287,13 +3288,22 @@ mod tests {
         actual
             .roles
             .insert(402, role(402, "Frischling", Permissions::empty().bits()));
+        actual.roles.insert(
+            403,
+            role(403, "Rang-Verknüpfung", Permissions::empty().bits()),
+        );
         actual
             .roles
-            .insert(403, role_with_flags(403, "Streams", 0, 7, false, true, 4));
+            .insert(404, role_with_flags(404, "Streams", 0, 7, false, true, 4));
 
         let derived = derive_desired_model(&actual)?;
 
-        for (name, id) in [("Invite-Gast", 401), ("Frischling", 402), ("Streams", 403)] {
+        for (name, id) in [
+            ("Invite-Gast", 401),
+            ("Frischling", 402),
+            ("Rang-Verknüpfung", 403),
+            ("Streams", 404),
+        ] {
             let matches = derived
                 .desired
                 .roles
@@ -4337,7 +4347,7 @@ mod tests {
                 "bestehende Rolle {role_name} muss erhalten bleiben"
             );
         }
-        for role_name in ["Invite-Gast", "Frischling", "Streams"] {
+        for role_name in ["Invite-Gast", "Frischling", "Rang-Verknüpfung", "Streams"] {
             assert!(
                 desired_role_names.contains(role_name),
                 "Welle2b-Rolle {role_name} muss im Soll-Modell existieren"

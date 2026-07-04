@@ -16,6 +16,7 @@ pub mod invite_lounge;
 pub mod invites;
 pub mod leave_survey;
 pub mod onboarding;
+pub mod onboarding_bridge;
 pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;

@@ -63,6 +63,18 @@ const REGELWERK_DISCORD_MAX_ATTEMPTS: usize = 5;
 const REGELWERK_DELETE_DELAY: Duration = Duration::from_millis(350);
 const PREVIEW_MAX_AGE_MINUTES: i64 = 15;
 
+pub(crate) fn serversync_kv_ns() -> &'static str {
+    SERVERSYNC_KV_NS
+}
+
+pub(crate) fn rang_guide_channel_id() -> u64 {
+    rang_guide_publish::RANG_GUIDE_CHANNEL_ID
+}
+
+pub(crate) fn rang_guide_message_id_key(message_index: usize) -> String {
+    rang_guide_publish::rang_guide_message_id_key(message_index)
+}
+
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
     "frag-die-community",
@@ -3446,6 +3458,12 @@ fn build_welle2b_onboarding_config(
     };
     let invite_role = require_role_id(model, &["Invite-Gast"], "Invite-Gast", &mut blockers);
     let frischling_role = require_role_id(model, &["Frischling"], "Frischling", &mut blockers);
+    let rang_verknuepfung_role = require_role_id(
+        model,
+        &["Rang-Verknüpfung"],
+        "Rang-Verknüpfung",
+        &mut blockers,
+    );
 
     let rank_prompt = find_rank_prompt(&live, model);
     if rank_prompt.is_none() {
@@ -3465,6 +3483,7 @@ fn build_welle2b_onboarding_config(
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
     }
+    prompts.push(rang_verknuepfung_prompt(rang_verknuepfung_role));
 
     if mitspieler_suche.is_some() {
         warnings.push(
@@ -3726,6 +3745,29 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
         title: "Wofür willst du Pings bekommen?".to_string(),
         options,
         single_select: false,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn rang_verknuepfung_prompt(role_id: Option<u64>) -> NativeOnboardingPrompt {
+    NativeOnboardingPrompt {
+        id: None,
+        prompt_type: 0,
+        title: "Willst du deinen echten Rang automatisch bekommen?".to_string(),
+        options: vec![NativeOnboardingOption {
+            id: None,
+            title: "Ja — zeig mir, wie ich Steam verknüpfe".to_string(),
+            description: Some(
+                "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).".to_string(),
+            ),
+            emoji: Some(json!({ "name": "🔗" })),
+            role_ids: role_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        }],
+        single_select: true,
         required: false,
         in_onboarding: true,
         extra: BTreeMap::new(),
@@ -6687,6 +6729,7 @@ mod tests {
             (5005, "Events & Turniere Ping Rolle", true),
             (5006, "Custom Games Ping Rolle", true),
             (5007, "Streams", true),
+            (5008, "Rang-Verknüpfung", false),
         ] {
             model
                 .roles
@@ -7071,7 +7114,7 @@ mod tests {
     }
 
     #[test]
-    fn onboarding_builder_baut_drei_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+    fn onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -7081,7 +7124,7 @@ mod tests {
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
         assert_eq!(built.config.default_channel_ids.len(), 9);
-        assert_eq!(built.config.prompts.len(), 3);
+        assert_eq!(built.config.prompts.len(), 4);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
         assert!(built.config.prompts[0].single_select);
         assert!(built.config.prompts[0].required);
@@ -7099,6 +7142,24 @@ mod tests {
             serde_json::to_value(&built.config.prompts[2]).expect("rank prompt"),
             live["prompts"][1]
         );
+        let rang_bridge = &built.config.prompts[3];
+        assert_eq!(
+            rang_bridge.title,
+            "Willst du deinen echten Rang automatisch bekommen?"
+        );
+        assert!(rang_bridge.single_select);
+        assert!(!rang_bridge.required);
+        assert!(rang_bridge.in_onboarding);
+        assert_eq!(rang_bridge.options.len(), 1);
+        let option = &rang_bridge.options[0];
+        assert_eq!(option.title, "Ja — zeig mir, wie ich Steam verknüpfe");
+        assert_eq!(
+            option.description.as_deref(),
+            Some("Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).")
+        );
+        assert_eq!(option.emoji, Some(json!({ "name": "🔗" })));
+        assert_eq!(option.role_ids, vec!["5008".to_string()]);
+        assert!(option.channel_ids.is_empty());
     }
 
     #[test]
@@ -7110,7 +7171,7 @@ mod tests {
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
-        for prompt in [&prompts[0], &prompts[1]] {
+        for prompt in [&prompts[0], &prompts[1], &prompts[3]] {
             assert!(!prompt.as_object().expect("prompt").contains_key("id"));
             for option in prompt["options"].as_array().expect("options") {
                 assert!(!option.as_object().expect("option").contains_key("id"));
@@ -7136,6 +7197,25 @@ mod tests {
         assert_eq!(ping_options[0]["role_ids"], json!(["5003"]));
         assert_eq!(ping_options[4]["title"], "Streams");
         assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
+
+        let rang_bridge = &payload["prompts"][3];
+        assert_eq!(
+            rang_bridge["title"],
+            "Willst du deinen echten Rang automatisch bekommen?"
+        );
+        assert_eq!(rang_bridge["required"], false);
+        assert_eq!(rang_bridge["single_select"], true);
+        assert_eq!(rang_bridge["in_onboarding"], true);
+        assert_eq!(
+            rang_bridge["options"][0]["title"],
+            "Ja — zeig mir, wie ich Steam verknüpfe"
+        );
+        assert_eq!(
+            rang_bridge["options"][0]["description"],
+            "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten)."
+        );
+        assert_eq!(rang_bridge["options"][0]["role_ids"], json!(["5008"]));
+        assert_eq!(rang_bridge["options"][0]["channel_ids"], json!([]));
     }
 
     #[test]
@@ -7153,6 +7233,7 @@ mod tests {
         assert_eq!(prompts[0]["options"][0]["emoji_animated"], false);
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
+        assert_eq!(prompts[3]["options"][0]["emoji_name"], "🔗");
         // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
         // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
         assert_eq!(prompts[0]["id"], "0");
@@ -7367,6 +7448,22 @@ mod tests {
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Kanal `server-support`")));
+    }
+
+    #[test]
+    fn onboarding_builder_blockt_fehlende_rang_verknuepfung_marker_rolle() {
+        let mut model = onboarding_model();
+        model
+            .roles
+            .retain(|_, role| role.name != "Rang-Verknüpfung");
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("builder returns blockers");
+
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Rolle `Rang-Verknüpfung`")));
     }
 
     #[test]

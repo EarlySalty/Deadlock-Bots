@@ -11,6 +11,7 @@ mod journeyglue;
 mod master;
 mod modglue;
 mod onboardglue;
+mod onboardingbridgeglue;
 mod serversync;
 
 use std::{num::NonZeroU64, sync::Arc};
@@ -1095,6 +1096,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _journey_role_events =
             journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
         let _journey_native_onboarding_completed = journeyglue::spawn_native_onboarding_completed(
+            central_pool.clone(),
+            adapter.clone(),
+            &dispatcher,
+            onboardglue::MAIN_GUILD_ID,
+        );
+        let _onboarding_bridge = onboardingbridgeglue::spawn(
             central_pool.clone(),
             adapter.clone(),
             &dispatcher,
