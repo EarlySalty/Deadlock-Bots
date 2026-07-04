@@ -193,6 +193,29 @@ pub struct LfgPanelMessage {
     pub custom_ids: Vec<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LfgPanelChannelKind {
+    Text,
+    News,
+    Forum,
+    Other(String),
+}
+
+impl LfgPanelChannelKind {
+    fn supports_regular_messages(&self) -> bool {
+        matches!(self, Self::Text | Self::News)
+    }
+
+    fn as_reason_fragment(&self) -> &str {
+        match self {
+            Self::Text => "text",
+            Self::News => "news",
+            Self::Forum => "forum",
+            Self::Other(kind) => kind.as_str(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LfgLaneOccupancy {
     pub member_count: i64,
@@ -256,6 +279,14 @@ pub trait LfgPanelPort: Send + Sync {
         channel_id: u64,
         limit: u8,
     ) -> Result<Vec<LfgPanelMessage>, String>;
+
+    async fn panel_channel_kind(
+        &self,
+        _guild_id: u64,
+        _channel_id: u64,
+    ) -> Option<LfgPanelChannelKind> {
+        None
+    }
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
 
@@ -346,8 +377,10 @@ struct LfgEditQueue {
 pub struct LfgPanelInterface {
     pool: PgPool,
     port: Arc<dyn LfgPanelPort>,
-    channel_id: Option<u64>,
-    missing_channel_reason: Option<String>,
+    panel_channel_id: Option<u64>,
+    missing_panel_channel_reason: Option<String>,
+    forum_channel_id: Option<u64>,
+    missing_forum_channel_reason: Option<String>,
     cutover_active: bool,
     lane_spawner: RwLock<Option<Arc<dyn LfgLaneSpawner>>>,
     edit_queue: LfgEditQueue,
@@ -355,13 +388,17 @@ pub struct LfgPanelInterface {
 
 impl LfgPanelInterface {
     pub fn new(pool: PgPool, port: Arc<dyn LfgPanelPort>, channel_id: Option<u64>) -> Arc<Self> {
-        Self::new_with_channel_config(
+        Self::new_with_split_channel_config(
             pool,
             port,
             channel_id,
             channel_id
                 .is_none()
                 .then(|| "DL_LFG_PANEL_CHANNEL_ID fehlt".to_string()),
+            channel_id,
+            channel_id
+                .is_none()
+                .then(|| "DL_LFG_FORUM_CHANNEL_ID fehlt".to_string()),
             true,
         )
     }
@@ -373,11 +410,35 @@ impl LfgPanelInterface {
         missing_channel_reason: Option<String>,
         cutover_active: bool,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        Self::new_with_split_channel_config(
             pool,
             port,
             channel_id,
-            missing_channel_reason,
+            missing_channel_reason.clone(),
+            channel_id,
+            channel_id
+                .is_none()
+                .then(|| "DL_LFG_FORUM_CHANNEL_ID fehlt".to_string()),
+            cutover_active,
+        )
+    }
+
+    pub fn new_with_split_channel_config(
+        pool: PgPool,
+        port: Arc<dyn LfgPanelPort>,
+        panel_channel_id: Option<u64>,
+        missing_panel_channel_reason: Option<String>,
+        forum_channel_id: Option<u64>,
+        missing_forum_channel_reason: Option<String>,
+        cutover_active: bool,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            pool,
+            port,
+            panel_channel_id,
+            missing_panel_channel_reason,
+            forum_channel_id,
+            missing_forum_channel_reason,
             cutover_active,
             lane_spawner: RwLock::new(None),
             edit_queue: LfgEditQueue::default(),
@@ -395,7 +456,7 @@ impl LfgPanelInterface {
     }
 
     pub fn target_channel_id(&self) -> Option<u64> {
-        self.channel_id
+        self.panel_channel_id
     }
 
     pub fn cutover_active(&self) -> bool {
@@ -410,8 +471,8 @@ impl LfgPanelInterface {
         if !self.cutover_active {
             let mut output = LfgPanelApplyOutput {
                 guild_id: LFG_GUILD_ID,
-                channel_id: self.channel_id,
-                dry_run: !confirm,
+                channel_id: self.panel_channel_id,
+                dry_run: true,
                 payload_format: LFG_PAYLOAD_FORMAT.to_string(),
                 stored_payload_format,
                 stored_message_id,
@@ -424,12 +485,34 @@ impl LfgPanelInterface {
             output
                 .warnings
                 .push("LFG-Panel: Cutover ist nicht aktiv; confirm wird blockiert.".to_string());
-            if confirm {
-                return Err("LfgPanelInterface: cutover_disabled".to_string());
+            if let Some(reason) = self.missing_forum_channel_reason.as_deref() {
+                output
+                    .warnings
+                    .push(format!("LFG-Forum: Zielkanal fehlt ({reason})."));
             }
             return Ok(output);
         }
-        let recent = match self.channel_id {
+        if let Some(reason) = self.panel_channel_blocked_reason().await {
+            let action = if self.panel_channel_id.is_some() {
+                "blocked_invalid_channel_type"
+            } else {
+                "blocked_missing_channel"
+            };
+            return Ok(LfgPanelApplyOutput {
+                guild_id: LFG_GUILD_ID,
+                channel_id: self.panel_channel_id,
+                dry_run: true,
+                payload_format: LFG_PAYLOAD_FORMAT.to_string(),
+                stored_payload_format,
+                stored_message_id,
+                action: action.to_string(),
+                message_id: stored_message_id,
+                blocked_reason: Some(reason.clone()),
+                warnings: vec![format!("LFG-Panel: {reason}")],
+                payload: Value::Object(body),
+            });
+        }
+        let recent = match self.panel_channel_id {
             Some(channel_id) => match self.port.recent_bot_messages(channel_id, 15).await {
                 Ok(messages) => Some(messages),
                 Err(err) => {
@@ -439,17 +522,17 @@ impl LfgPanelInterface {
             },
             None => None,
         };
-        let history_checked = self.channel_id.is_none() || recent.is_some();
+        let history_checked = self.panel_channel_id.is_none() || recent.is_some();
         let history_message_id = recent.as_deref().and_then(find_existing_lfg_v2_panel);
         let planned_message_id = stored_message_id.or(history_message_id);
-        let action = match (self.channel_id, planned_message_id) {
+        let action = match (self.panel_channel_id, planned_message_id) {
             (None, _) => "blocked_missing_channel",
             (Some(_), Some(_)) => "planned_edit",
             (Some(_), None) => "planned_post",
         };
         let mut output = LfgPanelApplyOutput {
             guild_id: LFG_GUILD_ID,
-            channel_id: self.channel_id,
+            channel_id: self.panel_channel_id,
             dry_run: !confirm,
             payload_format: LFG_PAYLOAD_FORMAT.to_string(),
             stored_payload_format,
@@ -457,28 +540,26 @@ impl LfgPanelInterface {
             action: action.to_string(),
             message_id: planned_message_id,
             blocked_reason: self
-                .channel_id
+                .panel_channel_id
                 .is_none()
-                .then(|| self.missing_channel_reason.clone())
+                .then(|| self.missing_panel_channel_reason.clone())
                 .flatten(),
             warnings: Vec::new(),
             payload: Value::Object(body.clone()),
         };
-        if self.channel_id.is_none() {
+        if self.panel_channel_id.is_none() {
             let reason = self
-                .missing_channel_reason
+                .missing_panel_channel_reason
                 .as_deref()
                 .unwrap_or("DL_LFG_PANEL_CHANNEL_ID fehlt");
             output.warnings.push(format!(
-                "LFG-Panel: Zielkanal fehlt ({reason}); DL_LFG_PANEL_CHANNEL_ID muss auf das Forum-/Panel-Ziel zeigen."
+                "LFG-Panel: Zielkanal fehlt ({reason}); DL_LFG_PANEL_CHANNEL_ID muss auf einen Text-Kanal zeigen."
             ));
-            if confirm {
-                return Err(format!("LfgPanelInterface: {reason}"));
-            }
+            output.dry_run = true;
             return Ok(output);
         }
         if !confirm {
-            if self.channel_id.is_some() && !history_checked {
+            if self.panel_channel_id.is_some() && !history_checked {
                 output.warnings.push(
                     "LFG-Panel: History-Scan fehlgeschlagen; Dry-Run ohne Adoption.".to_string(),
                 );
@@ -487,7 +568,7 @@ impl LfgPanelInterface {
         }
 
         validate_lfg_panel_attachments(&attachments)?;
-        let channel_id = self.channel_id.expect("checked channel_id");
+        let channel_id = self.panel_channel_id.expect("checked channel_id");
         let mut ignored_history_message_id = None;
         if let Some(message_id) = stored_message_id {
             match self
@@ -544,6 +625,27 @@ impl LfgPanelInterface {
         output.action = "posted".to_string();
         output.message_id = Some(message_id);
         Ok(output)
+    }
+
+    async fn panel_channel_blocked_reason(&self) -> Option<String> {
+        let Some(panel_channel_id) = self.panel_channel_id else {
+            return Some(
+                self.missing_panel_channel_reason
+                    .clone()
+                    .unwrap_or_else(|| "DL_LFG_PANEL_CHANNEL_ID fehlt".to_string()),
+            );
+        };
+        let kind = self
+            .port
+            .panel_channel_kind(LFG_GUILD_ID, panel_channel_id)
+            .await?;
+        if kind.supports_regular_messages() {
+            return None;
+        }
+        Some(format!(
+            "DL_LFG_PANEL_CHANNEL_ID zeigt auf {}-Kanal; Panel-Ziel muss ein Text-Kanal sein",
+            kind.as_reason_fragment()
+        ))
     }
 
     async fn panel_message_id(&self) -> Option<u64> {
@@ -1063,7 +1165,7 @@ impl LfgPanelInterface {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
 
-        let Some(forum_channel_id) = self.channel_id else {
+        let Some(forum_channel_id) = self.forum_channel_id else {
             return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         };
         let Some(requested_slots) = parse_requested_slots(&option_text(
@@ -1496,7 +1598,7 @@ impl LfgPanelInterface {
         lane_id: u64,
         mode: LfgMode,
     ) -> BridgeReply {
-        let Some(forum_channel_id) = self.channel_id else {
+        let Some(forum_channel_id) = self.forum_channel_id else {
             return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         };
         let Ok(Some((owner_id, current_mode))) = self.lane_owner_and_mode(lane_id).await else {
@@ -2241,7 +2343,10 @@ mod tests {
         assert!(dry_run.dry_run);
         assert_eq!(dry_run.action, "blocked_cutover_disabled");
         assert_eq!(dry_run.blocked_reason.as_deref(), Some("cutover_disabled"));
-        assert!(interface.apply_panel(true).await.is_err());
+        let confirm = interface.apply_panel(true).await.expect("confirm");
+        assert!(confirm.dry_run);
+        assert_eq!(confirm.action, "blocked_cutover_disabled");
+        assert_eq!(confirm.blocked_reason.as_deref(), Some("cutover_disabled"));
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         assert_eq!(port.edits.lock().expect("edits").len(), 0);
 
@@ -2257,7 +2362,168 @@ mod tests {
             no_channel_dry_run.blocked_reason.as_deref(),
             Some("cutover_disabled")
         );
-        assert!(no_channel.apply_panel(true).await.is_err());
+        let no_channel_confirm = no_channel.apply_panel(true).await.expect("confirm");
+        assert_eq!(
+            no_channel_confirm.blocked_reason.as_deref(),
+            Some("cutover_disabled")
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_env_split_panel_apply_nutzt_panel_und_forum_post_nutzt_forum_channel() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.next_thread_id.lock().expect("next thread") = 9901;
+        let interface = LfgPanelInterface::new_with_split_channel_config(
+            pool.clone(),
+            port.clone(),
+            Some(700),
+            None,
+            Some(800),
+            None,
+            true,
+        );
+
+        let apply = interface.apply_panel(true).await.expect("panel apply");
+        assert_eq!(apply.action, "posted");
+        assert_eq!(apply.channel_id, Some(700));
+        assert_eq!(port.posts.lock().expect("posts")[0].0, 700);
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: LfgMode::Casual.modal_custom_id(),
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                options: HashMap::from([
+                    (
+                        LFG_FIELD_RANK_RANGE.to_string(),
+                        json!("Ritualist bis Phantom"),
+                    ),
+                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("3")),
+                ]),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
+        assert_eq!(port.forum_posts.lock().expect("forum posts")[0].0, 800);
+        let forum_channel_id: i64 =
+            sqlx::query_scalar("SELECT forum_channel_id FROM voice.lfg_posts WHERE thread_id = $1")
+                .bind(9901_i64)
+                .fetch_one(&pool)
+                .await
+                .expect("forum channel id");
+        assert_eq!(forum_channel_id, 800);
+    }
+
+    #[tokio::test]
+    async fn lfg_cutover_bleibt_ohne_panel_id_fuer_tempvoice_forum_publish_aktiv() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        sqlx::query(
+            "INSERT INTO voice.tempvoice_lanes (
+                 channel_id, guild_id, owner_id, base_name, category_id, source_staging_id, initial_owner_id
+             )
+             VALUES ($1, $2, 42, 'Chill Lane 1', $3, NULL, 42)",
+        )
+        .bind(7777_i64)
+        .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+        .bind(i64::try_from(crate::router::mode_to_category("casual")).expect("category"))
+        .execute(&pool)
+        .await
+        .expect("lane");
+        let port = Arc::new(MockLfgPanelPort::default());
+        port.categories
+            .lock()
+            .expect("categories")
+            .insert(7777, crate::router::mode_to_category("casual"));
+        *port.next_thread_id.lock().expect("next thread") = 9910;
+        let interface = LfgPanelInterface::new_with_split_channel_config(
+            pool.clone(),
+            port.clone(),
+            None,
+            Some("DL_LFG_PANEL_CHANNEL_ID ist nicht gesetzt".to_string()),
+            Some(800),
+            None,
+            true,
+        );
+
+        assert!(interface.cutover_active());
+        let panel_dry_run = interface.apply_panel(false).await.expect("panel dry run");
+        assert_eq!(panel_dry_run.action, "blocked_missing_channel");
+        assert_eq!(
+            panel_dry_run.blocked_reason.as_deref(),
+            Some("DL_LFG_PANEL_CHANNEL_ID ist nicht gesetzt")
+        );
+        let panel_confirm = interface.apply_panel(true).await.expect("panel confirm");
+        assert_eq!(panel_confirm.action, "blocked_missing_channel");
+        assert!(port.posts.lock().expect("posts").is_empty());
+
+        let start = interface
+            .handle_publish_lane_start(
+                BridgeInteraction {
+                    guild_id: LFG_GUILD_ID,
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                },
+                7777,
+            )
+            .await;
+        let modal = start.modal.expect("publish modal");
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: modal.custom_id,
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                options: HashMap::from([
+                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
+                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("2")),
+                ]),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
+        assert_eq!(port.forum_posts.lock().expect("forum posts")[0].0, 800);
+    }
+
+    #[tokio::test]
+    async fn lfg_panel_apply_blockt_forum_als_panel_ziel_aus_cache() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.panel_channel_kind.lock().expect("panel channel kind") =
+            Some(LfgPanelChannelKind::Forum);
+        let interface = LfgPanelInterface::new_with_split_channel_config(
+            db.pool().clone(),
+            port.clone(),
+            Some(700),
+            None,
+            Some(800),
+            None,
+            true,
+        );
+
+        let dry_run = interface.apply_panel(false).await.expect("dry run");
+        assert_eq!(dry_run.action, "blocked_invalid_channel_type");
+        assert!(dry_run
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("forum")));
+
+        let confirm = interface.apply_panel(true).await.expect("confirm");
+        assert_eq!(confirm.action, "blocked_invalid_channel_type");
+        assert!(confirm.blocked_reason.is_some());
+        assert!(port.posts.lock().expect("posts").is_empty());
+        assert!(port.edits.lock().expect("edits").is_empty());
     }
 
     #[tokio::test]
@@ -3537,6 +3803,7 @@ mod tests {
         move_error: StdMutex<Option<String>>,
         occupancy: StdMutex<HashMap<u64, LfgLaneOccupancy>>,
         categories: StdMutex<HashMap<u64, u64>>,
+        panel_channel_kind: StdMutex<Option<LfgPanelChannelKind>>,
         forum_posts: StdMutex<Vec<(u64, LfgForumPostDraft)>>,
         next_thread_id: StdMutex<u64>,
         first_message_id: StdMutex<Result<Option<u64>, String>>,
@@ -3560,6 +3827,7 @@ mod tests {
                 move_error: StdMutex::default(),
                 occupancy: StdMutex::default(),
                 categories: StdMutex::default(),
+                panel_channel_kind: StdMutex::default(),
                 forum_posts: StdMutex::default(),
                 next_thread_id: StdMutex::new(910_001),
                 first_message_id: StdMutex::new(Ok(None)),
@@ -3616,6 +3884,17 @@ mod tests {
             _limit: u8,
         ) -> Result<Vec<LfgPanelMessage>, String> {
             Ok(self.recent.lock().expect("recent").clone())
+        }
+
+        async fn panel_channel_kind(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+        ) -> Option<LfgPanelChannelKind> {
+            self.panel_channel_kind
+                .lock()
+                .expect("panel channel kind")
+                .clone()
         }
 
         async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {

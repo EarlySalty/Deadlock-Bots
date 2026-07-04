@@ -43,7 +43,7 @@ pub const ONBOARDING_RECHECK_UNVERIFIED_HINT: &str =
     "Du hast die **Verified**-Rolle noch nicht. Bitte stelle sicher, dass du deinen Account verknüpft hast \
 und dem Steam-Bot (Freundescode 820142646) eine Freundschaftsanfrage geschickt und angenommen hast. \
 (Es kann ein paar Minuten dauern)";
-const LFG_PANEL_CHANNEL_ID_ENV: &str = "DL_LFG_PANEL_CHANNEL_ID";
+const LFG_FORUM_CHANNEL_ID_ENV: &str = "DL_LFG_FORUM_CHANNEL_ID";
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 const LFG_TARGET_CHANNEL_ID_TOKEN: &str = "{{DL_LFG_TARGET_CHANNEL_ID}}";
 
@@ -106,7 +106,7 @@ where
     if !cutover_enabled {
         return None;
     }
-    lookup(LFG_PANEL_CHANNEL_ID_ENV)
+    lookup(LFG_FORUM_CHANNEL_ID_ENV)
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|id| *id > 0)
 }
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("false".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("333".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("333".to_string()),
                 _ => None,
             }),
             LFG_LEGACY_CHANNEL_ID
@@ -669,7 +669,8 @@ mod tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("true".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("333".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("333".to_string()),
+                "DL_LFG_PANEL_CHANNEL_ID" => Some("999".to_string()),
                 _ => None,
             }),
             333
@@ -677,7 +678,7 @@ mod tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("true".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("0".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("0".to_string()),
                 _ => None,
             }),
             LFG_LEGACY_CHANNEL_ID

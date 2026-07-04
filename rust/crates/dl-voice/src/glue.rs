@@ -1736,6 +1736,21 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
             .collect())
     }
 
+    async fn panel_channel_kind(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+    ) -> Option<crate::lfg_panel::LfgPanelChannelKind> {
+        let guild = self.adapter.cache().guild(GuildId::new(guild_id))?;
+        let channel = guild.channels.get(&ChannelId::new(channel_id))?;
+        Some(match channel.kind {
+            serenity::all::ChannelType::Text => crate::lfg_panel::LfgPanelChannelKind::Text,
+            serenity::all::ChannelType::News => crate::lfg_panel::LfgPanelChannelKind::News,
+            serenity::all::ChannelType::Forum => crate::lfg_panel::LfgPanelChannelKind::Forum,
+            kind => crate::lfg_panel::LfgPanelChannelKind::Other(kind.name().to_string()),
+        })
+    }
+
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
             .cache()

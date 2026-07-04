@@ -5785,6 +5785,7 @@ mod tests {
         rang_guide_apply_calls: Mutex<Vec<ConfirmCall>>,
         router_apply_calls: Mutex<Vec<RouterApplyCall>>,
         lfg_panel_apply_calls: Mutex<Vec<ConfirmCall>>,
+        lfg_panel_apply_override: Mutex<Option<LfgPanelApplyOutput>>,
     }
 
     #[async_trait]
@@ -6041,6 +6042,14 @@ mod tests {
                 .lock()
                 .expect("lfg panel apply calls")
                 .push(confirm);
+            if let Some(output) = self
+                .lfg_panel_apply_override
+                .lock()
+                .expect("lfg panel apply override")
+                .clone()
+            {
+                return Ok(output);
+            }
             Ok(mock_lfg_panel_output(!confirm))
         }
     }
@@ -8389,6 +8398,56 @@ mod tests {
                 .expect("lfg panel apply calls")
                 .as_slice(),
             &[false, true]
+        );
+    }
+
+    #[tokio::test]
+    async fn lfg_panel_apply_http_liefert_blocked_reason_statt_500() {
+        let service = Arc::new(MockServerSync::default());
+        *service
+            .lfg_panel_apply_override
+            .lock()
+            .expect("lfg panel apply override") = Some(LfgPanelApplyOutput {
+            guild_id: GUILD_ID,
+            channel_id: Some(8101),
+            dry_run: true,
+            payload_format: dl_voice::lfg_panel::LFG_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: None,
+            stored_message_id: None,
+            action: "blocked_invalid_channel_type".to_string(),
+            message_id: None,
+            blocked_reason: Some(
+                "DL_LFG_PANEL_CHANNEL_ID zeigt auf forum-Kanal; Panel-Ziel muss ein Text-Kanal sein"
+                    .to_string(),
+            ),
+            warnings: Vec::new(),
+            payload: json!({"flags": dl_voice::lfg_panel::LFG_COMPONENTS_V2_FLAG}),
+        });
+        let app = router(service.clone(), Some("secret".to_string()));
+
+        let response = app
+            .oneshot(request(
+                "/serversync/lfg-panel-apply",
+                Some("secret"),
+                json!({"confirm": true}),
+            ))
+            .await
+            .expect("lfg blocked response");
+        let (status, body) = response_json(response).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["result"]["action"], "blocked_invalid_channel_type");
+        assert_eq!(
+            body["result"]["blocked_reason"],
+            "DL_LFG_PANEL_CHANNEL_ID zeigt auf forum-Kanal; Panel-Ziel muss ein Text-Kanal sein"
+        );
+        assert_eq!(
+            service
+                .lfg_panel_apply_calls
+                .lock()
+                .expect("lfg panel apply calls")
+                .as_slice(),
+            &[true]
         );
     }
 

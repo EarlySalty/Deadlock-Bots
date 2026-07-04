@@ -62,41 +62,62 @@ fn env_u64_default(name: &str, default: u64) -> u64 {
 }
 
 fn lfg_panel_channel_id_from_env() -> (Option<u64>, Option<String>) {
-    const NAME: &str = "DL_LFG_PANEL_CHANNEL_ID";
-    match std::env::var(NAME) {
+    match std::env::var("DL_LFG_PANEL_CHANNEL_ID") {
         Ok(raw) => lfg_panel_channel_id_from_value(Some(raw.as_str())),
         Err(std::env::VarError::NotPresent) => lfg_panel_channel_id_from_value(None),
         Err(err) => (
             None,
-            Some(format!("{NAME} konnte nicht gelesen werden: {err}")),
+            Some(format!(
+                "DL_LFG_PANEL_CHANNEL_ID konnte nicht gelesen werden: {err}"
+            )),
+        ),
+    }
+}
+
+fn lfg_forum_channel_id_from_env() -> (Option<u64>, Option<String>) {
+    match std::env::var("DL_LFG_FORUM_CHANNEL_ID") {
+        Ok(raw) => lfg_forum_channel_id_from_value(Some(raw.as_str())),
+        Err(std::env::VarError::NotPresent) => lfg_forum_channel_id_from_value(None),
+        Err(err) => (
+            None,
+            Some(format!(
+                "DL_LFG_FORUM_CHANNEL_ID konnte nicht gelesen werden: {err}"
+            )),
         ),
     }
 }
 
 fn lfg_panel_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<String>) {
-    const NAME: &str = "DL_LFG_PANEL_CHANNEL_ID";
+    lfg_channel_id_from_value("DL_LFG_PANEL_CHANNEL_ID", raw)
+}
+
+fn lfg_forum_channel_id_from_value(raw: Option<&str>) -> (Option<u64>, Option<String>) {
+    lfg_channel_id_from_value("DL_LFG_FORUM_CHANNEL_ID", raw)
+}
+
+fn lfg_channel_id_from_value(name: &str, raw: Option<&str>) -> (Option<u64>, Option<String>) {
     let Some(raw) = raw else {
-        return (None, Some(format!("{NAME} ist nicht gesetzt")));
+        return (None, Some(format!("{name} ist nicht gesetzt")));
     };
     let value = raw.trim();
     if value.is_empty() {
-        return (None, Some(format!("{NAME} ist leer")));
+        return (None, Some(format!("{name} ist leer")));
     }
     match value.parse::<u64>() {
-        Ok(0) => (None, Some(format!("{NAME} darf nicht 0 sein"))),
+        Ok(0) => (None, Some(format!("{name} darf nicht 0 sein"))),
         Ok(id) => (
             Some(NonZeroU64::new(id).expect("checked non-zero").get()),
             None,
         ),
         Err(_) => (
             None,
-            Some(format!("{NAME} ist keine gueltige positive Discord-ID")),
+            Some(format!("{name} ist keine gueltige positive Discord-ID")),
         ),
     }
 }
 
-fn lfg_cutover_active(lfg_forum_cutover_enabled: bool, lfg_panel_channel_id: Option<u64>) -> bool {
-    lfg_forum_cutover_enabled && lfg_panel_channel_id.is_some()
+fn lfg_cutover_active(lfg_forum_cutover_enabled: bool, lfg_forum_channel_id: Option<u64>) -> bool {
+    lfg_forum_cutover_enabled && lfg_forum_channel_id.is_some()
 }
 
 fn legacy_lfg_responder_enabled(lfg_cutover_active: bool) -> bool {
@@ -457,7 +478,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     let lfg_forum_cutover_enabled = env_bool_default("DL_LFG_FORUM_CUTOVER", false);
     let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
-    let lfg_cutover_active = lfg_cutover_active(lfg_forum_cutover_enabled, lfg_panel_channel_id);
+    let (lfg_forum_channel_id, lfg_forum_channel_reason) = lfg_forum_channel_id_from_env();
+    let lfg_cutover_active = lfg_cutover_active(lfg_forum_cutover_enabled, lfg_forum_channel_id);
     let tempvoice_interface = dl_voice::tempvoice::interface::TempVoiceInterface::new(
         tempvoice.clone(),
         cache_snapshot.clone(),
@@ -489,16 +511,24 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         .set_router_interface(router_interface.clone())
         .await;
     if lfg_forum_cutover_enabled && !lfg_cutover_active {
+        let reason = lfg_forum_channel_reason
+            .as_deref()
+            .unwrap_or("DL_LFG_FORUM_CHANNEL_ID fehlt oder ist ungueltig");
+        tracing::warn!(%reason, "LFG-Cutover deaktiviert: ungueltige Forum-Kanal-Konfiguration");
+    }
+    if lfg_cutover_active && lfg_panel_channel_id.is_none() {
         let reason = lfg_panel_channel_reason
             .as_deref()
             .unwrap_or("DL_LFG_PANEL_CHANNEL_ID fehlt oder ist ungueltig");
-        tracing::warn!(%reason, "LFG-Panel deaktiviert: ungueltige Zielkanal-Konfiguration");
+        tracing::warn!(%reason, "LFG-Panel deaktiviert: ungueltige Panel-Kanal-Konfiguration");
     }
-    let lfg_panel_interface = dl_voice::lfg_panel::LfgPanelInterface::new_with_channel_config(
+    let lfg_panel_interface = dl_voice::lfg_panel::LfgPanelInterface::new_with_split_channel_config(
         central_pool.clone(),
         router_glue.clone(),
         lfg_panel_channel_id,
         lfg_panel_channel_reason,
+        lfg_forum_channel_id,
+        lfg_forum_channel_reason,
         lfg_cutover_active,
     );
     lfg_panel_interface
@@ -1317,8 +1347,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        legacy_lfg_responder_enabled, lfg_cutover_active, lfg_panel_channel_id_from_value,
-        moderation_enforce_from_lookup,
+        legacy_lfg_responder_enabled, lfg_cutover_active, lfg_forum_channel_id_from_value,
+        lfg_panel_channel_id_from_value, moderation_enforce_from_lookup,
     };
     use std::collections::HashMap;
 
@@ -1372,7 +1402,26 @@ mod tests {
     }
 
     #[test]
-    fn alter_lfg_responder_laeuft_nur_ohne_forum_cutover() {
+    fn lfg_forum_channel_id_parst_nur_positive_nonzero_ids() {
+        assert_eq!(
+            lfg_forum_channel_id_from_value(Some("54321")),
+            (Some(54321), None)
+        );
+
+        for raw in [None, Some(""), Some("0"), Some("abc")] {
+            let (channel_id, reason) = lfg_forum_channel_id_from_value(raw);
+            assert_eq!(channel_id, None);
+            assert!(
+                reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("DL_LFG_FORUM_CHANNEL_ID")),
+                "reason fehlt fuer {raw:?}: {reason:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn forum_cutover_haengt_an_forum_id_nicht_an_panel_id() {
         assert!(legacy_lfg_responder_enabled(lfg_cutover_active(
             false,
             Some(123)

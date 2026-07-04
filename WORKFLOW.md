@@ -1374,3 +1374,23 @@ MERGE-BLOCKIERT bis der Marker-Cleanup nach Rollenentfernungsfehlern retryfaehig
 
 ## Offen
 - Keine bekannten offenen Rework-Punkte. Kein Commit/Push ausgefuehrt.
+
+# LFG Panel/Forum Env-Split 50008-Fix (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `fix/lfg-panel-forum-split`; Pflichtkontext `WORKFLOW.md` gelesen.
+- Live-Befund bestaetigt: `DL_LFG_PANEL_CHANNEL_ID` wird aktuell zugleich fuer Panel-Message und Forum-Post-Ziel genutzt; `lfg_cutover_active` haengt noch an der Panel-ID.
+- TDD rot: `SQLX_OFFLINE=true cargo test -p dl-voice lfg_env_split -- --nocapture` scheitert erwartbar an fehlender Split-Config/Channel-Type-Port-Implementierung.
+- Env-Split in `LfgPanelInterface` begonnen: Panel- und Forum-Ziel sind getrennte Felder; erster Split-Test mit Test-DB-Wrapper gruen.
+- Umsetzung fertig: `DL_LFG_FORUM_CHANNEL_ID` steuert Forum-Posts/DB/Reconcile-Cutover; `DL_LFG_PANEL_CHANNEL_ID` steuert nur Panel-Message. Panel-Apply blockt fehlende/falsche Panel-Ziele per `blocked_reason`, inklusive Forum-Kanal aus Cache-Typpruefung.
+- Repoint-Befund: `dl-community` Onboarding und AI-Onboarding verweisen bei Cutover auf die user-sichtbare Mitspieler-Suche; Ziel ist deshalb das Forum (`DL_LFG_FORUM_CHANNEL_ID`), nicht der Panel-Kanal.
+
+## Verifikation aktuell
+- Gruen: `cargo fmt -- --check`.
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen via Test-DB-Wrapper: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice -p dl-community` (dl-community 65 passed; dl-voice 161 passed; Doc-tests 0/0).
+- Gruen: `./scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot serversync` (79 passed, 1 ignored).
+- Hinweis: Direkter `SQLX_OFFLINE=true cargo test -p dl-voice -p dl-community` ohne `CENTRAL_TEST_DSN` scheitert am vorhandenen Test-Harness-DSN-Guard; fuer belastbare Zahlen wurde der zentrale DB-Wrapper genutzt.
+
+## Offen
+- Keine bekannten offenen Punkte. Kein Commit/Push ausgefuehrt.

@@ -33,7 +33,7 @@ pub const AI_ONBOARDING_DEFAULT_MAX_OUTPUT_TOKENS: u32 = 700;
 const TEMPERATURE: f64 = 0.45;
 
 const LFG_LEGACY_CHANNEL_ID: u64 = 1376335502919335936;
-const LFG_PANEL_CHANNEL_ID_ENV: &str = "DL_LFG_PANEL_CHANNEL_ID";
+const LFG_FORUM_CHANNEL_ID_ENV: &str = "DL_LFG_FORUM_CHANNEL_ID";
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 const TEMPVOICE_PANEL_CHANNEL_ID: u64 = 1371927143537315890;
 const FEEDBACK_CHANNEL_ID: u64 = 1289721245281292291;
@@ -740,7 +740,7 @@ where
     if !cutover_enabled {
         return None;
     }
-    lookup(LFG_PANEL_CHANNEL_ID_ENV)
+    lookup(LFG_FORUM_CHANNEL_ID_ENV)
         .and_then(|value| value.trim().parse::<u64>().ok())
         .filter(|id| *id > 0)
 }
@@ -862,7 +862,7 @@ mod pure_tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("0".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("222".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("222".to_string()),
                 _ => None,
             }),
             LFG_LEGACY_CHANNEL_ID
@@ -870,7 +870,8 @@ mod pure_tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("1".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("222".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("222".to_string()),
+                "DL_LFG_PANEL_CHANNEL_ID" => Some("999".to_string()),
                 _ => None,
             }),
             222
@@ -878,7 +879,7 @@ mod pure_tests {
         assert_eq!(
             lfg_target_channel_id_from_lookup(|key| match key {
                 LFG_FORUM_CUTOVER_ENV => Some("1".to_string()),
-                LFG_PANEL_CHANNEL_ID_ENV => Some("0".to_string()),
+                LFG_FORUM_CHANNEL_ID_ENV => Some("0".to_string()),
                 _ => None,
             }),
             LFG_LEGACY_CHANNEL_ID
