@@ -1759,15 +1759,12 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
     }
 
     async fn first_thread_message_id(&self, thread_id: u64) -> Result<Option<u64>, String> {
-        let mut messages = ChannelId::new(thread_id)
-            .messages(
-                &self.adapter.http,
-                GetMessages::new().after(MessageId::new(0)).limit(1),
-            )
-            .await
-            .map_err(|err| err.to_string())?;
-        messages.sort_by_key(|message| message.id.get());
-        Ok(messages.first().map(|message| message.id.get()))
+        // Bei Forum-Posts ist die ID der Start-Nachricht laut Discord-Vertrag
+        // identisch mit der Thread-ID. Kein Fetch noetig — und der alte
+        // `GetMessages::after(MessageId::new(0))` panickte (0 ist keine gueltige
+        // Snowflake), was den Interaktions-Handler nach dem Post-Erstellen killte
+        // ("Interaktion fehlgeschlagen", obwohl der Post schon stand).
+        Ok(Some(thread_id))
     }
 
     async fn archive_and_lock_thread(&self, thread_id: u64) -> Result<(), String> {
