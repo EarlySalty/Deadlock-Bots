@@ -151,9 +151,6 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         let Some(guild_id) = event.guild_id else {
             return;
         };
-        if !self.config.scan_channel_ids.contains(&event.channel_id) {
-            return;
-        }
         if !event.author_staff_status_known {
             tracing::warn!(
                 guild_id,
@@ -169,19 +166,22 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             return;
         }
 
+        // Verhaltens-Erkennung (Takeover/Burst) laeuft serverweit: uebernommene Konten
+        // koennen in jedem Kanal posten. Nur die inhaltliche LLM-Analyse bleibt auf die
+        // konfigurierten Scan-Kanaele beschraenkt (gezielter, kostenkontrollierter Scan).
         let behavior_signal = if let Some(detector) = &self.behavior_detector {
             detector.detect(guild_id, event).await
         } else {
             None
         };
-        let content_verdict = if event.content.trim().is_empty()
-            && event.image_attachment_urls.is_empty()
+        let content_verdict = if self.config.scan_channel_ids.contains(&event.channel_id)
+            && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
         {
-            None
-        } else {
             let input =
                 ModerationInput::new(event.content.clone(), event.image_attachment_urls.clone());
             self.pipeline.evaluate(&input).await
+        } else {
+            None
         };
         let outcome = self
             .policy
@@ -1120,5 +1120,81 @@ mod tests {
         assert!(matches!(outcome, ReviewOutcome::Done(_)));
         assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeout_minutes.lock().await.as_slice(), &[60]);
+    }
+
+    #[tokio::test]
+    async fn behavior_takeover_fires_outside_scan_channels() {
+        // Kontoübernahme kann in JEDEM Kanal posten. Die Verhaltens-Erkennung muss
+        // serverweit greifen, auch wenn der Kanal nicht in scan_channel_ids steht.
+        let analyzer_text = Arc::new(StaticText::default());
+        let verifier_text = Arc::new(StaticText::default());
+        let port = Arc::new(CountingPort::default());
+        let store = MemoryStore::default();
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let moderator = ModerationSystem::new_with_store(
+            store,
+            ContentModerationPipeline::new(
+                ContentAnalyzer::new(
+                    analyzer_text,
+                    None,
+                    ContentAnalyzerConfig {
+                        text_model: "MiniMax-M3".to_string(),
+                        image_model: "gpt-5.4-nano".to_string(),
+                    },
+                ),
+                ContentVerifier::new(verifier_text, None, Default::default()),
+                0.5,
+            ),
+            Some(detector),
+            ActionPolicy::new(ActionPolicyConfig::default()),
+            port.clone(),
+            ModerationSystemConfig {
+                // Nachrichten laufen in Kanal 10/11 — bewusst NICHT in scan_channel_ids.
+                scan_channel_ids: vec![777],
+                moderation_channel_id: 99,
+                enforce: true,
+            },
+        );
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 3600);
+
+        moderator
+            .handle_message(&image_event(200, 10, 1000, created_at, joined_at))
+            .await;
+        moderator
+            .handle_message(&image_event(200, 11, 1001, created_at, joined_at))
+            .await;
+
+        assert_eq!(port.bans.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let draft = moderator.store.drafts.lock().await.pop().expect("draft");
+        assert_eq!(draft.source, "behavior");
+        assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
+    }
+
+    #[tokio::test]
+    async fn content_scan_stays_limited_to_scan_channels() {
+        // Ohne Verhaltens-Detektor bleibt nur der Content-Pfad — der darf außerhalb
+        // der scan_channel_ids NICHT feuern (LLM-Scan bleibt gezielt).
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.9,"reason":"Verifier"}"#],
+            None,
+            vec![777],
+            true,
+        )
+        .await;
+
+        // scanned_text_event postet in Kanal 42 — nicht in scan_channel_ids [777].
+        moderator
+            .handle_message(&scanned_text_event(500, "free crypto"))
+            .await;
+
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(moderator.store.drafts.lock().await.len(), 0);
     }
 }
