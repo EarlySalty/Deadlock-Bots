@@ -1,11 +1,3 @@
-## #207 — Automatische Moderation schützt wieder den ganzen Server
-
-**Ausgangslage:** Seit dem Zusammenlegen der Moderations-Systeme lief die automatische Verhaltens-Erkennung — etwa übernommene Konten, die plötzlich Spam oder Scam streuen — nur noch in einem einzigen Kanal statt serverweit. Überall sonst griff sie nicht.
-
-**Was wurde geändert:** Die Verhaltens-Erkennung läuft wieder auf dem ganzen Server, egal in welchem Kanal etwas passiert. Die inhaltliche KI-Prüfung von Texten und Bildern bleibt wie vorgesehen gezielt auf die dafür bestimmten Kanäle beschränkt.
-
-**Wie es jetzt läuft:** Auffälliges Verhalten wird überall erkannt und wie gehabt behandelt — Sofort-Vollzug bei klaren Fällen, sonst ein Vorschlag an die Mods. An den Entscheidungen selbst ändert sich nichts, nur an ihrer Reichweite.
-
 ## #206 — Mitspieler-Suche: „Wann?" + Benachrichtigung bei Treffer
 
 **Ausgangslage:** In der Suche stand nur, wer spielt und mit welchem Rang — nicht, wann du überhaupt Zeit hast. Und wer gerade selbst kein Gesuch postet, verpasst passende Lobbys komplett.
