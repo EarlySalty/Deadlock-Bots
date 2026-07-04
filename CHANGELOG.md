@@ -6,6 +6,14 @@
 
 **Wie es jetzt läuft:** Frage ankreuzen, Onboarding abschließen, DM aufmachen, drei Schritte durchklicken — ab dann hält der Server deinen Rang von selbst aktuell. Wer keine DMs zulässt, findet den Weg weiterhin direkt im Rang-Kanal.
 
+## #200 — Mitspieler-Suche ist jetzt ein lebendiges Forum
+
+**Ausgangslage:** Die Mitspieler-Suche war ein Textkanal — Gesuche verschwanden im Verlauf, und man wusste nie, ob ein „wer noch Ranked?" von vor zehn Minuten noch aktuell ist.
+
+**Was wurde geändert:** `🎯mitspieler-suche` ist jetzt ein Forum. Du erstellst dein Gesuch per kurzem Formular (Modus, Rang-Bereich, freie Plätze) — entweder direkt im Forum oder mit einem Klick aus deiner eigenen Voice-Lane heraus. Das Besondere: Der Post zeigt live, wie viele Plätze in deiner Lane noch frei sind, ein „Beitreten"-Knopf zieht andere direkt zu dir rein, und sobald die Lane voll ist oder sich auflöst, schließt sich der Post von selbst. Der alte Textkanal ist ins Archiv gewandert.
+
+**Wie es jetzt läuft:** Formular ausfüllen, optional gleich eine Lane aufmachen, und der Post hält sich von allein aktuell — kein Friedhof aus veralteten Gesuchen mehr.
+
 ## #199 — Steam verknüpfen: ein klarer Weg in drei Schritten
 
 **Ausgangslage:** Im Rang-Kanal erklärten eine ältere Textnachricht und ein einfaches Embed die Steam-Verknüpfung — funktional, aber unübersichtlich: viel Fettdruck, gleich aussehende Textblöcke und ein verwirrendes Nebeneinander von Bot-Verknüpfung und der offiziellen Discord-Verknüpfung „Steam Verifiziert✅".
