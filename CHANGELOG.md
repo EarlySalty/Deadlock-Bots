@@ -1,3 +1,11 @@
+## #206 — Mitspieler-Suche: „Wann?" + Benachrichtigung bei Treffer
+
+**Ausgangslage:** In der Suche stand nur, wer spielt und mit welchem Rang — nicht, wann du überhaupt Zeit hast. Und wer gerade selbst kein Gesuch postet, verpasst passende Lobbys komplett.
+
+**Was wurde geändert:** Im Gesuch gibt's jetzt ein grobes „Wann?" (jetzt / heute Abend / Wochenende / flexibel). Neu ist außerdem der Button „Benachrichtige mich": du trägst Modus, Rang und Zeitfenster ein und bekommst eine DM, sobald ein passendes Gesuch auftaucht.
+
+**Wie es jetzt läuft:** Die Benachrichtigung ist rein freiwillig, einmalig und läuft von selbst ab. Ob sie feuert, richtet sich auch danach, wann du üblicherweise online bist — kein Ping zur Unzeit.
+
 ## #205 — Mitspieler-Suche: Rang per Klick statt Tippen
 
 **Ausgangslage:** Im Gesuch-Formular musstest du deinen Rang als Text eintippen („z. B. Archon bis Phantom"). Wer den genauen Rang-Namen nicht kennt, tippt schnell was Falsches — und ungenaue Eingaben brachen auch die automatischen Filter-Tags.
