@@ -1,3 +1,11 @@
+## #205 — Mitspieler-Suche: Rang per Klick statt Tippen
+
+**Ausgangslage:** Im Gesuch-Formular musstest du deinen Rang als Text eintippen („z. B. Archon bis Phantom"). Wer den genauen Rang-Namen nicht kennt, tippt schnell was Falsches — und ungenaue Eingaben brachen auch die automatischen Filter-Tags.
+
+**Was wurde geändert:** Rang und Plätze wählst du jetzt per Dropdown. Nach dem Modus kommt ein „Von"- und ein „Bis"-Menü mit allen Rängen (samt Rang-Emojis) plus die freien Plätze — kein Tippen mehr, keine Tippfehler. „Von = Bis" heißt genau ein Rang, „Rang egal" lässt's offen.
+
+**Wie es jetzt läuft:** Modus wählen → Von/Bis-Rang und Plätze anklicken → **Gesuch posten**. Die Filter-Tags kommen wie gehabt automatisch aus deiner Auswahl.
+
 ## #204 — Ranked-Lanes & -Gesuche erkennen deinen Rang wieder
 
 **Ausgangslage:** Wer eine Ranked-Lane aufmachen oder ein Ranked-Gesuch in der Mitspieler-Suche erstellen wollte, wurde abgewiesen („Für Ranked brauchst du einen verifizierten Rang") — auch wenn das Steam-Konto längst verknüpft war. Der Check suchte nach alten Rang-Rollen, die es nach dem Umbau des Rang-Systems gar nicht mehr gibt.

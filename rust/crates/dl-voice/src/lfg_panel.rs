@@ -9,8 +9,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use dl_central_db::kv;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, ModalField,
-    ModalSpec, VoiceEvent,
+    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -29,13 +28,13 @@ pub const LFG_BANNER_DIR: &str = "assets/welcome-banners";
 pub const LFG_PANEL_BANNER_FILENAME: &str = "router-hero.png";
 pub const LFG_CREATE_START_CUSTOM_ID: &str = "lfg:create:start";
 pub const LFG_CREATE_MODE_PREFIX: &str = "lfg:create:mode:";
-pub const LFG_CREATE_MODAL_PREFIX: &str = "lfg:create:modal:";
+pub const LFG_RANK_FROM_SELECT_CUSTOM_ID: &str = "lfg:rank_von";
+pub const LFG_RANK_TO_SELECT_CUSTOM_ID: &str = "lfg:rank_bis";
+pub const LFG_SLOTS_SELECT_CUSTOM_ID: &str = "lfg:slots";
+pub const LFG_POST_PREFIX: &str = "lfg:post:";
 pub const LFG_OPEN_LANE_PREFIX: &str = "lfg:open_lane:";
 pub const LFG_JOIN_PREFIX: &str = "lfg:join:";
 pub const LFG_PUBLISH_LANE_CUSTOM_ID: &str = "lfg:publish_lane";
-pub const LFG_PUBLISH_LANE_MODAL_PREFIX: &str = "lfg:publish_lane:modal:";
-pub const LFG_FIELD_RANK_RANGE: &str = "rank_range";
-pub const LFG_FIELD_REQUESTED_SLOTS: &str = "requested_slots";
 pub const LFG_EXPIRY_HOURS: i64 = 24;
 pub const LFG_CREATING_STALE_MINUTES: i64 = 5;
 pub const LFG_RECONCILE_INTERVAL_SECONDS: u64 = 60;
@@ -64,15 +63,17 @@ pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "Street Brawl";
 // Panel-Button-Emojis im Brand-Look (gold getönte Lucide-Icons): Modus recycelt
 // die Router-Emojis, "Mitspieler suchen" nutzt das Gold-Such-Emoji (gen_lfg_tag_emojis.py).
 pub const LFG_EMOJI_SEARCH: (&str, &str) = ("dl_lfg_sucht", "1522801046509064263");
-pub const LFG_MODAL_TITEL: &str = "Mitspieler suchen";
-pub const LFG_MODAL_FELD_RANG_LABEL: &str = "Rang-Bereich (optional)";
-pub const LFG_MODAL_FELD_RANG_PLACEHOLDER: &str =
-    "z. B. Archon oder Archon bis Phantom — leer lassen = alle Ränge";
-pub const LFG_MODAL_FELD_PLAETZE_LABEL: &str = "Wie viele Mitspieler suchst du?";
-pub const LFG_MODAL_FELD_PLAETZE_PLACEHOLDER: &str = "z. B. 3";
+pub const LFG_RANK_FROM_PLACEHOLDER: &str = "Von welchem Rang? (optional)";
+pub const LFG_RANK_TO_PLACEHOLDER: &str = "Bis welchem Rang? (optional)";
+pub const LFG_SLOTS_PLACEHOLDER: &str = "Wie viele Plätze frei?";
+pub const LFG_RANK_ANY_LABEL: &str = "Rang egal";
+pub const LFG_RANK_ANY_VALUE: &str = "egal";
+pub const LFG_BTN_POSTEN: &str = "Gesuch posten";
 pub const LFG_ERR_KEIN_RANKED_RANG: &str = "Für Ranked brauchst du einen verifizierten Rang. Verknüpf dein Steam-Konto in <#1398021105339334666>, dann geht's hier weiter.";
-pub const LFG_ERR_RANG_UNBEKANNT: &str = "Den Rang kenne ich nicht. Schreib z. B. „Archon“ oder „Archon bis Phantom“ — oder lass das Feld leer.";
-pub const LFG_ERR_PLAETZE_UNGUELTIG: &str = "Gib bei den Plätzen eine Zahl an, z. B. 3.";
+pub const LFG_ERR_RANG_UNBEKANNT: &str =
+    "Wähl deinen Rang oben aus der Liste — oder lass ihn auf „Rang egal“.";
+pub const LFG_ERR_PLAETZE_UNGUELTIG: &str =
+    "Wähl oben aus, wie viele Plätze frei sind, dann klick auf „Gesuch posten“.";
 pub const LFG_ERR_SCHON_AKTIVE_SUCHE: &str =
     "Du hast schon ein laufendes Gesuch. Schließ das erst, bevor du ein neues aufmachst.";
 pub const LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN: &str =
@@ -150,10 +151,6 @@ impl LfgMode {
         }
     }
 
-    fn modal_custom_id(self) -> String {
-        format!("{LFG_CREATE_MODAL_PREFIX}{}", self.as_str())
-    }
-
     fn mode_custom_id(self) -> String {
         format!("{LFG_CREATE_MODE_PREFIX}{}", self.as_str())
     }
@@ -164,6 +161,104 @@ pub struct LfgRankRange {
     pub min: Option<i32>,
     pub max: Option<i32>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LfgDraft {
+    mode: LfgMode,
+    rank_from: Option<String>,
+    rank_to: Option<String>,
+    slots: Option<i32>,
+    lane_id: Option<u64>,
+}
+
+impl LfgDraft {
+    fn new(mode: LfgMode, lane_id: Option<u64>) -> Self {
+        Self {
+            mode,
+            rank_from: None,
+            rank_to: None,
+            slots: None,
+            lane_id,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LfgRankSelectOption {
+    label: &'static str,
+    value: &'static str,
+    emoji_name: &'static str,
+    emoji_id: &'static str,
+}
+
+const LFG_RANK_SELECT_OPTIONS: [LfgRankSelectOption; 11] = [
+    LfgRankSelectOption {
+        label: "Initiate",
+        value: "initiate",
+        emoji_name: "initiate",
+        emoji_id: "1316457822518775869",
+    },
+    LfgRankSelectOption {
+        label: "Seeker",
+        value: "seeker",
+        emoji_name: "seeker",
+        emoji_id: "1316458138886475876",
+    },
+    LfgRankSelectOption {
+        label: "Alchemist",
+        value: "alchemist",
+        emoji_name: "alchemist",
+        emoji_id: "1316455291629342750",
+    },
+    LfgRankSelectOption {
+        label: "Arcanist",
+        value: "arcanist",
+        emoji_name: "arcanist",
+        emoji_id: "1316455305315352587",
+    },
+    LfgRankSelectOption {
+        label: "Ritualist",
+        value: "ritualist",
+        emoji_name: "ritualist",
+        emoji_id: "1316458203298660533",
+    },
+    LfgRankSelectOption {
+        label: "Emissary",
+        value: "emissary",
+        emoji_name: "emissary",
+        emoji_id: "1316457650367496306",
+    },
+    LfgRankSelectOption {
+        label: "Archon",
+        value: "archon",
+        emoji_name: "archon",
+        emoji_id: "1397687455313952918",
+    },
+    LfgRankSelectOption {
+        label: "Oracle",
+        value: "oracle",
+        emoji_name: "oracle",
+        emoji_id: "1316457885743579317",
+    },
+    LfgRankSelectOption {
+        label: "Phantom",
+        value: "phantom",
+        emoji_name: "phantom",
+        emoji_id: "1316457982363701278",
+    },
+    LfgRankSelectOption {
+        label: "Ascendant",
+        value: "ascendant",
+        emoji_name: "ascendant",
+        emoji_id: "1316457367818338385",
+    },
+    LfgRankSelectOption {
+        label: "Eternus",
+        value: "eternus",
+        emoji_name: "eternus",
+        emoji_id: "1316457737621868574",
+    },
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LfgForumPostDraft {
@@ -413,6 +508,7 @@ pub struct LfgPanelInterface {
     cutover_active: bool,
     lane_spawner: RwLock<Option<Arc<dyn LfgLaneSpawner>>>,
     edit_queue: LfgEditQueue,
+    pending_drafts: Mutex<HashMap<u64, LfgDraft>>,
 }
 
 impl LfgPanelInterface {
@@ -471,6 +567,7 @@ impl LfgPanelInterface {
             cutover_active,
             lane_spawner: RwLock::new(None),
             edit_queue: LfgEditQueue::default(),
+            pending_drafts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -851,42 +948,8 @@ fn lfg_mode_selection_components() -> Value {
     ]}])
 }
 
-fn lfg_create_modal(mode: LfgMode) -> ModalSpec {
-    lfg_rank_slots_modal(mode.modal_custom_id())
-}
-
-fn lfg_publish_lane_modal(lane_id: u64, mode: LfgMode) -> ModalSpec {
-    lfg_rank_slots_modal(format!(
-        "{LFG_PUBLISH_LANE_MODAL_PREFIX}{lane_id}:{}",
-        mode.as_str()
-    ))
-}
-
-fn lfg_rank_slots_modal(custom_id: String) -> ModalSpec {
-    ModalSpec {
-        custom_id,
-        title: LFG_MODAL_TITEL.to_string(),
-        fields: vec![
-            ModalField {
-                custom_id: LFG_FIELD_RANK_RANGE.to_string(),
-                label: LFG_MODAL_FELD_RANG_LABEL.to_string(),
-                placeholder: LFG_MODAL_FELD_RANG_PLACEHOLDER.to_string(),
-                required: false,
-                min_length: 0,
-                max_length: 80,
-                paragraph: false,
-            },
-            ModalField {
-                custom_id: LFG_FIELD_REQUESTED_SLOTS.to_string(),
-                label: LFG_MODAL_FELD_PLAETZE_LABEL.to_string(),
-                placeholder: LFG_MODAL_FELD_PLAETZE_PLACEHOLDER.to_string(),
-                required: true,
-                min_length: 1,
-                max_length: 1,
-                paragraph: false,
-            },
-        ],
-    }
+fn lfg_post_custom_id(mode: LfgMode) -> String {
+    format!("{LFG_POST_PREFIX}{}", mode.as_str())
 }
 
 fn lfg_open_lane_custom_id(post_id: i64) -> String {
@@ -903,22 +966,169 @@ fn lfg_success_components(post_id: i64) -> Value {
     ]}])
 }
 
-fn option_text(options: &HashMap<String, Value>, key: &str) -> String {
-    options
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim()
-        .to_string()
+fn lfg_rank_select_option_json(
+    label: &str,
+    value: &str,
+    emoji_name: &str,
+    emoji_id: &str,
+    selected: bool,
+) -> Value {
+    json!({
+        "label": label,
+        "value": value,
+        "default": selected,
+        "emoji": { "name": emoji_name, "id": emoji_id },
+    })
 }
 
-fn parse_requested_slots(raw: &str) -> Option<i32> {
+fn lfg_rank_select(custom_id: &str, placeholder: &str, current: Option<&str>) -> Value {
+    let current = current.unwrap_or(LFG_RANK_ANY_VALUE);
+    let mut options = Vec::with_capacity(LFG_RANK_SELECT_OPTIONS.len() + 1);
+    options.push(lfg_rank_select_option_json(
+        LFG_RANK_ANY_LABEL,
+        LFG_RANK_ANY_VALUE,
+        "dl_rang_egal",
+        "1522801043803472064",
+        current == LFG_RANK_ANY_VALUE,
+    ));
+    options.extend(LFG_RANK_SELECT_OPTIONS.iter().map(|rank| {
+        lfg_rank_select_option_json(
+            rank.label,
+            rank.value,
+            rank.emoji_name,
+            rank.emoji_id,
+            current == rank.value,
+        )
+    }));
+    json!({
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": custom_id,
+            "placeholder": placeholder,
+            "min_values": 1,
+            "max_values": 1,
+            "options": options,
+        }],
+    })
+}
+
+fn slot_select_cap(mode: LfgMode) -> i32 {
+    mode_default_capacity(mode).clamp(1, 5) as i32
+}
+
+fn lfg_slots_select(mode: LfgMode, current: Option<i32>) -> Value {
+    let options = (1..=slot_select_cap(mode))
+        .map(|slots| {
+            let label = match slots {
+                1 => "1 Platz".to_string(),
+                2 => "2 Plätze".to_string(),
+                3 => "3 Plätze".to_string(),
+                4 => "4 Plätze".to_string(),
+                5 => "5 Plätze".to_string(),
+                other => format!("{other} Plätze"),
+            };
+            json!({
+                "label": label,
+                "value": slots.to_string(),
+                "default": current == Some(slots),
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": LFG_SLOTS_SELECT_CUSTOM_ID,
+            "placeholder": LFG_SLOTS_PLACEHOLDER,
+            "min_values": 1,
+            "max_values": 1,
+            "options": options,
+        }],
+    })
+}
+
+fn lfg_draft_components(draft: &LfgDraft) -> Value {
+    json!([
+        lfg_rank_select(
+            LFG_RANK_FROM_SELECT_CUSTOM_ID,
+            LFG_RANK_FROM_PLACEHOLDER,
+            draft.rank_from.as_deref(),
+        ),
+        lfg_rank_select(
+            LFG_RANK_TO_SELECT_CUSTOM_ID,
+            LFG_RANK_TO_PLACEHOLDER,
+            draft.rank_to.as_deref(),
+        ),
+        lfg_slots_select(draft.mode, draft.slots),
+        { "type": 1, "components": [
+            lfg_button(LFG_BTN_POSTEN, 1, &lfg_post_custom_id(draft.mode))
+        ]},
+    ])
+}
+
+fn lfg_draft_content(mode: LfgMode) -> String {
+    format!(
+        "Modus: {} · wähl Rang-Bereich und freie Plätze, dann **Gesuch posten**.",
+        mode.display_name()
+    )
+}
+
+fn lfg_draft_reply(draft: &LfgDraft, update_message: bool) -> BridgeReply {
+    BridgeReply {
+        content: Some(lfg_draft_content(draft.mode)),
+        components: Some(lfg_draft_components(draft)),
+        ephemeral: !update_message,
+        update_message,
+        ..BridgeReply::default()
+    }
+}
+
+fn parse_requested_slots(raw: &str, mode: LfgMode) -> Option<i32> {
     raw.trim()
         .parse::<i32>()
         .ok()
-        .filter(|slots| (1..=5).contains(slots))
+        .filter(|slots| (1..=slot_select_cap(mode)).contains(slots))
 }
 
+fn normalize_lfg_rank_value(raw: &str) -> Option<Option<String>> {
+    let normalized = raw.trim().to_lowercase();
+    if normalized == LFG_RANK_ANY_VALUE {
+        return Some(None);
+    }
+    (crate::tempvoice::logic::rank_index(&normalized) > 0).then_some(Some(normalized))
+}
+
+fn lfg_rank_value_index(value: Option<&str>) -> Option<Option<i32>> {
+    let Some(value) = value else {
+        return Some(None);
+    };
+    if value == LFG_RANK_ANY_VALUE {
+        return Some(None);
+    }
+    let idx = crate::tempvoice::logic::rank_index(value);
+    if idx == 0 {
+        return None;
+    }
+    let Ok(idx) = i32::try_from(idx) else {
+        return None;
+    };
+    Some(Some(idx))
+}
+
+fn lfg_rank_range_from_draft(draft: &LfgDraft) -> Option<LfgRankRange> {
+    let mut min = lfg_rank_value_index(draft.rank_from.as_deref())?;
+    let mut max = lfg_rank_value_index(draft.rank_to.as_deref())?;
+    if let (Some(left), Some(right)) = (min, max) {
+        if left > right {
+            min = Some(right);
+            max = Some(left);
+        }
+    }
+    Some(LfgRankRange { min, max })
+}
+
+#[cfg(test)]
 fn parse_rank_range(raw: &str) -> Option<LfgRankRange> {
     let normalized = raw.trim().to_lowercase();
     if normalized.is_empty() {
@@ -972,6 +1182,8 @@ fn rank_range_label(range: LfgRankRange) -> String {
     match (range.min, range.max) {
         (Some(min), Some(max)) if min == max => rank_name(min),
         (Some(min), Some(max)) => format!("{} bis {}", rank_name(min), rank_name(max)),
+        (Some(min), None) => format!("{} bis {}", rank_name(min), rank_name(11)),
+        (None, Some(max)) => format!("{} bis {}", rank_name(1), rank_name(max)),
         _ => LFG_POST_RANG_EGAL.to_string(),
     }
 }
@@ -1030,6 +1242,18 @@ fn derive_lfg_forum_tag_ids(
             .iter()
             .filter_map(|bracket| {
                 ranges_overlap(min, max, bracket.min, bracket.max).then_some(bracket.tag_id)
+            })
+            .collect::<Vec<_>>(),
+        (LfgMode::Ranked, Some(min), None) => LFG_FORUM_RANK_BRACKETS
+            .iter()
+            .filter_map(|bracket| {
+                ranges_overlap(min, 11, bracket.min, bracket.max).then_some(bracket.tag_id)
+            })
+            .collect::<Vec<_>>(),
+        (LfgMode::Ranked, None, Some(max)) => LFG_FORUM_RANK_BRACKETS
+            .iter()
+            .filter_map(|bracket| {
+                ranges_overlap(1, max, bracket.min, bracket.max).then_some(bracket.tag_id)
             })
             .collect::<Vec<_>>(),
         _ => Vec::new(),
@@ -1173,12 +1397,6 @@ fn parse_i64_suffix(custom_id: &str, prefix: &str) -> Option<i64> {
     custom_id.strip_prefix(prefix)?.parse::<i64>().ok()
 }
 
-fn parse_publish_lane_modal_id(custom_id: &str) -> Option<(u64, LfgMode)> {
-    let rest = custom_id.strip_prefix(LFG_PUBLISH_LANE_MODAL_PREFIX)?;
-    let (lane_id, mode) = rest.split_once(':')?;
-    Some((lane_id.parse().ok()?, LfgMode::from_str(mode)?))
-}
-
 fn lfg_edit_delay_from_last(now: DateTime<Utc>, last: Option<DateTime<Utc>>) -> Option<Duration> {
     let last = last?;
     let elapsed = now.signed_duration_since(last);
@@ -1195,6 +1413,12 @@ fn lfg_edit_delay_from_last(now: DateTime<Utc>, last: Option<DateTime<Utc>>) -> 
 enum LfgReservationError {
     AlreadyOpen,
     Db(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LfgPostCreateError {
+    AlreadyOpen,
+    Failed,
 }
 
 #[derive(Debug, Clone)]
@@ -1274,13 +1498,79 @@ impl LfgPanelInterface {
         if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
-        BridgeReply {
-            modal: Some(lfg_create_modal(mode)),
-            ..BridgeReply::default()
-        }
+        let draft = LfgDraft::new(mode, None);
+        self.pending_drafts
+            .lock()
+            .await
+            .insert(interaction.user_id, draft.clone());
+        lfg_draft_reply(&draft, true)
     }
 
-    async fn handle_modal(&self, interaction: BridgeInteraction, mode: LfgMode) -> BridgeReply {
+    async fn handle_draft_select(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let Some(selected) = interaction.values.first().map(String::as_str) else {
+            return match interaction.custom_id.as_str() {
+                LFG_RANK_FROM_SELECT_CUSTOM_ID | LFG_RANK_TO_SELECT_CUSTOM_ID => {
+                    BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT)
+                }
+                LFG_SLOTS_SELECT_CUSTOM_ID => {
+                    BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG)
+                }
+                _ => BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN),
+            };
+        };
+        let mut drafts = self.pending_drafts.lock().await;
+        let Some(draft) = drafts.get_mut(&interaction.user_id) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        match interaction.custom_id.as_str() {
+            LFG_RANK_FROM_SELECT_CUSTOM_ID => {
+                let Some(rank) = normalize_lfg_rank_value(selected) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+                };
+                draft.rank_from = rank;
+            }
+            LFG_RANK_TO_SELECT_CUSTOM_ID => {
+                let Some(rank) = normalize_lfg_rank_value(selected) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+                };
+                draft.rank_to = rank;
+            }
+            LFG_SLOTS_SELECT_CUSTOM_ID => {
+                let Some(slots) = parse_requested_slots(selected, draft.mode) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
+                };
+                draft.slots = Some(slots);
+            }
+            _ => {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+        }
+        let updated = draft.clone();
+        drop(drafts);
+        lfg_draft_reply(&updated, true)
+    }
+
+    async fn handle_post_draft(
+        &self,
+        interaction: BridgeInteraction,
+        mode: LfgMode,
+    ) -> BridgeReply {
+        let draft = {
+            let drafts = self.pending_drafts.lock().await;
+            let Some(draft) = drafts.get(&interaction.user_id).cloned() else {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            };
+            draft
+        };
+        if draft.mode != mode {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        }
+        let Some(requested_slots) = draft.slots else {
+            return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
+        };
+        let Some(rank_range) = lfg_rank_range_from_draft(&draft) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+        };
         let guild_id = if interaction.guild_id == 0 {
             LFG_GUILD_ID
         } else {
@@ -1289,109 +1579,53 @@ impl LfgPanelInterface {
         if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
-
-        let Some(forum_channel_id) = self.forum_channel_id else {
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        let owner_id = if let Some(lane_id) = draft.lane_id {
+            let Ok(Some((owner_id, current_mode))) = self.lane_owner_and_mode(lane_id).await else {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            };
+            if current_mode != mode {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+            if owner_id != interaction.user_id && !interaction.author_can_manage_channels {
+                return BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_DEIN_POST);
+            }
+            owner_id
+        } else {
+            interaction.user_id
         };
-        let Some(requested_slots) = parse_requested_slots(&option_text(
-            &interaction.options,
-            LFG_FIELD_REQUESTED_SLOTS,
-        )) else {
-            return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
-        };
-        let Some(rank_range) =
-            parse_rank_range(&option_text(&interaction.options, LFG_FIELD_RANK_RANGE))
-        else {
-            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
-        };
-
         let post_id = match self
-            .reserve_lfg_post(
+            .create_lfg_post_from_values(
                 guild_id,
-                forum_channel_id,
-                interaction.user_id,
+                owner_id,
                 mode,
                 rank_range,
                 requested_slots,
-                None,
+                draft.lane_id,
             )
             .await
         {
             Ok(post_id) => post_id,
-            Err(LfgReservationError::AlreadyOpen) => {
+            Err(LfgPostCreateError::AlreadyOpen) if draft.lane_id.is_some() => {
+                return BridgeReply::ephemeral_text(LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT);
+            }
+            Err(LfgPostCreateError::AlreadyOpen) => {
                 return BridgeReply::ephemeral_text(LFG_ERR_SCHON_AKTIVE_SUCHE);
             }
-            Err(LfgReservationError::Db(err)) => {
-                tracing::error!(
-                    %err,
-                    owner_id = interaction.user_id,
-                    "LFG-Reservation konnte nicht erstellt werden"
-                );
+            Err(LfgPostCreateError::Failed) => {
                 return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
             }
         };
-
-        let draft = lfg_post_draft(
-            post_id,
-            interaction.user_id,
-            mode,
-            rank_range,
-            requested_slots,
-            None,
-            false,
-        );
-        let render_hash = render_hash(&draft.body);
-        let created = match self.port.create_forum_post(forum_channel_id, draft).await {
-            Ok(created) => created,
-            Err(err) => {
-                tracing::error!(
-                    %err,
-                    owner_id = interaction.user_id,
-                    thread_id = 0_u64,
-                    "LFG-Forum-Post konnte nach DB-Reservation nicht erstellt werden"
-                );
-                self.delete_lfg_reservation(post_id).await;
-                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-            }
-        };
-        let starter_message_id = match self.port.first_thread_message_id(created.thread_id).await {
-            Ok(message_id) => message_id,
-            Err(err) => {
-                tracing::warn!(
-                    %err,
-                    thread_id = created.thread_id,
-                    "LFG-Starter-Message konnte nicht kontrolliert gefetcht werden"
-                );
-                None
-            }
-        };
-
-        if let Err(err) = self
-            .open_lfg_post_reservation(post_id, created.thread_id, starter_message_id, &render_hash)
+        self.pending_drafts
+            .lock()
             .await
-        {
-            tracing::error!(
-                %err,
-                owner_id = interaction.user_id,
-                thread_id = created.thread_id,
-                "LFG-Forum-Post konnte nach Discord-Erstellung nicht persistiert werden"
-            );
-            self.delete_lfg_reservation(post_id).await;
-            if let Err(cleanup_err) = self.port.archive_and_lock_thread(created.thread_id).await {
-                tracing::error!(
-                    %cleanup_err,
-                    owner_id = interaction.user_id,
-                    thread_id = created.thread_id,
-                    "LFG-Forum-Thread konnte nach Persistenzfehler nicht archiviert/gelockt werden"
-                );
-            }
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-        }
-
+            .remove(&interaction.user_id);
         BridgeReply {
             content: Some(LFG_ERFOLG_POST_ERSTELLT.to_string()),
-            components: Some(lfg_success_components(post_id)),
-            ephemeral: true,
+            components: draft
+                .lane_id
+                .is_none()
+                .then(|| lfg_success_components(post_id)),
+            update_message: true,
             ..BridgeReply::default()
         }
     }
@@ -1458,6 +1692,107 @@ impl LfgPanelInterface {
                 LfgReservationError::Db(err.to_string())
             }
         })?;
+        Ok(post_id)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_lfg_post_from_values(
+        &self,
+        guild_id: u64,
+        owner_id: u64,
+        mode: LfgMode,
+        rank_range: LfgRankRange,
+        requested_slots: i32,
+        lane_id: Option<u64>,
+    ) -> Result<i64, LfgPostCreateError> {
+        let Some(forum_channel_id) = self.forum_channel_id else {
+            return Err(LfgPostCreateError::Failed);
+        };
+        let post_id = match self
+            .reserve_lfg_post(
+                guild_id,
+                forum_channel_id,
+                owner_id,
+                mode,
+                rank_range,
+                requested_slots,
+                lane_id,
+            )
+            .await
+        {
+            Ok(post_id) => post_id,
+            Err(LfgReservationError::AlreadyOpen) => return Err(LfgPostCreateError::AlreadyOpen),
+            Err(LfgReservationError::Db(err)) => {
+                tracing::error!(
+                    %err,
+                    owner_id,
+                    ?lane_id,
+                    "LFG-Reservation konnte nicht erstellt werden"
+                );
+                return Err(LfgPostCreateError::Failed);
+            }
+        };
+        let occupancy = match lane_id {
+            Some(lane_id) => self.port.lane_occupancy(guild_id, lane_id).await,
+            None => None,
+        };
+        let draft = lfg_post_draft(
+            post_id,
+            owner_id,
+            mode,
+            rank_range,
+            requested_slots,
+            occupancy,
+            lane_id.is_some(),
+        );
+        let render_hash = render_hash(&draft.body);
+        let created = match self.port.create_forum_post(forum_channel_id, draft).await {
+            Ok(created) => created,
+            Err(err) => {
+                tracing::error!(
+                    %err,
+                    owner_id,
+                    ?lane_id,
+                    "LFG-Forum-Post konnte nach DB-Reservation nicht erstellt werden"
+                );
+                self.delete_lfg_reservation(post_id).await;
+                return Err(LfgPostCreateError::Failed);
+            }
+        };
+        let starter_message_id = match self.port.first_thread_message_id(created.thread_id).await {
+            Ok(message_id) => message_id,
+            Err(err) => {
+                tracing::warn!(
+                    %err,
+                    thread_id = created.thread_id,
+                    "LFG-Starter-Message konnte nicht kontrolliert gefetcht werden"
+                );
+                None
+            }
+        };
+        if let Err(err) = self
+            .open_lfg_post_reservation(post_id, created.thread_id, starter_message_id, &render_hash)
+            .await
+        {
+            tracing::error!(
+                %err,
+                owner_id,
+                ?lane_id,
+                thread_id = created.thread_id,
+                "LFG-Forum-Post konnte nach Discord-Erstellung nicht persistiert werden"
+            );
+            self.delete_lfg_reservation(post_id).await;
+            if let Err(cleanup_err) = self.port.archive_and_lock_thread(created.thread_id).await {
+                tracing::error!(
+                    %cleanup_err,
+                    owner_id,
+                    ?lane_id,
+                    thread_id = created.thread_id,
+                    "LFG-Forum-Thread konnte nach Persistenzfehler nicht archiviert/gelockt werden"
+                );
+            }
+            return Err(LfgPostCreateError::Failed);
+        }
         Ok(post_id)
     }
 
@@ -1709,108 +2044,12 @@ impl LfgPanelInterface {
         if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
-        BridgeReply {
-            modal: Some(lfg_publish_lane_modal(lane_id, mode)),
-            ..BridgeReply::default()
-        }
-    }
-
-    async fn handle_publish_lane_modal(
-        &self,
-        interaction: BridgeInteraction,
-        lane_id: u64,
-        mode: LfgMode,
-    ) -> BridgeReply {
-        let Some(forum_channel_id) = self.forum_channel_id else {
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-        };
-        let Ok(Some((owner_id, current_mode))) = self.lane_owner_and_mode(lane_id).await else {
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-        };
-        if current_mode != mode {
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-        }
-        if owner_id != interaction.user_id && !interaction.author_can_manage_channels {
-            return BridgeReply::ephemeral_text(LFG_ERR_OPEN_NICHT_DEIN_POST);
-        }
-        let guild_id = if interaction.guild_id == 0 {
-            LFG_GUILD_ID
-        } else {
-            interaction.guild_id
-        };
-        if !self.ranked_allowed(&interaction, guild_id, mode).await {
-            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
-        }
-        let Some(requested_slots) = parse_requested_slots(&option_text(
-            &interaction.options,
-            LFG_FIELD_REQUESTED_SLOTS,
-        )) else {
-            return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
-        };
-        let Some(rank_range) =
-            parse_rank_range(&option_text(&interaction.options, LFG_FIELD_RANK_RANGE))
-        else {
-            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
-        };
-        let post_id = match self
-            .reserve_lfg_post(
-                guild_id,
-                forum_channel_id,
-                owner_id,
-                mode,
-                rank_range,
-                requested_slots,
-                Some(lane_id),
-            )
+        let draft = LfgDraft::new(mode, Some(lane_id));
+        self.pending_drafts
+            .lock()
             .await
-        {
-            Ok(post_id) => post_id,
-            Err(LfgReservationError::AlreadyOpen) => {
-                return BridgeReply::ephemeral_text(LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT);
-            }
-            Err(LfgReservationError::Db(err)) => {
-                tracing::error!(%err, owner_id, lane_id, "LFG-Lane-Publish-Reservation fehlgeschlagen");
-                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-            }
-        };
-        let occupancy = self.port.lane_occupancy(guild_id, lane_id).await;
-        let draft = lfg_post_draft(
-            post_id,
-            owner_id,
-            mode,
-            rank_range,
-            requested_slots,
-            occupancy,
-            true,
-        );
-        let body_hash = render_hash(&draft.body);
-        let created = match self.port.create_forum_post(forum_channel_id, draft).await {
-            Ok(created) => created,
-            Err(err) => {
-                tracing::error!(%err, owner_id, lane_id, "LFG-Lane-Publish-Forum-Post fehlgeschlagen");
-                self.delete_lfg_reservation(post_id).await;
-                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-            }
-        };
-        let starter_message_id = match self.port.first_thread_message_id(created.thread_id).await {
-            Ok(message_id) => message_id,
-            Err(err) => {
-                tracing::warn!(%err, thread_id = created.thread_id, "LFG-Starter-Message konnte nicht kontrolliert gefetcht werden");
-                None
-            }
-        };
-        if let Err(err) = self
-            .open_lfg_post_reservation(post_id, created.thread_id, starter_message_id, &body_hash)
-            .await
-        {
-            tracing::error!(%err, owner_id, lane_id, thread_id = created.thread_id, "LFG-Lane-Publish konnte nicht final persistiert werden");
-            self.delete_lfg_reservation(post_id).await;
-            if let Err(cleanup_err) = self.port.archive_and_lock_thread(created.thread_id).await {
-                tracing::error!(%cleanup_err, thread_id = created.thread_id, "LFG-Forum-Thread konnte nach Persistenzfehler nicht archiviert/gelockt werden");
-            }
-            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
-        }
-        BridgeReply::ephemeral_text(LFG_ERFOLG_POST_ERSTELLT)
+            .insert(interaction.user_id, draft.clone());
+        lfg_draft_reply(&draft, false)
     }
 
     async fn handle_open_lane(&self, interaction: BridgeInteraction, post_id: i64) -> BridgeReply {
@@ -2251,17 +2490,20 @@ impl InteractionHandler for LfgPanelInterface {
         {
             return self.handle_mode(interaction, mode).await;
         }
+        if matches!(
+            interaction.custom_id.as_str(),
+            LFG_RANK_FROM_SELECT_CUSTOM_ID
+                | LFG_RANK_TO_SELECT_CUSTOM_ID
+                | LFG_SLOTS_SELECT_CUSTOM_ID
+        ) {
+            return self.handle_draft_select(interaction).await;
+        }
         if let Some(mode) = interaction
             .custom_id
-            .strip_prefix(LFG_CREATE_MODAL_PREFIX)
+            .strip_prefix(LFG_POST_PREFIX)
             .and_then(LfgMode::from_str)
         {
-            return self.handle_modal(interaction, mode).await;
-        }
-        if let Some((lane_id, mode)) = parse_publish_lane_modal_id(&interaction.custom_id) {
-            return self
-                .handle_publish_lane_modal(interaction, lane_id, mode)
-                .await;
+            return self.handle_post_draft(interaction, mode).await;
         }
         if let Some(post_id) = parse_i64_suffix(&interaction.custom_id, LFG_OPEN_LANE_PREFIX) {
             return self.handle_open_lane(interaction, post_id).await;
@@ -2275,7 +2517,10 @@ impl InteractionHandler for LfgPanelInterface {
 
 pub fn register(router: &mut InteractionRouter, interface: Arc<LfgPanelInterface>) {
     router.on_prefix("lfg:create:", interface.clone());
-    router.on_prefix(LFG_PUBLISH_LANE_MODAL_PREFIX, interface.clone());
+    router.on_custom_id(LFG_RANK_FROM_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_RANK_TO_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_SLOTS_SELECT_CUSTOM_ID, interface.clone());
+    router.on_prefix(LFG_POST_PREFIX, interface.clone());
     router.on_prefix(LFG_OPEN_LANE_PREFIX, interface.clone());
     router.on_prefix(LFG_JOIN_PREFIX, interface);
 }
@@ -2323,6 +2568,67 @@ mod tests {
     use serde_json::{json, Map, Value};
     use std::sync::Arc;
     use std::sync::Mutex as StdMutex;
+
+    fn lfg_interaction(custom_id: impl Into<String>, user_id: u64) -> BridgeInteraction {
+        BridgeInteraction {
+            custom_id: custom_id.into(),
+            guild_id: LFG_GUILD_ID,
+            user_id,
+            ..BridgeInteraction::default()
+        }
+    }
+
+    fn lfg_select_interaction(custom_id: &str, user_id: u64, value: &str) -> BridgeInteraction {
+        BridgeInteraction {
+            custom_id: custom_id.to_string(),
+            guild_id: LFG_GUILD_ID,
+            user_id,
+            values: vec![value.to_string()],
+            ..BridgeInteraction::default()
+        }
+    }
+
+    async fn select_lfg_value(
+        interface: &Arc<LfgPanelInterface>,
+        custom_id: &str,
+        user_id: u64,
+        value: &str,
+    ) -> BridgeReply {
+        interface
+            .handle(lfg_select_interaction(custom_id, user_id, value))
+            .await
+    }
+
+    async fn post_lfg_draft(
+        interface: &Arc<LfgPanelInterface>,
+        mode: LfgMode,
+        user_id: u64,
+    ) -> BridgeReply {
+        interface
+            .handle(lfg_interaction(lfg_post_custom_id(mode), user_id))
+            .await
+    }
+
+    async fn fill_lfg_draft(
+        interface: &Arc<LfgPanelInterface>,
+        user_id: u64,
+        rank_from: &str,
+        rank_to: &str,
+        slots: &str,
+    ) {
+        let from = select_lfg_value(
+            interface,
+            LFG_RANK_FROM_SELECT_CUSTOM_ID,
+            user_id,
+            rank_from,
+        )
+        .await;
+        assert!(from.update_message);
+        let to = select_lfg_value(interface, LFG_RANK_TO_SELECT_CUSTOM_ID, user_id, rank_to).await;
+        assert!(to.update_message);
+        let slots = select_lfg_value(interface, LFG_SLOTS_SELECT_CUSTOM_ID, user_id, slots).await;
+        assert!(slots.update_message);
+    }
 
     #[test]
     fn lfg_panel_body_ist_components_v2_mit_start_button_und_banner() {
@@ -2547,23 +2853,14 @@ mod tests {
         assert_eq!(apply.channel_id, Some(700));
         assert_eq!(port.posts.lock().expect("posts")[0].0, 700);
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::Casual.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 42,
-                options: HashMap::from([
-                    (
-                        LFG_FIELD_RANK_RANGE.to_string(),
-                        json!("Ritualist bis Phantom"),
-                    ),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("3")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 42))
             .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 42, "ritualist", "phantom", "3").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 42).await;
 
-        assert!(reply.ephemeral);
+        assert!(reply.update_message);
         assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
         assert_eq!(port.forum_posts.lock().expect("forum posts")[0].0, 800);
         let forum_channel_id: i64 =
@@ -2630,21 +2927,12 @@ mod tests {
                 7777,
             )
             .await;
-        let modal = start.modal.expect("publish modal");
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: modal.custom_id,
-                guild_id: LFG_GUILD_ID,
-                user_id: 42,
-                options: HashMap::from([
-                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("2")),
-                ]),
-                ..BridgeInteraction::default()
-            })
-            .await;
+        assert!(start.ephemeral);
+        assert!(start.components.is_some());
+        fill_lfg_draft(&interface, 42, LFG_RANK_ANY_VALUE, LFG_RANK_ANY_VALUE, "2").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 42).await;
 
-        assert!(reply.ephemeral);
+        assert!(reply.update_message);
         assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
         assert_eq!(port.forum_posts.lock().expect("forum posts")[0].0, 800);
     }
@@ -2851,11 +3139,51 @@ mod tests {
                 LFG_FORUM_TAG_STATUS_ACTIVE,
             ]
         );
+        assert_eq!(
+            derive_lfg_forum_tag_ids(
+                LfgMode::Ranked,
+                LfgRankRange {
+                    min: Some(7),
+                    max: None,
+                },
+                false,
+            ),
+            vec![
+                LFG_FORUM_TAG_MODE_RANKED,
+                LFG_FORUM_TAG_RANK_EXPERIENCED,
+                LFG_FORUM_TAG_RANK_ELITE,
+                LFG_FORUM_TAG_STATUS_LOOKING,
+            ]
+        );
 
         let capped = derive_lfg_forum_tag_ids(LfgMode::Ranked, range(1, 11), true);
         assert_eq!(capped.len(), LFG_FORUM_MAX_APPLIED_TAGS);
         assert!(capped.contains(&LFG_FORUM_TAG_MODE_RANKED));
         assert!(capped.contains(&LFG_FORUM_TAG_STATUS_ACTIVE));
+    }
+
+    #[test]
+    fn lfg_draft_rank_range_tauscht_vertauchte_werte_und_erlaubt_offene_bereiche() {
+        let mut draft = LfgDraft::new(LfgMode::Ranked, None);
+        draft.rank_from = Some("phantom".to_string());
+        draft.rank_to = Some("archon".to_string());
+        assert_eq!(
+            lfg_rank_range_from_draft(&draft),
+            Some(LfgRankRange {
+                min: Some(7),
+                max: Some(9),
+            })
+        );
+
+        draft.rank_from = Some("archon".to_string());
+        draft.rank_to = None;
+        assert_eq!(
+            lfg_rank_range_from_draft(&draft),
+            Some(LfgRankRange {
+                min: Some(7),
+                max: None,
+            })
+        );
     }
 
     #[tokio::test]
@@ -2881,7 +3209,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_ranked_mode_mit_rankrolle_oeffnet_modal() {
+    async fn lfg_ranked_mode_mit_rankrolle_rendert_select_draft() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -2898,12 +3226,49 @@ mod tests {
             })
             .await;
 
-        let modal = reply.modal.expect("modal");
-        assert_eq!(modal.custom_id, LfgMode::Ranked.modal_custom_id());
-        assert_eq!(modal.title, LFG_MODAL_TITEL);
-        assert_eq!(modal.fields.len(), 2);
-        assert_eq!(modal.fields[0].custom_id, LFG_FIELD_RANK_RANGE);
-        assert_eq!(modal.fields[1].custom_id, LFG_FIELD_REQUESTED_SLOTS);
+        assert!(reply.update_message);
+        assert!(reply.modal.is_none());
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Modus: Ranked · wähl Rang-Bereich und freie Plätze, dann **Gesuch posten**.")
+        );
+        let rows = reply
+            .components
+            .as_ref()
+            .expect("components")
+            .as_array()
+            .expect("component rows");
+        assert_eq!(rows.len(), 4);
+        assert_eq!(
+            rows[0]["components"][0]["placeholder"],
+            LFG_RANK_FROM_PLACEHOLDER
+        );
+        assert_eq!(
+            rows[1]["components"][0]["placeholder"],
+            LFG_RANK_TO_PLACEHOLDER
+        );
+        assert_eq!(
+            rows[2]["components"][0]["placeholder"],
+            LFG_SLOTS_PLACEHOLDER
+        );
+        let rank_options = rows[0]["components"][0]["options"]
+            .as_array()
+            .expect("rank options");
+        assert_eq!(rank_options[0]["label"], LFG_RANK_ANY_LABEL);
+        assert_eq!(rank_options[0]["emoji"]["name"], "dl_rang_egal");
+        assert_eq!(rank_options[0]["emoji"]["id"], "1522801043803472064");
+        let archon = rank_options
+            .iter()
+            .find(|option| option["value"] == "archon")
+            .expect("archon option");
+        assert_eq!(archon["label"], "Archon");
+        assert_eq!(archon["emoji"]["name"], "archon");
+        assert_eq!(archon["emoji"]["id"], "1397687455313952918");
+        assert_eq!(
+            rows[3]["components"][0]["custom_id"],
+            lfg_post_custom_id(LfgMode::Ranked)
+        );
+        assert_eq!(rows[3]["components"][0]["label"], LFG_BTN_POSTEN);
     }
 
     #[tokio::test]
@@ -2924,32 +3289,25 @@ mod tests {
             })
             .await;
 
-        let modal = reply.modal.expect("modal");
-        assert_eq!(modal.custom_id, LfgMode::Ranked.modal_custom_id());
+        assert!(reply.update_message);
+        assert!(reply.components.is_some());
+        assert!(reply.modal.is_none());
     }
 
     #[tokio::test]
-    async fn lfg_modal_validiert_slots_und_postet_nicht_bei_muell() {
+    async fn lfg_select_validiert_slots_und_postet_nicht_bei_muell() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
         let port = Arc::new(MockLfgPanelPort::default());
         let interface = LfgPanelInterface::new(db.pool().clone(), port.clone(), Some(777));
 
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 42))
+            .await;
+        assert!(draft.update_message);
         let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::Casual.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 42,
-                options: HashMap::from([
-                    (
-                        LFG_FIELD_RANK_RANGE.to_string(),
-                        json!("Ritualist bis Phantom"),
-                    ),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("x")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+            .handle(lfg_select_interaction(LFG_SLOTS_SELECT_CUSTOM_ID, 42, "x"))
             .await;
 
         assert!(reply.ephemeral);
@@ -2958,7 +3316,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_modal_erstellt_forum_post_und_persistiert_row() {
+    async fn lfg_select_flow_erstellt_forum_post_und_persistiert_row() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -2968,23 +3326,14 @@ mod tests {
         *port.first_message_id.lock().expect("first message") = Ok(Some(9902));
         let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::Casual.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 42,
-                options: HashMap::from([
-                    (
-                        LFG_FIELD_RANK_RANGE.to_string(),
-                        json!("Ritualist bis Phantom"),
-                    ),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("3")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 42))
             .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 42, "ritualist", "phantom", "3").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 42).await;
 
-        assert!(reply.ephemeral);
+        assert!(reply.update_message);
         assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
         let (posted_channel_id, posted_title) = {
             let posts = port.forum_posts.lock().expect("forum posts");
@@ -3057,7 +3406,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_modal_blockt_zweiten_offenen_post_des_owners() {
+    async fn lfg_select_flow_archon_bis_phantom_slots_3_erstellt_ranked_post_mit_auto_tags() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        *port.roles.lock().expect("roles") = vec![crate::router::VERIFIED_RANK_ROLE_IDS[0]];
+        *port.next_thread_id.lock().expect("next thread") = 9904;
+        let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
+
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Ranked.mode_custom_id(), 42))
+            .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 42, "archon", "phantom", "3").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Ranked, 42).await;
+
+        assert!(reply.update_message);
+        assert_eq!(reply.content.as_deref(), Some(LFG_ERFOLG_POST_ERSTELLT));
+        {
+            let posts = port.forum_posts.lock().expect("forum posts");
+            assert_eq!(posts.len(), 1);
+            assert_eq!(
+                posts[0].1.applied_tags,
+                vec![
+                    LFG_FORUM_TAG_MODE_RANKED,
+                    LFG_FORUM_TAG_RANK_EXPERIENCED,
+                    LFG_FORUM_TAG_RANK_ELITE,
+                    LFG_FORUM_TAG_STATUS_LOOKING,
+                ]
+            );
+            assert!(posts[0].1.title.contains("Archon bis Phantom"));
+        }
+
+        let row: (Option<i32>, Option<i32>, i32) = sqlx::query_as(
+            "SELECT rank_min, rank_max, requested_slots
+               FROM voice.lfg_posts
+              WHERE thread_id = $1",
+        )
+        .bind(9904_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("lfg row");
+        assert_eq!(row, (Some(7), Some(9), 3));
+    }
+
+    #[tokio::test]
+    async fn lfg_select_flow_blockt_zweiten_offenen_post_des_owners() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3065,24 +3461,21 @@ mod tests {
         let port = Arc::new(MockLfgPanelPort::default());
         *port.next_thread_id.lock().expect("next thread") = 9911;
         let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
-        let interaction = || BridgeInteraction {
-            custom_id: LfgMode::Casual.modal_custom_id(),
-            guild_id: LFG_GUILD_ID,
-            user_id: 44,
-            options: HashMap::from([
-                (
-                    LFG_FIELD_RANK_RANGE.to_string(),
-                    json!("Ritualist bis Phantom"),
-                ),
-                (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("2")),
-            ]),
-            ..BridgeInteraction::default()
-        };
 
-        let first = interface.handle(interaction()).await;
-        assert!(first.ephemeral);
+        let first_draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 44))
+            .await;
+        assert!(first_draft.update_message);
+        fill_lfg_draft(&interface, 44, "ritualist", "phantom", "2").await;
+        let first = post_lfg_draft(&interface, LfgMode::Casual, 44).await;
+        assert!(first.update_message);
         *port.next_thread_id.lock().expect("next thread") = 9912;
-        let second = interface.handle(interaction()).await;
+        let second_draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 44))
+            .await;
+        assert!(second_draft.update_message);
+        fill_lfg_draft(&interface, 44, "ritualist", "phantom", "2").await;
+        let second = post_lfg_draft(&interface, LfgMode::Casual, 44).await;
 
         assert!(second.ephemeral);
         assert_eq!(second.content.as_deref(), Some(LFG_ERR_SCHON_AKTIVE_SUCHE));
@@ -3101,7 +3494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_modal_loescht_reservation_wenn_discord_post_fehlschlaegt() {
+    async fn lfg_select_flow_loescht_reservation_wenn_discord_post_fehlschlaegt() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3110,18 +3503,12 @@ mod tests {
         *port.create_forum_post_error.lock().expect("create error") = Some("HTTP 500".to_string());
         let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::Casual.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 45,
-                options: HashMap::from([
-                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("1")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 45))
             .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 45, LFG_RANK_ANY_VALUE, LFG_RANK_ANY_VALUE, "1").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 45).await;
 
         assert!(reply.ephemeral);
         assert!(port.forum_posts.lock().expect("forum posts").is_empty());
@@ -3135,7 +3522,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_modal_archiviert_thread_wenn_open_update_fehlschlaegt() {
+    async fn lfg_select_flow_archiviert_thread_wenn_open_update_fehlschlaegt() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3173,18 +3560,12 @@ mod tests {
         *port.next_thread_id.lock().expect("next thread") = 9913;
         let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::Casual.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 46,
-                options: HashMap::from([
-                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("1")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::Casual.mode_custom_id(), 46))
             .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 46, LFG_RANK_ANY_VALUE, LFG_RANK_ANY_VALUE, "1").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 46).await;
 
         assert!(reply.ephemeral);
         assert_eq!(
@@ -3201,7 +3582,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_modal_persistiert_null_wenn_starter_fetch_fehlschlaegt() {
+    async fn lfg_select_flow_persistiert_null_wenn_starter_fetch_fehlschlaegt() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3211,20 +3592,14 @@ mod tests {
         *port.first_message_id.lock().expect("first message") = Err("HTTP 500".to_string());
         let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: LfgMode::StreetBrawl.modal_custom_id(),
-                guild_id: LFG_GUILD_ID,
-                user_id: 43,
-                options: HashMap::from([
-                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("1")),
-                ]),
-                ..BridgeInteraction::default()
-            })
+        let draft = interface
+            .handle(lfg_interaction(LfgMode::StreetBrawl.mode_custom_id(), 43))
             .await;
+        assert!(draft.update_message);
+        fill_lfg_draft(&interface, 43, LFG_RANK_ANY_VALUE, LFG_RANK_ANY_VALUE, "1").await;
+        let reply = post_lfg_draft(&interface, LfgMode::StreetBrawl, 43).await;
 
-        assert!(reply.ephemeral);
+        assert!(reply.update_message);
         let starter_message_id: Option<i64> = sqlx::query_scalar(
             "SELECT starter_message_id FROM voice.lfg_posts WHERE thread_id = $1",
         )
@@ -3640,7 +4015,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lfg_publish_lane_modal_erstellt_direkt_verknuepften_post() {
+    async fn lfg_publish_lane_select_flow_erstellt_direkt_verknuepften_post() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3683,23 +4058,13 @@ mod tests {
                 7777,
             )
             .await;
-        let modal = start.modal.expect("publish modal");
-        assert!(modal.custom_id.starts_with(LFG_PUBLISH_LANE_MODAL_PREFIX));
+        assert!(start.ephemeral);
+        assert!(start.components.is_some());
 
-        let reply = interface
-            .handle(BridgeInteraction {
-                custom_id: modal.custom_id,
-                guild_id: LFG_GUILD_ID,
-                user_id: 42,
-                options: HashMap::from([
-                    (LFG_FIELD_RANK_RANGE.to_string(), json!("")),
-                    (LFG_FIELD_REQUESTED_SLOTS.to_string(), json!("2")),
-                ]),
-                ..BridgeInteraction::default()
-            })
-            .await;
+        fill_lfg_draft(&interface, 42, LFG_RANK_ANY_VALUE, LFG_RANK_ANY_VALUE, "2").await;
+        let reply = post_lfg_draft(&interface, LfgMode::Casual, 42).await;
 
-        assert!(reply.ephemeral);
+        assert!(reply.update_message);
         {
             let posts = port.forum_posts.lock().expect("forum posts");
             assert_eq!(posts.len(), 1);

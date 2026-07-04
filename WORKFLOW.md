@@ -1,3 +1,23 @@
+# LFG Rang-Dropdowns mit Emojis (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/lfg-rank-dropdown-emojis`; Vorgabe: kein Commit/Push, Claude reviewt/deployt.
+- Pflichtkontext `WORKFLOW.md` gelesen; relevante LFG-Stellen in `rust/crates/dl-voice/src/lfg_panel.rs` identifiziert.
+- Create-Flow und Publish-Lane-Flow auf per-User-`pending_drafts` mit String-Selects fuer Von/Bis/Slots und `lfg:post:<mode>` umgestellt; Modal-Bau/-Handler entfernt.
+- Gemeinsame strukturierte Post-Erstellung fuer Create und Publish-Lane eingefuehrt; Auto-Tags nutzen die gewaehlten Rang-Indizes inkl. offener Bereiche.
+- Tests auf Select-Flow angepasst und Kernfall Archon-bis-Phantom/3 Plaetze/Ranked-Auto-Tags ergaenzt.
+
+## Verifikation aktuell
+- Gruen: `cd rust && cargo fmt --all`.
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice lfg_panel -- --nocapture` (39 passed, 0 failed, 127 filtered out; Test-DB-Teardown-Warnungen beim Pool-Close).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo clippy -p dl-voice --all-targets`.
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice` (166 passed, 0 failed, 0 ignored; Doc-tests 0).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo build --release -p dl-bot`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Keine bekannten offenen Implementierungs-/Verifikationspunkte; kein Commit/Push ausgefuehrt.
+
 # Ranked-Gate Rollenquelle (2026-07-04)
 
 ## Fortschritt
