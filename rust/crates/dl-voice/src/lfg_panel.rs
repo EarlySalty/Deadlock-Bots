@@ -345,6 +345,7 @@ pub trait LfgLaneSpawner: Send + Sync {
         guild_id: u64,
         user_id: u64,
         mode: &str,
+        interaction_role_ids: &[u64],
     ) -> crate::router::RouterSpawnOutcome;
 
     async fn cleanup_created_lane(
@@ -372,9 +373,15 @@ impl LfgLaneSpawner for RouterLfgLaneSpawner {
         guild_id: u64,
         user_id: u64,
         mode: &str,
+        interaction_role_ids: &[u64],
     ) -> crate::router::RouterSpawnOutcome {
         self.router
-            .spawn_lane_from_current_voice(guild_id, user_id, mode)
+            .spawn_lane_from_current_voice_with_role_ids(
+                guild_id,
+                user_id,
+                mode,
+                interaction_role_ids,
+            )
             .await
     }
 
@@ -1229,11 +1236,24 @@ fn is_unique_violation(err: &sqlx::Error) -> bool {
 }
 
 impl LfgPanelInterface {
-    async fn ranked_allowed(&self, guild_id: u64, user_id: u64, mode: LfgMode) -> bool {
+    async fn ranked_allowed(
+        &self,
+        interaction: &BridgeInteraction,
+        guild_id: u64,
+        mode: LfgMode,
+    ) -> bool {
         if mode != LfgMode::Ranked {
             return true;
         }
-        has_verified_rank_role(&self.port.member_role_ids(guild_id, user_id).await)
+        if !interaction.role_ids.is_empty() {
+            return has_verified_rank_role(&interaction.role_ids);
+        }
+        has_verified_rank_role(
+            &self
+                .port
+                .member_role_ids(guild_id, interaction.user_id)
+                .await,
+        )
     }
 
     async fn handle_start(&self) -> BridgeReply {
@@ -1251,10 +1271,7 @@ impl LfgPanelInterface {
         } else {
             interaction.guild_id
         };
-        if !self
-            .ranked_allowed(guild_id, interaction.user_id, mode)
-            .await
-        {
+        if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
         BridgeReply {
@@ -1269,10 +1286,7 @@ impl LfgPanelInterface {
         } else {
             interaction.guild_id
         };
-        if !self
-            .ranked_allowed(guild_id, interaction.user_id, mode)
-            .await
-        {
+        if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
 
@@ -1692,10 +1706,7 @@ impl LfgPanelInterface {
         let Some(mode) = self.lane_mode(guild_id, lane_id).await else {
             return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         };
-        if !self
-            .ranked_allowed(guild_id, interaction.user_id, mode)
-            .await
-        {
+        if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
         BridgeReply {
@@ -1727,10 +1738,7 @@ impl LfgPanelInterface {
         } else {
             interaction.guild_id
         };
-        if !self
-            .ranked_allowed(guild_id, interaction.user_id, mode)
-            .await
-        {
+        if !self.ranked_allowed(&interaction, guild_id, mode).await {
             return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
         }
         let Some(requested_slots) = parse_requested_slots(&option_text(
@@ -1819,7 +1827,12 @@ impl LfgPanelInterface {
             return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
         };
         match spawner
-            .spawn_lane_from_current_voice(post.guild_id, interaction.user_id, post.mode.as_str())
+            .spawn_lane_from_current_voice(
+                post.guild_id,
+                interaction.user_id,
+                post.mode.as_str(),
+                &interaction.role_ids,
+            )
             .await
         {
             crate::router::RouterSpawnOutcome::Created { lane_id } => {
@@ -1918,7 +1931,7 @@ impl LfgPanelInterface {
             return BridgeReply::ephemeral_text(LFG_ERR_JOIN_LANE_VOLL);
         }
         if !self
-            .ranked_allowed(post.guild_id, interaction.user_id, post.mode)
+            .ranked_allowed(&interaction, post.guild_id, post.mode)
             .await
         {
             return BridgeReply::ephemeral_text(LFG_ERR_JOIN_KEIN_RANG);
@@ -2891,6 +2904,28 @@ mod tests {
         assert_eq!(modal.fields.len(), 2);
         assert_eq!(modal.fields[0].custom_id, LFG_FIELD_RANK_RANGE);
         assert_eq!(modal.fields[1].custom_id, LFG_FIELD_REQUESTED_SLOTS);
+    }
+
+    #[tokio::test]
+    async fn lfg_ranked_mode_nutzt_interaction_roles_bei_leerem_cache() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new(db.pool().clone(), port, Some(777));
+
+        let reply = interface
+            .handle(BridgeInteraction {
+                custom_id: LfgMode::Ranked.mode_custom_id(),
+                guild_id: LFG_GUILD_ID,
+                user_id: 42,
+                role_ids: vec![crate::router::VERIFIED_RANK_ROLE_IDS[0]],
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let modal = reply.modal.expect("modal");
+        assert_eq!(modal.custom_id, LfgMode::Ranked.modal_custom_id());
     }
 
     #[tokio::test]
@@ -3990,6 +4025,7 @@ mod tests {
             _guild_id: u64,
             _user_id: u64,
             _mode: &str,
+            _interaction_role_ids: &[u64],
         ) -> crate::router::RouterSpawnOutcome {
             let race_link = self.race_link.lock().expect("race link").take();
             if let (Some(pool), Some((post_id, lane_id))) = (&self.pool, race_link) {

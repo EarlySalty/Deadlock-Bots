@@ -31,6 +31,9 @@ pub struct BridgeInteraction {
     pub content: String,
     pub interaction_id: u64,
     pub user_id: u64,
+    /// Rollen-IDs aus dem Interaction-Member-Payload. Frisch von Discord,
+    /// auch wenn der Gateway-Cache das Member nicht vollständig enthält.
+    pub role_ids: Vec<u64>,
     /// Discord-Username (str(user)-Äquivalent, für Tracking-Zwecke).
     pub author_name: String,
     /// Discord-Displayname: Guild-Nick vor global_name vor username.

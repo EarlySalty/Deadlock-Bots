@@ -1,3 +1,24 @@
+# Ranked-Gate Rollenquelle (2026-07-04)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `fix/ranked-gate-member-roles-source`; Arbeitsbaum war sauber. Vorgabe: kein Commit/Push, Claude reviewt/deployt.
+- Pflichtkontext `WORKFLOW.md` gelesen; relevante Stellen per `rg` identifiziert: `BridgeInteraction`, Dispatch-Builder, `member_role_ids`-Ports, LFG-/Router-Ranked-Gates.
+- Teil A umgesetzt: `BridgeInteraction.role_ids` ergaenzt; Command-/Component-/Modal-Dispatch befuellt Rollen aus `member.roles`. Synthetische Interactions bleiben ueber Default bei `role_ids=[]`.
+- Teil B umgesetzt: `DiscordAdapter::member_role_ids_or_fetch` liest zuerst Cache und holt bei leerem Ergebnis `get_member` per REST nach; alle fuenf `member_role_ids`-Glue-Impls nutzen den Fallback.
+- Teil C umgesetzt: LFG `ranked_allowed` bevorzugt `interaction.role_ids` und faellt nur bei leerem Payload auf den Port zurueck; `lfg:open_lane` reicht Rollen an den Router-Spawner weiter. Router-Button-Spawn nutzt ebenfalls Interaction-Rollen, Voice-Event-/Smart-Route-Pfade bleiben beim Port-Fallback.
+- Regressionstests ergaenzt fuer LFG-Ranked-Modal und Router-Ranked-Spawn mit leerem Cache, aber verifizierter Rolle im Interaction-Payload.
+- Kein Commit, kein Push, kein Merge, kein Deploy.
+
+## Verifikation aktuell
+- Gruen: `cd rust && cargo fmt --all`.
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo clippy -p dl-voice -p dl-discord --all-targets` (0 Warnings/Errors).
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice` (164 passed, 0 failed, 0 ignored; Doc-tests 0).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo build --release -p dl-bot`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Keine bekannten offenen Punkte. Arbeitsbaum bleibt uncommitted fuer Claude-Review.
+
 # LFG Auto-Tags (2026-07-04)
 
 ## Fortschritt

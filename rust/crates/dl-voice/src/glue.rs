@@ -715,15 +715,8 @@ impl LanePort for CacheSnapshot {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|guild| {
-                guild
-                    .members
-                    .get(&UserId::new(user_id))
-                    .map(|member| member.roles.iter().map(|role_id| role_id.get()).collect())
-            })
-            .unwrap_or_default()
+            .member_role_ids_or_fetch(guild_id, user_id)
+            .await
     }
 
     async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
@@ -919,14 +912,8 @@ impl crate::stats::StatsPort for CacheSnapshot {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|g| {
-                g.members
-                    .get(&UserId::new(user_id))
-                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
-            })
-            .unwrap_or_default()
+            .member_role_ids_or_fetch(guild_id, user_id)
+            .await
     }
 
     async fn guild_name(&self, guild_id: u64) -> Option<String> {
@@ -960,14 +947,8 @@ impl crate::nudge::NudgePort for NudgeGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|g| {
-                g.members
-                    .get(&UserId::new(user_id))
-                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
-            })
-            .unwrap_or_default()
+            .member_role_ids_or_fetch(guild_id, user_id)
+            .await
     }
 
     async fn send_dm(
@@ -1537,14 +1518,8 @@ impl crate::router::RouterPort for RouterGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|g| {
-                g.members
-                    .get(&UserId::new(user_id))
-                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
-            })
-            .unwrap_or_default()
+            .member_role_ids_or_fetch(guild_id, user_id)
+            .await
     }
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64> {
@@ -1753,14 +1728,8 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
 
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
         self.adapter
-            .cache()
-            .guild(GuildId::new(guild_id))
-            .and_then(|g| {
-                g.members
-                    .get(&UserId::new(user_id))
-                    .map(|m| m.roles.iter().map(|r| r.get()).collect())
-            })
-            .unwrap_or_default()
+            .member_role_ids_or_fetch(guild_id, user_id)
+            .await
     }
 
     async fn create_forum_post(

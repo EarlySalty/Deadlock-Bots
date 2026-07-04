@@ -56,6 +56,7 @@ async fn dispatch_command(
         options,
         interaction_id: cmd.id.get(),
         user_id: cmd.user.id.get(),
+        role_ids: interaction_role_ids(cmd.member.as_deref()),
         author_name: username(&cmd.user),
         author_display_name: interaction_display_name(cmd.member.as_deref(), &cmd.user),
         author_can_manage_roles: cmd
@@ -127,6 +128,7 @@ async fn dispatch_component(
         values,
         interaction_id: component.id.get(),
         user_id: component.user.id.get(),
+        role_ids: interaction_role_ids(component.member.as_ref()),
         author_name: username(&component.user),
         author_display_name: interaction_display_name(component.member.as_ref(), &component.user),
         author_can_manage_roles: component
@@ -203,6 +205,7 @@ async fn dispatch_modal(
         options,
         interaction_id: modal.id.get(),
         user_id: modal.user.id.get(),
+        role_ids: interaction_role_ids(modal.member.as_ref()),
         author_name: username(&modal.user),
         author_display_name: interaction_display_name(modal.member.as_ref(), &modal.user),
         author_can_manage_roles: modal
@@ -257,6 +260,12 @@ fn username(user: &serenity::all::User) -> String {
         Some(d) => format!("{}#{:04}", user.name, d),
         None => user.name.to_string(),
     }
+}
+
+fn interaction_role_ids(member: Option<&serenity::all::Member>) -> Vec<u64> {
+    member
+        .map(|member| member.roles.iter().map(|role| role.get()).collect())
+        .unwrap_or_default()
 }
 
 fn interaction_display_name(

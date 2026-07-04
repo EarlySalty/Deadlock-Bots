@@ -807,6 +807,17 @@ impl LaneRouter {
         user_id: u64,
         mode: &str,
     ) -> RouterSpawnOutcome {
+        self.spawn_lane_from_current_voice_with_role_ids(guild_id, user_id, mode, &[])
+            .await
+    }
+
+    pub async fn spawn_lane_from_current_voice_with_role_ids(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+        interaction_role_ids: &[u64],
+    ) -> RouterSpawnOutcome {
         if router_mode(mode).is_none() {
             return RouterSpawnOutcome::UnknownMode;
         }
@@ -826,11 +837,18 @@ impl LaneRouter {
             };
         }
         if mode == "ranked" {
-            let roles = self.port.member_role_ids(guild_id, user_id).await;
-            if !roles
-                .iter()
-                .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
-            {
+            let verified = if !interaction_role_ids.is_empty() {
+                interaction_role_ids
+                    .iter()
+                    .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
+            } else {
+                self.port
+                    .member_role_ids(guild_id, user_id)
+                    .await
+                    .iter()
+                    .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
+            };
+            if !verified {
                 return RouterSpawnOutcome::RankedVerifyRequired;
             }
         }
@@ -946,7 +964,12 @@ impl InteractionHandler for RouterPanelHandler {
         if let Some(mode) = interaction.custom_id.strip_prefix("router_spawn_") {
             return match self
                 .router
-                .spawn_lane_from_current_voice(interaction.guild_id, interaction.user_id, mode)
+                .spawn_lane_from_current_voice_with_role_ids(
+                    interaction.guild_id,
+                    interaction.user_id,
+                    mode,
+                    &interaction.role_ids,
+                )
                 .await
             {
                 RouterSpawnOutcome::Created { lane_id } => BridgeReply::ephemeral_text(format!(
@@ -1904,5 +1927,37 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].channel_id, 1);
         assert_eq!(lanes[0].owner_id, 42);
+    }
+
+    #[tokio::test]
+    async fn router_spawn_handler_ranked_nutzt_interaction_roles_bei_leerem_cache() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(StaticRouterPort::default());
+        *port.voice_channel.lock().expect("voice") = Some(555);
+        let engine = test_engine(pool.clone());
+        let router = LaneRouter::new(pool, port, engine.clone(), None);
+        let handler = RouterPanelHandler { router };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "router_spawn_ranked".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                role_ids: vec![VERIFIED_RANK_ROLE_IDS[0]],
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>").as_str())
+        );
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].category_id, mode_to_category("ranked"));
     }
 }

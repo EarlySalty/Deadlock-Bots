@@ -76,6 +76,37 @@ impl DiscordAdapter {
         })
     }
 
+    pub async fn member_role_ids_or_fetch(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        let gid = GuildId::new(guild_id);
+        let uid = UserId::new(user_id);
+        let cached_roles: Vec<u64> = self
+            .cache()
+            .guild(gid)
+            .and_then(|guild| {
+                guild
+                    .members
+                    .get(&uid)
+                    .map(|member| member.roles.iter().map(|role_id| role_id.get()).collect())
+            })
+            .unwrap_or_default();
+        if !cached_roles.is_empty() {
+            return cached_roles;
+        }
+
+        match self.http.get_member(gid, uid).await {
+            Ok(member) => member.roles.iter().map(|role_id| role_id.get()).collect(),
+            Err(err) => {
+                tracing::debug!(
+                    %err,
+                    guild_id,
+                    user_id,
+                    "Discord-Memberrollen per REST-Fallback nicht abrufbar"
+                );
+                Vec::new()
+            }
+        }
+    }
+
     fn cache_ready(&self) -> bool {
         self.gateway_ready.load(Ordering::Relaxed)
     }
