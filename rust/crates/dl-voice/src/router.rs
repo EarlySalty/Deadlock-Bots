@@ -170,19 +170,16 @@ pub struct RouterPanelMessage {
     pub custom_ids: Vec<String>,
 }
 
-/// Die 11 Haupt-Rang-Rollen (wie VERIFIED_RANK_ROLE_IDS).
-pub const VERIFIED_RANK_ROLE_IDS: [u64; 11] = [
-    1331457571118387210,
-    1331457652877955072,
-    1331457699992436829,
-    1331457724848017539,
-    1331457879345070110,
-    1331457898781474836,
-    1331457949654319114,
-    1316966867033653338,
-    1331458016356208680,
-    1331458049637875785,
-    1331458087349129296,
+/// Rollen, die verifizierten Ranked-Zugang belegen (Router- **und** LFG-Gate).
+///
+/// Der Server hat sein Rang-System auf granulare Subrang-Rollen umgebaut; die
+/// frühere Liste der 11 „Haupt-Rang-Rollen" existiert im Server nicht mehr
+/// (tote IDs) und blockte damit jede Ranked-Aktion. Verifiziert wird stattdessen
+/// über den Steam-Verify-Marker, den der Steam-Bot bei jeder Verknüpfung vergibt
+/// (`STEAM_VERIFIED_ROLE_ID`); die neue Discord-Linked-Role zählt vorwärts mit.
+pub const VERIFIED_RANK_ROLE_IDS: [u64; 2] = [
+    1419608095533043774, // Steam Verifiziert✅ OLD — bot-vergebener Marker (aktueller Bestand)
+    1522540241951658024, // Steam Verifiziert✅ — Discord Linked Role (nach W3.3-Aktivierung)
 ];
 
 pub fn router_modes() -> &'static [RouterMode] {

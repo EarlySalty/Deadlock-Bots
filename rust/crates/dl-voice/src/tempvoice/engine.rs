@@ -847,6 +847,7 @@ impl TempVoiceEngine {
         }
         self.apply_owner_settings(guild_id, lane_id, user_id).await;
         self.refresh_name(guild_id, lane_id).await;
+        tracing::debug!(user_id, mode, category_id, lane_id, "Router: Lane erstellt");
         Ok(Some(lane_id))
     }
 

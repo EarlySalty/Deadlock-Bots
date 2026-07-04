@@ -1,3 +1,11 @@
+## #204 — Ranked-Lanes & -Gesuche erkennen deinen Rang wieder
+
+**Ausgangslage:** Wer eine Ranked-Lane aufmachen oder ein Ranked-Gesuch in der Mitspieler-Suche erstellen wollte, wurde abgewiesen („Für Ranked brauchst du einen verifizierten Rang") — auch wenn das Steam-Konto längst verknüpft war. Der Check suchte nach alten Rang-Rollen, die es nach dem Umbau des Rang-Systems gar nicht mehr gibt.
+
+**Was wurde geändert:** Der Ranked-Check erkennt jetzt die aktuelle Steam-Verifiziert-Rolle, die beim Verknüpfen vergeben wird. Wer verifiziert ist, kommt wieder durch — im Router-Panel genauso wie in der Mitspieler-Suche.
+
+**Wie es jetzt läuft:** Steam verknüpft = Ranked-Lane und Ranked-Gesuch gehen wieder. Ohne Verknüpfung führt der Weg wie gehabt in den Rang-Kanal.
+
 ## #203 — Voice-Lanes: die alten ➕-Kanäle sind ins Archiv gewandert
 
 **Ausgangslage:** Mit dem Router-Panel gibt es seit Kurzem einen Weg, per Klick eine eigene Voice-Lane zu öffnen. Die alten ➕-Kanäle („Lane eröffnen", „Ranked", „Street Brawl") liefen übergangsweise parallel weiter.
