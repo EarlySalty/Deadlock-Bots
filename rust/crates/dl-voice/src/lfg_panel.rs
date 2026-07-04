@@ -55,11 +55,15 @@ pub const LFG_FORUM_TAG_STATUS_ACTIVE: u64 = 1522799471594045518;
 pub const LFG_FORUM_TAG_STATUS_LOOKING: u64 = 1522799471594045519;
 
 pub const LFG_PANEL_BODY: &str = "**Mitspieler finden**\nModus wählen, Rang-Bereich und Plätze angeben — fertig ist dein Gesuch als eigener Post. Der Post zeigt live, wie viele Plätze in der Lane frei sind, und mit **Beitreten** landest du direkt im Voice.\n\nGesuche räumen sich selbst weg, sobald die Lane schließt.\nWer regelmäßig dabei ist, taucht im [Rank-Leaderboard](https://deutsche-deadlock-community.de/aktivitaet/#rank-leaderboard-card) der Community auf.";
-pub const LFG_PANEL_BUTTON: &str = "🔎 Mitspieler suchen";
+pub const LFG_PANEL_BUTTON: &str = "Mitspieler suchen";
 pub const LFG_MODE_PROMPT: &str = "Wofür suchst du Leute?";
 pub const LFG_MODE_BUTTON_CASUAL: &str = "Normale Lane";
-pub const LFG_MODE_BUTTON_RANKED: &str = "🏆 Ranked";
-pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "👊 Street Brawl";
+pub const LFG_MODE_BUTTON_RANKED: &str = "Ranked";
+pub const LFG_MODE_BUTTON_STREET_BRAWL: &str = "Street Brawl";
+
+// Panel-Button-Emojis im Brand-Look (gold getönte Lucide-Icons): Modus recycelt
+// die Router-Emojis, "Mitspieler suchen" nutzt das Gold-Such-Emoji (gen_lfg_tag_emojis.py).
+pub const LFG_EMOJI_SEARCH: (&str, &str) = ("dl_lfg_sucht", "1522801046509064263");
 pub const LFG_MODAL_TITEL: &str = "Mitspieler suchen";
 pub const LFG_MODAL_FELD_RANG_LABEL: &str = "Rang-Bereich (optional)";
 pub const LFG_MODAL_FELD_RANG_PLACEHOLDER: &str =
@@ -740,10 +744,11 @@ fn lfg_panel_body_for_attachments(attachments: &[LfgPanelAttachment]) -> Map<Str
         components.push(lfg_media_gallery(&attachments[0].filename));
     }
     components.push(lfg_text_display(LFG_PANEL_BODY.to_string()));
-    components.push(lfg_action_row(vec![lfg_button(
+    components.push(lfg_action_row(vec![lfg_emoji_button(
         LFG_PANEL_BUTTON,
         1,
         LFG_CREATE_START_CUSTOM_ID,
+        LFG_EMOJI_SEARCH,
     )]));
     body.insert(
         "components".to_string(),
@@ -789,6 +794,16 @@ fn lfg_button(label: &str, style: u8, custom_id: &str) -> Value {
     })
 }
 
+fn lfg_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &str)) -> Value {
+    json!({
+        "type": 2,
+        "style": style,
+        "label": label,
+        "custom_id": custom_id,
+        "emoji": { "name": emoji.0, "id": emoji.1 },
+    })
+}
+
 fn validate_lfg_panel_attachments(attachments: &[LfgPanelAttachment]) -> Result<(), String> {
     let repo_root = lfg_repo_root();
     for attachment in attachments {
@@ -823,9 +838,9 @@ fn is_not_found_error(err: &str) -> bool {
 
 fn lfg_mode_selection_components() -> Value {
     json!([{ "type": 1, "components": [
-        lfg_button(LFG_MODE_BUTTON_CASUAL, 2, &LfgMode::Casual.mode_custom_id()),
-        lfg_button(LFG_MODE_BUTTON_RANKED, 1, &LfgMode::Ranked.mode_custom_id()),
-        lfg_button(LFG_MODE_BUTTON_STREET_BRAWL, 2, &LfgMode::StreetBrawl.mode_custom_id()),
+        lfg_emoji_button(LFG_MODE_BUTTON_CASUAL, 2, &LfgMode::Casual.mode_custom_id(), crate::router::ROUTER_EMOJI_CASUAL),
+        lfg_emoji_button(LFG_MODE_BUTTON_RANKED, 1, &LfgMode::Ranked.mode_custom_id(), crate::router::ROUTER_EMOJI_RANKED),
+        lfg_emoji_button(LFG_MODE_BUTTON_STREET_BRAWL, 2, &LfgMode::StreetBrawl.mode_custom_id(), crate::router::ROUTER_EMOJI_BRAWL),
     ]}])
 }
 
