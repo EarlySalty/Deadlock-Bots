@@ -426,7 +426,7 @@ mod tests {
 
     fn event(message_id: u64, author_id: u64, content: &str) -> dl_discord::MessageEvent {
         dl_discord::MessageEvent {
-            guild_id: Some(128_972_124_528_129_2288),
+            guild_id: Some(1_289_721_245_281_292_288),
             channel_id: 123,
             message_id,
             author_id,
