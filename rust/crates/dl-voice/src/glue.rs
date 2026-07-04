@@ -1825,6 +1825,18 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
             .map(|c| c.get())
     }
 
+    async fn send_dm(&self, user_id: u64, content: String) -> Result<(), String> {
+        let channel = UserId::new(user_id)
+            .create_dm_channel(&self.adapter.http)
+            .await
+            .map_err(|err| format!("DM-Kanal: {err}"))?;
+        channel
+            .send_message(&self.adapter.http, CreateMessage::new().content(content))
+            .await
+            .map_err(|err| format!("DM senden: {err}"))?;
+        Ok(())
+    }
+
     async fn move_member(&self, guild_id: u64, user_id: u64, lane_id: u64) -> Result<(), String> {
         self.adapter
             .http

@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use crate::lfg_watch::{insert_or_replace_watch, LfgWatchWindow};
 use chrono::{DateTime, Utc};
 use dl_central_db::kv;
 use dl_discord::{
@@ -29,9 +30,16 @@ pub const LFG_BANNER_DIR: &str = "assets/welcome-banners";
 pub const LFG_PANEL_BANNER_FILENAME: &str = "router-hero.png";
 pub const LFG_CREATE_START_CUSTOM_ID: &str = "lfg:create:start";
 pub const LFG_CREATE_MODE_PREFIX: &str = "lfg:create:mode:";
+pub const LFG_WATCH_START_CUSTOM_ID: &str = "lfg:watch:start";
+pub const LFG_WATCH_MODE_PREFIX: &str = "lfg:watch:mode:";
+pub const LFG_WATCH_RANK_FROM_SELECT_CUSTOM_ID: &str = "lfg:watch:rank_von";
+pub const LFG_WATCH_RANK_TO_SELECT_CUSTOM_ID: &str = "lfg:watch:rank_bis";
+pub const LFG_WATCH_WINDOW_SELECT_CUSTOM_ID: &str = "lfg:watch:window";
+pub const LFG_WATCH_ACTIVATE_CUSTOM_ID: &str = "lfg:watch:activate";
 pub const LFG_RANK_FROM_SELECT_CUSTOM_ID: &str = "lfg:rank_von";
 pub const LFG_RANK_TO_SELECT_CUSTOM_ID: &str = "lfg:rank_bis";
 pub const LFG_SLOTS_SELECT_CUSTOM_ID: &str = "lfg:slots";
+pub const LFG_WHEN_SELECT_CUSTOM_ID: &str = "lfg:when";
 pub const LFG_POST_PREFIX: &str = "lfg:post:";
 pub const LFG_OPEN_LANE_PREFIX: &str = "lfg:open_lane:";
 pub const LFG_JOIN_PREFIX: &str = "lfg:join:";
@@ -56,6 +64,7 @@ pub const LFG_FORUM_TAG_STATUS_LOOKING: u64 = 1522799471594045519;
 
 pub const LFG_PANEL_BODY: &str = "**Mitspieler finden**\nModus wählen, Rang-Bereich und Plätze angeben — fertig ist dein Gesuch als eigener Post. Der Post zeigt live, wie viele Plätze in der Lane frei sind, und mit **Beitreten** landest du direkt im Voice.\n\nGesuche räumen sich selbst weg, sobald die Lane schließt.\nWer regelmäßig dabei ist, taucht im [Rank-Leaderboard](https://deutsche-deadlock-community.de/aktivitaet/#rank-leaderboard-card) der Community auf.";
 pub const LFG_PANEL_BUTTON: &str = "Mitspieler suchen";
+pub const LFG_WATCH_PANEL_BUTTON: &str = "🔔 Benachrichtige mich";
 pub const LFG_MODE_PROMPT: &str = "Wofür suchst du Leute?";
 pub const LFG_MODE_BUTTON_CASUAL: &str = "Normale Lane";
 pub const LFG_MODE_BUTTON_RANKED: &str = "Ranked";
@@ -118,6 +127,9 @@ pub const LFG_ERR_PUBLISH_LANE_SCHON_VEROEFFENTLICHT: &str =
 pub const LFG_PRESETS_SUBMENU_TEXT: &str = "Was willst du mit deinen Presets machen?";
 pub const LFG_PRESETS_BTN_SAVE: &str = "💾 Preset speichern";
 pub const LFG_PRESETS_BTN_LOAD: &str = "📂 Preset laden";
+pub const LFG_WATCH_BUILDER_TEXT: &str = "🔔 **Ich sag dir Bescheid.** Sag mir, wonach du suchst — ich schicke dir eine DM, sobald ein passendes Gesuch auftaucht.";
+pub const LFG_WATCH_ERR_UNVOLLSTAENDIG: &str = "Wähl noch Modus und Zeitfenster aus.";
+pub const LFG_WATCH_BTN_AKTIVIEREN: &str = "🔔 Aktivieren";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LfgMode {
@@ -155,6 +167,61 @@ impl LfgMode {
     fn mode_custom_id(self) -> String {
         format!("{LFG_CREATE_MODE_PREFIX}{}", self.as_str())
     }
+
+    fn watch_mode_custom_id(self) -> String {
+        format!("{LFG_WATCH_MODE_PREFIX}{}", self.as_str())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LfgPlayWindow {
+    Jetzt,
+    HeuteAbend,
+    Wochenende,
+    Flexibel,
+}
+
+impl LfgPlayWindow {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Jetzt => "jetzt",
+            Self::HeuteAbend => "heute_abend",
+            Self::Wochenende => "wochenende",
+            Self::Flexibel => "flexibel",
+        }
+    }
+
+    pub(crate) fn from_str(raw: &str) -> Option<Self> {
+        match raw {
+            "jetzt" => Some(Self::Jetzt),
+            "heute_abend" => Some(Self::HeuteAbend),
+            "wochenende" => Some(Self::Wochenende),
+            "flexibel" => Some(Self::Flexibel),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Jetzt => "Jetzt / bin bereit",
+            Self::HeuteAbend => "Heute Abend",
+            Self::Wochenende => "Wochenende",
+            Self::Flexibel => "Flexibel",
+        }
+    }
+
+    pub(crate) fn emoji(self) -> &'static str {
+        match self {
+            Self::Jetzt => "⚡",
+            Self::HeuteAbend => "🌙",
+            Self::Wochenende => "📅",
+            Self::Flexibel => "🕒",
+        }
+    }
+}
+
+pub fn play_window_dm_suffix(raw: &str) -> Option<String> {
+    LfgPlayWindow::from_str(raw).map(|window| format!(" · {} {}", window.emoji(), window.label()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,6 +236,7 @@ struct LfgDraft {
     rank_from: Option<String>,
     rank_to: Option<String>,
     slots: Option<i32>,
+    play_window: Option<LfgPlayWindow>,
     lane_id: Option<u64>,
 }
 
@@ -179,9 +247,18 @@ impl LfgDraft {
             rank_from: None,
             rank_to: None,
             slots: None,
+            play_window: None,
             lane_id,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct LfgWatchDraft {
+    mode: Option<LfgMode>,
+    rank_from: Option<String>,
+    rank_to: Option<String>,
+    window: Option<LfgWatchWindow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -189,6 +266,8 @@ struct LfgUserPreset {
     rank_from: Option<String>,
     rank_to: Option<String>,
     slots: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    play_window: Option<String>,
 }
 
 impl LfgUserPreset {
@@ -197,6 +276,7 @@ impl LfgUserPreset {
             rank_from: draft.rank_from.clone(),
             rank_to: draft.rank_to.clone(),
             slots: draft.slots,
+            play_window: draft.play_window.map(|window| window.as_str().to_string()),
         }
     }
 
@@ -211,6 +291,10 @@ impl LfgUserPreset {
             rank_from,
             rank_to,
             slots,
+            play_window: self
+                .play_window
+                .as_deref()
+                .and_then(LfgPlayWindow::from_str),
             lane_id: None,
         })
     }
@@ -459,6 +543,9 @@ pub trait LfgPanelPort: Send + Sync {
 
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
 
+    /// Schickt dem User eine Direktnachricht. Fehler werden vom Aufrufer nur geloggt.
+    async fn send_dm(&self, user_id: u64, content: String) -> Result<(), String>;
+
     async fn move_member(&self, guild_id: u64, user_id: u64, lane_id: u64) -> Result<(), String>;
 
     async fn lane_occupancy(&self, guild_id: u64, lane_id: u64) -> Option<LfgLaneOccupancy>;
@@ -542,6 +629,7 @@ pub struct LfgPanelInterface {
     lane_spawner: RwLock<Option<Arc<dyn LfgLaneSpawner>>>,
     edit_queue: LfgEditQueue,
     pending_drafts: Mutex<HashMap<u64, LfgDraft>>,
+    pending_watch_drafts: Mutex<HashMap<u64, LfgWatchDraft>>,
 }
 
 impl LfgPanelInterface {
@@ -601,6 +689,7 @@ impl LfgPanelInterface {
             lane_spawner: RwLock::new(None),
             edit_queue: LfgEditQueue::default(),
             pending_drafts: Mutex::new(HashMap::new()),
+            pending_watch_drafts: Mutex::new(HashMap::new()),
         })
     }
 
@@ -881,12 +970,15 @@ fn lfg_panel_body_for_attachments(attachments: &[LfgPanelAttachment]) -> Map<Str
         components.push(lfg_media_gallery(&attachments[0].filename));
     }
     components.push(lfg_text_display(LFG_PANEL_BODY.to_string()));
-    components.push(lfg_action_row(vec![lfg_emoji_button(
-        LFG_PANEL_BUTTON,
-        1,
-        LFG_CREATE_START_CUSTOM_ID,
-        LFG_EMOJI_SEARCH,
-    )]));
+    components.push(lfg_action_row(vec![
+        lfg_emoji_button(
+            LFG_PANEL_BUTTON,
+            1,
+            LFG_CREATE_START_CUSTOM_ID,
+            LFG_EMOJI_SEARCH,
+        ),
+        lfg_button(LFG_WATCH_PANEL_BUTTON, 2, LFG_WATCH_START_CUSTOM_ID),
+    ]));
     body.insert(
         "components".to_string(),
         json!([{
@@ -979,6 +1071,14 @@ fn lfg_mode_selection_components() -> Value {
         lfg_emoji_button(LFG_MODE_BUTTON_RANKED, 1, &LfgMode::Ranked.mode_custom_id(), crate::router::ROUTER_EMOJI_RANKED),
         lfg_emoji_button(LFG_MODE_BUTTON_STREET_BRAWL, 2, &LfgMode::StreetBrawl.mode_custom_id(), crate::router::ROUTER_EMOJI_BRAWL),
     ]}])
+}
+
+fn lfg_watch_mode_components() -> Value {
+    json!({ "type": 1, "components": [
+        lfg_emoji_button(LFG_MODE_BUTTON_CASUAL, 2, &LfgMode::Casual.watch_mode_custom_id(), crate::router::ROUTER_EMOJI_CASUAL),
+        lfg_emoji_button(LFG_MODE_BUTTON_RANKED, 1, &LfgMode::Ranked.watch_mode_custom_id(), crate::router::ROUTER_EMOJI_RANKED),
+        lfg_emoji_button(LFG_MODE_BUTTON_STREET_BRAWL, 2, &LfgMode::StreetBrawl.watch_mode_custom_id(), crate::router::ROUTER_EMOJI_BRAWL),
+    ]})
 }
 
 fn lfg_post_custom_id(mode: LfgMode) -> String {
@@ -1080,6 +1180,64 @@ fn lfg_slots_select(mode: LfgMode, current: Option<i32>) -> Value {
     })
 }
 
+fn lfg_when_select(current: Option<LfgPlayWindow>) -> Value {
+    let options = [
+        LfgPlayWindow::Jetzt,
+        LfgPlayWindow::HeuteAbend,
+        LfgPlayWindow::Wochenende,
+        LfgPlayWindow::Flexibel,
+    ]
+    .into_iter()
+    .map(|window| {
+        json!({
+            "label": format!("{} {}", window.emoji(), window.label()),
+            "value": window.as_str(),
+            "default": current == Some(window),
+        })
+    })
+    .collect::<Vec<_>>();
+    json!({
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": LFG_WHEN_SELECT_CUSTOM_ID,
+            "placeholder": "Wann willst du spielen? (optional)",
+            "min_values": 1,
+            "max_values": 1,
+            "options": options,
+        }],
+    })
+}
+
+fn lfg_watch_window_select(current: Option<LfgWatchWindow>) -> Value {
+    let options = [
+        (LfgWatchWindow::Now3h, "⚡ Die nächsten 3 Stunden"),
+        (LfgWatchWindow::Today, "🌙 Heute"),
+        (LfgWatchWindow::Weekend, "📅 Dieses Wochenende"),
+        (LfgWatchWindow::Week, "🗓️ Diese Woche"),
+    ]
+    .into_iter()
+    .map(|(window, label)| {
+        json!({
+            "label": label,
+            "value": window.as_str(),
+            "default": current == Some(window),
+        })
+    })
+    .collect::<Vec<_>>();
+    json!({
+        "type": 1,
+        "components": [{
+            "type": 3,
+            "custom_id": LFG_WATCH_WINDOW_SELECT_CUSTOM_ID,
+            "placeholder": "Wie lange soll ich Ausschau halten?",
+            "min_values": 1,
+            "max_values": 1,
+            "options": options,
+        }],
+    })
+}
+
 fn lfg_draft_components(draft: &LfgDraft) -> Value {
     json!([
         lfg_rank_select(
@@ -1093,8 +1251,29 @@ fn lfg_draft_components(draft: &LfgDraft) -> Value {
             draft.rank_to.as_deref(),
         ),
         lfg_slots_select(draft.mode, draft.slots),
+        lfg_when_select(draft.play_window),
         { "type": 1, "components": [
             lfg_button(LFG_BTN_POSTEN, 1, &lfg_post_custom_id(draft.mode))
+        ]},
+    ])
+}
+
+fn lfg_watch_components(draft: &LfgWatchDraft) -> Value {
+    json!([
+        lfg_watch_mode_components(),
+        lfg_rank_select(
+            LFG_WATCH_RANK_FROM_SELECT_CUSTOM_ID,
+            LFG_RANK_FROM_PLACEHOLDER,
+            draft.rank_from.as_deref(),
+        ),
+        lfg_rank_select(
+            LFG_WATCH_RANK_TO_SELECT_CUSTOM_ID,
+            LFG_RANK_TO_PLACEHOLDER,
+            draft.rank_to.as_deref(),
+        ),
+        lfg_watch_window_select(draft.window),
+        { "type": 1, "components": [
+            lfg_button(LFG_WATCH_BTN_AKTIVIEREN, 1, LFG_WATCH_ACTIVATE_CUSTOM_ID)
         ]},
     ])
 }
@@ -1145,11 +1324,16 @@ fn lfg_draft_slots_summary(slots: Option<i32>) -> String {
 }
 
 fn lfg_draft_content(draft: &LfgDraft) -> String {
+    let when = match draft.play_window {
+        Some(window) => format!(" · {} {}", window.emoji(), window.label()),
+        None => String::new(),
+    };
     format!(
-        "**{}** · {} · {}\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**.",
+        "**{}** · {} · {}{}\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**.",
         draft.mode.display_name(),
         lfg_draft_rank_summary(draft),
-        lfg_draft_slots_summary(draft.slots)
+        lfg_draft_slots_summary(draft.slots),
+        when
     )
 }
 
@@ -1161,6 +1345,48 @@ fn lfg_draft_reply(draft: &LfgDraft, update_message: bool) -> BridgeReply {
         update_message,
         ..BridgeReply::default()
     }
+}
+
+fn lfg_watch_reply(draft: &LfgWatchDraft, update_message: bool) -> BridgeReply {
+    BridgeReply {
+        content: Some(LFG_WATCH_BUILDER_TEXT.to_string()),
+        components: Some(lfg_watch_components(draft)),
+        ephemeral: !update_message,
+        update_message,
+        ..BridgeReply::default()
+    }
+}
+
+fn lfg_watch_expires_at_sql(now_expr: &str, window: LfgWatchWindow) -> String {
+    let target = match window {
+        LfgWatchWindow::Now3h => format!("({now_expr}) + interval '3 hours'"),
+        LfgWatchWindow::Today => {
+            format!(
+                "GREATEST(
+                    ({now_expr}) + interval '1 hour',
+                    (((({now_expr}) AT TIME ZONE 'Europe/Berlin')::date + 1) + time '02:00')
+                        AT TIME ZONE 'Europe/Berlin'
+                )"
+            )
+        }
+        LfgWatchWindow::Weekend => {
+            format!(
+                "((((({now_expr}) AT TIME ZONE 'Europe/Berlin')::date
+                    + (8 - EXTRACT(ISODOW FROM ({now_expr}) AT TIME ZONE 'Europe/Berlin')::int))
+                    + time '00:00') AT TIME ZONE 'Europe/Berlin')"
+            )
+        }
+        LfgWatchWindow::Week => format!("({now_expr}) + interval '7 days'"),
+    };
+    format!("SELECT GREATEST(({target}), ({now_expr}) + interval '1 minute')")
+}
+
+async fn lfg_watch_expires_at(
+    pool: &PgPool,
+    window: LfgWatchWindow,
+) -> Result<DateTime<Utc>, sqlx::Error> {
+    let sql = lfg_watch_expires_at_sql("now()", window);
+    sqlx::query_scalar(&sql).fetch_one(pool).await
 }
 
 fn parse_requested_slots(raw: &str, mode: LfgMode) -> Option<i32> {
@@ -1202,9 +1428,12 @@ fn lfg_rank_value_index(value: Option<&str>) -> Option<Option<i32>> {
     Some(Some(idx))
 }
 
-fn lfg_rank_range_from_draft(draft: &LfgDraft) -> Option<LfgRankRange> {
-    let mut min = lfg_rank_value_index(draft.rank_from.as_deref())?;
-    let mut max = lfg_rank_value_index(draft.rank_to.as_deref())?;
+fn lfg_rank_range_from_values(
+    rank_from: Option<&str>,
+    rank_to: Option<&str>,
+) -> Option<LfgRankRange> {
+    let mut min = lfg_rank_value_index(rank_from)?;
+    let mut max = lfg_rank_value_index(rank_to)?;
     if let (Some(left), Some(right)) = (min, max) {
         if left > right {
             min = Some(right);
@@ -1212,6 +1441,14 @@ fn lfg_rank_range_from_draft(draft: &LfgDraft) -> Option<LfgRankRange> {
         }
     }
     Some(LfgRankRange { min, max })
+}
+
+fn lfg_rank_range_from_draft(draft: &LfgDraft) -> Option<LfgRankRange> {
+    lfg_rank_range_from_values(draft.rank_from.as_deref(), draft.rank_to.as_deref())
+}
+
+fn lfg_rank_range_from_watch_draft(draft: &LfgWatchDraft) -> Option<LfgRankRange> {
+    lfg_rank_range_from_values(draft.rank_from.as_deref(), draft.rank_to.as_deref())
 }
 
 #[cfg(test)]
@@ -1414,14 +1651,20 @@ fn lfg_post_body(
     rank_range: LfgRankRange,
     requested_slots: i32,
     occupancy: Option<LfgLaneOccupancy>,
+    play_window: Option<LfgPlayWindow>,
 ) -> String {
     let rank_label = rank_range_label(rank_range);
     let capacity = rendered_capacity(mode, requested_slots, occupancy);
-    [
+    let mut lines = vec![
         LFG_POST_BODY_HEADER.to_string(),
         format!("{LFG_POST_BODY_VON}: <@{owner_id}>"),
         format!("{LFG_POST_BODY_MODUS}: {}", mode.display_name()),
         format!("{LFG_POST_BODY_RANG}: {rank_label}"),
+    ];
+    if let Some(window) = play_window {
+        lines.push(format!("🕒 Wann: {} {}", window.emoji(), window.label()));
+    }
+    lines.extend([
         format!(
             "{LFG_POST_BODY_PLAETZE}: {}/{}",
             capacity.free, capacity.total
@@ -1431,8 +1674,8 @@ fn lfg_post_body(
         } else {
             LFG_POST_STATUS_OFFEN.to_string()
         },
-    ]
-    .join("\n")
+    ]);
+    lines.join("\n")
 }
 
 fn render_hash(body: &str) -> String {
@@ -1441,6 +1684,7 @@ fn render_hash(body: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn lfg_post_draft(
     post_id: i64,
     owner_id: u64,
@@ -1449,13 +1693,21 @@ fn lfg_post_draft(
     requested_slots: i32,
     occupancy: Option<LfgLaneOccupancy>,
     lane_attached: bool,
+    play_window: Option<LfgPlayWindow>,
 ) -> LfgForumPostDraft {
     let rank_label = rank_range_label(rank_range);
     let title = format!(
         "{LFG_POST_TITEL_SCHEMA} {} · {rank_label} · sucht {requested_slots}",
         mode.display_name()
     );
-    let body = lfg_post_body(owner_id, mode, rank_range, requested_slots, occupancy);
+    let body = lfg_post_body(
+        owner_id,
+        mode,
+        rank_range,
+        requested_slots,
+        occupancy,
+        play_window,
+    );
     let applied_tags = derive_lfg_forum_tag_ids(mode, rank_range, lane_attached);
     LfgForumPostDraft {
         post_id,
@@ -1518,6 +1770,7 @@ struct LfgPostRecord {
     mode: LfgMode,
     rank_range: LfgRankRange,
     requested_slots: i32,
+    play_window: Option<LfgPlayWindow>,
     status: String,
     last_render_hash: Option<String>,
     last_post_edit_at: Option<DateTime<Utc>>,
@@ -1531,6 +1784,7 @@ impl LfgPostRecord {
             self.rank_range,
             self.requested_slots,
             occupancy,
+            self.play_window,
         )
     }
 
@@ -1571,6 +1825,132 @@ impl LfgPanelInterface {
             content: Some(LFG_MODE_PROMPT.to_string()),
             components: Some(lfg_mode_selection_components()),
             ephemeral: true,
+            ..BridgeReply::default()
+        }
+    }
+
+    async fn handle_watch_start(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let draft = LfgWatchDraft::default();
+        self.pending_watch_drafts
+            .lock()
+            .await
+            .insert(interaction.user_id, draft.clone());
+        lfg_watch_reply(&draft, false)
+    }
+
+    async fn handle_watch_select(
+        &self,
+        interaction: BridgeInteraction,
+        selected_mode: Option<LfgMode>,
+    ) -> BridgeReply {
+        let guild_id = if interaction.guild_id == 0 {
+            LFG_GUILD_ID
+        } else {
+            interaction.guild_id
+        };
+        if let Some(mode) = selected_mode {
+            if !self.ranked_allowed(&interaction, guild_id, mode).await {
+                return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
+            }
+            let mut drafts = self.pending_watch_drafts.lock().await;
+            let Some(draft) = drafts.get_mut(&interaction.user_id) else {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            };
+            draft.mode = Some(mode);
+            let updated = draft.clone();
+            drop(drafts);
+            return lfg_watch_reply(&updated, true);
+        }
+
+        let Some(selected) = interaction.values.first().map(String::as_str) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        let mut drafts = self.pending_watch_drafts.lock().await;
+        let Some(draft) = drafts.get_mut(&interaction.user_id) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        };
+        match interaction.custom_id.as_str() {
+            LFG_WATCH_RANK_FROM_SELECT_CUSTOM_ID => {
+                let Some(rank) = normalize_lfg_rank_value(selected) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+                };
+                draft.rank_from = rank;
+            }
+            LFG_WATCH_RANK_TO_SELECT_CUSTOM_ID => {
+                let Some(rank) = normalize_lfg_rank_value(selected) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+                };
+                draft.rank_to = rank;
+            }
+            LFG_WATCH_WINDOW_SELECT_CUSTOM_ID => {
+                let Some(window) = LfgWatchWindow::from_str(selected) else {
+                    return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+                };
+                draft.window = Some(window);
+            }
+            _ => {
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+        }
+        let updated = draft.clone();
+        drop(drafts);
+        lfg_watch_reply(&updated, true)
+    }
+
+    async fn handle_watch_activate(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let draft = {
+            let drafts = self.pending_watch_drafts.lock().await;
+            let Some(draft) = drafts.get(&interaction.user_id).cloned() else {
+                return BridgeReply::ephemeral_text(LFG_WATCH_ERR_UNVOLLSTAENDIG);
+            };
+            draft
+        };
+        let (Some(mode), Some(window)) = (draft.mode, draft.window) else {
+            return BridgeReply::ephemeral_text(LFG_WATCH_ERR_UNVOLLSTAENDIG);
+        };
+        let guild_id = if interaction.guild_id == 0 {
+            LFG_GUILD_ID
+        } else {
+            interaction.guild_id
+        };
+        if !self.ranked_allowed(&interaction, guild_id, mode).await {
+            return BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG);
+        }
+        let Some(range) = lfg_rank_range_from_watch_draft(&draft) else {
+            return BridgeReply::ephemeral_text(LFG_ERR_RANG_UNBEKANNT);
+        };
+        let expires_at = match lfg_watch_expires_at(&self.pool, window).await {
+            Ok(expires_at) => expires_at,
+            Err(err) => {
+                tracing::error!(%err, user_id = interaction.user_id, "LFG-Watch: expires_at konnte nicht berechnet werden");
+                return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+            }
+        };
+        if let Err(err) = insert_or_replace_watch(
+            &self.pool,
+            guild_id,
+            interaction.user_id,
+            mode.as_str(),
+            range,
+            window,
+            expires_at,
+        )
+        .await
+        {
+            tracing::error!(%err, user_id = interaction.user_id, "LFG-Watch konnte nicht gespeichert werden");
+            return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
+        }
+        self.pending_watch_drafts
+            .lock()
+            .await
+            .remove(&interaction.user_id);
+        BridgeReply {
+            content: Some(format!(
+                "🔔 Alles klar — ich halte Ausschau nach **{}** · {} und schicke dir eine DM, sobald was Passendes auftaucht. (Einmalig; danach kannst du dich wieder eintragen.)",
+                mode.display_name(),
+                rank_range_label(range)
+            )),
+            update_message: true,
             ..BridgeReply::default()
         }
     }
@@ -1644,6 +2024,9 @@ impl LfgPanelInterface {
                 LFG_SLOTS_SELECT_CUSTOM_ID => {
                     BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG)
                 }
+                LFG_WHEN_SELECT_CUSTOM_ID => {
+                    BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
+                }
                 _ => BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN),
             };
         };
@@ -1669,6 +2052,9 @@ impl LfgPanelInterface {
                     return BridgeReply::ephemeral_text(LFG_ERR_PLAETZE_UNGUELTIG);
                 };
                 draft.slots = Some(slots);
+            }
+            LFG_WHEN_SELECT_CUSTOM_ID => {
+                draft.play_window = LfgPlayWindow::from_str(selected);
             }
             _ => {
                 return BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN);
@@ -1730,6 +2116,7 @@ impl LfgPanelInterface {
                 rank_range,
                 requested_slots,
                 draft.lane_id,
+                draft.play_window,
             )
             .await
         {
@@ -1772,6 +2159,7 @@ impl LfgPanelInterface {
         rank_range: LfgRankRange,
         requested_slots: i32,
         lane_id: Option<u64>,
+        play_window: Option<LfgPlayWindow>,
     ) -> Result<i64, LfgReservationError> {
         let post_id: i64 = sqlx::query_scalar(
             "INSERT INTO voice.lfg_posts (
@@ -1791,11 +2179,12 @@ impl LfgPanelInterface {
                  expires_at,
                  closed_at,
                  last_render_hash,
-                 last_post_edit_at
+                 last_post_edit_at,
+                 play_window
              )
              VALUES (
                  $1, $2, NULL, NULL, $8, $3, $4, $5, $6, $7, 'creating',
-                 now(), now(), now() + INTERVAL '24 hours', NULL, NULL, NULL
+                 now(), now(), now() + INTERVAL '24 hours', NULL, NULL, NULL, $9
              )
              RETURNING id",
         )
@@ -1815,6 +2204,7 @@ impl LfgPanelInterface {
                 .transpose()
                 .map_err(LfgReservationError::Db)?,
         )
+        .bind(play_window.map(LfgPlayWindow::as_str))
         .fetch_one(&self.pool)
         .await
         .map_err(|err| {
@@ -1836,6 +2226,7 @@ impl LfgPanelInterface {
         rank_range: LfgRankRange,
         requested_slots: i32,
         lane_id: Option<u64>,
+        play_window: Option<LfgPlayWindow>,
     ) -> Result<i64, LfgPostCreateError> {
         let Some(forum_channel_id) = self.forum_channel_id else {
             return Err(LfgPostCreateError::Failed);
@@ -1849,6 +2240,7 @@ impl LfgPanelInterface {
                 rank_range,
                 requested_slots,
                 lane_id,
+                play_window,
             )
             .await
         {
@@ -1876,6 +2268,7 @@ impl LfgPanelInterface {
             requested_slots,
             occupancy,
             lane_id.is_some(),
+            play_window,
         );
         let render_hash = render_hash(&draft.body);
         let created = match self.port.create_forum_post(forum_channel_id, draft).await {
@@ -1924,6 +2317,31 @@ impl LfgPanelInterface {
                 );
             }
             return Err(LfgPostCreateError::Failed);
+        }
+        {
+            let pool = self.pool.clone();
+            let port = self.port.clone();
+            let thread_id = created.thread_id;
+            let mode_str = mode.as_str().to_string();
+            let mode_display = mode.display_name().to_string();
+            let rank_label = rank_range_label(rank_range);
+            let post_window = play_window.map(|window| window.as_str().to_string());
+            tokio::spawn(async move {
+                crate::lfg_watch::run_match_for_new_post(
+                    &pool,
+                    port.as_ref(),
+                    guild_id,
+                    post_id,
+                    thread_id,
+                    owner_id,
+                    &mode_str,
+                    &mode_display,
+                    rank_range,
+                    post_window,
+                    rank_label,
+                )
+                .await;
+            });
         }
         Ok(post_id)
     }
@@ -1998,6 +2416,7 @@ impl LfgPanelInterface {
                     rank_min,
                     rank_max,
                     requested_slots,
+                    play_window,
                     status,
                     last_render_hash,
                     last_post_edit_at
@@ -2014,6 +2433,18 @@ impl LfgPanelInterface {
         let mode_raw: String = row.try_get("mode").map_err(|err| err.to_string())?;
         let Some(mode) = LfgMode::from_str(&mode_raw) else {
             return Err(format!("unbekannter LFG-Modus `{mode_raw}`"));
+        };
+        let play_window_raw: Option<String> =
+            row.try_get("play_window").map_err(|err| err.to_string())?;
+        let play_window = match play_window_raw.as_deref() {
+            Some(raw) => match LfgPlayWindow::from_str(raw) {
+                Some(window) => Some(window),
+                None => {
+                    tracing::warn!(post_id, raw, "unbekanntes LFG-play_window ignoriert");
+                    None
+                }
+            },
+            None => None,
         };
         Ok(Some(LfgPostRecord {
             id: row.try_get("id").map_err(|err| err.to_string())?,
@@ -2048,6 +2479,7 @@ impl LfgPanelInterface {
             requested_slots: row
                 .try_get("requested_slots")
                 .map_err(|err| err.to_string())?,
+            play_window,
             status: row.try_get("status").map_err(|err| err.to_string())?,
             last_render_hash: row
                 .try_get("last_render_hash")
@@ -2615,6 +3047,9 @@ impl InteractionHandler for LfgPanelInterface {
         if interaction.custom_id == LFG_CREATE_START_CUSTOM_ID {
             return self.handle_start().await;
         }
+        if interaction.custom_id == LFG_WATCH_START_CUSTOM_ID {
+            return self.handle_watch_start(interaction).await;
+        }
         if let Some(mode) = interaction
             .custom_id
             .strip_prefix(LFG_CREATE_MODE_PREFIX)
@@ -2622,13 +3057,32 @@ impl InteractionHandler for LfgPanelInterface {
         {
             return self.handle_mode(interaction, mode).await;
         }
+        if let Some(mode) = interaction
+            .custom_id
+            .strip_prefix(LFG_WATCH_MODE_PREFIX)
+            .and_then(LfgMode::from_str)
+        {
+            return self.handle_watch_select(interaction, Some(mode)).await;
+        }
         if matches!(
             interaction.custom_id.as_str(),
             LFG_RANK_FROM_SELECT_CUSTOM_ID
                 | LFG_RANK_TO_SELECT_CUSTOM_ID
                 | LFG_SLOTS_SELECT_CUSTOM_ID
+                | LFG_WHEN_SELECT_CUSTOM_ID
         ) {
             return self.handle_draft_select(interaction).await;
+        }
+        if matches!(
+            interaction.custom_id.as_str(),
+            LFG_WATCH_RANK_FROM_SELECT_CUSTOM_ID
+                | LFG_WATCH_RANK_TO_SELECT_CUSTOM_ID
+                | LFG_WATCH_WINDOW_SELECT_CUSTOM_ID
+        ) {
+            return self.handle_watch_select(interaction, None).await;
+        }
+        if interaction.custom_id == LFG_WATCH_ACTIVATE_CUSTOM_ID {
+            return self.handle_watch_activate(interaction).await;
         }
         if let Some(mode) = interaction
             .custom_id
@@ -2649,9 +3103,16 @@ impl InteractionHandler for LfgPanelInterface {
 
 pub fn register(router: &mut InteractionRouter, interface: Arc<LfgPanelInterface>) {
     router.on_prefix("lfg:create:", interface.clone());
+    router.on_custom_id(LFG_WATCH_START_CUSTOM_ID, interface.clone());
+    router.on_prefix(LFG_WATCH_MODE_PREFIX, interface.clone());
     router.on_custom_id(LFG_RANK_FROM_SELECT_CUSTOM_ID, interface.clone());
     router.on_custom_id(LFG_RANK_TO_SELECT_CUSTOM_ID, interface.clone());
     router.on_custom_id(LFG_SLOTS_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_WHEN_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_WATCH_RANK_FROM_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_WATCH_RANK_TO_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_WATCH_WINDOW_SELECT_CUSTOM_ID, interface.clone());
+    router.on_custom_id(LFG_WATCH_ACTIVATE_CUSTOM_ID, interface.clone());
     router.on_prefix(LFG_POST_PREFIX, interface.clone());
     router.on_prefix(LFG_OPEN_LANE_PREFIX, interface.clone());
     router.on_prefix(LFG_JOIN_PREFIX, interface);
@@ -2808,7 +3269,25 @@ mod tests {
             .flat_map(|row| row["components"].as_array().into_iter().flatten())
             .filter_map(|component| component["custom_id"].as_str())
             .collect();
-        assert_eq!(custom_ids, vec![LFG_CREATE_START_CUSTOM_ID]);
+        assert_eq!(
+            custom_ids,
+            vec![LFG_CREATE_START_CUSTOM_ID, LFG_WATCH_START_CUSTOM_ID]
+        );
+    }
+
+    #[test]
+    fn preset_roundtrip_preserves_play_window() {
+        let draft = LfgDraft {
+            mode: LfgMode::Casual,
+            rank_from: None,
+            rank_to: None,
+            slots: Some(2),
+            play_window: Some(LfgPlayWindow::HeuteAbend),
+            lane_id: None,
+        };
+        let preset = LfgUserPreset::from_draft(&draft);
+        let back = preset.into_draft(LfgMode::Casual).expect("preset -> draft");
+        assert_eq!(back.play_window, Some(LfgPlayWindow::HeuteAbend));
     }
 
     #[tokio::test]
@@ -3351,6 +3830,12 @@ mod tests {
             lfg_draft_content(&draft),
             "**Ranked** · Archon → Phantom · 3 Plätze\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
         );
+
+        draft.play_window = Some(LfgPlayWindow::HeuteAbend);
+        assert_eq!(
+            lfg_draft_content(&draft),
+            "**Ranked** · Archon → Phantom · 3 Plätze · 🌙 Heute Abend\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+        );
     }
 
     #[tokio::test]
@@ -3407,7 +3892,7 @@ mod tests {
             .expect("components")
             .as_array()
             .expect("component rows");
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(
             rows[0]["components"][0]["placeholder"],
             LFG_RANK_FROM_PLACEHOLDER
@@ -3420,9 +3905,14 @@ mod tests {
             rows[2]["components"][0]["placeholder"],
             LFG_SLOTS_PLACEHOLDER
         );
+        assert_eq!(
+            rows[3]["components"][0]["placeholder"],
+            "Wann willst du spielen? (optional)"
+        );
         assert_select_has_no_default(&rows[0]);
         assert_select_has_no_default(&rows[1]);
         assert_select_has_no_default(&rows[2]);
+        assert_select_has_no_default(&rows[3]);
         let rank_options = rows[0]["components"][0]["options"]
             .as_array()
             .expect("rank options");
@@ -3437,10 +3927,10 @@ mod tests {
         assert_eq!(archon["emoji"]["name"], "archon");
         assert_eq!(archon["emoji"]["id"], "1397687455313952918");
         assert_eq!(
-            rows[3]["components"][0]["custom_id"],
+            rows[4]["components"][0]["custom_id"],
             lfg_post_custom_id(LfgMode::Ranked)
         );
-        assert_eq!(rows[3]["components"][0]["label"], LFG_BTN_POSTEN);
+        assert_eq!(rows[4]["components"][0]["label"], LFG_BTN_POSTEN);
     }
 
     #[tokio::test]
@@ -3575,6 +4065,309 @@ mod tests {
         .await
         .expect("expires diff");
         assert!((expires_in_hours - LFG_EXPIRY_HOURS as f64).abs() < 0.01);
+    }
+
+    #[tokio::test]
+    async fn created_post_persists_play_window() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::default());
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        let post_id = interface
+            .create_lfg_post_from_values(
+                LFG_GUILD_ID,
+                424_242,
+                LfgMode::Casual,
+                LfgRankRange {
+                    min: None,
+                    max: None,
+                },
+                2,
+                None,
+                Some(LfgPlayWindow::HeuteAbend),
+            )
+            .await
+            .expect("post");
+        let stored: Option<String> =
+            sqlx::query_scalar("SELECT play_window FROM voice.lfg_posts WHERE id = $1")
+                .bind(post_id)
+                .fetch_one(&pool)
+                .await
+                .expect("row");
+        assert_eq!(stored.as_deref(), Some("heute_abend"));
+    }
+
+    #[tokio::test]
+    async fn mock_records_sent_dm() {
+        let port = MockLfgPanelPort::new();
+        port.send_dm(42, "hallo".to_string()).await.expect("dm");
+        assert_eq!(port.sent_dms(), vec![(42, "hallo".to_string())]);
+    }
+
+    #[tokio::test]
+    async fn watch_activate_inserts_row() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::new());
+        let interface = LfgPanelInterface::new(pool.clone(), port, Some(777));
+        interface.pending_watch_drafts.lock().await.insert(
+            42,
+            LfgWatchDraft {
+                mode: Some(LfgMode::Casual),
+                rank_from: None,
+                rank_to: None,
+                window: Some(LfgWatchWindow::Now3h),
+            },
+        );
+        let reply = interface
+            .handle_watch_activate(lfg_interaction(LFG_WATCH_ACTIVATE_CUSTOM_ID, 42))
+            .await;
+        assert!(reply.update_message);
+        let armed = crate::lfg_watch::armed_watches_for_match(&pool, LFG_GUILD_ID, "casual", 0)
+            .await
+            .expect("armed");
+        assert_eq!(armed.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn watch_weekend_expires_after_sunday_late_reference() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let reference = DateTime::parse_from_rfc3339("2026-07-05T21:59:30Z")
+            .expect("reference")
+            .with_timezone(&Utc);
+        let sql = lfg_watch_expires_at_sql(
+            "TIMESTAMPTZ '2026-07-05 21:59:30+00'",
+            LfgWatchWindow::Weekend,
+        );
+        let expires_at: DateTime<Utc> = sqlx::query_scalar(&sql)
+            .fetch_one(&pool)
+            .await
+            .expect("expires_at");
+
+        assert!(expires_at > reference);
+        assert!(expires_at >= reference + chrono::Duration::minutes(1));
+    }
+
+    #[tokio::test]
+    async fn matching_gesuch_fires_one_dm_then_stops() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::new());
+        let exp = Utc::now() + chrono::Duration::hours(3);
+        crate::lfg_watch::insert_or_replace_watch(
+            &pool,
+            LFG_GUILD_ID,
+            99,
+            "casual",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            LfgWatchWindow::Now3h,
+            exp,
+        )
+        .await
+        .expect("watch");
+
+        crate::lfg_watch::run_match_for_new_post(
+            &pool,
+            port.as_ref(),
+            LFG_GUILD_ID,
+            500,
+            910_100,
+            42,
+            "casual",
+            "Normale Lane",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            Some("jetzt".into()),
+            "Alle Ränge".into(),
+        )
+        .await;
+        assert_eq!(port.sent_dms().len(), 1);
+        assert_eq!(port.sent_dms()[0].0, 99);
+        assert!(port.sent_dms()[0]
+            .1
+            .contains("https://discord.com/channels/"));
+        let claimed: (Option<DateTime<Utc>>, Option<i64>) = sqlx::query_as(
+            "SELECT fired_at, matched_post_id
+               FROM activity.lfg_watches
+              WHERE guild_id = $1
+                AND user_id = $2",
+        )
+        .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+        .bind(99_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("claimed");
+        assert!(claimed.0.is_some());
+        assert_eq!(claimed.1, Some(500));
+
+        crate::lfg_watch::run_match_for_new_post(
+            &pool,
+            port.as_ref(),
+            LFG_GUILD_ID,
+            501,
+            910_101,
+            43,
+            "casual",
+            "Normale Lane",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            Some("jetzt".into()),
+            "Alle Ränge".into(),
+        )
+        .await;
+        assert_eq!(port.sent_dms().len(), 1, "one-shot: keine zweite DM");
+    }
+
+    #[tokio::test]
+    async fn matching_geclaimter_watch_sendet_bei_zweitem_passenden_post_keine_dm() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::new());
+        let exp = Utc::now() + chrono::Duration::hours(3);
+        crate::lfg_watch::insert_or_replace_watch(
+            &pool,
+            LFG_GUILD_ID,
+            199,
+            "casual",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            LfgWatchWindow::Now3h,
+            exp,
+        )
+        .await
+        .expect("watch");
+
+        crate::lfg_watch::run_match_for_new_post(
+            &pool,
+            port.as_ref(),
+            LFG_GUILD_ID,
+            700,
+            910_300,
+            42,
+            "casual",
+            "Normale Lane",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            Some("jetzt".into()),
+            "Alle Ränge".into(),
+        )
+        .await;
+        let claimed_post_id: Option<i64> = sqlx::query_scalar(
+            "SELECT matched_post_id
+               FROM activity.lfg_watches
+              WHERE guild_id = $1
+                AND user_id = $2
+                AND fired_at IS NOT NULL",
+        )
+        .bind(i64::try_from(LFG_GUILD_ID).expect("guild id"))
+        .bind(199_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("claimed");
+        assert_eq!(claimed_post_id, Some(700));
+
+        crate::lfg_watch::run_match_for_new_post(
+            &pool,
+            port.as_ref(),
+            LFG_GUILD_ID,
+            701,
+            910_301,
+            43,
+            "casual",
+            "Normale Lane",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            Some("jetzt".into()),
+            "Alle Ränge".into(),
+        )
+        .await;
+
+        assert_eq!(port.sent_dms().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn matching_gesuch_ignoriert_falschen_modus_disjunkten_rang_und_abgelaufen() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        let port = Arc::new(MockLfgPanelPort::new());
+        let future = Utc::now() + chrono::Duration::hours(3);
+        crate::lfg_watch::insert_or_replace_watch(
+            &pool,
+            LFG_GUILD_ID,
+            100,
+            "casual",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            LfgWatchWindow::Now3h,
+            future,
+        )
+        .await
+        .expect("watch wrong mode");
+        crate::lfg_watch::insert_or_replace_watch(
+            &pool,
+            LFG_GUILD_ID,
+            101,
+            "ranked",
+            LfgRankRange {
+                min: Some(1),
+                max: Some(3),
+            },
+            LfgWatchWindow::Now3h,
+            future,
+        )
+        .await
+        .expect("watch disjoint");
+        crate::lfg_watch::insert_or_replace_watch(
+            &pool,
+            LFG_GUILD_ID,
+            102,
+            "ranked",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            LfgWatchWindow::Now3h,
+            Utc::now() - chrono::Duration::hours(1),
+        )
+        .await
+        .expect("watch expired");
+
+        crate::lfg_watch::run_match_for_new_post(
+            &pool,
+            port.as_ref(),
+            LFG_GUILD_ID,
+            600,
+            910_200,
+            42,
+            "ranked",
+            "Ranked",
+            LfgRankRange {
+                min: Some(7),
+                max: Some(9),
+            },
+            Some("jetzt".into()),
+            "Archon bis Phantom".into(),
+        )
+        .await;
+        assert!(port.sent_dms().is_empty());
     }
 
     #[tokio::test]
@@ -4677,6 +5470,7 @@ mod tests {
         recent: StdMutex<Vec<LfgPanelMessage>>,
         roles: StdMutex<Vec<u64>>,
         voice_channel: StdMutex<Option<u64>>,
+        sent_dms: StdMutex<Vec<(u64, String)>>,
         moves: StdMutex<Vec<(u64, u64, u64)>>,
         move_error: StdMutex<Option<String>>,
         occupancy: StdMutex<HashMap<u64, LfgLaneOccupancy>>,
@@ -4702,6 +5496,7 @@ mod tests {
                 recent: StdMutex::default(),
                 roles: StdMutex::default(),
                 voice_channel: StdMutex::default(),
+                sent_dms: StdMutex::default(),
                 moves: StdMutex::default(),
                 move_error: StdMutex::default(),
                 occupancy: StdMutex::default(),
@@ -4715,6 +5510,16 @@ mod tests {
                 archived_threads: StdMutex::default(),
                 archive_thread_error: StdMutex::default(),
             }
+        }
+    }
+
+    impl MockLfgPanelPort {
+        fn new() -> Self {
+            Self::default()
+        }
+
+        fn sent_dms(&self) -> Vec<(u64, String)> {
+            self.sent_dms.lock().expect("sent_dms").clone()
         }
     }
 
@@ -4854,6 +5659,14 @@ mod tests {
 
         async fn member_voice_channel(&self, _guild_id: u64, _user_id: u64) -> Option<u64> {
             *self.voice_channel.lock().expect("voice channel")
+        }
+
+        async fn send_dm(&self, user_id: u64, content: String) -> Result<(), String> {
+            self.sent_dms
+                .lock()
+                .expect("sent_dms")
+                .push((user_id, content));
+            Ok(())
         }
 
         async fn move_member(
