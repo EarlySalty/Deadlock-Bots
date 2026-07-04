@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Glossar — Deadlock Bot Wissensbasis</title><style>:root{--bg:#fbfaf7;--fg:#22201c;--muted:#6b6459;--line:#e7e2d8;--card:#fff;--accent:#c8a86b;--accentfg:#8a6a35;--warn:#8a3b2e;--ok:#3f6b4a;--code:#f2eee6}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
+a{color:var(--accentfg);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:flex;gap:36px;align-items:flex-start}
+nav.side{position:sticky;top:0;flex:0 0 244px;max-height:100vh;overflow:auto;padding:22px 0 40px;font-size:14px}
+nav.side .grp{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:16px 0 5px;font-weight:700}
+nav.side a{display:block;padding:3px 0;color:var(--fg)}nav.side a:hover{color:var(--accentfg)}
+nav.side a.here{color:var(--accentfg);font-weight:700;border-left:3px solid var(--accent);padding-left:8px;margin-left:-11px}
+main{flex:1 1 auto;min-width:0;padding:26px 0 90px;max-width:768px}
+h1{font-size:30px;line-height:1.22;margin:.1em 0 .35em;letter-spacing:-.01em}
+h2{font-size:21px;margin:1.7em 0 .5em;padding-top:.55em;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.3em 0 .35em}
+p,li{color:var(--fg)}.muted,small{color:var(--muted)}
+.lead{font-size:18px;line-height:1.55;color:var(--muted);margin:.2em 0 1.1em}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:14.5px;display:block;overflow-x:auto;white-space:normal}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600;white-space:nowrap}
+code{background:var(--code);padding:1px 6px;border-radius:5px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
+.tag{display:inline-block;font-size:12px;padding:2px 9px;border-radius:999px;background:var(--code);color:var(--accentfg);border:1px solid var(--line);margin:0 4px 4px 0}
+.callout{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--card);padding:13px 17px;border-radius:7px;margin:1.1em 0}
+.callout h3{margin-top:0;font-size:15px}
+.callout.may{border-left-color:var(--ok)}
+.callout.never{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,var(--card))}
+.callout.abstract{border-left-color:var(--accent);font-size:14px;color:var(--muted)}
+ul.clean{list-style:none;padding-left:0;margin:.4em 0}ul.clean li{padding:5px 0;border-bottom:1px solid var(--line)}
+ol.steps{padding-left:1.2em}ol.steps li{margin:.35em 0}
+header.top{border-bottom:1px solid var(--line);background:var(--card);position:relative;z-index:2}
+header.top .in{max-width:1180px;margin:0 auto;padding:13px 20px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+header.top .brand{font-weight:800;color:var(--accentfg);letter-spacing:-.01em}
+header.top .crumb{color:var(--muted);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:14px;margin:1.2em 0}
+.cards a{display:block;border:1px solid var(--line);border-radius:9px;padding:14px 15px;background:var(--card)}
+.cards a:hover{border-color:var(--accent);text-decoration:none}
+.cards a b{display:block;color:var(--fg);margin-bottom:3px}.cards a span{color:var(--muted);font-size:13.5px}
+footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;padding:22px;text-align:center}
+@media(max-width:860px){.wrap{flex-direction:column;gap:0}nav.side{position:static;flex-basis:auto;max-height:none;width:100%;border-bottom:1px solid var(--line)}main{padding-top:10px}}
+@media(prefers-color-scheme:dark){:root{--bg:#17150f;--fg:#e9e4d8;--muted:#a49a86;--line:#33302a;--card:#201d16;--accent:#c8a86b;--accentfg:#d8b877;--warn:#e08b6f;--ok:#7fb98f;--code:#26231b}}</style></head>
+<body><header class="top"><div class="in"><span class="brand">Deadlock Bot · Support-Wissensbasis</span><span class="crumb">Referenz</span></div></header>
+<div class="wrap"><nav class="side"><div class="grp">Start</div><a href="../index.html">Übersicht</a><div class="grp">Module</div><a href="../modules/moderation.html">Moderation &amp; Scam-Schutz</a><a href="../modules/onboarding.html">Onboarding &amp; Rollen</a><a href="../modules/voice-lanes.html">Voice-Lanes (TempVoice)</a><a href="../modules/mitspielersuche-lfg.html">Mitspielersuche (LFG)</a><a href="../modules/statistiken-privatsphaere.html">Statistiken &amp; Privatsphäre</a><a href="../modules/tierlist-builds.html">Tierlist &amp; Builds</a><a href="../modules/brain.html">Wissensabfrage (!brain)</a><a href="../modules/faq-support.html">FAQ &amp; Support-Chat</a><a href="../modules/coaching.html">Coaching</a><a href="../modules/steam-twitch-verknuepfung.html">Steam- &amp; Twitch-Verknüpfung</a><a href="../modules/changelog-ankuendigungen.html">Changelog &amp; Ankündigungen</a><a href="../modules/dashboard-login.html">Dashboard &amp; Login</a><a href="../modules/serverstruktur.html">Serverstruktur</a><div class="grp">Abläufe</div><a href="../workflows/onboarding-beitritt.html">Server betreten</a><a href="../workflows/steam-verknuepfen-rang.html">Steam verknüpfen &amp; Rang</a><a href="../workflows/voice-lane-erstellen-verwalten.html">Voice-Lane erstellen &amp; verwalten</a><a href="../workflows/mitspieler-finden.html">Mitspieler finden</a><a href="../workflows/moderationsfall-einspruch.html">Moderationsfall &amp; Einspruch</a><a href="../workflows/rang-sichtbarkeit.html">Rang-Sichtbarkeit einstellen</a><a href="../workflows/coaching-anfragen.html">Coaching anfragen</a><a href="../workflows/builds-abstimmen.html">Über Builds abstimmen</a><a href="../workflows/streamer-partner-werden.html">Streamer-Partner werden</a><a href="../workflows/austritt-datenloeschung.html">Austritt &amp; Datenlöschung</a><div class="grp">Support</div><a href="../support/agent-guide.html">Agenten-Leitfaden</a><a href="../support/troubleshooting.html">Fehlerbehebung</a><div class="grp">Referenz</div><a href="../reference/glossar.html" class="here">Glossar</a><a href="../reference/status-und-fehler.html">Status &amp; Fehler</a><div class="grp">Sicherheit</div><a href="../security/redaktions-hinweise.html">Redaktions-Hinweise</a></nav><main><h1>Glossar</h1>
+<p class="lead">Einheitliche Begriffe, wie sie in dieser Wissensbasis und gegenüber Mitgliedern verwendet werden. Definitionen bleiben auf der beobachtbaren Ebene — ohne interne Kriterien.</p>
+
+<table>
+  <thead><tr><th>Begriff</th><th>Bedeutung</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Onboarding</strong></td><td>Der geführte Einstieg direkt nach dem Beitritt: Fragen zu Interessen und Spielstil, danach automatische Rollen und Kanalzugriff.</td></tr>
+    <tr><td><strong>Verified-Rolle</strong></td><td>Rolle, die ein Mitglied nach der vollständig verifizierten Steam-Verknüpfung erhält. Schaltet Rang-Erkennung und weitere Funktionen frei.</td></tr>
+    <tr><td><strong>Freundescode</strong></td><td>Der Steam-Freundescode des Mitglieds. Nötig, damit der Bot eine Steam-Freundschaftsanfrage schicken kann.</td></tr>
+    <tr><td><strong>Rang / Rang-Rolle</strong></td><td>Der aus dem verifizierten Steam-Account erkannte Deadlock-Rang, als Server-Rolle abgebildet. <code>/checkrank</code> gleicht die Rollen aktiv ab.</td></tr>
+    <tr><td><strong>Rang-Historie</strong></td><td>Verlauf des Rangs über die Zeit auf der Statistik-Website. Sichtbarkeit ist pro Mitglied einstellbar: privat, nur Mitglieder oder öffentlich.</td></tr>
+    <tr><td><strong>Voice-Lane (TempVoice)</strong></td><td>Automatisch erzeugter, selbstverwalteter Sprachkanal. Über ein Panel mit Buttons steuert der Ersteller Name, Limit, Zugang und mehr.</td></tr>
+    <tr><td><strong>Ranked-Lane</strong></td><td>Voice-Lane mit Rang-Bezug: der Rang erscheint im Kanalnamen, und es kann eine Rang-Voraussetzung geben.</td></tr>
+    <tr><td><strong>Anfänger-Umleitung</strong></td><td>Hinweis/Umleitung, der neue oder niedrig eingestufte Mitglieder in eine passende Lane lenkt.</td></tr>
+    <tr><td><strong>Live-Match-Status</strong></td><td>Anzeige im Lane-Namen, dass gerade ein Match läuft. Wird automatisch gesetzt und wieder entfernt.</td></tr>
+    <tr><td><strong>LFG („Looking for Group")</strong></td><td>Mitspieler-/Lobby-Suche: ein Gesuch erreicht passende Mitglieder, die antworten können.</td></tr>
+    <tr><td><strong>SmartPing</strong></td><td>Gezielter Mitspieler-Hinweis in passenden Kanälen (<code>!smartping</code>).</td></tr>
+    <tr><td><strong>Scrim / Squad</strong></td><td>Programm für organisierte Teams: Teilnehmer-Pool, Team-Zuordnung, geplante Matches; Zustände wie Pool, Team, Ersatzbank, Warteliste.</td></tr>
+    <tr><td><strong>Ragebaiter-Free</strong></td><td>Als besonders ruhig markierter Voice-Bereich. Bei Provokationen kommt zuerst eine freundliche Hinweis-DM statt einer Strafe.</td></tr>
+    <tr><td><strong>Timeout</strong></td><td>Zeitlich begrenzte Stummschaltung: das Mitglied kann vorübergehend nicht schreiben/sprechen. Vom Team aufhebbar.</td></tr>
+    <tr><td><strong>Vorschlag (Mod-Review)</strong></td><td>Grenzfall, den der Bot nicht automatisch ahndet, sondern dem Team mit Prüf-Buttons vorlegt. Die Nachricht bleibt bis zur Entscheidung stehen.</td></tr>
+    <tr><td><strong>Rücknahme</strong></td><td>Aufhebung eines Timeouts oder Banns durch das Team; der Fall gilt dann als zurückgenommen.</td></tr>
+    <tr><td><strong>Streamer-Partner</strong></td><td>Automatisch erkannte Verbindung zwischen Discord-Mitglied und Twitch-Streamer; kann eine Streamer-Rolle und Live-Ankündigungen auslösen.</td></tr>
+    <tr><td><strong>Highlight-Clips</strong></td><td>Automatisch in festen Kanälen gepostete Clip-Beiträge.</td></tr>
+    <tr><td><strong>Changelog-Beitrag</strong></td><td>Vom Team ausgelöste Änderungs-/Neuerungs-Meldung in festen Kanälen, teils mit Rollen-Ping.</td></tr>
+    <tr><td><strong>FAQ-Chat / Ticket-Auto-Hilfe</strong></td><td>Dokumentationsbasierter Assistent: privater FAQ-Chat auf Anfrage und eine automatische Erst-Antwort in bestimmten Ticket-Bereichen.</td></tr>
+    <tr><td><strong>!brain</strong></td><td>Wissensfrage an den Bot. Sehr lange Antworten werden aufgeteilt.</td></tr>
+    <tr><td><strong>Master-Dashboard</strong></td><td>Zentrale Login-/Verwaltungs-Website; liefert außerdem öffentliche Server-Statistiken und den Austritts-Umfrage-Flow.</td></tr>
+    <tr><td><strong>Austritts-Umfrage</strong></td><td>Nach einem Austritt per DM verschickte kurze Umfrage über einen persönlichen Link.</td></tr>
+    <tr><td><strong>Datenschutz-Löschung</strong></td><td>Auf Wunsch angestoßene Löschung der zum Mitglied gespeicherten Daten.</td></tr>
+  </tbody>
+</table>
+</main></div>
+<footer>Interne Support-Wissensbasis · Discord-Bot (Rust) · Stand Juli 2026. Enthält bewusst keine internen Schwellenwerte, Formeln, Pfade, IDs oder Zugangsdaten.</footer></body></html>

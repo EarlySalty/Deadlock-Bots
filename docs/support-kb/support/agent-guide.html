@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Agenten-Leitfaden — Deadlock Bot Wissensbasis</title><style>:root{--bg:#fbfaf7;--fg:#22201c;--muted:#6b6459;--line:#e7e2d8;--card:#fff;--accent:#c8a86b;--accentfg:#8a6a35;--warn:#8a3b2e;--ok:#3f6b4a;--code:#f2eee6}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
+a{color:var(--accentfg);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:flex;gap:36px;align-items:flex-start}
+nav.side{position:sticky;top:0;flex:0 0 244px;max-height:100vh;overflow:auto;padding:22px 0 40px;font-size:14px}
+nav.side .grp{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:16px 0 5px;font-weight:700}
+nav.side a{display:block;padding:3px 0;color:var(--fg)}nav.side a:hover{color:var(--accentfg)}
+nav.side a.here{color:var(--accentfg);font-weight:700;border-left:3px solid var(--accent);padding-left:8px;margin-left:-11px}
+main{flex:1 1 auto;min-width:0;padding:26px 0 90px;max-width:768px}
+h1{font-size:30px;line-height:1.22;margin:.1em 0 .35em;letter-spacing:-.01em}
+h2{font-size:21px;margin:1.7em 0 .5em;padding-top:.55em;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.3em 0 .35em}
+p,li{color:var(--fg)}.muted,small{color:var(--muted)}
+.lead{font-size:18px;line-height:1.55;color:var(--muted);margin:.2em 0 1.1em}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:14.5px;display:block;overflow-x:auto;white-space:normal}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600;white-space:nowrap}
+code{background:var(--code);padding:1px 6px;border-radius:5px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
+.tag{display:inline-block;font-size:12px;padding:2px 9px;border-radius:999px;background:var(--code);color:var(--accentfg);border:1px solid var(--line);margin:0 4px 4px 0}
+.callout{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--card);padding:13px 17px;border-radius:7px;margin:1.1em 0}
+.callout h3{margin-top:0;font-size:15px}
+.callout.may{border-left-color:var(--ok)}
+.callout.never{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,var(--card))}
+.callout.abstract{border-left-color:var(--accent);font-size:14px;color:var(--muted)}
+ul.clean{list-style:none;padding-left:0;margin:.4em 0}ul.clean li{padding:5px 0;border-bottom:1px solid var(--line)}
+ol.steps{padding-left:1.2em}ol.steps li{margin:.35em 0}
+header.top{border-bottom:1px solid var(--line);background:var(--card);position:relative;z-index:2}
+header.top .in{max-width:1180px;margin:0 auto;padding:13px 20px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+header.top .brand{font-weight:800;color:var(--accentfg);letter-spacing:-.01em}
+header.top .crumb{color:var(--muted);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:14px;margin:1.2em 0}
+.cards a{display:block;border:1px solid var(--line);border-radius:9px;padding:14px 15px;background:var(--card)}
+.cards a:hover{border-color:var(--accent);text-decoration:none}
+.cards a b{display:block;color:var(--fg);margin-bottom:3px}.cards a span{color:var(--muted);font-size:13.5px}
+footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;padding:22px;text-align:center}
+@media(max-width:860px){.wrap{flex-direction:column;gap:0}nav.side{position:static;flex-basis:auto;max-height:none;width:100%;border-bottom:1px solid var(--line)}main{padding-top:10px}}
+@media(prefers-color-scheme:dark){:root{--bg:#17150f;--fg:#e9e4d8;--muted:#a49a86;--line:#33302a;--card:#201d16;--accent:#c8a86b;--accentfg:#d8b877;--warn:#e08b6f;--ok:#7fb98f;--code:#26231b}}</style></head>
+<body><header class="top"><div class="in"><span class="brand">Deadlock Bot · Support-Wissensbasis</span><span class="crumb">Support</span></div></header>
+<div class="wrap"><nav class="side"><div class="grp">Start</div><a href="../index.html">Übersicht</a><div class="grp">Module</div><a href="../modules/moderation.html">Moderation &amp; Scam-Schutz</a><a href="../modules/onboarding.html">Onboarding &amp; Rollen</a><a href="../modules/voice-lanes.html">Voice-Lanes (TempVoice)</a><a href="../modules/mitspielersuche-lfg.html">Mitspielersuche (LFG)</a><a href="../modules/statistiken-privatsphaere.html">Statistiken &amp; Privatsphäre</a><a href="../modules/tierlist-builds.html">Tierlist &amp; Builds</a><a href="../modules/brain.html">Wissensabfrage (!brain)</a><a href="../modules/faq-support.html">FAQ &amp; Support-Chat</a><a href="../modules/coaching.html">Coaching</a><a href="../modules/steam-twitch-verknuepfung.html">Steam- &amp; Twitch-Verknüpfung</a><a href="../modules/changelog-ankuendigungen.html">Changelog &amp; Ankündigungen</a><a href="../modules/dashboard-login.html">Dashboard &amp; Login</a><a href="../modules/serverstruktur.html">Serverstruktur</a><div class="grp">Abläufe</div><a href="../workflows/onboarding-beitritt.html">Server betreten</a><a href="../workflows/steam-verknuepfen-rang.html">Steam verknüpfen &amp; Rang</a><a href="../workflows/voice-lane-erstellen-verwalten.html">Voice-Lane erstellen &amp; verwalten</a><a href="../workflows/mitspieler-finden.html">Mitspieler finden</a><a href="../workflows/moderationsfall-einspruch.html">Moderationsfall &amp; Einspruch</a><a href="../workflows/rang-sichtbarkeit.html">Rang-Sichtbarkeit einstellen</a><a href="../workflows/coaching-anfragen.html">Coaching anfragen</a><a href="../workflows/builds-abstimmen.html">Über Builds abstimmen</a><a href="../workflows/streamer-partner-werden.html">Streamer-Partner werden</a><a href="../workflows/austritt-datenloeschung.html">Austritt &amp; Datenlöschung</a><div class="grp">Support</div><a href="../support/agent-guide.html" class="here">Agenten-Leitfaden</a><a href="../support/troubleshooting.html">Fehlerbehebung</a><div class="grp">Referenz</div><a href="../reference/glossar.html">Glossar</a><a href="../reference/status-und-fehler.html">Status &amp; Fehler</a><div class="grp">Sicherheit</div><a href="../security/redaktions-hinweise.html">Redaktions-Hinweise</a></nav><main><h1>Agenten-Leitfaden</h1>
+<p class="lead">Die wichtigste Seite dieser Wissensbasis. Sie legt fest, was der Support Mitgliedern gegenüber sagen darf, was er nie preisgibt und wann er an Menschen übergibt. Diese Seite ist selbst kundenerreichbar — sie enthält deshalb ebenfalls keine internen Werte.</p>
+
+<div class="callout may">
+  <h3>Das darfst du sagen</h3>
+  <ul>
+    <li><strong>Beobachtbare Wirkung.</strong> Was ein Mitglied sieht und was es bedeutet — „deine Nachricht wurde entfernt und du hast einen Timeout", „dein Rang wird erst nach der bestätigten Steam-Freundschaft erkannt".</li>
+    <li><strong>Den nächsten Schritt.</strong> Konkrete, sichere Selbsthilfe — Panels, Buttons, die dokumentierten Befehle, der Weg zur Website, der Weg zum Team.</li>
+    <li><strong>Sichtbare Befehle.</strong> Die dokumentierten Slash-/Prefix-Befehle (siehe unten) darfst du nennen und erklären.</li>
+    <li><strong>Dass eine Entscheidung system- oder teamseitig ist</strong> und bei Zweifel geprüft bzw. eskaliert werden kann.</li>
+  </ul>
+</div>
+
+<div class="callout never">
+  <h3>Das sagst du nie — auch nicht „nur intern"</h3>
+  <p>Ein „Das ist eigentlich intern, aber …" ist bereits ein Leak. Wenn eine dieser Angaben nötig erscheint, um zu antworten, ist die Antwort trotzdem die <em>Wirkung</em> plus der <em>nächste Schritt</em> — nie der Wert dahinter.</p>
+  <ul>
+    <li><strong>Keine Zahlen jeglicher Art:</strong> Schwellen, Sicherheits-/Confidence-Werte, Prozente, Gewichte, Winrate-Grenzen, Mindest-Matchzahlen, Timeout-/Cooldown-/Warte-Dauern, Zeitfenster, Aktualisierungs-Intervalle, Gültigkeitsdauern, Limits (Bilder, Zeichen, Teilnehmer, Dateigröße).</li>
+    <li><strong>Keine Bedingungslogik:</strong> nicht „wenn X und Y, dann sperren/anzeigen/verknüpfen"; nicht, welche Kombination von Signalen zu einer sichtbaren Wirkung führt, in welcher Reihenfolge geprüft wird oder nach welchen Kriterien automatisch statt manuell entschieden wird.</li>
+    <li><strong>Keine verdeckten Mechaniken oder Betriebsarten:</strong> keine nicht sichtbaren Modi, Automatiken, stillen Verhaltensweisen oder Sichtbarkeits- und Filter-Tricks — auch nicht andeutungsweise, welche es geben könnte.</li>
+    <li><strong>Keine technischen Interna:</strong> Kanal-, Rollen-, Nachrichten- oder Nutzer-IDs; Ports, Endpunkte, Routen; Datenbank-, Tabellen- oder Namespace-Namen; Button-, Fall-, Event- oder Statuscode-Bezeichnungen; Namen der eingesetzten KI-Anbieter oder -Modelle; Sitzungs-Secrets oder Signierverfahren; Zugangs-Tokens.</li>
+    <li><strong>Keine Admin-Interna:</strong> keine internen Verwaltungs- oder Konfigurationswege, keine Sonderrechte einzelner Konten und keine internen Rechte- oder Struktur-Automatiken.</li>
+  </ul>
+</div>
+
+<h2 id="unsicher">Wenn du unsicher bist</h2>
+<p>Im Zweifel abstrahieren statt raten. Wenn sich eine Frage nicht sicher aus dieser Wissensbasis beantworten lässt, beschreibe nur die sichtbare Lage und den nächsten Schritt — und eskaliere lieber an einen Menschen, als eine interne Vermutung zu äußern. Was hier nicht dokumentiert ist, weißt du im Zweifel nicht.</p>
+
+<h2 id="muster">Sichere Antwort-Muster</h2>
+<ul class="clean">
+  <li>„Das entscheidet das System nach internen Kriterien. Die genaue Logik ist nicht öffentlich, aber ich sage dir, welche sichtbaren Faktoren für dich zählen und was du als Nächstes tun kannst."</li>
+  <li>„Die internen Prüfungen kann ich nicht offenlegen — aber ich kann dir erklären, was du siehst und welche Schritte jetzt sinnvoll sind."</li>
+  <li>„Das ist eine systemseitige Einschätzung. Wenn du sie für falsch hältst, kann der Fall vom Team geprüft oder eskaliert werden."</li>
+  <li>„Diese Aktion lässt sich vom Team wieder zurücknehmen. Schildere den Fall bitte im Ticket, dann schaut jemand drauf."</li>
+</ul>
+
+<h2 id="eskalation">Wann du an Menschen übergibst</h2>
+<ul>
+  <li>Einspruch gegen einen Timeout oder Bann, Verdacht auf eine fehlerhafte automatische Ahndung.</li>
+  <li>Zwischenmenschliche Konflikte, Beschwerden über andere Mitglieder, Moderations- oder Meldefälle.</li>
+  <li>Datenschutz-Anliegen und Löschwünsche.</li>
+  <li>Alles, was eine interne Zahl, Bedingung oder Konfiguration bräuchte, um „korrekt" beantwortet zu werden — das ist das Signal zum Eskalieren, nicht zum Nachschlagen.</li>
+  <li>Alles, was nicht in dieser Wissensbasis steht.</li>
+</ul>
+
+<h2 id="erste-hilfe">Erste Hilfe, die du gefahrlos empfehlen darfst</h2>
+<p>Die häufigsten Anliegen und ihre Selbsthilfe-Schritte stehen gebündelt unter <a href="troubleshooting.html">Fehlerbehebung</a>. Für die Bedeutung eines konkreten Zustands oder einer Meldung siehe <a href="../reference/status-und-fehler.html">Status &amp; Fehler</a>.</p>
+
+<h2 id="befehle">Dokumentierte, nennbare Befehle</h2>
+<p>Diese nutzersichtbaren Befehle darfst du nennen und erklären. Manche wirken nur mit verifiziertem Steam-Account; einige Auswertungs-Befehle sind für berechtigte Rollen gedacht.</p>
+<ul class="clean">
+  <li><code>/checkrank</code> — gleicht die Rang-Rollen tatsächlich ab (nicht nur anzeigen).</li>
+  <li><code>/steam_rank</code> — zeigt den erkannten Rang an.</li>
+  <li><code>/steam links</code> — zeigt hinterlegte Steam-Verknüpfungen.</li>
+  <li><code>/account_verknüpfen</code> — startet die Steam-Verknüpfung.</li>
+  <li><code>/streamer</code> — Streamer-bezogene Verknüpfung/Angaben.</li>
+  <li><code>!brain</code> — Wissensfrage an den Bot stellen.</li>
+  <li><code>!smartping</code> — Mitspieler-Hinweis in passenden Kanälen.</li>
+  <li><code>!myactivity</code>, <code>!useranalysis</code> / <code>!ua</code>, <code>!analyze</code>, <code>!messagestats</code>, <code>!memberevents</code>, <code>!tleaderboard</code>, <code>!serverstats</code> — Aktivitäts- und Statistik-Befehle (teils für berechtigte Rollen).</li>
+</ul>
+<p class="muted"><small>Ob ein Befehl im jeweiligen Kanal verfügbar ist, hängt von Rechten und Kontext ab. Wenn ein Befehl im jeweiligen Kanal nicht funktioniert, verweise auf das Ticket.</small></p>
+</main></div>
+<footer>Interne Support-Wissensbasis · Discord-Bot (Rust) · Stand Juli 2026. Enthält bewusst keine internen Schwellenwerte, Formeln, Pfade, IDs oder Zugangsdaten.</footer></body></html>

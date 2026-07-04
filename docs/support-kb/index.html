@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="de"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Übersicht — Deadlock Bot Wissensbasis</title><style>:root{--bg:#fbfaf7;--fg:#22201c;--muted:#6b6459;--line:#e7e2d8;--card:#fff;--accent:#c8a86b;--accentfg:#8a6a35;--warn:#8a3b2e;--ok:#3f6b4a;--code:#f2eee6}
+*{box-sizing:border-box}html{-webkit-text-size-adjust:100%}
+body{margin:0;font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;color:var(--fg);background:var(--bg)}
+a{color:var(--accentfg);text-decoration:none}a:hover{text-decoration:underline}
+.wrap{max-width:1180px;margin:0 auto;padding:0 20px;display:flex;gap:36px;align-items:flex-start}
+nav.side{position:sticky;top:0;flex:0 0 244px;max-height:100vh;overflow:auto;padding:22px 0 40px;font-size:14px}
+nav.side .grp{font-size:11px;letter-spacing:.09em;text-transform:uppercase;color:var(--muted);margin:16px 0 5px;font-weight:700}
+nav.side a{display:block;padding:3px 0;color:var(--fg)}nav.side a:hover{color:var(--accentfg)}
+nav.side a.here{color:var(--accentfg);font-weight:700;border-left:3px solid var(--accent);padding-left:8px;margin-left:-11px}
+main{flex:1 1 auto;min-width:0;padding:26px 0 90px;max-width:768px}
+h1{font-size:30px;line-height:1.22;margin:.1em 0 .35em;letter-spacing:-.01em}
+h2{font-size:21px;margin:1.7em 0 .5em;padding-top:.55em;border-top:1px solid var(--line)}
+h3{font-size:16px;margin:1.3em 0 .35em}
+p,li{color:var(--fg)}.muted,small{color:var(--muted)}
+.lead{font-size:18px;line-height:1.55;color:var(--muted);margin:.2em 0 1.1em}
+table{border-collapse:collapse;width:100%;margin:1em 0;font-size:14.5px;display:block;overflow-x:auto;white-space:normal}
+th,td{border:1px solid var(--line);padding:8px 11px;text-align:left;vertical-align:top}
+th{background:var(--code);font-weight:600;white-space:nowrap}
+code{background:var(--code);padding:1px 6px;border-radius:5px;font:13px/1.5 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;color:var(--fg)}
+.tag{display:inline-block;font-size:12px;padding:2px 9px;border-radius:999px;background:var(--code);color:var(--accentfg);border:1px solid var(--line);margin:0 4px 4px 0}
+.callout{border:1px solid var(--line);border-left:4px solid var(--accent);background:var(--card);padding:13px 17px;border-radius:7px;margin:1.1em 0}
+.callout h3{margin-top:0;font-size:15px}
+.callout.may{border-left-color:var(--ok)}
+.callout.never{border-left-color:var(--warn);background:color-mix(in srgb,var(--warn) 7%,var(--card))}
+.callout.abstract{border-left-color:var(--accent);font-size:14px;color:var(--muted)}
+ul.clean{list-style:none;padding-left:0;margin:.4em 0}ul.clean li{padding:5px 0;border-bottom:1px solid var(--line)}
+ol.steps{padding-left:1.2em}ol.steps li{margin:.35em 0}
+header.top{border-bottom:1px solid var(--line);background:var(--card);position:relative;z-index:2}
+header.top .in{max-width:1180px;margin:0 auto;padding:13px 20px;display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+header.top .brand{font-weight:800;color:var(--accentfg);letter-spacing:-.01em}
+header.top .crumb{color:var(--muted);font-size:14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(215px,1fr));gap:14px;margin:1.2em 0}
+.cards a{display:block;border:1px solid var(--line);border-radius:9px;padding:14px 15px;background:var(--card)}
+.cards a:hover{border-color:var(--accent);text-decoration:none}
+.cards a b{display:block;color:var(--fg);margin-bottom:3px}.cards a span{color:var(--muted);font-size:13.5px}
+footer{border-top:1px solid var(--line);color:var(--muted);font-size:13px;padding:22px;text-align:center}
+@media(max-width:860px){.wrap{flex-direction:column;gap:0}nav.side{position:static;flex-basis:auto;max-height:none;width:100%;border-bottom:1px solid var(--line)}main{padding-top:10px}}
+@media(prefers-color-scheme:dark){:root{--bg:#17150f;--fg:#e9e4d8;--muted:#a49a86;--line:#33302a;--card:#201d16;--accent:#c8a86b;--accentfg:#d8b877;--warn:#e08b6f;--ok:#7fb98f;--code:#26231b}}</style></head>
+<body><header class="top"><div class="in"><span class="brand">Deadlock Bot · Support-Wissensbasis</span><span class="crumb">Übersicht</span></div></header>
+<div class="wrap"><nav class="side"><div class="grp">Start</div><a href="index.html" class="here">Übersicht</a><div class="grp">Module</div><a href="modules/moderation.html">Moderation &amp; Scam-Schutz</a><a href="modules/onboarding.html">Onboarding &amp; Rollen</a><a href="modules/voice-lanes.html">Voice-Lanes (TempVoice)</a><a href="modules/mitspielersuche-lfg.html">Mitspielersuche (LFG)</a><a href="modules/statistiken-privatsphaere.html">Statistiken &amp; Privatsphäre</a><a href="modules/tierlist-builds.html">Tierlist &amp; Builds</a><a href="modules/brain.html">Wissensabfrage (!brain)</a><a href="modules/faq-support.html">FAQ &amp; Support-Chat</a><a href="modules/coaching.html">Coaching</a><a href="modules/steam-twitch-verknuepfung.html">Steam- &amp; Twitch-Verknüpfung</a><a href="modules/changelog-ankuendigungen.html">Changelog &amp; Ankündigungen</a><a href="modules/dashboard-login.html">Dashboard &amp; Login</a><a href="modules/serverstruktur.html">Serverstruktur</a><div class="grp">Abläufe</div><a href="workflows/onboarding-beitritt.html">Server betreten</a><a href="workflows/steam-verknuepfen-rang.html">Steam verknüpfen &amp; Rang</a><a href="workflows/voice-lane-erstellen-verwalten.html">Voice-Lane erstellen &amp; verwalten</a><a href="workflows/mitspieler-finden.html">Mitspieler finden</a><a href="workflows/moderationsfall-einspruch.html">Moderationsfall &amp; Einspruch</a><a href="workflows/rang-sichtbarkeit.html">Rang-Sichtbarkeit einstellen</a><a href="workflows/coaching-anfragen.html">Coaching anfragen</a><a href="workflows/builds-abstimmen.html">Über Builds abstimmen</a><a href="workflows/streamer-partner-werden.html">Streamer-Partner werden</a><a href="workflows/austritt-datenloeschung.html">Austritt &amp; Datenlöschung</a><div class="grp">Support</div><a href="support/agent-guide.html">Agenten-Leitfaden</a><a href="support/troubleshooting.html">Fehlerbehebung</a><div class="grp">Referenz</div><a href="reference/glossar.html">Glossar</a><a href="reference/status-und-fehler.html">Status &amp; Fehler</a><div class="grp">Sicherheit</div><a href="security/redaktions-hinweise.html">Redaktions-Hinweise</a></nav><main><h1>Support-Wissensbasis · Deadlock Community Bot</h1>
+<p class="lead">Was der Discord-Bot für Mitglieder sichtbar tut, was die einzelnen Zustände bedeuten und welchen sicheren nächsten Schritt der Support empfehlen kann — ohne interne Mechanik offenzulegen.</p>
+
+<p>Diese Wissensbasis ist für <strong>Support</strong> gedacht: für das Mod-/Team, für Menschen im Ticket und für einen KI-Support-Assistenten, der Mitgliedern hilft. Sie beschreibt den Rust-Discord-Bot aus der <strong>Außensicht</strong> — also das, was ein Mitglied merkt, und wie man ihm weiterhilft.</p>
+
+<div class="callout">
+  <h3>Wie hier formuliert wird</h3>
+  <p>Jeder Eintrag nennt drei Dinge und hört dann auf: <strong>dass</strong> es etwas gibt, welche <strong>beobachtbare Wirkung</strong> es hat und welchen <strong>nächsten Schritt</strong> ein Mitglied gehen kann. Bewusst <em>nicht</em> enthalten sind interne Schwellenwerte, Formeln, Zeitgrenzen, Bedingungen, Kanal-/Rollen-IDs, Endpunkte oder Zugangsdaten. Der Grund steht in den <a href="security/redaktions-hinweise.html">Redaktions-Hinweisen</a>.</p>
+</div>
+
+<h2 id="schnellzugriff">Schnellzugriff</h2>
+<div class="cards">
+  <a href="support/agent-guide.html"><b>Agenten-Leitfaden</b><span>Was der Support sagen darf, nie sagt und wann er eskaliert.</span></a>
+  <a href="support/troubleshooting.html"><b>Fehlerbehebung</b><span>Die häufigsten Anliegen mit konkreten Selbsthilfe-Schritten.</span></a>
+  <a href="reference/status-und-fehler.html"><b>Status &amp; Fehler</b><span>Alle sichtbaren Zustände und Meldungen mit Bedeutung.</span></a>
+  <a href="reference/glossar.html"><b>Glossar</b><span>Begriffe wie Verified-Rolle, Voice-Lane, LFG, Ragebaiter-Free.</span></a>
+  <a href="modules/onboarding.html"><b>Onboarding &amp; Rollen</b><span>Was beim Beitritt passiert und wie Rollen entstehen.</span></a>
+  <a href="modules/moderation.html"><b>Moderation &amp; Scam-Schutz</b><span>Automatische Prüfung, Ahndung, Vorschläge, Rücknahme.</span></a>
+  <a href="modules/steam-twitch-verknuepfung.html"><b>Steam &amp; Twitch</b><span>Konto verknüpfen, Rang prüfen, Streamer-Partner.</span></a>
+  <a href="modules/voice-lanes.html"><b>Voice-Lanes</b><span>Selbstverwaltete Voice-Kanäle und Ranked-Lanes.</span></a>
+</div>
+
+<h2 id="aufbau">Aufbau</h2>
+<ul class="clean">
+  <li><strong>Module</strong> — Funktionsbereiche des Bots (Moderation, Onboarding, Voice, Statistiken, …), jeweils mit sichtbaren Zuständen, typischen Fehlern und was der Support sagen darf.</li>
+  <li><strong>Abläufe</strong> — durchgehende Wege aus Mitglieder-Sicht (Server betreten, Steam verknüpfen, Voice-Lane erstellen, Moderationsfall &amp; Einspruch, …).</li>
+  <li><strong>Support</strong> — der Agenten-Leitfaden und die Fehlerbehebung.</li>
+  <li><strong>Referenz</strong> — Glossar sowie eine Gesamtliste aller Status &amp; Fehler.</li>
+  <li><strong>Sicherheit</strong> — warum bestimmte Details bewusst fehlen und wie man die Wissensbasis sicher erweitert.</li>
+</ul>
+
+<h2 id="grenzen">Was hier bewusst nicht steht</h2>
+<ul>
+  <li><strong>Interne Werte und Regeln</strong> — keine Schwellen, Gewichte, Zeitgrenzen, Formeln oder „wenn X, dann Y"-Bedingungen. Sie helfen niemandem im Support, aber sehr wohl jemandem, der das System austricksen will.</li>
+  <li><strong>Technische Interna</strong> — keine IDs, Ports, Endpunkte, Datenbank- oder Zugangsdaten.</li>
+  <li><strong>Gameplay-Wissen zu Deadlock</strong> — Item-Builds, Timings, Map-Wissen sind nicht Aufgabe dieser Doku.</li>
+  <li><strong>Zwischenmenschliches</strong> — Konflikte, Beschwerden über andere Mitglieder und Moderationsentscheidungen gehören an Menschen, nicht in eine automatische Antwort.</li>
+</ul>
+</main></div>
+<footer>Interne Support-Wissensbasis · Discord-Bot (Rust) · Stand Juli 2026. Enthält bewusst keine internen Schwellenwerte, Formeln, Pfade, IDs oder Zugangsdaten.</footer></body></html>
