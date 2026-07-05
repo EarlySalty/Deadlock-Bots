@@ -145,11 +145,18 @@ impl ActionPolicy {
             };
         }
 
-        if content.is_some_and(|verdict| {
-            verdict.verification.confirmed
-                && verdict.verification.category.is_high_damage()
-                && verdict.verification.confidence >= self.config.auto_execute_verified_confidence
-        }) {
+        let Some(verdict) = content else {
+            return PolicyDecision::Ignore;
+        };
+        if !verdict.verification.confirmed
+            || verdict.verification.confidence < self.config.proposal_verified_confidence
+        {
+            return PolicyDecision::Ignore;
+        }
+
+        if verdict.verification.category.is_high_damage()
+            && verdict.verification.confidence >= self.config.auto_execute_verified_confidence
+        {
             return PolicyDecision::AutoExecute {
                 action: if signal.account_is_new {
                     ModerationAction::Ban
