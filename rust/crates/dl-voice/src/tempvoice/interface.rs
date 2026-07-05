@@ -18,7 +18,7 @@ use dl_discord::{
 use serde_json::{json, Map, Value};
 
 use super::engine::{TempVoiceEngine, VERIFIED_ROLE_ID};
-use super::store::{InterfaceRecord, PresetRecord};
+use super::store::{DefaultPresetRecord, InterfaceRecord, PresetRecord};
 
 const NOT_IN_LANE: &str = "Du musst dafür in einer TempVoice-Lane sein.";
 const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
@@ -529,6 +529,7 @@ struct PanelHandler {
     /// kommt (Port von Pythons modul-globalem `_pending_main_rank`). Per-Prozess-
     /// RAM, geht — wie im Original — bei Neustart verloren.
     pending_main_rank: tokio::sync::Mutex<std::collections::HashMap<u64, String>>,
+    pending_default_rank: tokio::sync::Mutex<std::collections::HashMap<u64, String>>,
 }
 
 impl PanelHandler {
@@ -612,6 +613,121 @@ impl PanelHandler {
     fn selected_user(interaction: &BridgeInteraction) -> Option<u64> {
         interaction.values.first().and_then(|v| v.parse().ok())
     }
+
+    fn prefs_reply(content: String, components: Value) -> BridgeReply {
+        BridgeReply {
+            content: Some(content),
+            components: Some(components),
+            ephemeral: true,
+            allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+            ..BridgeReply::default()
+        }
+    }
+
+    fn prefs_text(default: Option<&DefaultPresetRecord>) -> String {
+        match default {
+            Some(default) => format!(
+                "**⚙️ Voreinstellungen**\nModus: {}\nName: {}\nLimit: {}\nRang: {}",
+                prefs_mode_label(&default.mode),
+                default.base_name,
+                default.limit,
+                if default.min_rank == "unknown" {
+                    "noch keiner gesetzt".to_string()
+                } else {
+                    default.min_rank.clone()
+                }
+            ),
+            None => "**⚙️ Voreinstellungen**\nnoch keiner gesetzt".to_string(),
+        }
+    }
+
+    fn prefs_components(has_default: bool, can_apply_lane: bool) -> Value {
+        let mut rows = vec![
+            action_row(vec![
+                button("Casual", 1, "tv_prefs_mode_casual"),
+                button("Ranked", 3, "tv_prefs_mode_ranked"),
+                button("Street Brawl", 2, "tv_prefs_mode_street_brawl"),
+            ]),
+            action_row(vec![
+                button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
+                button("Rang ändern", 2, "tv_prefs_rank"),
+                button("Default löschen", 4, "tv_prefs_delete"),
+            ]),
+        ];
+        if has_default && can_apply_lane {
+            rows.push(action_row(vec![button(
+                "Auf aktuelle Lane anwenden",
+                3,
+                "tv_prefs_apply_lane",
+            )]));
+        }
+        json!(rows)
+    }
+
+    async fn prefs_open_reply(&self, interaction: &BridgeInteraction) -> BridgeReply {
+        let default = self
+            .engine
+            .store
+            .get_default_preset(interaction.user_id)
+            .await
+            .ok()
+            .flatten();
+        let can_apply_lane = self.owned_lane_of(interaction).await.is_ok();
+        Self::prefs_reply(
+            Self::prefs_text(default.as_ref()),
+            Self::prefs_components(default.is_some(), can_apply_lane),
+        )
+    }
+
+    async fn current_or_new_default(
+        &self,
+        user_id: u64,
+        mode: Option<&str>,
+    ) -> DefaultPresetRecord {
+        let mut record = self
+            .engine
+            .store
+            .get_default_preset(user_id)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| crate::router::default_preset_for_mode(user_id, "casual"));
+        if let Some(mode) = mode {
+            let fallback = crate::router::default_preset_for_mode(user_id, mode);
+            record.mode = fallback.mode;
+            if record.base_name.trim().is_empty() {
+                record.base_name = fallback.base_name;
+            }
+            if record.limit < 0 {
+                record.limit = fallback.limit;
+            }
+        }
+        record
+    }
+
+    async fn save_default_and_show(
+        &self,
+        interaction: &BridgeInteraction,
+        record: DefaultPresetRecord,
+    ) -> BridgeReply {
+        match self.engine.store.save_default_preset(record).await {
+            Ok(()) => self.prefs_open_reply(interaction).await,
+            Err(err) => BridgeReply {
+                content: Some(format!("Speichern fehlgeschlagen: {err}")),
+                ephemeral: true,
+                allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                ..BridgeReply::default()
+            },
+        }
+    }
+}
+
+fn prefs_mode_label(mode: &str) -> &'static str {
+    match mode {
+        "ranked" => "Ranked",
+        "street_brawl" => "Street Brawl",
+        _ => "Casual",
+    }
 }
 
 #[async_trait::async_trait]
@@ -619,6 +735,230 @@ impl InteractionHandler for PanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let engine = &self.engine;
         match interaction.custom_id.as_str() {
+            "tv_prefs_open" => self.prefs_open_reply(&interaction).await,
+            "tv_prefs_mode_casual" | "tv_prefs_mode_ranked" | "tv_prefs_mode_street_brawl" => {
+                let mode = interaction
+                    .custom_id
+                    .trim_start_matches("tv_prefs_mode_")
+                    .to_string();
+                let record = self
+                    .current_or_new_default(interaction.user_id, Some(&mode))
+                    .await;
+                self.save_default_and_show(&interaction, record).await
+            }
+            "tv_prefs_name_limit" => BridgeReply {
+                modal: Some(ModalSpec {
+                    custom_id: "tv_prefs_name_limit_modal".to_string(),
+                    title: "Name+Limit ändern".to_string(),
+                    fields: vec![
+                        ModalField {
+                            custom_id: "name".to_string(),
+                            label: "Name".to_string(),
+                            placeholder: "z. B. Chill Lane".to_string(),
+                            required: true,
+                            min_length: 1,
+                            max_length: 90,
+                            paragraph: false,
+                        },
+                        ModalField {
+                            custom_id: "limit".to_string(),
+                            label: "Limit".to_string(),
+                            placeholder: "z. B. 6".to_string(),
+                            required: true,
+                            min_length: 1,
+                            max_length: 2,
+                            paragraph: false,
+                        },
+                    ],
+                }),
+                ..BridgeReply::default()
+            },
+            "tv_prefs_name_limit_modal" => {
+                let Some(name) = interaction
+                    .options
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v.trim().to_string())
+                    .filter(|v| !v.is_empty())
+                else {
+                    return BridgeReply::ephemeral_text("Bitte einen Namen eingeben.");
+                };
+                let Some(limit) = interaction
+                    .options
+                    .get("limit")
+                    .and_then(|v| v.as_str())
+                    .and_then(|v| v.trim().parse::<i64>().ok())
+                else {
+                    return BridgeReply::ephemeral_text("Bitte eine Zahl eingeben.");
+                };
+                let mut record = self.current_or_new_default(interaction.user_id, None).await;
+                record.base_name = name;
+                record.limit = if record.mode == "street_brawl" {
+                    limit.clamp(1, 4)
+                } else {
+                    limit.clamp(0, 99)
+                };
+                self.save_default_and_show(&interaction, record).await
+            }
+            "tv_prefs_rank" => {
+                let current = self
+                    .engine
+                    .store
+                    .get_default_preset(interaction.user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|default| default.min_rank)
+                    .unwrap_or_else(|| "unknown".to_string());
+                let options = std::iter::once(json!({
+                    "label": RANK_PREF_UNKNOWN_LABEL,
+                    "value": "unknown",
+                    "default": current == "unknown",
+                }))
+                .chain(super::logic::RANK_ORDER.iter().skip(1).map(|rank| {
+                    json!({
+                        "label": super::logic::capitalize(rank),
+                        "value": rank,
+                        "default": current.starts_with(rank),
+                    })
+                }))
+                .collect::<Vec<_>>();
+                Self::prefs_reply(
+                    "Rang ändern".to_string(),
+                    json!([{ "type": 1, "components": [{
+                        "type": 3, "custom_id": "tv_prefs_rank_main",
+                        "options": options,
+                        "min_values": 1, "max_values": 1,
+                    }]}]),
+                )
+            }
+            "tv_prefs_rank_main" => {
+                let Some(rank) = interaction.values.first().cloned() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                if rank == "unknown" {
+                    let mut record = self.current_or_new_default(interaction.user_id, None).await;
+                    record.min_rank = "unknown".to_string();
+                    return self.save_default_and_show(&interaction, record).await;
+                }
+                self.pending_default_rank
+                    .lock()
+                    .await
+                    .insert(interaction.user_id, rank);
+                Self::prefs_reply(
+                    "Rang ändern".to_string(),
+                    json!([{ "type": 1, "components": [{
+                        "type": 3,
+                        "custom_id": "tv_prefs_rank_sub",
+                        "placeholder": "Sub-Rang wählen",
+                        "min_values": 1,
+                        "max_values": 1,
+                        "options": std::iter::once(json!({"label": "Ohne Sub-Rang", "value": "0"}))
+                            .chain((1..=6).map(|n| json!({"label": format!("Sub-Rang {n}"), "value": n.to_string()})))
+                            .collect::<Vec<_>>(),
+                    }]}]),
+                )
+            }
+            "tv_prefs_rank_sub" => {
+                let Some(sub_raw) = interaction.values.first() else {
+                    return BridgeReply::ephemeral_text("Keine Auswahl.");
+                };
+                let sub = sub_raw.trim().parse::<i64>().unwrap_or(-1);
+                let Some(main_rank) = self
+                    .pending_default_rank
+                    .lock()
+                    .await
+                    .remove(&interaction.user_id)
+                else {
+                    return BridgeReply::ephemeral_text(
+                        "Bitte zuerst den **① Haupt-Rang** auswählen.",
+                    );
+                };
+                let min_rank = if sub == 0 {
+                    main_rank
+                } else if (1..=6).contains(&sub) {
+                    format!("{main_rank} {sub}")
+                } else {
+                    return BridgeReply::ephemeral_text("Ungültiger Sub-Rang.");
+                };
+                let mut record = self.current_or_new_default(interaction.user_id, None).await;
+                record.min_rank = min_rank;
+                self.save_default_and_show(&interaction, record).await
+            }
+            "tv_prefs_delete" => match self
+                .engine
+                .store
+                .delete_default_preset(interaction.user_id)
+                .await
+            {
+                Ok(()) => self.prefs_open_reply(&interaction).await,
+                Err(err) => BridgeReply {
+                    content: Some(format!("Speichern fehlgeschlagen: {err}")),
+                    ephemeral: true,
+                    allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                    ..BridgeReply::default()
+                },
+            },
+            "tv_prefs_apply_lane" => {
+                let lane = match self.owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(default) = self
+                    .engine
+                    .store
+                    .get_default_preset(interaction.user_id)
+                    .await
+                    .ok()
+                    .flatten()
+                else {
+                    return Self::prefs_reply(
+                        "**⚙️ Voreinstellungen**\nnoch keiner gesetzt".to_string(),
+                        Self::prefs_components(false, false),
+                    );
+                };
+                if let Some(err) = self
+                    .engine
+                    .switch_lane_mode(
+                        interaction.guild_id,
+                        lane,
+                        interaction.user_id,
+                        &default.mode,
+                    )
+                    .await
+                {
+                    return BridgeReply {
+                        content: Some(err),
+                        ephemeral: true,
+                        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                        ..BridgeReply::default()
+                    };
+                }
+                if let Err(err) = self
+                    .engine
+                    .set_lane_template(
+                        interaction.guild_id,
+                        lane,
+                        &default.base_name,
+                        default.limit,
+                    )
+                    .await
+                {
+                    return BridgeReply {
+                        content: Some(format!("Speichern fehlgeschlagen: {err}")),
+                        ephemeral: true,
+                        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                        ..BridgeReply::default()
+                    };
+                }
+                if default.min_rank != "unknown" {
+                    let _ = self
+                        .engine
+                        .set_min_rank(interaction.guild_id, lane, &default.min_rank)
+                        .await;
+                }
+                self.prefs_open_reply(&interaction).await
+            }
             // ── Region ────────────────────────────────────────────────
             "tv_region_de" | "tv_region_e" => {
                 let lane = match self.owned_lane_of(&interaction).await {
@@ -1348,8 +1688,20 @@ pub fn register(
         engine,
         lfg,
         pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
     for custom_id in [
+        "tv_prefs_open",
+        "tv_prefs_mode_casual",
+        "tv_prefs_mode_ranked",
+        "tv_prefs_mode_street_brawl",
+        "tv_prefs_name_limit",
+        "tv_prefs_name_limit_modal",
+        "tv_prefs_rank",
+        "tv_prefs_rank_main",
+        "tv_prefs_rank_sub",
+        "tv_prefs_delete",
+        "tv_prefs_apply_lane",
         "tv_region_de",
         "tv_region_e",
         "tv_owner_claim",
@@ -1590,6 +1942,7 @@ mod tests {
             engine,
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         let reply = handler
@@ -1869,6 +2222,249 @@ mod tests {
         }
     }
 
+    async fn panel_handler_for_test() -> (dl_central_db::TestDb, PanelHandler) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let engine = TempVoiceEngine::new(
+            TempVoiceConfig {
+                guild_id_hint: 1,
+                staging_channels: HashSet::new(),
+                fixed_lane_ids: HashSet::new(),
+                tempvoice_categories: HashSet::new(),
+                minrank_categories: HashSet::new(),
+                ranked_category_id: 0,
+                staging_rules: HashMap::new(),
+            },
+            TempVoiceStore::new(db.pool().clone()),
+            Arc::new(ForeignLanePort),
+        );
+        let handler = PanelHandler {
+            engine,
+            lfg: None,
+            pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        (db, handler)
+    }
+
+    fn reply_custom_ids(reply: &BridgeReply) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(components) = &reply.components {
+            collect_reply_custom_ids(components, &mut out);
+        }
+        out
+    }
+
+    fn collect_reply_custom_ids(value: &Value, out: &mut Vec<String>) {
+        if let Some(custom_id) = value.get("custom_id").and_then(Value::as_str) {
+            out.push(custom_id.to_string());
+        }
+        if let Some(children) = value.get("components").and_then(Value::as_array) {
+            for child in children {
+                collect_reply_custom_ids(child, out);
+            }
+        }
+        if let Some(children) = value.as_array() {
+            for child in children {
+                collect_reply_custom_ids(child, out);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn prefs_editor_zeigt_keinen_default() {
+        let (_db, handler) = panel_handler_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_prefs_open".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(reply.allowed_mentions, Some(json!({ "parse": [] })));
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("**⚙️ Voreinstellungen**\nnoch keiner gesetzt")
+        );
+        let ids = reply_custom_ids(&reply);
+        assert!(ids.contains(&"tv_prefs_mode_casual".to_string()));
+        assert!(ids.contains(&"tv_prefs_mode_ranked".to_string()));
+        assert!(ids.contains(&"tv_prefs_mode_street_brawl".to_string()));
+        assert!(ids.contains(&"tv_prefs_name_limit".to_string()));
+        assert!(ids.contains(&"tv_prefs_rank".to_string()));
+        assert!(ids.contains(&"tv_prefs_delete".to_string()));
+        assert!(!ids.contains(&"tv_prefs_apply_lane".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prefs_editor_zeigt_vorhandenen_default() {
+        let (_db, handler) = panel_handler_for_test().await;
+        handler
+            .engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 42,
+                mode: "ranked".to_string(),
+                base_name: "Scrim Lane".to_string(),
+                limit: 5,
+                min_rank: "archon 2".to_string(),
+            })
+            .await
+            .expect("default");
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_prefs_open".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let content = reply.content.as_deref().expect("content");
+        assert!(content.contains("Modus: Ranked"));
+        assert!(content.contains("Name: Scrim Lane"));
+        assert!(content.contains("Limit: 5"));
+        assert!(content.contains("Rang: archon 2"));
+        assert!(!reply_custom_ids(&reply).contains(&"tv_prefs_apply_lane".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prefs_editor_zeigt_apply_nur_in_eigener_lane() {
+        let (_db, handler) = panel_handler_for_test().await;
+        handler
+            .engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 42,
+                mode: "casual".to_string(),
+                base_name: "Chill Lane".to_string(),
+                limit: 6,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default");
+        handler
+            .engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: 4242,
+                guild_id: 1,
+                owner_id: 42,
+                initial_owner_id: Some(42),
+                base_name: "Lane 1".to_string(),
+                category_id: 1289721245281292290,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        handler.engine.rehydrate().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_prefs_open".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply_custom_ids(&reply).contains(&"tv_prefs_apply_lane".to_string()));
+    }
+
+    #[tokio::test]
+    async fn prefs_editor_loescht_default() {
+        let (_db, handler) = panel_handler_for_test().await;
+        handler
+            .engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 42,
+                mode: "street_brawl".to_string(),
+                base_name: "Brawl".to_string(),
+                limit: 4,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default");
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_prefs_delete".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("**⚙️ Voreinstellungen**\nnoch keiner gesetzt")
+        );
+        assert!(handler
+            .engine
+            .store
+            .get_default_preset(42)
+            .await
+            .expect("load default")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn prefs_editor_wendet_default_auf_eigene_lane_an() {
+        let (_db, handler) = panel_handler_for_test().await;
+        handler
+            .engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 42,
+                mode: "casual".to_string(),
+                base_name: "Team Lane".to_string(),
+                limit: 3,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default");
+        handler
+            .engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: 4242,
+                guild_id: 1,
+                owner_id: 42,
+                initial_owner_id: Some(42),
+                base_name: "Lane 1".to_string(),
+                category_id: 1289721245281292290,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        handler.engine.rehydrate().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_prefs_apply_lane".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        let content = reply.content.as_deref().expect("content");
+        assert!(content.contains("Name: Team Lane"));
+        assert!(content.contains("Limit: 3"));
+        assert_eq!(
+            handler.engine.lane_snapshot(4242).await,
+            Some(("Team Lane".to_string(), 1289721245281292290))
+        );
+    }
+
     #[tokio::test]
     async fn verwaltungs_handler_fremde_lane_liefert_owner_fehler() {
         let db = dl_central_db::testing::test_pool()
@@ -1905,6 +2501,7 @@ mod tests {
             engine,
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         let reply = handler

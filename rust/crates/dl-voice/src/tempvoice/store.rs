@@ -1,6 +1,6 @@
 //! TempVoice-Persistenz über die Bestands-Tabellen (Verträge unverändert).
 
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::db::{
     i64_to_i32, i64_to_u64, opt_i64_to_u64, opt_u64_to_i64, u64_to_i64, VoiceDbResult,
@@ -42,6 +42,18 @@ pub struct PresetRecord {
     pub limit: i64,
     pub min_rank: String,
     pub region: String,
+}
+
+pub const DEFAULT_PRESET_CATEGORY_ID: u64 = 0;
+pub const DEFAULT_PRESET_NAME: &str = "standard";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultPresetRecord {
+    pub user_id: u64,
+    pub mode: String,
+    pub base_name: String,
+    pub limit: i64,
+    pub min_rank: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -584,6 +596,98 @@ impl TempVoiceStore {
         }))
     }
 
+    pub async fn save_default_preset(&self, preset: DefaultPresetRecord) -> VoiceDbResult<()> {
+        let user_id = u64_to_i64("tempvoice_presets.user_id", preset.user_id)?;
+        let category_id = u64_to_i64("tempvoice_presets.category_id", DEFAULT_PRESET_CATEGORY_ID)?;
+        let member_limit = i64_to_i32("tempvoice_presets.member_limit", preset.limit)?;
+        let mode = normalize_default_mode(&preset.mode).to_string();
+        let min_rank = if preset.min_rank.trim().is_empty() {
+            "unknown".to_string()
+        } else {
+            preset.min_rank
+        };
+        sqlx::query(
+            r#"
+            INSERT INTO voice.tempvoice_presets (
+                user_id, category_id, name, base_name, member_limit,
+                min_rank, region, mode, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, 'EU', $7, NOW())
+            ON CONFLICT (user_id, category_id, name) DO UPDATE SET
+                base_name = EXCLUDED.base_name,
+                member_limit = EXCLUDED.member_limit,
+                min_rank = EXCLUDED.min_rank,
+                mode = EXCLUDED.mode,
+                updated_at = NOW()
+            "#,
+        )
+        .bind(user_id)
+        .bind(category_id)
+        .bind(DEFAULT_PRESET_NAME)
+        .bind(preset.base_name)
+        .bind(member_limit)
+        .bind(min_rank)
+        .bind(mode)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn get_default_preset(
+        &self,
+        user_id: u64,
+    ) -> VoiceDbResult<Option<DefaultPresetRecord>> {
+        let user_id_i64 = u64_to_i64("tempvoice_presets.user_id", user_id)?;
+        let category_id = u64_to_i64("tempvoice_presets.category_id", DEFAULT_PRESET_CATEGORY_ID)?;
+        let row = sqlx::query(
+            r#"
+            SELECT mode, base_name, member_limit, min_rank
+              FROM voice.tempvoice_presets
+             WHERE user_id = $1
+               AND category_id = $2
+               AND name = $3
+            "#,
+        )
+        .bind(user_id_i64)
+        .bind(category_id)
+        .bind(DEFAULT_PRESET_NAME)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let mode: String = row.try_get("mode")?;
+            let base_name: String = row.try_get("base_name")?;
+            let member_limit: i32 = row.try_get("member_limit")?;
+            let min_rank: String = row.try_get("min_rank")?;
+            Ok(DefaultPresetRecord {
+                user_id,
+                mode,
+                base_name,
+                limit: i64::from(member_limit),
+                min_rank,
+            })
+        })
+        .transpose()
+    }
+
+    pub async fn delete_default_preset(&self, user_id: u64) -> VoiceDbResult<()> {
+        let user_id = u64_to_i64("tempvoice_presets.user_id", user_id)?;
+        let category_id = u64_to_i64("tempvoice_presets.category_id", DEFAULT_PRESET_CATEGORY_ID)?;
+        sqlx::query(
+            r#"
+            DELETE FROM voice.tempvoice_presets
+             WHERE user_id = $1
+               AND category_id = $2
+               AND name = $3
+            "#,
+        )
+        .bind(user_id)
+        .bind(category_id)
+        .bind(DEFAULT_PRESET_NAME)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── Persistente Interface-Messages (tempvoice_interface) ───────────────
 
     pub async fn ensure_interface_schema(&self) -> VoiceDbResult<()> {
@@ -738,6 +842,14 @@ impl TempVoiceStore {
     }
 }
 
+pub fn normalize_default_mode(mode: &str) -> &'static str {
+    match mode {
+        "ranked" => "ranked",
+        "street_brawl" => "street_brawl",
+        _ => "casual",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -854,6 +966,45 @@ mod tests {
             .get_preset(100, 5, "fehlt")
             .await
             .expect("none")
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn default_preset_roundtrip_als_standard_datensatz() {
+        let (_dir, store) = store().await;
+        assert!(store
+            .get_default_preset(100)
+            .await
+            .expect("initial")
+            .is_none());
+
+        store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 100,
+                mode: "ranked".to_string(),
+                base_name: "Tryhard".to_string(),
+                limit: 5,
+                min_rank: "phantom 3".to_string(),
+            })
+            .await
+            .expect("save");
+
+        assert_eq!(
+            store.get_default_preset(100).await.expect("get"),
+            Some(DefaultPresetRecord {
+                user_id: 100,
+                mode: "ranked".to_string(),
+                base_name: "Tryhard".to_string(),
+                limit: 5,
+                min_rank: "phantom 3".to_string(),
+            })
+        );
+
+        store.delete_default_preset(100).await.expect("delete");
+        assert!(store
+            .get_default_preset(100)
+            .await
+            .expect("after delete")
             .is_none());
     }
 

@@ -29,6 +29,7 @@ use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
 use crate::db::u64_to_i64;
+use crate::tempvoice::store::DefaultPresetRecord;
 use crate::tempvoice::TempVoiceEngine;
 
 pub const ROUTER_VC_ID: u64 = 1513468587195633674;
@@ -52,7 +53,8 @@ pub const ROUTER_BANNER_DIR: &str = "assets/welcome-banners";
 pub const ROUTER_HERO_BANNER_FILENAME: &str = "router-hero.png";
 pub const ROUTER_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
 pub const ROUTER_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
-pub const ROUTER_SPAWN_COOLDOWN_SECS: u64 = 30;
+pub const ROUTER_FLOOD_WINDOW_SECS: u64 = 60;
+pub const ROUTER_FLOOD_MAX_CREATES: usize = 4;
 pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Wähle zuerst einen Spielmodus.";
 pub const ROUTER_PANEL_INTRO: &str =
     "Wähle deinen Modus — der Bot erstellt dir eine eigene Voice-Lane in der passenden Kategorie und zieht dich direkt rüber. Dafür musst du in einem Sprachkanal sitzen, zum Beispiel im Deadlock Router.";
@@ -68,6 +70,10 @@ pub const ROUTER_BUTTON_KICK: &str = "Kick";
 pub const ROUTER_BUTTON_BAN: &str = "Ban";
 pub const ROUTER_BUTTON_UNBAN: &str = "Unban";
 pub const ROUTER_BUTTON_MODE: &str = "Modus wechseln";
+pub const VOICE_GUIDE_TITLE: &str = "**🎙️ So funktionieren unsere Voice-Lanes**";
+pub const VOICE_GUIDE_BODY: &str = "Bei uns joinst du nicht in volle Kanäle — du bekommst deine eigene Lane:\n1. Join ➕Deadlock Router oder klick unten einen Modus-Button. Beim **ersten Mal** wählst du, was du spielen willst (Casual, Ranked, Street Brawl) — der Bot merkt sich das als deinen Standard.\n2. **Ab dann** geht's beim Router-Join sofort in deine eigene Lane — ohne Extra-Klick. Standard ändern? ⚙️ Voreinstellungen, jederzeit, auch ohne in einer Voice zu sein.\n3. Deine Lane gehört dir: Name, Limit, Kick — alles über „Lane verwalten\" steuerbar.\n4. Mitspieler findest du über „Mitspieler finden\" — oder lass dich mit 🔔 benachrichtigen, sobald ein passendes Gesuch reinkommt.";
+pub const VOICE_GUIDE_DETAIL_BUTTON: &str = "📖 Ausführliche Anleitung";
+pub const VOICE_PREFS_BUTTON: &str = "⚙️ Voreinstellungen";
 
 // Server-Emojis im Brand-Look: gold getönte Lucide-Icons (gen_router_emojis.py),
 // einmalig als Guild-Emojis hochgeladen — (Name, ID) sind stabil.
@@ -82,7 +88,8 @@ pub const ROUTER_EMOJI_BAN: (&str, &str) = ("dl_ban", "1522518261290369034");
 pub const ROUTER_EMOJI_UNBAN: (&str, &str) = ("dl_unban", "1522518273827143751");
 pub const ROUTER_EMOJI_MODE: (&str, &str) = ("dl_mode", "1522518269456547962");
 
-pub const ROUTER_PANEL_MODE_HINT: &str = "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang · nach jeder Lane 30 Sekunden Abklingzeit";
+pub const ROUTER_PANEL_MODE_HINT: &str =
+    "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang";
 pub const ROUTER_PANEL_LANE_CAPTION: &str = "-# Deine Lane";
 pub const ROUTER_PANEL_MOD_CAPTION: &str = "-# Moderation";
 pub const ROUTER_PANEL_GUIDE_CREATE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für <:dl_ranked:1522518271306366996> Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung.";
@@ -99,9 +106,9 @@ pub const ROUTER_REPLY_NOT_CREATED: &str =
     "Das hat gerade nicht geklappt — versuch es in ein paar Sekunden nochmal.";
 pub const ROUTER_REPLY_ALREADY_OWN_LANE: &str =
     "Du hast schon eine eigene Lane. Modus oder Name änderst du über <:dl_mode:1522518269456547962> Modus wechseln und <:dl_rename:1522518272497418250> Umbenennen:";
-pub const ROUTER_REPLY_COOLDOWN_PREFIX: &str =
-    "Kurz durchatmen — die nächste Lane gibt's gleich wieder.";
-const ROUTER_SPAWN_COOLDOWN: Duration = Duration::from_secs(ROUTER_SPAWN_COOLDOWN_SECS);
+pub const ROUTER_REPLY_FLOOD_GUARD: &str =
+    "Ganz schön viele Lanes auf einmal 😄 — warte kurz, dann geht's weiter.";
+pub const ROUTER_REPLY_DEFAULT_SAVED: &str = "Als dein Standard gespeichert — ändern über ⚙️";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouterMode {
@@ -223,6 +230,22 @@ pub fn mode_to_staging(mode: &str) -> u64 {
     router_mode(mode)
         .map(|mode| mode.staging_id)
         .unwrap_or(ROUTER_MODES[0].staging_id)
+}
+
+pub fn default_preset_for_mode(user_id: u64, mode: &str) -> DefaultPresetRecord {
+    let mode = router_mode(mode).map(|mode| mode.id).unwrap_or("casual");
+    let (base_name, limit) = match mode {
+        "ranked" => ("Ranked".to_string(), 6),
+        "street_brawl" => ("Street Brawl".to_string(), 4),
+        _ => ("Chill Lane".to_string(), 6),
+    };
+    DefaultPresetRecord {
+        user_id,
+        mode: mode.to_string(),
+        base_name,
+        limit,
+        min_rank: "unknown".to_string(),
+    }
 }
 
 const STAGING_IDS: [u64; 3] = [
@@ -375,6 +398,32 @@ fn router_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &s
         "custom_id": custom_id,
         "emoji": { "name": emoji.0, "id": emoji.1 },
     })
+}
+
+pub fn voice_guide_detail_text() -> String {
+    format!(
+        "**📖 Voice-Lanes im Detail**\n{}\nRouter-VC-Join: erst Modus wählen, dann Verschiebung.\nRanked geht nur mit verifiziertem Rang — Steam verknüpfen in <#1398021105339334666>.\n{}\n{}\n**⚙️ Voreinstellungen** — Name, Limit (und Rang-Bereich) jederzeit festlegen, auch ohne in einer Lane zu sein — wird bei jeder neuen Lane automatisch angewandt. 💾 Presets sichern zusätzlich den Stand einer laufenden Lane.\n**Mitspieler finden** — Gesuch per Klick (Modus, Rang, Wann), erscheint in <#1522769149208821881>; 🔔 benachrichtigt dich bei passenden Gesuchen.",
+        ROUTER_PANEL_GUIDE_CREATE,
+        ROUTER_PANEL_GUIDE_OWNER,
+        ROUTER_PANEL_GUIDE_BUTTONS,
+    )
+}
+
+pub fn voice_guide_detail_reply() -> BridgeReply {
+    let text = voice_guide_detail_text();
+    let fallback = BridgeReply {
+        content: Some(text.clone()),
+        ephemeral: true,
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        ..BridgeReply::default()
+    };
+    BridgeReply {
+        components: Some(json!([router_container(vec![router_text_display(text)])])),
+        message_flags: Some(64 | ROUTER_COMPONENTS_V2_FLAG),
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        fallback: Some(Box::new(fallback)),
+        ..BridgeReply::default()
+    }
 }
 
 // ── Discord-Seite ──────────────────────────────────────────────────────────
@@ -691,14 +740,14 @@ pub struct LaneRouter {
     pub port: Arc<dyn RouterPort>,
     pub engine: Arc<TempVoiceEngine>,
     pub analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
-    spawn_cooldowns: tokio::sync::Mutex<HashMap<u64, Instant>>,
+    spawn_history: tokio::sync::Mutex<HashMap<u64, Vec<Instant>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RouterSpawnOutcome {
     Created { lane_id: u64 },
     AlreadyOwnLane { lane_id: u64 },
-    Cooldown { remaining_secs: u64 },
+    FloodLimited,
     NotInVoice,
     RankedVerifyRequired,
     NotCreated,
@@ -717,7 +766,7 @@ impl LaneRouter {
             port,
             engine,
             analyzer,
-            spawn_cooldowns: tokio::sync::Mutex::new(HashMap::new()),
+            spawn_history: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -789,16 +838,31 @@ impl LaneRouter {
         if channel_id != ROUTER_VC_ID {
             return;
         }
-        let Some((mode, auto_join)) = self.user_pref(user_id).await else {
+        let Some(default) = self.default_preset(user_id).await else {
             return; // ohne Präferenz: User bleibt im Router-VC (Panel hilft)
         };
-        if !auto_join {
-            self.engine
-                .create_router_lane(guild_id, user_id, &mode, ROUTER_VC_ID)
+        if default.mode == "ranked" && !self.ranked_allowed(guild_id, user_id, &[]).await {
+            self.port
+                .send_dm(
+                    user_id,
+                    format!(
+                        "Für Ranked-Lanes musst du deinen Rang verifizieren. Mehr Infos: <#{RANKED_INFO_CHANNEL_ID}>"
+                    ),
+                )
                 .await;
             return;
         }
-        self.smart_route(guild_id, user_id, &mode).await;
+        if !self.flood_guard_allows(user_id).await {
+            return;
+        }
+        if self
+            .engine
+            .create_router_lane(guild_id, user_id, &default.mode, ROUTER_VC_ID)
+            .await
+            .is_some()
+        {
+            self.mark_spawn_created(user_id).await;
+        }
     }
 
     pub async fn spawn_lane_from_current_voice(
@@ -821,8 +885,8 @@ impl LaneRouter {
         if router_mode(mode).is_none() {
             return RouterSpawnOutcome::UnknownMode;
         }
-        if let Some(remaining_secs) = self.spawn_cooldown_remaining(user_id).await {
-            return RouterSpawnOutcome::Cooldown { remaining_secs };
+        if !self.flood_guard_allows(user_id).await {
+            return RouterSpawnOutcome::FloodLimited;
         }
         let Some(current_channel_id) = self.port.member_voice_channel(guild_id, user_id).await
         else {
@@ -836,21 +900,12 @@ impl LaneRouter {
                 lane_id: current_channel_id,
             };
         }
-        if mode == "ranked" {
-            let verified = if !interaction_role_ids.is_empty() {
-                interaction_role_ids
-                    .iter()
-                    .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
-            } else {
-                self.port
-                    .member_role_ids(guild_id, user_id)
-                    .await
-                    .iter()
-                    .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
-            };
-            if !verified {
-                return RouterSpawnOutcome::RankedVerifyRequired;
-            }
+        if mode == "ranked"
+            && !self
+                .ranked_allowed(guild_id, user_id, interaction_role_ids)
+                .await
+        {
+            return RouterSpawnOutcome::RankedVerifyRequired;
         }
         match self
             .engine
@@ -875,24 +930,66 @@ impl LaneRouter {
         Ok(())
     }
 
-    async fn spawn_cooldown_remaining(&self, user_id: u64) -> Option<u64> {
+    async fn flood_guard_allows(&self, user_id: u64) -> bool {
         let now = Instant::now();
-        let mut cooldowns = self.spawn_cooldowns.lock().await;
-        let last_created = cooldowns.get(&user_id).copied()?;
-        let elapsed = now.saturating_duration_since(last_created);
-        if elapsed >= ROUTER_SPAWN_COOLDOWN {
-            cooldowns.remove(&user_id);
-            return None;
-        }
-        let remaining = ROUTER_SPAWN_COOLDOWN - elapsed;
-        Some(remaining.as_secs().max(1))
+        let window = Duration::from_secs(ROUTER_FLOOD_WINDOW_SECS);
+        let mut history = self.spawn_history.lock().await;
+        let entries = history.entry(user_id).or_default();
+        entries.retain(|created_at| now.saturating_duration_since(*created_at) < window);
+        entries.len() < ROUTER_FLOOD_MAX_CREATES
     }
 
     async fn mark_spawn_created(&self, user_id: u64) {
-        self.spawn_cooldowns
-            .lock()
+        let now = Instant::now();
+        let window = Duration::from_secs(ROUTER_FLOOD_WINDOW_SECS);
+        let mut history = self.spawn_history.lock().await;
+        let entries = history.entry(user_id).or_default();
+        entries.retain(|created_at| now.saturating_duration_since(*created_at) < window);
+        entries.push(now);
+    }
+
+    async fn ranked_allowed(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        interaction_role_ids: &[u64],
+    ) -> bool {
+        if !interaction_role_ids.is_empty() {
+            return interaction_role_ids
+                .iter()
+                .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role));
+        }
+        self.port
+            .member_role_ids(guild_id, user_id)
             .await
-            .insert(user_id, Instant::now());
+            .iter()
+            .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
+    }
+
+    pub async fn default_preset(&self, user_id: u64) -> Option<DefaultPresetRecord> {
+        self.engine
+            .store
+            .get_default_preset(user_id)
+            .await
+            .ok()
+            .flatten()
+    }
+
+    pub async fn ensure_default_mode_if_missing(&self, user_id: u64, mode: &str) -> bool {
+        if self.default_preset(user_id).await.is_some() {
+            return false;
+        }
+        let Some(mode) = router_mode(mode) else {
+            return false;
+        };
+        let record = default_preset_for_mode(user_id, mode.id);
+        match self.engine.store.save_default_preset(record).await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%err, user_id, mode = mode.id, "Router: Default-Preset konnte nicht gespeichert werden");
+                false
+            }
+        }
     }
 
     async fn user_owns_tempvoice_lane(&self, guild_id: u64, channel_id: u64, user_id: u64) -> bool {
@@ -953,6 +1050,14 @@ impl LaneRouter {
     }
 }
 
+fn router_reply_with_default_hint(base: String, default_saved: bool) -> String {
+    if default_saved {
+        format!("{base}\n{ROUTER_REPLY_DEFAULT_SAVED}")
+    } else {
+        base
+    }
+}
+
 /// Panel-Buttons: router_mode_{mode} + router_autojoin_toggle.
 struct RouterPanelHandler {
     router: Arc<LaneRouter>,
@@ -961,7 +1066,14 @@ struct RouterPanelHandler {
 #[async_trait::async_trait]
 impl InteractionHandler for RouterPanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if interaction.custom_id == "voice:guide:detail" {
+            return voice_guide_detail_reply();
+        }
         if let Some(mode) = interaction.custom_id.strip_prefix("router_spawn_") {
+            let default_saved = self
+                .router
+                .ensure_default_mode_if_missing(interaction.user_id, mode)
+                .await;
             return match self
                 .router
                 .spawn_lane_from_current_voice_with_role_ids(
@@ -972,21 +1084,33 @@ impl InteractionHandler for RouterPanelHandler {
                 )
                 .await
             {
-                RouterSpawnOutcome::Created { lane_id } => BridgeReply::ephemeral_text(format!(
-                    "{ROUTER_REPLY_CREATED_PREFIX} <#{lane_id}>"
-                )),
-                RouterSpawnOutcome::AlreadyOwnLane { lane_id } => BridgeReply::ephemeral_text(
-                    format!("{ROUTER_REPLY_ALREADY_OWN_LANE} <#{lane_id}>"),
-                ),
-                RouterSpawnOutcome::Cooldown { remaining_secs } => BridgeReply::ephemeral_text(
-                    format!("{ROUTER_REPLY_COOLDOWN_PREFIX} ({remaining_secs}s)"),
-                ),
-                RouterSpawnOutcome::NotInVoice => BridgeReply::ephemeral_text(format!(
-                    "{ROUTER_REPLY_NOT_IN_VOICE} <#{ROUTER_VC_ID}>"
-                )),
-                RouterSpawnOutcome::RankedVerifyRequired => BridgeReply::ephemeral_text(format!(
-                    "{ROUTER_REPLY_RANKED_VERIFY} <#{RANKED_INFO_CHANNEL_ID}>"
-                )),
+                RouterSpawnOutcome::Created { lane_id } => {
+                    BridgeReply::ephemeral_text(router_reply_with_default_hint(
+                        format!("{ROUTER_REPLY_CREATED_PREFIX} <#{lane_id}>"),
+                        default_saved,
+                    ))
+                }
+                RouterSpawnOutcome::AlreadyOwnLane { lane_id } => {
+                    BridgeReply::ephemeral_text(router_reply_with_default_hint(
+                        format!("{ROUTER_REPLY_ALREADY_OWN_LANE} <#{lane_id}>"),
+                        default_saved,
+                    ))
+                }
+                RouterSpawnOutcome::FloodLimited => {
+                    BridgeReply::ephemeral_text(ROUTER_REPLY_FLOOD_GUARD)
+                }
+                RouterSpawnOutcome::NotInVoice => {
+                    BridgeReply::ephemeral_text(router_reply_with_default_hint(
+                        format!("{ROUTER_REPLY_NOT_IN_VOICE} <#{ROUTER_VC_ID}>"),
+                        default_saved,
+                    ))
+                }
+                RouterSpawnOutcome::RankedVerifyRequired => {
+                    BridgeReply::ephemeral_text(router_reply_with_default_hint(
+                        format!("{ROUTER_REPLY_RANKED_VERIFY} <#{RANKED_INFO_CHANNEL_ID}>"),
+                        default_saved,
+                    ))
+                }
                 RouterSpawnOutcome::UnknownMode => {
                     BridgeReply::ephemeral_text(ROUTER_REPLY_UNKNOWN_MODE)
                 }
@@ -1050,7 +1174,8 @@ pub fn register(router_panel: &mut InteractionRouter, router: Arc<LaneRouter>) {
     let handler = Arc::new(RouterPanelHandler { router });
     router_panel.on_prefix("router_spawn_", handler.clone());
     router_panel.on_prefix("router_mode_", handler.clone());
-    router_panel.on_custom_id("router_autojoin_toggle", handler);
+    router_panel.on_custom_id("router_autojoin_toggle", handler.clone());
+    router_panel.on_custom_id("voice:guide:detail", handler);
 }
 
 pub fn spawn(router: Arc<LaneRouter>, dispatcher: &Dispatcher) -> tokio::task::JoinHandle<()> {
@@ -1843,7 +1968,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_spawn_setzt_cooldown_nur_nach_created() {
+    async fn router_spawn_bremst_erst_ab_fuenfter_erstellung_in_60s() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -1853,17 +1978,15 @@ mod tests {
         let engine = test_engine(pool.clone());
         let router = LaneRouter::new(pool, port, engine.clone(), None);
 
-        let first = router.spawn_lane_from_current_voice(1, 42, "casual").await;
-        let second = router.spawn_lane_from_current_voice(1, 42, "casual").await;
-
-        assert_eq!(first, RouterSpawnOutcome::Created { lane_id: 1 });
-        match second {
-            RouterSpawnOutcome::Cooldown { remaining_secs } => {
-                assert!(remaining_secs > 0);
-                assert!(remaining_secs <= ROUTER_SPAWN_COOLDOWN_SECS);
-            }
-            other => panic!("expected cooldown, got {other:?}"),
+        for _ in 0..ROUTER_FLOOD_MAX_CREATES {
+            assert_eq!(
+                router.spawn_lane_from_current_voice(1, 42, "casual").await,
+                RouterSpawnOutcome::Created { lane_id: 1 }
+            );
         }
+        let blocked = router.spawn_lane_from_current_voice(1, 42, "casual").await;
+
+        assert_eq!(blocked, RouterSpawnOutcome::FloodLimited);
         let lanes = engine.store.all_lanes().await.expect("lanes");
         assert_eq!(lanes.len(), 1);
     }
@@ -1895,6 +2018,16 @@ mod tests {
         let content = reply.content.expect("content");
         assert!(content.contains(ROUTER_REPLY_NOT_IN_VOICE));
         assert!(content.contains(&format!("<#{ROUTER_VC_ID}>")));
+        assert!(content.contains(ROUTER_REPLY_DEFAULT_SAVED));
+        assert_eq!(
+            handler
+                .router
+                .default_preset(42)
+                .await
+                .expect("default")
+                .mode,
+            "casual"
+        );
     }
 
     #[tokio::test]
@@ -1919,14 +2052,23 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(
-            reply.content.as_deref(),
-            Some(format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>").as_str())
-        );
+        let content = reply.content.expect("content");
+        assert!(content.contains(&format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>")));
+        assert!(content.contains(ROUTER_REPLY_DEFAULT_SAVED));
         let lanes = engine.store.all_lanes().await.expect("lanes");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].channel_id, 1);
         assert_eq!(lanes[0].owner_id, 42);
+        assert_eq!(
+            engine
+                .store
+                .get_default_preset(42)
+                .await
+                .expect("default query")
+                .expect("default")
+                .mode,
+            "casual"
+        );
     }
 
     #[tokio::test]
@@ -1952,12 +2094,108 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        assert_eq!(
-            reply.content.as_deref(),
-            Some(format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>").as_str())
-        );
+        let content = reply.content.expect("content");
+        assert!(content.contains(&format!("{ROUTER_REPLY_CREATED_PREFIX} <#1>")));
+        assert!(content.contains(ROUTER_REPLY_DEFAULT_SAVED));
         let lanes = engine.store.all_lanes().await.expect("lanes");
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].category_id, mode_to_category("ranked"));
+    }
+
+    #[tokio::test]
+    async fn router_join_ohne_default_erstellt_keine_lane() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        let router = LaneRouter::new(
+            pool,
+            Arc::new(StaticRouterPort::default()),
+            engine.clone(),
+            None,
+        );
+
+        router
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            })
+            .await;
+
+        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+    }
+
+    #[tokio::test]
+    async fn router_join_mit_default_erstellt_lane_im_default_modus() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        engine
+            .store
+            .save_default_preset(default_preset_for_mode(42, "street_brawl"))
+            .await
+            .expect("default");
+        let router = LaneRouter::new(
+            pool,
+            Arc::new(StaticRouterPort::default()),
+            engine.clone(),
+            None,
+        );
+
+        router
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            })
+            .await;
+
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].category_id, mode_to_category("street_brawl"));
+    }
+
+    #[tokio::test]
+    async fn router_join_ranked_ohne_verify_behaelt_default_und_moved_nicht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        engine
+            .store
+            .save_default_preset(default_preset_for_mode(42, "ranked"))
+            .await
+            .expect("default");
+        let router = LaneRouter::new(
+            pool,
+            Arc::new(StaticRouterPort::default()),
+            engine.clone(),
+            None,
+        );
+
+        router
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            })
+            .await;
+
+        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+        assert_eq!(
+            engine
+                .store
+                .get_default_preset(42)
+                .await
+                .expect("default query")
+                .expect("default")
+                .mode,
+            "ranked"
+        );
     }
 }

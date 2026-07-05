@@ -1,3 +1,33 @@
+# W3.4c Sprachkanal-UX (2026-07-05)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/support-regelwerk-v2`; Vorgabe: kein Commit/Push/Deploy/Discord-Post, andere Repo-Doku ignorieren.
+- Maßgebliche Spec vollständig gelesen: `docs/onboarding-redesign/2026-07-05-sprachkanal-ux-spec.md`.
+- Arbeitsbaum vor Start geprüft: untracked ist die Spec-Datei; bestehende Änderungen aus vorherigen Arbeiten bleiben unangetastet.
+- Umgesetzt: Voice-UX-Publisher für 4 Components-V2-Messages in zwei Zielkanälen, LFG-Forum-Post, Legacy-Panel-Cleanup/KV-Umzug, Router-Ready-Autopublish entfernt.
+- Umgesetzt: Default-Preset mit Modus, Erstwahl-speichert-Default, Router-VC-Auto-Route, Ranked-Gate, `tv_prefs_open`-Editor und stiller Flood-Guard statt sichtbarem 30s-Cooldown.
+- Alter `/serversync/lfg-panel-apply`-Servicepfad blockiert, damit das alte LFG-Einzelpanel nicht manuell wiederhergestellt wird.
+
+## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-bot --bins`.
+- Gruen: `SQLX_OFFLINE=true cargo test -p dl-voice -p dl-bot --no-run`.
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice tempvoice::interface::tests::prefs_editor -- --nocapture` (5 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice router::tests:: -- --nocapture` (19 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot voice_ux -- --nocapture` (3 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot router_apply_http_ist_dry_run_default_und_liefert_v2_payload -- --nocapture` (1 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot service_voice_ux_apply_zieht_legacy_kv_auf_neue_zielkanaele_um -- --nocapture` (1 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot service_lfg_panel_apply_blockt_alten_einzelpanel_publisher -- --nocapture` (1 passed).
+- Gruen: `cargo fmt --all`.
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test --workspace` (829 total; 794 passed, 35 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `cargo fmt --all`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Ein Spec-erlaubter Platzhalter bleibt: `ROUTER_REPLY_FLOOD_GUARD = "PLATZHALTER-flood-guard"`.
+- Kein Commit/Push/Merge/Deploy/Discord-Post ausgefuehrt.
+
 # Regelwerk+Support V2 Publisher (2026-07-05)
 
 ## Fortschritt

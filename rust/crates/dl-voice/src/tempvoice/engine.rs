@@ -14,11 +14,20 @@ use chrono::{NaiveDateTime, Utc};
 use dl_discord::{ChannelEvent, Dispatcher, GatewayEvent, VoiceEvent};
 
 use super::logic;
-use super::store::{LaneRecord, TempVoiceStore};
+use super::store::{DefaultPresetRecord, LaneRecord, TempVoiceStore};
 
 pub const PURGE_INTERVAL_SECONDS: u64 = 180;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
 pub const MIN_RANK_DISABLED_REPLY: &str = "Mindest-Rang ist hier deaktiviert.";
+
+fn router_lane_limit(mode: &str, preset: Option<&DefaultPresetRecord>) -> i64 {
+    match (mode, preset.map(|preset| preset.limit)) {
+        ("street_brawl", Some(limit)) => limit.clamp(1, 4),
+        ("street_brawl", None) => 4,
+        (_, Some(limit)) => limit.clamp(0, 99),
+        _ => 6,
+    }
+}
 
 async fn wait_for_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<GatewayEvent>,
@@ -777,7 +786,14 @@ impl TempVoiceEngine {
             "street_brawl" => 1357422957017698478,
             _ => 1289721245281292290,
         };
-        let base = if mode == "ranked" {
+        let default_preset = self.store.get_default_preset(user_id).await.ok().flatten();
+        let matching_default = default_preset
+            .as_ref()
+            .filter(|preset| preset.mode == mode)
+            .cloned();
+        let base = if let Some(preset) = matching_default.as_ref() {
+            preset.base_name.clone()
+        } else if mode == "ranked" {
             let roles = self.port.member_role_names(guild_id, user_id).await;
             logic::rank_prefix_for(&roles).unwrap_or_else(|| "Ranked".to_string())
         } else if mode == "street_brawl" {
@@ -792,7 +808,7 @@ impl TempVoiceEngine {
             .len()
             + 1;
         let create_name = format!("{base} {index}");
-        let cap = if mode == "street_brawl" { 4 } else { 6 };
+        let cap = router_lane_limit(mode, matching_default.as_ref());
         let lane_id = self
             .port
             .create_voice_channel(guild_id, Some(category_id), &create_name, cap)
@@ -846,6 +862,13 @@ impl TempVoiceEngine {
             return Err(err);
         }
         self.apply_owner_settings(guild_id, lane_id, user_id).await;
+        if let Some(preset) = matching_default.as_ref() {
+            if preset.min_rank != "unknown" {
+                if let Err(err) = self.set_min_rank(guild_id, lane_id, &preset.min_rank).await {
+                    tracing::debug!(%err, lane_id, "TempVoice: Default-Mindest-Rang konnte nicht angewendet werden");
+                }
+            }
+        }
         self.refresh_name(guild_id, lane_id).await;
         tracing::debug!(user_id, mode, category_id, lane_id, "Router: Lane erstellt");
         Ok(Some(lane_id))
