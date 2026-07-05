@@ -606,7 +606,7 @@ fn guide_container() -> Value {
                 vec![button_with_id(
                     VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
                     dl_voice::router::VOICE_PREFS_BUTTON,
-                    1,
+                    2,
                     "tv_prefs_open",
                 )],
             ),
@@ -691,7 +691,9 @@ fn spawn_container() -> Value {
                     .map(|mode| {
                         emoji_button(
                             mode.label,
-                            mode.style,
+                            // Einheitlich grau (Owner-Wunsch): der Modus-Akzent
+                            // kommt vom Emoji, nicht von der Button-Farbe.
+                            2,
                             &format!("router_spawn_{}", mode.id),
                             mode.emoji,
                         )
