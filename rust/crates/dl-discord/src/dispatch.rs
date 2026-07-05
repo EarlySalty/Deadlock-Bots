@@ -121,6 +121,9 @@ async fn dispatch_component(
         ComponentInteractionDataKind::StringSelect { values } => {
             values.iter().map(|v| v.to_string()).collect()
         }
+        ComponentInteractionDataKind::UserSelect { values } => {
+            values.iter().map(|id| id.get().to_string()).collect()
+        }
         _ => Vec::new(),
     };
     let bridge = BridgeInteraction {

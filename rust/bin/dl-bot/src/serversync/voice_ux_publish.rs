@@ -34,12 +34,10 @@ pub const VOICE_UX_COMPONENT_ID_GUIDE_MEDIA: u64 = 34_000;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER: u64 = 34_001;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_TEXT: u64 = 34_002;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW: u64 = 34_003;
-pub const VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON: u64 = 34_004;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON: u64 = 34_005;
 pub const VOICE_UX_COMPONENT_ID_LFG_MEDIA: u64 = 34_009;
 pub const VOICE_UX_COMPONENT_ID_LFG_CONTAINER: u64 = 34_010;
 pub const VOICE_UX_COMPONENT_ID_LFG_TEXT: u64 = 34_011;
-pub const VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW: u64 = 34_012;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_MEDIA: u64 = 34_019;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER: u64 = 34_020;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_TEXT: u64 = 34_021;
@@ -196,7 +194,7 @@ pub fn build_voice_ux_publish_output(
     dry_run: bool,
 ) -> Result<VoiceUxPublishOutput, String> {
     let mut warnings = Vec::new();
-    let base_messages = voice_ux_messages(repo_root, &mut warnings);
+    let base_messages = voice_ux_messages(repo_root, forum_thread_id, &mut warnings);
     validate_voice_ux_messages(&base_messages)?;
     let payload_hash = voice_ux_payload_hash(repo_root, &base_messages)?;
     let mut targets = Vec::new();
@@ -509,7 +507,11 @@ fn text_display_chars_from_value(value: &Value) -> usize {
     own + children
 }
 
-fn voice_ux_messages(repo_root: &Path, warnings: &mut Vec<String>) -> Vec<VoiceUxMessageOutput> {
+fn voice_ux_messages(
+    repo_root: &Path,
+    forum_thread_id: Option<u64>,
+    warnings: &mut Vec<String>,
+) -> Vec<VoiceUxMessageOutput> {
     let guide_banner =
         optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings);
     let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings);
@@ -533,11 +535,7 @@ fn voice_ux_messages(repo_root: &Path, warnings: &mut Vec<String>) -> Vec<VoiceU
                     (
                         VOICE_UX_COMPONENT_ID_LFG_MEDIA,
                         lfg_banner.as_ref(),
-                        lfg_container(
-                            VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
-                            VOICE_UX_COMPONENT_ID_LFG_TEXT,
-                            VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
-                        ),
+                        lfg_link_container(forum_thread_id),
                     ),
                 ],
             ),
@@ -605,20 +603,12 @@ fn guide_container() -> Value {
             ),
             action_row(
                 VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
-                vec![
-                    button_with_id(
-                        VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
-                        dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
-                        1,
-                        "voice:guide:detail",
-                    ),
-                    button_with_id(
-                        VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
-                        dl_voice::router::VOICE_PREFS_BUTTON,
-                        2,
-                        "tv_prefs_open",
-                    ),
-                ],
+                vec![button_with_id(
+                    VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
+                    dl_voice::router::VOICE_PREFS_BUTTON,
+                    1,
+                    "tv_prefs_open",
+                )],
             ),
         ],
     )
@@ -635,6 +625,29 @@ fn lfg_payload(
         media_id,
         banner,
         lfg_container(container_id, text_id, row_id),
+    )
+}
+
+// Panel-Variante der Mitspieler-finden-Sektion: keine eigenen Buttons — Gesuch
+// und 🔔 laufen über den Forum-Post, hierhin kommt nur der Link. Die Thread-ID
+// stammt aus dem KV; solange der Post noch nicht existiert, zeigt der Link auf
+// das Forum selbst.
+fn lfg_link_container(forum_thread_id: Option<u64>) -> Value {
+    let guild_id = dl_server_as_code::DEFAULT_GUILD_ID;
+    let url = match forum_thread_id {
+        Some(thread_id) => {
+            format!("https://discord.com/channels/{guild_id}/{thread_id}/{thread_id}")
+        }
+        None => format!("https://discord.com/channels/{guild_id}/{VOICE_UX_LFG_FORUM_CHANNEL_ID}"),
+    };
+    container(
+        VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
+        vec![text_display(
+            VOICE_UX_COMPONENT_ID_LFG_TEXT,
+            format!(
+                "**Mitspieler finden**\nGesuch aufgeben oder 🔔 Benachrichtigungen einschalten — beides direkt im Post [**{VOICE_UX_LFG_FORUM_TITLE}**]({url}).\nDein Gesuch zeigt live, wie viele Plätze frei sind, und mit **Beitreten** landest du direkt im Voice."
+            ),
+        )],
     )
 }
 
@@ -732,7 +745,6 @@ fn manage_container() -> Value {
                         "tv_mode_switch_btn",
                         dl_voice::router::ROUTER_EMOJI_MODE,
                     ),
-                    button(dl_voice::router::VOICE_PREFS_BUTTON, 2, "tv_prefs_open"),
                 ],
             ),
             text_display(
@@ -973,7 +985,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
-            None,
+            Some(555),
             None,
             true,
         )
@@ -1039,12 +1051,21 @@ mod tests {
                     dl_voice::router::VOICE_GUIDE_BODY
                 )
             );
-            // Sektion 2 (Mitspieler finden) folgt nach dem Separator im selben Container.
-            assert_eq!(
-                target.messages[0].payload.components[0]["components"][6]["components"][0]
-                    ["custom_id"],
-                dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
-            );
+            // Message 1: Anleitung behält nur ⚙️ Voreinstellungen; Mitspieler
+            // finden hat keine eigenen Buttons mehr, sondern verlinkt den
+            // Forum-Post (Thread-ID aus dem KV, hier 555).
+            let msg0_custom_ids =
+                collect_component_custom_ids(&target.messages[0].payload.components);
+            assert_eq!(msg0_custom_ids, vec!["tv_prefs_open".to_string()]);
+            let lfg_text = target.messages[0].payload.components[0]["components"][5]["content"]
+                .as_str()
+                .expect("lfg text");
+            assert!(lfg_text.contains("/555/555"));
+            // Message 2: Verwalten-Reihe ohne ⚙️ Voreinstellungen.
+            let msg1_custom_ids =
+                collect_component_custom_ids(&target.messages[1].payload.components);
+            assert!(!msg1_custom_ids.contains(&"tv_prefs_open".to_string()));
+            assert!(msg1_custom_ids.contains(&"tv_owner_claim".to_string()));
             assert_eq!(target.messages[0].action, "planned_post");
         }
     }
