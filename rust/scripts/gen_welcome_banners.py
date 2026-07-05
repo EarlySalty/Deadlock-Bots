@@ -176,6 +176,8 @@ DIVIDERS = [
     ("divider-custom.png", "CUSTOM GAMES"),
     ("divider-quickstart.png", "SCHNELLSTART"),
     ("divider-lane-verwalten.png", "LANE VERWALTEN"),
+    ("divider-mitspieler-finden.png", "MITSPIELER FINDEN"),
+    ("divider-lane-erstellen.png", "LANE ERSTELLEN"),
     ("divider-anleitung.png", "ANLEITUNG"),
 ]
 

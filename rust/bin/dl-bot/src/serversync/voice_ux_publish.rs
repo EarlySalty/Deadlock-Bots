@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+use std::fs;
+use std::path::Path;
 
 pub const VOICE_UX_CHANNEL_ID: u64 = dl_voice::router::ROUTER_TEXT_CHANNEL_ID;
 pub const VOICE_UX_ROUTER_CHAT_CHANNEL_ID: u64 = dl_voice::router::ROUTER_VC_ID;
@@ -13,27 +15,37 @@ pub const VOICE_UX_PAYLOAD_FORMAT_KEY_BASE: &str = "voice_ux_payload_format_";
 pub const VOICE_UX_PAYLOAD_HASH_KEY_BASE: &str = "voice_ux_payload_hash_";
 pub const VOICE_UX_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const VOICE_UX_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const VOICE_UX_BANNER_DIR: &str = "assets/welcome-banners";
+pub const VOICE_UX_GUIDE_BANNER_FILENAME: &str = "router-hero.png";
+pub const VOICE_UX_LFG_BANNER_FILENAME: &str = "divider-mitspieler-finden.png";
+pub const VOICE_UX_SPAWN_BANNER_FILENAME: &str = "divider-lane-erstellen.png";
+pub const VOICE_UX_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
 
 pub const VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID: u64 = 1_522_516_664_279_760_999;
-pub const VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID: u64 = 1_522_795_818_803_749_904;
+pub const VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID: u64 = 1_522_795_818_803_789_904;
 pub const VOICE_UX_LFG_FORUM_CHANNEL_ID: u64 = 1_522_769_149_208_821_881;
 pub const VOICE_UX_LFG_FORUM_TITLE: &str = "So findest du Mitspieler";
+pub const VOICE_UX_LFG_FORUM_INFO_TAG_ID: &str = "1523260926797676586";
 pub const VOICE_UX_LFG_FORUM_THREAD_ID_KEY: &str = "voice_ux_lfg_forum_thread_id";
 pub const VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY: &str = "voice_ux_lfg_forum_payload_hash";
 pub const VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY: &str = "voice_ux_lfg_forum_payload_format";
 
+pub const VOICE_UX_COMPONENT_ID_GUIDE_MEDIA: u64 = 34_000;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER: u64 = 34_001;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_TEXT: u64 = 34_002;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW: u64 = 34_003;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON: u64 = 34_004;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON: u64 = 34_005;
+pub const VOICE_UX_COMPONENT_ID_LFG_MEDIA: u64 = 34_009;
 pub const VOICE_UX_COMPONENT_ID_LFG_CONTAINER: u64 = 34_010;
 pub const VOICE_UX_COMPONENT_ID_LFG_TEXT: u64 = 34_011;
 pub const VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW: u64 = 34_012;
+pub const VOICE_UX_COMPONENT_ID_SPAWN_MEDIA: u64 = 34_019;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER: u64 = 34_020;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_TEXT: u64 = 34_021;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_ACTION_ROW: u64 = 34_022;
 pub const VOICE_UX_COMPONENT_ID_SPAWN_HINT: u64 = 34_023;
+pub const VOICE_UX_COMPONENT_ID_MANAGE_MEDIA: u64 = 34_029;
 pub const VOICE_UX_COMPONENT_ID_MANAGE_CONTAINER: u64 = 34_030;
 pub const VOICE_UX_COMPONENT_ID_MANAGE_TEXT: u64 = 34_031;
 pub const VOICE_UX_COMPONENT_ID_MANAGE_LANE_CAPTION: u64 = 34_032;
@@ -90,7 +102,15 @@ pub struct VoiceUxMessageOutput {
     pub action: String,
     pub stored_message_id: Option<u64>,
     pub message_id: Option<u64>,
+    pub banner: Option<VoiceUxBannerOutput>,
     pub payload: VoiceUxMessagePayload,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceUxBannerOutput {
+    pub filename: String,
+    pub relative_path: String,
+    pub present: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -112,11 +132,21 @@ pub struct VoiceUxMessagePayload {
     pub flags: u64,
     pub allowed_mentions: VoiceUxAllowedMentions,
     pub components: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<VoiceUxPayloadAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VoiceUxAllowedMentions {
     pub parse: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct VoiceUxPayloadAttachment {
+    pub id: u8,
+    pub filename: String,
+    #[serde(skip)]
+    pub relative_path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,6 +185,7 @@ pub fn voice_ux_payload_hash_key(channel_id: u64) -> String {
 }
 
 pub fn build_voice_ux_publish_output(
+    repo_root: &Path,
     stored_message_ids: &BTreeMap<u64, Vec<u64>>,
     stored_payload_formats: &BTreeMap<u64, Option<String>>,
     stored_payload_hashes: &BTreeMap<u64, Option<String>>,
@@ -162,9 +193,10 @@ pub fn build_voice_ux_publish_output(
     forum_stored_payload_hash: Option<&str>,
     dry_run: bool,
 ) -> Result<VoiceUxPublishOutput, String> {
-    let base_messages = voice_ux_messages();
+    let mut warnings = Vec::new();
+    let base_messages = voice_ux_messages(repo_root, &mut warnings);
     validate_voice_ux_messages(&base_messages)?;
-    let payload_hash = voice_ux_payload_hash(&base_messages)?;
+    let payload_hash = voice_ux_payload_hash(repo_root, &base_messages)?;
     let mut targets = Vec::new();
 
     for channel_id in VOICE_UX_TARGET_CHANNEL_IDS {
@@ -213,14 +245,18 @@ pub fn build_voice_ux_publish_output(
     }
 
     let forum_payload = voice_ux_forum_payload();
-    let forum_payload_hash = voice_ux_payload_hash(&[VoiceUxMessageOutput {
-        message_index: 0,
-        message_key: "lfg_forum".to_string(),
-        action: String::new(),
-        stored_message_id: None,
-        message_id: None,
-        payload: forum_payload.clone(),
-    }])?;
+    let forum_payload_hash = voice_ux_payload_hash(
+        repo_root,
+        &[VoiceUxMessageOutput {
+            message_index: 0,
+            message_key: "lfg_forum".to_string(),
+            action: String::new(),
+            stored_message_id: None,
+            message_id: None,
+            payload: forum_payload.clone(),
+            banner: None,
+        }],
+    )?;
     let forum_hash_matches = forum_stored_payload_hash == Some(forum_payload_hash.as_str());
     let forum_action = if dry_run {
         match (forum_thread_id, forum_hash_matches) {
@@ -236,7 +272,7 @@ pub fn build_voice_ux_publish_output(
         guild_id: dl_server_as_code::DEFAULT_GUILD_ID,
         dry_run,
         payload_format: VOICE_UX_PAYLOAD_FORMAT.to_string(),
-        warnings: Vec::new(),
+        warnings,
         targets,
         legacy_cleanup_candidates: Vec::new(),
         deleted_legacy_message_ids: Vec::new(),
@@ -291,10 +327,54 @@ pub fn adopt_voice_ux_message_ids(
     }
 }
 
-pub fn voice_ux_payload_hash(messages: &[VoiceUxMessageOutput]) -> Result<String, String> {
-    let raw = serde_json::to_vec(messages)
+pub fn voice_ux_payload_hash(
+    repo_root: &Path,
+    messages: &[VoiceUxMessageOutput],
+) -> Result<String, String> {
+    let payloads = messages
+        .iter()
+        .map(|message| {
+            let attachment_hashes = message
+                .payload
+                .attachments
+                .iter()
+                .map(|attachment| {
+                    let path = repo_root.join(&attachment.relative_path);
+                    let bytes = fs::read(&path).map_err(|err| {
+                        format!(
+                            "Voice-UX-Attachment `{}` konnte fuer Hash nicht gelesen werden: {err}",
+                            path.display()
+                        )
+                    })?;
+                    Ok(VoiceUxPayloadHashAttachment {
+                        id: attachment.id,
+                        filename: attachment.filename.as_str(),
+                        sha256: format!("{:x}", Sha256::digest(bytes)),
+                    })
+                })
+                .collect::<Result<Vec<_>, String>>()?;
+            Ok(VoiceUxPayloadHashMessage {
+                message,
+                attachment_hashes,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let raw = serde_json::to_vec(&payloads)
         .map_err(|err| format!("Voice-UX-Payload konnte nicht serialisiert werden: {err}"))?;
     Ok(format!("{:x}", Sha256::digest(raw)))
+}
+
+#[derive(Serialize)]
+struct VoiceUxPayloadHashMessage<'a> {
+    message: &'a VoiceUxMessageOutput,
+    attachment_hashes: Vec<VoiceUxPayloadHashAttachment<'a>>,
+}
+
+#[derive(Serialize)]
+struct VoiceUxPayloadHashAttachment<'a> {
+    id: u8,
+    filename: &'a str,
+    sha256: String,
 }
 
 pub fn is_voice_ux_v2_message(message: &VoiceUxV2Message, bot_user_id: u64) -> bool {
@@ -427,208 +507,283 @@ fn text_display_chars_from_value(value: &Value) -> usize {
     own + children
 }
 
-fn voice_ux_messages() -> Vec<VoiceUxMessageOutput> {
+fn voice_ux_messages(repo_root: &Path, warnings: &mut Vec<String>) -> Vec<VoiceUxMessageOutput> {
+    let guide_banner =
+        optional_voice_ux_banner(repo_root, VOICE_UX_GUIDE_BANNER_FILENAME, warnings);
+    let lfg_banner = optional_voice_ux_banner(repo_root, VOICE_UX_LFG_BANNER_FILENAME, warnings);
+    let spawn_banner =
+        optional_voice_ux_banner(repo_root, VOICE_UX_SPAWN_BANNER_FILENAME, warnings);
+    let manage_banner =
+        optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings);
     vec![
-        message("guide", guide_payload()),
+        message(
+            "guide",
+            guide_banner.clone(),
+            guide_payload(guide_banner.as_ref()),
+        ),
         message(
             "lfg",
+            lfg_banner.clone(),
             lfg_payload(
+                VOICE_UX_COMPONENT_ID_LFG_MEDIA,
                 VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
                 VOICE_UX_COMPONENT_ID_LFG_TEXT,
                 VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
+                lfg_banner.as_ref(),
             ),
         ),
-        message("spawn", spawn_payload()),
-        message("manage", manage_payload()),
+        message(
+            "spawn",
+            spawn_banner.clone(),
+            spawn_payload(spawn_banner.as_ref()),
+        ),
+        message(
+            "manage",
+            manage_banner.clone(),
+            manage_payload(manage_banner.as_ref()),
+        ),
     ]
 }
 
 fn voice_ux_forum_payload() -> VoiceUxMessagePayload {
     lfg_payload(
+        0,
         VOICE_UX_COMPONENT_ID_FORUM_CONTAINER,
         VOICE_UX_COMPONENT_ID_FORUM_TEXT,
         VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW,
+        None,
     )
 }
 
-fn message(message_key: &str, payload: VoiceUxMessagePayload) -> VoiceUxMessageOutput {
+fn message(
+    message_key: &str,
+    banner: Option<VoiceUxBannerOutput>,
+    payload: VoiceUxMessagePayload,
+) -> VoiceUxMessageOutput {
     VoiceUxMessageOutput {
         message_index: 0,
         message_key: message_key.to_string(),
         action: String::new(),
         stored_message_id: None,
         message_id: None,
+        banner,
         payload,
     }
 }
 
-fn guide_payload() -> VoiceUxMessagePayload {
-    payload(vec![container(
-        VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
-        vec![
-            text_display(
-                VOICE_UX_COMPONENT_ID_GUIDE_TEXT,
-                format!(
-                    "{}\n{}",
-                    dl_voice::router::VOICE_GUIDE_TITLE,
-                    dl_voice::router::VOICE_GUIDE_BODY
+fn guide_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
+    payload_with_optional_banner(
+        VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
+        banner,
+        container(
+            VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
+            vec![
+                text_display(
+                    VOICE_UX_COMPONENT_ID_GUIDE_TEXT,
+                    format!(
+                        "{}\n{}",
+                        dl_voice::router::VOICE_GUIDE_TITLE,
+                        dl_voice::router::VOICE_GUIDE_BODY
+                    ),
                 ),
-            ),
-            action_row(
-                VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
-                vec![
-                    button_with_id(
-                        VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
-                        dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
-                        1,
-                        "voice:guide:detail",
-                    ),
-                    button_with_id(
-                        VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
-                        dl_voice::router::VOICE_PREFS_BUTTON,
-                        2,
-                        "tv_prefs_open",
-                    ),
-                ],
-            ),
-        ],
-    )])
+                action_row(
+                    VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
+                    vec![
+                        button_with_id(
+                            VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
+                            dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
+                            1,
+                            "voice:guide:detail",
+                        ),
+                        button_with_id(
+                            VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
+                            dl_voice::router::VOICE_PREFS_BUTTON,
+                            2,
+                            "tv_prefs_open",
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
 }
 
-fn lfg_payload(container_id: u64, text_id: u64, row_id: u64) -> VoiceUxMessagePayload {
-    payload(vec![container(
-        container_id,
-        vec![
-            text_display(text_id, dl_voice::lfg_panel::LFG_PANEL_BODY.to_string()),
-            action_row(
-                row_id,
-                vec![
-                    emoji_button(
-                        dl_voice::lfg_panel::LFG_PANEL_BUTTON,
-                        1,
-                        dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
-                        dl_voice::lfg_panel::LFG_EMOJI_SEARCH,
-                    ),
-                    button(
-                        dl_voice::lfg_panel::LFG_WATCH_PANEL_BUTTON,
-                        2,
-                        dl_voice::lfg_panel::LFG_WATCH_START_CUSTOM_ID,
-                    ),
-                ],
-            ),
-        ],
-    )])
-}
-
-fn spawn_payload() -> VoiceUxMessagePayload {
-    payload(vec![container(
-        VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
-        vec![
-            text_display(
-                VOICE_UX_COMPONENT_ID_SPAWN_TEXT,
-                "**Lane erstellen**\nRanked = verifizierter Rang".to_string(),
-            ),
-            action_row(
-                VOICE_UX_COMPONENT_ID_SPAWN_ACTION_ROW,
-                dl_voice::router::router_modes()
-                    .iter()
-                    .map(|mode| {
+fn lfg_payload(
+    media_id: u64,
+    container_id: u64,
+    text_id: u64,
+    row_id: u64,
+    banner: Option<&VoiceUxBannerOutput>,
+) -> VoiceUxMessagePayload {
+    payload_with_optional_banner(
+        media_id,
+        banner,
+        container(
+            container_id,
+            vec![
+                text_display(text_id, dl_voice::lfg_panel::LFG_PANEL_BODY.to_string()),
+                action_row(
+                    row_id,
+                    vec![
                         emoji_button(
-                            mode.label,
-                            mode.style,
-                            &format!("router_spawn_{}", mode.id),
-                            mode.emoji,
-                        )
-                    })
-                    .collect(),
-            ),
-            text_display(
-                VOICE_UX_COMPONENT_ID_SPAWN_HINT,
-                "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang".to_string(),
-            ),
-        ],
-    )])
+                            dl_voice::lfg_panel::LFG_PANEL_BUTTON,
+                            1,
+                            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
+                            dl_voice::lfg_panel::LFG_EMOJI_SEARCH,
+                        ),
+                        button(
+                            dl_voice::lfg_panel::LFG_WATCH_PANEL_BUTTON,
+                            2,
+                            dl_voice::lfg_panel::LFG_WATCH_START_CUSTOM_ID,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
 }
 
-fn manage_payload() -> VoiceUxMessagePayload {
-    payload(vec![container(
-        VOICE_UX_COMPONENT_ID_MANAGE_CONTAINER,
-        vec![
-            text_display(
-                VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
-                dl_voice::router::ROUTER_PANEL_MANAGE_INTRO.to_string(),
-            ),
-            text_display(
-                VOICE_UX_COMPONENT_ID_MANAGE_LANE_CAPTION,
-                dl_voice::router::ROUTER_PANEL_LANE_CAPTION.to_string(),
-            ),
-            action_row(
-                VOICE_UX_COMPONENT_ID_MANAGE_LANE_ROW,
-                vec![
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_CLAIM,
-                        3,
-                        "tv_owner_claim",
-                        dl_voice::router::ROUTER_EMOJI_CROWN,
-                    ),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_RENAME,
-                        2,
-                        "tv_rename_btn",
-                        dl_voice::router::ROUTER_EMOJI_RENAME,
-                    ),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_LIMIT,
-                        2,
-                        "tv_limit_btn",
-                        dl_voice::router::ROUTER_EMOJI_LIMIT,
-                    ),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_MODE,
-                        2,
-                        "tv_mode_switch_btn",
-                        dl_voice::router::ROUTER_EMOJI_MODE,
-                    ),
-                    button(dl_voice::router::VOICE_PREFS_BUTTON, 2, "tv_prefs_open"),
-                ],
-            ),
-            text_display(
-                VOICE_UX_COMPONENT_ID_MANAGE_MOD_CAPTION,
-                dl_voice::router::ROUTER_PANEL_MOD_CAPTION.to_string(),
-            ),
-            action_row(
-                VOICE_UX_COMPONENT_ID_MANAGE_MOD_ROW,
-                vec![
-                    button("💾 Presets", 2, "tv_presets"),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_KICK,
-                        4,
-                        "tv_kick",
-                        dl_voice::router::ROUTER_EMOJI_KICK,
-                    ),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_BAN,
-                        4,
-                        "tv_ban",
-                        dl_voice::router::ROUTER_EMOJI_BAN,
-                    ),
-                    emoji_button(
-                        dl_voice::router::ROUTER_BUTTON_UNBAN,
-                        2,
-                        "tv_unban",
-                        dl_voice::router::ROUTER_EMOJI_UNBAN,
-                    ),
-                ],
-            ),
-        ],
-    )])
+fn spawn_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
+    payload_with_optional_banner(
+        VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
+        banner,
+        container(
+            VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
+            vec![
+                text_display(
+                    VOICE_UX_COMPONENT_ID_SPAWN_TEXT,
+                    "**Lane erstellen**\nRanked = verifizierter Rang".to_string(),
+                ),
+                action_row(
+                    VOICE_UX_COMPONENT_ID_SPAWN_ACTION_ROW,
+                    dl_voice::router::router_modes()
+                        .iter()
+                        .map(|mode| {
+                            emoji_button(
+                                mode.label,
+                                mode.style,
+                                &format!("router_spawn_{}", mode.id),
+                                mode.emoji,
+                            )
+                        })
+                        .collect(),
+                ),
+                text_display(
+                    VOICE_UX_COMPONENT_ID_SPAWN_HINT,
+                    "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang"
+                        .to_string(),
+                ),
+            ],
+        ),
+    )
 }
 
-fn payload(components: Vec<Value>) -> VoiceUxMessagePayload {
+fn manage_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
+    payload_with_optional_banner(
+        VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
+        banner,
+        container(
+            VOICE_UX_COMPONENT_ID_MANAGE_CONTAINER,
+            vec![
+                text_display(
+                    VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
+                    dl_voice::router::ROUTER_PANEL_MANAGE_INTRO.to_string(),
+                ),
+                text_display(
+                    VOICE_UX_COMPONENT_ID_MANAGE_LANE_CAPTION,
+                    dl_voice::router::ROUTER_PANEL_LANE_CAPTION.to_string(),
+                ),
+                action_row(
+                    VOICE_UX_COMPONENT_ID_MANAGE_LANE_ROW,
+                    vec![
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_CLAIM,
+                            3,
+                            "tv_owner_claim",
+                            dl_voice::router::ROUTER_EMOJI_CROWN,
+                        ),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_RENAME,
+                            2,
+                            "tv_rename_btn",
+                            dl_voice::router::ROUTER_EMOJI_RENAME,
+                        ),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_LIMIT,
+                            2,
+                            "tv_limit_btn",
+                            dl_voice::router::ROUTER_EMOJI_LIMIT,
+                        ),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_MODE,
+                            2,
+                            "tv_mode_switch_btn",
+                            dl_voice::router::ROUTER_EMOJI_MODE,
+                        ),
+                        button(dl_voice::router::VOICE_PREFS_BUTTON, 2, "tv_prefs_open"),
+                    ],
+                ),
+                text_display(
+                    VOICE_UX_COMPONENT_ID_MANAGE_MOD_CAPTION,
+                    dl_voice::router::ROUTER_PANEL_MOD_CAPTION.to_string(),
+                ),
+                action_row(
+                    VOICE_UX_COMPONENT_ID_MANAGE_MOD_ROW,
+                    vec![
+                        button("💾 Presets", 2, "tv_presets"),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_KICK,
+                            4,
+                            "tv_kick",
+                            dl_voice::router::ROUTER_EMOJI_KICK,
+                        ),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_BAN,
+                            4,
+                            "tv_ban",
+                            dl_voice::router::ROUTER_EMOJI_BAN,
+                        ),
+                        emoji_button(
+                            dl_voice::router::ROUTER_BUTTON_UNBAN,
+                            2,
+                            "tv_unban",
+                            dl_voice::router::ROUTER_EMOJI_UNBAN,
+                        ),
+                    ],
+                ),
+            ],
+        ),
+    )
+}
+
+fn payload_with_optional_banner(
+    media_id: u64,
+    banner: Option<&VoiceUxBannerOutput>,
+    container: Value,
+) -> VoiceUxMessagePayload {
+    let mut components = Vec::new();
+    let mut attachments = Vec::new();
+    if let Some(banner) = banner {
+        components.push(media_gallery(media_id, &banner.filename));
+        attachments.push(VoiceUxPayloadAttachment {
+            id: 0,
+            filename: banner.filename.clone(),
+            relative_path: banner.relative_path.clone(),
+        });
+    }
+    components.push(container);
+    payload(components, attachments)
+}
+
+fn payload(
+    components: Vec<Value>,
+    attachments: Vec<VoiceUxPayloadAttachment>,
+) -> VoiceUxMessagePayload {
     VoiceUxMessagePayload {
         flags: VOICE_UX_COMPONENTS_V2_FLAG,
         allowed_mentions: VoiceUxAllowedMentions { parse: Vec::new() },
         components,
+        attachments,
     }
 }
 
@@ -646,6 +801,18 @@ fn text_display(id: u64, content: String) -> Value {
         "type": 10,
         "id": id,
         "content": content,
+    })
+}
+
+fn media_gallery(id: u64, filename: &str) -> Value {
+    json!({
+        "type": 12,
+        "id": id,
+        "items": [{
+            "media": {
+                "url": format!("attachment://{filename}"),
+            },
+        }],
     })
 }
 
@@ -686,13 +853,54 @@ fn emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &str)) ->
     })
 }
 
+fn optional_voice_ux_banner(
+    repo_root: &Path,
+    filename: &str,
+    warnings: &mut Vec<String>,
+) -> Option<VoiceUxBannerOutput> {
+    let relative_path = format!("{VOICE_UX_BANNER_DIR}/{filename}");
+    let path = repo_root.join(&relative_path);
+    if !path.is_file() {
+        warnings.push(format!(
+            "Voice-UX-Banner `{relative_path}` fehlt; Publish laeuft ohne diesen Banner"
+        ));
+        return None;
+    }
+    Some(VoiceUxBannerOutput {
+        filename: filename.to_string(),
+        relative_path,
+        present: true,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    fn write_voice_ux_banner(repo_root: &Path, filename: &str, bytes: &[u8]) {
+        let path = repo_root.join(format!("{VOICE_UX_BANNER_DIR}/{filename}"));
+        fs::create_dir_all(path.parent().expect("banner parent")).expect("mkdir banner parent");
+        fs::write(path, bytes).expect("write banner");
+    }
+
+    fn write_all_voice_ux_banners(repo_root: &Path, bytes: &[u8]) {
+        for filename in [
+            VOICE_UX_GUIDE_BANNER_FILENAME,
+            VOICE_UX_LFG_BANNER_FILENAME,
+            VOICE_UX_SPAWN_BANNER_FILENAME,
+            VOICE_UX_MANAGE_BANNER_FILENAME,
+        ] {
+            write_voice_ux_banner(repo_root, filename, bytes);
+        }
+    }
 
     #[test]
     fn voice_ux_baut_vier_messages_in_spec_reihenfolge() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_voice_ux_banners(temp.path(), b"banner");
         let output = build_voice_ux_publish_output(
+            temp.path(),
             &BTreeMap::new(),
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -701,6 +909,7 @@ mod tests {
             true,
         )
         .expect("output");
+        assert!(output.warnings.is_empty());
         assert_eq!(output.targets.len(), 2);
         for target in &output.targets {
             let keys: Vec<&str> = target
@@ -709,13 +918,40 @@ mod tests {
                 .map(|message| message.message_key.as_str())
                 .collect();
             assert_eq!(keys, vec!["guide", "lfg", "spawn", "manage"]);
+            let banners = [
+                VOICE_UX_GUIDE_BANNER_FILENAME,
+                VOICE_UX_LFG_BANNER_FILENAME,
+                VOICE_UX_SPAWN_BANNER_FILENAME,
+                VOICE_UX_MANAGE_BANNER_FILENAME,
+            ];
+            for (message, filename) in target.messages.iter().zip(banners) {
+                assert_eq!(
+                    message
+                        .banner
+                        .as_ref()
+                        .map(|banner| banner.filename.as_str()),
+                    Some(filename)
+                );
+                assert_eq!(message.payload.attachments.len(), 1);
+                assert_eq!(message.payload.attachments[0].filename, filename);
+                assert_eq!(message.payload.attachments[0].id, 0);
+                assert_eq!(message.payload.components[0]["type"], json!(12));
+                assert_eq!(
+                    message.payload.components[0]["items"][0]["media"]["url"],
+                    format!("attachment://{filename}")
+                );
+                assert_eq!(
+                    message.payload.components[1]["accent_color"],
+                    json!(VOICE_UX_ACCENT_GOLD)
+                );
+            }
             assert!(target.messages.iter().all(|message| message
                 .payload
                 .allowed_mentions
                 .parse
                 .is_empty()));
             assert_eq!(
-                target.messages[0].payload.components[0]["components"][0]["content"],
+                target.messages[0].payload.components[1]["components"][0]["content"],
                 format!(
                     "{}\n{}",
                     dl_voice::router::VOICE_GUIDE_TITLE,
@@ -728,11 +964,14 @@ mod tests {
 
     #[test]
     fn voice_ux_doppel_apply_wird_planned_no_op() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_voice_ux_banners(temp.path(), b"banner");
         let ids = BTreeMap::from([
             (VOICE_UX_CHANNEL_ID, vec![1, 2, 3, 4]),
             (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, vec![5, 6, 7, 8]),
         ]);
         let first = build_voice_ux_publish_output(
+            temp.path(),
             &ids,
             &BTreeMap::new(),
             &BTreeMap::new(),
@@ -757,11 +996,12 @@ mod tests {
             (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, Some(hash)),
         ]);
         let same = build_voice_ux_publish_output(
+            temp.path(),
             &ids,
             &formats,
             &hashes,
             Some(9),
-            first.forum_post.stored_payload_hash.as_deref(),
+            Some(&first.forum_post.payload_hash),
             true,
         )
         .expect("same");
@@ -772,8 +1012,44 @@ mod tests {
     }
 
     #[test]
+    fn voice_ux_payload_hash_noop_und_banner_bytes_aendern_hash() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        write_all_voice_ux_banners(temp.path(), b"banner-one");
+        let ids = BTreeMap::from([(VOICE_UX_CHANNEL_ID, vec![1, 2, 3, 4])]);
+        let formats = BTreeMap::from([(
+            VOICE_UX_CHANNEL_ID,
+            Some(VOICE_UX_PAYLOAD_FORMAT.to_string()),
+        )]);
+        let first = build_voice_ux_publish_output(
+            temp.path(),
+            &ids,
+            &formats,
+            &BTreeMap::new(),
+            None,
+            None,
+            true,
+        )
+        .expect("first");
+        let first_hash = first.targets[0].payload_hash.clone();
+        let hashes = BTreeMap::from([(VOICE_UX_CHANNEL_ID, Some(first_hash.clone()))]);
+        let same =
+            build_voice_ux_publish_output(temp.path(), &ids, &formats, &hashes, None, None, true)
+                .expect("same");
+        assert_eq!(same.targets[0].messages[0].action, "planned_no_op");
+        assert!(voice_ux_target_payload_is_unchanged(&same.targets[0]));
+
+        write_voice_ux_banner(temp.path(), VOICE_UX_LFG_BANNER_FILENAME, b"banner-two");
+        let changed =
+            build_voice_ux_publish_output(temp.path(), &ids, &formats, &hashes, None, None, true)
+                .expect("changed");
+        assert_eq!(changed.targets[0].messages[0].action, "planned_edit");
+        assert_ne!(changed.targets[0].payload_hash, first_hash);
+    }
+
+    #[test]
     fn voice_ux_legacy_cleanup_prueft_autor_und_custom_id() {
         let bot_id = 42;
+        assert_eq!(VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID, 1_522_795_818_803_789_904);
         let router = VoiceUxLegacyMessage {
             channel_id: VOICE_UX_CHANNEL_ID,
             message_id: VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID,
@@ -793,5 +1069,13 @@ mod tests {
             custom_ids: vec![dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID.to_string()],
         };
         assert!(is_voice_ux_legacy_cleanup_candidate(&lfg, bot_id));
+        let lfg_watch_only = VoiceUxLegacyMessage {
+            custom_ids: vec![dl_voice::lfg_panel::LFG_WATCH_START_CUSTOM_ID.to_string()],
+            ..lfg
+        };
+        assert!(is_voice_ux_legacy_cleanup_candidate(
+            &lfg_watch_only,
+            bot_id
+        ));
     }
 }
