@@ -455,6 +455,8 @@ struct DiscordMessage {
     #[serde(default)]
     flags: u64,
     #[serde(default)]
+    pinned: bool,
+    #[serde(default)]
     embeds: Vec<DiscordMessageEmbed>,
     #[serde(default)]
     components: Vec<Value>,
@@ -4531,8 +4533,26 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<Option<u64>> {
         let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
         let payload_value = serde_json::to_value(&message.payload)?;
+        let attachments = message
+            .payload
+            .attachments
+            .iter()
+            .map(|attachment| {
+                (
+                    attachment.id,
+                    attachment.filename.clone(),
+                    attachment.relative_path.clone(),
+                )
+            })
+            .collect();
         let response = self
-            .send_components_v2_message_payload("Voice-UX", "PATCH", url, payload_value, Vec::new())
+            .send_components_v2_message_payload(
+                "Voice-UX",
+                "PATCH",
+                url,
+                payload_value,
+                attachments,
+            )
             .await?;
         if response.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -4549,8 +4569,20 @@ impl ServerSyncOps for ServerSyncService {
     ) -> ServerSyncResult<u64> {
         let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
         let payload_value = serde_json::to_value(&message.payload)?;
+        let attachments = message
+            .payload
+            .attachments
+            .iter()
+            .map(|attachment| {
+                (
+                    attachment.id,
+                    attachment.filename.clone(),
+                    attachment.relative_path.clone(),
+                )
+            })
+            .collect();
         let response = self
-            .send_components_v2_message_payload("Voice-UX", "POST", url, payload_value, Vec::new())
+            .send_components_v2_message_payload("Voice-UX", "POST", url, payload_value, attachments)
             .await?;
         let written: DiscordMessageWriteResponse =
             discord_regelwerk_json_response(response, "POST")?;
@@ -4670,6 +4702,20 @@ impl ServerSyncOps for ServerSyncService {
         channel_id: u64,
         message_id: u64,
     ) -> Result<(), String> {
+        let message_url =
+            self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
+        let response = self
+            .discord_get_response(message_url)
+            .await
+            .map_err(|err| err.to_string())?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Err("Message wurde beim Pin-Check nicht gefunden".to_string());
+        }
+        let message: DiscordMessage =
+            discord_regelwerk_json_response(response, "GET").map_err(|err| err.to_string())?;
+        if message.pinned {
+            return Ok(());
+        }
         let url = self.discord_api_url(&format!("/channels/{channel_id}/pins/{message_id}"));
         let response = discord_regelwerk_send_with_retry(
             || {
@@ -4866,6 +4912,7 @@ impl ServerSyncOps for ServerSyncService {
         let body = json!({
             "name": forum.title,
             "auto_archive_duration": 1440,
+            "applied_tags": [voice_ux_publish::VOICE_UX_LFG_FORUM_INFO_TAG_ID],
             "message": forum.payload,
         });
         let response = discord_regelwerk_send_with_retry(
@@ -4976,6 +5023,7 @@ impl ServerSyncOps for ServerSyncService {
             .load_serversync_kv(voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY)
             .await?;
         let mut output = voice_ux_publish::build_voice_ux_publish_output(
+            &self.rang_guide_repo_root,
             &stored_message_ids,
             &stored_payload_formats,
             &stored_payload_hashes,
@@ -8126,7 +8174,10 @@ mod tests {
         post_responses: Mutex<VecDeque<FakePostResponse>>,
         next_post_id: Mutex<u64>,
         post_calls: Mutex<Vec<u64>>,
+        post_bodies: Mutex<Vec<(u64, Value)>>,
         patch_calls: Mutex<Vec<u64>>,
+        pin_calls: Mutex<Vec<(u64, u64)>>,
+        patched_channels: Mutex<Vec<(u64, Value)>>,
         delete_calls: Mutex<Vec<u64>>,
     }
 
@@ -8499,7 +8550,10 @@ mod tests {
             post_responses: Mutex::new(post_responses.into()),
             next_post_id: Mutex::new(90_000),
             post_calls: Mutex::new(Vec::new()),
+            post_bodies: Mutex::new(Vec::new()),
             patch_calls: Mutex::new(Vec::new()),
+            pin_calls: Mutex::new(Vec::new()),
+            patched_channels: Mutex::new(Vec::new()),
             delete_calls: Mutex::new(Vec::new()),
         });
         let app = Router::new()
@@ -8590,13 +8644,19 @@ mod tests {
     async fn fake_discord_post_message(
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath(channel_id): AxumPath<u64>,
-        _body: Bytes,
+        body: Bytes,
     ) -> Response {
         state
             .post_calls
             .lock()
             .expect("post calls")
             .push(channel_id);
+        let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        state
+            .post_bodies
+            .lock()
+            .expect("post bodies")
+            .push((channel_id, parsed_body.clone()));
         let response = state
             .post_responses
             .lock()
@@ -8609,6 +8669,24 @@ mod tests {
             FakePostResponse::Ok(id)
         }) {
             FakePostResponse::Ok(message_id) => {
+                state.messages.lock().expect("messages").insert(
+                    message_id,
+                    json!({
+                        "id": message_id.to_string(),
+                        "author": {"id": state.bot_user_id.to_string()},
+                        "content": "",
+                        "flags": parsed_body
+                            .get("flags")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG),
+                        "pinned": false,
+                        "components": parsed_body
+                            .get("components")
+                            .cloned()
+                            .unwrap_or_else(|| json!([])),
+                        "embeds": [],
+                    }),
+                );
                 Json(json!({"id": message_id.to_string()})).into_response()
             }
             FakePostResponse::Status(status) => {
@@ -8620,13 +8698,19 @@ mod tests {
     async fn fake_discord_create_thread(
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath(channel_id): AxumPath<u64>,
-        _body: Bytes,
+        body: Bytes,
     ) -> Response {
         state
             .post_calls
             .lock()
             .expect("post calls")
             .push(channel_id);
+        let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        state
+            .post_bodies
+            .lock()
+            .expect("post bodies")
+            .push((channel_id, parsed_body));
         let response = state
             .post_responses
             .lock()
@@ -8691,11 +8775,39 @@ mod tests {
         }
     }
 
-    async fn fake_discord_pin_message() -> StatusCode {
-        StatusCode::NO_CONTENT
+    async fn fake_discord_pin_message(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath((channel_id, message_id)): AxumPath<(u64, u64)>,
+    ) -> StatusCode {
+        state
+            .pin_calls
+            .lock()
+            .expect("pin calls")
+            .push((channel_id, message_id));
+        if let Some(message) = state
+            .messages
+            .lock()
+            .expect("messages")
+            .get_mut(&message_id)
+        {
+            message["pinned"] = json!(true);
+            StatusCode::NO_CONTENT
+        } else {
+            StatusCode::NOT_FOUND
+        }
     }
 
-    async fn fake_discord_patch_channel(AxumPath(channel_id): AxumPath<u64>) -> Json<Value> {
+    async fn fake_discord_patch_channel(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath(channel_id): AxumPath<u64>,
+        body: Bytes,
+    ) -> Json<Value> {
+        let parsed_body = serde_json::from_slice::<Value>(&body).unwrap_or(Value::Null);
+        state
+            .patched_channels
+            .lock()
+            .expect("patched channels")
+            .push((channel_id, parsed_body));
         Json(json!({"id": channel_id.to_string()}))
     }
 
@@ -8722,6 +8834,7 @@ mod tests {
             "author": {"id": author_id.to_string()},
             "content": content,
             "flags": flags,
+            "pinned": false,
             "components": components,
             "embeds": embeds,
         })
@@ -8812,6 +8925,24 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         std::fs::create_dir_all(banner_path.parent().expect("banner parent"))
             .expect("mkdir banner parent");
         std::fs::write(banner_path, b"faq-banner").expect("write banner");
+    }
+
+    fn write_test_voice_ux_repo(repo_root: &std::path::Path, bytes: &[u8]) {
+        for filename in [
+            voice_ux_publish::VOICE_UX_GUIDE_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_LFG_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_SPAWN_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_MANAGE_BANNER_FILENAME,
+        ] {
+            let banner_path = repo_root.join(format!(
+                "{}/{}",
+                voice_ux_publish::VOICE_UX_BANNER_DIR,
+                filename
+            ));
+            std::fs::create_dir_all(banner_path.parent().expect("banner parent"))
+                .expect("mkdir banner parent");
+            std::fs::write(banner_path, bytes).expect("write voice ux banner");
+        }
     }
 
     async fn set_serversync_kv(pool: &PgPool, key: &str, value: &str) {
@@ -9232,6 +9363,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     fn mock_router_output(dry_run: bool) -> RouterApplyOutput {
+        let repo = tempfile::tempdir().expect("voice ux repo");
+        write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
         let ids = BTreeMap::from([
             (
                 voice_ux_publish::VOICE_UX_CHANNEL_ID,
@@ -9253,6 +9386,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ),
         ]);
         let mut output = voice_ux_publish::build_voice_ux_publish_output(
+            repo.path(),
             &ids,
             &formats,
             &BTreeMap::new(),
@@ -11444,6 +11578,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .await
             .expect("test_pool");
         let repo = tempfile::tempdir().expect("repo");
+        write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
         dl_central_db::kv::set(
             db.pool(),
             dl_voice::router::ROUTER_PANEL_KV_NS,
@@ -11591,6 +11726,164 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID,
             ]
         );
+        assert_eq!(
+            output.targets[0].pinned_message_ids,
+            vec![9201, 9202, 9203, 9204]
+        );
+        assert_eq!(
+            output.targets[1].pinned_message_ids,
+            vec![9205, 9206, 9207, 9208]
+        );
+        assert_eq!(
+            fake.state.pin_calls.lock().expect("pin calls").as_slice(),
+            &[
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9201),
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9202),
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9203),
+                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9204),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9205),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9206),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9207),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9208),
+            ]
+        );
+        let post_bodies = fake.state.post_bodies.lock().expect("post bodies");
+        let forum_create = post_bodies
+            .iter()
+            .find(|(channel_id, _)| *channel_id == voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID)
+            .expect("forum create body");
+        assert_eq!(
+            forum_create.1["applied_tags"],
+            json!([voice_ux_publish::VOICE_UX_LFG_FORUM_INFO_TAG_ID])
+        );
+        assert_eq!(
+            fake.state
+                .patched_channels
+                .lock()
+                .expect("patched channels")
+                .as_slice(),
+            &[(9209, json!({"pinned": true}))]
+        );
+    }
+
+    #[tokio::test]
+    async fn service_voice_ux_noop_zieht_fehlende_router_vc_pins_nach() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
+        let ids = BTreeMap::from([
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                vec![9301, 9302, 9303, 9304],
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                vec![9311, 9312, 9313, 9314],
+            ),
+        ]);
+        let formats = BTreeMap::from([
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+        ]);
+        let planned = voice_ux_publish::build_voice_ux_publish_output(
+            repo.path(),
+            &ids,
+            &formats,
+            &BTreeMap::new(),
+            Some(9401),
+            None,
+            true,
+        )
+        .expect("planned");
+        for target in &planned.targets {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(target.channel_id);
+            for (index, message_id) in target.stored_message_ids.iter().copied().enumerate() {
+                set_serversync_kv(
+                    db.pool(),
+                    &format!("{prefix}{index}"),
+                    &message_id.to_string(),
+                )
+                .await;
+            }
+            set_serversync_kv(
+                db.pool(),
+                &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
+                voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            )
+            .await;
+            set_serversync_kv(
+                db.pool(),
+                &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
+                &target.payload_hash,
+            )
+            .await;
+        }
+        set_serversync_kv(
+            db.pool(),
+            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+            "9401",
+        )
+        .await;
+        set_serversync_kv(
+            db.pool(),
+            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+            &planned.forum_post.payload_hash,
+        )
+        .await;
+
+        let mut messages = Vec::new();
+        for target in &planned.targets {
+            for message in &target.messages {
+                let mut fake = fake_discord_message(
+                    message.message_id.expect("message id"),
+                    42,
+                    voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG,
+                    message.payload.components.clone(),
+                    Vec::new(),
+                );
+                fake["pinned"] = json!(target.channel_id == voice_ux_publish::VOICE_UX_CHANNEL_ID);
+                messages.push(fake);
+            }
+        }
+        let fake = spawn_fake_discord(42, messages, Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.router_apply(true).await.expect("apply");
+
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+        assert!(fake
+            .state
+            .patch_calls
+            .lock()
+            .expect("patch calls")
+            .is_empty());
+        assert_eq!(output.targets[0].messages[0].action, "no_op");
+        assert_eq!(output.targets[1].messages[0].action, "no_op");
+        assert_eq!(
+            fake.state.pin_calls.lock().expect("pin calls").as_slice(),
+            &[
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9311),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9312),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9313),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9314),
+            ]
+        );
+        assert_eq!(
+            output.targets[1].pinned_message_ids,
+            vec![9311, 9312, 9313, 9314]
+        );
     }
 
     #[tokio::test]
@@ -11649,7 +11942,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             messages[0]["payload"]["flags"],
             voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG
         );
-        for message in messages {
+        for (message, filename) in messages.iter().zip([
+            voice_ux_publish::VOICE_UX_GUIDE_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_LFG_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_SPAWN_BANNER_FILENAME,
+            voice_ux_publish::VOICE_UX_MANAGE_BANNER_FILENAME,
+        ]) {
             assert_eq!(
                 message["payload"]["allowed_mentions"]["parse"]
                     .as_array()
@@ -11657,9 +11955,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     .len(),
                 0
             );
+            assert_eq!(message["payload"]["attachments"][0]["filename"], filename);
+            assert_eq!(message["payload"]["components"][0]["type"], json!(12));
+            assert_eq!(
+                message["payload"]["components"][0]["items"][0]["media"]["url"],
+                format!("attachment://{filename}")
+            );
+            assert_eq!(
+                message["payload"]["components"][1]["accent_color"],
+                json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
+            );
         }
         assert_eq!(
-            messages[0]["payload"]["components"][0]["components"][0]["content"],
+            messages[0]["payload"]["components"][1]["components"][0]["content"],
             format!(
                 "{}\n{}",
                 dl_voice::router::VOICE_GUIDE_TITLE,
@@ -11667,19 +11975,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
         );
         assert_eq!(
-            messages[0]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            messages[0]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
             "voice:guide:detail"
         );
         assert_eq!(
-            messages[1]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            messages[1]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
             dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
         );
         assert_eq!(
-            messages[2]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            messages[2]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
             "router_spawn_casual"
         );
         assert_eq!(
-            messages[3]["payload"]["components"][0]["components"][2]["components"][4]["custom_id"],
+            messages[3]["payload"]["components"][1]["components"][2]["components"][4]["custom_id"],
             "tv_prefs_open"
         );
         assert_eq!(

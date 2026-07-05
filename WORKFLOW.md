@@ -1,6 +1,9 @@
 # W3.4c Sprachkanal-UX (2026-07-05)
 
 ## Fortschritt
+- Rework-Worker gestartet fuer Voice-UX Banner+ForumTag+Cleanup auf Branch `feat/support-regelwerk-v2`; Vorgabe: kein Commit/Push/Deploy/Discord-Post.
+- Rework umgesetzt: Voice-UX-Panels nutzen Banner-MediaGallery vor Gold-Container, Payload-Hash inkl. Banner-Bytes, Multipart-Attachments, korrektes altes LFG-Panel `1522795818803789904`, Forum-Info-Tag und Pin-Nachziehen.
+- Neue Banner generiert: `divider-mitspieler-finden.png`, `divider-lane-erstellen.png`; bestehend genutzt: `router-hero.png`, `divider-lane-verwalten.png`.
 - Implementierungsworker gestartet auf Branch `feat/support-regelwerk-v2`; Vorgabe: kein Commit/Push/Deploy/Discord-Post, andere Repo-Doku ignorieren.
 - Maßgebliche Spec vollständig gelesen: `docs/onboarding-redesign/2026-07-05-sprachkanal-ux-spec.md`.
 - Arbeitsbaum vor Start geprüft: untracked ist die Spec-Datei; bestehende Änderungen aus vorherigen Arbeiten bleiben unangetastet.
@@ -9,6 +12,14 @@
 - Alter `/serversync/lfg-panel-apply`-Servicepfad blockiert, damit das alte LFG-Einzelpanel nicht manuell wiederhergestellt wird.
 
 ## Verifikation aktuell
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot voice_ux -- --nocapture` (6 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot router_apply_http_ist_dry_run_default_und_liefert_v2_payload -- --nocapture` (1 passed).
+- Gruen: `cargo fmt --all`.
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test --workspace` (831 gelistet; 796 passed, 35 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
 - Gruen: `SQLX_OFFLINE=true cargo check -p dl-voice -p dl-bot --bins`.
 - Gruen: `SQLX_OFFLINE=true cargo test -p dl-voice -p dl-bot --no-run`.
 - Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice tempvoice::interface::tests::prefs_editor -- --nocapture` (5 passed).
