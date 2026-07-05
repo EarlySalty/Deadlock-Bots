@@ -11926,21 +11926,26 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     .len(),
                 0
             );
+            let combined_container = &message["payload"]["components"][0];
+            assert_eq!(combined_container["type"], json!(17));
+            assert_eq!(
+                combined_container["accent_color"],
+                json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
+            );
+            let galleries: Vec<&serde_json::Value> = combined_container["components"]
+                .as_array()
+                .expect("container children")
+                .iter()
+                .filter(|child| child["type"] == json!(12))
+                .collect();
+            assert_eq!(galleries.len(), 2);
             for (section, filename) in filenames.iter().enumerate() {
                 assert_eq!(
                     message["payload"]["attachments"][section]["filename"],
                     *filename
                 );
-                let section_container = &message["payload"]["components"][section];
-                assert_eq!(section_container["type"], json!(17));
                 assert_eq!(
-                    section_container["accent_color"],
-                    json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
-                );
-                let gallery = &section_container["components"][0];
-                assert_eq!(gallery["type"], json!(12));
-                assert_eq!(
-                    gallery["items"][0]["media"]["url"],
+                    galleries[section]["items"][0]["media"]["url"],
                     format!("attachment://{filename}")
                 );
             }
@@ -11958,7 +11963,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "voice:guide:detail"
         );
         assert_eq!(
-            messages[0]["payload"]["components"][1]["components"][2]["components"][0]["custom_id"],
+            messages[0]["payload"]["components"][0]["components"][6]["components"][0]["custom_id"],
             dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
         );
         assert_eq!(
@@ -11966,7 +11971,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "router_spawn_casual"
         );
         assert_eq!(
-            messages[1]["payload"]["components"][1]["components"][3]["components"][4]["custom_id"],
+            messages[1]["payload"]["components"][0]["components"][8]["components"][4]["custom_id"],
             "tv_prefs_open"
         );
         assert_eq!(
