@@ -1,3 +1,11 @@
+## #213 — Twitch-Live-Posts im neuen Layout möglich
+
+**Ausgangslage:** Die Ankündigungen, wenn jemand auf Twitch live geht, steckten im alten, starren Nachrichten-Format fest.
+
+**Was wurde geändert:** Der Bot kann solche Posts jetzt im neuen, aufgeräumten Discord-Layout ausliefern. Alle anderen Bot-Nachrichten — Moderation, Hinweise, DMs — bleiben genau wie vorher.
+
+**Wie es jetzt läuft:** Twitch-Live- und Offline-Posts erscheinen im neuen Look; der Rest ist unverändert.
+
 ## #212 — Moderation: keine 100%-Warnung mehr auf ganz normale Nachrichten
 
 **Ausgangslage:** Wer in kurzer Zeit in zwei Kanälen was gepostet hat — etwa ein Bild in team-1 und eine Nachricht in team-2 — konnte einen Moderationsfall auslösen, der dann auch noch stur „Verifikation 100%" behauptete. Dabei hatte gar keine KI den Inhalt angeschaut. Das traf völlig harmlose, alteingesessene Accounts.

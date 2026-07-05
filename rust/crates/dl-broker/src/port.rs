@@ -60,6 +60,8 @@ pub struct RichMessage {
     pub content: Option<String>,
     /// Roh-Embed-Dict (Discord-Embed-Format) — Tiefenvalidierung macht Discord.
     pub embed: Value,
+    /// Fertiger Discord-Components-V2-Array (top-level), ohne Broker-Button.
+    pub components: Option<Value>,
     pub allowed_user_ids: Vec<u64>,
     pub allowed_role_ids: Vec<u64>,
     pub view_spec: Option<ViewSpec>,

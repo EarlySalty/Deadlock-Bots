@@ -72,6 +72,15 @@ pub fn embed_dict(payload: &Map<String, Value>) -> ParseResult<Map<String, Value
     }
 }
 
+/// Fertiger Discord-Components-V2-Array; Inhalte bleiben Broker-seitig opaque.
+pub fn components(payload: &Map<String, Value>) -> ParseResult<Option<Value>> {
+    match payload.get("components") {
+        None | Some(Value::Null) => Ok(None),
+        Some(value @ Value::Array(_)) => Ok(Some(value.clone())),
+        Some(_) => Err("components must be a JSON array".to_string()),
+    }
+}
+
 /// `_parse_int_id_list`: Liste positiver Ints (oder Ziffern-Strings), dedupliziert.
 pub fn id_list(payload: &Map<String, Value>, key: &str) -> ParseResult<Vec<u64>> {
     let raw = match payload.get(key) {
@@ -282,6 +291,18 @@ mod tests {
         assert_eq!(id_list(&obj(json!({})), "ids"), Ok(vec![]));
         assert!(id_list(&obj(json!({"ids": [0]})), "ids").is_err());
         assert!(id_list(&obj(json!({"ids": "nope"})), "ids").is_err());
+    }
+
+    #[test]
+    fn components_bleibt_opaque_aber_muss_array_sein() {
+        let v2 = json!([{"type": 17, "components": [{"type": 10, "content": "x"}]}]);
+        assert_eq!(
+            components(&obj(json!({"components": v2.clone()}))),
+            Ok(Some(v2))
+        );
+        assert_eq!(components(&obj(json!({}))), Ok(None));
+        assert_eq!(components(&obj(json!({"components": null}))), Ok(None));
+        assert!(components(&obj(json!({"components": {"type": 17}}))).is_err());
     }
 
     #[test]
