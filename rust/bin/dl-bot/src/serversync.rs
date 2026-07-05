@@ -5040,7 +5040,10 @@ impl ServerSyncOps for ServerSyncService {
                 .fetch_voice_ux_v2_message_ids(channel_id, bot_user_id)
                 .await?;
             let expected = output.targets[target_index].messages.len();
-            if output.targets[target_index].stored_message_ids.len() != expected {
+            // Adoption nur bei komplett verlorenem KV; ein Format-/Layoutwechsel mit
+            // intaktem KV (Länge ≠ erwartet) läuft über den Repost-Pfad, der die
+            // gespeicherten alten Messages selbst abräumt.
+            if output.targets[target_index].stored_message_ids.is_empty() {
                 match discovered.len() {
                     0 => {}
                     count if count == expected => {
@@ -9366,13 +9369,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let repo = tempfile::tempdir().expect("voice ux repo");
         write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
         let ids = BTreeMap::from([
-            (
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                vec![8001, 8002, 8003, 8004],
-            ),
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![8001, 8002]),
             (
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                vec![8011, 8012, 8013, 8014],
+                vec![8011, 8012],
             ),
         ]);
         let formats = BTreeMap::from([
@@ -11637,15 +11637,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let output = service.router_apply(true).await.expect("apply");
 
         assert_eq!(output.targets.len(), 2);
-        assert_eq!(
-            output.targets[0].posted_message_ids,
-            vec![9201, 9202, 9203, 9204]
-        );
-        assert_eq!(
-            output.targets[1].posted_message_ids,
-            vec![9205, 9206, 9207, 9208]
-        );
-        assert_eq!(output.forum_post.thread_id, Some(9209));
+        assert_eq!(output.targets[0].posted_message_ids, vec![9201, 9202]);
+        assert_eq!(output.targets[1].posted_message_ids, vec![9203, 9204]);
+        assert_eq!(output.forum_post.thread_id, Some(9205));
         assert!(output.forum_post.pinned);
         assert_eq!(
             output.deleted_legacy_message_ids,
@@ -11655,13 +11649,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             ]
         );
         for (channel_id, expected_ids) in [
-            (
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                vec![9201_u64, 9202, 9203, 9204],
-            ),
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9201_u64, 9202]),
             (
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                vec![9205_u64, 9206, 9207, 9208],
+                vec![9203_u64, 9204],
             ),
         ] {
             let prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
@@ -11694,7 +11685,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
             .await
             .as_deref(),
-            Some("9209")
+            Some("9205")
         );
         assert!(dl_central_db::kv::get(
             db.pool(),
@@ -11717,34 +11708,20 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             &[
                 voice_ux_publish::VOICE_UX_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
                 voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID,
             ]
         );
-        assert_eq!(
-            output.targets[0].pinned_message_ids,
-            vec![9201, 9202, 9203, 9204]
-        );
-        assert_eq!(
-            output.targets[1].pinned_message_ids,
-            vec![9205, 9206, 9207, 9208]
-        );
+        assert_eq!(output.targets[0].pinned_message_ids, vec![9201, 9202]);
+        assert_eq!(output.targets[1].pinned_message_ids, vec![9203, 9204]);
         assert_eq!(
             fake.state.pin_calls.lock().expect("pin calls").as_slice(),
             &[
                 (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9201),
                 (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9202),
-                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9203),
-                (voice_ux_publish::VOICE_UX_CHANNEL_ID, 9204),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9205),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9206),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9207),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9208),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9203),
+                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9204),
             ]
         );
         let post_bodies = fake.state.post_bodies.lock().expect("post bodies");
@@ -11762,7 +11739,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 .lock()
                 .expect("patched channels")
                 .as_slice(),
-            &[(9209, json!({"pinned": true}))]
+            &[(9205, json!({"pinned": true}))]
         );
     }
 
@@ -11774,13 +11751,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let repo = tempfile::tempdir().expect("repo");
         write_test_voice_ux_repo(repo.path(), b"voice-ux-banner");
         let ids = BTreeMap::from([
-            (
-                voice_ux_publish::VOICE_UX_CHANNEL_ID,
-                vec![9301, 9302, 9303, 9304],
-            ),
+            (voice_ux_publish::VOICE_UX_CHANNEL_ID, vec![9301, 9302]),
             (
                 voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
-                vec![9311, 9312, 9313, 9314],
+                vec![9311, 9312],
             ),
         ]);
         let formats = BTreeMap::from([
@@ -11876,14 +11850,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             &[
                 (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9311),
                 (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9312),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9313),
-                (voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID, 9314),
             ]
         );
-        assert_eq!(
-            output.targets[1].pinned_message_ids,
-            vec![9311, 9312, 9313, 9314]
-        );
+        assert_eq!(output.targets[1].pinned_message_ids, vec![9311, 9312]);
     }
 
     #[tokio::test]
@@ -11930,11 +11899,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             voice_ux_publish::VOICE_UX_CHANNEL_ID
         );
         let messages = first_target["messages"].as_array().expect("messages");
-        assert_eq!(messages.len(), 4);
-        assert_eq!(messages[0]["message_key"], "guide");
-        assert_eq!(messages[1]["message_key"], "lfg");
-        assert_eq!(messages[2]["message_key"], "spawn");
-        assert_eq!(messages[3]["message_key"], "manage");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0]["message_key"], "guide_lfg");
+        assert_eq!(messages[1]["message_key"], "spawn_manage");
         assert!(messages
             .iter()
             .all(|message| message["action"] == "planned_edit"));
@@ -11942,11 +11909,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             messages[0]["payload"]["flags"],
             voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG
         );
-        for (message, filename) in messages.iter().zip([
-            voice_ux_publish::VOICE_UX_GUIDE_BANNER_FILENAME,
-            voice_ux_publish::VOICE_UX_LFG_BANNER_FILENAME,
-            voice_ux_publish::VOICE_UX_SPAWN_BANNER_FILENAME,
-            voice_ux_publish::VOICE_UX_MANAGE_BANNER_FILENAME,
+        for (message, filenames) in messages.iter().zip([
+            [
+                voice_ux_publish::VOICE_UX_GUIDE_BANNER_FILENAME,
+                voice_ux_publish::VOICE_UX_LFG_BANNER_FILENAME,
+            ],
+            [
+                voice_ux_publish::VOICE_UX_SPAWN_BANNER_FILENAME,
+                voice_ux_publish::VOICE_UX_MANAGE_BANNER_FILENAME,
+            ],
         ]) {
             assert_eq!(
                 message["payload"]["allowed_mentions"]["parse"]
@@ -11955,16 +11926,22 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     .len(),
                 0
             );
-            assert_eq!(message["payload"]["attachments"][0]["filename"], filename);
-            assert_eq!(message["payload"]["components"][0]["type"], json!(12));
-            assert_eq!(
-                message["payload"]["components"][0]["items"][0]["media"]["url"],
-                format!("attachment://{filename}")
-            );
-            assert_eq!(
-                message["payload"]["components"][1]["accent_color"],
-                json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
-            );
+            for (section, filename) in filenames.iter().enumerate() {
+                assert_eq!(
+                    message["payload"]["attachments"][section]["filename"],
+                    *filename
+                );
+                let gallery = &message["payload"]["components"][section * 2];
+                assert_eq!(gallery["type"], json!(12));
+                assert_eq!(
+                    gallery["items"][0]["media"]["url"],
+                    format!("attachment://{filename}")
+                );
+                assert_eq!(
+                    message["payload"]["components"][section * 2 + 1]["accent_color"],
+                    json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
+                );
+            }
         }
         assert_eq!(
             messages[0]["payload"]["components"][1]["components"][0]["content"],
@@ -11979,15 +11956,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             "voice:guide:detail"
         );
         assert_eq!(
-            messages[1]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
+            messages[0]["payload"]["components"][3]["components"][1]["components"][0]["custom_id"],
             dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
         );
         assert_eq!(
-            messages[2]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
+            messages[1]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
             "router_spawn_casual"
         );
         assert_eq!(
-            messages[3]["payload"]["components"][1]["components"][2]["components"][4]["custom_id"],
+            messages[1]["payload"]["components"][3]["components"][2]["components"][4]["custom_id"],
             "tv_prefs_open"
         );
         assert_eq!(
