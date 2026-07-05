@@ -1,6 +1,10 @@
 # Regelwerk+Support V2 Publisher (2026-07-05)
 
 ## Fortschritt
+- Server-FAQ V2 Worker gestartet auf Branch `feat/support-regelwerk-v2`; Vorgabe: kein Commit/Push/Deploy/Discord-Post, andere Repo-Doku ignorieren.
+- Pflichtkontext gelesen: `WORKFLOW.md`, `regelwerk_publish.rs`, `support_publish.rs`, `dispatch.rs`, `main.rs`, finale FAQ-Texte aus `docs/onboarding-redesign/2026-07-05-server-faq-v2-texte.md`, Banner-Generator und ServerSync-Apply-Pfade.
+- Geplante Umsetzung: dritter statischer Components-V2-Publisher `faq_publish.rs`, `POST /serversync/faq-apply`, String-Select `faq:show`, ephemere V2-Antworten mit V1-Fallback, Runtime-TOML `assets/faq_texts.toml`, Banner `faq-hero.png`.
+- Umgesetzt im Arbeitsstand: `faq_publish.rs` mit finalen Defaults/Select/Handler/Tests, `assets/faq_texts.toml`, Banner-Generator-Eintrag plus generiertes `faq-hero.png`, ServerSync-Apply-Route und Main-Registry.
 - Implementierungsworker gestartet im Repo `/home/naniadm/Documents/Deadlock-Bots`; verbindliche Vorgabe aus Claude-Worker-Regeln: kein Commit/Push, Änderungen bleiben uncommitted.
 - Pflichtkontext `WORKFLOW.md`, `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs`, `rust/bin/dl-bot/src/serversync.rs`, `rust/bin/dl-bot/src/main.rs` und `rust/scripts/gen_welcome_banners.py` gelesen.
 - Relevantes Muster identifiziert: Rang-Guide nutzt Components V2, Payload-Hash inkl. Attachment-Bytes, KV-Metadaten, zweiphasigen Repost, Delete-Revalidierung per Author/V2/Marker, raw reqwest Multipart und `allowed_mentions.parse=[]`.
@@ -8,6 +12,14 @@
 - Sicherheit umgesetzt: Payload-Hash inkl. Banner-Bytes, Preview-No-op, zweiphasiger Repost mit Best-effort-Cleanup, gespeicherte Deletes nur nach Fetch-Revalidierung, alte Regelwerk-Bot-Message nur bei Author+Content-Prefix, Support-Owner-Message bleibt unangetastet.
 
 ## Verifikation aktuell
+- Gruen: `cd rust && cargo fmt --all`.
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot faq -- --nocapture` (11 passed).
+- Gruen: TOML-vs-Markdown-Check: `assets/faq_texts.toml` entspricht allen 15 Antworten aus `docs/onboarding-redesign/2026-07-05-server-faq-v2-texte.md`.
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `cd rust && SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test --workspace` (780 passed, 35 ignored).
+- Gruen: `cd rust && SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `git diff --check`.
+- Banner-Abmessungen per Pillow geprueft: `assets/welcome-banners/faq-hero.png` ist 1100x300.
 - Gruen: `cargo fmt --all`.
 - Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot regelwerk -- --nocapture` (14 passed).
 - Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot support -- --nocapture` (6 passed).
@@ -19,6 +31,7 @@
 - Banner-Abmessungen per Pillow geprueft: beide 1100x300.
 
 ## Rest-Risiken
+- Server-FAQ V2: Keine bekannten offenen Implementierungs-/Verifikationspunkte. Kein Commit/Push, kein Merge, kein Deploy, keine Discord-Posts.
 - Keine bekannten offenen Implementierungs-/Verifikationspunkte. Kein Commit/Push, kein Merge, kein Deploy, keine Discord-Posts.
 
 # LFG Dropdown Polish (2026-07-04)
