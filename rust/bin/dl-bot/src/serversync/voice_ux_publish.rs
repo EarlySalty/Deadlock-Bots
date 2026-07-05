@@ -9,7 +9,7 @@ pub const VOICE_UX_CHANNEL_ID: u64 = dl_voice::router::ROUTER_TEXT_CHANNEL_ID;
 pub const VOICE_UX_ROUTER_CHAT_CHANNEL_ID: u64 = dl_voice::router::ROUTER_VC_ID;
 pub const VOICE_UX_TARGET_CHANNEL_IDS: [u64; 2] =
     [VOICE_UX_CHANNEL_ID, VOICE_UX_ROUTER_CHAT_CHANNEL_ID];
-pub const VOICE_UX_PAYLOAD_FORMAT: &str = "1";
+pub const VOICE_UX_PAYLOAD_FORMAT: &str = "2";
 pub const VOICE_UX_MESSAGE_ID_PREFIX_BASE: &str = "voice_ux_message_id_";
 pub const VOICE_UX_PAYLOAD_FORMAT_KEY_BASE: &str = "voice_ux_payload_format_";
 pub const VOICE_UX_PAYLOAD_HASH_KEY_BASE: &str = "voice_ux_payload_hash_";
@@ -517,30 +517,40 @@ fn voice_ux_messages(repo_root: &Path, warnings: &mut Vec<String>) -> Vec<VoiceU
         optional_voice_ux_banner(repo_root, VOICE_UX_MANAGE_BANNER_FILENAME, warnings);
     vec![
         message(
-            "guide",
+            "guide_lfg",
             guide_banner.clone(),
-            guide_payload(guide_banner.as_ref()),
+            payload_with_banner_sections(vec![
+                (
+                    VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
+                    guide_banner.as_ref(),
+                    guide_container(),
+                ),
+                (
+                    VOICE_UX_COMPONENT_ID_LFG_MEDIA,
+                    lfg_banner.as_ref(),
+                    lfg_container(
+                        VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
+                        VOICE_UX_COMPONENT_ID_LFG_TEXT,
+                        VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
+                    ),
+                ),
+            ]),
         ),
         message(
-            "lfg",
-            lfg_banner.clone(),
-            lfg_payload(
-                VOICE_UX_COMPONENT_ID_LFG_MEDIA,
-                VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
-                VOICE_UX_COMPONENT_ID_LFG_TEXT,
-                VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
-                lfg_banner.as_ref(),
-            ),
-        ),
-        message(
-            "spawn",
+            "spawn_manage",
             spawn_banner.clone(),
-            spawn_payload(spawn_banner.as_ref()),
-        ),
-        message(
-            "manage",
-            manage_banner.clone(),
-            manage_payload(manage_banner.as_ref()),
+            payload_with_banner_sections(vec![
+                (
+                    VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
+                    spawn_banner.as_ref(),
+                    spawn_container(),
+                ),
+                (
+                    VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
+                    manage_banner.as_ref(),
+                    manage_container(),
+                ),
+            ]),
         ),
     ]
 }
@@ -571,40 +581,36 @@ fn message(
     }
 }
 
-fn guide_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
-    payload_with_optional_banner(
-        VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
-        banner,
-        container(
-            VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
-            vec![
-                text_display(
-                    VOICE_UX_COMPONENT_ID_GUIDE_TEXT,
-                    format!(
-                        "{}\n{}",
-                        dl_voice::router::VOICE_GUIDE_TITLE,
-                        dl_voice::router::VOICE_GUIDE_BODY
+fn guide_container() -> Value {
+    container(
+        VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
+        vec![
+            text_display(
+                VOICE_UX_COMPONENT_ID_GUIDE_TEXT,
+                format!(
+                    "{}\n{}",
+                    dl_voice::router::VOICE_GUIDE_TITLE,
+                    dl_voice::router::VOICE_GUIDE_BODY
+                ),
+            ),
+            action_row(
+                VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
+                vec![
+                    button_with_id(
+                        VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
+                        dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
+                        1,
+                        "voice:guide:detail",
                     ),
-                ),
-                action_row(
-                    VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
-                    vec![
-                        button_with_id(
-                            VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
-                            dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
-                            1,
-                            "voice:guide:detail",
-                        ),
-                        button_with_id(
-                            VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
-                            dl_voice::router::VOICE_PREFS_BUTTON,
-                            2,
-                            "tv_prefs_open",
-                        ),
-                    ],
-                ),
-            ],
-        ),
+                    button_with_id(
+                        VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
+                        dl_voice::router::VOICE_PREFS_BUTTON,
+                        2,
+                        "tv_prefs_open",
+                    ),
+                ],
+            ),
+        ],
     )
 }
 
@@ -618,142 +624,156 @@ fn lfg_payload(
     payload_with_optional_banner(
         media_id,
         banner,
-        container(
-            container_id,
-            vec![
-                text_display(text_id, dl_voice::lfg_panel::LFG_PANEL_BODY.to_string()),
-                action_row(
-                    row_id,
-                    vec![
-                        emoji_button(
-                            dl_voice::lfg_panel::LFG_PANEL_BUTTON,
-                            1,
-                            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
-                            dl_voice::lfg_panel::LFG_EMOJI_SEARCH,
-                        ),
-                        button(
-                            dl_voice::lfg_panel::LFG_WATCH_PANEL_BUTTON,
-                            2,
-                            dl_voice::lfg_panel::LFG_WATCH_START_CUSTOM_ID,
-                        ),
-                    ],
-                ),
-            ],
-        ),
+        lfg_container(container_id, text_id, row_id),
     )
 }
 
-fn spawn_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
-    payload_with_optional_banner(
-        VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
-        banner,
-        container(
-            VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
-            vec![
-                text_display(
-                    VOICE_UX_COMPONENT_ID_SPAWN_TEXT,
-                    "**Lane erstellen**\nRanked = verifizierter Rang".to_string(),
-                ),
-                action_row(
-                    VOICE_UX_COMPONENT_ID_SPAWN_ACTION_ROW,
-                    dl_voice::router::router_modes()
-                        .iter()
-                        .map(|mode| {
-                            emoji_button(
-                                mode.label,
-                                mode.style,
-                                &format!("router_spawn_{}", mode.id),
-                                mode.emoji,
-                            )
-                        })
-                        .collect(),
-                ),
-                text_display(
-                    VOICE_UX_COMPONENT_ID_SPAWN_HINT,
-                    "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang"
-                        .to_string(),
-                ),
-            ],
-        ),
+fn lfg_container(container_id: u64, text_id: u64, row_id: u64) -> Value {
+    container(
+        container_id,
+        vec![
+            text_display(text_id, dl_voice::lfg_panel::LFG_PANEL_BODY.to_string()),
+            action_row(
+                row_id,
+                vec![
+                    emoji_button(
+                        dl_voice::lfg_panel::LFG_PANEL_BUTTON,
+                        1,
+                        dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
+                        dl_voice::lfg_panel::LFG_EMOJI_SEARCH,
+                    ),
+                    button(
+                        dl_voice::lfg_panel::LFG_WATCH_PANEL_BUTTON,
+                        2,
+                        dl_voice::lfg_panel::LFG_WATCH_START_CUSTOM_ID,
+                    ),
+                ],
+            ),
+        ],
     )
 }
 
-fn manage_payload(banner: Option<&VoiceUxBannerOutput>) -> VoiceUxMessagePayload {
-    payload_with_optional_banner(
-        VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
-        banner,
-        container(
-            VOICE_UX_COMPONENT_ID_MANAGE_CONTAINER,
-            vec![
-                text_display(
-                    VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
-                    dl_voice::router::ROUTER_PANEL_MANAGE_INTRO.to_string(),
-                ),
-                text_display(
-                    VOICE_UX_COMPONENT_ID_MANAGE_LANE_CAPTION,
-                    dl_voice::router::ROUTER_PANEL_LANE_CAPTION.to_string(),
-                ),
-                action_row(
-                    VOICE_UX_COMPONENT_ID_MANAGE_LANE_ROW,
-                    vec![
+fn spawn_container() -> Value {
+    container(
+        VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
+        vec![
+            text_display(
+                VOICE_UX_COMPONENT_ID_SPAWN_TEXT,
+                "**Lane erstellen**\nRanked = verifizierter Rang".to_string(),
+            ),
+            action_row(
+                VOICE_UX_COMPONENT_ID_SPAWN_ACTION_ROW,
+                dl_voice::router::router_modes()
+                    .iter()
+                    .map(|mode| {
                         emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_CLAIM,
-                            3,
-                            "tv_owner_claim",
-                            dl_voice::router::ROUTER_EMOJI_CROWN,
-                        ),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_RENAME,
-                            2,
-                            "tv_rename_btn",
-                            dl_voice::router::ROUTER_EMOJI_RENAME,
-                        ),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_LIMIT,
-                            2,
-                            "tv_limit_btn",
-                            dl_voice::router::ROUTER_EMOJI_LIMIT,
-                        ),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_MODE,
-                            2,
-                            "tv_mode_switch_btn",
-                            dl_voice::router::ROUTER_EMOJI_MODE,
-                        ),
-                        button(dl_voice::router::VOICE_PREFS_BUTTON, 2, "tv_prefs_open"),
-                    ],
-                ),
-                text_display(
-                    VOICE_UX_COMPONENT_ID_MANAGE_MOD_CAPTION,
-                    dl_voice::router::ROUTER_PANEL_MOD_CAPTION.to_string(),
-                ),
-                action_row(
-                    VOICE_UX_COMPONENT_ID_MANAGE_MOD_ROW,
-                    vec![
-                        button("💾 Presets", 2, "tv_presets"),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_KICK,
-                            4,
-                            "tv_kick",
-                            dl_voice::router::ROUTER_EMOJI_KICK,
-                        ),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_BAN,
-                            4,
-                            "tv_ban",
-                            dl_voice::router::ROUTER_EMOJI_BAN,
-                        ),
-                        emoji_button(
-                            dl_voice::router::ROUTER_BUTTON_UNBAN,
-                            2,
-                            "tv_unban",
-                            dl_voice::router::ROUTER_EMOJI_UNBAN,
-                        ),
-                    ],
-                ),
-            ],
-        ),
+                            mode.label,
+                            mode.style,
+                            &format!("router_spawn_{}", mode.id),
+                            mode.emoji,
+                        )
+                    })
+                    .collect(),
+            ),
+            text_display(
+                VOICE_UX_COMPONENT_ID_SPAWN_HINT,
+                "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang".to_string(),
+            ),
+        ],
     )
+}
+
+fn manage_container() -> Value {
+    container(
+        VOICE_UX_COMPONENT_ID_MANAGE_CONTAINER,
+        vec![
+            text_display(
+                VOICE_UX_COMPONENT_ID_MANAGE_TEXT,
+                dl_voice::router::ROUTER_PANEL_MANAGE_INTRO.to_string(),
+            ),
+            text_display(
+                VOICE_UX_COMPONENT_ID_MANAGE_LANE_CAPTION,
+                dl_voice::router::ROUTER_PANEL_LANE_CAPTION.to_string(),
+            ),
+            action_row(
+                VOICE_UX_COMPONENT_ID_MANAGE_LANE_ROW,
+                vec![
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_CLAIM,
+                        3,
+                        "tv_owner_claim",
+                        dl_voice::router::ROUTER_EMOJI_CROWN,
+                    ),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_RENAME,
+                        2,
+                        "tv_rename_btn",
+                        dl_voice::router::ROUTER_EMOJI_RENAME,
+                    ),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_LIMIT,
+                        2,
+                        "tv_limit_btn",
+                        dl_voice::router::ROUTER_EMOJI_LIMIT,
+                    ),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_MODE,
+                        2,
+                        "tv_mode_switch_btn",
+                        dl_voice::router::ROUTER_EMOJI_MODE,
+                    ),
+                    button(dl_voice::router::VOICE_PREFS_BUTTON, 2, "tv_prefs_open"),
+                ],
+            ),
+            text_display(
+                VOICE_UX_COMPONENT_ID_MANAGE_MOD_CAPTION,
+                dl_voice::router::ROUTER_PANEL_MOD_CAPTION.to_string(),
+            ),
+            action_row(
+                VOICE_UX_COMPONENT_ID_MANAGE_MOD_ROW,
+                vec![
+                    button("💾 Presets", 2, "tv_presets"),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_KICK,
+                        4,
+                        "tv_kick",
+                        dl_voice::router::ROUTER_EMOJI_KICK,
+                    ),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_BAN,
+                        4,
+                        "tv_ban",
+                        dl_voice::router::ROUTER_EMOJI_BAN,
+                    ),
+                    emoji_button(
+                        dl_voice::router::ROUTER_BUTTON_UNBAN,
+                        2,
+                        "tv_unban",
+                        dl_voice::router::ROUTER_EMOJI_UNBAN,
+                    ),
+                ],
+            ),
+        ],
+    )
+}
+
+fn payload_with_banner_sections(
+    sections: Vec<(u64, Option<&VoiceUxBannerOutput>, Value)>,
+) -> VoiceUxMessagePayload {
+    let mut components = Vec::new();
+    let mut attachments = Vec::new();
+    for (media_id, banner, section_container) in sections {
+        if let Some(banner) = banner {
+            components.push(media_gallery(media_id, &banner.filename));
+            attachments.push(VoiceUxPayloadAttachment {
+                id: attachments.len() as u8,
+                filename: banner.filename.clone(),
+                relative_path: banner.relative_path.clone(),
+            });
+        }
+        components.push(section_container);
+    }
+    payload(components, attachments)
 }
 
 fn payload_with_optional_banner(
@@ -896,7 +916,7 @@ mod tests {
     }
 
     #[test]
-    fn voice_ux_baut_vier_messages_in_spec_reihenfolge() {
+    fn voice_ux_baut_zwei_kombi_messages_in_spec_reihenfolge() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_all_voice_ux_banners(temp.path(), b"banner");
         let output = build_voice_ux_publish_output(
@@ -917,33 +937,32 @@ mod tests {
                 .iter()
                 .map(|message| message.message_key.as_str())
                 .collect();
-            assert_eq!(keys, vec!["guide", "lfg", "spawn", "manage"]);
-            let banners = [
-                VOICE_UX_GUIDE_BANNER_FILENAME,
-                VOICE_UX_LFG_BANNER_FILENAME,
-                VOICE_UX_SPAWN_BANNER_FILENAME,
-                VOICE_UX_MANAGE_BANNER_FILENAME,
+            assert_eq!(keys, vec!["guide_lfg", "spawn_manage"]);
+            let banner_pairs = [
+                [VOICE_UX_GUIDE_BANNER_FILENAME, VOICE_UX_LFG_BANNER_FILENAME],
+                [
+                    VOICE_UX_SPAWN_BANNER_FILENAME,
+                    VOICE_UX_MANAGE_BANNER_FILENAME,
+                ],
             ];
-            for (message, filename) in target.messages.iter().zip(banners) {
-                assert_eq!(
-                    message
-                        .banner
-                        .as_ref()
-                        .map(|banner| banner.filename.as_str()),
-                    Some(filename)
-                );
-                assert_eq!(message.payload.attachments.len(), 1);
-                assert_eq!(message.payload.attachments[0].filename, filename);
-                assert_eq!(message.payload.attachments[0].id, 0);
-                assert_eq!(message.payload.components[0]["type"], json!(12));
-                assert_eq!(
-                    message.payload.components[0]["items"][0]["media"]["url"],
-                    format!("attachment://{filename}")
-                );
-                assert_eq!(
-                    message.payload.components[1]["accent_color"],
-                    json!(VOICE_UX_ACCENT_GOLD)
-                );
+            for (message, filenames) in target.messages.iter().zip(banner_pairs) {
+                assert_eq!(message.payload.attachments.len(), 2);
+                assert_eq!(message.payload.components.len(), 4);
+                for (section, filename) in filenames.iter().enumerate() {
+                    let attachment = &message.payload.attachments[section];
+                    assert_eq!(attachment.filename, *filename);
+                    assert_eq!(attachment.id, section as u8);
+                    let gallery = &message.payload.components[section * 2];
+                    assert_eq!(gallery["type"], json!(12));
+                    assert_eq!(
+                        gallery["items"][0]["media"]["url"],
+                        format!("attachment://{filename}")
+                    );
+                    assert_eq!(
+                        message.payload.components[section * 2 + 1]["accent_color"],
+                        json!(VOICE_UX_ACCENT_GOLD)
+                    );
+                }
             }
             assert!(target.messages.iter().all(|message| message
                 .payload
@@ -967,8 +986,8 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         write_all_voice_ux_banners(temp.path(), b"banner");
         let ids = BTreeMap::from([
-            (VOICE_UX_CHANNEL_ID, vec![1, 2, 3, 4]),
-            (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, vec![5, 6, 7, 8]),
+            (VOICE_UX_CHANNEL_ID, vec![1, 2]),
+            (VOICE_UX_ROUTER_CHAT_CHANNEL_ID, vec![5, 6]),
         ]);
         let first = build_voice_ux_publish_output(
             temp.path(),
@@ -1015,7 +1034,7 @@ mod tests {
     fn voice_ux_payload_hash_noop_und_banner_bytes_aendern_hash() {
         let temp = tempfile::tempdir().expect("tempdir");
         write_all_voice_ux_banners(temp.path(), b"banner-one");
-        let ids = BTreeMap::from([(VOICE_UX_CHANNEL_ID, vec![1, 2, 3, 4])]);
+        let ids = BTreeMap::from([(VOICE_UX_CHANNEL_ID, vec![1, 2])]);
         let formats = BTreeMap::from([(
             VOICE_UX_CHANNEL_ID,
             Some(VOICE_UX_PAYLOAD_FORMAT.to_string()),
