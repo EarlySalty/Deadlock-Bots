@@ -15,7 +15,7 @@ use sqlx::PgPool;
 /// per Discord-API verifiziert, ID ist rename-stabil — Welle-2a-Rename und
 /// Rollback 2026-07-03 haben sie nicht veraendert. Die aeltere ID aus den
 /// Python-Cogs war schlicht veraltet).
-pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_464_736_918_951_432_222;
+pub const INVITE_LOUNGE_CHANNEL_ID: u64 = 1_426_220_702_054_355_077;
 pub const INVITE_LOUNGE_HINT_TEXT: &str = "Kleiner Tipp: pack noch deinen Steam-Freundescode dazu, sonst kann dich niemand einladen :) Du findest ihn in Steam unter Freunde → „Freund hinzufügen\". Einfach hier posten — wer Zeit hat, lädt dich ein.";
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;

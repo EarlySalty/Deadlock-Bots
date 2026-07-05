@@ -9,7 +9,7 @@ value = 'f1'
 label = 'Wie bekomme ich einen Deadlock-Invite?'
 emoji = '🔑'
 answer = '''**🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Falls du <#1464736918951432222> nicht siehst: Wähl im „Kanäle & Rollen"-Tab „Ich hab Deadlock noch nicht" aus, dann taucht der Kanal auf.'''
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1426220702054355077> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.'''
 
 [[options]]
 value = 'f2'

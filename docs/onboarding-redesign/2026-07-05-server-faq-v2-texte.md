@@ -38,7 +38,7 @@ Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach ei
 ## Antworten (ephemeral, V2-Gold-Container; jeweils Titel = Frage fett)
 
 [f1] **🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Falls du <#1464736918951432222> nicht siehst: Wähl im „Kanäle & Rollen"-Tab „Ich hab Deadlock noch nicht" aus, dann taucht der Kanal auf.
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1426220702054355077> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.
 
 [f2] **🤝 Muss ich dem Bot eine Steam-Freundschaftsanfrage schicken?**
 Normalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie auf Steam nur annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.

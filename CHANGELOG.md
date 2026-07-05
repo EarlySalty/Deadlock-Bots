@@ -1,3 +1,11 @@
+## #209 — Invite-Fragen ziehen nach frag-die-community
+
+**Ausgangslage:** Für „Ich brauche einen Deadlock-Invite" gab es einen eigenen Kanal — ein Kanal mehr, den Neue erst finden mussten, obwohl die Community-Fragen sowieso woanders laufen.
+
+**Was wurde geändert:** Der Invite-Kanal ist ins Archiv gewandert. Invite-Fragen stellst du jetzt einfach in frag-die-community — der Bot-Tipp mit dem Steam-Freundescode kommt dort genauso, und Regelwerk, FAQ und Willkommens-Hub zeigen alle auf den neuen Weg.
+
+**Wie es jetzt läuft:** Ein Kanal weniger. Egal ob Frage oder Invite-Wunsch: frag-die-community ist die eine Anlaufstelle — nett fragen, Freundescode dazu, jemand lädt dich ein.
+
 ## #208 — Regelwerk zum Anklicken, Server-FAQ & Unterstützer-Info im neuen Look
 
 **Ausgangslage:** Das Regelwerk war eine lange Textwand, die Server-FAQ gab's seit dem Umbau gar nicht mehr, und die Unterstützer-Infos lagen als alte Textnachricht im Support-Kanal.
