@@ -55,6 +55,8 @@ pub const VOICE_UX_COMPONENT_ID_MANAGE_MOD_ROW: u64 = 34_035;
 pub const VOICE_UX_COMPONENT_ID_FORUM_CONTAINER: u64 = 34_040;
 pub const VOICE_UX_COMPONENT_ID_FORUM_TEXT: u64 = 34_041;
 pub const VOICE_UX_COMPONENT_ID_FORUM_ACTION_ROW: u64 = 34_042;
+pub const VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR: u64 = 34_050;
+pub const VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR: u64 = 34_051;
 
 pub const VOICE_UX_MARKER_COMPONENT_IDS: &[u64] = &[
     VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
@@ -519,38 +521,46 @@ fn voice_ux_messages(repo_root: &Path, warnings: &mut Vec<String>) -> Vec<VoiceU
         message(
             "guide_lfg",
             guide_banner.clone(),
-            payload_with_banner_sections(vec![
-                (
-                    VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
-                    guide_banner.as_ref(),
-                    guide_container(),
-                ),
-                (
-                    VOICE_UX_COMPONENT_ID_LFG_MEDIA,
-                    lfg_banner.as_ref(),
-                    lfg_container(
-                        VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
-                        VOICE_UX_COMPONENT_ID_LFG_TEXT,
-                        VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
+            payload_with_banner_sections(
+                VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER,
+                VOICE_UX_COMPONENT_ID_GUIDE_LFG_SEPARATOR,
+                vec![
+                    (
+                        VOICE_UX_COMPONENT_ID_GUIDE_MEDIA,
+                        guide_banner.as_ref(),
+                        guide_container(),
                     ),
-                ),
-            ]),
+                    (
+                        VOICE_UX_COMPONENT_ID_LFG_MEDIA,
+                        lfg_banner.as_ref(),
+                        lfg_container(
+                            VOICE_UX_COMPONENT_ID_LFG_CONTAINER,
+                            VOICE_UX_COMPONENT_ID_LFG_TEXT,
+                            VOICE_UX_COMPONENT_ID_LFG_ACTION_ROW,
+                        ),
+                    ),
+                ],
+            ),
         ),
         message(
             "spawn_manage",
             spawn_banner.clone(),
-            payload_with_banner_sections(vec![
-                (
-                    VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
-                    spawn_banner.as_ref(),
-                    spawn_container(),
-                ),
-                (
-                    VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
-                    manage_banner.as_ref(),
-                    manage_container(),
-                ),
-            ]),
+            payload_with_banner_sections(
+                VOICE_UX_COMPONENT_ID_SPAWN_CONTAINER,
+                VOICE_UX_COMPONENT_ID_SPAWN_MANAGE_SEPARATOR,
+                vec![
+                    (
+                        VOICE_UX_COMPONENT_ID_SPAWN_MEDIA,
+                        spawn_banner.as_ref(),
+                        spawn_container(),
+                    ),
+                    (
+                        VOICE_UX_COMPONENT_ID_MANAGE_MEDIA,
+                        manage_banner.as_ref(),
+                        manage_container(),
+                    ),
+                ],
+            ),
         ),
     ]
 }
@@ -757,25 +767,41 @@ fn manage_container() -> Value {
     )
 }
 
+// Beide Sektionen einer Message landen in EINEM Container, damit die Message
+// als eine zusammenhängende Karte rendert statt als zwei getrennte Blöcke.
 fn payload_with_banner_sections(
+    container_id: u64,
+    separator_id: u64,
     sections: Vec<(u64, Option<&VoiceUxBannerOutput>, Value)>,
 ) -> VoiceUxMessagePayload {
-    let mut components = Vec::new();
+    let mut children = Vec::new();
     let mut attachments = Vec::new();
-    for (media_id, banner, section_container) in sections {
-        let section_container = if let Some(banner) = banner {
+    let section_count = sections.len();
+    for (index, (media_id, banner, section_container)) in sections.into_iter().enumerate() {
+        if let Some(banner) = banner {
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
                 filename: banner.filename.clone(),
                 relative_path: banner.relative_path.clone(),
             });
-            container_with_leading_banner(media_id, &banner.filename, section_container)
-        } else {
-            section_container
-        };
-        components.push(section_container);
+            children.push(media_gallery(media_id, &banner.filename));
+        }
+        children.extend(container_children(section_container));
+        if index + 1 < section_count {
+            children.push(separator(separator_id));
+        }
     }
-    payload(components, attachments)
+    payload(vec![container(container_id, children)], attachments)
+}
+
+fn container_children(container: Value) -> Vec<Value> {
+    match container {
+        Value::Object(mut map) => match map.remove("components") {
+            Some(Value::Array(children)) => children,
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
 }
 
 fn payload_with_optional_banner(
@@ -847,6 +873,15 @@ fn media_gallery(id: u64, filename: &str) -> Value {
                 "url": format!("attachment://{filename}"),
             },
         }],
+    })
+}
+
+fn separator(id: u64) -> Value {
+    json!({
+        "type": 14,
+        "id": id,
+        "divider": true,
+        "spacing": 2,
     })
 }
 
@@ -961,21 +996,32 @@ mod tests {
             ];
             for (message, filenames) in target.messages.iter().zip(banner_pairs) {
                 assert_eq!(message.payload.attachments.len(), 2);
-                assert_eq!(message.payload.components.len(), 2);
+                assert_eq!(message.payload.components.len(), 1);
+                let combined_container = &message.payload.components[0];
+                assert_eq!(combined_container["type"], json!(17));
+                assert_eq!(
+                    combined_container["accent_color"],
+                    json!(VOICE_UX_ACCENT_GOLD)
+                );
+                let children = combined_container["components"]
+                    .as_array()
+                    .expect("container children");
+                let galleries: Vec<&Value> = children
+                    .iter()
+                    .filter(|child| child["type"] == json!(12))
+                    .collect();
+                assert_eq!(galleries.len(), 2);
+                let separators = children
+                    .iter()
+                    .filter(|child| child["type"] == json!(14))
+                    .count();
+                assert_eq!(separators, 1);
                 for (section, filename) in filenames.iter().enumerate() {
                     let attachment = &message.payload.attachments[section];
                     assert_eq!(attachment.filename, *filename);
                     assert_eq!(attachment.id, section as u8);
-                    let section_container = &message.payload.components[section];
-                    assert_eq!(section_container["type"], json!(17));
                     assert_eq!(
-                        section_container["accent_color"],
-                        json!(VOICE_UX_ACCENT_GOLD)
-                    );
-                    let gallery = &section_container["components"][0];
-                    assert_eq!(gallery["type"], json!(12));
-                    assert_eq!(
-                        gallery["items"][0]["media"]["url"],
+                        galleries[section]["items"][0]["media"]["url"],
                         format!("attachment://{filename}")
                     );
                 }
@@ -992,6 +1038,12 @@ mod tests {
                     dl_voice::router::VOICE_GUIDE_TITLE,
                     dl_voice::router::VOICE_GUIDE_BODY
                 )
+            );
+            // Sektion 2 (Mitspieler finden) folgt nach dem Separator im selben Container.
+            assert_eq!(
+                target.messages[0].payload.components[0]["components"][6]["components"][0]
+                    ["custom_id"],
+                dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
             );
             assert_eq!(target.messages[0].action, "planned_post");
         }
