@@ -1,0 +1,30 @@
+# Regelwerk V2 Texte fuer /serversync/regelwerk-apply.
+# Fehlende Felder fallen auf Compile-Defaults zurueck.
+
+[texts]
+title = "**📜 Regelwerk · Deutsche Deadlock Community**"
+body = """Die Kurzfassung: **Sei kein Arschloch** 😄 — Respekt gegenüber allen, keine Hassrede, kein Spam, keine Fremdwerbung.
+
+Für die Details tipp unten auf einen Button — die Antwort siehst nur du."""
+verhalten = """**🤝 Verhalten**
+- Respekt gegenüber allen — keine Beleidigungen, Diskriminierung oder persönlichen Angriffe
+- Keine Hassrede. Kein NSFW außerhalb der dafür markierten Kanäle. Kein Spam, keine Fremdwerbung
+- Privatsphäre respektieren — keine fremden Daten posten
+- Schädliche Inhalte (Viren, IP-Grabber, Scam-Links) = sofortiger permanenter Bann"""
+spielkontext = """**🎮 Im Spielkontext erlaubt**
+Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay — solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein" — dann ist gut."""
+moderation = """**🛡️ Moderation & Konsequenzen**
+Probleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#1483136301271355532> auf, wenn's diskreter sein soll.
+Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann."""
+wegweiser = """**🧭 Schnell zurechtfinden**
+- <#1398021105339334666> — Steam verknüpfen, Rang eintragen
+- <#1464736918951432222> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite
+- <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)
+- <#1426220702054355077> — jede Frage ist okay
+- <#1522769149208821881> — Mitspieler finden"""
+
+[buttons]
+verhalten = "🤝 Verhalten"
+spielkontext = "🎮 Ton & Trash-Talk"
+moderation = "🛡️ Moderation"
+wegweiser = "🧭 Wichtige Kanäle"

@@ -37,6 +37,9 @@ BANNERS = [
     ("socials.png", "LINKS &", "SOCIALS"),
     ("router-hero.png", "DEADLOCK", "ROUTER"),
     ("rang-guide-hero.png", "STEAM", "VERKNÜPFEN"),
+    ("regelwerk-hero.png", "COMMUNITY", "REGELWERK"),
+    ("support-hero.png", "SERVER", "UNTERSTÜTZEN"),
+    ("faq-hero.png", "SERVER", "FAQ"),
 ]
 
 

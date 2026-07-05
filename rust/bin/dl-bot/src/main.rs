@@ -393,6 +393,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         }),
     );
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
+    serversync::register_regelwerk_components(&mut router);
+    serversync::register_faq_components(&mut router);
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {

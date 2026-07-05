@@ -85,6 +85,14 @@ pub struct BridgeReply {
     /// Komplette components-Struktur (Action-Rows) im Discord-API-Format.
     pub components: Option<Value>,
     pub ephemeral: bool,
+    /// Optionaler direkter Discord-Message-Flags-Wert. Wenn gesetzt, hat er
+    /// Vorrang vor `ephemeral`; genutzt fuer Components-V2-Interaction-Replies.
+    pub message_flags: Option<u64>,
+    /// Optionales Discord-allowed_mentions-Objekt fuer Replies mit Text in
+    /// Embeds oder Components-V2-TextDisplays.
+    pub allowed_mentions: Option<Value>,
+    /// Einmaliger Fallback, falls Discord die primaere Response ablehnt.
+    pub fallback: Option<Box<BridgeReply>>,
     /// Statt einer Nachricht ein Modal öffnen (nur als Erst-Antwort möglich).
     pub modal: Option<ModalSpec>,
     /// Antwort in den Kanal posten statt als Interaction-Reply
@@ -112,6 +120,9 @@ impl fmt::Debug for BridgeReply {
             .field("embeds", &self.embeds)
             .field("components", &self.components)
             .field("ephemeral", &self.ephemeral)
+            .field("message_flags", &self.message_flags)
+            .field("allowed_mentions", &self.allowed_mentions)
+            .field("fallback", &self.fallback.as_ref().map(|_| "<reply>"))
             .field("modal", &self.modal)
             .field("channel_message", &self.channel_message)
             .field("attachments", &self.attachments)
