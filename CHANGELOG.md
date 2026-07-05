@@ -1,3 +1,11 @@
+## #208 — Regelwerk zum Anklicken, Server-FAQ & Unterstützer-Info im neuen Look
+
+**Ausgangslage:** Das Regelwerk war eine lange Textwand, die Server-FAQ gab's seit dem Umbau gar nicht mehr, und die Unterstützer-Infos lagen als alte Textnachricht im Support-Kanal.
+
+**Was wurde geändert:** Das Regelwerk hat jetzt Buttons — Kurzfassung oben, Details (Verhalten, Ton & Trash-Talk, Moderation, wichtige Kanäle) holst du dir per Klick, und die Antwort siehst nur du. Im Support-Kanal gibt's eine neue FAQ mit den 15 häufigsten Fragen als Auswahlmenü — von „Wie bekomme ich einen Invite?" bis „Wo finde ich Mitspieler?". Die Unterstützer-Infos (Boost & Spende) sind im gleichen Stil neu aufgesetzt.
+
+**Wie es jetzt läuft:** Frage auswählen oder Button klicken → Antwort kommt sofort und nur für dich. Kein Scrollen durch Textwände mehr.
+
 ## #206 — Mitspieler-Suche: „Wann?" + Benachrichtigung bei Treffer
 
 **Ausgangslage:** In der Suche stand nur, wer spielt und mit welchem Rang — nicht, wann du überhaupt Zeit hast. Und wer gerade selbst kein Gesuch postet, verpasst passende Lobbys komplett.
