@@ -1,3 +1,11 @@
+## #212 — Moderation: keine 100%-Warnung mehr auf ganz normale Nachrichten
+
+**Ausgangslage:** Wer in kurzer Zeit in zwei Kanälen was gepostet hat — etwa ein Bild in team-1 und eine Nachricht in team-2 — konnte einen Moderationsfall auslösen, der dann auch noch stur „Verifikation 100%" behauptete. Dabei hatte gar keine KI den Inhalt angeschaut. Das traf völlig harmlose, alteingesessene Accounts.
+
+**Was wurde geändert:** Das Verhaltensmuster (schnelles Posten über mehrere Kanäle) ist jetzt nur noch ein Vorfilter — es sagt „hier lohnt sich ein Blick", entscheidet aber nichts mehr allein. Erst schaut die KI wirklich auf den Inhalt. Ist alles harmlos, passiert nichts. Ist tatsächlich was dran, kommt der Fall mit der echten Trefferquote statt einer erfundenen 100%.
+
+**Wie es jetzt läuft:** Normale Aktivität löst keinen Fehlalarm mehr aus. Die Prozentzahl im Fall entspricht ab jetzt dem, was die KI wirklich gesehen hat.
+
 ## #211 — Sprachkanal-Panel entschlackt + Bann mit Mitglieder-Suche
 
 **Ausgangslage:** Das Panel hatte 16 Buttons — einiges doppelt, einiges nur für Spezialfälle. Und bannen ging nur, solange der Störer noch mit dir in der Lane saß.

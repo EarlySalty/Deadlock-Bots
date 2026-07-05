@@ -5,7 +5,7 @@ use serde_json::Value;
 use sqlx::PgPool;
 
 use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision, PolicyDecisionSource};
-use crate::behavior_detector::{BehaviorDetector, BehaviorSignal};
+use crate::behavior_detector::{BehaviorDetector, BehaviorSignal, BehaviorTriggerType};
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
 use crate::content_analyzer::{ContentModerationPipeline, ModerationInput};
 use crate::moderation_channel::{DEFAULT_MODERATION_CHANNEL_ID, DEFAULT_SCAN_CHANNEL_IDS};
@@ -167,14 +167,15 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         }
 
         // Verhaltens-Erkennung (Takeover/Burst) laeuft serverweit: uebernommene Konten
-        // koennen in jedem Kanal posten. Nur die inhaltliche LLM-Analyse bleibt auf die
-        // konfigurierten Scan-Kanaele beschraenkt (gezielter, kostenkontrollierter Scan).
+        // koennen in jedem Kanal posten. Bei Verhaltenstreffern laeuft Content-AI als
+        // Richter nach, damit reine Heuristiken keine Fake-Konfidenz erzeugen.
         let behavior_signal = if let Some(detector) = &self.behavior_detector {
             detector.detect(guild_id, event).await
         } else {
             None
         };
-        let content_verdict = if self.config.scan_channel_ids.contains(&event.channel_id)
+        let content_verdict = if (self.config.scan_channel_ids.contains(&event.channel_id)
+            || behavior_signal.is_some())
             && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
         {
             let input =
@@ -192,7 +193,17 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         };
 
         let verdict = match outcome.source {
-            Some(PolicyDecisionSource::Behavior) => behavior_signal.as_ref().map(behavior_verdict),
+            Some(PolicyDecisionSource::Behavior) => {
+                let is_takeover = behavior_signal
+                    .as_ref()
+                    .map(|signal| signal.trigger_type == BehaviorTriggerType::AccountTakeover)
+                    .unwrap_or(false);
+                if is_takeover {
+                    behavior_signal.as_ref().map(behavior_verdict)
+                } else {
+                    content_verdict
+                }
+            }
             Some(PolicyDecisionSource::Content) => content_verdict,
             None => content_verdict.or_else(|| behavior_signal.as_ref().map(behavior_verdict)),
         };
@@ -896,6 +907,25 @@ mod tests {
         event
     }
 
+    fn burst_text_attachment_event(
+        user_id: u64,
+        channel_id: u64,
+        message_id: u64,
+        created_at: i64,
+        joined_at: Option<i64>,
+    ) -> dl_discord::MessageEvent {
+        let mut event = scanned_text_event(message_id, "lfg wer hat bock auf ranked");
+        event.author_id = user_id;
+        event.channel_id = channel_id;
+        event.message_created_at = chrono::Utc::now().timestamp();
+        event.attachment_count = 1;
+        event.image_attachment_count = 0;
+        event.image_attachment_urls = Vec::new();
+        event.author_created_at = created_at;
+        event.author_joined_at = joined_at;
+        event
+    }
+
     #[test]
     fn default_config_uses_single_moderation_channel() {
         let config = ModerationSystemConfig::default();
@@ -1014,6 +1044,77 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn benign_burst_rate_does_not_create_case() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"game_related_ok","confidence":0.2,"reason":"harmlos"}"#],
+            &[],
+            Some(detector),
+            vec![999],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                400, 10, 1300, created_at, joined_at,
+            ))
+            .await;
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                400, 11, 1301, created_at, joined_at,
+            ))
+            .await;
+
+        assert!(moderator.store.drafts.lock().await.is_empty());
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.bans.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn burst_rate_with_ai_confirmed_scam_creates_case_with_real_confidence() {
+        let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"scam","confidence":0.7,"reason":"Krypto-Verdacht"}"#],
+            &[r#"{"confirmed":true,"category":"scam","confidence":0.72,"reason":"Bestätigt"}"#],
+            Some(detector),
+            vec![999],
+            true,
+        )
+        .await;
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 100_000 * 3600;
+        let joined_at = Some(now - 3_000 * 3600);
+
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                401, 10, 1400, created_at, joined_at,
+            ))
+            .await;
+        moderator
+            .handle_message(&burst_text_attachment_event(
+                401, 11, 1401, created_at, joined_at,
+            ))
+            .await;
+
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].category, "scam");
+        assert_eq!(port.posts.load(Ordering::Relaxed), 1);
+        let embed = port.posted_embeds.lock().await.pop().expect("embed");
+        let serialized = embed.to_string();
+        assert!(serialized.contains("72%"));
+        assert!(!serialized.contains("100%"));
+        assert!(serialized.contains("Nachrichten"));
+        assert!(serialized.contains("Kanäle"));
+        assert!(serialized.contains("scam"));
+    }
+
+    #[tokio::test]
     async fn takeover_signal_creates_one_case_embed_and_deletes_only_current_message() {
         let analyzer_text = Arc::new(StaticText::default());
         let verifier_text = Arc::new(StaticText::default());
@@ -1110,7 +1211,14 @@ mod tests {
             crate::behavior_detector::BehaviorDetector::new(Arc::new(StaticInviteBehaviorPort {
                 guild_id: Some(2),
             }));
-        let (moderator, port) = memory_moderator(&[], &[], Some(detector), vec![42], true).await;
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"other","confidence":0.7,"reason":"Invite-Kontext"}"#],
+            &[r#"{"confirmed":true,"category":"other","confidence":0.72,"reason":"Bestätigt"}"#],
+            Some(detector),
+            vec![42],
+            true,
+        )
+        .await;
 
         moderator
             .handle_message(&scanned_text_event(1200, "join https://discord.gg/FOREIGN"))
