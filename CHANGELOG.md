@@ -1,3 +1,11 @@
+## #210 — Voice-Lanes: aufgeräumtes Panel, gemerkter Modus, Voreinstellungen
+
+**Ausgangslage:** Im Sprachkanal-Verwalten-Kanal war alles ein Riesen-Block, beim Router-Join musste jedes Mal neu gewählt werden, und Lane-Einstellungen gingen nur, wenn man schon in einer Lane saß.
+
+**Was wurde geändert:** Der Kanal ist neu sortiert — Anleitung oben (Details per Button, nur für dich sichtbar), dann Mitspieler finden, Lane erstellen, Lane verwalten; dieselben Panels hängen jetzt auch angepinnt im Router-Chat und als Post im Mitspieler-Suche-Forum. Deine erste Modus-Wahl wird als Standard gespeichert: Ab dann landest du beim Router-Join sofort in deiner eigenen Lane. Über ⚙️ Voreinstellungen legst du Modus, Lane-Name und Limit jederzeit fest — auch ohne in einer Voice zu sein.
+
+**Wie es jetzt läuft:** Einmal wählen, ab dann geht's direkt in deine Lane — Standard ändern jederzeit über ⚙️. Und die 30-Sekunden-Wartezeit beim Lane-Erstellen ist weg.
+
 ## #209 — Invite-Fragen ziehen nach frag-die-community
 
 **Ausgangslage:** Für „Ich brauche einen Deadlock-Invite" gab es einen eigenen Kanal — ein Kanal mehr, den Neue erst finden mussten, obwohl die Community-Fragen sowieso woanders laufen.
