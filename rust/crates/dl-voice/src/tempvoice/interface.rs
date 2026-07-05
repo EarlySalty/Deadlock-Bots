@@ -564,6 +564,20 @@ impl PanelHandler {
         self.engine.lane_owner_or_actor(lane, actor_id).await
     }
 
+    /// Lane-Kontext für Ban/Unban: Nur wenn der Klickende die Lane besitzt
+    /// (oder Mod-Rechte hat), zählt die Banliste des Lane-Owners und wird
+    /// sofort im Kanal durchgesetzt. Sonst — auch ganz ohne Voice — läuft
+    /// der Ban rein über die persönliche Liste des Klickenden.
+    async fn ban_context_lane(&self, interaction: &BridgeInteraction) -> Option<u64> {
+        let lane = self.lane_of(interaction).await?;
+        let is_owner = self.engine.lane_owner(lane).await == Some(interaction.user_id);
+        if is_owner || interaction.author_can_manage_channels {
+            Some(lane)
+        } else {
+            None
+        }
+    }
+
     /// Select mit den anderen Membern der Lane (für Kick/Ban).
     async fn member_select(
         &self,
@@ -1072,41 +1086,56 @@ impl InteractionHandler for PanelHandler {
                 }
             }
             "tv_ban" => {
-                let lane = match self.owned_lane_of(&interaction).await {
-                    Ok(lane) => lane,
-                    Err(reply) => return reply,
-                };
-                self.member_select(&interaction, lane, "tv_ban_sel", "Wen bannen?")
-                    .await
+                // Bannen braucht keine Lane: Die Banliste hängt am User und wird
+                // beim Join jeder seiner künftigen Lanes durchgesetzt. Der
+                // User-Select (Typ 5) ist serverweit durchsuchbar — der Störer
+                // muss nicht (mehr) in der Lane sitzen.
+                BridgeReply {
+                    content: Some(
+                        "Wen bannen? Name eintippen und auswählen — gilt für alle deine Lanes."
+                            .to_string(),
+                    ),
+                    components: Some(json!([{ "type": 1, "components": [{
+                        "type": 5, "custom_id": "tv_ban_sel",
+                        "placeholder": "Mitglied suchen…",
+                        "min_values": 1, "max_values": 1,
+                    }]}])),
+                    ephemeral: true,
+                    ..BridgeReply::default()
+                }
             }
             "tv_ban_sel" => {
-                let lane = match self.owned_lane_of(&interaction).await {
-                    Ok(lane) => lane,
-                    Err(reply) => return reply,
-                };
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                if target == interaction.user_id {
+                    return BridgeReply::ephemeral_text("Dich selbst bannen geht nicht.");
+                }
+                let owned_lane = self.ban_context_lane(&interaction).await;
+                let owner_id = match owned_lane {
+                    Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
+                    None => interaction.user_id,
+                };
                 let _ = engine.store.add_ban(owner_id, target).await;
-                let _ = engine
-                    .port
-                    .set_member_connect(lane, target, Some(false))
-                    .await;
-                let _ = engine
-                    .port
-                    .disconnect_member(interaction.guild_id, target, "TempVoice: Owner-Bann")
-                    .await;
+                if let Some(lane) = owned_lane {
+                    let _ = engine
+                        .port
+                        .set_member_connect(lane, target, Some(false))
+                        .await;
+                    let _ = engine
+                        .port
+                        .disconnect_member(interaction.guild_id, target, "TempVoice: Owner-Bann")
+                        .await;
+                }
                 BridgeReply::ephemeral_text(format!(
                     "<@{target}> gebannt — gilt für alle deine Lanes, bis du den Bann aufhebst."
                 ))
             }
             "tv_unban" => {
-                let lane = match self.owned_lane_of(&interaction).await {
-                    Ok(lane) => lane,
-                    Err(reply) => return reply,
+                let owner_id = match self.ban_context_lane(&interaction).await {
+                    Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
+                    None => interaction.user_id,
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
                 let bans = engine.store.list_bans(owner_id).await.unwrap_or_default();
                 if bans.is_empty() {
                     return BridgeReply::ephemeral_text("Du hast niemanden gebannt.");
@@ -1132,16 +1161,18 @@ impl InteractionHandler for PanelHandler {
                 }
             }
             "tv_unban_sel" => {
-                let lane = match self.owned_lane_of(&interaction).await {
-                    Ok(lane) => lane,
-                    Err(reply) => return reply,
-                };
                 let Some(target) = Self::selected_user(&interaction) else {
                     return BridgeReply::ephemeral_text("Keine Auswahl.");
                 };
-                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                let owned_lane = self.ban_context_lane(&interaction).await;
+                let owner_id = match owned_lane {
+                    Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
+                    None => interaction.user_id,
+                };
                 let _ = engine.store.remove_ban(owner_id, target).await;
-                let _ = engine.port.set_member_connect(lane, target, None).await;
+                if let Some(lane) = owned_lane {
+                    let _ = engine.port.set_member_connect(lane, target, None).await;
+                }
                 BridgeReply::ephemeral_text(format!("<@{target}> entbannt."))
             }
 
@@ -2248,6 +2279,34 @@ mod tests {
         (db, handler)
     }
 
+    /// Wie panel_handler_for_test, aber der Port-Kanal 4242 zählt als Staging —
+    /// lane_of liefert dann None, d. h. der User sitzt in keiner Lane.
+    async fn panel_handler_ohne_lane_for_test() -> (dl_central_db::TestDb, PanelHandler) {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let engine = TempVoiceEngine::new(
+            TempVoiceConfig {
+                guild_id_hint: 1,
+                staging_channels: HashSet::from([4242]),
+                fixed_lane_ids: HashSet::new(),
+                tempvoice_categories: HashSet::new(),
+                minrank_categories: HashSet::new(),
+                ranked_category_id: 0,
+                staging_rules: HashMap::new(),
+            },
+            TempVoiceStore::new(db.pool().clone()),
+            Arc::new(ForeignLanePort),
+        );
+        let handler = PanelHandler {
+            engine,
+            lfg: None,
+            pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        };
+        (db, handler)
+    }
+
     fn reply_custom_ids(reply: &BridgeReply) -> Vec<String> {
         let mut out = Vec::new();
         if let Some(components) = &reply.components {
@@ -2375,6 +2434,151 @@ mod tests {
             .await;
 
         assert!(reply_custom_ids(&reply).contains(&"tv_prefs_apply_lane".to_string()));
+    }
+
+    fn reply_component_types(reply: &BridgeReply) -> Vec<u64> {
+        let mut out = Vec::new();
+        fn walk(value: &Value, out: &mut Vec<u64>) {
+            if let Some(kind) = value.get("type").and_then(Value::as_u64) {
+                out.push(kind);
+            }
+            if let Some(children) = value.get("components").and_then(Value::as_array) {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+            if let Some(children) = value.as_array() {
+                for child in children {
+                    walk(child, out);
+                }
+            }
+        }
+        if let Some(components) = &reply.components {
+            walk(components, &mut out);
+        }
+        out
+    }
+
+    #[tokio::test]
+    async fn ban_ohne_lane_zeigt_durchsuchbaren_user_select() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_ban".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert!(reply_custom_ids(&reply).contains(&"tv_ban_sel".to_string()));
+        // Typ 5 = Discord User-Select: tippen + über alle Servermitglieder suchen.
+        assert!(reply_component_types(&reply).contains(&5));
+    }
+
+    #[tokio::test]
+    async fn ban_ohne_lane_traegt_in_banliste_ein() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_ban_sel".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                values: vec!["77".to_string()],
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        let bans = handler.engine.store.list_bans(42).await.expect("bans");
+        assert_eq!(bans, vec![77]);
+    }
+
+    #[tokio::test]
+    async fn selbst_ban_wird_abgelehnt() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_ban_sel".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                values: vec!["42".to_string()],
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("selbst"));
+        let bans = handler.engine.store.list_bans(42).await.expect("bans");
+        assert!(bans.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ban_in_eigener_lane_bannt_unter_owner_id() {
+        let (_db, handler) = panel_handler_for_test().await;
+        handler
+            .engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: 4242,
+                guild_id: 1,
+                owner_id: 42,
+                initial_owner_id: Some(42),
+                base_name: "Lane 1".to_string(),
+                category_id: 1289721245281292290,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        handler.engine.rehydrate().await;
+
+        handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_ban_sel".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                values: vec!["77".to_string()],
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        let bans = handler.engine.store.list_bans(42).await.expect("bans");
+        assert_eq!(bans, vec![77]);
+    }
+
+    #[tokio::test]
+    async fn unban_ohne_lane_listet_banliste_und_entfernt() {
+        let (_db, handler) = panel_handler_ohne_lane_for_test().await;
+        handler.engine.store.add_ban(42, 77).await.expect("ban");
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_unban".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert!(reply_custom_ids(&reply).contains(&"tv_unban_sel".to_string()));
+
+        handler
+            .handle(BridgeInteraction {
+                custom_id: "tv_unban_sel".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                values: vec!["77".to_string()],
+                ..BridgeInteraction::default()
+            })
+            .await;
+        let bans = handler.engine.store.list_bans(42).await.expect("bans");
+        assert!(bans.is_empty());
     }
 
     #[tokio::test]

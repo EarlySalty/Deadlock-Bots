@@ -11960,20 +11960,23 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert_eq!(
             messages[0]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
-            "voice:guide:detail"
+            "tv_prefs_open"
         );
-        assert_eq!(
-            messages[0]["payload"]["components"][0]["components"][6]["components"][0]["custom_id"],
-            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
-        );
+        // Mitspieler-finden-Sektion hat keine Buttons mehr — nur den Link auf den Forum-Post.
+        let lfg_text = messages[0]["payload"]["components"][0]["components"][5]["content"]
+            .as_str()
+            .expect("lfg text");
+        assert!(lfg_text.contains("discord.com/channels/"));
         assert_eq!(
             messages[1]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
             "router_spawn_casual"
         );
-        assert_eq!(
-            messages[1]["payload"]["components"][0]["components"][8]["components"][4]["custom_id"],
-            "tv_prefs_open"
-        );
+        // Verwalten-Reihe endet ohne ⚙️ Voreinstellungen bei Modus wechseln.
+        let lane_row = messages[1]["payload"]["components"][0]["components"][8]["components"]
+            .as_array()
+            .expect("lane row");
+        assert_eq!(lane_row.len(), 4);
+        assert_eq!(lane_row[3]["custom_id"], "tv_mode_switch_btn");
         assert_eq!(
             body["result"]["forum_post"]["payload"]["allowed_mentions"]["parse"]
                 .as_array()

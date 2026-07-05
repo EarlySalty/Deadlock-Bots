@@ -1,3 +1,11 @@
+## #211 — Sprachkanal-Panel entschlackt + Bann mit Mitglieder-Suche
+
+**Ausgangslage:** Das Panel hatte 16 Buttons — einiges doppelt, einiges nur für Spezialfälle. Und bannen ging nur, solange der Störer noch mit dir in der Lane saß.
+
+**Was wurde geändert:** Anleitung und Mitspieler-Suche kommen jetzt ohne eigene Buttons aus — Gesuche und 🔔 Benachrichtigungen laufen direkt über den Forum-Post, der im Panel verlinkt ist; ⚙️ Voreinstellungen gibt's nur noch einmal oben. Beim Bann öffnet sich eine Mitglieder-Suche: Name eintippen, auswählen, fertig — auch nachträglich, wenn der Störer längst weg ist oder du gerade in keinem Sprachkanal bist.
+
+**Wie es jetzt läuft:** Deutlich weniger Knöpfe bei gleichen Funktionen. Deine Bann-Liste gilt wie gehabt für alle deine Lanes, bis du sie wieder aufhebst.
+
 ## #210 — Voice-Lanes: aufgeräumtes Panel, gemerkter Modus, Voreinstellungen
 
 **Ausgangslage:** Im Sprachkanal-Verwalten-Kanal war alles ein Riesen-Block, beim Router-Join musste jedes Mal neu gewählt werden, und Lane-Einstellungen gingen nur, wenn man schon in einer Lane saß.
