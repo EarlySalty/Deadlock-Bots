@@ -1,3 +1,26 @@
+# Regelwerk+Support V2 Publisher (2026-07-05)
+
+## Fortschritt
+- Implementierungsworker gestartet im Repo `/home/naniadm/Documents/Deadlock-Bots`; verbindliche Vorgabe aus Claude-Worker-Regeln: kein Commit/Push, Änderungen bleiben uncommitted.
+- Pflichtkontext `WORKFLOW.md`, `rust/bin/dl-bot/src/serversync/rang_guide_publish.rs`, `rust/bin/dl-bot/src/serversync.rs`, `rust/bin/dl-bot/src/main.rs` und `rust/scripts/gen_welcome_banners.py` gelesen.
+- Relevantes Muster identifiziert: Rang-Guide nutzt Components V2, Payload-Hash inkl. Attachment-Bytes, KV-Metadaten, zweiphasigen Repost, Delete-Revalidierung per Author/V2/Marker, raw reqwest Multipart und `allowed_mentions.parse=[]`.
+- Umgesetzt: neue Publisher `regelwerk_publish.rs` und `support_publish.rs`, Runtime-TOMLs, neue Banner `regelwerk-hero.png`/`support-hero.png`, Endpoints `/serversync/regelwerk-apply` und `/serversync/support-apply`, Regelwerk-Button-Handler mit ephemeral Components V2 plus V1-Embed-Fallback.
+- Sicherheit umgesetzt: Payload-Hash inkl. Banner-Bytes, Preview-No-op, zweiphasiger Repost mit Best-effort-Cleanup, gespeicherte Deletes nur nach Fetch-Revalidierung, alte Regelwerk-Bot-Message nur bei Author+Content-Prefix, Support-Owner-Message bleibt unangetastet.
+
+## Verifikation aktuell
+- Gruen: `cargo fmt --all`.
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot regelwerk -- --nocapture` (14 passed).
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-bot --bin dl-bot support -- --nocapture` (6 passed).
+- Gruen: `SQLX_OFFLINE=true cargo build --workspace`.
+- Gruen: `SQLX_OFFLINE=true scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test --workspace` (804 gelistet; 769 passed, 35 ignored).
+- Gruen: `SQLX_OFFLINE=true cargo clippy --workspace --all-targets -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
+- Banner-Abmessungen per Pillow geprueft: beide 1100x300.
+
+## Rest-Risiken
+- Keine bekannten offenen Implementierungs-/Verifikationspunkte. Kein Commit/Push, kein Merge, kein Deploy, keine Discord-Posts.
+
 # LFG Dropdown Polish (2026-07-04)
 
 ## Fortschritt

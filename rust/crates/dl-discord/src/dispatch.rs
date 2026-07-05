@@ -339,7 +339,12 @@ fn message_data(reply: &BridgeReply) -> Value {
     if let Some(components) = &reply.components {
         data.insert("components".into(), components.clone());
     }
-    if reply.ephemeral {
+    if let Some(allowed_mentions) = &reply.allowed_mentions {
+        data.insert("allowed_mentions".into(), allowed_mentions.clone());
+    }
+    if let Some(flags) = reply.message_flags {
+        data.insert("flags".into(), json!(flags));
+    } else if reply.ephemeral {
         data.insert("flags".into(), json!(EPHEMERAL_FLAG));
     }
     if !reply.attachments.is_empty() {
@@ -451,7 +456,17 @@ async fn respond(
         .await
     {
         Ok(message) => run_response_hook(&reply, message.id.get()).await,
-        Err(err) => tracing::warn!(%err, "Followup fehlgeschlagen"),
+        Err(err) => {
+            tracing::warn!(%err, "Followup fehlgeschlagen");
+            if let Some(fallback) = &reply.fallback {
+                if let Err(fallback_err) = http
+                    .create_followup_message(token, &message_data(fallback), build_files(fallback))
+                    .await
+                {
+                    tracing::warn!(%fallback_err, "Fallback-Followup fehlgeschlagen");
+                }
+            }
+        }
     }
 }
 
@@ -519,7 +534,23 @@ async fn send_initial(
                 }
             }
         }
-        Err(err) => tracing::warn!(%err, "Interaction-Response fehlgeschlagen"),
+        Err(err) => {
+            tracing::warn!(%err, "Interaction-Response fehlgeschlagen");
+            if let Some(fallback) = &reply.fallback {
+                let fallback_response = json!({ "type": cb, "data": message_data(fallback) });
+                if let Err(fallback_err) = http
+                    .create_interaction_response(
+                        interaction_id.into(),
+                        token,
+                        &fallback_response,
+                        build_files(fallback),
+                    )
+                    .await
+                {
+                    tracing::warn!(%fallback_err, "Fallback-Interaction-Response fehlgeschlagen");
+                }
+            }
+        }
     }
 }
 
@@ -625,12 +656,20 @@ mod tests {
             embeds: vec![json!({"title": "T"})],
             components: Some(json!([{"type": 1, "components": []}])),
             ephemeral: true,
+            allowed_mentions: Some(json!({"parse": []})),
             ..BridgeReply::default()
         };
         let data = message_data(&reply);
         assert_eq!(data["content"], "Hi");
         assert_eq!(data["flags"], 64);
         assert_eq!(data["embeds"][0]["title"], "T");
+        assert_eq!(data["allowed_mentions"]["parse"], json!([]));
+
+        let v2 = BridgeReply {
+            message_flags: Some(64 | (1 << 15)),
+            ..BridgeReply::default()
+        };
+        assert_eq!(message_data(&v2)["flags"], 64 | (1 << 15));
 
         let public = BridgeReply {
             content: Some("Pub".into()),

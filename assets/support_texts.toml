@@ -1,0 +1,25 @@
+# Support V2 Texte fuer /serversync/support-apply.
+# Fehlende Felder fallen auf Compile-Defaults zurueck.
+
+[texts]
+title = "**💜 Server unterstützen**"
+boost = """**Du hast Nitro?**
+Dann kannst du uns ohne Extra-Kosten mit bis zu zwei Server-Boosts unterstützen: Klick oben links auf den Servernamen → **Server Boost** → auf diesen Server boosten. Das war's schon."""
+donation = """**Kein Nitro?**
+Du kannst uns auch mit einer Spende unterstützen — sie fließt komplett in Serverkosten, Bots und unsere Website. Als Dankeschön bekommst du innerhalb von 24 Stunden nach Eingang die exklusive Unterstützer-Rolle für 31 Tage (nicht auf andere Accounts übertragbar)."""
+benefits = """**Deine Vorteile als Booster & Unterstützer**
+- Privater Text- & Voice-Bereich
+- Zugriff auf den ||geheimen|| Caster-Chat — plane Turniere & Events direkt mit
+- Lese-Zugriff auf den ||noch geheimeren|| Community-Moderatoren-Chat <:pepecrywow:1483145247319003320>
+- Platz in der Aktivitätenliste direkt unterm Team ❤️
+- Zugriff auf <#1326984426906714236>
+- Voice-Moderationsrechte (Leute moven, in volle Kanäle joinen)
+- Du streamst? Dann warten ein paar exklusive Extra-Features für den Twitch-Bot auf dich
+
+Danke — jede Unterstützung, egal wie groß, trägt den Server. 💜"""
+
+[buttons]
+donate = "☕ Auf Ko-fi spenden"
+
+[urls]
+donate = "https://ko-fi.com/deutschedeadlockcommunity"
