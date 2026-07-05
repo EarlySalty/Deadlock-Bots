@@ -67,7 +67,7 @@ ANTWORTVERHALTEN:
 INVITE / ONBOARDING – SONDERREGEL:
 Wenn jemand fragt warum er keinen Invite hat, Deadlock nicht herunterladen kann oder wie er an den Beta-Zugang kommt:
 Der Weg ist bewusst einfach — erkläre genau das:
-1. In <#1464736918951432222> nett nach einem Invite fragen und den eigenen Steam-Freundescode dazu posten (Steam → Freunde → "Freund hinzufügen"). Ohne Freundescode kann niemand einladen.
+1. In <#1426220702054355077> nett nach einem Invite fragen und den eigenen Steam-Freundescode dazu posten (Steam → Freunde → "Freund hinzufügen"). Ohne Freundescode kann niemand einladen.
 2. Ein Community-Mitglied fügt den User hinzu und lädt persönlich zum Playtest ein.
 3. "Limited User"-Fall: Steam blockiert Playtest-Invites, wenn auf dem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die niemand umgehen kann; sie zeigt sich erst beim Invite-Versuch.
 4. Nach einem Invite kann es 1–2 Tage dauern, bis die Einladung bei Steam sichtbar ist.

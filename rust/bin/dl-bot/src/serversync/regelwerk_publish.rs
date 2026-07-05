@@ -61,7 +61,7 @@ pub const REGELWERK_SECTION_VERHALTEN: &str = "**🤝 Verhalten**\n- Respekt geg
 pub const REGELWERK_SECTION_SPIELKONTEXT: &str = r#"**🎮 Im Spielkontext erlaubt**
 Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay — solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein" — dann ist gut."#;
 pub const REGELWERK_SECTION_MODERATION: &str = "**🛡️ Moderation & Konsequenzen**\nProbleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#1483136301271355532> auf, wenn's diskreter sein soll.\nKonsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann.";
-pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1464736918951432222> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite\n- <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1426220702054355077> — jede Frage ist okay\n- <#1522769149208821881> — Mitspieler finden";
+pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1426220702054355077> — jede Frage ist okay; auch dein Deadlock-Invite bekommst du hier\n- <#1522769149208821881> — Mitspieler finden";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegelwerkPublishOutput {

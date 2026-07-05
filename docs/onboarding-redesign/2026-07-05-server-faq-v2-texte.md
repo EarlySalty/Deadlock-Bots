@@ -11,7 +11,7 @@ in 1513468476365209670, Ranked-Gate = Steam-Verify-Nutzen.
 
 [Titel] **❓ Server-FAQ · Deutsche Deadlock Community**
 [Body] Wähl unten deine Frage aus — die Antwort siehst nur du.
-Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach hier ein Ticket auf.
+Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach ein Ticket in <#1483136301271355532> auf.
 
 [Select placeholder] Wähl deine Frage …
 
@@ -38,7 +38,7 @@ Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach hi
 ## Antworten (ephemeral, V2-Gold-Container; jeweils Titel = Frage fett)
 
 [f1] **🔑 Wie bekomme ich einen Deadlock-Invite?**
-Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Falls du <#1464736918951432222> nicht siehst: Wähl im „Kanäle & Rollen"-Tab „Ich hab Deadlock noch nicht" aus, dann taucht der Kanal auf.
+Der Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Alternativ frag einfach in <#1426220702054355077> nach einem Invite — pack am besten direkt deinen Steam-Freundescode dazu, dann kann dich jemand persönlich einladen.
 
 [f2] **🤝 Muss ich dem Bot eine Steam-Freundschaftsanfrage schicken?**
 Normalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie auf Steam nur annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.
@@ -47,13 +47,13 @@ Normalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfr
 Sobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es in der Regel nur ein paar Stunden — oft schneller. Unsicher, ob alles durch ist? Über das Panel in <#1398021105339334666> kannst du deine Verknüpfung jederzeit neu prüfen lassen. Wenn es deutlich länger hängt, schau in „Mein Invite hängt — was tun?".
 
 [f4] **🛠️ Mein Invite hängt — was tun?**
-Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach hier ein Ticket auf: Da schaut ein Mensch drauf.
+Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach ein Ticket in <#1483136301271355532> auf: Da schaut ein Mensch drauf.
 
 [f5] **💌 Kann mich ein Mensch direkt einladen?**
 Ja — Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1426220702054355077>. Und wenn gerade kein Mensch greifbar ist: Der Bot übernimmt automatisch, du musst nichts extra tun.
 
 [f6] **🚧 Steam sagt „limited account" — warum kein Invite?**
-Das ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket auf — das Team geht die Optionen mit dir durch.
+Das ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket in <#1483136301271355532> auf — das Team geht die Optionen mit dir durch.
 
 [f7] **🔗 Wie verknüpfe ich meinen Steam-Account?**
 Geh in <#1398021105339334666> — der Guide dort führt dich Schritt für Schritt durch: Button klicken, auf der offiziellen Steam-Seite einloggen, Freundschaftsanfrage des Bots annehmen, fertig. Über dasselbe Panel kannst du den Stand jederzeit neu prüfen lassen.
