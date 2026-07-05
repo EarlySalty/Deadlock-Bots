@@ -11931,20 +11931,22 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                     message["payload"]["attachments"][section]["filename"],
                     *filename
                 );
-                let gallery = &message["payload"]["components"][section * 2];
+                let section_container = &message["payload"]["components"][section];
+                assert_eq!(section_container["type"], json!(17));
+                assert_eq!(
+                    section_container["accent_color"],
+                    json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
+                );
+                let gallery = &section_container["components"][0];
                 assert_eq!(gallery["type"], json!(12));
                 assert_eq!(
                     gallery["items"][0]["media"]["url"],
                     format!("attachment://{filename}")
                 );
-                assert_eq!(
-                    message["payload"]["components"][section * 2 + 1]["accent_color"],
-                    json!(voice_ux_publish::VOICE_UX_ACCENT_GOLD)
-                );
             }
         }
         assert_eq!(
-            messages[0]["payload"]["components"][1]["components"][0]["content"],
+            messages[0]["payload"]["components"][0]["components"][1]["content"],
             format!(
                 "{}\n{}",
                 dl_voice::router::VOICE_GUIDE_TITLE,
@@ -11952,19 +11954,19 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             )
         );
         assert_eq!(
-            messages[0]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
+            messages[0]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
             "voice:guide:detail"
         );
         assert_eq!(
-            messages[0]["payload"]["components"][3]["components"][1]["components"][0]["custom_id"],
+            messages[0]["payload"]["components"][1]["components"][2]["components"][0]["custom_id"],
             dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
         );
         assert_eq!(
-            messages[1]["payload"]["components"][1]["components"][1]["components"][0]["custom_id"],
+            messages[1]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
             "router_spawn_casual"
         );
         assert_eq!(
-            messages[1]["payload"]["components"][3]["components"][2]["components"][4]["custom_id"],
+            messages[1]["payload"]["components"][1]["components"][3]["components"][4]["custom_id"],
             "tv_prefs_open"
         );
         assert_eq!(

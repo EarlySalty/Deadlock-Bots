@@ -763,14 +763,16 @@ fn payload_with_banner_sections(
     let mut components = Vec::new();
     let mut attachments = Vec::new();
     for (media_id, banner, section_container) in sections {
-        if let Some(banner) = banner {
-            components.push(media_gallery(media_id, &banner.filename));
+        let section_container = if let Some(banner) = banner {
             attachments.push(VoiceUxPayloadAttachment {
                 id: attachments.len() as u8,
                 filename: banner.filename.clone(),
                 relative_path: banner.relative_path.clone(),
             });
-        }
+            container_with_leading_banner(media_id, &banner.filename, section_container)
+        } else {
+            section_container
+        };
         components.push(section_container);
     }
     payload(components, attachments)
@@ -781,18 +783,30 @@ fn payload_with_optional_banner(
     banner: Option<&VoiceUxBannerOutput>,
     container: Value,
 ) -> VoiceUxMessagePayload {
-    let mut components = Vec::new();
     let mut attachments = Vec::new();
-    if let Some(banner) = banner {
-        components.push(media_gallery(media_id, &banner.filename));
+    let container = if let Some(banner) = banner {
         attachments.push(VoiceUxPayloadAttachment {
             id: 0,
             filename: banner.filename.clone(),
             relative_path: banner.relative_path.clone(),
         });
+        container_with_leading_banner(media_id, &banner.filename, container)
+    } else {
+        container
+    };
+    payload(vec![container], attachments)
+}
+
+// Banner gehört als erstes Kind in den Container, damit Banner + Text + Buttons
+// als ein zusammenhängender Block mit durchgehendem Akzent-Balken rendern.
+fn container_with_leading_banner(media_id: u64, filename: &str, mut container: Value) -> Value {
+    if let Some(children) = container
+        .get_mut("components")
+        .and_then(Value::as_array_mut)
+    {
+        children.insert(0, media_gallery(media_id, filename));
     }
-    components.push(container);
-    payload(components, attachments)
+    container
 }
 
 fn payload(
@@ -947,20 +961,22 @@ mod tests {
             ];
             for (message, filenames) in target.messages.iter().zip(banner_pairs) {
                 assert_eq!(message.payload.attachments.len(), 2);
-                assert_eq!(message.payload.components.len(), 4);
+                assert_eq!(message.payload.components.len(), 2);
                 for (section, filename) in filenames.iter().enumerate() {
                     let attachment = &message.payload.attachments[section];
                     assert_eq!(attachment.filename, *filename);
                     assert_eq!(attachment.id, section as u8);
-                    let gallery = &message.payload.components[section * 2];
+                    let section_container = &message.payload.components[section];
+                    assert_eq!(section_container["type"], json!(17));
+                    assert_eq!(
+                        section_container["accent_color"],
+                        json!(VOICE_UX_ACCENT_GOLD)
+                    );
+                    let gallery = &section_container["components"][0];
                     assert_eq!(gallery["type"], json!(12));
                     assert_eq!(
                         gallery["items"][0]["media"]["url"],
                         format!("attachment://{filename}")
-                    );
-                    assert_eq!(
-                        message.payload.components[section * 2 + 1]["accent_color"],
-                        json!(VOICE_UX_ACCENT_GOLD)
                     );
                 }
             }
@@ -970,7 +986,7 @@ mod tests {
                 .parse
                 .is_empty()));
             assert_eq!(
-                target.messages[0].payload.components[1]["components"][0]["content"],
+                target.messages[0].payload.components[0]["components"][1]["content"],
                 format!(
                     "{}\n{}",
                     dl_voice::router::VOICE_GUIDE_TITLE,
