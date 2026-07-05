@@ -332,23 +332,33 @@ impl BehaviorDetector {
             ));
         }
 
-        if should_trigger(recent).is_some() {
-            let trigger = if is_new_account(event.author_created_at, event.author_joined_at, now) {
-                BehaviorTriggerType::YoungAccountBurst
-            } else {
-                BehaviorTriggerType::BurstRate
-            };
-            return Some(build_signal(
-                event,
-                now,
-                trigger,
-                BehaviorSeverity::Suspicious,
-                BehaviorActionHint::Proposal,
-                "behavior:burst_rate",
-                WINDOW_SECONDS,
-                recent.to_vec(),
-                None,
-            ));
+        if let Some((_reason, meta)) = should_trigger(recent) {
+            let account_new = is_new_account(event.author_created_at, event.author_joined_at, now);
+            // meta = [unique_channels, total_messages, attachment_count, keyword_hit].
+            // A pure multi-channel message burst without any content signal (no
+            // attachment, no keyword) is normal activity for an established member
+            // chatting across channels. Only treat it as suspicious for new
+            // accounts (classic flood pattern); established accounts must show a
+            // real spam signal (attachment or keyword) to trigger burst_rate.
+            let has_content_signal = meta[2] > 0 || meta[3] > 0;
+            if account_new || has_content_signal {
+                let trigger = if account_new {
+                    BehaviorTriggerType::YoungAccountBurst
+                } else {
+                    BehaviorTriggerType::BurstRate
+                };
+                return Some(build_signal(
+                    event,
+                    now,
+                    trigger,
+                    BehaviorSeverity::Suspicious,
+                    BehaviorActionHint::Proposal,
+                    "behavior:burst_rate",
+                    WINDOW_SECONDS,
+                    recent.to_vec(),
+                    None,
+                ));
+            }
         }
 
         if is_image_multi_channel(recent, now) {
@@ -674,7 +684,7 @@ pub fn is_new_account(created_at: i64, joined_at: Option<i64>, now: i64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::{HashMap, VecDeque};
     use tokio::sync::Mutex;
 
     fn recent(
@@ -840,6 +850,105 @@ mod tests {
             .detect(1, &image_event(100, 12, 1002, created_at, joined_at))
             .await
             .is_none());
+    }
+
+    #[tokio::test]
+    async fn established_account_plain_multichannel_activity_does_not_trigger() {
+        let detector = BehaviorDetector::new_with_config(
+            Arc::new(FakePort::default()),
+            BehaviorDetectorConfig {
+                case_cooldown_seconds: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 67508 * 3600;
+        let joined_at = Some(now - 6317 * 3600);
+        let channels = [10, 11, 12, 10, 11, 12];
+        let mut last = None;
+
+        for (idx, channel_id) in channels.into_iter().enumerate() {
+            last = detector
+                .detect(
+                    1,
+                    &event(
+                        100,
+                        channel_id,
+                        2000 + idx as u64,
+                        "gg wp lets scrim",
+                        created_at,
+                        joined_at,
+                    ),
+                )
+                .await;
+        }
+
+        assert!(
+            last.is_none(),
+            "established plain text multichannel activity must not trigger burst_rate"
+        );
+    }
+
+    #[tokio::test]
+    async fn new_account_plain_multichannel_burst_still_triggers_young_burst() {
+        let detector = BehaviorDetector::new(Arc::new(FakePort::default()));
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 10 * 3600;
+        let joined_at = Some(now - 2 * 3600);
+        let channels = [10, 11, 12];
+        let mut last = None;
+
+        for (idx, channel_id) in channels.into_iter().enumerate() {
+            last = detector
+                .detect(
+                    1,
+                    &event(
+                        200,
+                        channel_id,
+                        3000 + idx as u64,
+                        "hello everyone",
+                        created_at,
+                        joined_at,
+                    ),
+                )
+                .await;
+        }
+
+        let sig = last.expect("new account plain multichannel burst signal");
+        assert_eq!(sig.trigger_type, BehaviorTriggerType::YoungAccountBurst);
+    }
+
+    #[tokio::test]
+    async fn established_account_with_keyword_across_channels_still_triggers() {
+        let detector = BehaviorDetector::new_with_config(
+            Arc::new(FakePort::default()),
+            BehaviorDetectorConfig {
+                case_cooldown_seconds: 0,
+            },
+        );
+        let now = chrono::Utc::now().timestamp();
+        let created_at = now - 67508 * 3600;
+        let joined_at = Some(now - 6317 * 3600);
+        let first_event = event(300, 10, 4000, "join my telegram now", created_at, joined_at);
+        let first = detector
+            .detect(1, &first_event)
+            .await
+            .expect("standalone keyword signal");
+        assert_eq!(first.trigger_type, BehaviorTriggerType::Keyword);
+
+        // The standalone keyword path clears history after signaling; restore the
+        // first message so this regression covers the burst-rate content signal.
+        let mut seeded = VecDeque::new();
+        seeded.push_back(event_to_recent(&first_event, now));
+        detector.history.lock().await.insert(300, seeded);
+
+        let sig = detector
+            .detect(
+                1,
+                &event(300, 11, 4001, "dm me for payout", created_at, joined_at),
+            )
+            .await
+            .expect("established account keyword burst signal");
+        assert_eq!(sig.trigger_type, BehaviorTriggerType::BurstRate);
     }
 
     #[tokio::test]
