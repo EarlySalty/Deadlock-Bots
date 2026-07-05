@@ -8,8 +8,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-pub const FAQ_CHANNEL_ID: u64 = 1_483_136_301_271_355_532;
-pub const FAQ_CHANNEL_NAME: &str = "server-support";
+pub const FAQ_CHANNEL_ID: u64 = 1_491_953_161_747_955_853;
+pub const FAQ_CHANNEL_NAME: &str = "server-faq";
 pub const FAQ_TEXTS_FILE: &str = "assets/faq_texts.toml";
 pub const FAQ_BANNER_DIR: &str = "assets/welcome-banners";
 pub const FAQ_HERO_FILENAME: &str = "faq-hero.png";
@@ -44,7 +44,7 @@ const MESSAGE_TEXT_DISPLAY_CHAR_LIMIT: usize = 4000;
 
 pub const FAQ_SELECT_CUSTOM_ID: &str = "faq:show";
 pub const FAQ_MAIN_TITLE: &str = "**❓ Server-FAQ · Deutsche Deadlock Community**";
-pub const FAQ_MAIN_BODY: &str = "Wähl unten deine Frage aus — die Antwort siehst nur du.\nNichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach hier ein Ticket auf.";
+pub const FAQ_MAIN_BODY: &str = "Wähl unten deine Frage aus — die Antwort siehst nur du.\nNichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach ein Ticket in <#1483136301271355532> auf.";
 pub const FAQ_SELECT_PLACEHOLDER: &str = "Wähl deine Frage …";
 pub const FAQ_UNKNOWN_VALUE_MESSAGE: &str =
     "Diese Frage kenne ich nicht mehr — Panel wird gleich aktualisiert.";
@@ -52,9 +52,9 @@ pub const FAQ_UNKNOWN_VALUE_MESSAGE: &str =
 pub const FAQ_ANSWER_F1: &str = "**🔑 Wie bekomme ich einen Deadlock-Invite?**\nDer Weg ist kurz: Verknüpf deinen Steam-Account in <#1398021105339334666> (der Guide dort führt dich durch) und nimm danach die Freundschaftsanfrage unseres Steam-Bots an — dein Invite kommt dann automatisch. Falls du <#1464736918951432222> nicht siehst: Wähl im „Kanäle & Rollen\"-Tab „Ich hab Deadlock noch nicht\" aus, dann taucht der Kanal auf.";
 pub const FAQ_ANSWER_F2: &str = "**🤝 Muss ich dem Bot eine Steam-Freundschaftsanfrage schicken?**\nNormalerweise nicht — nach dem Verknüpfen schickt unser Bot **dir** eine Anfrage, du musst sie auf Steam nur annehmen. Kam nichts an? Dann geh den Weg selbst: Steam → Freunde → „Freund hinzufügen\" → Freundescode **820142646** eingeben — damit findest du unseren Bot eindeutig, unabhängig vom Anzeigenamen. Sobald die Freundschaft steht, läuft dein Invite automatisch weiter.";
 pub const FAQ_ANSWER_F3: &str = "**⏳ Wie lange dauert mein Invite?**\nSobald deine Steam-Freundschaft mit dem Bot bestätigt ist, dauert es in der Regel nur ein paar Stunden — oft schneller. Unsicher, ob alles durch ist? Über das Panel in <#1398021105339334666> kannst du deine Verknüpfung jederzeit neu prüfen lassen. Wenn es deutlich länger hängt, schau in „Mein Invite hängt — was tun?\".";
-pub const FAQ_ANSWER_F4: &str = "**🛠️ Mein Invite hängt — was tun?**\nFast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited\" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach hier ein Ticket auf: Da schaut ein Mensch drauf.";
+pub const FAQ_ANSWER_F4: &str = "**🛠️ Mein Invite hängt — was tun?**\nFast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited\" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach ein Ticket in <#1483136301271355532> auf: Da schaut ein Mensch drauf.";
 pub const FAQ_ANSWER_F5: &str = "**💌 Kann mich ein Mensch direkt einladen?**\nJa — Mitglieder mit verknüpftem Steam-Account können Freunde persönlich einladen. Frag am besten direkt die Person, die dich hergeholt hat, oder schreib in <#1426220702054355077>. Und wenn gerade kein Mensch greifbar ist: Der Bot übernimmt automatisch, du musst nichts extra tun.";
-pub const FAQ_ANSWER_F6: &str = "**🚧 Steam sagt „limited account\" — warum kein Invite?**\nDas ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited\" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket auf — das Team geht die Optionen mit dir durch.";
+pub const FAQ_ANSWER_F6: &str = "**🚧 Steam sagt „limited account\" — warum kein Invite?**\nDas ist eine Beschränkung von Valve, kein Fehler bei uns: „Limited\" sind Steam-Accounts, die noch nie mindestens 5 $ im Steam-Store ausgegeben haben — solche Accounts können über unseren Weg keine Playtest-Einladung erhalten. Sobald du einmalig für 5 $ irgendwas auf Steam gekauft hast, fällt die Sperre weg. Wenn du unsicher bist, mach ein Ticket in <#1483136301271355532> auf — das Team geht die Optionen mit dir durch.";
 pub const FAQ_ANSWER_F7: &str = "**🔗 Wie verknüpfe ich meinen Steam-Account?**\nGeh in <#1398021105339334666> — der Guide dort führt dich Schritt für Schritt durch: Button klicken, auf der offiziellen Steam-Seite einloggen, Freundschaftsanfrage des Bots annehmen, fertig. Über dasselbe Panel kannst du den Stand jederzeit neu prüfen lassen.";
 pub const FAQ_ANSWER_F8: &str = "**🛡️ Was passiert bei der Verifizierung mit meinen Daten?**\nWas du davon hast: deine echte Rang-Rolle (hält sich ab dann von selbst aktuell), Zugang zu den Ranked-Funktionen (Ranked-Lanes öffnen und Ranked-Gesuchen beitreten) und du kannst Freunde per Invite reinholen. Zur Technik: Die Verknüpfung läuft über den offiziellen Steam-Login (OpenID) — wir sehen nie dein Passwort und haben keinerlei Zugriff auf deinen Account, wir bekommen nur deine Steam-ID. Deine Daten kannst du jederzeit exportieren oder löschen lassen.";
 pub const FAQ_ANSWER_F9: &str = "**🏆 Wie bekomme oder ändere ich meine Rang-Rolle?**\nZwei Stufen: Beim Onboarding gibst du deinen Rang selbst an und bekommst die passende Rolle — das kannst du jederzeit im „Kanäle & Rollen\"-Tab ändern. Verknüpfst du zusätzlich deinen Steam-Account in <#1398021105339334666>, bekommst du deine echte Rang-Rolle aus dem Spiel, die sich ab dann automatisch aktuell hält — da musst du nie wieder etwas anfassen.";
