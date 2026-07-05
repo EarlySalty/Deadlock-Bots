@@ -4,6 +4,7 @@ mod faq_publish;
 mod rang_guide_publish;
 mod regelwerk_publish;
 mod support_publish;
+mod voice_ux_publish;
 mod welcome_publish;
 
 use std::collections::BTreeMap;
@@ -35,10 +36,10 @@ use sqlx::{PgPool, Row};
 
 use crate::master;
 pub use dl_voice::lfg_panel::LfgPanelApplyOutput;
-pub use dl_voice::router::RouterApplyOutput;
 pub use faq_publish::FaqPublishOutput;
 pub use rang_guide_publish::RangGuidePublishOutput;
 pub use support_publish::SupportPublishOutput;
+pub use voice_ux_publish::VoiceUxPublishOutput as RouterApplyOutput;
 pub use welcome_publish::{WelcomePublishOutput, WelcomeTeamMember};
 
 pub const GUILD_ID: u64 = dl_server_as_code::DEFAULT_GUILD_ID;
@@ -338,7 +339,7 @@ struct RangGuideDeleteOutcome {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct StaticV2DeleteOutcome {
+pub(crate) struct StaticV2DeleteOutcome {
     deleted: Vec<u64>,
     warnings: Vec<String>,
 }
@@ -639,6 +640,113 @@ pub trait ServerSyncOps: Send + Sync {
     async fn welcome_preview(&self) -> ServerSyncResult<WelcomePublishOutput>;
     async fn welcome_apply(&self, confirm: bool) -> ServerSyncResult<WelcomePublishOutput>;
     async fn rang_guide_apply(&self, confirm: bool) -> ServerSyncResult<RangGuidePublishOutput>;
+    async fn load_voice_ux_message_ids(&self) -> ServerSyncResult<BTreeMap<u64, Vec<u64>>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn load_voice_ux_payload_formats(
+        &self,
+    ) -> ServerSyncResult<BTreeMap<u64, Option<String>>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn load_voice_ux_payload_hashes(
+        &self,
+    ) -> ServerSyncResult<BTreeMap<u64, Option<String>>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn load_voice_ux_lfg_forum_thread_id(&self) -> ServerSyncResult<Option<u64>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn fetch_voice_ux_v2_message_ids(
+        &self,
+        _channel_id: u64,
+        _bot_user_id: u64,
+    ) -> ServerSyncResult<Vec<u64>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn edit_voice_ux_message(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+        _message: &voice_ux_publish::VoiceUxMessageOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn post_voice_ux_message(
+        &self,
+        _channel_id: u64,
+        _message: &voice_ux_publish::VoiceUxMessageOutput,
+    ) -> ServerSyncResult<u64> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn replace_voice_ux_target_metadata(
+        &self,
+        _target: &voice_ux_publish::VoiceUxTargetOutput,
+        _message_ids: &[u64],
+    ) -> ServerSyncResult<()> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn store_voice_ux_target_metadata(
+        &self,
+        _target: &voice_ux_publish::VoiceUxTargetOutput,
+    ) -> ServerSyncResult<()> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn delete_voice_ux_messages(
+        &self,
+        _channel_id: u64,
+        _stored_message_ids: &[u64],
+        _bot_user_id: u64,
+    ) -> ServerSyncResult<StaticV2DeleteOutcome> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn cleanup_new_voice_ux_posts_best_effort(&self, _channel_id: u64, _message_ids: &[u64]) {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn pin_voice_ux_message_best_effort(
+        &self,
+        _channel_id: u64,
+        _message_id: u64,
+    ) -> Result<(), String> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn fetch_voice_ux_legacy_cleanup_candidates(
+        &self,
+        _bot_user_id: u64,
+    ) -> ServerSyncResult<(
+        Vec<voice_ux_publish::VoiceUxLegacyCleanupCandidate>,
+        Vec<String>,
+    )> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn cleanup_voice_ux_legacy_messages(
+        &self,
+        _output: &mut voice_ux_publish::VoiceUxPublishOutput,
+    ) -> ServerSyncResult<()> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn post_voice_ux_forum_post(
+        &self,
+        _forum: &voice_ux_publish::VoiceUxForumPostOutput,
+    ) -> ServerSyncResult<u64> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn edit_voice_ux_forum_post(
+        &self,
+        _thread_id: u64,
+        _forum: &voice_ux_publish::VoiceUxForumPostOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn store_voice_ux_forum_metadata(
+        &self,
+        _thread_id: u64,
+        _payload_hash: &str,
+    ) -> ServerSyncResult<()> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
+    async fn pin_voice_ux_forum_thread_best_effort(&self, _thread_id: u64) -> Result<(), String> {
+        unreachable!("only ServerSyncService uses Voice-UX internals")
+    }
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput>;
     async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput>;
     async fn serverguide_preview(
@@ -4321,28 +4429,830 @@ impl ServerSyncOps for ServerSyncService {
         Ok(output)
     }
 
+    async fn load_voice_ux_message_ids(&self) -> ServerSyncResult<BTreeMap<u64, Vec<u64>>> {
+        let mut out = BTreeMap::new();
+        for channel_id in voice_ux_publish::VOICE_UX_TARGET_CHANNEL_IDS {
+            let ids = self
+                .load_static_v2_message_ids(&voice_ux_publish::voice_ux_message_id_prefix(
+                    channel_id,
+                ))
+                .await?;
+            if !ids.is_empty() {
+                out.insert(channel_id, ids);
+            }
+        }
+        Ok(out)
+    }
+
+    async fn load_voice_ux_payload_formats(
+        &self,
+    ) -> ServerSyncResult<BTreeMap<u64, Option<String>>> {
+        let mut out = BTreeMap::new();
+        for channel_id in voice_ux_publish::VOICE_UX_TARGET_CHANNEL_IDS {
+            out.insert(
+                channel_id,
+                self.load_serversync_kv(&voice_ux_publish::voice_ux_payload_format_key(channel_id))
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
+
+    async fn load_voice_ux_payload_hashes(
+        &self,
+    ) -> ServerSyncResult<BTreeMap<u64, Option<String>>> {
+        let mut out = BTreeMap::new();
+        for channel_id in voice_ux_publish::VOICE_UX_TARGET_CHANNEL_IDS {
+            out.insert(
+                channel_id,
+                self.load_serversync_kv(&voice_ux_publish::voice_ux_payload_hash_key(channel_id))
+                    .await?,
+            );
+        }
+        Ok(out)
+    }
+
+    async fn load_voice_ux_lfg_forum_thread_id(&self) -> ServerSyncResult<Option<u64>> {
+        self.load_serversync_kv(voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY)
+            .await?
+            .map(|value| parse_discord_id("voice_ux_lfg_forum_thread_id", &value))
+            .transpose()
+    }
+
+    async fn fetch_voice_ux_v2_message_ids(
+        &self,
+        channel_id: u64,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<Vec<u64>> {
+        let mut before: Option<u64> = None;
+        let mut message_ids = Vec::new();
+        for _ in 0..5 {
+            let mut url =
+                self.discord_api_url(&format!("/channels/{channel_id}/messages?limit=100"));
+            if let Some(before) = before {
+                url.push_str("&before=");
+                url.push_str(&before.to_string());
+            }
+            let page: Vec<DiscordMessage> = self.discord_get_json(url).await?;
+            if page.is_empty() {
+                break;
+            }
+            for message in &page {
+                let message_id = parse_discord_id("Message-ID", &message.id)?;
+                let author_id = parse_discord_id("Message-Author-ID", &message.author.id)?;
+                let candidate = voice_ux_publish::VoiceUxV2Message {
+                    message_id,
+                    author_id,
+                    flags: message.flags,
+                    components: message.components.clone(),
+                };
+                if voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id) {
+                    message_ids.push(message_id);
+                }
+            }
+            before = page
+                .last()
+                .map(|message| parse_discord_id("Message-ID", &message.id))
+                .transpose()?;
+            if page.len() < 100 {
+                break;
+            }
+        }
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        Ok(message_ids)
+    }
+
+    async fn edit_voice_ux_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        message: &voice_ux_publish::VoiceUxMessageOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}"));
+        let payload_value = serde_json::to_value(&message.payload)?;
+        let response = self
+            .send_components_v2_message_payload("Voice-UX", "PATCH", url, payload_value, Vec::new())
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let written: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "PATCH")?;
+        parse_discord_id("Message-ID", &written.id).map(Some)
+    }
+
+    async fn post_voice_ux_message(
+        &self,
+        channel_id: u64,
+        message: &voice_ux_publish::VoiceUxMessageOutput,
+    ) -> ServerSyncResult<u64> {
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/messages"));
+        let payload_value = serde_json::to_value(&message.payload)?;
+        let response = self
+            .send_components_v2_message_payload("Voice-UX", "POST", url, payload_value, Vec::new())
+            .await?;
+        let written: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "POST")?;
+        parse_discord_id("Message-ID", &written.id)
+    }
+
+    async fn replace_voice_ux_target_metadata(
+        &self,
+        target: &voice_ux_publish::VoiceUxTargetOutput,
+        message_ids: &[u64],
+    ) -> ServerSyncResult<()> {
+        self.replace_static_v2_message_ids_and_metadata(
+            &voice_ux_publish::voice_ux_message_id_prefix(target.channel_id),
+            &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
+            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
+            &target.payload_hash,
+            message_ids,
+        )
+        .await
+    }
+
+    async fn store_voice_ux_target_metadata(
+        &self,
+        target: &voice_ux_publish::VoiceUxTargetOutput,
+    ) -> ServerSyncResult<()> {
+        self.store_static_v2_metadata(
+            &voice_ux_publish::voice_ux_payload_format_key(target.channel_id),
+            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+            &voice_ux_publish::voice_ux_payload_hash_key(target.channel_id),
+            &target.payload_hash,
+        )
+        .await
+    }
+
+    async fn delete_voice_ux_messages(
+        &self,
+        channel_id: u64,
+        stored_message_ids: &[u64],
+        bot_user_id: u64,
+    ) -> ServerSyncResult<StaticV2DeleteOutcome> {
+        let mut message_ids = stored_message_ids.to_vec();
+        message_ids.sort_unstable();
+        message_ids.dedup();
+        let mut deleted = Vec::new();
+        let mut warnings = Vec::new();
+        for message_id in message_ids {
+            let response = match self
+                .discord_get_response(
+                    self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}")),
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: gespeicherte Message-ID {message_id} konnte vor Delete nicht gelesen werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                warnings.push(format!(
+                    "Voice-UX: gespeicherte Message-ID {message_id} war beim Delete bereits weg"
+                ));
+                continue;
+            }
+            let message: DiscordMessage = match discord_regelwerk_json_response(response, "GET") {
+                Ok(message) => message,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: gespeicherte Message-ID {message_id} konnte vor Delete nicht validiert werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let author_id = match parse_discord_id("Message-Author-ID", &message.author.id) {
+                Ok(author_id) => author_id,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: gespeicherte Message-ID {message_id} hat ungueltigen Autor und wird nicht geloescht: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let candidate = voice_ux_publish::VoiceUxV2Message {
+                message_id,
+                author_id,
+                flags: message.flags,
+                components: message.components,
+            };
+            if !voice_ux_publish::is_voice_ux_v2_message(&candidate, bot_user_id) {
+                warnings.push(format!(
+                    "Voice-UX: gespeicherte Message-ID {message_id} passt nicht zur eigenen V2-Signatur und wird nicht geloescht"
+                ));
+                continue;
+            }
+            if self
+                .discord_delete(
+                    self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}")),
+                )
+                .await?
+            {
+                deleted.push(message_id);
+            }
+        }
+        Ok(StaticV2DeleteOutcome { deleted, warnings })
+    }
+
+    async fn cleanup_new_voice_ux_posts_best_effort(&self, channel_id: u64, message_ids: &[u64]) {
+        self.cleanup_new_static_v2_posts_best_effort("Voice-UX", channel_id, message_ids)
+            .await;
+    }
+
+    async fn pin_voice_ux_message_best_effort(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<(), String> {
+        let url = self.discord_api_url(&format!("/channels/{channel_id}/pins/{message_id}"));
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .put(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "PUT",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "HTTP {}: {}",
+                response.status().as_u16(),
+                response.body_preview()
+            ))
+        }
+    }
+
+    async fn fetch_voice_ux_legacy_cleanup_candidates(
+        &self,
+        bot_user_id: u64,
+    ) -> ServerSyncResult<(
+        Vec<voice_ux_publish::VoiceUxLegacyCleanupCandidate>,
+        Vec<String>,
+    )> {
+        let mut raw_candidates = vec![
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID,
+                "fixed_router_panel".to_string(),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID,
+                "fixed_lfg_panel".to_string(),
+            ),
+        ];
+        if let Ok(Some(raw)) = dl_central_db::kv::get(
+            &self.pool,
+            dl_voice::router::ROUTER_PANEL_KV_NS,
+            dl_voice::router::ROUTER_PANEL_MESSAGE_KEY,
+        )
+        .await
+        {
+            if let Ok(message_id) =
+                parse_discord_id("tempvoice_router.components_v2_message_id", &raw)
+            {
+                raw_candidates.push((
+                    voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                    message_id,
+                    "kv_tempvoice_router_components_v2_message_id".to_string(),
+                ));
+            }
+        }
+        if let Ok(Some(raw)) = dl_central_db::kv::get(
+            &self.pool,
+            dl_voice::lfg_panel::LFG_PANEL_KV_NS,
+            dl_voice::lfg_panel::LFG_PANEL_MESSAGE_KEY,
+        )
+        .await
+        {
+            if let Ok(message_id) = parse_discord_id("lfg_panel.components_v2_message_id", &raw) {
+                raw_candidates.push((
+                    voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                    message_id,
+                    "kv_lfg_panel_components_v2_message_id".to_string(),
+                ));
+            }
+        }
+
+        raw_candidates.sort_unstable_by_key(|(_, message_id, _)| *message_id);
+        raw_candidates.dedup_by_key(|(_, message_id, _)| *message_id);
+
+        let mut candidates = Vec::new();
+        let mut warnings = Vec::new();
+        for (channel_id, message_id, source) in raw_candidates {
+            let response = match self
+                .discord_get_response(
+                    self.discord_api_url(&format!("/channels/{channel_id}/messages/{message_id}")),
+                )
+                .await
+            {
+                Ok(response) => response,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: Legacy-Message {message_id} aus {source} konnte nicht gelesen werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            if response.status() == reqwest::StatusCode::NOT_FOUND {
+                warnings.push(format!(
+                    "Voice-UX: Legacy-Message {message_id} aus {source} wurde nicht gefunden"
+                ));
+                continue;
+            }
+            let message: DiscordMessage = match discord_regelwerk_json_response(response, "GET") {
+                Ok(message) => message,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: Legacy-Message {message_id} aus {source} konnte nicht validiert werden: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let author_id = match parse_discord_id("Message-Author-ID", &message.author.id) {
+                Ok(author_id) => author_id,
+                Err(err) => {
+                    warnings.push(format!(
+                        "Voice-UX: Legacy-Message {message_id} aus {source} hat ungueltigen Autor: {err}"
+                    ));
+                    continue;
+                }
+            };
+            let legacy = voice_ux_publish::VoiceUxLegacyMessage {
+                channel_id,
+                message_id,
+                author_id,
+                custom_ids: voice_ux_publish::collect_component_custom_ids(&message.components),
+            };
+            if voice_ux_publish::is_voice_ux_legacy_cleanup_candidate(&legacy, bot_user_id) {
+                candidates.push(voice_ux_publish::VoiceUxLegacyCleanupCandidate {
+                    channel_id,
+                    message_id,
+                    source,
+                });
+            } else {
+                warnings.push(format!(
+                    "Voice-UX: Legacy-Message {message_id} aus {source} passt nicht zur Bot-/Custom-ID-Signatur und wird nicht geloescht"
+                ));
+            }
+        }
+        Ok((candidates, warnings))
+    }
+
+    async fn cleanup_voice_ux_legacy_messages(
+        &self,
+        output: &mut voice_ux_publish::VoiceUxPublishOutput,
+    ) -> ServerSyncResult<()> {
+        for candidate in output.legacy_cleanup_candidates.clone() {
+            if self
+                .discord_delete(self.discord_api_url(&format!(
+                    "/channels/{}/messages/{}",
+                    candidate.channel_id, candidate.message_id
+                )))
+                .await?
+            {
+                output.deleted_legacy_message_ids.push(candidate.message_id);
+            } else {
+                output.warnings.push(format!(
+                    "Voice-UX: Legacy-Message {} war beim Cleanup bereits weg",
+                    candidate.message_id
+                ));
+            }
+        }
+        for (ns, key) in [
+            (
+                dl_voice::router::ROUTER_PANEL_KV_NS,
+                dl_voice::router::ROUTER_PANEL_MESSAGE_KEY,
+            ),
+            (
+                dl_voice::lfg_panel::LFG_PANEL_KV_NS,
+                dl_voice::lfg_panel::LFG_PANEL_MESSAGE_KEY,
+            ),
+        ] {
+            match dl_central_db::kv::delete(&self.pool, ns, key).await {
+                Ok(()) => output.cleared_legacy_kv_keys.push(format!("{ns}:{key}")),
+                Err(err) => output.warnings.push(format!(
+                    "Voice-UX: Legacy-KV {ns}:{key} konnte nicht entfernt werden: {err}"
+                )),
+            }
+        }
+        Ok(())
+    }
+
+    async fn post_voice_ux_forum_post(
+        &self,
+        forum: &voice_ux_publish::VoiceUxForumPostOutput,
+    ) -> ServerSyncResult<u64> {
+        let url = self.discord_api_url(&format!(
+            "/channels/{}/threads",
+            voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID
+        ));
+        let body = json!({
+            "name": forum.title,
+            "auto_archive_duration": 1440,
+            "message": forum.payload,
+        });
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .post(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("Content-Type", "application/json")
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                    .json(&body);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "POST",
+        )
+        .await?;
+        let thread: DiscordThread = discord_regelwerk_json_response(response, "POST")?;
+        parse_discord_id("Forum-Thread-ID", &thread.id)
+    }
+
+    async fn edit_voice_ux_forum_post(
+        &self,
+        thread_id: u64,
+        forum: &voice_ux_publish::VoiceUxForumPostOutput,
+    ) -> ServerSyncResult<Option<u64>> {
+        let url = self.discord_api_url(&format!("/channels/{thread_id}/messages/{thread_id}"));
+        let payload_value = serde_json::to_value(&forum.payload)?;
+        let response = self
+            .send_components_v2_message_payload(
+                "Voice-UX-Forum",
+                "PATCH",
+                url,
+                payload_value,
+                Vec::new(),
+            )
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        let written: DiscordMessageWriteResponse =
+            discord_regelwerk_json_response(response, "PATCH")?;
+        parse_discord_id("Forum-Starter-Message-ID", &written.id).map(Some)
+    }
+
+    async fn store_voice_ux_forum_metadata(
+        &self,
+        thread_id: u64,
+        payload_hash: &str,
+    ) -> ServerSyncResult<()> {
+        self.store_serversync_kv(
+            voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY,
+            &thread_id.to_string(),
+        )
+        .await?;
+        self.store_serversync_kv(
+            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_FORMAT_KEY,
+            voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT,
+        )
+        .await?;
+        self.store_serversync_kv(
+            voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY,
+            payload_hash,
+        )
+        .await
+    }
+
+    async fn pin_voice_ux_forum_thread_best_effort(&self, thread_id: u64) -> Result<(), String> {
+        let url = self.discord_api_url(&format!("/channels/{thread_id}"));
+        let payload = json!({ "pinned": true });
+        let response = discord_regelwerk_send_with_retry(
+            || {
+                let request = self
+                    .http_client
+                    .patch(url.clone())
+                    .header("Authorization", format!("Bot {}", self.discord_token))
+                    .header("Content-Type", "application/json")
+                    .header("X-Audit-Log-Reason", ONBOARDING_AUDIT_LOG_REASON)
+                    .json(&payload);
+                async move {
+                    let response = request.send().await?;
+                    DiscordRestResponse::from_response(response).await
+                }
+            },
+            "PATCH",
+        )
+        .await
+        .map_err(|err| err.to_string())?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(format!(
+                "HTTP {}: {}",
+                response.status().as_u16(),
+                response.body_preview()
+            ))
+        }
+    }
+
     async fn router_apply(&self, confirm: bool) -> ServerSyncResult<RouterApplyOutput> {
-        let Some(interface) = self.router_interface.read().await.clone() else {
-            return Err(ServerSyncError::internal(
-                "RouterInterface ist im ServerSyncService nicht verdrahtet",
-            ));
-        };
-        interface
-            .apply_panel(confirm)
-            .await
-            .map_err(ServerSyncError::internal)
+        let stored_message_ids = self.load_voice_ux_message_ids().await?;
+        let stored_payload_formats = self.load_voice_ux_payload_formats().await?;
+        let stored_payload_hashes = self.load_voice_ux_payload_hashes().await?;
+        let forum_thread_id = self.load_voice_ux_lfg_forum_thread_id().await?;
+        let forum_stored_payload_hash = self
+            .load_serversync_kv(voice_ux_publish::VOICE_UX_LFG_FORUM_PAYLOAD_HASH_KEY)
+            .await?;
+        let mut output = voice_ux_publish::build_voice_ux_publish_output(
+            &stored_message_ids,
+            &stored_payload_formats,
+            &stored_payload_hashes,
+            forum_thread_id,
+            forum_stored_payload_hash.as_deref(),
+            !confirm,
+        )
+        .map_err(ServerSyncError::bad_request)?;
+        let bot_user_id = self.fetch_current_bot_user_id().await?;
+
+        for target_index in 0..output.targets.len() {
+            let channel_id = output.targets[target_index].channel_id;
+            let discovered = self
+                .fetch_voice_ux_v2_message_ids(channel_id, bot_user_id)
+                .await?;
+            let expected = output.targets[target_index].messages.len();
+            if output.targets[target_index].stored_message_ids.len() != expected {
+                match discovered.len() {
+                    0 => {}
+                    count if count == expected => {
+                        voice_ux_publish::adopt_voice_ux_message_ids(
+                            &mut output.targets[target_index],
+                            &discovered,
+                            confirm,
+                        );
+                        output.warnings.push(format!(
+                            "Voice-UX: KV-Message-IDs fuer Kanal {channel_id} fehlen/unvollstaendig; vorhandene eigene V2-Messages werden adoptiert: {discovered:?}"
+                        ));
+                    }
+                    count => {
+                        return Err(ServerSyncError::bad_request(format!(
+                            "Voice-UX: KV-Message-IDs fuer Kanal {channel_id} fehlen/unvollstaendig, aber History-Scan fand {count} eigene V2-Messages fuer {expected} erwartete Messages; Apply blockiert gegen Duplikate."
+                        )));
+                    }
+                }
+            }
+        }
+
+        let (legacy_candidates, legacy_warnings) = self
+            .fetch_voice_ux_legacy_cleanup_candidates(bot_user_id)
+            .await?;
+        output.legacy_cleanup_candidates = legacy_candidates;
+        output.warnings.extend(legacy_warnings);
+
+        if !confirm {
+            return Ok(output);
+        }
+
+        for target_index in 0..output.targets.len() {
+            if output.targets[target_index].repost_required {
+                let channel_id = output.targets[target_index].channel_id;
+                let old_ids = output.targets[target_index].stored_message_ids.clone();
+                let mut posted_message_ids = Vec::new();
+                for message_index in 0..output.targets[target_index].messages.len() {
+                    let post_result = self
+                        .post_voice_ux_message(
+                            channel_id,
+                            &output.targets[target_index].messages[message_index],
+                        )
+                        .await;
+                    let message_id = match post_result {
+                        Ok(message_id) => message_id,
+                        Err(err) => {
+                            self.cleanup_new_voice_ux_posts_best_effort(
+                                channel_id,
+                                &posted_message_ids,
+                            )
+                            .await;
+                            return Err(err);
+                        }
+                    };
+                    posted_message_ids.push(message_id);
+                    let message = &mut output.targets[target_index].messages[message_index];
+                    message.action = "posted".to_string();
+                    message.message_id = Some(message_id);
+                    message.stored_message_id = Some(message_id);
+                    output.targets[target_index]
+                        .posted_message_ids
+                        .push(message_id);
+                }
+                if let Err(err) = self
+                    .replace_voice_ux_target_metadata(
+                        &output.targets[target_index],
+                        &posted_message_ids,
+                    )
+                    .await
+                {
+                    self.cleanup_new_voice_ux_posts_best_effort(channel_id, &posted_message_ids)
+                        .await;
+                    return Err(err);
+                }
+                let delete_outcome = self
+                    .delete_voice_ux_messages(channel_id, &old_ids, bot_user_id)
+                    .await?;
+                output.targets[target_index].deleted_message_ids = delete_outcome.deleted;
+                output.warnings.extend(delete_outcome.warnings);
+            } else if voice_ux_publish::voice_ux_target_payload_is_unchanged(
+                &output.targets[target_index],
+            ) {
+                for message in &mut output.targets[target_index].messages {
+                    if let Some(message_id) = message.stored_message_id {
+                        message.action = "no_op".to_string();
+                        message.message_id = Some(message_id);
+                    }
+                }
+                self.store_voice_ux_target_metadata(&output.targets[target_index])
+                    .await?;
+            } else {
+                let channel_id = output.targets[target_index].channel_id;
+                let mut message_ids = Vec::new();
+                for message_index in 0..output.targets[target_index].messages.len() {
+                    let stored_message_id =
+                        output.targets[target_index].messages[message_index].stored_message_id;
+                    if let Some(stored_message_id) = stored_message_id {
+                        if let Some(message_id) = self
+                            .edit_voice_ux_message(
+                                channel_id,
+                                stored_message_id,
+                                &output.targets[target_index].messages[message_index],
+                            )
+                            .await?
+                        {
+                            message_ids.push(message_id);
+                            let message = &mut output.targets[target_index].messages[message_index];
+                            message.action = "edited".to_string();
+                            message.message_id = Some(message_id);
+                            message.stored_message_id = Some(message_id);
+                            output.targets[target_index]
+                                .edited_message_ids
+                                .push(message_id);
+                            continue;
+                        }
+                        output.warnings.push(format!(
+                            "Voice-UX: gespeicherte Message-ID {stored_message_id} in Kanal {channel_id} ist stale (404); es wird neu gepostet."
+                        ));
+                    }
+                    let message_id = self
+                        .post_voice_ux_message(
+                            channel_id,
+                            &output.targets[target_index].messages[message_index],
+                        )
+                        .await?;
+                    message_ids.push(message_id);
+                    self.store_static_v2_message_id(
+                        &voice_ux_publish::voice_ux_message_id_prefix(channel_id),
+                        message_index,
+                        message_id,
+                    )
+                    .await?;
+                    let message = &mut output.targets[target_index].messages[message_index];
+                    message.action = "posted".to_string();
+                    message.message_id = Some(message_id);
+                    message.stored_message_id = Some(message_id);
+                    output.targets[target_index]
+                        .posted_message_ids
+                        .push(message_id);
+                }
+                self.replace_voice_ux_target_metadata(&output.targets[target_index], &message_ids)
+                    .await?;
+            }
+
+            let channel_id = output.targets[target_index].channel_id;
+            let message_ids = output.targets[target_index]
+                .messages
+                .iter()
+                .filter_map(|message| message.message_id)
+                .collect::<Vec<_>>();
+            for message_id in message_ids {
+                match self.pin_voice_ux_message_best_effort(channel_id, message_id).await {
+                    Ok(()) => {
+                        if !output.targets[target_index]
+                            .pinned_message_ids
+                            .contains(&message_id)
+                        {
+                            output.targets[target_index]
+                                .pinned_message_ids
+                                .push(message_id);
+                        }
+                    }
+                    Err(err) => output.warnings.push(format!(
+                        "Voice-UX: Message {message_id} in Kanal {channel_id} konnte nicht gepinnt werden: {err}"
+                    )),
+                }
+            }
+            output.targets[target_index].repost_required = false;
+        }
+
+        if output.forum_post.stored_thread_id.is_some()
+            && voice_ux_publish::voice_ux_forum_payload_is_unchanged(&output.forum_post)
+        {
+            if let Some(thread_id) = output.forum_post.stored_thread_id {
+                output.forum_post.thread_id = Some(thread_id);
+                output.forum_post.action = "no_op".to_string();
+                self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
+                    .await?;
+                match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
+                    Ok(()) => output.forum_post.pinned = true,
+                    Err(err) => output.forum_post.warnings.push(format!(
+                        "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
+                    )),
+                }
+            }
+        } else if let Some(thread_id) = output.forum_post.stored_thread_id {
+            match self
+                .edit_voice_ux_forum_post(thread_id, &output.forum_post)
+                .await?
+            {
+                Some(_) => {
+                    output.forum_post.thread_id = Some(thread_id);
+                    output.forum_post.action = "edited".to_string();
+                    self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
+                        .await?;
+                    match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
+                        Ok(()) => output.forum_post.pinned = true,
+                        Err(err) => output.forum_post.warnings.push(format!(
+                            "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
+                        )),
+                    }
+                }
+                None => {
+                    let new_thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
+                    output.forum_post.thread_id = Some(new_thread_id);
+                    output.forum_post.action = "posted".to_string();
+                    self.store_voice_ux_forum_metadata(
+                        new_thread_id,
+                        &output.forum_post.payload_hash,
+                    )
+                    .await?;
+                    match self
+                        .pin_voice_ux_forum_thread_best_effort(new_thread_id)
+                        .await
+                    {
+                        Ok(()) => output.forum_post.pinned = true,
+                        Err(err) => output.forum_post.warnings.push(format!(
+                            "Forum-Thread {new_thread_id} konnte nicht gepinnt werden: {err}"
+                        )),
+                    }
+                }
+            }
+        } else {
+            let thread_id = self.post_voice_ux_forum_post(&output.forum_post).await?;
+            output.forum_post.thread_id = Some(thread_id);
+            output.forum_post.action = "posted".to_string();
+            self.store_voice_ux_forum_metadata(thread_id, &output.forum_post.payload_hash)
+                .await?;
+            match self.pin_voice_ux_forum_thread_best_effort(thread_id).await {
+                Ok(()) => output.forum_post.pinned = true,
+                Err(err) => output.forum_post.warnings.push(format!(
+                    "Forum-Thread {thread_id} konnte nicht gepinnt werden: {err}"
+                )),
+            }
+        }
+
+        output.warnings.extend(output.forum_post.warnings.clone());
+        self.cleanup_voice_ux_legacy_messages(&mut output).await?;
+        output.dry_run = false;
+        Ok(output)
     }
 
     async fn lfg_panel_apply(&self, confirm: bool) -> ServerSyncResult<LfgPanelApplyOutput> {
-        let Some(interface) = self.lfg_panel_interface.read().await.clone() else {
-            return Err(ServerSyncError::internal(
-                "LfgPanelInterface ist im ServerSyncService nicht verdrahtet",
-            ));
-        };
-        interface
-            .apply_panel(confirm)
-            .await
-            .map_err(ServerSyncError::internal)
+        Ok(LfgPanelApplyOutput {
+            guild_id: self.guild_id,
+            channel_id: None,
+            dry_run: !confirm,
+            payload_format: dl_voice::lfg_panel::LFG_PAYLOAD_FORMAT.to_string(),
+            stored_payload_format: None,
+            stored_message_id: None,
+            action: "blocked_superseded_by_voice_ux".to_string(),
+            message_id: None,
+            blocked_reason: Some(
+                "lfg_panel_apply_superseded_by_serversync_router_apply".to_string(),
+            ),
+            warnings: vec![
+                "LFG-Panel: alter Einzelpanel-Publisher ist durch Voice-UX in /serversync/router-apply ersetzt.".to_string(),
+            ],
+            payload: json!({}),
+        })
     }
 }
 
@@ -7187,7 +8097,7 @@ mod tests {
     use axum::extract::{Path as AxumPath, Query, State};
     use axum::http::Request;
     use axum::response::IntoResponse;
-    use axum::routing::get;
+    use axum::routing::{get, patch, put};
     use dl_server_as_code::{
         BotMessageSpec, CategorySpec, ChannelKind, ChannelSpec, OverwriteKey, RoleSpec, TargetKind,
     };
@@ -7604,6 +8514,18 @@ mod tests {
                     .patch(fake_discord_patch_message)
                     .delete(fake_discord_delete_message),
             )
+            .route(
+                "/api/v10/channels/{channel_id}/pins/{message_id}",
+                put(fake_discord_pin_message),
+            )
+            .route(
+                "/api/v10/channels/{channel_id}/threads",
+                post(fake_discord_create_thread),
+            )
+            .route(
+                "/api/v10/channels/{channel_id}",
+                patch(fake_discord_patch_channel),
+            )
             .with_state(state.clone());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
@@ -7695,6 +8617,36 @@ mod tests {
         }
     }
 
+    async fn fake_discord_create_thread(
+        State(state): State<Arc<FakeDiscordState>>,
+        AxumPath(channel_id): AxumPath<u64>,
+        _body: Bytes,
+    ) -> Response {
+        state
+            .post_calls
+            .lock()
+            .expect("post calls")
+            .push(channel_id);
+        let response = state
+            .post_responses
+            .lock()
+            .expect("post responses")
+            .pop_front();
+        match response.unwrap_or_else(|| {
+            let mut next = state.next_post_id.lock().expect("next post id");
+            let id = *next;
+            *next += 1;
+            FakePostResponse::Ok(id)
+        }) {
+            FakePostResponse::Ok(thread_id) => {
+                Json(json!({"id": thread_id.to_string()})).into_response()
+            }
+            FakePostResponse::Status(status) => {
+                (status, Json(json!({"message": "forced failure"}))).into_response()
+            }
+        }
+    }
+
     async fn fake_discord_patch_message(
         State(state): State<Arc<FakeDiscordState>>,
         AxumPath((_channel_id, message_id)): AxumPath<(u64, u64)>,
@@ -7737,6 +8689,14 @@ mod tests {
         } else {
             (StatusCode::NOT_FOUND, Json(json!({"message": "missing"}))).into_response()
         }
+    }
+
+    async fn fake_discord_pin_message() -> StatusCode {
+        StatusCode::NO_CONTENT
+    }
+
+    async fn fake_discord_patch_channel(AxumPath(channel_id): AxumPath<u64>) -> Json<Value> {
+        Json(json!({"id": channel_id.to_string()}))
     }
 
     fn fake_discord_message(
@@ -8272,40 +9232,49 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     fn mock_router_output(dry_run: bool) -> RouterApplyOutput {
-        RouterApplyOutput {
-            guild_id: GUILD_ID,
-            channel_id: dl_voice::router::ROUTER_TEXT_CHANNEL_ID,
+        let ids = BTreeMap::from([
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                vec![8001, 8002, 8003, 8004],
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                vec![8011, 8012, 8013, 8014],
+            ),
+        ]);
+        let formats = BTreeMap::from([
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT.to_string()),
+            ),
+        ]);
+        let mut output = voice_ux_publish::build_voice_ux_publish_output(
+            &ids,
+            &formats,
+            &BTreeMap::new(),
+            Some(8021),
+            Some("old-hash"),
             dry_run,
-            payload_format: dl_voice::router::ROUTER_PAYLOAD_FORMAT.to_string(),
-            stored_payload_format: Some(dl_voice::router::ROUTER_PAYLOAD_FORMAT.to_string()),
-            stored_message_id: Some(8001),
-            action: if dry_run { "planned_edit" } else { "edited" }.to_string(),
-            message_id: Some(8001),
-            warnings: Vec::new(),
-            payload: json!({
-                "flags": dl_voice::router::ROUTER_COMPONENTS_V2_FLAG,
-                "allowed_mentions": {"parse": []},
-                "components": [{
-                    "type": 17,
-                    "accent_color": dl_voice::router::ROUTER_ACCENT_GOLD,
-                    "components": [
-                        {
-                            "type": 12,
-                            "items": [{"media": {"url": "attachment://router-hero.png"}}],
-                        },
-                        {
-                            "type": 10,
-                            "content": dl_voice::router::ROUTER_PANEL_INTRO,
-                        },
-                    ],
-                }],
-                "attachments": [
-                    {"id": 0, "filename": "router-hero.png"},
-                    {"id": 1, "filename": "divider-lane-verwalten.png"},
-                    {"id": 2, "filename": "divider-anleitung.png"},
-                ],
-            }),
+        )
+        .expect("voice ux mock output");
+        if !dry_run {
+            for target in &mut output.targets {
+                target.edited_message_ids = target.stored_message_ids.clone();
+                target.repost_required = false;
+                for message in &mut target.messages {
+                    message.action = "edited".to_string();
+                    message.message_id = message.stored_message_id;
+                }
+            }
+            output.forum_post.action = "edited".to_string();
+            output.forum_post.thread_id = output.forum_post.stored_thread_id;
+            output.dry_run = false;
         }
+        output
     }
 
     fn mock_lfg_panel_output(dry_run: bool) -> LfgPanelApplyOutput {
@@ -10470,6 +11439,184 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[tokio::test]
+    async fn service_voice_ux_apply_zieht_legacy_kv_auf_neue_zielkanaele_um() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        dl_central_db::kv::set(
+            db.pool(),
+            dl_voice::router::ROUTER_PANEL_KV_NS,
+            dl_voice::router::ROUTER_PANEL_MESSAGE_KEY,
+            &voice_ux_publish::VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID.to_string(),
+        )
+        .await
+        .expect("set router legacy kv");
+        dl_central_db::kv::set(
+            db.pool(),
+            dl_voice::lfg_panel::LFG_PANEL_KV_NS,
+            dl_voice::lfg_panel::LFG_PANEL_MESSAGE_KEY,
+            &voice_ux_publish::VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID.to_string(),
+        )
+        .await
+        .expect("set lfg legacy kv");
+        let fake = spawn_fake_discord(
+            42,
+            vec![
+                fake_discord_message(
+                    voice_ux_publish::VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID,
+                    42,
+                    0,
+                    vec![json!({
+                        "type": 1,
+                        "components": [{
+                            "type": 2,
+                            "custom_id": "router_spawn_casual",
+                        }],
+                    })],
+                    Vec::new(),
+                ),
+                fake_discord_message(
+                    voice_ux_publish::VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID,
+                    42,
+                    0,
+                    vec![json!({
+                        "type": 1,
+                        "components": [{
+                            "type": 2,
+                            "custom_id": dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID,
+                        }],
+                    })],
+                    Vec::new(),
+                ),
+            ],
+            (9201_u64..=9209).map(FakePostResponse::Ok).collect(),
+        )
+        .await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.router_apply(true).await.expect("apply");
+
+        assert_eq!(output.targets.len(), 2);
+        assert_eq!(
+            output.targets[0].posted_message_ids,
+            vec![9201, 9202, 9203, 9204]
+        );
+        assert_eq!(
+            output.targets[1].posted_message_ids,
+            vec![9205, 9206, 9207, 9208]
+        );
+        assert_eq!(output.forum_post.thread_id, Some(9209));
+        assert!(output.forum_post.pinned);
+        assert_eq!(
+            output.deleted_legacy_message_ids,
+            vec![
+                voice_ux_publish::VOICE_UX_OLD_ROUTER_PANEL_MESSAGE_ID,
+                voice_ux_publish::VOICE_UX_OLD_LFG_PANEL_MESSAGE_ID,
+            ]
+        );
+        for (channel_id, expected_ids) in [
+            (
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                vec![9201_u64, 9202, 9203, 9204],
+            ),
+            (
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                vec![9205_u64, 9206, 9207, 9208],
+            ),
+        ] {
+            let prefix = voice_ux_publish::voice_ux_message_id_prefix(channel_id);
+            for (index, expected_id) in expected_ids.into_iter().enumerate() {
+                assert_eq!(
+                    get_serversync_kv(db.pool(), &format!("{prefix}{index}")).await,
+                    Some(expected_id.to_string())
+                );
+            }
+            assert_eq!(
+                get_serversync_kv(
+                    db.pool(),
+                    &voice_ux_publish::voice_ux_payload_format_key(channel_id)
+                )
+                .await
+                .as_deref(),
+                Some(voice_ux_publish::VOICE_UX_PAYLOAD_FORMAT)
+            );
+            assert!(get_serversync_kv(
+                db.pool(),
+                &voice_ux_publish::voice_ux_payload_hash_key(channel_id)
+            )
+            .await
+            .is_some());
+        }
+        assert_eq!(
+            get_serversync_kv(
+                db.pool(),
+                voice_ux_publish::VOICE_UX_LFG_FORUM_THREAD_ID_KEY
+            )
+            .await
+            .as_deref(),
+            Some("9209")
+        );
+        assert!(dl_central_db::kv::get(
+            db.pool(),
+            dl_voice::router::ROUTER_PANEL_KV_NS,
+            dl_voice::router::ROUTER_PANEL_MESSAGE_KEY,
+        )
+        .await
+        .expect("get router legacy kv")
+        .is_none());
+        assert!(dl_central_db::kv::get(
+            db.pool(),
+            dl_voice::lfg_panel::LFG_PANEL_KV_NS,
+            dl_voice::lfg_panel::LFG_PANEL_MESSAGE_KEY,
+        )
+        .await
+        .expect("get lfg legacy kv")
+        .is_none());
+        assert_eq!(
+            fake.state.post_calls.lock().expect("post calls").as_slice(),
+            &[
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_ROUTER_CHAT_CHANNEL_ID,
+                voice_ux_publish::VOICE_UX_LFG_FORUM_CHANNEL_ID,
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn service_lfg_panel_apply_blockt_alten_einzelpanel_publisher() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let repo = tempfile::tempdir().expect("repo");
+        let fake = spawn_fake_discord(42, Vec::new(), Vec::new()).await;
+        let service = ServerSyncService::new_for_test(
+            db.pool().clone(),
+            fake.base_url.clone(),
+            repo.path().to_path_buf(),
+        );
+
+        let output = service.lfg_panel_apply(true).await.expect("blocked");
+
+        assert_eq!(output.action, "blocked_superseded_by_voice_ux");
+        assert_eq!(
+            output.blocked_reason.as_deref(),
+            Some("lfg_panel_apply_superseded_by_serversync_router_apply")
+        );
+        assert!(fake.state.post_calls.lock().expect("post calls").is_empty());
+    }
+
+    #[tokio::test]
     async fn router_apply_http_ist_dry_run_default_und_liefert_v2_payload() {
         let service = Arc::new(MockServerSync::default());
         let app = router(service.clone(), Some("secret".to_string()));
@@ -10482,33 +11629,70 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let (status, body) = response_json(dry_run).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["dry_run"], true);
-        assert_eq!(body["result"]["action"], "planned_edit");
+        let targets = body["result"]["targets"].as_array().expect("targets");
+        assert_eq!(targets.len(), 2);
+        let first_target = &targets[0];
         assert_eq!(
-            body["result"]["payload"]["flags"],
-            dl_voice::router::ROUTER_COMPONENTS_V2_FLAG
+            first_target["channel_id"],
+            voice_ux_publish::VOICE_UX_CHANNEL_ID
+        );
+        let messages = first_target["messages"].as_array().expect("messages");
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0]["message_key"], "guide");
+        assert_eq!(messages[1]["message_key"], "lfg");
+        assert_eq!(messages[2]["message_key"], "spawn");
+        assert_eq!(messages[3]["message_key"], "manage");
+        assert!(messages
+            .iter()
+            .all(|message| message["action"] == "planned_edit"));
+        assert_eq!(
+            messages[0]["payload"]["flags"],
+            voice_ux_publish::VOICE_UX_COMPONENTS_V2_FLAG
+        );
+        for message in messages {
+            assert_eq!(
+                message["payload"]["allowed_mentions"]["parse"]
+                    .as_array()
+                    .expect("parse")
+                    .len(),
+                0
+            );
+        }
+        assert_eq!(
+            messages[0]["payload"]["components"][0]["components"][0]["content"],
+            format!(
+                "{}\n{}",
+                dl_voice::router::VOICE_GUIDE_TITLE,
+                dl_voice::router::VOICE_GUIDE_BODY
+            )
         );
         assert_eq!(
-            body["result"]["payload"]["allowed_mentions"]["parse"]
+            messages[0]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            "voice:guide:detail"
+        );
+        assert_eq!(
+            messages[1]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
+        );
+        assert_eq!(
+            messages[2]["payload"]["components"][0]["components"][1]["components"][0]["custom_id"],
+            "router_spawn_casual"
+        );
+        assert_eq!(
+            messages[3]["payload"]["components"][0]["components"][2]["components"][4]["custom_id"],
+            "tv_prefs_open"
+        );
+        assert_eq!(
+            body["result"]["forum_post"]["payload"]["allowed_mentions"]["parse"]
                 .as_array()
                 .expect("parse")
                 .len(),
             0
         );
         assert_eq!(
-            body["result"]["payload"]["components"][0]["components"][0]["items"][0]["media"]["url"],
-            "attachment://router-hero.png"
-        );
-        assert_eq!(
-            body["result"]["payload"]["components"][0]["components"][1]["content"],
-            dl_voice::router::ROUTER_PANEL_INTRO
-        );
-        assert_eq!(
-            body["result"]["payload"]["attachments"],
-            json!([
-                {"id": 0, "filename": "router-hero.png"},
-                {"id": 1, "filename": "divider-lane-verwalten.png"},
-                {"id": 2, "filename": "divider-anleitung.png"},
-            ])
+            body["result"]["forum_post"]["payload"]["components"][0]["components"][1]["components"]
+                [0]["custom_id"],
+            dl_voice::lfg_panel::LFG_CREATE_START_CUSTOM_ID
         );
 
         let confirmed = app
@@ -10522,7 +11706,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let (status, body) = response_json(confirmed).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["result"]["dry_run"], false);
-        assert_eq!(body["result"]["action"], "edited");
+        assert_eq!(
+            body["result"]["targets"][0]["messages"][0]["action"],
+            "edited"
+        );
+        assert_eq!(body["result"]["forum_post"]["action"], "edited");
         assert_eq!(
             service
                 .router_apply_calls

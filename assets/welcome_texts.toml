@@ -61,10 +61,6 @@ key = "server-support"
 description = "Fragen oder Probleme mit dem Server? Hier entlang."
 
 [[channel]]
-key = "deadlock-invite"
-description = "Unser Einladungslink zum Weitergeben."
-
-[[channel]]
 key = "ankündigungen"
 description = "Alles Wichtige aus der Community, kompakt."
 

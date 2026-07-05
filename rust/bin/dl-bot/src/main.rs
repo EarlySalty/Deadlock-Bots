@@ -1301,8 +1301,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.link_cache(client.cache.clone());
         let mut panel_cache_ready = dispatcher.subscribe_gateway();
         let tempvoice_interface_ready = tempvoice_interface.clone();
-        let router_interface_ready = router_interface.clone();
-        let lfg_panel_interface_ready = lfg_panel_interface.clone();
         tokio::spawn(async move {
             wait_for_gateway_cache_ready(
                 &mut panel_cache_ready,
@@ -1311,10 +1309,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             )
             .await;
             tempvoice_interface_ready.refresh_all_interfaces().await;
-            router_interface_ready.ensure_panel().await;
-            if lfg_panel_interface_ready.cutover_active() {
-                lfg_panel_interface_ready.ensure_panel().await;
-            }
         });
         dl_bridges::steam::spawn_panel_restore(
             steam_client.clone(),

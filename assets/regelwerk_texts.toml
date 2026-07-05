@@ -18,9 +18,8 @@ Probleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#
 Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann."""
 wegweiser = """**🧭 Schnell zurechtfinden**
 - <#1398021105339334666> — Steam verknüpfen, Rang eintragen
-- <#1464736918951432222> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite
 - <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)
-- <#1426220702054355077> — jede Frage ist okay
+- <#1426220702054355077> — jede Frage ist okay; auch dein Deadlock-Invite bekommst du hier
 - <#1522769149208821881> — Mitspieler finden"""
 
 [buttons]

@@ -2680,7 +2680,7 @@ impl LfgPanelInterface {
             crate::router::RouterSpawnOutcome::RankedVerifyRequired => {
                 BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG)
             }
-            crate::router::RouterSpawnOutcome::Cooldown { .. }
+            crate::router::RouterSpawnOutcome::FloodLimited
             | crate::router::RouterSpawnOutcome::NotCreated
             | crate::router::RouterSpawnOutcome::UnknownMode => {
                 BridgeReply::ephemeral_text(LFG_ERR_ERSTELLUNG_FEHLGESCHLAGEN)
