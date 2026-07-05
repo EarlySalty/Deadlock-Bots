@@ -11,6 +11,7 @@ use std::sync::{Arc, OnceLock};
 use regex::Regex;
 
 pub const WINDOW_SECONDS: i64 = 3600;
+pub const BURST_WINDOW_SECONDS: i64 = 60;
 pub const CHANNEL_THRESHOLD: usize = 3;
 pub const MESSAGE_THRESHOLD: usize = 3;
 pub const NEW_ACCOUNT_MAX_AGE_HOURS: i64 = 720;
@@ -332,33 +333,33 @@ impl BehaviorDetector {
             ));
         }
 
-        if let Some((_reason, meta)) = should_trigger(recent) {
-            let account_new = is_new_account(event.author_created_at, event.author_joined_at, now);
-            // meta = [unique_channels, total_messages, attachment_count, keyword_hit].
-            // A pure multi-channel message burst without any content signal (no
-            // attachment, no keyword) is normal activity for an established member
-            // chatting across channels. Only treat it as suspicious for new
-            // accounts (classic flood pattern); established accounts must show a
-            // real spam signal (attachment or keyword) to trigger burst_rate.
-            let has_content_signal = meta[2] > 0 || meta[3] > 0;
-            if account_new || has_content_signal {
-                let trigger = if account_new {
-                    BehaviorTriggerType::YoungAccountBurst
-                } else {
-                    BehaviorTriggerType::BurstRate
-                };
-                return Some(build_signal(
-                    event,
-                    now,
-                    trigger,
-                    BehaviorSeverity::Suspicious,
-                    BehaviorActionHint::Proposal,
-                    "behavior:burst_rate",
-                    WINDOW_SECONDS,
-                    recent.to_vec(),
-                    None,
-                ));
-            }
+        if should_trigger(recent, now).is_some() {
+            // A burst is only spam when it happens fast: many channels within a
+            // short window. should_trigger already restricts to BURST_WINDOW_SECONDS,
+            // so any hit here is a genuine fast multi-channel burst. Established
+            // and possibly compromised accounts count too, not just new ones.
+            let burst_cutoff = now - BURST_WINDOW_SECONDS;
+            let burst_window: Vec<RecentMessage> = recent
+                .iter()
+                .filter(|message| message.created_at >= burst_cutoff)
+                .cloned()
+                .collect();
+            let trigger = if is_new_account(event.author_created_at, event.author_joined_at, now) {
+                BehaviorTriggerType::YoungAccountBurst
+            } else {
+                BehaviorTriggerType::BurstRate
+            };
+            return Some(build_signal(
+                event,
+                now,
+                trigger,
+                BehaviorSeverity::Suspicious,
+                BehaviorActionHint::Proposal,
+                "behavior:burst_rate",
+                BURST_WINDOW_SECONDS,
+                burst_window,
+                None,
+            ));
         }
 
         if is_image_multi_channel(recent, now) {
@@ -620,25 +621,30 @@ pub fn detect_takeover(
     ))
 }
 
-pub fn should_trigger(messages: &[RecentMessage]) -> Option<(String, [i64; 4])> {
-    if messages.is_empty() {
+pub fn should_trigger(messages: &[RecentMessage], now: i64) -> Option<(String, [i64; 4])> {
+    let cutoff = now - BURST_WINDOW_SECONDS;
+    let windowed: Vec<&RecentMessage> = messages
+        .iter()
+        .filter(|message| message.created_at >= cutoff)
+        .collect();
+    if windowed.is_empty() {
         return None;
     }
-    let unique_channels = messages
+    let unique_channels = windowed
         .iter()
         .map(|message| message.channel_id)
         .collect::<HashSet<_>>();
-    let total = messages.len();
-    let attachment_count = messages
+    let total = windowed.len();
+    let attachment_count = windowed
         .iter()
         .filter(|message| message.attachment_count > 0)
         .count();
-    let attachment_channels = messages
+    let attachment_channels = windowed
         .iter()
         .filter(|message| message.attachment_count > 0)
         .map(|message| message.channel_id)
         .collect::<HashSet<_>>();
-    let keyword_hit = messages
+    let keyword_hit = windowed
         .iter()
         .any(|message| contains_suspicious_text(&message.content));
 
@@ -684,7 +690,7 @@ pub fn is_new_account(created_at: i64, joined_at: Option<i64>, now: i64) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{HashMap, VecDeque};
+    use std::collections::HashMap;
     use tokio::sync::Mutex;
 
     fn recent(
@@ -800,16 +806,19 @@ mod tests {
 
     #[test]
     fn burst_trigger_keeps_channel_message_attachment_keyword_meta() {
+        let now = 1_000_000;
         let messages = vec![
             recent(1, 10, 30, "join my telegram", 0),
             recent(2, 11, 20, "hi", 0),
         ];
-        let (_reason, meta) = should_trigger(&messages).expect("trigger");
+        let (_reason, meta) = should_trigger(&messages, now).expect("trigger");
 
         assert_eq!(meta, [2, 2, 0, 1]);
-        assert!(
-            should_trigger(&[recent(1, 10, 30, "hi", 0), recent(2, 11, 20, "ho", 0)]).is_none()
-        );
+        assert!(should_trigger(
+            &[recent(1, 10, 30, "hi", 0), recent(2, 11, 20, "ho", 0)],
+            now
+        )
+        .is_none());
     }
 
     #[test]
@@ -823,6 +832,40 @@ mod tests {
             &[recent(1, 10, 301, "", 1), recent(2, 11, 10, "", 1)],
             now
         ));
+    }
+
+    #[test]
+    fn should_trigger_ignores_activity_spread_beyond_burst_window() {
+        let now = 1_000_000;
+        assert!(should_trigger(
+            &[
+                recent(1, 10, 200, "hi", 0),
+                recent(2, 11, 120, "ho", 0),
+                recent(3, 12, 0, "he", 0),
+            ],
+            now
+        )
+        .is_none());
+        assert!(should_trigger(
+            &[
+                recent(1, 10, 40, "hi", 0),
+                recent(2, 11, 20, "ho", 0),
+                recent(3, 12, 0, "he", 0),
+            ],
+            now
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn should_trigger_attachment_multichannel_respects_burst_window() {
+        let now = 1_000_000;
+        assert!(
+            should_trigger(&[recent(1, 10, 200, "", 1), recent(2, 11, 0, "", 1)], now).is_none()
+        );
+        assert!(
+            should_trigger(&[recent(1, 10, 40, "", 1), recent(2, 11, 0, "", 1)], now).is_some()
+        );
     }
 
     #[tokio::test]
@@ -853,17 +896,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn established_account_plain_multichannel_activity_does_not_trigger() {
-        let detector = BehaviorDetector::new_with_config(
-            Arc::new(FakePort::default()),
-            BehaviorDetectorConfig {
-                case_cooldown_seconds: 0,
-            },
-        );
+    async fn established_account_fast_multichannel_burst_triggers_burst_rate() {
+        let detector = BehaviorDetector::new(Arc::new(FakePort::default()));
         let now = chrono::Utc::now().timestamp();
         let created_at = now - 67508 * 3600;
         let joined_at = Some(now - 6317 * 3600);
-        let channels = [10, 11, 12, 10, 11, 12];
+        let channels = [10, 11, 12];
         let mut last = None;
 
         for (idx, channel_id) in channels.into_iter().enumerate() {
@@ -871,10 +909,10 @@ mod tests {
                 .detect(
                     1,
                     &event(
-                        100,
+                        300,
                         channel_id,
-                        2000 + idx as u64,
-                        "gg wp lets scrim",
+                        4000 + idx as u64,
+                        "hello everyone",
                         created_at,
                         joined_at,
                     ),
@@ -882,10 +920,8 @@ mod tests {
                 .await;
         }
 
-        assert!(
-            last.is_none(),
-            "established plain text multichannel activity must not trigger burst_rate"
-        );
+        let sig = last.expect("established account fast multichannel burst signal");
+        assert_eq!(sig.trigger_type, BehaviorTriggerType::BurstRate);
     }
 
     #[tokio::test]
@@ -915,40 +951,6 @@ mod tests {
 
         let sig = last.expect("new account plain multichannel burst signal");
         assert_eq!(sig.trigger_type, BehaviorTriggerType::YoungAccountBurst);
-    }
-
-    #[tokio::test]
-    async fn established_account_with_keyword_across_channels_still_triggers() {
-        let detector = BehaviorDetector::new_with_config(
-            Arc::new(FakePort::default()),
-            BehaviorDetectorConfig {
-                case_cooldown_seconds: 0,
-            },
-        );
-        let now = chrono::Utc::now().timestamp();
-        let created_at = now - 67508 * 3600;
-        let joined_at = Some(now - 6317 * 3600);
-        let first_event = event(300, 10, 4000, "join my telegram now", created_at, joined_at);
-        let first = detector
-            .detect(1, &first_event)
-            .await
-            .expect("standalone keyword signal");
-        assert_eq!(first.trigger_type, BehaviorTriggerType::Keyword);
-
-        // The standalone keyword path clears history after signaling; restore the
-        // first message so this regression covers the burst-rate content signal.
-        let mut seeded = VecDeque::new();
-        seeded.push_back(event_to_recent(&first_event, now));
-        detector.history.lock().await.insert(300, seeded);
-
-        let sig = detector
-            .detect(
-                1,
-                &event(300, 11, 4001, "dm me for payout", created_at, joined_at),
-            )
-            .await
-            .expect("established account keyword burst signal");
-        assert_eq!(sig.trigger_type, BehaviorTriggerType::BurstRate);
     }
 
     #[tokio::test]
