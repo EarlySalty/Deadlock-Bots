@@ -1491,6 +1491,60 @@
         }
         .dev-add { color: #51cf66; }
         .dev-del { color: #ff6b6b; }
+        .scrim-grid {
+            display: grid;
+            grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+            gap: 1rem;
+            align-items: start;
+        }
+        .scrim-form {
+            display: grid;
+            gap: 0.75rem;
+        }
+        .scrim-form label {
+            display: grid;
+            gap: 0.35rem;
+            color: #ced4da;
+            font-size: 0.9rem;
+        }
+        .scrim-form input,
+        .scrim-form select,
+        .scrim-note {
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            background: #1f1f1f;
+            color: inherit;
+            padding: 0.45rem 0.6rem;
+        }
+        .scrim-note {
+            min-height: 58px;
+            resize: vertical;
+        }
+        .scrim-message {
+            min-height: 1.2rem;
+            font-size: 0.9rem;
+            color: #adb5bd;
+        }
+        .scrim-message.error { color: #ff8787; }
+        .scrim-message.success { color: #69db7c; }
+        .scrim-team-list {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+            gap: 0.75rem;
+        }
+        .scrim-team-members {
+            margin: 0.5rem 0 0;
+            padding-left: 1rem;
+            color: #ced4da;
+            font-size: 0.9rem;
+        }
+        @media (max-width: 900px) {
+            .scrim-grid {
+                grid-template-columns: 1fr;
+            }
+        }
     </style>
 </head>
 <body>
@@ -1546,6 +1600,7 @@
         <button class="tab-btn" data-tab="activity">Aktivität</button>
         <button class="tab-btn" data-tab="services">Dienste</button>
         <button class="tab-btn" data-tab="deadlock">Deadlock Heroes</button>
+        <button class="tab-btn" data-tab="scrims">Scrims</button>
         <button class="tab-btn" data-tab="cogs">Cogs</button>
         <button class="tab-btn" data-tab="logs">Logs</button>
         <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
@@ -1918,6 +1973,94 @@
     </div><!-- end tab: deadlock -->
 
     <!-- ════════════════════════════════════════════════
+         Tab: Scrims
+         ════════════════════════════════════════════════ -->
+    <div class="tab-panel" data-tab="scrims">
+        <section>
+            <div class="section-header">
+                <h2>Scrim-Management</h2>
+                <div class="section-actions">
+                    <button id="scrim-refresh" class="reload">Neu laden</button>
+                    <span class="voice-meta" id="scrim-updated">noch nicht geladen</span>
+                </div>
+            </div>
+            <div class="scrim-grid" style="margin-top:1rem;">
+                <div class="card">
+                    <h3>Match anlegen</h3>
+                    <div class="scrim-message" id="scrim-message"></div>
+                    <form class="scrim-form" id="scrim-create-form">
+                        <label>
+                            Team A
+                            <select id="scrim-team-a"></select>
+                        </label>
+                        <label>
+                            Team B
+                            <select id="scrim-team-b"></select>
+                        </label>
+                        <label>
+                            Termin (optional)
+                            <input type="datetime-local" id="scrim-scheduled-at">
+                        </label>
+                        <label>
+                            Coach als Zuschauer (optional)
+                            <input type="text" id="scrim-coach-spectator" placeholder="Discord-ID">
+                        </label>
+                        <button class="load" type="submit">Match anlegen</button>
+                    </form>
+                </div>
+                <div class="card">
+                    <h3>Matches</h3>
+                    <div class="dev-table-wrap">
+                        <table class="dev-table">
+                            <thead>
+                                <tr>
+                                    <th>Match</th>
+                                    <th>Teams</th>
+                                    <th>Status</th>
+                                    <th>Lobby</th>
+                                    <th>Join-Code</th>
+                                    <th>Sieger</th>
+                                    <th>Aktionen</th>
+                                </tr>
+                            </thead>
+                            <tbody id="scrim-match-rows"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <section>
+            <div class="section-header">
+                <h2>Teams & Aufstellungen</h2>
+            </div>
+            <div id="scrim-teams" class="scrim-team-list" style="margin-top:1rem;"></div>
+        </section>
+
+        <section>
+            <div class="section-header">
+                <h2>Teilnehmer-Pool</h2>
+            </div>
+            <div class="dev-table-wrap" style="margin-top:1rem;">
+                <table class="dev-table">
+                    <thead>
+                        <tr>
+                            <th>Teilnehmer</th>
+                            <th>Rang</th>
+                            <th>Rollen</th>
+                            <th>Verfügbarkeit</th>
+                            <th>Status</th>
+                            <th>Notiz</th>
+                            <th>Aktion</th>
+                        </tr>
+                    </thead>
+                    <tbody id="scrim-participant-rows"></tbody>
+                </table>
+            </div>
+        </section>
+    </div><!-- end tab: scrims -->
+
+    <!-- ════════════════════════════════════════════════
          Tab: Cogs  –  Cog Management Tree
          ════════════════════════════════════════════════ -->
     <div class="tab-panel" data-tab="cogs">
@@ -2107,6 +2250,17 @@
     const reactionRoleRemoveInput = document.getElementById('reaction-role-remove-on-unreact');
     const reactionRoleBackfillInput = document.getElementById('reaction-role-backfill');
     const reactionRoleBackfillWarning = document.getElementById('reaction-role-backfill-warning');
+    const scrimRefreshBtn = document.getElementById('scrim-refresh');
+    const scrimUpdated = document.getElementById('scrim-updated');
+    const scrimMessage = document.getElementById('scrim-message');
+    const scrimCreateForm = document.getElementById('scrim-create-form');
+    const scrimTeamASelect = document.getElementById('scrim-team-a');
+    const scrimTeamBSelect = document.getElementById('scrim-team-b');
+    const scrimScheduledAtInput = document.getElementById('scrim-scheduled-at');
+    const scrimCoachSpectatorInput = document.getElementById('scrim-coach-spectator');
+    const scrimMatchRows = document.getElementById('scrim-match-rows');
+    const scrimTeamsContainer = document.getElementById('scrim-teams');
+    const scrimParticipantRows = document.getElementById('scrim-participant-rows');
     const voiceHistoryUser = document.getElementById('voice-history-user');
     const voiceUserApply = document.getElementById('voice-user-apply');
     const voiceUserSummary = document.getElementById('voice-user-summary');
@@ -2190,6 +2344,7 @@
     let selectedHeroId = null;
     let heroesLoading = false;
     let heroBuildDraftRows = [];
+    let scrimData = { teams: [], participants: [], matches: [] };
     const REACTION_ROLE_DEFAULT_DM_TEXT = `Hey! 👋 Schön, dass du beim Scrim-Coaching dabei bist.
 
 Kurz worum's geht: Wir (Leo & deniz) stellen feste Teams mit einem festen Coach zusammen, spielen regelmäßig Showmatches gegeneinander und setzen uns zwischendurch zusammen, um an euren Punkten zu arbeiten — Schritt für Schritt besser werden, als Team.
@@ -2844,6 +2999,289 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         }
     }
 
+    // ─── Scrims (Coach) ─────────────────────────────
+    function setScrimMessage(text, type='success') {
+        if (!scrimMessage) return;
+        scrimMessage.textContent = text || '';
+        scrimMessage.className = text
+            ? 'scrim-message ' + (type === 'error' ? 'error' : 'success')
+            : 'scrim-message';
+    }
+
+    function scrimCell(value) {
+        if (value === null || value === undefined || value === '') return '-';
+        return String(value);
+    }
+
+    function scrimTeamLabel(team) {
+        const name = team && team.name ? String(team.name) : '';
+        const id = team && team.id !== undefined ? `#${team.id}` : '';
+        return name && id ? `${name} ${id}` : (name || id || '-');
+    }
+
+    function scrimMatchTeamLabel(match, side) {
+        const name = match[`${side}_name`];
+        const id = match[`${side}_id`];
+        return name || (id ? `#${id}` : '-');
+    }
+
+    function scrimDate(ts) {
+        if (!ts) return '-';
+        return new Date(Number(ts) * 1000).toLocaleString();
+    }
+
+    function renderScrimTeamOptions() {
+        [scrimTeamASelect, scrimTeamBSelect].forEach((select) => {
+            if (!select) return;
+            const selected = select.value;
+            select.innerHTML = '';
+            const empty = document.createElement('option');
+            empty.value = '';
+            empty.textContent = 'Team auswählen …';
+            select.appendChild(empty);
+            (scrimData.teams || []).forEach((team) => {
+                const option = document.createElement('option');
+                option.value = String(team.id);
+                option.textContent = scrimTeamLabel(team);
+                select.appendChild(option);
+            });
+            select.value = selected;
+        });
+    }
+
+    function renderScrimMatches() {
+        if (!scrimMatchRows) return;
+        scrimMatchRows.innerHTML = '';
+        const rows = scrimData.matches || [];
+        if (!rows.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.textContent = 'Noch keine Matches angelegt.';
+            td.style.color = '#9aa0a6';
+            tr.appendChild(td);
+            scrimMatchRows.appendChild(tr);
+            return;
+        }
+        const botStates = new Set(['starting', 'start_failed', 'in_progress', 'finished', 'result_fetching', 'result_failed']);
+        rows.forEach((match) => {
+            const tr = document.createElement('tr');
+            const values = [
+                `#${match.id} · ${scrimDate(match.scheduled_at)}`,
+                `${scrimMatchTeamLabel(match, 'team_a')} vs ${scrimMatchTeamLabel(match, 'team_b')}`,
+                match.status,
+                match.lobby_state,
+                match.join_code,
+                match.winner_team_id,
+            ];
+            values.forEach((value) => {
+                const td = document.createElement('td');
+                td.textContent = scrimCell(value);
+                tr.appendChild(td);
+            });
+            const actionTd = document.createElement('td');
+            const state = String(match.lobby_state || '');
+            const startBtn = document.createElement('button');
+            startBtn.type = 'button';
+            startBtn.className = 'load';
+            startBtn.textContent = 'Start';
+            startBtn.disabled = botStates.has(state) || state === 'start_requested';
+            startBtn.addEventListener('click', () => requestScrimState(match.id, 'start'));
+            const resultBtn = document.createElement('button');
+            resultBtn.type = 'button';
+            resultBtn.className = 'namespace';
+            resultBtn.textContent = 'Ergebnis holen';
+            resultBtn.disabled = botStates.has(state) || state === 'result_requested';
+            resultBtn.addEventListener('click', () => requestScrimState(match.id, 'result'));
+            actionTd.appendChild(startBtn);
+            actionTd.appendChild(resultBtn);
+            tr.appendChild(actionTd);
+            scrimMatchRows.appendChild(tr);
+        });
+    }
+
+    function renderScrimTeams() {
+        if (!scrimTeamsContainer) return;
+        scrimTeamsContainer.innerHTML = '';
+        const teams = scrimData.teams || [];
+        if (!teams.length) {
+            const empty = document.createElement('div');
+            empty.className = 'card';
+            empty.textContent = 'Noch keine Teams angelegt.';
+            scrimTeamsContainer.appendChild(empty);
+            return;
+        }
+        teams.forEach((team) => {
+            const card = document.createElement('div');
+            card.className = 'card';
+            const title = document.createElement('h3');
+            title.textContent = scrimTeamLabel(team);
+            card.appendChild(title);
+            const meta = document.createElement('div');
+            meta.className = 'voice-meta';
+            meta.textContent = [team.coach, team.discord_channel_id ? `#${team.discord_channel_id}` : '']
+                .filter(Boolean)
+                .join(' · ') || '-';
+            card.appendChild(meta);
+            const list = document.createElement('ul');
+            list.className = 'scrim-team-members';
+            const members = team.members || [];
+            if (!members.length) {
+                const li = document.createElement('li');
+                li.textContent = 'Keine Mitglieder.';
+                list.appendChild(li);
+            } else {
+                members.forEach((member) => {
+                    const li = document.createElement('li');
+                    const flags = [member.role, member.is_captain ? 'captain' : '', member.is_bench ? 'bench' : '']
+                        .filter(Boolean)
+                        .join(', ');
+                    li.textContent = `${member.display_name || member.participant_id}${flags ? ` (${flags})` : ''}`;
+                    list.appendChild(li);
+                });
+            }
+            card.appendChild(list);
+            scrimTeamsContainer.appendChild(card);
+        });
+    }
+
+    function renderScrimParticipants() {
+        if (!scrimParticipantRows) return;
+        scrimParticipantRows.innerHTML = '';
+        const participants = scrimData.participants || [];
+        if (!participants.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 7;
+            td.textContent = 'Noch keine Teilnehmer im Pool.';
+            td.style.color = '#9aa0a6';
+            tr.appendChild(td);
+            scrimParticipantRows.appendChild(tr);
+            return;
+        }
+        participants.forEach((participant) => {
+            const tr = document.createElement('tr');
+            [
+                `${participant.display_name || '-'} #${participant.id}`,
+                participant.rank,
+                participant.roles,
+                participant.availability,
+                participant.status,
+            ].forEach((value) => {
+                const td = document.createElement('td');
+                td.textContent = scrimCell(value);
+                tr.appendChild(td);
+            });
+            const noteTd = document.createElement('td');
+            const note = document.createElement('textarea');
+            note.className = 'scrim-note';
+            note.value = participant.notes || '';
+            note.placeholder = 'Notiz zum Spieler …';
+            noteTd.appendChild(note);
+            tr.appendChild(noteTd);
+            const actionTd = document.createElement('td');
+            const save = document.createElement('button');
+            save.type = 'button';
+            save.className = 'load';
+            save.textContent = 'Speichern';
+            save.addEventListener('click', () => saveScrimNotes(participant.id, note.value));
+            actionTd.appendChild(save);
+            tr.appendChild(actionTd);
+            scrimParticipantRows.appendChild(tr);
+        });
+    }
+
+    function renderScrims() {
+        renderScrimTeamOptions();
+        renderScrimMatches();
+        renderScrimTeams();
+        renderScrimParticipants();
+    }
+
+    async function loadScrims() {
+        if (!scrimMatchRows) return;
+        try {
+            const data = await fetchJSON('/api/scrims');
+            scrimData = {
+                teams: Array.isArray(data.teams) ? data.teams : [],
+                participants: Array.isArray(data.participants) ? data.participants : [],
+                matches: Array.isArray(data.matches) ? data.matches : [],
+            };
+            renderScrims();
+            if (scrimUpdated) scrimUpdated.textContent = 'Liste aktualisiert';
+        } catch (err) {
+            setScrimMessage(`Konnte Scrims nicht laden (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function createScrimMatch(ev) {
+        if (ev) ev.preventDefault();
+        const teamA = scrimTeamASelect ? parseInt(scrimTeamASelect.value, 10) : NaN;
+        const teamB = scrimTeamBSelect ? parseInt(scrimTeamBSelect.value, 10) : NaN;
+        if (!Number.isFinite(teamA) || !Number.isFinite(teamB)) {
+            setScrimMessage('Bitte beide Teams auswählen.', 'error');
+            return;
+        }
+        if (teamA === teamB) {
+            setScrimMessage('Team A und B müssen verschieden sein.', 'error');
+            return;
+        }
+        let scheduledAt = null;
+        const scheduledRaw = scrimScheduledAtInput ? scrimScheduledAtInput.value : '';
+        if (scheduledRaw) {
+            const parsed = new Date(scheduledRaw);
+            if (Number.isNaN(parsed.getTime())) {
+                setScrimMessage('Termin ist ungültig.', 'error');
+                return;
+            }
+            scheduledAt = parsed.toISOString();
+        }
+        const coach = scrimCoachSpectatorInput ? scrimCoachSpectatorInput.value.trim() : '';
+        try {
+            await fetchJSON('/api/scrims/matches', {
+                method: 'POST',
+                body: JSON.stringify({
+                    team_a_id: teamA,
+                    team_b_id: teamB,
+                    scheduled_at: scheduledAt,
+                    coach_spectator_discord_id: coach || null,
+                }),
+            });
+            setScrimMessage('Match angelegt.', 'success');
+            if (scrimScheduledAtInput) scrimScheduledAtInput.value = '';
+            if (scrimCoachSpectatorInput) scrimCoachSpectatorInput.value = '';
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Match konnte nicht angelegt werden (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function requestScrimState(matchId, action) {
+        try {
+            await fetchJSON(`/api/scrims/matches/${matchId}/${action}`, {
+                method: 'POST',
+                body: JSON.stringify({}),
+            });
+            setScrimMessage('Aktion ausgelöst — der Bot übernimmt.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Aktion fehlgeschlagen (${err.message || '-'})`, 'error');
+        }
+    }
+
+    async function saveScrimNotes(participantId, notes) {
+        try {
+            await fetchJSON(`/api/scrims/participants/${participantId}/notes`, {
+                method: 'POST',
+                body: JSON.stringify({ notes }),
+            });
+            setScrimMessage('Notiz gespeichert.', 'success');
+            await loadScrims();
+        } catch (err) {
+            setScrimMessage(`Notiz konnte nicht gespeichert werden (${err.message || '-'})`, 'error');
+        }
+    }
+
     function formatBytes(value) {
         if (value === null || value === undefined || Number.isNaN(value)) {
             return '-';
@@ -3115,6 +3553,12 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
     }
     if (reactionRoleBackfillInput) {
         reactionRoleBackfillInput.addEventListener('change', updateReactionRoleBackfillWarning);
+    }
+    if (scrimRefreshBtn) {
+        scrimRefreshBtn.addEventListener('click', () => loadScrims());
+    }
+    if (scrimCreateForm) {
+        scrimCreateForm.addEventListener('submit', createScrimMatch);
     }
     if (logsRefreshButton) {
         logsRefreshButton.addEventListener('click', () => {
@@ -6142,6 +6586,9 @@ async function fetchStandaloneLogs(key, limit = 200) {
                     if (typeof loadDeadlockHeroes === 'function') loadDeadlockHeroes();
                     if (typeof loadReactionRoles === 'function') loadReactionRoles();
                 }
+                if (target === 'scrims') {
+                    if (typeof loadScrims === 'function') loadScrims();
+                }
                 if (target === 'logs') {
                     ensureLogsLoaded();
                 }
@@ -6164,6 +6611,7 @@ async function fetchStandaloneLogs(key, limit = 200) {
     loadDeadlockHeroes();
     clearReactionRoleForm();
     loadReactionRoles();
+    loadScrims();
 
     // Server Stats Initial Load
     loadServerStats();

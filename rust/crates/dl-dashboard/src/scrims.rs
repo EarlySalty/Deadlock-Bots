@@ -1,0 +1,819 @@
+//! Minimaler Coach-Blick auf `scrim.*`.
+
+use std::collections::HashMap;
+
+use axum::body::Bytes;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
+use axum::response::Response;
+use chrono::{DateTime, NaiveDateTime, Utc};
+use serde_json::{json, Value};
+use sqlx::{PgPool, Row};
+
+use crate::db::{advisory_lock, i64_to_i32, unix_to_utc, utc_to_json_unix, DashboardDbResult};
+use crate::web::{err_text, ok_json, DashboardApp};
+
+const MATCHES_LOCK: i64 = 42_060_004_003;
+const STATE_DRAFT: &str = "draft";
+const STATE_SCHEDULED: &str = "scheduled";
+const STATE_START_REQUESTED: &str = "start_requested";
+const STATE_RESULT_REQUESTED: &str = "result_requested";
+
+pub async fn scrims_overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    match load_overview(app.pool()).await {
+        Ok(data) => ok_json(data),
+        Err(err) => {
+            tracing::error!(%err, "scrims_overview fehlgeschlagen");
+            err_text(500, "Scrims unavailable")
+        }
+    }
+}
+
+pub async fn scrims_create_match(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let input = match parse_create_match(&payload) {
+        Ok(input) => input,
+        Err(resp) => return resp,
+    };
+    if input.team_a_id == input.team_b_id {
+        return err_text(400, "team_a_id and team_b_id must differ");
+    }
+    for team_id in [input.team_a_id, input.team_b_id] {
+        match team_exists(app.pool(), team_id).await {
+            Ok(true) => {}
+            Ok(false) => return err_text(400, &format!("team_id {team_id} does not exist")),
+            Err(err) => {
+                tracing::error!(%err, team_id, "Scrim-Team-Validierung fehlgeschlagen");
+                return err_text(500, "Team validation failed");
+            }
+        }
+    }
+
+    match create_match_record(app.pool(), input).await {
+        Ok(scrim_match) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match.create",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                match_id = scrim_match["id"].as_i64().unwrap_or_default(),
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "match": scrim_match }))
+        }
+        Err(err) => {
+            tracing::error!(%err, "Scrim-Match-Anlage fehlgeschlagen");
+            err_text(500, "Create match failed")
+        }
+    }
+}
+
+pub async fn scrims_start_match(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(match_id): Path<String>,
+) -> Response {
+    request_state(app, headers, &match_id, STATE_START_REQUESTED).await
+}
+
+pub async fn scrims_request_result(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(match_id): Path<String>,
+) -> Response {
+    request_state(app, headers, &match_id, STATE_RESULT_REQUESTED).await
+}
+
+pub async fn scrims_update_participant_notes(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    Path(participant_id): Path<String>,
+    body: Bytes,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let participant_id = match parse_path_i32(&participant_id, "participant_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let payload = match serde_json::from_slice::<Value>(&body) {
+        Ok(v) if v.is_object() => v,
+        _ => return err_text(400, "Invalid JSON body"),
+    };
+    let notes = match parse_notes(&payload) {
+        Ok(notes) => notes,
+        Err(resp) => return resp,
+    };
+    match update_participant_notes(app.pool(), participant_id, notes.clone()).await {
+        Ok(true) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.participant.notes",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                participant_id,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "participant_id": participant_id, "notes": notes }))
+        }
+        Ok(false) => err_text(404, "Participant not found"),
+        Err(err) => {
+            tracing::error!(%err, participant_id, "Scrim-Participant-Notiz fehlgeschlagen");
+            err_text(500, "Save notes failed")
+        }
+    }
+}
+
+async fn request_state(
+    app: DashboardApp,
+    headers: HeaderMap,
+    match_id: &str,
+    requested_state: &'static str,
+) -> Response {
+    let session = match app.guard_mutate(&headers, true).await {
+        Ok(s) => s,
+        Err(resp) => return resp,
+    };
+    let match_id = match parse_path_i32(match_id, "match_id") {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    match set_lobby_request(app.pool(), match_id, requested_state).await {
+        Ok(LobbyRequest::Updated(state)) => {
+            tracing::info!(
+                target: "audit",
+                action = "scrim.match.lobby_state",
+                user_id = session.user_id,
+                display_name = %session.display_name,
+                access = session.access_level.as_str(),
+                match_id,
+                lobby_state = state,
+                "AUDIT scrims"
+            );
+            ok_json(json!({ "match_id": match_id, "lobby_state": state }))
+        }
+        Ok(LobbyRequest::NotFound) => err_text(404, "Match not found"),
+        Ok(LobbyRequest::BotOwned(current)) => err_text(
+            409,
+            &format!(
+                "Lobby state is controlled by bot: {}",
+                current.unwrap_or_default()
+            ),
+        ),
+        Err(err) => {
+            tracing::error!(%err, match_id, "Scrim-Lobby-State-Request fehlgeschlagen");
+            err_text(500, "Lobby state update failed")
+        }
+    }
+}
+
+struct CreateMatchInput {
+    team_a_id: i32,
+    team_b_id: i32,
+    scheduled_at: Option<DateTime<Utc>>,
+    coach_spectator_discord_id: Option<i64>,
+}
+
+fn parse_create_match(payload: &Value) -> Result<CreateMatchInput, Response> {
+    Ok(CreateMatchInput {
+        team_a_id: parse_i32(get2(payload, "team_a_id", "teamAId"), "team_a_id")?,
+        team_b_id: parse_i32(get2(payload, "team_b_id", "teamBId"), "team_b_id")?,
+        scheduled_at: parse_optional_datetime(
+            get2(payload, "scheduled_at", "scheduledAt"),
+            "scheduled_at",
+        )?,
+        coach_spectator_discord_id: parse_optional_i64(
+            get2(
+                payload,
+                "coach_spectator_discord_id",
+                "coachSpectatorDiscordId",
+            ),
+            "coach_spectator_discord_id",
+        )?,
+    })
+}
+
+fn get2<'a>(obj: &'a Value, k1: &str, k2: &str) -> Option<&'a Value> {
+    obj.get(k1).or_else(|| obj.get(k2))
+}
+
+fn parse_i32(raw: Option<&Value>, field: &'static str) -> Result<i32, Response> {
+    let value = parse_i64(raw, field)?;
+    i64_to_i32(value, field).map_err(|_| err_text(400, &format!("{field} must fit integer")))
+}
+
+fn parse_i64(raw: Option<&Value>, field: &str) -> Result<i64, Response> {
+    match raw {
+        Some(Value::Number(n)) => n
+            .as_i64()
+            .ok_or_else(|| err_text(400, &format!("{field} must be integer"))),
+        Some(Value::String(s)) => s
+            .trim()
+            .parse::<i64>()
+            .map_err(|_| err_text(400, &format!("{field} must be integer"))),
+        _ => Err(err_text(400, &format!("{field} must be integer"))),
+    }
+}
+
+fn parse_optional_i64(raw: Option<&Value>, field: &str) -> Result<Option<i64>, Response> {
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(_) => parse_i64(raw, field).map(Some),
+    }
+}
+
+fn parse_path_i32(raw: &str, field: &'static str) -> Result<i32, Response> {
+    let value = raw
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| err_text(400, &format!("{field} must be integer")))?;
+    i64_to_i32(value, field).map_err(|_| err_text(400, &format!("{field} must fit integer")))
+}
+
+fn parse_optional_datetime(
+    raw: Option<&Value>,
+    field: &str,
+) -> Result<Option<DateTime<Utc>>, Response> {
+    match raw {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Value::Number(n)) => {
+            let ts = n
+                .as_i64()
+                .ok_or_else(|| err_text(400, &format!("{field} must be unix seconds")))?;
+            unix_to_utc(ts)
+                .map(Some)
+                .map_err(|_| err_text(400, &format!("{field} is out of range")))
+        }
+        Some(Value::String(s)) => {
+            let value = s.trim();
+            if let Ok(dt) = DateTime::parse_from_rfc3339(value) {
+                return Ok(Some(dt.with_timezone(&Utc)));
+            }
+            NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M")
+                .map(|dt| Some(DateTime::<Utc>::from_naive_utc_and_offset(dt, Utc)))
+                .map_err(|_| err_text(400, &format!("{field} must be RFC3339 or unix seconds")))
+        }
+        Some(_) => Err(err_text(400, &format!("{field} must be datetime"))),
+    }
+}
+
+fn parse_notes(payload: &Value) -> Result<Option<String>, Response> {
+    match payload.get("notes").or_else(|| payload.get("note")) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => Ok(None),
+        Some(Value::String(s)) => {
+            if s.chars().count() > 4000 {
+                return Err(err_text(400, "notes must be at most 4000 characters"));
+            }
+            Ok(Some(s.to_string()))
+        }
+        Some(_) => Err(err_text(400, "notes must be string")),
+    }
+}
+
+async fn load_overview(pool: &PgPool) -> DashboardDbResult<Value> {
+    let participants = load_participants(pool).await?;
+    let teams = load_teams(pool).await?;
+    let matches = load_matches(pool).await?;
+    Ok(json!({
+        "teams": teams,
+        "participants": participants,
+        "matches": matches,
+    }))
+}
+
+async fn load_participants(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id::bigint AS id,
+               discord_id,
+               display_name,
+               rank,
+               roles,
+               availability,
+               availability_slots,
+               notes,
+               status
+          FROM scrim.participants
+         ORDER BY status ASC, display_name ASC, id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter()
+        .map(|row| {
+            Ok(json!({
+                "id": row.try_get::<i64, _>("id")?,
+                "discord_id": row.try_get::<Option<i64>, _>("discord_id")?,
+                "display_name": row.try_get::<String, _>("display_name")?,
+                "rank": row.try_get::<Option<String>, _>("rank")?,
+                "roles": row.try_get::<Option<String>, _>("roles")?,
+                "availability": row.try_get::<Option<String>, _>("availability")?,
+                "availability_slots": row.try_get::<Option<Value>, _>("availability_slots")?,
+                "notes": row.try_get::<Option<String>, _>("notes")?,
+                "status": row.try_get::<String, _>("status")?,
+            }))
+        })
+        .collect()
+}
+
+async fn load_teams(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let member_rows = sqlx::query(
+        r#"
+        SELECT tm.team_id::bigint AS team_id,
+               p.id::bigint AS participant_id,
+               p.display_name,
+               p.rank,
+               p.discord_id,
+               tm.role,
+               tm.is_captain,
+               tm.is_bench
+          FROM scrim.team_members tm
+          JOIN scrim.participants p ON p.id = tm.participant_id
+         ORDER BY tm.team_id ASC, tm.is_bench ASC, tm.role ASC, p.display_name ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut members: HashMap<i64, Vec<Value>> = HashMap::new();
+    for row in member_rows {
+        let team_id = row.try_get::<i64, _>("team_id")?;
+        members.entry(team_id).or_default().push(json!({
+            "participant_id": row.try_get::<i64, _>("participant_id")?,
+            "display_name": row.try_get::<String, _>("display_name")?,
+            "rank": row.try_get::<Option<String>, _>("rank")?,
+            "discord_id": row.try_get::<Option<i64>, _>("discord_id")?,
+            "role": row.try_get::<Option<String>, _>("role")?,
+            "is_captain": row.try_get::<bool, _>("is_captain")?,
+            "is_bench": row.try_get::<bool, _>("is_bench")?,
+        }));
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id::bigint AS id,
+               name,
+               coach,
+               discord_role_id,
+               discord_channel_id
+          FROM scrim.teams
+         ORDER BY name ASC, id ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut teams = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = row.try_get::<i64, _>("id")?;
+        teams.push(json!({
+            "id": id,
+            "name": row.try_get::<String, _>("name")?,
+            "coach": row.try_get::<Option<String>, _>("coach")?,
+            "discord_role_id": row.try_get::<Option<i64>, _>("discord_role_id")?,
+            "discord_channel_id": row.try_get::<Option<i64>, _>("discord_channel_id")?,
+            "members": members.remove(&id).unwrap_or_default(),
+        }));
+    }
+    Ok(teams)
+}
+
+async fn load_matches(pool: &PgPool) -> DashboardDbResult<Vec<Value>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT m.id::bigint AS id,
+               m.team_a_id::bigint AS team_a_id,
+               ta.name AS team_a_name,
+               m.team_b_id::bigint AS team_b_id,
+               tb.name AS team_b_name,
+               m.when_text,
+               m.scheduled_at,
+               m.status,
+               m.lobby_state,
+               m.join_code,
+               m.steam_match_id,
+               m.winner_team_id::bigint AS winner_team_id,
+               m.coach_spectator_discord_id,
+               m.created_at,
+               m.updated_at
+          FROM scrim.matches m
+          LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
+          LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
+         ORDER BY m.scheduled_at DESC NULLS LAST, m.created_at DESC, m.id DESC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    rows.into_iter().map(match_json).collect()
+}
+
+fn match_json(row: sqlx::postgres::PgRow) -> DashboardDbResult<Value> {
+    Ok(json!({
+        "id": row.try_get::<i64, _>("id")?,
+        "team_a_id": row.try_get::<Option<i64>, _>("team_a_id")?,
+        "team_a_name": row.try_get::<Option<String>, _>("team_a_name")?,
+        "team_b_id": row.try_get::<Option<i64>, _>("team_b_id")?,
+        "team_b_name": row.try_get::<Option<String>, _>("team_b_name")?,
+        "when_text": row.try_get::<Option<String>, _>("when_text")?,
+        "scheduled_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("scheduled_at")?),
+        "status": row.try_get::<String, _>("status")?,
+        "lobby_state": row.try_get::<Option<String>, _>("lobby_state")?,
+        "join_code": row.try_get::<Option<String>, _>("join_code")?,
+        "steam_match_id": row.try_get::<Option<i64>, _>("steam_match_id")?,
+        "winner_team_id": row.try_get::<Option<i64>, _>("winner_team_id")?,
+        "coach_spectator_discord_id": row.try_get::<Option<i64>, _>("coach_spectator_discord_id")?,
+        "created_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("created_at")?),
+        "updated_at": utc_to_json_unix(row.try_get::<Option<DateTime<Utc>>, _>("updated_at")?),
+    }))
+}
+
+async fn team_exists(pool: &PgPool, team_id: i32) -> DashboardDbResult<bool> {
+    let exists = sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT EXISTS(SELECT 1 FROM scrim.teams WHERE id = $1)
+        "#,
+    )
+    .bind(team_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(exists)
+}
+
+async fn create_match_record(pool: &PgPool, input: CreateMatchInput) -> DashboardDbResult<Value> {
+    let mut tx = pool.begin().await?;
+    advisory_lock(&mut tx, MATCHES_LOCK).await?;
+    let id = sqlx::query_scalar::<_, i32>(
+        r#"
+        SELECT (COALESCE(MAX(id), 0) + 1)::int4
+          FROM scrim.matches
+        "#,
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        INSERT INTO scrim.matches(
+            id, team_a_id, team_b_id, scheduled_at, status, lobby_state,
+            coach_spectator_discord_id, created_at, updated_at
+        )
+        VALUES($1, $2, $3, $4, $5, $6, $7, now(), now())
+        "#,
+    )
+    .bind(id)
+    .bind(input.team_a_id)
+    .bind(input.team_b_id)
+    .bind(input.scheduled_at)
+    .bind(STATE_SCHEDULED)
+    .bind(STATE_DRAFT)
+    .bind(input.coach_spectator_discord_id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    load_match(pool, id)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound.into())
+}
+
+async fn load_match(pool: &PgPool, id: i32) -> DashboardDbResult<Option<Value>> {
+    let row = sqlx::query(
+        r#"
+        SELECT m.id::bigint AS id,
+               m.team_a_id::bigint AS team_a_id,
+               ta.name AS team_a_name,
+               m.team_b_id::bigint AS team_b_id,
+               tb.name AS team_b_name,
+               m.when_text,
+               m.scheduled_at,
+               m.status,
+               m.lobby_state,
+               m.join_code,
+               m.steam_match_id,
+               m.winner_team_id::bigint AS winner_team_id,
+               m.coach_spectator_discord_id,
+               m.created_at,
+               m.updated_at
+          FROM scrim.matches m
+          LEFT JOIN scrim.teams ta ON ta.id = m.team_a_id
+          LEFT JOIN scrim.teams tb ON tb.id = m.team_b_id
+         WHERE m.id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?;
+    row.map(match_json).transpose()
+}
+
+enum LobbyRequest {
+    Updated(&'static str),
+    NotFound,
+    BotOwned(Option<String>),
+}
+
+async fn set_lobby_request(
+    pool: &PgPool,
+    match_id: i32,
+    requested_state: &'static str,
+) -> DashboardDbResult<LobbyRequest> {
+    let current = sqlx::query(
+        r#"
+        SELECT lobby_state
+          FROM scrim.matches
+         WHERE id = $1
+        "#,
+    )
+    .bind(match_id)
+    .fetch_optional(pool)
+    .await?;
+    let Some(row) = current else {
+        return Ok(LobbyRequest::NotFound);
+    };
+    let lobby_state = row.try_get::<Option<String>, _>("lobby_state")?;
+    if lobby_state.as_deref().is_some_and(is_bot_owned_lobby_state) {
+        return Ok(LobbyRequest::BotOwned(lobby_state));
+    }
+    sqlx::query(
+        r#"
+        UPDATE scrim.matches
+           SET lobby_state = $2,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(match_id)
+    .bind(requested_state)
+    .execute(pool)
+    .await?;
+    Ok(LobbyRequest::Updated(requested_state))
+}
+
+fn is_bot_owned_lobby_state(state: &str) -> bool {
+    matches!(
+        state,
+        "starting"
+            | "start_failed"
+            | "in_progress"
+            | "finished"
+            | "result_fetching"
+            | "result_failed"
+    )
+}
+
+async fn update_participant_notes(
+    pool: &PgPool,
+    participant_id: i32,
+    notes: Option<String>,
+) -> DashboardDbResult<bool> {
+    let changed = sqlx::query(
+        r#"
+        UPDATE scrim.participants
+           SET notes = $2,
+               updated_at = now()
+         WHERE id = $1
+        "#,
+    )
+    .bind(participant_id)
+    .bind(notes)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    Ok(changed > 0)
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::body::Body;
+    use axum::http::{header, Request, StatusCode};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::authority::{MemberAccessInfo, MemberLookup};
+    use crate::config::{AccessLevel, DashboardConfig};
+    use crate::names::NameResolver;
+    use crate::now_unix_f64;
+    use crate::web::{router, SESSION_COOKIE};
+
+    struct NoMemberLookup;
+
+    #[async_trait::async_trait]
+    impl MemberLookup for NoMemberLookup {
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Option<MemberAccessInfo> {
+            None
+        }
+    }
+
+    struct NoNameResolver;
+
+    #[async_trait::async_trait]
+    impl NameResolver for NoNameResolver {
+        async fn resolve(&self, _user_ids: &[u64]) -> HashMap<u64, String> {
+            HashMap::new()
+        }
+    }
+
+    async fn app_with_session(
+    ) -> Result<(dl_central_db::TestDb, axum::Router, String, String), Box<dyn std::error::Error>>
+    {
+        let db = dl_central_db::testing::test_pool().await?;
+        let session_id = "scrim-test-session".to_string();
+        let csrf = "scrim-test-csrf".to_string();
+        let now = now_unix_f64();
+        dl_central_db::kv::set(
+            db.pool(),
+            "dl_dashboard_admin_session",
+            &session_id,
+            &json!({
+                "user_id": 42,
+                "username": "coach",
+                "display_name": "Coach",
+                "reason": "test",
+                "access_level": AccessLevel::Full.as_str(),
+                "csrf_token": csrf,
+                "created_at": now,
+                "last_seen_at": now,
+                "expires_at": now + 3600.0,
+            })
+            .to_string(),
+        )
+        .await?;
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = DashboardApp::new(
+            cfg,
+            db.pool().clone(),
+            Arc::new(NoMemberLookup),
+            Arc::new(NoNameResolver),
+        )
+        .await?;
+        Ok((db, router(app), session_id, csrf))
+    }
+
+    fn auth_post(
+        uri: &str,
+        session_id: &str,
+        csrf: &str,
+        body: Value,
+    ) -> Result<Request<Body>, axum::http::Error> {
+        Request::builder()
+            .method("POST")
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::ORIGIN,
+                "https://admin.deutsche-deadlock-community.de",
+            )
+            .header("X-CSRF-Token", csrf)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={session_id}"))
+            .body(Body::from(body.to_string()))
+    }
+
+    async fn insert_team(pool: &PgPool, id: i32, name: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.teams(id, name, created_at)
+            VALUES($1, $2, now())
+            "#,
+        )
+        .bind(id)
+        .bind(name)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    async fn insert_match(pool: &PgPool, id: i32, state: &str) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO scrim.matches(
+                id, team_a_id, team_b_id, status, lobby_state, created_at, updated_at
+            )
+            VALUES($1, 1, 2, 'scheduled', $2, now(), now())
+            "#,
+        )
+        .bind(id)
+        .bind(state)
+        .execute(pool)
+        .await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_match_route_insertet_scheduled_draft() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches",
+                &session_id,
+                &csrf,
+                json!({
+                    "team_a_id": 1,
+                    "team_b_id": 2,
+                    "coach_spectator_discord_id": "123456789",
+                    "scheduled_at": "2026-07-06T19:00:00Z",
+                }),
+            )?)
+            .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 4096).await?;
+        let data: Value = serde_json::from_slice(&body)?;
+        let match_id = data["match"]["id"].as_i64().ok_or("missing match id")?;
+        let row = sqlx::query(
+            r#"
+            SELECT team_a_id, team_b_id, status, lobby_state, coach_spectator_discord_id
+              FROM scrim.matches
+             WHERE id = $1
+            "#,
+        )
+        .bind(i64_to_i32(match_id, "match_id")?)
+        .fetch_one(db.pool())
+        .await?;
+
+        assert_eq!(row.try_get::<i32, _>("team_a_id")?, 1);
+        assert_eq!(row.try_get::<i32, _>("team_b_id")?, 2);
+        assert_eq!(row.try_get::<String, _>("status")?, "scheduled");
+        assert_eq!(
+            row.try_get::<Option<String>, _>("lobby_state")?,
+            Some("draft".to_string())
+        );
+        assert_eq!(
+            row.try_get::<Option<i64>, _>("coach_spectator_discord_id")?,
+            Some(123456789)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn start_route_setzt_flag_und_ueberschreibt_bot_state_nicht(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session_id, csrf) = app_with_session().await?;
+        insert_team(db.pool(), 1, "A").await?;
+        insert_team(db.pool(), 2, "B").await?;
+        insert_match(db.pool(), 10, "draft").await?;
+        insert_match(db.pool(), 11, "in_progress").await?;
+
+        let response = app
+            .clone()
+            .oneshot(auth_post(
+                "/api/scrims/matches/10/start",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 10")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "start_requested");
+
+        let response = app
+            .oneshot(auth_post(
+                "/api/scrims/matches/11/start",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let state =
+            sqlx::query_scalar::<_, String>("SELECT lobby_state FROM scrim.matches WHERE id = 11")
+                .fetch_one(db.pool())
+                .await?;
+        assert_eq!(state, "in_progress");
+        Ok(())
+    }
+}
