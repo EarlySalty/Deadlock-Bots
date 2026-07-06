@@ -1,3 +1,11 @@
+## #215 — Twitch-Spam-Alerts haben Lernknöpfe
+
+**Ausgangslage:** Verdächtige Twitch-Spam-Meldungen kamen im Discord an, aber Mods konnten aus der Meldung heraus nicht zurückmelden, ob das Muster wirklich Spam oder harmlos war.
+
+**Was wurde geändert:** Solche Meldungen bekommen jetzt zwei Lernknöpfe. Berechtigte Mods können den Fall als Spam oder als harmlos bestätigen; der Bot schreibt das über die interne Twitch-Schnittstelle in die vorhandenen Lernlisten.
+
+**Wie es jetzt läuft:** Neue Spam-/Scam-Maschen lassen sich direkt aus dem Discord-Alert trainieren. Nach erfolgreichem Klick werden die Knöpfe deaktiviert, damit derselbe Fall nicht mehrfach entschieden wird.
+
 ## #214 — Moderation löscht Takeover-Bilder kanalübergreifend
 
 **Ausgangslage:** Beim Account-Takeover-Alarm erkannte der Bot zwar Bilder in mehreren Kanälen, löschte aber nur die auslösende Nachricht. Im Mod-Fall standen die Bilder außerdem als Original-Links; nach dem Löschen konnten diese Links ins Leere laufen.
