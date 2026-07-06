@@ -12,6 +12,7 @@ mod master;
 mod modglue;
 mod onboardglue;
 mod onboardingbridgeglue;
+mod scrimglue;
 mod serversync;
 mod vanity;
 
@@ -940,6 +941,15 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
+    let scrim_announcement_channel_id =
+        NonZeroU64::new(env_u64_default("DL_SCRIM_ANNOUNCEMENT_CHANNEL_ID", 0))
+            .map(NonZeroU64::get);
+    let mut scrim_match_driver = scrimglue::spawn(
+        central_pool.clone(),
+        adapter.clone(),
+        scrim_announcement_channel_id,
+    );
+
     // Gateway: user-gated — Python hält die Session bis zum Cutover
     let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
     let gateway_task = if gateway_enabled {
@@ -1352,6 +1362,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         result = broker_server => result.context("Broker-Server")?,
         result = changelog_server => result.context("Changelog-Server")?,
         result = serversync_server => result.context("Server-Sync-Server")?,
+        result = &mut scrim_match_driver => {
+            result.context("Scrim-Match-Treiber")?;
+            anyhow::bail!("Scrim-Match-Treiber beendet");
+        },
         action = master_action_rx.recv() => {
             match action {
                 Some(master::MasterAction::Restart) => {
@@ -1365,6 +1379,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         },
         _ = tokio::signal::ctrl_c() => tracing::info!("dl-bot beendet"),
     }
+    scrim_match_driver.abort();
     if let Some(task) = gateway_task {
         task.abort();
     }

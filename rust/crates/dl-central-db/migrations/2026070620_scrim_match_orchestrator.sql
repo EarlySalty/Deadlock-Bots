@@ -1,0 +1,9 @@
+ALTER TABLE scrim.matches
+    ADD COLUMN IF NOT EXISTS party_id TEXT,
+    ADD COLUMN IF NOT EXISTS join_code TEXT,
+    ADD COLUMN IF NOT EXISTS steam_match_id BIGINT,
+    ADD COLUMN IF NOT EXISTS winner_team_id INTEGER,
+    ADD COLUMN IF NOT EXISTS result_json JSONB,
+    ADD COLUMN IF NOT EXISTS lobby_state TEXT,
+    ADD COLUMN IF NOT EXISTS coach_spectator_discord_id BIGINT,
+    ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;

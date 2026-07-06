@@ -378,6 +378,23 @@ pub fn router(app: DashboardApp) -> Router {
             "/api/reaction-roles/{id}",
             axum::routing::delete(crate::reaction_roles::reaction_role_delete),
         )
+        .route("/api/scrims", get(crate::scrims::scrims_overview))
+        .route(
+            "/api/scrims/matches",
+            post(crate::scrims::scrims_create_match),
+        )
+        .route(
+            "/api/scrims/matches/{match_id}/start",
+            post(crate::scrims::scrims_start_match),
+        )
+        .route(
+            "/api/scrims/matches/{match_id}/result",
+            post(crate::scrims::scrims_request_result),
+        )
+        .route(
+            "/api/scrims/participants/{participant_id}/notes",
+            post(crate::scrims::scrims_update_participant_notes),
+        )
         // Öffentlicher Austritts-Umfrage-Flow (Phase 9e) — token-basiert.
         // POST nimmt bis zu 5 Bilder (5 MiB) → Body-Limit hochsetzen.
         .route(
