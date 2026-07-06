@@ -21,6 +21,7 @@ pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;
 pub mod retention;
+pub mod scrim_signup;
 pub mod tags;
 pub mod tags_ui;
 pub mod voice_change_hint;
