@@ -9,6 +9,7 @@
 mod build_publisher;
 mod journeyglue;
 mod master;
+mod mcp;
 mod modglue;
 mod onboardglue;
 mod onboardingbridgeglue;
@@ -941,6 +942,19 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
+    // MCP-Connector :8890 — loopback-only Streamable-HTTP-Endpunkt für Claude.
+    // Läuft mit der Bot-Identität (DISCORD_TOKEN aus dem Prozess-Env, via
+    // Infisical/systemd-creds) — kein eigener Secrets-Weg nötig.
+    let mcp_state = Arc::new(
+        mcp::McpState::from_env(discord_token.clone(), env).context("MCP-Connector-State")?,
+    );
+    let mcp_addr = mcp::McpState::bind_addr(env);
+    let mcp_listener = tokio::net::TcpListener::bind(&mcp_addr)
+        .await
+        .with_context(|| format!("MCP-Connector-Port binden: {mcp_addr}"))?;
+    tracing::info!(addr = %mcp_addr, "MCP-Connector gebunden");
+    let mcp_server = axum::serve(mcp_listener, mcp::router(mcp_state));
+
     let scrim_announcement_channel_id =
         NonZeroU64::new(env_u64_default("DL_SCRIM_ANNOUNCEMENT_CHANNEL_ID", 0))
             .map(NonZeroU64::get);
@@ -1362,6 +1376,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         result = broker_server => result.context("Broker-Server")?,
         result = changelog_server => result.context("Changelog-Server")?,
         result = serversync_server => result.context("Server-Sync-Server")?,
+        result = mcp_server => result.context("MCP-Connector-Server")?,
         result = &mut scrim_match_driver => {
             result.context("Scrim-Match-Treiber")?;
             anyhow::bail!("Scrim-Match-Treiber beendet");
