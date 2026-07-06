@@ -28,7 +28,7 @@ httpx==0.28.1
 requests==2.34.2
 
 # AI / LLM (Bild-Scam-Vision via OpenAI)
-openai==2.43.0
+openai==2.44.0
 
 # HTML parsing
 beautifulsoup4==4.15.0
