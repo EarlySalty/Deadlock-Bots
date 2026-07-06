@@ -1,3 +1,11 @@
+## #217 — Twitch-Spam-Lernen läuft im Live-Bot
+
+**Ausgangslage:** Die Lernknöpfe für verdächtige Twitch-Spam-Alerts waren vorbereitet, aber der laufende Rust-Discord-Bot konnte die Klicks noch nicht selbst an den Twitch-Bot weitergeben.
+
+**Was wurde geändert:** Der Live-Bot hängt die Lernknöpfe jetzt an passende Alerts, prüft die Mod-Rechte beim Klick und schreibt die Entscheidung über die interne Twitch-Schnittstelle in die Spam- oder Harmlos-Lernliste.
+
+**Wie es jetzt läuft:** Mods können neue Spam-/Scam-Maschen direkt aus dem Discord-Alert als positiv oder negativ lernen lassen. Nach einem erfolgreichen Klick werden die Knöpfe deaktiviert.
+
 ## #216 — Discord-Moderation nutzt Fireworks statt Minimax
 
 **Ausgangslage:** Die Textanalyse der Discord-Moderation lief noch über Minimax, obwohl dafür ein Fireworks-Schlüssel bereitsteht.

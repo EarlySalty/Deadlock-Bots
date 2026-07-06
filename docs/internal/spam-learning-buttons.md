@@ -33,6 +33,14 @@ Body: {"verdict":"spam|safe", ...}
 Token-Auflösung: `TWITCH_INTERNAL_API_TOKEN` → `MASTER_BROKER_TOKEN` →
 `MAIN_BOT_INTERNAL_TOKEN`. Tokens werden nie geloggt.
 
+## Live-Pfad
+Der Rust-Changelog-Empfaenger liest `spam_learning`, erzeugt die Buttons und haelt
+die zugehoerige Payload kurzzeitig im Speicher. Der Rust-Twitch-Bridge-Handler
+nimmt den Button-Klick entgegen und sendet das Urteil an die Twitch-API.
+
+Die Python-Implementierung ist Legacy-Paritaet fuer alte Changelog-Pfade; live
+entscheidend ist der Rust-Bot.
+
 ## Bedienung
 - `Spam lernen`: Muster wird als Spam gespeichert.
 - `Harmlos lernen`: Muster wird als Safe-Muster gespeichert.
@@ -40,5 +48,6 @@ Token-Auflösung: `TWITCH_INTERNAL_API_TOKEN` → `MASTER_BROKER_TOKEN` →
 - Bei Erfolg werden beide Buttons deaktiviert und auf `Gelernt` gesetzt.
 
 ## Tests
-- `tests/test_changelog_spam_learning.py` prüft Payload-Parsing, Kurzpattern-Ablehnung und
-  Button-Aufbau.
+- `cargo test -p dl-changelog spam_learning --lib` prüft Payload-Parsing und Button-Aufbau.
+- `cargo test -p dl-bridges spam_learning --lib` prüft Button-IDs, Rechte und API-Weitergabe.
+- `tests/test_changelog_spam_learning.py` hält den Legacy-Python-Pfad kompatibel.

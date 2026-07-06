@@ -83,6 +83,12 @@ async fn dispatch_command(
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
             .unwrap_or(false),
+        author_can_manage_messages: cmd
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_messages() || p.administrator())
+            .unwrap_or(false),
         author_can_manage_channels: cmd
             .member
             .as_ref()
@@ -157,6 +163,12 @@ async fn dispatch_component(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_messages: component
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_messages() || p.administrator())
             .unwrap_or(false),
         author_can_manage_channels: component
             .member
@@ -234,6 +246,12 @@ async fn dispatch_modal(
             .as_ref()
             .and_then(|m| m.permissions)
             .map(|p| p.manage_guild() || p.administrator())
+            .unwrap_or(false),
+        author_can_manage_messages: modal
+            .member
+            .as_ref()
+            .and_then(|m| m.permissions)
+            .map(|p| p.manage_messages() || p.administrator())
             .unwrap_or(false),
         author_can_manage_channels: modal
             .member

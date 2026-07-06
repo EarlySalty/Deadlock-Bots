@@ -8,8 +8,11 @@
 // Frühe HTTP-Fehlerantworten als Err(Response) — axum-idiomatisch.
 #![allow(clippy::result_large_err)]
 
+use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -43,6 +46,7 @@ pub trait ChangelogDiscord: Send + Sync {
         content: Option<&str>,
         embeds: &[Value],
         mention_roles: bool,
+        components: Option<&Value>,
     ) -> Result<u64, ChangelogError>;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), ChangelogError>;
     async fn send_file(
@@ -67,6 +71,7 @@ pub trait ChangelogDiscord: Send + Sync {
 pub struct ChangelogState {
     pub discord: Arc<dyn ChangelogDiscord>,
     pub token: String,
+    pub spam_learning: Option<SpamLearningStore>,
 }
 
 pub type SharedChangelog = Arc<ChangelogState>;
@@ -74,14 +79,150 @@ pub type SharedChangelog = Arc<ChangelogState>;
 impl ChangelogState {
     /// Token wie das Original: CHANGELOG_API_TOKEN, Default "changeme-local".
     pub fn new(discord: Arc<dyn ChangelogDiscord>, token: Option<String>) -> SharedChangelog {
+        Self::new_with_spam_learning(discord, token, None)
+    }
+
+    pub fn new_with_spam_learning(
+        discord: Arc<dyn ChangelogDiscord>,
+        token: Option<String>,
+        spam_learning: Option<SpamLearningStore>,
+    ) -> SharedChangelog {
         Arc::new(Self {
             discord,
             token: token
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| "changeme-local".to_string()),
+            spam_learning,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpamLearningPayload {
+    pub pattern: String,
+    pub pattern_type: String,
+    pub source_message: String,
+    pub source_channel: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Default)]
+pub struct SpamLearningStore {
+    inner: Arc<SpamLearningStoreInner>,
+}
+
+#[derive(Default)]
+struct SpamLearningStoreInner {
+    seq: AtomicU64,
+    items: Mutex<HashMap<String, StoredSpamLearning>>,
+}
+
+#[derive(Clone)]
+struct StoredSpamLearning {
+    created_at_ms: u128,
+    payload: SpamLearningPayload,
+}
+
+impl SpamLearningStore {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&self, payload: SpamLearningPayload) -> String {
+        let now = now_ms();
+        let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
+        let token = format!("{now:x}{seq:x}");
+        let mut items = self.inner.items.lock().expect("spam learning store lock");
+        items.retain(|_, item| now.saturating_sub(item.created_at_ms) < 24 * 60 * 60 * 1000);
+        items.insert(
+            token.clone(),
+            StoredSpamLearning {
+                created_at_ms: now,
+                payload,
+            },
+        );
+        token
+    }
+
+    pub fn take(&self, token: &str) -> Option<SpamLearningPayload> {
+        self.inner
+            .items
+            .lock()
+            .expect("spam learning store lock")
+            .remove(token)
+            .map(|item| item.payload)
+    }
+}
+
+fn now_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or_default()
+}
+
+fn trim_text(value: Option<&Value>, limit: usize) -> String {
+    let raw = match value {
+        Some(Value::String(value)) => value.as_str(),
+        Some(Value::Null) | None => "",
+        Some(value) => {
+            return value
+                .to_string()
+                .replace(['\r', '\n'], " ")
+                .trim()
+                .chars()
+                .take(limit)
+                .collect();
+        }
+    };
+    raw.replace(['\r', '\n'], " ")
+        .trim()
+        .chars()
+        .take(limit)
+        .collect()
+}
+
+pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningPayload> {
+    let obj = raw?.as_object()?;
+    let pattern = trim_text(obj.get("pattern"), 200);
+    if pattern.chars().count() < 4 {
+        return None;
+    }
+    let pattern_type = match trim_text(obj.get("pattern_type"), 20).as_str() {
+        "phrase" => "phrase".to_string(),
+        _ => "fragment".to_string(),
+    };
+    Some(SpamLearningPayload {
+        pattern,
+        pattern_type,
+        source_message: trim_text(obj.get("source_message"), 500),
+        source_channel: trim_text(obj.get("source_channel"), 100),
+        reason: trim_text(obj.get("reason"), 200),
+    })
+}
+
+fn spam_learning_components(state: &ChangelogState, data: &Map<String, Value>) -> Option<Value> {
+    let store = state.spam_learning.as_ref()?;
+    let payload = parse_spam_learning(data.get("spam_learning"))?;
+    let token = store.insert(payload);
+    Some(json!([{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 4,
+                "label": "Spam lernen",
+                "custom_id": format!("spam-learning:spam:{token}"),
+            },
+            {
+                "type": 2,
+                "style": 3,
+                "label": "Harmlos lernen",
+                "custom_id": format!("spam-learning:safe:{token}"),
+            },
+        ],
+    }]))
 }
 
 pub fn router(state: SharedChangelog) -> Router {
@@ -161,7 +302,7 @@ pub async fn publish_changelog(
     let embed = build_embed(title, content, target);
     state
         .discord
-        .send(channel_id, None, &[embed], false)
+        .send(channel_id, None, &[embed], false, None)
         .await?;
     Ok(channel_id)
 }
@@ -230,7 +371,13 @@ async fn handle_alert(State(state): State<SharedChangelog>, body: Option<Json<Va
     let ping = matches!(level, "warn" | "crit").then(|| format!("<@{SERVER_ALERT_PING_USER_ID}>"));
     match state
         .discord
-        .send(SERVER_ALERT_CHANNEL_ID, ping.as_deref(), &[embed], false)
+        .send(
+            SERVER_ALERT_CHANNEL_ID,
+            ping.as_deref(),
+            &[embed],
+            false,
+            None,
+        )
         .await
     {
         Ok(_) => Json(json!({ "ok": true, "channel_id": SERVER_ALERT_CHANNEL_ID })).into_response(),
@@ -288,7 +435,12 @@ async fn handle_changelog(
     };
 
     let embed = build_embed(title, content, target);
-    match state.discord.send(channel_id, None, &[embed], false).await {
+    let components = spam_learning_components(&state, &data);
+    match state
+        .discord
+        .send(channel_id, None, &[embed], false, components.as_ref())
+        .await
+    {
         Ok(_) => Json(json!({ "ok": true, "channel_id": channel_id })).into_response(),
         Err(e) => {
             tracing::warn!(%e, channel_id, "Changelog-Post fehlgeschlagen");
@@ -398,7 +550,13 @@ async fn handle_rich(State(state): State<SharedChangelog>, body: Option<Json<Val
 
     match state
         .discord
-        .send(channel_id, content.as_deref(), &embeds, role_ping.is_some())
+        .send(
+            channel_id,
+            content.as_deref(),
+            &embeds,
+            role_ping.is_some(),
+            None,
+        )
         .await
     {
         Ok(message_id) => Json(json!({
@@ -465,7 +623,11 @@ async fn handle_highlights(
         "color": 0xE67E22,
         "timestamp": utc_now_iso(),
     });
-    if let Err(e) = state.discord.send(channel_id, None, &[header], false).await {
+    if let Err(e) = state
+        .discord
+        .send(channel_id, None, &[header], false, None)
+        .await
+    {
         if matches!(e, ChangelogError::ChannelNotFound(_)) {
             return err(404, &format!("channel {channel_id} not found"));
         }
@@ -569,9 +731,11 @@ mod tests {
     use std::sync::Mutex;
     use tower::ServiceExt;
 
+    type SentMessage = (u64, Option<String>, usize, Option<Value>);
+
     /// Mock: zeichnet Sends auf, simuliert unbekannte Kanäle.
     struct MockDiscord {
-        sent: Mutex<Vec<(u64, Option<String>, usize)>>,
+        sent: Mutex<Vec<SentMessage>>,
     }
 
     #[async_trait::async_trait]
@@ -582,6 +746,7 @@ mod tests {
             content: Option<&str>,
             embeds: &[Value],
             _mention_roles: bool,
+            components: Option<&Value>,
         ) -> Result<u64, ChangelogError> {
             if channel_id == 404 {
                 return Err(ChangelogError::ChannelNotFound(channel_id));
@@ -590,6 +755,7 @@ mod tests {
                 channel_id,
                 content.map(str::to_string),
                 embeds.len(),
+                components.cloned(),
             ));
             Ok(999)
         }
@@ -678,6 +844,53 @@ mod tests {
         let sent = mock.sent.lock().expect("lock");
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, DEV_UPDATES_CHANNEL_ID);
+    }
+
+    #[tokio::test]
+    async fn direkter_changelog_mit_spam_learning_baut_buttons() {
+        let mock = Arc::new(MockDiscord {
+            sent: Mutex::new(Vec::new()),
+        });
+        let store = SpamLearningStore::new();
+        let state = ChangelogState::new_with_spam_learning(
+            mock.clone(),
+            Some("test-token".to_string()),
+            Some(store.clone()),
+        );
+        let app = router(state);
+
+        let (status, body) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Verdächtige Nachricht",
+                "content": "x",
+                "spam_learning": {
+                    "pattern": "aha, so sammelt man also viewer Kappa",
+                    "pattern_type": "phrase",
+                    "source_message": "@MiracleGhost9 aha, so sammelt man also viewer Kappa",
+                    "source_channel": "miracleghost9",
+                    "reason": "Score 1",
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["ok"], true);
+        let sent = mock.sent.lock().expect("lock");
+        let components = sent[0].3.as_ref().expect("components");
+        assert_eq!(components[0]["components"][0]["label"], "Spam lernen");
+        assert_eq!(components[0]["components"][1]["label"], "Harmlos lernen");
+        let custom_id = components[0]["components"][0]["custom_id"]
+            .as_str()
+            .expect("custom id");
+        let token = custom_id.trim_start_matches("spam-learning:spam:");
+        let learned = store.take(token).expect("stored payload");
+        assert_eq!(learned.pattern, "aha, so sammelt man also viewer Kappa");
+        assert_eq!(learned.pattern_type, "phrase");
     }
 
     #[tokio::test]
