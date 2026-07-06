@@ -1,5 +1,4 @@
-//! dl-ai — MiniMax-Anbindung (Port des MiniMax-Pfads aus
-//! `cogs/ai_connector.py`).
+//! dl-ai — LLM-Anbindungen fuer Bot-Flows.
 //!
 //! Zwei Modi wie das Original:
 //! - **Token-Plan** (`MINIMAX_TOKEN_PLAN_KEY`): Anthropic-kompatible API
@@ -22,12 +21,14 @@ mod chat_provider;
 pub use chat_provider::*;
 
 pub const DEFAULT_MODEL: &str = "MiniMax-M3";
+pub const DEFAULT_FIREWORKS_MODEL: &str = "accounts/fireworks/models/deepseek-v4-flash";
 pub const DEFAULT_OPENAI_MODEL: &str = "gpt-5.4-nano";
 pub const DEFAULT_OPENAI_TEXT_MODEL: &str = "gpt-4o-mini";
 pub const DEFAULT_GEMINI_MODEL: &str = "gemini-2.0-flash";
 pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 800;
 const DEFAULT_BASE_URL: &str = "https://api.minimax.chat/v1";
 const DEFAULT_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
+const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 const DEFAULT_GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta";
 const MAX_OPENAI_IMAGE_BYTES: u64 = 8 * 1024 * 1024;
@@ -180,6 +181,13 @@ impl MiniMaxClient {
 }
 
 pub struct OpenAiClient {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+}
+
+pub struct FireworksClient {
     http: reqwest::Client,
     base_url: String,
     api_key: String,
@@ -403,6 +411,41 @@ impl OpenAiClient {
     }
 }
 
+impl FireworksClient {
+    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Option<Arc<Self>> {
+        let get = |key: &str| {
+            lookup(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        };
+        let api_key = get("FIREWORK_API_KEY").or_else(|| get("FIREWORKS_API_KEY"))?;
+        let base_url = get("FIREWORK_BASE_URL")
+            .or_else(|| get("FIREWORKS_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.to_string());
+        let model = get("FIREWORK_MODEL")
+            .or_else(|| get("FIREWORKS_MODEL"))
+            .unwrap_or_else(|| DEFAULT_FIREWORKS_MODEL.to_string());
+        tracing::info!(%base_url, %model, "Fireworks-Text-Client initialisiert");
+        Some(Self::new(base_url, api_key, model))
+    }
+
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            http: reqwest::Client::builder()
+                .timeout(Duration::from_secs(60))
+                .build()
+                .unwrap_or_default(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+        })
+    }
+}
+
 pub struct GeminiClient {
     http: reqwest::Client,
     base_url: String,
@@ -431,6 +474,47 @@ impl GeminiClient {
             api_key,
             model,
         }))
+    }
+}
+
+#[async_trait::async_trait]
+impl TextGenerator for FireworksClient {
+    async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
+        let model = request.model.unwrap_or_else(|| self.model.clone());
+        let max_tokens = request
+            .max_output_tokens
+            .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
+        let mut messages = Vec::new();
+        if let Some(system) = &request.system_prompt {
+            messages.push(json!({ "role": "system", "content": system }));
+        }
+        messages.push(json!({ "role": "user", "content": request.prompt }));
+
+        let response = self
+            .http
+            .post(format!("{}/chat/completions", self.base_url))
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .json(&json!({
+                "model": model,
+                "messages": messages,
+                "max_tokens": max_tokens,
+                "temperature": request.temperature,
+            }))
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(err) => {
+                tracing::warn!(%err, "Fireworks-Text-Request fehlgeschlagen");
+                return None;
+            }
+        };
+        if !response.status().is_success() {
+            tracing::warn!(status = %response.status(), "Fireworks-Text-API-Fehler");
+            return None;
+        }
+        let data: Value = response.json().await.ok()?;
+        OpenAiClient::extract_openai_text(&data)
     }
 }
 
@@ -1225,6 +1309,71 @@ mod tests {
         })
         .expect("legacy text client");
         assert_eq!(legacy_openai_model_ignored.model, "gpt-4o-mini");
+    }
+
+    #[test]
+    fn fireworks_from_env_nutzt_singular_key_und_deepseek_flash_default() {
+        let client = FireworksClient::from_env(|key| match key {
+            "FIREWORK_API_KEY" => Some("fw-key".to_string()),
+            _ => None,
+        })
+        .expect("fireworks client");
+
+        assert_eq!(client.model, DEFAULT_FIREWORKS_MODEL);
+        assert_eq!(client.base_url, DEFAULT_FIREWORKS_BASE_URL);
+    }
+
+    #[tokio::test]
+    async fn fireworks_chat_completion_wire_format() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<std::sync::Mutex<Vec<Value>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<Value>| {
+                    let cap = cap.clone();
+                    async move {
+                        assert_eq!(
+                            headers.get("authorization").and_then(|v| v.to_str().ok()),
+                            Some("Bearer fw-key")
+                        );
+                        cap.lock().expect("lock").push(body);
+                        Json(json!({ "choices": [
+                            { "message": { "content": "{\"category\":\"game_related_ok\"}" } }
+                        ]}))
+                    }
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        let base = format!("http://{addr}");
+        let client = FireworksClient::new(&base, "fw-key", DEFAULT_FIREWORKS_MODEL);
+
+        let text = client
+            .generate_text(GenerateRequest {
+                prompt: "pruefe".to_string(),
+                system_prompt: Some("system".to_string()),
+                model: None,
+                max_output_tokens: Some(300),
+                temperature: 0.0,
+            })
+            .await;
+
+        assert_eq!(text.as_deref(), Some("{\"category\":\"game_related_ok\"}"));
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured[0]["model"], DEFAULT_FIREWORKS_MODEL);
+        assert_eq!(captured[0]["messages"][0]["role"], "system");
+        assert_eq!(captured[0]["messages"][1]["content"], "pruefe");
+        assert_eq!(captured[0]["max_tokens"], 300);
+        assert_eq!(captured[0]["temperature"], 0.0);
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.

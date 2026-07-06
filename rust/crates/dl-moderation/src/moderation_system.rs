@@ -886,7 +886,7 @@ mod tests {
                     analyzer_text,
                     None,
                     ContentAnalyzerConfig {
-                        text_model: "MiniMax-M3".to_string(),
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),
@@ -933,7 +933,7 @@ mod tests {
                     analyzer_text,
                     None,
                     ContentAnalyzerConfig {
-                        text_model: "MiniMax-M3".to_string(),
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),
@@ -1230,7 +1230,7 @@ mod tests {
                     analyzer_text,
                     None,
                     ContentAnalyzerConfig {
-                        text_model: "MiniMax-M3".to_string(),
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),
@@ -1360,7 +1360,7 @@ mod tests {
                     analyzer_text,
                     None,
                     ContentAnalyzerConfig {
-                        text_model: "MiniMax-M3".to_string(),
+                        text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                         image_model: "gpt-5.4-nano".to_string(),
                     },
                 ),

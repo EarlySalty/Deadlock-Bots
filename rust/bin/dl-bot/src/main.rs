@@ -577,9 +577,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let moderation_scan_channel_ids =
         dl_moderation::moderation_channel::scan_channel_ids_from_lookup(|k| std::env::var(k).ok());
 
-    let moderation_text_analyze_client = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
+    let moderation_text_analyze_client =
+        dl_ai::FireworksClient::from_env(|k| std::env::var(k).ok());
     let moderation_text_analyze_model =
-        env("MOD_TEXT_ANALYZE_MODEL").unwrap_or_else(|| dl_ai::DEFAULT_MODEL.to_string());
+        env("MOD_TEXT_ANALYZE_MODEL").unwrap_or_else(|| dl_ai::DEFAULT_FIREWORKS_MODEL.to_string());
     let moderation_image_analyze_client =
         openai_client_with_model_from_env("MOD_IMAGE_ANALYZE_MODEL", dl_ai::DEFAULT_OPENAI_MODEL);
     let moderation_verify_client =
@@ -792,7 +793,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
 
     // Moderation (6) — Review-Buttons brauchen den Router, Scan ist gateway-gated.
-    // Text-Analyze laeuft ueber MiniMax, Bild-Analyze und Verify ueber OpenAI nano.
+    // Text-Analyze laeuft ueber Fireworks, Bild-Analyze und Verify ueber OpenAI nano.
     let moderator = match (
         moderation_text_analyze_client.clone(),
         moderation_image_analyze_client.clone(),
