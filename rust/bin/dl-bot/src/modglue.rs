@@ -12,7 +12,9 @@ use std::time::Duration;
 use dl_ai::TextGenerator;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
-use serenity::all::{ChannelId, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId};
+use serenity::all::{
+    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId,
+};
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -26,6 +28,9 @@ const INVITE_CACHE_MAX_ENTRIES: usize = 256;
 const DISCORD_FIELD_LIMIT: usize = 1024;
 const CASE_IMAGE_ATTACHMENT_EXTENSIONS: &[&str] =
     &[".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif"];
+const MODERATION_EVIDENCE_IMAGE_LIMIT: usize = 4;
+const MODERATION_EVIDENCE_IMAGE_MAX_BYTES: usize = 7_000_000;
+const MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(5);
 const DISCORD_MESSAGE_SAFE_LIMIT: usize = 1800;
 const AUTO_RAGEBAITER_TAG_SET_BY: u64 = 0;
 const BRAIN_SUBPROCESS_TIMEOUT: Duration = Duration::from_secs(20);
@@ -846,6 +851,49 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
             .is_ok()
     }
 
+    async fn mirror_evidence_images(
+        &self,
+        image_urls: &[String],
+    ) -> Vec<dl_moderation::moderation_system::ModerationEvidenceFile> {
+        let client = reqwest::Client::new();
+        let mut files = Vec::new();
+        for url in image_urls.iter().take(MODERATION_EVIDENCE_IMAGE_LIMIT) {
+            let Ok(Ok(response)) =
+                timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, client.get(url).send()).await
+            else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let content_type = response
+                .headers()
+                .get(reqwest::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            if response
+                .content_length()
+                .is_some_and(|size| size > MODERATION_EVIDENCE_IMAGE_MAX_BYTES as u64)
+            {
+                continue;
+            }
+            let Ok(Ok(bytes)) =
+                timeout(MODERATION_EVIDENCE_DOWNLOAD_TIMEOUT, response.bytes()).await
+            else {
+                continue;
+            };
+            if bytes.len() > MODERATION_EVIDENCE_IMAGE_MAX_BYTES {
+                continue;
+            }
+            files.push(dl_moderation::moderation_system::ModerationEvidenceFile {
+                filename: moderation_evidence_filename(files.len(), &content_type, url),
+                data: bytes.to_vec(),
+            });
+        }
+        files
+    }
+
     async fn timeout_member(
         &self,
         guild_id: u64,
@@ -905,12 +953,41 @@ impl dl_moderation::moderation_system::ModerationPort for ModGlue {
         channel_id: u64,
         embed: Value,
         components: Value,
+        files: Vec<dl_moderation::moderation_system::ModerationEvidenceFile>,
     ) -> Option<u64> {
         let mut body = serde_json::Map::new();
         body.insert("embeds".into(), json!([embed]));
         body.insert("components".into(), components);
-        self.adapter.send_raw_public(channel_id, &body).await.ok()
+        let attachments = files
+            .into_iter()
+            .map(|file| CreateAttachment::bytes(file.data, file.filename))
+            .collect::<Vec<_>>();
+        self.adapter
+            .http
+            .send_message(ChannelId::new(channel_id), attachments, &body)
+            .await
+            .ok()
+            .map(|message| message.id.get())
     }
+}
+
+fn moderation_evidence_filename(index: usize, content_type: &str, url: &str) -> String {
+    let ext = if content_type.contains("png") {
+        "png"
+    } else if content_type.contains("gif") {
+        "gif"
+    } else if content_type.contains("webp") {
+        "webp"
+    } else if content_type.contains("avif") {
+        "avif"
+    } else {
+        url.rsplit('?')
+            .next()
+            .and_then(|clean| clean.rsplit('.').next())
+            .filter(|ext| matches!(*ext, "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif"))
+            .unwrap_or("jpg")
+    };
+    format!("moderation-evidence-{}.{}", index + 1, ext)
 }
 
 impl ModGlue {

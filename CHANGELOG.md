@@ -1,3 +1,11 @@
+## #214 — Moderation löscht Takeover-Bilder kanalübergreifend
+
+**Ausgangslage:** Beim Account-Takeover-Alarm erkannte der Bot zwar Bilder in mehreren Kanälen, löschte aber nur die auslösende Nachricht. Im Mod-Fall standen die Bilder außerdem als Original-Links; nach dem Löschen konnten diese Links ins Leere laufen.
+
+**Was wurde geändert:** Der automatische Vollzug löscht jetzt alle Nachrichten, die zum erkannten Takeover-Muster gehören. Die Bildbeweise werden vor dem Löschen geladen und als echte Anhänge an den Mod-Post gehängt.
+
+**Wie es jetzt läuft:** Offtopic, Coaching-Lane und andere betroffene Kanäle werden gemeinsam bereinigt. Mods sehen die Bilder dauerhaft im Fall-Post, nicht nur als kaputte Original-Links.
+
 ## #213 — Twitch-Live-Posts im neuen Layout möglich
 
 **Ausgangslage:** Die Ankündigungen, wenn jemand auf Twitch live geht, steckten im alten, starren Nachrichten-Format fest.

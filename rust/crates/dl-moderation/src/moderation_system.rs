@@ -35,6 +35,7 @@ impl Default for ModerationSystemConfig {
 #[async_trait]
 pub trait ModerationPort: Send + Sync {
     async fn delete_message(&self, channel_id: u64, message_id: u64, reason: &str) -> bool;
+    async fn mirror_evidence_images(&self, image_urls: &[String]) -> Vec<ModerationEvidenceFile>;
     async fn timeout_member(&self, guild_id: u64, user_id: u64, minutes: i64, reason: &str)
         -> bool;
     async fn ban_member(&self, guild_id: u64, user_id: u64, reason: &str) -> bool;
@@ -45,7 +46,14 @@ pub trait ModerationPort: Send + Sync {
         channel_id: u64,
         embed: Value,
         components: Value,
+        files: Vec<ModerationEvidenceFile>,
     ) -> Option<u64>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModerationEvidenceFile {
+    pub filename: String,
+    pub data: Vec<u8>,
 }
 
 #[async_trait]
@@ -247,6 +255,11 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             return;
         };
 
+        let evidence_files = self
+            .port
+            .mirror_evidence_images(&evidence_image_urls(event, behavior_signal.as_ref()))
+            .await;
+        let evidence_file_count = evidence_files.len();
         let mut executed_actions = Vec::new();
         if let PolicyDecision::AutoExecute {
             action,
@@ -254,15 +267,27 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         } = decision
         {
             if self.config.enforce {
-                let deleted = self
-                    .port
-                    .delete_message(
-                        event.channel_id,
-                        event.message_id,
-                        "Automatische Moderation: Nachricht entfernt",
-                    )
-                    .await;
-                executed_actions.push(format!("delete:{}", if deleted { "ok" } else { "failed" }));
+                let delete_targets = auto_delete_targets(event, behavior_signal.as_ref());
+                let mut deleted_count = 0usize;
+                for (channel_id, message_id) in &delete_targets {
+                    let deleted = self
+                        .port
+                        .delete_message(
+                            *channel_id,
+                            *message_id,
+                            "Automatische Moderation: Nachricht entfernt",
+                        )
+                        .await;
+                    if deleted {
+                        deleted_count += 1;
+                    }
+                }
+                let deleted = deleted_count == delete_targets.len();
+                executed_actions.push(if delete_targets.len() == 1 {
+                    format!("delete:{}", if deleted { "ok" } else { "failed" })
+                } else {
+                    format!("delete:{deleted_count}/{}", delete_targets.len())
+                });
                 let action_ok = match action {
                     ModerationAction::Timeout => {
                         let timed_out = self
@@ -315,11 +340,17 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
             behavior_signal,
             policy_decision: decision.clone(),
             executed_actions,
+            mirrored_image_count: evidence_file_count,
         });
         let components = build_case_components(&case_id, &decision);
         if let Some(message_id) = self
             .port
-            .post_moderation_case(self.config.moderation_channel_id, embed, components)
+            .post_moderation_case(
+                self.config.moderation_channel_id,
+                embed,
+                components,
+                evidence_files,
+            )
             .await
         {
             self.store.set_review_message(&case_id, message_id).await;
@@ -504,6 +535,50 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
     }
 }
 
+fn auto_delete_targets(
+    event: &dl_discord::MessageEvent,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> Vec<(u64, u64)> {
+    let mut targets = Vec::new();
+    if let Some(signal) = behavior_signal {
+        for message in &signal.messages {
+            if !targets
+                .iter()
+                .any(|(_, message_id)| *message_id == message.message_id)
+            {
+                targets.push((message.channel_id, message.message_id));
+            }
+        }
+    }
+    if !targets
+        .iter()
+        .any(|(_, message_id)| *message_id == event.message_id)
+    {
+        targets.push((event.channel_id, event.message_id));
+    }
+    targets
+}
+
+fn evidence_image_urls(
+    event: &dl_discord::MessageEvent,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> Vec<String> {
+    let mut urls = Vec::new();
+    if let Some(signal) = behavior_signal {
+        for url in &signal.evidence.image_urls {
+            if !urls.contains(url) {
+                urls.push(url.clone());
+            }
+        }
+    }
+    for url in &event.image_attachment_urls {
+        if !urls.contains(url) {
+            urls.push(url.clone());
+        }
+    }
+    urls
+}
+
 fn behavior_verdict(signal: &BehaviorSignal) -> ModerationVerdict {
     let raw = behavior_signal_raw(signal).to_string();
     ModerationVerdict {
@@ -627,15 +702,40 @@ mod tests {
         untimeouts: AtomicUsize,
         unbans: AtomicUsize,
         posts: AtomicUsize,
+        delete_targets: Mutex<Vec<(u64, u64)>>,
+        mirrored_urls: Mutex<Vec<String>>,
+        posted_file_counts: Mutex<Vec<usize>>,
         timeout_minutes: Mutex<Vec<i64>>,
         posted_embeds: Mutex<Vec<Value>>,
     }
 
     #[async_trait::async_trait]
     impl ModerationPort for CountingPort {
-        async fn delete_message(&self, _channel_id: u64, _message_id: u64, _reason: &str) -> bool {
+        async fn delete_message(&self, channel_id: u64, message_id: u64, _reason: &str) -> bool {
             self.deletes.fetch_add(1, Ordering::Relaxed);
+            self.delete_targets
+                .lock()
+                .await
+                .push((channel_id, message_id));
             true
+        }
+
+        async fn mirror_evidence_images(
+            &self,
+            image_urls: &[String],
+        ) -> Vec<ModerationEvidenceFile> {
+            self.mirrored_urls
+                .lock()
+                .await
+                .extend(image_urls.iter().cloned());
+            image_urls
+                .iter()
+                .enumerate()
+                .map(|(idx, _)| ModerationEvidenceFile {
+                    filename: format!("evidence-{idx}.png"),
+                    data: vec![idx as u8],
+                })
+                .collect()
         }
 
         async fn timeout_member(
@@ -670,8 +770,10 @@ mod tests {
             _channel_id: u64,
             embed: Value,
             _components: Value,
+            files: Vec<ModerationEvidenceFile>,
         ) -> Option<u64> {
             self.posts.fetch_add(1, Ordering::Relaxed);
+            self.posted_file_counts.lock().await.push(files.len());
             self.posted_embeds.lock().await.push(embed);
             Some(55)
         }
@@ -1115,7 +1217,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn takeover_signal_creates_one_case_embed_and_deletes_only_current_message() {
+    async fn takeover_signal_creates_one_case_embed_and_deletes_all_signal_messages() {
         let analyzer_text = Arc::new(StaticText::default());
         let verifier_text = Arc::new(StaticText::default());
         let port = Arc::new(CountingPort::default());
@@ -1158,7 +1260,19 @@ mod tests {
         assert_eq!(moderator.store.drafts.lock().await.len(), 1);
         assert_eq!(moderator.store.review_messages.lock().await.len(), 1);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            port.delete_targets.lock().await.as_slice(),
+            &[(10, 1000), (11, 1001)]
+        );
+        assert_eq!(
+            port.mirrored_urls.lock().await.as_slice(),
+            &[
+                "https://img/1000.png".to_string(),
+                "https://img/1001.png".to_string()
+            ]
+        );
+        assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[2]);
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
@@ -1275,7 +1389,7 @@ mod tests {
             .await;
 
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
-        assert_eq!(port.deletes.load(Ordering::Relaxed), 1);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
         assert_eq!(draft.source, "behavior");

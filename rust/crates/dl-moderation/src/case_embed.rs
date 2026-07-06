@@ -17,6 +17,7 @@ pub struct CompactCaseEmbedInput {
     pub behavior_signal: Option<BehaviorSignal>,
     pub policy_decision: PolicyDecision,
     pub executed_actions: Vec<String>,
+    pub mirrored_image_count: usize,
 }
 
 pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
@@ -80,7 +81,11 @@ pub fn build_compact_case_embed(input: &CompactCaseEmbedInput) -> Value {
         if !signal.evidence.image_urls.is_empty() {
             fields.push(json!({
                 "name": "Bilder",
-                "value": truncate_chars(&signal.evidence.image_urls.join("\n"), DISCORD_FIELD_LIMIT),
+                "value": if input.mirrored_image_count > 0 {
+                    format!("{} Bild(er) als Anhang gespiegelt", input.mirrored_image_count)
+                } else {
+                    "Bild(er) erkannt, Spiegelung fehlgeschlagen".to_string()
+                },
                 "inline": false,
             }));
         }
@@ -236,6 +241,7 @@ mod tests {
                 timeout_minutes: 1440,
             },
             executed_actions: vec!["delete:ok".to_string(), "timeout:ok".to_string()],
+            mirrored_image_count: 0,
         });
         let serialized = embed.to_string();
 
@@ -313,13 +319,15 @@ mod tests {
                 timeout_minutes: 1440,
             },
             executed_actions: Vec::new(),
+            mirrored_image_count: 1,
         });
         let serialized = embed.to_string();
 
         assert!(!serialized.contains("Case-ID"));
         assert!(serialized.contains("account_takeover"));
         assert!(serialized.contains("2 Nachrichten · 2 Kanäle · 30s"));
-        assert!(serialized.contains("https://img/1.png"));
+        assert!(serialized.contains("1 Bild"));
+        assert!(!serialized.contains("https://img/1.png"));
 
         let components = build_case_components(
             "case-123",
