@@ -470,6 +470,7 @@ dependencies = [
  "axum",
  "chrono",
  "dl-central-db",
+ "dl-changelog",
  "dl-core",
  "dl-discord",
  "hex",

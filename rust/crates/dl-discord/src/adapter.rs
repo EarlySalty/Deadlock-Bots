@@ -923,12 +923,16 @@ impl ChangelogDiscord for DiscordAdapter {
         content: Option<&str>,
         embeds: &[Value],
         mention_roles: bool,
+        components: Option<&Value>,
     ) -> Result<u64, ChangelogError> {
         let mut body = Map::new();
         if let Some(content) = content {
             body.insert("content".into(), json!(content));
         }
         body.insert("embeds".into(), json!(embeds));
+        if let Some(components) = components {
+            body.insert("components".into(), components.clone());
+        }
         if mention_roles {
             body.insert(
                 "allowed_mentions".into(),

@@ -12,6 +12,7 @@ async-trait.workspace = true
 chrono.workspace = true
 dl-core.workspace = true
 dl-central-db.workspace = true
+dl-changelog.workspace = true
 dl-discord.workspace = true
 hex.workspace = true
 rand.workspace = true

@@ -14,6 +14,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dl_changelog::{SpamLearningPayload, SpamLearningStore};
 use dl_discord::{BridgeInteraction, BridgeReply, InteractionHandler, InteractionRouter};
 use reqwest::Url;
 use serde_json::{json, Value};
@@ -21,6 +22,7 @@ use tokio::sync::RwLock;
 
 pub const TWITCH_INTERNAL_API_BASE_PATH: &str = "/internal/twitch/v1";
 pub const TRACKING_PREFIX: &str = "twitch-live:";
+pub const SPAM_LEARNING_PREFIX: &str = "spam-learning:";
 const DEFAULT_BUTTON_LABEL: &str = "Auf Twitch ansehen";
 /// Backoff der Start-Rehydrierung (der Twitch-Bot kann später hochkommen).
 const RESTORE_RETRY_DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
@@ -325,6 +327,28 @@ impl TwitchApiClient {
         .await
         .map(|_| ())
     }
+
+    pub async fn learn_spam_pattern(
+        &self,
+        payload: &SpamLearningPayload,
+        verdict: &str,
+    ) -> Result<(), TwitchBridgeError> {
+        self.request(
+            reqwest::Method::POST,
+            "/spam-learning",
+            Some(&json!({
+                "verdict": verdict,
+                "pattern": &payload.pattern,
+                "patternType": &payload.pattern_type,
+                "sourceMessage": &payload.source_message,
+                "sourceChannel": &payload.source_channel,
+                "reason": &payload.reason,
+            })),
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -528,6 +552,69 @@ impl InteractionHandler for TrackingClickHandler {
     }
 }
 
+pub struct SpamLearningHandler {
+    pub client: Arc<TwitchApiClient>,
+    pub store: SpamLearningStore,
+}
+
+fn parse_spam_learning_custom_id(custom_id: &str) -> Option<(&str, &str)> {
+    let rest = custom_id.strip_prefix(SPAM_LEARNING_PREFIX)?;
+    let (verdict, token) = rest.split_once(':')?;
+    match verdict {
+        "spam" | "safe" if !token.trim().is_empty() => Some((verdict, token)),
+        _ => None,
+    }
+}
+
+fn learned_components(token: &str) -> Value {
+    json!([{
+        "type": 1,
+        "components": [
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Gelernt",
+                "custom_id": format!("spam-learning:done-spam:{token}"),
+                "disabled": true,
+            },
+            {
+                "type": 2,
+                "style": 2,
+                "label": "Gelernt",
+                "custom_id": format!("spam-learning:done-safe:{token}"),
+                "disabled": true,
+            },
+        ],
+    }])
+}
+
+#[async_trait::async_trait]
+impl InteractionHandler for SpamLearningHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if !interaction.author_can_manage_messages && !interaction.author_can_manage_guild {
+            return BridgeReply::ephemeral_text("Keine Berechtigung.");
+        }
+
+        let Some((verdict, token)) = parse_spam_learning_custom_id(&interaction.custom_id) else {
+            return BridgeReply::ephemeral_text("Lernen fehlgeschlagen.");
+        };
+        let Some(payload) = self.store.take(token) else {
+            return BridgeReply::ephemeral_text("Dieser Lernfall ist nicht mehr aktiv.");
+        };
+
+        if let Err(err) = self.client.learn_spam_pattern(&payload, verdict).await {
+            tracing::error!(%err, verdict, "Twitch-Spam-Lernen fehlgeschlagen");
+            return BridgeReply::ephemeral_text("Lernen fehlgeschlagen.");
+        }
+
+        BridgeReply {
+            components: Some(learned_components(token)),
+            update_message: true,
+            ..BridgeReply::default()
+        }
+    }
+}
+
 /// Registriert die Twitch-Live-Routen am Router.
 pub fn register(
     router: &mut InteractionRouter,
@@ -537,6 +624,17 @@ pub fn register(
     router.on_prefix(
         TRACKING_PREFIX,
         Arc::new(TrackingClickHandler { client, registry }),
+    );
+}
+
+pub fn register_spam_learning(
+    router: &mut InteractionRouter,
+    client: Arc<TwitchApiClient>,
+    store: SpamLearningStore,
+) {
+    router.on_prefix(
+        SPAM_LEARNING_PREFIX,
+        Arc::new(SpamLearningHandler { client, store }),
     );
 }
 
@@ -603,6 +701,33 @@ mod tests {
         (format!("http://{addr}"), received, handle)
     }
 
+    async fn mock_spam_learning_bot() -> (
+        String,
+        Arc<Mutex<Vec<(String, Value)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let received: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec_post = received.clone();
+        let app = axum::Router::new().route(
+            "/internal/twitch/v1/spam-learning",
+            axum::routing::post(move |body: axum::Json<Value>| {
+                let received = rec_post.clone();
+                async move {
+                    received.lock().expect("lock").push(("POST".into(), body.0));
+                    axum::Json(json!({"ok": true}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), received, handle)
+    }
+
     fn announcement_json() -> Value {
         json!([{
             "streamer_login": "DragSkope",
@@ -626,6 +751,20 @@ mod tests {
             build_custom_id("abc-def_ghi", &"x".repeat(40)),
             format!("twitch-live:abcdefghi:{}", "x".repeat(32))
         );
+    }
+
+    #[test]
+    fn spam_learning_custom_id_validierung() {
+        assert_eq!(
+            parse_spam_learning_custom_id("spam-learning:spam:abc"),
+            Some(("spam", "abc"))
+        );
+        assert_eq!(
+            parse_spam_learning_custom_id("spam-learning:safe:abc"),
+            Some(("safe", "abc"))
+        );
+        assert!(parse_spam_learning_custom_id("spam-learning:done-spam:abc").is_none());
+        assert!(parse_spam_learning_custom_id("spam-learning:spam:").is_none());
     }
 
     #[test]
@@ -720,6 +859,40 @@ mod tests {
         assert_eq!(click.1["streamer_login"], "dragskope");
         assert_eq!(click.1["discord_user_id"], "42");
         assert_eq!(click.1["message_id"], "555");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn spam_learning_klick_postet_verdict_und_deaktiviert_buttons() {
+        let (url, received, server) = mock_spam_learning_bot().await;
+        let client = TwitchApiClient::new(url, "tok", Duration::from_secs(5));
+        let store = SpamLearningStore::new();
+        let token = store.insert(SpamLearningPayload {
+            pattern: "viewer bot pitch".to_string(),
+            pattern_type: "phrase".to_string(),
+            source_message: "@demo viewer bot pitch".to_string(),
+            source_channel: "demo".to_string(),
+            reason: "Score 1".to_string(),
+        });
+
+        let handler = SpamLearningHandler { client, store };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: format!("spam-learning:spam:{token}"),
+                author_can_manage_messages: true,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.update_message);
+        let components = reply.components.expect("components");
+        assert_eq!(components[0]["components"][0]["label"], "Gelernt");
+        assert_eq!(components[0]["components"][0]["disabled"], true);
+        let sent = received.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].1["verdict"], "spam");
+        assert_eq!(sent[0].1["pattern"], "viewer bot pitch");
+        assert_eq!(sent[0].1["patternType"], "phrase");
         server.abort();
     }
 
