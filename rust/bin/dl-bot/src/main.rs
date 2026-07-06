@@ -381,6 +381,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             adapter: adapter.clone(),
         }),
     );
+    let scrim_signup = dl_community::scrim_signup::ScrimSignup::new(central_pool.clone());
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
@@ -396,6 +397,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     serversync::register_commands(&mut router, serversync_service.clone(), owner_id);
     serversync::register_regelwerk_components(&mut router);
     serversync::register_faq_components(&mut router);
+    dl_community::scrim_signup::register(&mut router, scrim_signup);
     let twitch_registry = dl_bridges::twitch::TrackingRegistry::new();
     let twitch_client = dl_bridges::twitch::TwitchApiClient::from_env(|k| std::env::var(k).ok());
     let matcher = match &twitch_client {
