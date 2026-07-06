@@ -336,14 +336,14 @@ jobs:
             --exclude build \
             .
       - name: Upload Semgrep Results to Security Tab
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         if: always() && hashFiles('semgrep.sarif') != ''
         with:
           sarif_file: semgrep.sarif
           # Keep the historical category stable so existing Semgrep alerts can auto-close.
           category: semgrep
       - name: Upload Custom Semgrep Results to Security Tab
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         if: always() && hashFiles('semgrep-custom.sarif') != ''
         with:
           sarif_file: semgrep-custom.sarif
@@ -383,7 +383,7 @@ jobs:
           severity: 'HIGH,CRITICAL'
           exit-code: 1
       - name: Upload Trivy Results to Security Tab
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         if: always() && hashFiles('trivy-fs.sarif') != ''
         with:
           sarif_file: 'trivy-fs.sarif'
@@ -533,7 +533,7 @@ jobs:
           results_format: sarif
           publish_results: true
       - name: Upload Scorecard SARIF
-        uses: github/codeql-action/upload-sarif@8aad20d150bbac5944a9f9d289da16a4b0d87c1e # v4
+        uses: github/codeql-action/upload-sarif@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4
         if: always() && hashFiles('scorecard-results.sarif') != ''
         with:
           sarif_file: scorecard-results.sarif
