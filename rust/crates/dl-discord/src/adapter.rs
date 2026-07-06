@@ -194,6 +194,23 @@ impl DiscordAdapter {
 
     fn rich_body(message: &RichMessage) -> Map<String, Value> {
         let mut body = Map::new();
+        if let Some(components) = &message.components {
+            let mut component_rows = components.as_array().cloned().unwrap_or_default();
+            if let Some(spec) = &message.view_spec {
+                let view_components = Self::view_components(spec);
+                if let Some(rows) = view_components.as_array() {
+                    component_rows.extend(rows.iter().cloned());
+                }
+            }
+            body.insert("flags".into(), json!(1u64 << 15));
+            body.insert("components".into(), Value::Array(component_rows));
+            body.insert(
+                "allowed_mentions".into(),
+                Self::allowed_mentions(&message.allowed_user_ids, &message.allowed_role_ids),
+            );
+            return body;
+        }
+
         body.insert("content".into(), json!(message.content));
         body.insert("embeds".into(), json!([message.embed]));
         body.insert(
@@ -1025,6 +1042,15 @@ fn serialize_message_py(message: &serenity::all::Message) -> Value {
 mod tests {
     use super::*;
 
+    fn twitch_tracking_spec() -> ViewSpec {
+        ViewSpec::TwitchLiveTracking {
+            streamer_login: "DeadlockTV".to_string(),
+            referral_url: "https://twitch.tv/deadlocktv".to_string(),
+            tracking_token: "token-123".to_string(),
+            button_label: "Auf Twitch ansehen".to_string(),
+        }
+    }
+
     #[test]
     fn view_components_rendern_scam_revoke_button_wie_python() {
         let spec = ViewSpec::ScamRevoke {
@@ -1045,6 +1071,96 @@ mod tests {
                     "custom_id": "scam-revoke:42",
                 }],
             }])
+        );
+    }
+
+    #[test]
+    fn rich_body_components_v2_reicht_components_durch_und_haengt_tracking_button_an() {
+        let input_components = json!([{
+            "type": 17,
+            "accent_color": 0xC8A86B,
+            "components": [
+                {"type": 10, "content": "LIVE"},
+                {"type": 12, "items": [{
+                    "media": {"url": "https://example.test/preview.jpg"},
+                }]},
+            ],
+        }]);
+        let message = RichMessage {
+            channel_id: 123,
+            content: Some("legacy content".to_string()),
+            embed: json!({"title": "legacy embed"}),
+            allowed_user_ids: vec![11],
+            allowed_role_ids: vec![22],
+            view_spec: Some(twitch_tracking_spec()),
+            components: Some(input_components.clone()),
+        };
+
+        let body = DiscordAdapter::rich_body(&message);
+
+        assert_eq!(body.get("flags"), Some(&json!(32768)));
+        assert!(!body.contains_key("content"));
+        assert!(!body.contains_key("embeds"));
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&DiscordAdapter::allowed_mentions(&[11], &[22]))
+        );
+        let components = body
+            .get("components")
+            .and_then(Value::as_array)
+            .expect("components array");
+        let input_array = input_components.as_array().expect("input array");
+        assert_eq!(components.len(), input_array.len() + 1);
+        assert_eq!(&components[0], &input_array[0]);
+        assert_eq!(
+            components[1],
+            json!({
+                "type": 1,
+                "components": [{
+                    "type": 2,
+                    "style": 1,
+                    "label": "Auf Twitch ansehen",
+                    "custom_id": "twitch-live:deadlocktv:token-123",
+                }],
+            })
+        );
+    }
+
+    #[test]
+    fn rich_body_ohne_components_bleibt_v1_payload() {
+        let message = RichMessage {
+            channel_id: 123,
+            content: Some("legacy content".to_string()),
+            embed: json!({"title": "legacy embed"}),
+            allowed_user_ids: vec![11],
+            allowed_role_ids: vec![22],
+            view_spec: Some(twitch_tracking_spec()),
+            components: None,
+        };
+
+        let body = DiscordAdapter::rich_body(&message);
+
+        assert_eq!(
+            Value::Object(body),
+            json!({
+                "content": "legacy content",
+                "embeds": [{"title": "legacy embed"}],
+                "allowed_mentions": {
+                    "parse": [],
+                    "users": ["11"],
+                    "roles": ["22"],
+                    "replied_user": false,
+                },
+                "components": [{
+                    "type": 1,
+                    "components": [{
+                        "type": 2,
+                        "style": 1,
+                        "label": "Auf Twitch ansehen",
+                        "custom_id": "twitch-live:deadlocktv:token-123",
+                    }],
+                }],
+            })
         );
     }
 

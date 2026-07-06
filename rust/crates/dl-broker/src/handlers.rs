@@ -785,16 +785,18 @@ fn parse_rich(
         let channel_id = payload::positive_int(payload, "channel_id")?;
         let content = payload::optional_content(payload, "content")?;
         let embed = payload::embed_dict(payload)?;
+        let components = payload::components(payload)?;
         let allowed_user_ids = payload::id_list(payload, "allowed_user_ids")?;
         let allowed_role_ids = payload::id_list(payload, "allowed_role_ids")?;
         let view_spec = payload::view_spec(payload)?;
-        if content.is_none() && embed.is_empty() {
+        if content.is_none() && embed.is_empty() && components.is_none() {
             return Err("content or embed is required".to_string());
         }
         Ok(RichMessage {
             channel_id,
             content,
             embed: Value::Object(embed),
+            components,
             allowed_user_ids,
             allowed_role_ids,
             view_spec,
@@ -817,6 +819,9 @@ fn parse_rich(
     op.insert("channel_id".into(), json!(rich.channel_id));
     op.insert("content".into(), json!(rich.content));
     op.insert("embed".into(), rich.embed.clone());
+    if let Some(components) = &rich.components {
+        op.insert("components".into(), components.clone());
+    }
     op.insert("allowed_user_ids".into(), json!(rich.allowed_user_ids));
     op.insert("allowed_role_ids".into(), json!(rich.allowed_role_ids));
     op.insert(
@@ -1725,6 +1730,39 @@ mod tests {
 
     fn peer(addr: &str) -> Result<Peer, std::net::AddrParseError> {
         Ok(ConnectInfo(addr.parse()?))
+    }
+
+    #[test]
+    fn parse_rich_akzeptiert_components_ohne_content_oder_embed() -> Result<(), String> {
+        let state = test_state()?;
+        let components = json!([{
+            "type": 17,
+            "accent_color": 0xC8A86B,
+            "components": [
+                {"type": 10, "content": "LIVE"},
+                {"type": 12, "items": [{
+                    "media": {"url": "https://example.test/preview.jpg"},
+                }]},
+            ],
+        }]);
+        let payload = json!({
+            "channel_id": 123,
+            "embed": {},
+            "components": components.clone(),
+        })
+        .as_object()
+        .expect("payload object")
+        .clone();
+
+        let parsed = parse_rich(&state, "rid", "idem", &payload);
+        assert!(parsed.is_ok());
+        let (rich, op) = parsed.expect("parsed rich payload");
+
+        assert_eq!(rich.content, None);
+        assert_eq!(rich.embed, json!({}));
+        assert_eq!(rich.components.as_ref(), Some(&components));
+        assert_eq!(op.get("components"), Some(&components));
+        Ok(())
     }
 
     async fn response_json(response: Response) -> Result<(u16, Value), Box<dyn std::error::Error>> {
