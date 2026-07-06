@@ -1,3 +1,11 @@
+## #216 — Discord-Moderation nutzt Fireworks statt Minimax
+
+**Ausgangslage:** Die Textanalyse der Discord-Moderation lief noch über Minimax, obwohl dafür ein Fireworks-Schlüssel bereitsteht.
+
+**Was wurde geändert:** Die Textanalyse läuft jetzt über Fireworks mit DeepSeek V4 Flash. Die zusätzliche Prüfung über GPT nano bleibt unverändert aktiv.
+
+**Wie es jetzt läuft:** Neue Discord-Moderationsfälle nutzen Fireworks für den ersten Textblick und weiterhin GPT nano für Bildanalyse und Verifikation.
+
 ## #215 — Twitch-Spam-Alerts haben Lernknöpfe
 
 **Ausgangslage:** Verdächtige Twitch-Spam-Meldungen kamen im Discord an, aber Mods konnten aus der Meldung heraus nicht zurückmelden, ob das Muster wirklich Spam oder harmlos war.

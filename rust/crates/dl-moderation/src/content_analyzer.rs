@@ -81,7 +81,7 @@ pub struct ContentAnalyzerConfig {
 impl Default for ContentAnalyzerConfig {
     fn default() -> Self {
         Self {
-            text_model: dl_ai::DEFAULT_MODEL.to_string(),
+            text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
             image_model: dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
         }
     }
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn analyzer_routes_text_to_minimax_text_model() {
+    async fn analyzer_routes_text_to_fireworks_text_model() {
         let text = Arc::new(RecordingText::default());
         let vision = Arc::new(RecordingVision::default());
         text.responses
@@ -315,7 +315,7 @@ mod tests {
             text.clone(),
             Some(vision.clone()),
             ContentAnalyzerConfig {
-                text_model: "MiniMax-M3".to_string(),
+                text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                 image_model: "gpt-5.4-nano".to_string(),
             },
         );
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(result.category.as_label(), "scam");
         assert_eq!(
             text.models.lock().await.as_slice(),
-            &[Some("MiniMax-M3".to_string())]
+            &[Some(dl_ai::DEFAULT_FIREWORKS_MODEL.to_string())]
         );
         assert!(vision.models.lock().await.is_empty());
     }
@@ -343,7 +343,7 @@ mod tests {
             text.clone(),
             Some(vision.clone()),
             ContentAnalyzerConfig {
-                text_model: "MiniMax-M3".to_string(),
+                text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                 image_model: "gpt-5.4-nano".to_string(),
             },
         );
@@ -380,7 +380,7 @@ mod tests {
             text.clone(),
             Some(vision.clone()),
             ContentAnalyzerConfig {
-                text_model: "MiniMax-M3".to_string(),
+                text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                 image_model: "gpt-5.4-nano".to_string(),
             },
         );
@@ -395,7 +395,7 @@ mod tests {
         assert_eq!(result.category.as_label(), "scam");
         assert_eq!(
             text.models.lock().await.as_slice(),
-            &[Some("MiniMax-M3".to_string())]
+            &[Some(dl_ai::DEFAULT_FIREWORKS_MODEL.to_string())]
         );
         assert_eq!(
             vision.models.lock().await.as_slice(),
@@ -482,7 +482,7 @@ mod tests {
                 text,
                 Some(vision),
                 ContentAnalyzerConfig {
-                    text_model: "MiniMax-M3".to_string(),
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                     image_model: "gpt-5.4-nano".to_string(),
                 },
             ),
@@ -526,7 +526,7 @@ mod tests {
                 text,
                 Some(vision),
                 ContentAnalyzerConfig {
-                    text_model: "MiniMax-M3".to_string(),
+                    text_model: dl_ai::DEFAULT_FIREWORKS_MODEL.to_string(),
                     image_model: "gpt-5.4-nano".to_string(),
                 },
             ),
