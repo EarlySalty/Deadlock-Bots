@@ -174,6 +174,20 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "presence_daily_seen",
+        "user_id",
+        "activity.presence_daily_seen",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "guild_member_directory",
+        "user_id",
+        "activity.guild_member_directory",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "member_events",
         "user_id",
         "activity.member_events",
@@ -1808,6 +1822,28 @@ mod tests {
         .execute(db.pool())
         .await
         .expect("interaction_events");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.presence_daily_seen(guild_id, user_id, day)
+            VALUES (1, 42, CURRENT_DATE), (1, 99, CURRENT_DATE)
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("presence_daily_seen");
+        sqlx::query(
+            r#"
+            INSERT INTO activity.guild_member_directory(
+                guild_id, user_id, joined_at, account_created_at, is_bot, present, synced_at
+            )
+            VALUES
+              (1, 42, now(), now(), false, true, now()),
+              (1, 99, now(), now(), false, true, now())
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("guild_member_directory");
         sqlx::query!(
             r#"
             INSERT INTO coaching.requests(
@@ -1886,6 +1922,14 @@ mod tests {
             Some(1)
         );
         assert_eq!(s.counts.get("interaction_events.user_id").copied(), Some(1));
+        assert_eq!(
+            s.counts.get("presence_daily_seen.user_id").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            s.counts.get("guild_member_directory.user_id").copied(),
+            Some(1)
+        );
         assert_eq!(s.counts.get("user_co_players").copied(), Some(2));
         assert_eq!(s.counts.get("tempvoice_bans.owner_id").copied(), Some(1));
         assert_eq!(s.counts.get("tempvoice_bans.banned_id").copied(), Some(1));

@@ -277,6 +277,7 @@ pub fn router(app: DashboardApp) -> Router {
     Router::new()
         .route("/", get(index))
         .route("/admin", get(index))
+        .route("/insights", get(insights_page))
         .route("/api/auth/me", get(auth_me))
         .route("/auth/discord/login", get(login))
         .route("/auth/discord/callback", get(own_callback))
@@ -339,6 +340,21 @@ pub fn router(app: DashboardApp) -> Router {
         .route(
             "/api/co-player-network/",
             get(crate::analytics::co_player_network),
+        )
+        .route("/api/insights/overview", get(crate::insights::overview))
+        .route("/api/insights/growth", get(crate::insights::growth))
+        .route("/api/insights/activation", get(crate::insights::activation))
+        .route("/api/insights/retention", get(crate::insights::retention))
+        .route("/api/insights/engagement", get(crate::insights::engagement))
+        .route("/api/insights/audience", get(crate::insights::audience))
+        .route(
+            "/api/insights/top-invites",
+            get(crate::insights::top_invites),
+        )
+        .route(
+            "/api/insights/import",
+            post(crate::insights::import)
+                .layer(axum::extract::DefaultBodyLimit::max(30 * 1024 * 1024)),
         )
         // Deadlock-Konfiguration (Phase 9c) — Read-Seite, Full-Access.
         .route(
@@ -483,6 +499,29 @@ async fn index(State(app): State<DashboardApp>, headers: HeaderMap) -> Response 
         return err_text(500, "dashboard.html nicht ladbar");
     };
     render_spa(html, &display_name, "%2Fadmin")
+}
+
+/// `/insights` — Server-Einblicke-Seite (statisch, Daten via `/api/insights/*`).
+/// Gleiches Auth-Verhalten wie `index`.
+async fn insights_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if app.cfg().auth_misconfigured() {
+        return auth_misconfigured_response();
+    }
+    let session = match app.session_from_headers(&headers).await {
+        Ok(session) => session,
+        Err(resp) => return resp,
+    };
+    if app.cfg().auth_enforced() && session.is_none() {
+        return redirect("/auth/discord/login?next=%2Finsights", None);
+    }
+    let display_name = session
+        .as_ref()
+        .map(|s| s.display_name.clone())
+        .unwrap_or_else(|| "Nicht angemeldet".to_string());
+    let Some(html) = load_static_html(&app, "insights.html").await else {
+        return err_text(500, "insights.html nicht ladbar");
+    };
+    render_spa(html, &display_name, "%2Finsights")
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {

@@ -58,6 +58,12 @@ pub enum GatewayEvent {
     CacheReady { guild_ids: Vec<u64> },
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct PresenceEvent {
+    pub guild_id: u64,
+    pub user_id: u64,
+}
+
 /// Normalisierte Interaction-Metadaten. Optionen, Modal-Felder und Message-
 /// Inhalte werden bewusst nicht gespeichert; `route` ist Command-Name oder
 /// custom_id fuer stille Klick-/Interaktionsmetriken.
@@ -241,6 +247,7 @@ pub struct Dispatcher {
     channel_tx: broadcast::Sender<ChannelEvent>,
     interaction_tx: broadcast::Sender<InteractionEvent>,
     gateway_tx: broadcast::Sender<GatewayEvent>,
+    presence_tx: broadcast::Sender<PresenceEvent>,
 }
 
 impl Default for Dispatcher {
@@ -258,6 +265,7 @@ impl Dispatcher {
         let (channel_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (interaction_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         let (gateway_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
+        let (presence_tx, _) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             voice_tx,
             message_tx,
@@ -266,6 +274,7 @@ impl Dispatcher {
             channel_tx,
             interaction_tx,
             gateway_tx,
+            presence_tx,
         }
     }
 
@@ -297,6 +306,10 @@ impl Dispatcher {
         self.gateway_tx.subscribe()
     }
 
+    pub fn subscribe_presence(&self) -> broadcast::Receiver<PresenceEvent> {
+        self.presence_tx.subscribe()
+    }
+
     pub fn publish_voice(&self, event: VoiceEvent) {
         // send schlägt nur fehl, wenn niemand subscribed ist — kein Fehler.
         let _ = self.voice_tx.send(event);
@@ -320,6 +333,10 @@ impl Dispatcher {
 
     pub fn publish_gateway(&self, event: GatewayEvent) {
         let _ = self.gateway_tx.send(event);
+    }
+
+    pub fn publish_presence(&self, event: PresenceEvent) {
+        let _ = self.presence_tx.send(event);
     }
 
     pub fn publish_role(&self, event: RoleEvent) {

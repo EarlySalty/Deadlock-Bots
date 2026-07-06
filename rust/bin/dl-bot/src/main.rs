@@ -13,6 +13,7 @@ mod modglue;
 mod onboardglue;
 mod onboardingbridgeglue;
 mod serversync;
+mod vanity;
 
 use std::{num::NonZeroU64, sync::Arc};
 
@@ -942,6 +943,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Gateway: user-gated — Python hält die Session bis zum Cutover
     let gateway_enabled = env("DL_BOT_GATEWAY").as_deref() == Some("1");
     let gateway_task = if gateway_enabled {
+        let presence_intent_enabled = env_bool_default("DL_ENABLE_PRESENCE_INTENT", false);
+        if presence_intent_enabled {
+            tracing::info!("GUILD_PRESENCES-Intent aktiviert via DL_ENABLE_PRESENCE_INTENT");
+        }
         // Aktive Twitch-Live-Ankündigungen rehydrieren (Klick-Routing)
         if let Some(twitch_client) = &twitch_client {
             dl_bridges::twitch::spawn_restore(twitch_client.clone(), twitch_registry.clone());
@@ -1291,6 +1296,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 pool: central_pool.clone(),
                 feature_module_count: master::FEATURE_MODULES.len(),
                 command_prefix: env("COMMAND_PREFIX").unwrap_or_else(|| "!".to_string()),
+                enable_presence_intent: presence_intent_enabled,
             },
         )
         .await
@@ -1299,6 +1305,16 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         // Kopplung läse die gesamte Glue aus einem leeren Adapter-Cache (alle
         // Voice-/Channel-/Member-Lookups None → TempVoice baut keine Lanes usw.).
         adapter.link_cache(client.cache.clone());
+        let _vanity_snapshots = vanity::spawn_vanity_snapshots(
+            central_pool.clone(),
+            discord_token.clone(),
+            &dispatcher,
+        );
+        let _member_directory_sweep = vanity::spawn_member_directory_sweep(
+            central_pool.clone(),
+            discord_token.clone(),
+            &dispatcher,
+        );
         let mut panel_cache_ready = dispatcher.subscribe_gateway();
         let tempvoice_interface_ready = tempvoice_interface.clone();
         tokio::spawn(async move {
