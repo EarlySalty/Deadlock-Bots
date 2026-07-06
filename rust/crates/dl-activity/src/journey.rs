@@ -4,9 +4,10 @@
 //! nur wer/wo/wann/Laenge/Anhang/Reply. Rohereignisse werden nach fester Frist
 //! in anonyme Tagesaggregate verdichtet und geloescht.
 
+use std::collections::HashSet;
 use std::time::Duration as StdDuration;
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
 
@@ -175,6 +176,7 @@ pub struct RawRetentionRun {
     pub message_rows_deleted: i64,
     pub voice_rows_deleted: i64,
     pub interaction_rows_deleted: i64,
+    pub presence_rows_deleted: i64,
     pub journey_rows_deleted: i64,
     pub stale_open_voice_sessions_deleted: i64,
 }
@@ -968,6 +970,38 @@ pub async fn record_interaction_metadata(
     Ok(inserted)
 }
 
+pub async fn record_presence_seen(
+    pool: &PgPool,
+    guild_id: u64,
+    user_id: u64,
+    day: NaiveDate,
+) -> ActivityDbResult<bool> {
+    let guild_id = discord_id_to_i64(guild_id, "presence_daily_seen.guild_id")?;
+    let user_id = discord_id_to_i64(user_id, "presence_daily_seen.user_id")?;
+
+    let mut tx = pool.begin().await?;
+    if is_opted_out_tx(&mut tx, user_id).await? {
+        tx.commit().await?;
+        return Ok(false);
+    }
+    let inserted = sqlx::query(
+        r#"
+        INSERT INTO activity.presence_daily_seen(guild_id, user_id, day)
+        VALUES($1, $2, $3)
+        ON CONFLICT(guild_id, user_id, day) DO NOTHING
+        "#,
+    )
+    .bind(guild_id)
+    .bind(user_id)
+    .bind(day)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected()
+        > 0;
+    tx.commit().await?;
+    Ok(inserted)
+}
+
 async fn open_voice_join_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
@@ -1202,7 +1236,7 @@ pub fn spawn_ingestion(
     pool: PgPool,
     dispatcher: &dl_discord::Dispatcher,
 ) -> Vec<tokio::task::JoinHandle<()>> {
-    let mut handles = Vec::with_capacity(4);
+    let mut handles = Vec::with_capacity(5);
 
     let mut messages = dispatcher.subscribe_messages();
     let message_pool = pool.clone();
@@ -1259,16 +1293,46 @@ pub fn spawn_ingestion(
     }));
 
     let mut interactions = dispatcher.subscribe_interactions();
+    let interaction_pool = pool.clone();
     handles.push(tokio::spawn(async move {
         loop {
             match interactions.recv().await {
                 Ok(event) => {
-                    if let Err(err) = record_interaction_metadata(&pool, &event).await {
+                    if let Err(err) = record_interaction_metadata(&interaction_pool, &event).await {
                         tracing::warn!(%err, "journey/interaction-metadata write fehlgeschlagen");
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "journey/interaction Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }));
+
+    let mut presences = dispatcher.subscribe_presence();
+    handles.push(tokio::spawn(async move {
+        let mut day = Utc::now().date_naive();
+        let mut seen: HashSet<(u64, u64)> = HashSet::new();
+        loop {
+            match presences.recv().await {
+                Ok(event) => {
+                    let today = Utc::now().date_naive();
+                    if today != day {
+                        day = today;
+                        seen.clear();
+                    }
+                    if !seen.insert((event.guild_id, event.user_id)) {
+                        continue;
+                    }
+                    if let Err(err) =
+                        record_presence_seen(&pool, event.guild_id, event.user_id, day).await
+                    {
+                        tracing::warn!(%err, "journey/presence write fehlgeschlagen");
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "journey/presence Events verpasst");
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
@@ -1431,6 +1495,39 @@ async fn compact_interactions_tx(
     Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
 }
 
+async fn compact_presence_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    cutoff: DateTime<Utc>,
+) -> Result<i64, sqlx::Error> {
+    sqlx::query(
+        r#"
+        INSERT INTO activity.presence_daily_aggregates(
+            day, guild_id, distinct_user_count
+        )
+        SELECT day,
+               guild_id,
+               COUNT(DISTINCT user_id)
+          FROM activity.presence_daily_seen
+         WHERE day < $1::date
+         GROUP BY day, guild_id
+        ON CONFLICT(day, guild_id) DO UPDATE SET
+            distinct_user_count = GREATEST(
+                activity.presence_daily_aggregates.distinct_user_count,
+                EXCLUDED.distinct_user_count
+            )
+        "#,
+    )
+    .bind(cutoff)
+    .execute(&mut **tx)
+    .await?;
+    let deleted = sqlx::query("DELETE FROM activity.presence_daily_seen WHERE day < $1::date")
+        .bind(cutoff)
+        .execute(&mut **tx)
+        .await?
+        .rows_affected();
+    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+}
+
 async fn compact_journey_tx(
     tx: &mut Transaction<'_, Postgres>,
     cutoff: DateTime<Utc>,
@@ -1475,12 +1572,14 @@ pub async fn compact_raw_events(
     let (voice_rows_deleted, stale_open_voice_sessions_deleted) =
         compact_voice_tx(&mut tx, cutoff).await?;
     let interaction_rows_deleted = compact_interactions_tx(&mut tx, cutoff).await?;
+    let presence_rows_deleted = compact_presence_tx(&mut tx, cutoff).await?;
     let journey_rows_deleted = compact_journey_tx(&mut tx, cutoff).await?;
     tx.commit().await?;
     Ok(RawRetentionRun {
         message_rows_deleted,
         voice_rows_deleted,
         interaction_rows_deleted,
+        presence_rows_deleted,
         journey_rows_deleted,
         stale_open_voice_sessions_deleted,
     })
@@ -1494,6 +1593,7 @@ pub fn spawn_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
                     messages = summary.message_rows_deleted,
                     voice = summary.voice_rows_deleted,
                     interactions = summary.interaction_rows_deleted,
+                    presence = summary.presence_rows_deleted,
                     journey = summary.journey_rows_deleted,
                     stale_voice = summary.stale_open_voice_sessions_deleted,
                     retention_days = RAW_EVENT_RETENTION_DAYS,

@@ -16,9 +16,11 @@ use std::collections::HashMap;
 
 use serde_json::Value;
 
-/// Die sechs Quellen-Buckets (Reihenfolge wie im Original).
-pub const BUCKETS: [&str; 6] = [
+/// Quellen-Buckets (Reihenfolge wie im Original, plus Vanity als eigener
+/// Discord-Insights-Bucket).
+pub const BUCKETS: [&str; 7] = [
     "public",
+    "vanity",
     "website",
     "twitch",
     "personal",
@@ -140,9 +142,11 @@ pub fn classify(
             "twitch"
         } else if matches!(
             kind.as_str(),
-            "server_discovery" | "discovery" | "public_discovery" | "vanity" | "vanity_url"
+            "server_discovery" | "discovery" | "public_discovery"
         ) {
             "public"
+        } else if matches!(kind.as_str(), "vanity" | "vanity_url" | "public_vanity") {
+            "vanity"
         } else if kind == "bot_invite"
             || metadata
                 .get("inviter_bot")
@@ -181,6 +185,7 @@ pub fn classify(
 fn default_label(bucket: &str, twitch_login: Option<&str>, metadata: &Value) -> String {
     match bucket {
         "public" => "Public".to_string(),
+        "vanity" => "Vanity-Link".to_string(),
         "website" => "Website".to_string(),
         "twitch" => match twitch_login {
             Some(login) => format!("Twitch: {login}"),
@@ -261,6 +266,8 @@ mod tests {
         // discovery → public
         let m = json!({ "join_source_kind": "server_discovery" });
         assert_eq!(classify(&m, &tw, &web).bucket, "public");
+        let m = json!({ "join_source_kind": "vanity" });
+        assert_eq!(classify(&m, &tw, &web).bucket, "vanity");
         // invite ohne Zuordnung → personal
         let m = json!({ "invite_code": "zzz", "join_source_kind": "invite_link" });
         assert_eq!(classify(&m, &tw, &web).bucket, "personal");

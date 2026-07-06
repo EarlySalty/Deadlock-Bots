@@ -1,0 +1,929 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Server-Einblicke – EarlySalty Deadlock</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js" integrity="sha384-e6nUZLBkQ86NJ6TVVKAeSaK8jWa3NhkYWZFomE39AvDbQWeie9PlQqM3pmYW5d1g" crossorigin="anonymous"></script>
+<style>
+/* ── Fonts ── */
+@font-face {
+  font-family: "Manrope";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/manrope-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+@font-face {
+  font-family: "Sora";
+  font-style: normal;
+  font-weight: 400 800;
+  font-display: swap;
+  src: url("/fonts/sora-latin.woff2") format("woff2");
+  unicode-range: U+0000-00FF, U+0131, U+0152-0153, U+02BB-02BC, U+02C6, U+02DA, U+02DC, U+0304, U+0308, U+0329, U+2000-206F, U+20AC, U+2122, U+2191, U+2193, U+2212, U+2215, U+FEFF, U+FFFD;
+}
+
+/* ── Theme (identisch zu activity_stats.html) ── */
+:root {
+  --bg: #07151d;
+  --background: #0b1d28;
+  --card: #102635;
+  --card-hover: #173448;
+  --primary: #ff7a18;
+  --primary-hover: #ff8d39;
+  --accent: #10b7ad;
+  --accent-hover: #1dd4ca;
+  --success: #2ecc71;
+  --warning: #f5b642;
+  --danger: #ff6b5e;
+  --secondary: #8ea8bb;
+  --text-primary: #e9f1f7;
+  --text-secondary: #9bb3c5;
+  --border: rgba(194, 221, 240, 0.14);
+  --border-hover: rgba(194, 221, 240, 0.3);
+  --font-sans: "Manrope", "Segoe UI", sans-serif;
+  --font-display: "Sora", "Manrope", sans-serif;
+  --r: 14px;
+  --r-sm: 10px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; background: var(--bg); }
+
+body {
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background:
+    radial-gradient(1100px 500px at 85% -10%, rgba(16, 183, 173, 0.10), transparent 60%),
+    radial-gradient(900px 420px at -10% 0%, rgba(255, 122, 24, 0.08), transparent 55%),
+    var(--bg);
+  min-height: 100vh;
+}
+
+.wrap { max-width: 1240px; margin: 0 auto; padding: 28px 20px 80px; }
+
+/* ── Kopf ── */
+.page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
+.page-head h1 { font-family: var(--font-display); font-size: 26px; font-weight: 700; letter-spacing: -0.02em; }
+.page-head h1 span { color: var(--accent); }
+.page-sub { color: var(--text-secondary); margin: 6px 0 22px; max-width: 760px; }
+
+.controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.controls label { color: var(--text-secondary); font-size: 12px; display: block; margin-bottom: 4px; }
+.controls select, .controls input[type="date"] {
+  background: var(--card); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 8px 10px; font: inherit; font-size: 13px; color-scheme: dark;
+}
+.controls select:hover, .controls input[type="date"]:hover { border-color: var(--border-hover); }
+
+.btn {
+  display: inline-block; background: var(--card); color: var(--text-primary);
+  border: 1px solid var(--border); border-radius: var(--r-sm);
+  padding: 9px 14px; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer;
+  transition: background .15s, border-color .15s;
+}
+.btn:hover { background: var(--card-hover); border-color: var(--border-hover); }
+.btn.primary { background: var(--primary); border-color: transparent; color: #17110a; }
+.btn.primary:hover { background: var(--primary-hover); }
+
+/* ── Abschnitte & Karten ── */
+section { margin-top: 40px; }
+section > h2 { font-family: var(--font-display); font-size: 19px; font-weight: 700; letter-spacing: -0.01em; margin-bottom: 4px; }
+section > .hint { color: var(--text-secondary); font-size: 13px; margin-bottom: 16px; max-width: 820px; }
+
+.card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: var(--r); padding: 18px;
+}
+.card h3 { font-size: 14px; font-weight: 700; margin-bottom: 2px; }
+.card .sub { color: var(--text-secondary); font-size: 12px; margin-bottom: 12px; }
+
+.grid { display: grid; gap: 14px; }
+.grid.kpi { grid-template-columns: repeat(auto-fit, minmax(210px, 1fr)); }
+.grid.two { grid-template-columns: 1fr 1fr; }
+.grid.three { grid-template-columns: repeat(3, 1fr); }
+@media (max-width: 900px) { .grid.two, .grid.three { grid-template-columns: 1fr; } }
+
+/* ── Kennzahlen-Kacheln ── */
+.kpi-card .kpi-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-secondary); }
+.kpi-card .kpi-value { font-family: var(--font-display); font-size: 30px; font-weight: 700; margin: 6px 0 4px; }
+.kpi-card .kpi-change { font-size: 12px; color: var(--text-secondary); }
+.kpi-card .kpi-change b.up { color: var(--success); }
+.kpi-card .kpi-change b.down { color: var(--danger); }
+.badge {
+  display: inline-block; font-size: 10px; font-weight: 700; letter-spacing: 0.05em;
+  color: var(--accent); border: 1px solid rgba(16,183,173,.4); border-radius: 999px;
+  padding: 1px 7px; margin-left: 6px; vertical-align: 2px;
+}
+
+/* ── Charts ── */
+.chart-wrap { position: relative; height: 260px; }
+.chart-wrap.tall { height: 340px; }
+.note { color: var(--text-secondary); font-size: 12px; margin-top: 10px; }
+
+/* ── Tabellen ── */
+table { width: 100%; border-collapse: collapse; font-size: 13px; }
+th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--border); }
+th { color: var(--text-secondary); font-size: 11px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; }
+tr:last-child td { border-bottom: none; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+code { background: rgba(194,221,240,0.08); border-radius: 6px; padding: 1px 6px; font-size: 12px; }
+
+/* ── Import ── */
+.dropzone {
+  border: 2px dashed var(--border); border-radius: var(--r);
+  padding: 34px 20px; text-align: center; color: var(--text-secondary);
+  cursor: pointer; transition: border-color .15s, background .15s;
+}
+.dropzone:hover, .dropzone.drag { border-color: var(--accent); background: rgba(16,183,173,0.06); }
+.import-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; margin-bottom: 14px; }
+.import-row input[type="text"] {
+  background: var(--bg); color: var(--text-primary); border: 1px solid var(--border);
+  border-radius: var(--r-sm); padding: 8px 10px; font: inherit; font-size: 13px; width: 240px;
+}
+.import-log { margin-top: 14px; font-size: 13px; }
+.import-log .ok { color: var(--success); }
+.import-log .err { color: var(--danger); }
+
+.empty { color: var(--text-secondary); font-size: 13px; padding: 18px 0; text-align: center; }
+.loading { opacity: 0.45; pointer-events: none; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="page-head">
+    <div>
+      <h1>Server-Einblicke <span>· Deutsche Deadlock Community</span></h1>
+    </div>
+    <div class="controls">
+      <div>
+        <label for="interval">Intervall</label>
+        <select id="interval">
+          <option value="weekly" selected>Wöchentlich</option>
+          <option value="daily">Täglich</option>
+        </select>
+      </div>
+      <div>
+        <label for="from">Von</label>
+        <input type="date" id="from">
+      </div>
+      <div>
+        <label for="to">Bis</label>
+        <input type="date" id="to">
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <a class="btn" href="#import">CSV-Import</a>
+      </div>
+    </div>
+  </div>
+  <p class="page-sub">
+    Eigene Analytics auf Server-Insights-Niveau — direkt aus unseren Bot-Daten, ohne 120-Tage-Grenze und ohne Anonymisierungs-Schwellen.
+    Die Journey-Datenbasis läuft seit Juli 2026; ältere Zeiträume kommen aus dem Discord-CSV-Import unten.
+  </p>
+
+  <!-- ── Kennzahlen ── -->
+  <section id="kpis">
+    <h2>Wichtige Kennzahlen</h2>
+    <p class="hint">Letzte abgeschlossene Periode, verglichen mit der Periode davor.</p>
+    <div class="grid kpi" id="kpiGrid">
+      <div class="empty">Lade Kennzahlen…</div>
+    </div>
+  </section>
+
+  <!-- ── Wachstum ── -->
+  <section id="growth">
+    <h2>Wachstum &amp; Teilnahmebereitschaft</h2>
+    <p class="hint">Wie viele neue Mitglieder treten bei — und wo kommen sie her? Die Quelle wird pro Beitritt aus Invite-Deltas, Vanity-Zähler und unseren eigenen Kampagnen-Links bestimmt.</p>
+    <div class="card">
+      <h3>Beitritte nach Quelle</h3>
+      <div class="sub">Pro Periode, gestapelt nach erkannter Beitrittsquelle.</div>
+      <div class="chart-wrap tall"><canvas id="joinsChart"></canvas></div>
+    </div>
+    <div class="grid two" style="margin-top:14px">
+      <div class="card">
+        <h3>Gesamte Mitgliedschaften im Verlauf</h3>
+        <div class="sub" id="memberTotalBasis">Rekonstruiert aus Join/Leave-Events.</div>
+        <div class="chart-wrap"><canvas id="membersChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Abgänge nach Mitgliedsdauer</h3>
+        <div class="sub">Wer den Server verlässt — kurz nach Beitritt oder nach längerer Zeit?</div>
+        <div class="chart-wrap"><canvas id="leavesChart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Aktivierung ── -->
+  <section id="activation">
+    <h2>Aktivierung neuer Mitglieder</h2>
+    <p class="hint">Anteil neuer Mitglieder, die noch am Beitrittstag etwas geschrieben haben oder in einem Voice-Kanal waren. Wer am ersten Tag nichts tut, bleibt meistens still — hier zeigt sich, ob das Onboarding zieht.</p>
+    <div class="card">
+      <h3>Interaktion am Beitrittstag</h3>
+      <div class="sub">Orange gestrichelt: Discord-Richtwert 15 %.</div>
+      <div class="chart-wrap tall"><canvas id="activationChart"></canvas></div>
+      <div class="note">Rohzahlen (neue Mitglieder, davon aktiviert) stehen im Tooltip.</div>
+    </div>
+  </section>
+
+  <!-- ── Bindung ── -->
+  <section id="retention">
+    <h2>Woche-1-Bindung</h2>
+    <p class="hint">Kohorte = Beitritte einer Kalenderwoche (Mo–So, UTC). Gebunden = in der Folgewoche noch einmal aktiv gewesen (Nachricht, Voice, Interaktion oder online gesehen). Es werden nur Kohorten gezeigt, deren Folgewoche komplett vorbei ist.</p>
+    <div class="card">
+      <h3>Bindung pro Beitrittswoche</h3>
+      <div class="sub">Orange gestrichelt: Discord-Richtwert 20 %.</div>
+      <div class="chart-wrap tall"><canvas id="retentionChart"></canvas></div>
+      <div class="note">Rohzahlen (beigetreten, davon zurückgekehrt) stehen im Tooltip.</div>
+    </div>
+  </section>
+
+  <!-- ── Beteiligung ── -->
+  <section id="engagement">
+    <h2>Beteiligung</h2>
+    <p class="hint">Besucher = online im Server gesehen (Näherung über Presence). Beiträger = mindestens 3 Nachrichten oder Voice-Teilnahme in der Periode — dieselbe Definition wie bei Discord.</p>
+    <div class="grid three">
+      <div class="card">
+        <h3>Besucher &amp; Beiträger</h3>
+        <div class="sub">Beiträger-Quote steht im Tooltip.</div>
+        <div class="chart-wrap"><canvas id="visitorsChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Nachrichtenaktivität</h3>
+        <div class="sub">Ø Nachrichten pro Beiträger im Tooltip.</div>
+        <div class="chart-wrap"><canvas id="messagesChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Sprachaktivität</h3>
+        <div class="sub">Sprachminuten gesamt pro Periode.</div>
+        <div class="chart-wrap"><canvas id="voiceChart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Zielgruppe ── -->
+  <section id="audience">
+    <h2>Zielgruppe</h2>
+    <p class="hint">Länder- und Geräte-Daten gibt die Discord-API nicht her — diese beiden Verteilungen können wir dafür exakt berechnen.</p>
+    <div class="grid two">
+      <div class="card">
+        <h3>Wie lange schon Mitglied?</h3>
+        <div class="sub" id="tenureBasis">Aktuelle Mitglieder nach Beitrittsdatum.</div>
+        <div class="chart-wrap"><canvas id="tenureChart"></canvas></div>
+      </div>
+      <div class="card">
+        <h3>Sind neue Mitglieder auch neu bei Discord?</h3>
+        <div class="sub">Kontoalter der Beitritte der letzten 28 Tage.</div>
+        <div class="chart-wrap"><canvas id="accountAgeChart"></canvas></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Top-Invites ── -->
+  <section id="invites">
+    <h2>Beliebteste Einladungen</h2>
+    <p class="hint">Beitritte der letzten 28 Tage, gruppiert nach Invite-Code.</p>
+    <div class="card">
+      <table id="invitesTable">
+        <thead><tr><th>Einladungslink</th><th>Eingeladen von</th><th class="num">Beitritte</th></tr></thead>
+        <tbody><tr><td colspan="3" class="empty">Lade…</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- ── CSV-Import ── -->
+  <section id="import">
+    <h2>Discord-CSV-Import</h2>
+    <p class="hint">
+      Einmal im Monat: im Developer-Portal unter Server-Einblicke alle „CSV exportieren"-Dateien ziehen und hier reinwerfen.
+      Der Import erkennt am Header selbst, welcher Export es ist, und überschreibt bereits importierte Zeiträume sauber (kein Duplizieren).
+      So kommen Referrer-Domains, „Server entdecken" und die Historie von vor der Bot-Zeit ins Dashboard.
+    </p>
+    <div class="card">
+      <div class="import-row">
+        <div>
+          <label class="controls" style="display:block" for="guildId">Guild-ID</label>
+          <input type="text" id="guildId" value="1289721245281292288" spellcheck="false">
+        </div>
+        <button class="btn primary" id="pickFiles">Dateien wählen…</button>
+        <input type="file" id="fileInput" accept=".csv,text/csv" multiple hidden>
+      </div>
+      <div class="dropzone" id="dropzone">CSV-Dateien hierher ziehen oder klicken zum Auswählen</div>
+      <div class="import-log" id="importLog"></div>
+      <div class="note" id="importedKinds"></div>
+    </div>
+  </section>
+
+</div>
+
+<script>
+"use strict";
+
+/* ── Farbrollen (validierte kategoriale Palette, dunkle Fläche) ── */
+const SOURCES = [
+  { key: "personal", label: "Einladung",        color: "#d95926" },
+  { key: "website",  label: "Website",          color: "#199e70" },
+  { key: "vanity",   label: "Vanity-Link",      color: "#c98500" },
+  { key: "twitch",   label: "Twitch",           color: "#9085e9" },
+  { key: "public",   label: "Server entdecken", color: "#008300" },
+  { key: "unknown",  label: "Unbekannt",        color: "#8ea8bb" }, // neutral, bewusst grau
+];
+const SURFACE = "#102635";
+const ACCENT = "#10b7ad";
+const BENCHMARK = "rgba(255, 122, 24, 0.75)";
+const TEAL_RAMP = ["#a7dcd4", "#5cb9ad", "#23948a", "#0e6b63"];
+const AMBER_RAMP = ["#f2c879", "#d99a2b", "#a06f10"];
+
+const nf = new Intl.NumberFormat("de-DE");
+const nf1 = new Intl.NumberFormat("de-DE", { maximumFractionDigits: 1 });
+
+Chart.defaults.color = "#9bb3c5";
+Chart.defaults.borderColor = "rgba(194, 221, 240, 0.10)";
+Chart.defaults.font.family = '"Manrope", "Segoe UI", sans-serif';
+Chart.defaults.font.size = 11;
+Chart.defaults.plugins.tooltip.backgroundColor = "#173448";
+Chart.defaults.plugins.tooltip.borderColor = "rgba(194, 221, 240, 0.25)";
+Chart.defaults.plugins.tooltip.borderWidth = 1;
+Chart.defaults.plugins.tooltip.titleColor = "#e9f1f7";
+Chart.defaults.plugins.tooltip.bodyColor = "#e9f1f7";
+Chart.defaults.plugins.tooltip.padding = 10;
+Chart.defaults.plugins.legend.labels.boxWidth = 10;
+Chart.defaults.plugins.legend.labels.boxHeight = 10;
+Chart.defaults.plugins.legend.labels.usePointStyle = true;
+Chart.defaults.plugins.legend.labels.pointStyle = "rectRounded";
+
+const charts = {};
+function renderChart(id, config) {
+  if (charts[id]) charts[id].destroy();
+  charts[id] = new Chart(document.getElementById(id), config);
+}
+
+/* Richtwert-Linie als Plugin (gestrichelt, mit Beschriftung) */
+function benchmarkPlugin(value, text) {
+  return {
+    id: "benchmark",
+    afterDatasetsDraw(chart) {
+      const { ctx, chartArea, scales } = chart;
+      const y = scales.y.getPixelForValue(value);
+      if (y < chartArea.top || y > chartArea.bottom) return;
+      ctx.save();
+      ctx.strokeStyle = BENCHMARK;
+      ctx.setLineDash([5, 5]);
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(chartArea.right, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = BENCHMARK;
+      ctx.font = "11px Manrope, sans-serif";
+      ctx.fillText(text, chartArea.left + 4, y - 5);
+      ctx.restore();
+    },
+  };
+}
+
+/* ── Daten laden ── */
+async function fetchJson(url) {
+  const res = await fetch(url, { credentials: "same-origin" });
+  if (res.status === 401) {
+    location.href = "/auth/discord/login?next=%2Finsights";
+    throw new Error("nicht angemeldet");
+  }
+  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`);
+  return res.json();
+}
+
+function qs() {
+  const interval = document.getElementById("interval").value;
+  const from = document.getElementById("from").value;
+  const to = document.getElementById("to").value;
+  const p = new URLSearchParams({ interval });
+  if (from) p.set("from", from);
+  if (to) p.set("to", to);
+  return p.toString();
+}
+
+function fmtPeriod(iso, interval) {
+  const d = new Date(iso + "T00:00:00Z");
+  const label = d.toLocaleDateString("de-DE", { day: "numeric", month: "short", timeZone: "UTC" });
+  return interval === "weekly" ? "ab " + label : label;
+}
+
+/* ── Kennzahlen ── */
+const KPI_META = {
+  new_members:         { label: "Neue Mitglieder" },
+  new_contributors:    { label: "Neue Beiträger" },
+  week1_retention:     { label: "Bindung neuer Mitglieder", pct: true },
+  visitors:            { label: "Besucher", approx: true },
+  contributors:        { label: "Beiträger" },
+  messages_total:      { label: "Gesendete Nachrichten" },
+  voice_minutes_total: { label: "Sprachminuten" },
+};
+
+function renderKpis(overview) {
+  const grid = document.getElementById("kpiGrid");
+  grid.innerHTML = "";
+  for (const card of overview.live.cards) {
+    const meta = KPI_META[card.key];
+    if (!meta) continue;
+    const el = document.createElement("div");
+    el.className = "card kpi-card";
+    let value = "–";
+    if (card.value !== null && card.value !== undefined) {
+      value = meta.pct ? nf1.format(card.value * 100) + " %" : nf.format(Math.round(card.value));
+    }
+    let change = "";
+    if (card.change_pct !== null && card.change_pct !== undefined) {
+      const up = card.change_pct >= 0;
+      const arrow = up ? "▲" : "▼";
+      const cls = up ? "up" : "down";
+      change = `<b class="${cls}">${arrow} ${nf1.format(Math.abs(card.change_pct))} %</b> vs. Vorperiode`;
+    } else if (card.key === "visitors" && card.value === null) {
+      change = "noch keine Presence-Daten";
+    }
+    el.innerHTML = `
+      <div class="kpi-label">${meta.label}${meta.approx ? '<span class="badge">Näherung</span>' : ""}</div>
+      <div class="kpi-value">${value}</div>
+      <div class="kpi-change">${change}</div>`;
+    grid.appendChild(el);
+  }
+}
+
+/* ── Wachstum ── */
+function renderGrowth(growth, interval) {
+  const periods = growth.live.periods;
+  const labels = periods.map(p => fmtPeriod(p.period_start, interval));
+
+  renderChart("joinsChart", {
+    type: "bar",
+    data: {
+      labels,
+      datasets: SOURCES.map(src => ({
+        label: src.label,
+        data: periods.map(p => p.joins[src.key] ?? 0),
+        backgroundColor: src.color,
+        borderColor: SURFACE,
+        borderWidth: 2,
+        borderRadius: 3,
+        borderSkipped: false,
+        stack: "joins",
+        maxBarThickness: 34,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { stacked: true, grid: { display: false } },
+        y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } },
+      },
+      plugins: { legend: { position: "top" } },
+    },
+  });
+
+  document.getElementById("memberTotalBasis").textContent =
+    growth.live.member_total_basis?.includes("directory")
+      ? "Anker: aktueller Mitgliederstand, rückwärts über Join/Leave-Events."
+      : "Rekonstruiert aus Join/Leave-Events seit Tracking-Beginn (ohne Live-Anker).";
+
+  renderChart("membersChart", {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Mitglieder",
+        data: periods.map(p => p.member_total),
+        borderColor: ACCENT,
+        backgroundColor: "rgba(16, 183, 173, 0.12)",
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        fill: true,
+        tension: 0.25,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { display: false } }, y: { ticks: { precision: 0 } } },
+      plugins: { legend: { display: false } },
+    },
+  });
+
+  const leaveSeries = [
+    { key: "lt_1_month", label: "Unter 1 Monat dabei", color: "#c98500" },
+    { key: "ge_1_month", label: "1 Monat+ dabei", color: "#199e70" },
+    { key: "unknown", label: "Unbekannt", color: "#8ea8bb" },
+  ];
+  renderChart("leavesChart", {
+    type: "bar",
+    data: {
+      labels,
+      datasets: leaveSeries.map(s => ({
+        label: s.label,
+        data: periods.map(p => p.leaves[s.key] ?? 0),
+        backgroundColor: s.color,
+        borderColor: SURFACE,
+        borderWidth: 2,
+        borderRadius: 3,
+        borderSkipped: false,
+        stack: "leaves",
+        maxBarThickness: 34,
+      })),
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { stacked: true, grid: { display: false } },
+        y: { stacked: true, beginAtZero: true, ticks: { precision: 0 } },
+      },
+      plugins: { legend: { position: "top" } },
+    },
+  });
+}
+
+/* ── Aktivierung ── */
+function renderActivation(activation, interval) {
+  const rows = activation.live.periods;
+  const labels = rows.map(r => fmtPeriod(r.period_start, interval));
+  renderChart("activationChart", {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "% mit Interaktion am Beitrittstag",
+        data: rows.map(r => r.same_day_interaction_rate === null ? null : r.same_day_interaction_rate * 100),
+        borderColor: ACCENT,
+        backgroundColor: ACCENT,
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        spanGaps: true,
+        tension: 0.25,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { grid: { display: false } },
+        y: { min: 0, max: 100, ticks: { callback: v => v + " %" } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const r = rows[ctx.dataIndex];
+              return [
+                `Aktiviert: ${nf1.format(ctx.parsed.y)} %`,
+                `Neue Mitglieder: ${nf.format(r.new_members)}`,
+                `Davon aktiviert: ${nf.format(r.same_day_interaction_count)}`,
+              ];
+            },
+          },
+        },
+      },
+    },
+    plugins: [benchmarkPlugin(15, "Richtwert: 15 % aktiviert")],
+  });
+}
+
+/* ── Woche-1-Bindung ── */
+function renderRetention(retention) {
+  const rows = retention.live.cohorts;
+  const labels = rows.map(r => "KW ab " + fmtPeriod(r.cohort_week, "daily"));
+  renderChart("retentionChart", {
+    type: "line",
+    data: {
+      labels,
+      datasets: [{
+        label: "Woche-1-Bindung",
+        data: rows.map(r => r.retention_rate === null ? null : r.retention_rate * 100),
+        borderColor: ACCENT,
+        backgroundColor: ACCENT,
+        borderWidth: 2,
+        pointRadius: 3,
+        pointHoverRadius: 5,
+        spanGaps: true,
+        tension: 0.25,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: {
+        x: { grid: { display: false } },
+        y: { min: 0, max: 100, ticks: { callback: v => v + " %" } },
+      },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: ctx => {
+              const r = rows[ctx.dataIndex];
+              return [
+                `Bindung: ${nf1.format(ctx.parsed.y)} %`,
+                `Beigetreten: ${nf.format(r.joined)}`,
+                `Zurückgekehrt: ${nf.format(r.retained)}`,
+              ];
+            },
+          },
+        },
+      },
+    },
+    plugins: [benchmarkPlugin(20, "Richtwert: 20 % gebunden")],
+  });
+}
+
+/* ── Beteiligung ── */
+function renderEngagement(engagement, interval) {
+  const rows = engagement.live.periods;
+  const labels = rows.map(r => fmtPeriod(r.period_start, interval));
+
+  renderChart("visitorsChart", {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "Besucher",
+          data: rows.map(r => r.visitors),
+          backgroundColor: "#199e70",
+          borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
+          maxBarThickness: 22,
+        },
+        {
+          label: "Beiträger",
+          data: rows.map(r => r.contributors),
+          backgroundColor: "#d95926",
+          borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
+          maxBarThickness: 22,
+        },
+      ],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { display: false } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
+      plugins: {
+        legend: { position: "top" },
+        tooltip: {
+          callbacks: {
+            afterBody: items => {
+              const r = rows[items[0].dataIndex];
+              if (r.visitors && r.contributors !== null) {
+                return `Beiträger-Quote: ${nf1.format((r.contributors / r.visitors) * 100)} %`;
+              }
+              return "";
+            },
+          },
+        },
+      },
+    },
+  });
+
+  renderChart("messagesChart", {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Nachrichten",
+        data: rows.map(r => r.messages_total),
+        backgroundColor: ACCENT,
+        borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
+        maxBarThickness: 28,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { display: false } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            afterBody: items => {
+              const r = rows[items[0].dataIndex];
+              return r.avg_messages_per_contributor !== null
+                ? `Ø pro Beiträger: ${nf1.format(r.avg_messages_per_contributor)}`
+                : "";
+            },
+          },
+        },
+      },
+    },
+  });
+
+  renderChart("voiceChart", {
+    type: "bar",
+    data: {
+      labels,
+      datasets: [{
+        label: "Sprachminuten",
+        data: rows.map(r => Math.round(r.voice_minutes_total)),
+        backgroundColor: "#9085e9",
+        borderColor: SURFACE, borderWidth: 2, borderRadius: 3, borderSkipped: false,
+        maxBarThickness: 28,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      scales: { x: { grid: { display: false } }, y: { beginAtZero: true, ticks: { precision: 0 } } },
+      plugins: { legend: { display: false } },
+    },
+  });
+}
+
+/* ── Zielgruppe ── */
+function donut(id, entries, ramp) {
+  const total = entries.reduce((sum, e) => sum + e.count, 0);
+  renderChart(id, {
+    type: "doughnut",
+    data: {
+      labels: entries.map(e => e.label),
+      datasets: [{
+        data: entries.map(e => e.count),
+        backgroundColor: entries.map((_, i) => ramp[i % ramp.length]),
+        borderColor: SURFACE,
+        borderWidth: 2,
+      }],
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false, cutout: "62%",
+      plugins: {
+        legend: {
+          position: "right",
+          labels: {
+            generateLabels: chart => chart.data.labels.map((label, i) => ({
+              text: total > 0
+                ? `${label}: ${nf1.format((chart.data.datasets[0].data[i] / total) * 100)} %`
+                : label,
+              fillStyle: chart.data.datasets[0].backgroundColor[i],
+              strokeStyle: SURFACE,
+              pointStyle: "rectRounded",
+              index: i,
+            })),
+          },
+        },
+        tooltip: {
+          callbacks: {
+            label: ctx => ` ${nf.format(ctx.parsed)} Mitglieder`,
+          },
+        },
+      },
+    },
+  });
+}
+
+const TENURE_ORDER = [
+  { key: "<1_month", label: "Unter 1 Monat" },
+  { key: "1_6_months", label: "1–6 Monate" },
+  { key: "6_12_months", label: "6–12 Monate" },
+  { key: "1_year_plus", label: "1 Jahr+" },
+];
+const ACCOUNT_AGE_ORDER = [
+  { key: "<1_day", label: "Unter 1 Tag" },
+  { key: "<1_month", label: "Unter 1 Monat" },
+  { key: "1_month_plus", label: "1 Monat+" },
+];
+
+function renderAudience(audience) {
+  const tenure = audience.live.member_tenure ?? {};
+  donut("tenureChart",
+    TENURE_ORDER.map(t => ({ label: t.label, count: tenure[t.key] ?? 0 })),
+    TEAL_RAMP);
+  const tenureBasis = audience.live.basis?.member_tenure;
+  if (tenureBasis) {
+    document.getElementById("tenureBasis").textContent =
+      tenureBasis.includes("directory")
+        ? "Alle aktuellen Mitglieder (täglicher Verzeichnis-Abgleich)."
+        : "Nur Mitglieder seit Tracking-Beginn — Verzeichnis-Abgleich läuft noch nicht.";
+  }
+  const age = audience.live.new_member_account_age_28d ?? {};
+  donut("accountAgeChart",
+    ACCOUNT_AGE_ORDER.map(a => ({ label: a.label, count: age[a.key] ?? 0 })),
+    AMBER_RAMP);
+}
+
+/* ── Top-Invites ── */
+function renderInvites(top) {
+  const body = document.querySelector("#invitesTable tbody");
+  const rows = top.live.top_invites;
+  if (!rows.length) {
+    body.innerHTML = '<tr><td colspan="3" class="empty">Keine Invite-Beitritte in den letzten 28 Tagen.</td></tr>';
+    return;
+  }
+  body.innerHTML = rows.map(r => `
+    <tr>
+      <td><code>discord.gg/${r.invite_code ?? "?"}</code></td>
+      <td>${r.inviter_label ?? (r.inviter_id ? `ID ${r.inviter_id}` : "–")}</td>
+      <td class="num">${nf.format(r.joins)}</td>
+    </tr>`).join("");
+}
+
+/* ── CSV-Import ── */
+let csrfToken = null;
+async function ensureCsrf() {
+  if (csrfToken) return csrfToken;
+  const me = await fetchJson("/api/auth/me");
+  csrfToken = me.csrf_token ?? null;
+  return csrfToken;
+}
+
+async function uploadCsvs(files) {
+  const log = document.getElementById("importLog");
+  const guildId = document.getElementById("guildId").value.trim();
+  if (!guildId) {
+    log.innerHTML = '<div class="err">Guild-ID fehlt.</div>';
+    return;
+  }
+  const csvs = [...files].filter(f => /\.csv$/i.test(f.name));
+  if (!csvs.length) {
+    log.innerHTML = '<div class="err">Keine CSV-Dateien dabei.</div>';
+    return;
+  }
+  log.innerHTML = `Lade ${csvs.length} Datei(en) hoch…`;
+  const form = new FormData();
+  for (const f of csvs) form.append("files", f, f.name);
+  try {
+    const token = await ensureCsrf();
+    const res = await fetch(`/api/insights/import?guild_id=${encodeURIComponent(guildId)}`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: token ? { "X-CSRF-Token": token } : {},
+      body: form,
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const headers = data.details?.headers ? `<br>Gefundene Spalten: <code>${data.details.headers.join(", ")}</code>` : "";
+      log.innerHTML = `<div class="err">Import fehlgeschlagen (HTTP ${res.status}): ${data.error ?? "unbekannter Fehler"}${headers}</div>`;
+      return;
+    }
+    log.innerHTML = `<div class="ok">✓ ${data.files} Datei(en), ${nf.format(data.rows)} Zeilen importiert.</div>` +
+      (data.results ?? []).map(r => `<div>· ${r.file} → <code>${r.import_kind}</code> (${nf.format(r.rows)} Zeilen)</div>`).join("");
+    loadAll();
+  } catch (err) {
+    log.innerHTML = `<div class="err">Import fehlgeschlagen: ${err.message}</div>`;
+  }
+}
+
+function wireImport() {
+  const dz = document.getElementById("dropzone");
+  const input = document.getElementById("fileInput");
+  document.getElementById("pickFiles").addEventListener("click", () => input.click());
+  dz.addEventListener("click", () => input.click());
+  input.addEventListener("change", () => { if (input.files.length) uploadCsvs(input.files); input.value = ""; });
+  ["dragover", "dragenter"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add("drag"); }));
+  ["dragleave", "drop"].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove("drag"); }));
+  dz.addEventListener("drop", e => { if (e.dataTransfer.files.length) uploadCsvs(e.dataTransfer.files); });
+}
+
+function renderImportedKinds(overview) {
+  const el = document.getElementById("importedKinds");
+  const kinds = [...new Set((overview.imported ?? []).map(r => r.import_kind))];
+  el.textContent = kinds.length
+    ? `Vorhandene Import-Daten im gewählten Zeitraum: ${kinds.join(", ")}`
+    : "Im gewählten Zeitraum sind noch keine Import-Daten vorhanden.";
+}
+
+/* ── Orchestrierung ── */
+async function loadAll() {
+  const interval = document.getElementById("interval").value;
+  const query = qs();
+  document.body.classList.add("loading");
+  try {
+    const [overview, growth, activation, retention, engagement, audience, invites] = await Promise.all([
+      fetchJson(`/api/insights/overview?${query}`),
+      fetchJson(`/api/insights/growth?${query}`),
+      fetchJson(`/api/insights/activation?${query}`),
+      fetchJson(`/api/insights/retention?${query}`),
+      fetchJson(`/api/insights/engagement?${query}`),
+      fetchJson(`/api/insights/audience?${query}`),
+      fetchJson(`/api/insights/top-invites?${query}`),
+    ]);
+    renderKpis(overview);
+    renderImportedKinds(overview);
+    renderGrowth(growth, interval);
+    renderActivation(activation, interval);
+    renderRetention(retention);
+    renderEngagement(engagement, interval);
+    renderAudience(audience);
+    renderInvites(invites);
+  } catch (err) {
+    console.error(err);
+    document.getElementById("kpiGrid").innerHTML =
+      `<div class="empty">Daten konnten nicht geladen werden: ${err.message}</div>`;
+  } finally {
+    document.body.classList.remove("loading");
+  }
+}
+
+for (const id of ["interval", "from", "to"]) {
+  document.getElementById(id).addEventListener("change", loadAll);
+}
+wireImport();
+loadAll();
+</script>
+</body>
+</html>

@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serenity::all::{
     CommandDataOption, CommandDataOptionValue, Context, EventHandler, GatewayIntents, GuildChannel,
     GuildId, GuildMemberFlags, GuildMemberUpdateEvent, Interaction, InviteCreateEvent,
-    InviteDeleteEvent, Member, Message, Permissions, Reaction, ReactionType, Ready, User, UserId,
-    VoiceState,
+    InviteDeleteEvent, Member, Message, OnlineStatus, Permissions, Reaction, ReactionType, Ready,
+    User, UserId, VoiceState,
 };
 use serenity::async_trait;
 use serenity::gateway::ActivityData;
@@ -20,7 +20,8 @@ use crate::core_user_sync::{
 };
 use crate::dispatcher::{
     member_screening_completed_event, role_events_from_diff, ChannelEvent, Dispatcher,
-    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEvent, VoiceEvent,
+    GatewayEvent, InteractionEvent, MemberEvent, MessageAttachment, MessageEvent, PresenceEvent,
+    VoiceEvent,
 };
 use crate::interactions::InteractionRouter;
 use crate::invite_tracker::InviteTracker;
@@ -246,6 +247,22 @@ impl EventHandler for Handler {
             self.invite_tracker.prime(&ctx.http, gid.get()).await;
         }
         tracing::info!(guilds = guilds.len(), "Invite-Snapshots geprimt");
+    }
+
+    async fn presence_update(&self, _ctx: Context, new_data: serenity::all::Presence) {
+        let Some(guild_id) = new_data.guild_id else {
+            return;
+        };
+        if matches!(
+            new_data.status,
+            OnlineStatus::Offline | OnlineStatus::Invisible
+        ) {
+            return;
+        }
+        self.dispatcher.publish_presence(PresenceEvent {
+            guild_id: guild_id.get(),
+            user_id: new_data.user.id.get(),
+        });
     }
 
     async fn interaction_create(&self, _ctx: Context, interaction: serenity::all::Interaction) {
@@ -589,6 +606,7 @@ pub struct GatewayClientOptions {
     pub pool: sqlx::PgPool,
     pub feature_module_count: usize,
     pub command_prefix: String,
+    pub enable_presence_intent: bool,
 }
 
 /// Baut den serenity-Client. Aufrufer entscheidet über den Start
@@ -600,7 +618,7 @@ pub async fn build_client(
     router: Arc<InteractionRouter>,
     options: GatewayClientOptions,
 ) -> serenity::Result<serenity::Client> {
-    let intents = GatewayIntents::GUILDS
+    let mut intents = GatewayIntents::GUILDS
         | GatewayIntents::GUILD_MEMBERS
         | GatewayIntents::GUILD_VOICE_STATES
         | GatewayIntents::GUILD_MESSAGES
@@ -608,6 +626,9 @@ pub async fn build_client(
         | GatewayIntents::GUILD_INVITES
         | GatewayIntents::DIRECT_MESSAGES
         | GatewayIntents::MESSAGE_CONTENT;
+    if options.enable_presence_intent {
+        intents |= GatewayIntents::GUILD_PRESENCES;
+    }
     serenity::Client::builder(token, intents)
         .event_handler(Handler {
             adapter,
