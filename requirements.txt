@@ -34,5 +34,5 @@ openai==2.43.0
 beautifulsoup4==4.15.0
 
 # Crypto / auth
-cryptography==48.0.0
+cryptography==49.0.0
 keyring==25.7.0
