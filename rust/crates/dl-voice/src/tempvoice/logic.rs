@@ -201,16 +201,6 @@ pub fn next_name(existing_names: &[String], prefix: &str) -> String {
     format!("{prefix} {n}")
 }
 
-/// Verwaltete Lane? (Kategorie + Namens-Präfix, Fixed-IDs ausgenommen.)
-pub fn is_managed_lane_name(name: &str) -> bool {
-    let n = name.to_lowercase();
-    let mut prefixes: Vec<&str> = vec!["lane", "street brawl", "chill"];
-    prefixes.extend(RANK_ORDER);
-    prefixes
-        .iter()
-        .any(|p| n == *p || n.starts_with(&format!("{p} ")))
-}
-
 /// Lane-Name inkl. optionalem Min-Rang-Suffix (wie _compose_name).
 pub fn compose_name(base: &str, min_rank: &str, in_minrank_category: bool) -> String {
     let mut name = base.to_string();
@@ -281,14 +271,5 @@ mod tests {
         );
         assert_eq!(compose_name("Lane 2", "seeker", true), "Lane 2");
         assert_eq!(compose_name("Lane 2", "phantom", false), "Lane 2");
-    }
-
-    #[test]
-    fn managed_lane_namen() {
-        assert!(is_managed_lane_name("Lane 4"));
-        assert!(is_managed_lane_name("Phantom 2"));
-        assert!(is_managed_lane_name("Street Brawl 1"));
-        assert!(is_managed_lane_name("chill 3"));
-        assert!(!is_managed_lane_name("AFK"));
     }
 }

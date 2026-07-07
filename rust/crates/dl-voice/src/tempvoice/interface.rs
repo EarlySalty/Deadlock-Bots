@@ -375,7 +375,8 @@ fn global_panel_embed() -> Value {
             "• **Normale Lane:** Setzt die Berechtigungen wieder auf offen.\n",
             "• **Lurker-Rolle:** Für Zuhörer; schafft einen zusätzlichen Platz für Mitspieler.\n",
             "• **Limit & Sprache:** Setze Teilnehmerlimit (0–99) und Deutsch/Offen-Filter.\n",
-            "• **Owner Claim & Mindest-Rang:** Übernimm die Lane und lege optional einen Mindest-Rang fest."
+            "• **Owner Claim:** Übernimm die Lane, wenn der Owner weg ist.\n",
+            "• **🔓 Rang-Gate** *(nur Ranked)*: Mach deine Lane exklusiv für verifizierte Ränge in einem Fenster (Standard: dein Rang ±1,5). Niemand fliegt raus — wirkt nur auf neue Joins."
         ),
         "color": 0x2ECC71,
         "footer": {"text": "Deutsche Deadlock Community • TempVoice"},
@@ -398,10 +399,10 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
                 "🦵 Kick · 🚫 Ban · ✅ Unban – Mitglieder verwalten\n",
                 "👥 Duo / Trio · 🔄 Reset – Lane-Größe schnell anpassen\n",
                 "👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen\n\n",
-                "**Mindest-Rang** *(nur Ranked)*\n",
-                "① Wähle den **Haupt-Rang** (z. B. Archon)\n",
-                "② Wähle dann den **Sub-Rang** (1–6)\n",
-                "→ Der Rang wird erst gesetzt, wenn **beide** gewählt sind."
+                "**🔓 Rang-Gate** *(nur Ranked, nur Owner)*\n",
+                "Macht die Lane exklusiv für verifizierte Ränge in einem Fenster\n",
+                "(Standard: dein Rang ±1,5). Wer drin ist, bleibt drin —\n",
+                "wirkt nur auf neue Joins. Nochmal drücken = wieder offen."
             ),
             owner_display
         ),
@@ -825,11 +826,14 @@ impl PanelHandler {
     }
 
     fn prefs_reply(content: String, components: Value) -> BridgeReply {
+        let mut container_components = vec![tv_text_display(30, &content), json!({ "type": 14 })];
+        container_components.extend(components.as_array().cloned().unwrap_or_default());
         BridgeReply {
-            content: Some(content),
-            components: Some(components),
+            components: Some(json!([tv_container(29, container_components)])),
             ephemeral: true,
+            message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
             allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+            fallback: Some(Box::new(BridgeReply::ephemeral_text(content))),
             ..BridgeReply::default()
         }
     }
@@ -837,7 +841,7 @@ impl PanelHandler {
     fn prefs_text(default: Option<&DefaultPresetRecord>) -> String {
         match default {
             Some(default) => format!(
-                "**⚙️ Voreinstellungen**\nModus: {}\nName: {}\nLimit: {}\nRang: {}",
+                "## ⚙️ Voreinstellungen\n**Modus:** {}\n**Name:** {}\n**Limit:** {}\n**Rang:** {}",
                 prefs_mode_label(&default.mode),
                 default.base_name,
                 default.limit,
@@ -847,7 +851,10 @@ impl PanelHandler {
                     default.min_rank.clone()
                 }
             ),
-            None => "**⚙️ Voreinstellungen**\nnoch keiner gesetzt".to_string(),
+            None => {
+                "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
+                    .to_string()
+            }
         }
     }
 
@@ -1236,7 +1243,7 @@ impl InteractionHandler for PanelHandler {
                     .flatten()
                 else {
                     return Self::prefs_reply(
-                        "**⚙️ Voreinstellungen**\nnoch keiner gesetzt".to_string(),
+                        Self::prefs_text(None),
                         Self::prefs_components(false, false),
                     );
                 };
@@ -2200,7 +2207,7 @@ mod tests {
         assert!(description.contains(
             "• Betritt einen **(+) Sprachkanal**, deine eigene Lane wird automatisch erstellt."
         ));
-        assert!(description.contains("• **Owner Claim & Mindest-Rang:** Übernimm die Lane und lege optional einen Mindest-Rang fest."));
+        assert!(description.contains("• **🔓 Rang-Gate** *(nur Ranked)*"));
         assert_eq!(
             embeds[0]["footer"]["text"],
             "Deutsche Deadlock Community • TempVoice"
@@ -2363,7 +2370,7 @@ mod tests {
         let description = embed["description"].as_str().expect("description");
         assert!(description.contains("**Owner:** <@42>"));
         assert!(description.contains("👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen"));
-        assert!(description.contains("→ Der Rang wird erst gesetzt, wenn **beide** gewählt sind."));
+        assert!(description.contains("**🔓 Rang-Gate** *(nur Ranked, nur Owner)*"));
     }
 
     #[test]
@@ -2668,6 +2675,29 @@ mod tests {
         out
     }
 
+    fn reply_prefs_container(reply: &BridgeReply) -> &Value {
+        let components = reply
+            .components
+            .as_ref()
+            .and_then(Value::as_array)
+            .expect("components");
+        assert_eq!(components.len(), 1);
+        let container = &components[0];
+        assert_eq!(container["type"], 17);
+        assert_eq!(container["accent_color"], TV_ACCENT_GOLD);
+        container
+    }
+
+    fn reply_prefs_text(reply: &BridgeReply) -> &str {
+        reply_prefs_container(reply)["components"]
+            .as_array()
+            .expect("container components")
+            .iter()
+            .find(|component| component["type"] == 10)
+            .and_then(|component| component["content"].as_str())
+            .expect("text display")
+    }
+
     fn collect_reply_custom_ids(value: &Value, out: &mut Vec<String>) {
         if let Some(custom_id) = value.get("custom_id").and_then(Value::as_str) {
             out.push(custom_id.to_string());
@@ -2698,11 +2728,25 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
+        assert_eq!(
+            reply.message_flags,
+            Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG)
+        );
+        assert!(reply.content.is_none());
         assert_eq!(reply.allowed_mentions, Some(json!({ "parse": [] })));
         assert_eq!(
-            reply.content.as_deref(),
-            Some("**⚙️ Voreinstellungen**\nnoch keiner gesetzt")
+            reply_prefs_text(&reply),
+            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
         );
+        let container = reply_prefs_container(&reply);
+        let container_components = container["components"]
+            .as_array()
+            .expect("container components");
+        assert_eq!(container_components[0]["type"], 10);
+        assert_eq!(container_components[1]["type"], 14);
+        assert!(container_components[2..]
+            .iter()
+            .all(|component| component["type"] == 1));
         let ids = reply_custom_ids(&reply);
         assert!(ids.contains(&"tv_prefs_mode_casual".to_string()));
         assert!(ids.contains(&"tv_prefs_mode_ranked".to_string()));
@@ -2738,11 +2782,10 @@ mod tests {
             })
             .await;
 
-        let content = reply.content.as_deref().expect("content");
-        assert!(content.contains("Modus: Ranked"));
-        assert!(content.contains("Name: Scrim Lane"));
-        assert!(content.contains("Limit: 5"));
-        assert!(content.contains("Rang: archon 2"));
+        assert_eq!(
+            reply_prefs_text(&reply),
+            "## ⚙️ Voreinstellungen\n**Modus:** Ranked\n**Name:** Scrim Lane\n**Limit:** 5\n**Rang:** archon 2"
+        );
         assert!(!reply_custom_ids(&reply).contains(&"tv_prefs_apply_lane".to_string()));
     }
 
@@ -2960,8 +3003,8 @@ mod tests {
             .await;
 
         assert_eq!(
-            reply.content.as_deref(),
-            Some("**⚙️ Voreinstellungen**\nnoch keiner gesetzt")
+            reply_prefs_text(&reply),
+            "## ⚙️ Voreinstellungen\n_Noch kein Standard gesetzt — wähle unten einen Modus._"
         );
         assert!(handler
             .engine
@@ -3013,9 +3056,9 @@ mod tests {
             .await;
 
         assert!(reply.ephemeral);
-        let content = reply.content.as_deref().expect("content");
-        assert!(content.contains("Name: Team Lane"));
-        assert!(content.contains("Limit: 3"));
+        let content = reply_prefs_text(&reply);
+        assert!(content.contains("**Name:** Team Lane"));
+        assert!(content.contains("**Limit:** 3"));
         assert_eq!(
             handler.engine.lane_snapshot(4242).await,
             Some(("Team Lane".to_string(), 1289721245281292290))

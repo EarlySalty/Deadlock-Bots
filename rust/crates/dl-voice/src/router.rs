@@ -68,6 +68,7 @@ pub const ROUTER_BUTTON_STREET_BRAWL: &str = "Street Brawl";
 pub const ROUTER_BUTTON_CLAIM: &str = "Owner übernehmen";
 pub const ROUTER_BUTTON_LIMIT: &str = "Limit setzen";
 pub const ROUTER_BUTTON_RENAME: &str = "Umbenennen";
+pub const ROUTER_BUTTON_RANK_GATE: &str = "Rang-Gate";
 pub const ROUTER_BUTTON_KICK: &str = "Kick";
 pub const ROUTER_BUTTON_BAN: &str = "Ban";
 pub const ROUTER_BUTTON_UNBAN: &str = "Unban";
@@ -95,7 +96,7 @@ pub const ROUTER_PANEL_LANE_CAPTION: &str = "-# Deine Lane";
 pub const ROUTER_PANEL_MOD_CAPTION: &str = "-# Moderation";
 pub const ROUTER_PANEL_GUIDE_CREATE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da.";
 pub const ROUTER_PANEL_GUIDE_OWNER: &str = "**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit <:dl_crown:1522518265421631538> Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.";
-pub const ROUTER_PANEL_GUIDE_BUTTONS: &str = "**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — ändert den Modus deiner Lane (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
+pub const ROUTER_PANEL_GUIDE_BUTTONS: &str = "**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — ändert den Modus deiner Lane (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane\n🔓 **Rang-Gate** *(nur Ranked, nur Owner)* — macht deine Lane exklusiv für verifizierte Ränge in einem Fenster (Standard: dein Rang ±1,5). Niemand fliegt raus, wirkt nur auf neue Joins; nochmal drücken schaltet es aus";
 pub const ROUTER_REPLY_NOT_IN_VOICE: &str =
     "Du bist gerade in keinem Sprachkanal — geh zuerst in Voice, dann klappt's. Einstieg:";
 pub const ROUTER_REPLY_UNKNOWN_MODE: &str =
@@ -328,6 +329,13 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
                     "tv_mode_switch_btn",
                     ROUTER_EMOJI_MODE
                 ),
+                json!({
+                    "type": 2,
+                    "style": 2,
+                    "label": ROUTER_BUTTON_RANK_GATE,
+                    "custom_id": "tv_rank_gate",
+                    "emoji": { "name": "🔓" },
+                }),
             ]),
             router_text_display(ROUTER_PANEL_MOD_CAPTION.to_string()),
             router_action_row(vec![
@@ -401,7 +409,7 @@ fn router_emoji_button(label: &str, style: u8, custom_id: &str, emoji: (&str, &s
 
 pub fn voice_guide_detail_text() -> String {
     format!(
-        "**📖 Voice-Lanes im Detail**\n{}\nRouter-VC-Join: erst Modus wählen, dann Verschiebung.\nRanked geht nur mit verifiziertem Rang — Steam verknüpfen in <#1398021105339334666>.\n{}\n{}\n**⚙️ Voreinstellungen** — Name, Limit (und Rang-Bereich) jederzeit festlegen, auch ohne in einer Lane zu sein — wird bei jeder neuen Lane automatisch angewandt. 💾 Presets sichern zusätzlich den Stand einer laufenden Lane.\n**Mitspieler finden** — Gesuch per Klick (Modus, Rang, Wann), erscheint in <#1522769149208821881>; 🔔 benachrichtigt dich bei passenden Gesuchen.",
+        "**📖 Voice-Lanes im Detail**\n{}\nRouter-VC-Join: erst Modus wählen, dann Verschiebung.\nRanked ist offen für alle — der Lane-Owner kann per 🔓 Rang-Gate optional nur verifizierte Ränge reinlassen (Steam verknüpfen in <#1398021105339334666>).\n{}\n{}\n**⚙️ Voreinstellungen** — Name, Limit (und Rang-Bereich) jederzeit festlegen, auch ohne in einer Lane zu sein — wird bei jeder neuen Lane automatisch angewandt. 💾 Presets sichern zusätzlich den Stand einer laufenden Lane.\n**Mitspieler finden** — Gesuch per Klick (Modus, Rang, Wann), erscheint in <#1522769149208821881>; 🔔 benachrichtigt dich bei passenden Gesuchen.",
         ROUTER_PANEL_GUIDE_CREATE,
         ROUTER_PANEL_GUIDE_OWNER,
         ROUTER_PANEL_GUIDE_BUTTONS,
@@ -1254,6 +1262,7 @@ mod tests {
                 "tv_rename_btn",
                 "tv_limit_btn",
                 "tv_mode_switch_btn",
+                "tv_rank_gate",
                 "tv_kick",
                 "tv_ban",
                 "tv_unban",
