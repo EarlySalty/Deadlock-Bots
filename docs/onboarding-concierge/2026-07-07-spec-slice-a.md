@@ -165,11 +165,12 @@ kein Nice-to-have. Assets liefert Claude, Codex bindet nur ein.
 
 ## 10. Launch-Gates (vor Aktivierung für echte neue Joins)
 
-1. **Fireworks-DPA/AVV als Nachweis abgelegt** (Owner bestätigt 07.07.,
-   dass Fireworks das anbietet; Dokument sichern, §5.6-Anforderung
-   „Prozessor mit DPA + No-Training-Zusage" gilt weiter). Bis dahin läuft
-   der Concierge im Testmodus hinter Config-Flag mit Test-Allowlist
-   (nur benannte Test-User bekommen T0).
+1. **ERFÜLLT (07.07.):** Fireworks-DPA als Nachweis abgelegt
+   (`fireworks-dpa-v3.2.pdf` in diesem Ordner, Quelle
+   https://fireworks.ai/dpa). §5.6-Anforderung „Prozessor mit DPA +
+   No-Training-Zusage" damit belegt. Seit 07.07. läuft der Concierge im
+   Open-Modus (leere Allowlist = alle User), der Testmodus über die
+   Allowlist bleibt als Option erhalten.
 2. Texte final von Claude reviewt (Codex schreibt KEINE finalen
    user-sichtbaren Texte; fehlt ein Text, `"Platzhalter"` + Meldung).
 3. Vertragstests grün (§11).

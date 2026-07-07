@@ -39,9 +39,16 @@ Kern von §5.6. DeepSeek läuft als offenes Modell auf Fireworks-Infrastruktur
 in den USA, es gilt derselbe Transfer-Rahmen wie bei OpenAI/Anthropic
 (DPF/SCC dokumentieren).
 
-## Restpunkt (Owner)
+## DPA-Nachweis (ERLEDIGT 2026-07-07)
 
-Aus dem Trust Center das DPA-Dokument beziehen und eine Kopie ablegen
-(dieser Ordner oder Ablage des Owners). Danach ist Launch-Gate 1 aus der
-Spec (§10) erfüllt und der Testmodus kann für echte neue Joins geöffnet
-werden.
+- Kopie liegt hier: `fireworks-dpa-v3.2.pdf` (8 Seiten, Quelle:
+  https://fireworks.ai/dpa — Direktlink zur jeweils aktuellen PDF).
+- Das DPA ist laut eigenem Wortlaut Bestandteil des Agreements für jeden
+  Business-Kunden der Services ("forms part of and is incorporated into
+  the agreement"), eine separate Unterschrift ist nicht nötig.
+- Enthält GDPR-Begriffe, Subprozessoren-Regelung und Standard Contractual
+  Clauses (Transfer-Rahmen USA).
+- Damit ist Launch-Gate 1 aus der Spec (§10) erfüllt.
+
+Optionaler Beifang aus dem Trust Center (nicht Gate-relevant): Transfer
+Impact Assessment, ISO-/SOC-2-Reports.
