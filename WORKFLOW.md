@@ -1,3 +1,25 @@
+# P2b FAQ auf dl-knowledge + Shadow-Mode (2026-07-07)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/faq-dl-knowledge`; Vorgabe: kein Commit/Push, Aenderungen bleiben uncommitted.
+- Umgesetzt: `dl-community::faq::ask_knowledge` gegen `DL_KNOWLEDGE_URL` (Default `http://127.0.0.1:8896`) mit 20s-Timeout und fail-closed `None` bei HTTP-/Netzfehlern.
+- FAQ-Chat und Ticket-Auto-Help nutzen jetzt dl-knowledge statt lokalem `docs/*.md`-/MiniMax-Grounding; Chat-Kontext konkateniert nur die Nutzerfragen der Session.
+- Umgesetzt: `DL_FAQ_SHADOW_CHANNEL_ID` fuer Ticket-Auto-Help; gesetzt postet die Antwort in den Shadow-Kanal mit Ticket-Verweis, nicht ins Ticket.
+- Entfernt: `load_docs`, FAQ-Prompt-/Docs-Grounding und der alte Ticket-Tool/Guard-Codepfad aus `faq.rs`, weil danach unbenutzt.
+
+## Verifikation aktuell
+- Gruen: `cargo test -p dl-community` (75 passed).
+- Gruen: `env -u SQLX_OFFLINE ./scripts/central_test_db.sh env -u SQLX_OFFLINE sh -c 'DATABASE_URL="$CENTRAL_TEST_DSN" cargo test -p dl-community --features testing faq::tests -- --nocapture'` (12 passed; bekannte TestDb-Pool-Close-Warnungen).
+- Gruen: `cargo build --workspace`.
+- Gruen: `cargo clippy --workspace -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Erster feature-gated Versuch mit `SQLX_OFFLINE=true` scheiterte vor FAQ-Tests in bestehendem `privacy.rs` wegen fehlendem SQLx-Cache; online mit `DATABASE_URL="$CENTRAL_TEST_DSN"` gruen.
+- Shadow-Text ist absichtlich Platzhalter fuer Claude-Finaltext.
+- Kein Commit/Push ausgefuehrt.
+
 # dl-knowledge Dienst (2026-07-07)
 
 ## Fortschritt
