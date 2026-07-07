@@ -736,6 +736,7 @@ fn validate_router_panel_attachments(attachments: &[RouterPanelAttachment]) -> R
 fn find_existing_router_v2_panel(messages: &[RouterPanelMessage]) -> Option<u64> {
     messages
         .iter()
+        .rev()
         .find(|message| {
             !message.has_embeds
                 && message.has_components
@@ -1687,12 +1688,20 @@ mod tests {
             .expect("test_pool");
         let pool = db.pool().clone();
         let port = Arc::new(MockRouterInterfacePort::default());
-        *port.recent.lock().expect("recent") = vec![RouterPanelMessage {
-            message_id: 7002,
-            has_embeds: false,
-            has_components: true,
-            custom_ids: vec!["router_spawn_casual".to_string()],
-        }];
+        *port.recent.lock().expect("recent") = vec![
+            RouterPanelMessage {
+                message_id: 7002,
+                has_embeds: false,
+                has_components: true,
+                custom_ids: vec!["router_spawn_casual".to_string()],
+            },
+            RouterPanelMessage {
+                message_id: 7004,
+                has_embeds: false,
+                has_components: true,
+                custom_ids: vec!["router_spawn_ranked".to_string()],
+            },
+        ];
         let interface = RouterInterface::new(pool.clone(), port.clone());
 
         interface.ensure_panel().await;
@@ -1700,14 +1709,14 @@ mod tests {
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         let edits = port.edits.lock().expect("edits");
         assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].1, 7002);
+        assert_eq!(edits[0].1, 7004);
         assert_eq!(edits[0].3, router_panel_attachments());
         assert_eq!(
             dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PANEL_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
-            Some("7002")
+            Some("7004")
         );
         assert_eq!(
             dl_central_db::kv::get(&pool, ROUTER_PANEL_KV_NS, ROUTER_PAYLOAD_FORMAT_KEY)

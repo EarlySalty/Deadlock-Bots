@@ -1,3 +1,11 @@
+## #228 — Voice-Panel erkennt vorhandene neue Panels wieder
+
+**Ausgangslage:** Im Sprachkanal-Verwalten-Kanal konnte beim Bot-Neustart ein zweites neues Panel entstehen, obwohl schon eins da war.
+
+**Was wurde geändert:** Der Bot liest die vorhandenen Panel-Nachrichten jetzt direkt so aus, wie Discord sie liefert, und erkennt dadurch auch die neuen Komponenten-Panels zuverlässig.
+
+**Wie es jetzt läuft:** Beim Neustart wird das vorhandene Panel aktualisiert statt daneben noch einmal neu gepostet.
+
 ## #227 — Coaching-Abschlüsse schließen Anfrage und Website-Stand
 
 **Ausgangslage:** Abgeschlossene Coachings konnten im Anfrage-Post weiter wie laufende oder offene Anfragen wirken. Dadurch passte auch der Stand, den die Website aus dem Bot-Spiegel bekam, nicht zuverlässig zum echten Abschluss.

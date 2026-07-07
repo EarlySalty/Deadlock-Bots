@@ -1050,6 +1050,7 @@ fn validate_lfg_panel_attachments(attachments: &[LfgPanelAttachment]) -> Result<
 fn find_existing_lfg_v2_panel(messages: &[LfgPanelMessage]) -> Option<u64> {
     messages
         .iter()
+        .rev()
         .find(|message| {
             !message.has_embeds
                 && message.has_components
@@ -3414,26 +3415,32 @@ mod tests {
                 has_components: true,
                 custom_ids: vec![LFG_CREATE_START_CUSTOM_ID.to_string()],
             },
+            LfgPanelMessage {
+                message_id: 7004,
+                has_embeds: false,
+                has_components: true,
+                custom_ids: vec![LFG_CREATE_START_CUSTOM_ID.to_string()],
+            },
         ];
         let interface = LfgPanelInterface::new(pool.clone(), port.clone(), Some(777));
 
         let output = interface.apply_panel(true).await.expect("apply");
 
         assert_eq!(output.action, "adopted_edit");
-        assert_eq!(output.message_id, Some(7003));
+        assert_eq!(output.message_id, Some(7004));
         assert_eq!(port.posts.lock().expect("posts").len(), 0);
         let edited_message_id = {
             let edits = port.edits.lock().expect("edits");
             assert_eq!(edits.len(), 1);
             edits[0].1
         };
-        assert_eq!(edited_message_id, 7003);
+        assert_eq!(edited_message_id, 7004);
         assert_eq!(
             dl_central_db::kv::get(&pool, LFG_PANEL_KV_NS, LFG_PANEL_MESSAGE_KEY)
                 .await
                 .expect("kv")
                 .as_deref(),
-            Some("7003")
+            Some("7004")
         );
     }
 
