@@ -391,6 +391,20 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "concierge_patenschaften_user",
+        "user_id",
+        "bot.concierge_patenschaften",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "concierge_patenschaften_pate",
+        "pate_id",
+        "bot.concierge_patenschaften",
+        "pate_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "onboarding_pending_verify",
         "user_id",
         "bot.onboarding_pending_verify",

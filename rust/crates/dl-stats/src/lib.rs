@@ -28,6 +28,8 @@ use axum::Router;
 use dl_webcore::{DashboardClient, SessionCodec, WebConfig};
 use sqlx::PgPool;
 
+pub use ranks::RANK_ORDER;
+
 pub const SESSION_COOKIE: &str = "dl_session";
 pub const PRE_AUTH_COOKIE: &str = "dl_pre_auth";
 pub const SESSION_TTL: i64 = 14 * 24 * 60 * 60;

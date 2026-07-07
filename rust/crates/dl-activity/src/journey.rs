@@ -66,6 +66,7 @@ pub enum JourneyEventType {
     SteckbriefPosted,
     NudgeSent,
     PateOffered,
+    PateMatched,
     ConciergeOptedOut,
     CongratsSent,
 }
@@ -96,6 +97,7 @@ impl JourneyEventType {
             Self::SteckbriefPosted => "steckbrief_posted",
             Self::NudgeSent => "nudge_sent",
             Self::PateOffered => "pate_offered",
+            Self::PateMatched => "pate_matched",
             Self::ConciergeOptedOut => "opted_out",
             Self::CongratsSent => "congrats_sent",
         }
@@ -126,6 +128,7 @@ impl JourneyEventType {
             Self::SteckbriefPosted,
             Self::NudgeSent,
             Self::PateOffered,
+            Self::PateMatched,
             Self::ConciergeOptedOut,
             Self::CongratsSent,
         ]

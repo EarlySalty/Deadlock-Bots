@@ -27,12 +27,10 @@ pub const MODAL_CUSTOM_ID: &str = "voice_feedback:modal";
 pub const RESPONSE_WINDOW_SECONDS: i64 = 72 * 3600;
 pub const FEEDBACK_BUTTON_LABEL: &str = "Feedback ausfüllen";
 pub const FEEDBACK_ALREADY_RESPONDED_TEXT: &str =
-    "Danke, dein Voice-Feedback ist schon angekommen. 👍";
+    "Du hast mir dazu schon geantwortet, alles gut. Danke dir!";
 pub const FEEDBACK_WINDOW_EXPIRED_TEXT: &str =
-    "Dieses Feedback-Fenster ist abgelaufen. Schreib uns gern direkt, falls noch etwas offen ist.";
-pub const ACK_TEXT: &str = "Danke für dein Feedback! 🙌\n\n\
-Wenn sonst irgendwas sein sollte, kannst du dich jederzeit an unser Team wenden – hier beißt keiner und jeder hilft gerne! :) \
-Falls es doch mal ein Problem geben sollte, wende dich bitte direkt an einen Community Moderator (bei kleineren Dingen), einen Moderator oder an den Owner. ❤️";
+    "Das Fenster für dieses Feedback ist leider schon zu. Wenn du mir trotzdem was mitgeben willst, schreib einfach los, ich lese alles.";
+pub const ACK_TEXT: &str = "Danke dir, ist angekommen und wird weitergegeben. Wenn dir sonst noch was auffällt, schreib mir jederzeit.";
 const FEEDBACK_REQUEST_ID_LOCK_KEY: i64 = -7_010_020_001;
 const FEEDBACK_RESPONSE_ID_LOCK_KEY: i64 = -7_010_020_002;
 
@@ -47,31 +45,16 @@ struct FeedbackRequestResponse {
 }
 
 /// DM-Text wie das Original (first/second).
-pub fn build_message(display_name: &str, request_type: &str, co_player_names: &[String]) -> String {
-    let mut names: Vec<String> = co_player_names.to_vec();
-    let extra = names.len().saturating_sub(MAX_NAMES);
-    names.truncate(MAX_NAMES);
-    let mut co_text = names.join(", ");
-    if extra > 0 {
-        co_text = format!("{co_text} (+{extra} weitere)");
-    }
-    let mut lines: Vec<String> = if request_type == "second" {
-        vec![
-            format!("Hey {display_name}, danke für deine Voice-Runden."),
-            "Kurzes Update: Was läuft gut, was nervt, was sollen wir fixen?".to_string(),
-            "Button drücken und in 1-2 Sätzen Feedback dalassen.".to_string(),
-        ]
+pub fn build_message(
+    display_name: &str,
+    request_type: &str,
+    _co_player_names: &[String],
+) -> String {
+    if request_type == "second" {
+        format!("Hey {display_name}, danke, dass du wieder in den Lanes warst. Magst du mir kurz erzählen, wie es diesmal war? Dein Eindruck hilft uns mehr als jede Statistik.")
     } else {
-        vec![
-            format!("Hey {display_name}!"),
-            "Wie waren deine ersten Runden bei uns? Wir würden mega gern wissen, wie's dir gefallen hat :)".to_string(),
-            "Hau einfach kurz auf den Button und lass uns wissen, was gut lief oder auch nicht und was vielleicht noch besser gehen könnte. Dauert nur ne Minute und wir freuen uns echt über deine Meinung ❤️".to_string(),
-        ]
-    };
-    if !co_player_names.is_empty() {
-        lines.push(format!("Mit im Call waren u.a.: {co_text}"));
+        format!("Hey {display_name}, schön, dass du bei uns in den Voice-Lanes warst. Wie waren deine ersten Runden? Wenn du zwei Minuten hast, erzähl mir kurz, was gut lief und wo es gehakt hat. Das landet direkt bei den Leuten, die den Server bauen.")
     }
-    lines.join("\n\n")
 }
 
 /// Das 4-Fragen-Modal (Labels/Placeholder wortgleich).
@@ -878,12 +861,24 @@ mod tests {
     fn texte_wie_python() {
         let names: Vec<String> = (1..=12).map(|i| format!("Spieler{i}")).collect();
         let text = build_message("Anna", "first", &names);
-        assert!(text.starts_with("Hey Anna!"));
-        assert!(text.contains("Wie waren deine ersten Runden bei uns?"));
-        assert!(text.contains("(+2 weitere)")); // 12 Namen → 10 + 2
-        let text = build_message("Ben", "second", &[]);
-        assert!(text.contains("danke für deine Voice-Runden"));
+        assert!(text.starts_with("Hey Anna, schön, dass du bei uns in den Voice-Lanes warst."));
+        assert!(text.contains("Wenn du zwei Minuten hast, erzähl mir kurz"));
         assert!(!text.contains("Mit im Call"));
+        let text = build_message("Ben", "second", &[]);
+        assert!(text.contains("Magst du mir kurz erzählen, wie es diesmal war?"));
+        assert!(!text.contains("Mit im Call"));
+        assert_eq!(
+            ACK_TEXT,
+            "Danke dir, ist angekommen und wird weitergegeben. Wenn dir sonst noch was auffällt, schreib mir jederzeit."
+        );
+        assert_eq!(
+            FEEDBACK_ALREADY_RESPONDED_TEXT,
+            "Du hast mir dazu schon geantwortet, alles gut. Danke dir!"
+        );
+        assert_eq!(
+            FEEDBACK_WINDOW_EXPIRED_TEXT,
+            "Das Fenster für dieses Feedback ist leider schon zu. Wenn du mir trotzdem was mitgeben willst, schreib einfach los, ich lese alles."
+        );
     }
 
     #[test]

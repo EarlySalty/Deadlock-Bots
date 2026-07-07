@@ -31,16 +31,7 @@ pub const NUDGE_TEST_TARGET_REQUIRED_TEXT: &str = "Bitte Ziel angeben: `!nudgese
 /// English-Only-Rolle ist ausgenommen (wie _EXEMPT_DEFAULT).
 pub const EXEMPT_ROLE_IDS: [u64; 1] = [1309741866098491479];
 
-const DM_DESCRIPTION: &str = "Du bist öfter in unseren Voice-Lanes unterwegs — sehr nice! Eine Sache fehlt dir noch: die Steam-Verknüpfung. Damit weiß der Server, wer du in Deadlock bist, und du bekommst einiges dazu:\n\n\
-<:eternus:1316457737621868574> Deine Rang-Rolle — dein In-Game-Rang, immer aktuell\n\
-<:dl_ranked:1522518271306366996> Zugang zum Ranked-Bereich — die Ranked-Lanes stehen dir offen\n\
-<:dl_casual:1522518264088100995> Bessere Mitspieler-Suche — du findest Leute auf deinem Skill-Level\n\n\
-So geht's — dauert etwa eine Minute:\n\
-1. Drück unten auf „Mit Steam anmelden“ (offizieller Steam-Login — wir sehen dein Passwort nie)\n\
-2. Gib deinen Steam-Freundescode ein\n\
-3. Nimm unsere Freundschaftsanfrage in Steam an\n\
-4. Fertig — Rang-Rolle und Ranked-Lanes schalten sich automatisch frei\n\n\
-Zur Sicherheit: Wir speichern nur deine Discord-ID, SteamID und Rang-Daten — keine Passwörter, keine Freundesliste, nichts geht an Dritte.";
+const DM_DESCRIPTION: &str = "Schön, dass du so oft in unseren Voice-Lanes bist. Ein Tipp von mir: Verknüpf einmal kurz deinen Steam-Account, dann bekommst du deinen Deadlock-Rang als Rolle, wirst in der Spielersuche richtig einsortiert und dein Live-Status in den Lanes stimmt. Dauert keine Minute, der Knopf unten bringt dich direkt hin. Und wenn du dabei Fragen hast, schreib mir einfach, ich bin per DM da.";
 
 /// Discord-Seite des Nudges (Tests mocken sie).
 #[async_trait::async_trait]
@@ -271,7 +262,7 @@ impl VoiceNudge {
             );
         }
         let embed = json!({
-            "title": "Hol dir deinen Rang auf den Server",
+            "title": "Dein Rang gehört auf den Server",
             "description": description,
             "color": 0x5865F2,
             "footer": { "text": "Kurzbefehle: /account_verknüpfen · /steam unlink · /steam setprimary" },
@@ -614,6 +605,7 @@ pub fn spawn(nudge: Arc<VoiceNudge>, dispatcher: &Dispatcher) -> tokio::task::Jo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
     use std::sync::Mutex as StdMutex;
 
     struct MockPort {
@@ -695,6 +687,28 @@ mod tests {
         (db, VoiceNudge::new(pool, port.clone()), port)
     }
 
+    fn lazy_pool() -> PgPool {
+        let options =
+            sqlx::postgres::PgConnectOptions::from_str("postgres://postgres@127.0.0.1:1/test")
+                .expect("connect options");
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .connect_lazy_with(options)
+    }
+
+    fn mock_port(url: Option<&str>) -> Arc<MockPort> {
+        Arc::new(MockPort {
+            in_voice: StdMutex::new(true),
+            dms: StdMutex::new(Vec::new()),
+            refreshes: StdMutex::new(Vec::new()),
+            missing_messages: StdMutex::new(HashSet::new()),
+            logs: StdMutex::new(Vec::new()),
+            url: url.map(str::to_string),
+            roles: StdMutex::new(Vec::new()),
+            fail_dm: StdMutex::new(false),
+        })
+    }
+
     #[tokio::test]
     async fn erster_tag_merkt_nur_vor() {
         let (_dir, nudge, port) = setup(Some("https://s.test/login")).await;
@@ -739,6 +753,17 @@ mod tests {
         assert_eq!(nudge.kv(DONE_NS, 100).await.as_deref(), Some("sent"));
         assert!(nudge.has_active_nudge(100).await);
         assert!(!port.logs.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn nudge_text_ist_concierge_stimme() {
+        let nudge = VoiceNudge::new(lazy_pool(), mock_port(Some("https://s.test/login")));
+        let (embed, _components) = nudge.build_dm_payload(100).await;
+        assert_eq!(embed["title"], "Dein Rang gehört auf den Server");
+        assert_eq!(
+            embed["description"],
+            "Schön, dass du so oft in unseren Voice-Lanes bist. Ein Tipp von mir: Verknüpf einmal kurz deinen Steam-Account, dann bekommst du deinen Deadlock-Rang als Rolle, wirst in der Spielersuche richtig einsortiert und dein Live-Status in den Lanes stimmt. Dauert keine Minute, der Knopf unten bringt dich direkt hin. Und wenn du dabei Fragen hast, schreib mir einfach, ich bin per DM da."
+        );
     }
 
     #[tokio::test]
