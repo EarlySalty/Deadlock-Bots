@@ -712,18 +712,22 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 channel_allowlist = channel_allowlist.as_ref().map(|ids| ids.len()).unwrap_or(0),
                 "Brain-Command registriert"
             );
-            Some(Arc::new(modglue::BrainHandler {
-                adapter: adapter.clone(),
-                config: dl_brain::BrainConfig {
-                    max_question_len,
-                    cooldown_secs,
-                },
-                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                retriever: Arc::new(modglue::BrainRetrieverGlue {
+            let config = Arc::new(dl_brain::BrainConfig {
+                max_question_len,
+                cooldown_secs,
+            });
+            let retriever: Arc<dyn dl_brain::BrainRetriever> =
+                Arc::new(modglue::BrainRetrieverGlue {
                     bin: brain_bin_path,
                     db_path: Some(brain_db_path),
-                }),
-                answerer: Arc::new(modglue::BrainAiGlue { client }),
+                });
+            let answerer: Arc<dyn dl_brain::AiAnswerer> = Arc::new(modglue::BrainAiGlue { client });
+            Some(Arc::new(modglue::BrainHandler {
+                adapter: adapter.clone(),
+                config,
+                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                retriever,
+                answerer,
                 channel_allowlist,
             }))
         }
@@ -781,6 +785,14 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         central_pool.clone(),
         Arc::new(modglue::ConciergeGlue {
             adapter: adapter.clone(),
+            brain: brain_handler
+                .as_ref()
+                .map(|handler| modglue::ConciergeBrain {
+                    config: handler.config.clone(),
+                    cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                    retriever: handler.retriever.clone(),
+                    answerer: handler.answerer.clone(),
+                }),
         }),
         concierge_ai,
         concierge_config.clone(),

@@ -90,11 +90,13 @@ pub const PATE_ALREADY_CLAIMED_TEXT: &str =
 pub const PATE_LOAD_LIMIT_TEXT: &str = "Du begleitest gerade schon drei Neulinge, das reicht erstmal. Lass diesmal jemand anderem den Vortritt und danke, dass du so aktiv bist.";
 pub const PATE_REQUEST_FALLBACK_TEXT: &str = "Klingt, als würde dir ein fester Ansprechpartner guttun. Soll ich einen unserer Paten für dich suchen?";
 pub const PATE_REQUEST_RULE: &str = "Wenn der User sich einen Paten, Mentor oder eine feste Bezugsperson wünscht, setze \"pate_request\": true. Setze es nicht, wenn er nur wissen will, was ein Pate ist.";
+pub const ANTI_INVENT_RULE: &str = "Nenne nur Befehle, Kanäle, Rollen und Features, die im Wissenskontext oder in deinen Anweisungen vorkommen. Wenn du etwas nicht sicher weißt, sag das ehrlich und verweise auf <#1426220702054355077>. Erfinde niemals Befehle oder Abläufe.";
 pub const STEAM_NUDGE_MEMORY_MARKER: &str =
     "[Ich habe dir eine DM mit dem Tipp zur Steam-Verknüpfung geschickt.]";
 pub const VOICE_FEEDBACK_MEMORY_MARKER: &str =
     "[Ich habe dich per DM nach Feedback zu deinen Voice-Runden gefragt.]";
 pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch.";
+pub const GAP_GUIDANCE: &str = "Zu dieser Frage gibt es keinen belastbaren Wissenskontext. Erfinde keine Server-Fakten, Befehle, Kanäle oder Features. Wenn die Frage solche Fakten braucht, antworte sinngemäß: Da will ich dir nichts Falsches erzählen, stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch. Gesprächsfragen, persönliche Fragen und Smalltalk beantwortest du ganz normal.";
 pub const PLAY_TEXT: &str = "Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also was und wie du spielen willst. Danach joinst du den Deadlock Router, der packt dich automatisch in eine passende Lane oder macht dir eine eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)";
 pub const STECKBRIEF_MODAL_TITLE: &str = "Deine Vorstellung";
 pub const STECKBRIEF_MODAL_LABEL: &str = "Dein Text";
@@ -688,6 +690,7 @@ pub trait ConciergePort: Send + Sync {
         content: &str,
         allowed_role_id: Option<u64>,
     );
+    async fn brain_answer(&self, question: &str) -> Option<String>;
 }
 
 #[derive(Clone)]
@@ -1506,6 +1509,10 @@ impl Concierge {
             return false;
         };
         let trimmed = content.trim();
+        let trimmed = trimmed
+            .strip_prefix("!brain")
+            .map(str::trim_start)
+            .unwrap_or(trimmed);
         if trimmed.is_empty() {
             return true;
         }
@@ -1657,16 +1664,22 @@ impl Concierge {
                         )
                         .await;
                 }
-                _ => {
-                    return LlmAnswer {
-                        reply: Some(KNOWLEDGE_GAP_TEXT.to_string()),
-                        ..LlmAnswer::default()
-                    };
-                }
+                _ => {}
             }
         }
         let _ = guild_id;
-        self.llm_answer(user_id, None).await
+        let extra_system = self
+            .port
+            .brain_answer(question)
+            .await
+            .filter(|answer| !answer.trim().is_empty())
+            .map(|answer| {
+                format!(
+                    "Spielwissen aus dem Deadlock-Brain (nutze es als Faktenbasis, antworte in deinem eigenen Ton):\n{answer}"
+                )
+            })
+            .unwrap_or_else(|| GAP_GUIDANCE.to_string());
+        self.llm_answer(user_id, Some(extra_system)).await
     }
 
     async fn llm_answer(&self, user_id: u64, extra_system: Option<String>) -> LlmAnswer {
@@ -2236,7 +2249,7 @@ fn parse_llm_answer(raw: &str) -> LlmAnswer {
 
 fn llm_system(extra: Option<&str>) -> String {
     let schema = format!(
-        "{SYSTEM_PROMPT}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
+        "{SYSTEM_PROMPT}\n{ANTI_INVENT_RULE}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
     );
     match extra {
         Some(extra) => format!("{schema}\n\n{extra}"),
@@ -2619,6 +2632,8 @@ mod tests {
     #[derive(Default)]
     struct MockConciergePort {
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
+        brain_answer: std::sync::Mutex<Option<String>>,
+        brain_questions: std::sync::Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -2673,6 +2688,14 @@ mod tests {
             _allowed_role_id: Option<u64>,
         ) {
         }
+
+        async fn brain_answer(&self, question: &str) -> Option<String> {
+            self.brain_questions
+                .lock()
+                .unwrap()
+                .push(question.to_string());
+            self.brain_answer.lock().unwrap().clone()
+        }
     }
 
     fn lazy_pool() -> PgPool {
@@ -2689,6 +2712,24 @@ mod tests {
         body["components"][0]["components"][0]["content"]
             .as_str()
             .unwrap()
+    }
+
+    fn mock_port(brain_answer: Option<&str>) -> Arc<MockConciergePort> {
+        Arc::new(MockConciergePort {
+            sent_channel_v2: std::sync::Mutex::new(Vec::new()),
+            brain_answer: std::sync::Mutex::new(brain_answer.map(str::to_string)),
+            brain_questions: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn fast_knowledge_config() -> ConciergeConfig {
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = "http://127.0.0.1:1".to_string();
+        config
+    }
+
+    fn first_system_prompt(provider: &dl_ai::MockChatProvider) -> String {
+        provider.requests()[0].0[0].content.clone()
     }
 
     #[tokio::test]
@@ -2887,6 +2928,82 @@ mod tests {
         );
         assert!(parsed.pate_request);
         assert_eq!(parsed.reply, None);
+    }
+
+    #[tokio::test]
+    async fn wissensfrage_mit_brain_answer_nutzt_brain_systemprompt_und_llm_reply() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"reply":"Brain sagt Abrams","intent":"learn","opted_out":false,"forget":false}"#,
+        );
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let port = mock_port(Some("Abrams ist ein Deadlock-Held."));
+        let concierge =
+            Concierge::new(lazy_pool(), port.clone(), Some(ai), fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Was ist Abrams?")
+                .await
+        );
+
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            "Brain sagt Abrams"
+        );
+        let system = first_system_prompt(&provider);
+        assert!(system.contains("Spielwissen aus dem Deadlock-Brain"));
+        assert!(system.contains("Abrams ist ein Deadlock-Held."));
+    }
+
+    #[tokio::test]
+    async fn brain_none_nutzt_gap_guidance_und_llm_reply() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"reply":"Normale Antwort","intent":"casual","opted_out":false,"forget":false}"#,
+        );
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let port = mock_port(None);
+        let concierge =
+            Concierge::new(lazy_pool(), port.clone(), Some(ai), fast_knowledge_config());
+
+        assert!(concierge.handle_user_message(10, None, 42, "Hallo").await);
+
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            "Normale Antwort"
+        );
+        assert!(first_system_prompt(&provider).contains("keinen belastbaren Wissenskontext"));
+    }
+
+    #[tokio::test]
+    async fn brain_prefix_dm_wird_als_normale_frage_verarbeitet() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"reply":"Abrams Antwort","intent":"learn","opted_out":false,"forget":false}"#,
+        );
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let port = mock_port(Some("Abrams Brain-Kontext"));
+        let concierge =
+            Concierge::new(lazy_pool(), port.clone(), Some(ai), fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "!brain wer ist Abrams?")
+                .await
+        );
+
+        assert_eq!(
+            port.brain_questions.lock().unwrap().as_slice(),
+            ["wer ist Abrams?"]
+        );
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            "Abrams Antwort"
+        );
+        assert!(first_system_prompt(&provider).contains("Spielwissen aus dem Deadlock-Brain"));
+    }
+
+    #[test]
+    fn llm_system_enthaelt_anti_invent_rule() {
+        assert!(llm_system(None).contains("Erfinde niemals Befehle oder Abläufe."));
     }
 
     #[test]

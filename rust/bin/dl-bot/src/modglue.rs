@@ -273,7 +273,7 @@ impl dl_brain::AiAnswerer for BrainAiGlue {
 
 pub struct BrainHandler {
     pub adapter: Arc<DiscordAdapter>,
-    pub config: dl_brain::BrainConfig,
+    pub config: Arc<dl_brain::BrainConfig>,
     pub cooldowns: Arc<dl_brain::BrainCooldowns>,
     pub retriever: Arc<dyn dl_brain::BrainRetriever>,
     pub answerer: Arc<dyn dl_brain::AiAnswerer>,
@@ -292,8 +292,8 @@ impl BrainHandler {
         dl_brain::handle_brain_query(
             question,
             user_id,
-            &self.config,
-            &self.cooldowns,
+            self.config.as_ref(),
+            self.cooldowns.as_ref(),
             self.retriever.as_ref(),
             self.answerer.as_ref(),
         )
@@ -394,6 +394,9 @@ impl BrainHandler {
     }
 
     pub async fn handle_message_event(&self, event: &dl_discord::MessageEvent) {
+        if event.guild_id.is_none() {
+            return;
+        }
         if !self.channel_allowed(event.channel_id) {
             return;
         }
@@ -2085,6 +2088,14 @@ impl dl_voice::feedback::FeedbackPort for VoiceFeedbackGlue {
 
 pub struct ConciergeGlue {
     pub adapter: Arc<DiscordAdapter>,
+    pub brain: Option<ConciergeBrain>,
+}
+
+pub struct ConciergeBrain {
+    pub config: Arc<dl_brain::BrainConfig>,
+    pub cooldowns: Arc<dl_brain::BrainCooldowns>,
+    pub retriever: Arc<dyn dl_brain::BrainRetriever>,
+    pub answerer: Arc<dyn dl_brain::AiAnswerer>,
 }
 
 #[async_trait::async_trait]
@@ -2256,6 +2267,27 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         );
         if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
             tracing::warn!(%err, channel_id, message_id, "Concierge-Reply fehlgeschlagen");
+        }
+    }
+
+    async fn brain_answer(&self, question: &str) -> Option<String> {
+        let brain = self.brain.as_ref()?;
+        let config = dl_brain::BrainConfig {
+            cooldown_secs: 0,
+            ..*brain.config
+        };
+        match dl_brain::handle_brain_query(
+            question,
+            0,
+            &config,
+            brain.cooldowns.as_ref(),
+            brain.retriever.as_ref(),
+            brain.answerer.as_ref(),
+        )
+        .await
+        {
+            dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => Some(answer),
+            _ => None,
         }
     }
 }
@@ -3140,6 +3172,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::path::Path;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
@@ -3180,6 +3213,61 @@ mod tests {
 
         async fn unban_case(&self, _case_id: &str, _mod_id: u64) -> dl_moderation::ReviewOutcome {
             dl_moderation::ReviewOutcome::Done("unban".to_string())
+        }
+    }
+
+    struct CountingBrainRetriever {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl dl_brain::BrainRetriever for CountingBrainRetriever {
+        async fn ask_context(
+            &self,
+            _frage: &str,
+        ) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(dl_brain::BrainContext {
+                intent: "answer".to_string(),
+                prompt: "prompt".to_string(),
+                sources: Vec::new(),
+            })
+        }
+    }
+
+    struct StaticBrainAnswerer(Option<&'static str>);
+
+    #[async_trait::async_trait]
+    impl dl_brain::AiAnswerer for StaticBrainAnswerer {
+        async fn answer(&self, _prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
+            Ok(self.0.map(str::to_string))
+        }
+    }
+
+    fn test_message_event(guild_id: Option<u64>, content: &str) -> dl_discord::MessageEvent {
+        dl_discord::MessageEvent {
+            guild_id,
+            channel_id: 1,
+            message_id: 2,
+            author_id: 3,
+            author_display_name: "user".to_string(),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_can_manage_guild: false,
+            author_is_staff: false,
+            author_staff_status_known: true,
+            content: content.to_string(),
+            message_created_at: 0,
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
+            author_created_at: 0,
+            author_joined_at: None,
         }
     }
 
@@ -3236,6 +3324,62 @@ mod tests {
         assert!(styled_engine.contains(BRAIN_BUILD_OVERRIDE));
         assert!(!styled_ask.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
         assert!(!styled_engine.contains(BRAIN_DIRECT_ANSWER_OVERRIDE));
+    }
+
+    #[tokio::test]
+    async fn brain_handler_ignoriert_dms() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler = BrainHandler {
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            config: Arc::new(dl_brain::BrainConfig {
+                max_question_len: 300,
+                cooldown_secs: 20,
+            }),
+            cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+            retriever: Arc::new(CountingBrainRetriever {
+                calls: calls.clone(),
+            }),
+            answerer: Arc::new(StaticBrainAnswerer(Some("Antwort"))),
+            channel_allowlist: None,
+        };
+
+        handler
+            .handle_message_event(&test_message_event(None, "!brain Abrams"))
+            .await;
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn concierge_brain_answer_nutzt_eigene_cooldowns_und_nur_answers() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let glue = ConciergeGlue {
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            brain: Some(ConciergeBrain {
+                config: Arc::new(dl_brain::BrainConfig {
+                    max_question_len: 300,
+                    cooldown_secs: 999,
+                }),
+                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                retriever: Arc::new(CountingBrainRetriever {
+                    calls: calls.clone(),
+                }),
+                answerer: Arc::new(StaticBrainAnswerer(Some("Antwort"))),
+            }),
+        };
+
+        let first = <ConciergeGlue as dl_community::concierge::ConciergePort>::brain_answer(
+            &glue, "Abrams",
+        )
+        .await;
+        let second = <ConciergeGlue as dl_community::concierge::ConciergePort>::brain_answer(
+            &glue, "Abrams",
+        )
+        .await;
+
+        assert_eq!(first.as_deref(), Some("Antwort"));
+        assert_eq!(second.as_deref(), Some("Antwort"));
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
     }
 
     #[test]
