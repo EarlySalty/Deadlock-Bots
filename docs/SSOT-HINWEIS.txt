@@ -1,0 +1,11 @@
+SSOT-HINWEIS (2026-07-07)
+
+Das Wissens-SSOT ist jetzt das Repo Deadlock-Docs (github.com/EarlySalty/Deadlock-Docs).
+
+- docs/support-kb/ ist vollständig dorthin umgezogen (public/discord-server/, als Markdown) und hier gelöscht.
+- Die Top-Level-*.md hier bleiben NUR als Laufzeit-Grounding des FAQ-Bots (load_docs) bis zur P2-Umstellung.
+  Änderungen zuerst in Deadlock-Docs pflegen, dann hier spiegeln.
+- In Deadlock-Docs sind die "Für Devs"-Sektionen nach internal/ abgespalten (Redaction); die Kopien hier
+  enthalten sie noch, bis das Grounding in P2 auf Deadlock-Docs umgestellt ist.
+
+(.txt statt .md, damit load_docs diese Notiz nicht als Bot-Wissen lädt.)
