@@ -1,3 +1,11 @@
+## #230 — Voice-Panel nutzt wieder das Lane-Erstellen-Bild
+
+**Ausgangslage:** Das neu erzeugte Voice-Panel zeigte im Bereich „Lane erstellen" wieder das Deadlock-Router-Bild, obwohl dort der Lane-Erstellen-Divider hingehört.
+
+**Was wurde geändert:** Der Panel-Aufbau verwendet für den ersten Bereich wieder das Lane-Erstellen-Bild und lädt es zusammen mit dem Lane-Verwalten-Bild aus.
+
+**Wie es jetzt läuft:** Neue oder aktualisierte Voice-Panels zeigen oben „Lane erstellen" und darunter „Lane verwalten" mit den passenden Bildern.
+
 ## #229 — Voice-Lanes bleiben beim Namen ruhig
 
 **Ausgangslage:** Chill-Lanes konnten nach Beitritten, Wechseln oder Spielstatus-Updates wieder automatisch auf generische Namen wie „Lane 1" springen.
