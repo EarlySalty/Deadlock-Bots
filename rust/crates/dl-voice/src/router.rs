@@ -21,7 +21,8 @@ use std::{
 
 use dl_central_db::kv;
 use dl_discord::{
-    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter, VoiceEvent,
+    BridgeAttachment, BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler,
+    InteractionRouter, VoiceEvent,
 };
 use serde::Serialize;
 use serde_json::{json, Map, Value};
@@ -418,6 +419,20 @@ pub fn voice_guide_detail_text() -> String {
 
 pub fn voice_guide_detail_reply() -> BridgeReply {
     let text = voice_guide_detail_text();
+    let banner_path = router_repo_root()
+        .join(ROUTER_BANNER_DIR)
+        .join(ROUTER_HERO_BANNER_FILENAME);
+    let banner = std::fs::read(banner_path)
+        .ok()
+        .map(|data| BridgeAttachment {
+            filename: ROUTER_HERO_BANNER_FILENAME.to_string(),
+            data,
+        });
+    let mut components = Vec::new();
+    if banner.is_some() {
+        components.push(router_media_gallery(ROUTER_HERO_BANNER_FILENAME));
+    }
+    components.push(router_text_display(text.clone()));
     let fallback = BridgeReply {
         content: Some(text.clone()),
         ephemeral: true,
@@ -425,10 +440,11 @@ pub fn voice_guide_detail_reply() -> BridgeReply {
         ..BridgeReply::default()
     };
     BridgeReply {
-        components: Some(json!([router_container(vec![router_text_display(text)])])),
+        components: Some(json!([router_container(components)])),
         message_flags: Some(64 | ROUTER_COMPONENTS_V2_FLAG),
         allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
         fallback: Some(Box::new(fallback)),
+        attachments: banner.into_iter().collect(),
         ..BridgeReply::default()
     }
 }
@@ -1268,6 +1284,31 @@ mod tests {
                 "tv_unban",
             ]
         );
+    }
+
+    #[test]
+    fn voice_guide_detail_reply_ist_v2_mit_banner() {
+        let reply = voice_guide_detail_reply();
+        assert_eq!(reply.message_flags, Some(64 | ROUTER_COMPONENTS_V2_FLAG));
+        assert_eq!(reply.attachments.len(), 1);
+        assert_eq!(reply.attachments[0].filename, ROUTER_HERO_BANNER_FILENAME);
+        let container = &reply
+            .components
+            .as_ref()
+            .and_then(serde_json::Value::as_array)
+            .expect("components")[0];
+        let children = container["components"]
+            .as_array()
+            .expect("container children");
+        assert_eq!(
+            children[0]["items"][0]["media"]["url"],
+            format!("attachment://{ROUTER_HERO_BANNER_FILENAME}")
+        );
+        assert!(children
+            .iter()
+            .filter_map(|component| component["content"].as_str())
+            .any(|content| content.contains(ROUTER_PANEL_GUIDE_BUTTONS)));
+        assert!(reply.fallback.is_some());
     }
 
     #[derive(Default)]

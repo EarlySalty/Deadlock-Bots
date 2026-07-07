@@ -1,3 +1,11 @@
+## #225 — Voice-Panel zeigt Anleitung und Rang-Gate sauber
+
+**Ausgangslage:** Im Sprachkanal-Verwalten-Kanal lagen altes und neues Panel nebeneinander. Das übersichtlichere Panel hatte die bessere Button-Reihenfolge, aber das neue Rang-Gate fehlte dort, und die Anleitung war als eigene Nachricht zu präsent.
+
+**Was wurde geändert:** Das bestehende Panel bekommt oben neben den Voreinstellungen eine ausführliche Anleitung per Knopf und unten beim Verwalten den Rang-Gate-Knopf. Die Anleitung öffnet sich im neuen goldenen Komponenten-Look mit Bild und erklärt die Voice-Lanes und Buttons im Detail.
+
+**Wie es jetzt läuft:** Der Kanal kann wieder auf das kompakte Panel reduziert werden: Anleitung nur bei Bedarf, Rang-Gate direkt im Verwalten-Bereich.
+
 ## #224 — Der Bot antwortet dir jetzt richtig per DM
 
 **Ausgangslage:** Wer dem Bot eine DM geschrieben hat, bekam oft nur ein Standard-Menü mit Buttons zurück. Für echte Fragen musste man in den Server ausweichen.
