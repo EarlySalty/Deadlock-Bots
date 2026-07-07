@@ -566,6 +566,9 @@ impl FaqChat {
         author_id: u64,
         content: &str,
     ) {
+        if guild_id == 0 {
+            return;
+        }
         if self.port.channel_category(guild_id, channel_id).await
             != Some(TICKET_AUTO_HELP_CATEGORY_ID)
         {
@@ -1187,5 +1190,25 @@ mod tests {
         assert_eq!(sent[0].0, 999);
         assert!(sent[0].1.contains("<#222>"));
         assert!(sent[0].1.contains("Ticket-Antwort"));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn ticket_auto_help_ignoriert_events_ohne_guild() {
+        let db = db_with_kv().await;
+        let port = ticket_port();
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+
+        faq.handle_ticket_message(0, 222, 111111111111111111, "Steam geht nicht")
+            .await;
+        handle.abort();
+
+        assert!(port.sent.lock().unwrap().is_empty());
     }
 }
