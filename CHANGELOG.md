@@ -1,3 +1,11 @@
+## #220 — Datenschutz-Hinweis im Regelwerk per Knopf
+
+**Ausgangslage:** Wie der Bot Nachrichten per KI prüft, was dabei gespeichert wird und welche Rechte du hast, stand bisher nirgends kompakt im Server.
+
+**Was wurde geändert:** Das Regelwerk hat einen neuen Knopf „🔒 Datenschutz". Ein Tipp darauf zeigt dir – nur für dich sichtbar – kurz und klar: KI-Moderation, Speicherung samt 90-Tage-Löschung und deine Rechte inklusive `/datenschutz` und Kontakt.
+
+**Wie es jetzt läuft:** Der Hinweis ist jederzeit im Regelwerk abrufbar, ohne den Chat vollzumüllen.
+
 ## #219 — Moderationsdaten werden nach 90 Tagen gelöscht
 
 **Ausgangslage:** Bei einem Regelverstoß speichert der Bot den gemeldeten Nachrichtentext zur Nachvollziehbarkeit. Bisher blieb dieser Inhalt unbegrenzt liegen.
