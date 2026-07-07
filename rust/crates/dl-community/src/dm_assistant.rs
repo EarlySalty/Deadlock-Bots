@@ -145,7 +145,7 @@ struct ParsedAi {
 /// Prüft das Rate-Limit (Port von `_check_cooldown`): gibt eine Hinweis-Nachricht
 /// zurück, wenn der User warten muss; sonst `None` und der Zeitstempel wird
 /// vermerkt.
-fn check_cooldown(stamps: &mut Vec<f64>, now: f64) -> Option<String> {
+pub(crate) fn check_cooldown(stamps: &mut Vec<f64>, now: f64) -> Option<String> {
     stamps.retain(|&t| now - t < WINDOW_SECONDS);
     if let Some(&last) = stamps.last() {
         if now - last < MIN_INTERVAL_SECONDS {

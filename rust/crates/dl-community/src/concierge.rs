@@ -3,9 +3,9 @@
 //! Der Kern bleibt port-basiert: Discord-I/O, LLM und HTTP-Wissen sind von der
 //! Entscheidungslogik getrennt, damit die Slice-Vertraege ohne Gateway laufen.
 
-use std::collections::HashSet;
-use std::sync::Arc;
-use std::time::Duration as StdDuration;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration as StdDuration, Instant};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
@@ -19,6 +19,7 @@ use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Row};
 
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
+use crate::dm_assistant::check_cooldown;
 
 pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
@@ -78,6 +79,7 @@ pub const CONGRATS_VOICE_TEXT: &str = "Na also, erste Lane. Viel Spaß da drin, 
 pub const OPTOUT_TEXT: &str =
     "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal brauchst, schreib mir einfach, ich antworte immer.";
 pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt hatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir einfach.";
+pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner letzten Nachricht. Gib mir einen kleinen Moment, dann bin ich wieder ganz für dich da.";
 pub const PATE_PING_TEMPLATE: &str =
     "Neuer Neuling sucht einen Paten: {user_mention}\n{kurz_destillat}\nWer übernimmt? Kurz hier melden, dann stelle ich euch vor.";
 pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch.";
@@ -174,10 +176,14 @@ impl ConciergeConfig {
         }
     }
 
+    /// Open-Modus: leere Allowlist erlaubt alle User; gesetzte Allowlist bleibt Testmodus.
     fn user_allowed(&self, user_id: u64) -> bool {
         self.enabled
-            && !self.test_user_allowlist.is_empty()
-            && self.test_user_allowlist.contains(&user_id)
+            && (self.test_user_allowlist.is_empty() || self.test_user_allowlist.contains(&user_id))
+    }
+
+    pub fn open_for_all(&self) -> bool {
+        self.enabled && self.test_user_allowlist.is_empty()
     }
 }
 
@@ -824,10 +830,10 @@ impl ConciergeStore {
     pub async fn mark_first_message(
         &self,
         user_id: u64,
-        guild_id: u64,
+        _guild_id: u64,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<()> {
-        self.ensure_profile(user_id, guild_id, now).await?;
+        // Nur vorhandene Profile markieren; Open-Modus soll nicht jeden Guild-Post speichern.
         let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
         sqlx::query(
             "UPDATE bot.concierge_profiles
@@ -844,10 +850,10 @@ impl ConciergeStore {
     pub async fn mark_first_voice(
         &self,
         user_id: u64,
-        guild_id: u64,
+        _guild_id: u64,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<()> {
-        self.ensure_profile(user_id, guild_id, now).await?;
+        // Nur vorhandene Profile markieren; Open-Modus soll nicht jeden Voice-Join speichern.
         let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
         sqlx::query(
             "UPDATE bot.concierge_profiles
@@ -1145,6 +1151,8 @@ pub struct Concierge {
     port: Arc<dyn ConciergePort>,
     ai: Option<Arc<dyn ChatProvider>>,
     config: ConciergeConfig,
+    cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
+    start: Instant,
 }
 
 impl Concierge {
@@ -1159,6 +1167,8 @@ impl Concierge {
             port,
             ai,
             config,
+            cooldowns: Mutex::new(HashMap::new()),
+            start: Instant::now(),
         })
     }
 
@@ -1341,6 +1351,21 @@ impl Concierge {
         let intent = classify_intent(trimmed);
         if let Err(err) = self.store.set_intent_if_missing(user_id, intent, now).await {
             tracing::warn!(%err, user_id, "Concierge: Intent konnte nicht gespeichert werden");
+        }
+        let cooldown_hit = {
+            let mut map = self.cooldowns.lock().expect("cooldowns");
+            check_cooldown(
+                map.entry(user_id).or_default(),
+                self.start.elapsed().as_secs_f64(),
+            )
+            .is_some()
+        };
+        if cooldown_hit {
+            let _ = self
+                .port
+                .send_channel_v2(channel_id, v2_body(COOLDOWN_TEXT, Vec::new()))
+                .await;
+            return true;
         }
         let answer = self
             .answer_with_knowledge_and_llm(user_id, effective_guild_id, trimmed)
@@ -2166,6 +2191,131 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+    use std::str::FromStr;
+
+    fn test_config(enabled: bool, allowlist: &[u64]) -> ConciergeConfig {
+        let allowlist = allowlist
+            .iter()
+            .map(u64::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        ConciergeConfig::from_env(|key| match key {
+            "DL_CONCIERGE_ENABLED" => Some(if enabled { "1" } else { "0" }.to_string()),
+            "DL_CONCIERGE_TEST_USER_ALLOWLIST" => Some(allowlist.clone()),
+            _ => None,
+        })
+    }
+
+    #[test]
+    fn user_allowed_open_modus_und_allowlist() {
+        let open = test_config(true, &[]);
+        assert!(open.open_for_all());
+        assert!(open.user_allowed(1));
+        assert!(open.user_allowed(999));
+
+        let allowlist = test_config(true, &[42]);
+        assert!(!allowlist.open_for_all());
+        assert!(allowlist.user_allowed(42));
+        assert!(!allowlist.user_allowed(7));
+
+        let disabled = test_config(false, &[]);
+        assert!(!disabled.open_for_all());
+        assert!(!disabled.user_allowed(42));
+    }
+
+    #[derive(Default)]
+    struct MockConciergePort {
+        sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ConciergePort for MockConciergePort {
+        async fn send_dm_v2(
+            &self,
+            _user_id: u64,
+            _body: Map<String, Value>,
+        ) -> ConciergeDmDelivery {
+            ConciergeDmDelivery::Sent {
+                channel_id: Some(1),
+                message_id: 1,
+            }
+        }
+
+        async fn create_private_channel(
+            &self,
+            _guild_id: u64,
+            _user_id: u64,
+            _category_id: u64,
+            _name: &str,
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
+
+        async fn send_channel_v2(
+            &self,
+            _channel_id: u64,
+            body: Map<String, Value>,
+        ) -> Result<u64, String> {
+            let mut sent = self.sent_channel_v2.lock().unwrap();
+            sent.push(body);
+            Ok(sent.len() as u64)
+        }
+
+        async fn send_channel_text(&self, _channel_id: u64, _content: &str) -> Result<u64, String> {
+            Ok(1)
+        }
+
+        async fn add_reaction(&self, _channel_id: u64, _message_id: u64, _emoji: &str) {}
+
+        async fn reply_to_message(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+            _content: &str,
+            _allowed_role_id: Option<u64>,
+        ) {
+        }
+    }
+
+    fn lazy_pool() -> PgPool {
+        let options =
+            sqlx::postgres::PgConnectOptions::from_str("postgres://postgres@127.0.0.1:1/test")
+                .unwrap();
+        sqlx::postgres::PgPoolOptions::new()
+            .max_connections(1)
+            .acquire_timeout(std::time::Duration::from_millis(10))
+            .connect_lazy_with(options)
+    }
+
+    fn sent_v2_content(body: &Map<String, Value>) -> &str {
+        body["components"][0]["components"][0]["content"]
+            .as_str()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn handle_user_message_cooldown_blockt_llm_aber_nicht_stopp() {
+        let provider = dl_ai::MockChatProvider::single(
+            r#"{"reply":"LLM","intent":"learn","opted_out":false,"forget":false}"#,
+        );
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), test_config(true, &[]));
+
+        assert!(concierge.handle_user_message(10, None, 42, "Hallo").await);
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Noch eine Frage")
+                .await
+        );
+        assert!(concierge.handle_user_message(10, None, 42, "stopp").await);
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent_v2_content(&sent[0]), "LLM");
+        assert_eq!(sent_v2_content(&sent[1]), COOLDOWN_TEXT);
+        assert_eq!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
+        assert_eq!(provider.requests().len(), 1);
+    }
 
     fn profile_at(t0: DateTime<Utc>) -> ConciergeProfile {
         ConciergeProfile {
@@ -2365,5 +2515,14 @@ mod tests {
             .claim_once(CONCIERGE_FALLBACK_CLAIM_NS, "1:42", "claimed")
             .await
             .unwrap());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn mark_first_message_ohne_profil_legt_keins_an() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let store = ConciergeStore::new(db.pool().clone());
+        store.mark_first_message(4242, 1, Utc::now()).await.unwrap();
+        assert!(store.profile(4242).await.unwrap().is_none());
     }
 }
