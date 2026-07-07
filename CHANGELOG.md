@@ -1,3 +1,11 @@
+## #222 — Brain-Ingestion-Migration ist im Hauptzweig
+
+**Ausgangslage:** Die zentrale Brain-Postgres-Migration fuer die fehlenden Ingestion-Tabellen war produktiv angewandt, lag aber nur auf einem separaten Branch.
+
+**Was wurde geändert:** Der Hauptzweig enthaelt jetzt die idempotente Migration fuer die ergaenzenden `brain.*`-Tabellen.
+
+**Wie es jetzt läuft:** Neue Deploys haben die Schema-Provenance im Repo; auf bereits migrierten Systemen laeuft die Migration ohne neue Datenbewegung durch.
+
 ## #221 — Voice-Umbau: Alle Lanes in einer Kategorie, Ranked offen
 
 **Ausgangslage:** Ranked-Voice hatte eine eigene Kategorie mit Dauer-Schloss für alle Unverifizierten — das hat viele vom Joinen abgehalten, und drei getrennte Voice-Kategorien machten es unübersichtlich.
