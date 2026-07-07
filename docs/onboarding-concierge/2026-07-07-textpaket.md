@@ -201,6 +201,54 @@ Vergessen-Bestätigung („vergiss das" oder sinngemäß):
 `{kurz_destillat}` = 1 bis 2 Zeilen aus dem Profil (Intent, Rang falls
 verknüpft, Spielzeiten falls bekannt). Keine Gesprächszitate.
 
+## 9b. Ergänzungstexte (Nachtrag nach Review, final)
+
+Wissens-Lücke und LLM-Ausfall (eine Antwort für beides):
+
+> Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in
+> <#1426220702054355077>, da antwortet dir ein echter Mensch.
+
+„Ich will direkt spielen"-Button:
+
+> Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also
+> was und wie du spielen willst. Danach joinst du den Deadlock Router,
+> der packt dich automatisch in eine passende Lane oder macht dir eine
+> eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)
+
+Steckbrief-Modal: Titel `Deine Vorstellung`, Feld-Label `Dein Text`,
+Platzhalter im Feld `Schreib es einfach so, wie du redest.`
+
+Leere Modal-Eingabe:
+
+> Da ist nichts angekommen. Drück nochmal auf Anpassen und probier es
+> erneut.
+
+Entwurf verloren gegangen (Posten ohne gespeicherten Entwurf):
+
+> Ich finde deinen Entwurf gerade nicht mehr. Klick nochmal auf Ja,
+> schreib was vor, dann machen wir fix einen neuen.
+
+Bestätigung nach erfolgreichem Post (`{channel}` = Ziel-Kanal-Mention):
+
+> Ist draußen, deine Vorstellung steht in {channel}. Schau gleich mal
+> rein, falls wer antwortet.
+
+Steckbrief-Fallback, wenn kein Entwurf erzeugt werden kann (statischer
+Text in Ich-Form, User editiert eh):
+
+> Hey, bin neu hier und hab Lust auf ein paar Runden Deadlock. Wer nimmt
+> mich mit oder zeigt mir alles?
+
+Paten-Ping-Destillat, wenn noch nichts bekannt ist (intern):
+
+> Noch nichts Näheres bekannt, am besten einfach direkt anschreiben.
+
+**Formregel für alle Texte im Code:** Die Zeilenumbrüche in diesem
+Dokument sind Doku-Wrapping. Im Code gilt: Innerhalb eines Absatzes
+werden Zeilen mit Leerzeichen verbunden, nur Absatz-Trenner bleiben als
+`\n\n`. In der Tour bleibt der einzelne `\n` zwischen Kanal-Mention und
+zugehöriger Beschreibung erhalten.
+
 ## 10. System-Prompt Concierge v0.3 (Referenz für Codex, deutsch)
 
 Basis: KI-Charakter-Design §5 (v0.2-Härtungen) + Agenten-Leitfaden
