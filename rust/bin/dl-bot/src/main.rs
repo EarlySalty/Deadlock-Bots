@@ -710,7 +710,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 cooldown_secs,
             });
             let retriever: Arc<dyn dl_brain::BrainRetriever> =
-                Arc::new(modglue::BrainRetrieverGlue { bin: brain_bin_path });
+                Arc::new(modglue::BrainRetrieverGlue {
+                    bin: brain_bin_path,
+                });
             let answerer: Arc<dyn dl_brain::AiAnswerer> = Arc::new(modglue::BrainAiGlue { client });
             Some(Arc::new(modglue::BrainHandler {
                 adapter: adapter.clone(),
