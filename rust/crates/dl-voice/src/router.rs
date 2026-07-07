@@ -127,7 +127,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
         label: ROUTER_BUTTON_CASUAL,
         category_id: ROUTER_CATEGORY_CHILL,
         staging_id: 1501089974093873232,
-        style: 1,
+        style: 2,
         emoji: ROUTER_EMOJI_CASUAL,
     },
     RouterMode {
@@ -135,7 +135,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
         label: ROUTER_BUTTON_RANKED,
         category_id: ROUTER_CATEGORY_CHILL,
         staging_id: 1412804671432818890,
-        style: 3,
+        style: 2,
         emoji: ROUTER_EMOJI_RANKED,
     },
     RouterMode {
@@ -199,19 +199,15 @@ pub fn router_repo_root() -> PathBuf {
 }
 
 pub fn router_panel_attachments() -> Vec<RouterPanelAttachment> {
-    [
-        ROUTER_HERO_BANNER_FILENAME,
-        ROUTER_MANAGE_BANNER_FILENAME,
-        ROUTER_GUIDE_BANNER_FILENAME,
-    ]
-    .into_iter()
-    .enumerate()
-    .map(|(id, filename)| RouterPanelAttachment {
-        id: u8::try_from(id).unwrap_or(u8::MAX),
-        filename: filename.to_string(),
-        relative_path: format!("{ROUTER_BANNER_DIR}/{filename}"),
-    })
-    .collect()
+    [ROUTER_HERO_BANNER_FILENAME, ROUTER_MANAGE_BANNER_FILENAME]
+        .into_iter()
+        .enumerate()
+        .map(|(id, filename)| RouterPanelAttachment {
+            id: u8::try_from(id).unwrap_or(u8::MAX),
+            filename: filename.to_string(),
+            relative_path: format!("{ROUTER_BANNER_DIR}/{filename}"),
+        })
+        .collect()
 }
 
 pub fn router_mode(mode: &str) -> Option<RouterMode> {
@@ -344,13 +340,6 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
                 router_emoji_button(ROUTER_BUTTON_BAN, 4, "tv_ban", ROUTER_EMOJI_BAN),
                 router_emoji_button(ROUTER_BUTTON_UNBAN, 2, "tv_unban", ROUTER_EMOJI_UNBAN),
             ]),
-            router_separator(false, 2),
-            router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME),
-            router_text_display(ROUTER_PANEL_GUIDE_CREATE.to_string()),
-            router_separator(true, 1),
-            router_text_display(ROUTER_PANEL_GUIDE_OWNER.to_string()),
-            router_separator(true, 1),
-            router_text_display(ROUTER_PANEL_GUIDE_BUTTONS.to_string()),
         ])]),
     );
     body.insert("attachments".to_string(), json!(attachments));
@@ -421,16 +410,16 @@ pub fn voice_guide_detail_reply() -> BridgeReply {
     let text = voice_guide_detail_text();
     let banner_path = router_repo_root()
         .join(ROUTER_BANNER_DIR)
-        .join(ROUTER_HERO_BANNER_FILENAME);
+        .join(ROUTER_GUIDE_BANNER_FILENAME);
     let banner = std::fs::read(banner_path)
         .ok()
         .map(|data| BridgeAttachment {
-            filename: ROUTER_HERO_BANNER_FILENAME.to_string(),
+            filename: ROUTER_GUIDE_BANNER_FILENAME.to_string(),
             data,
         });
     let mut components = Vec::new();
     if banner.is_some() {
-        components.push(router_media_gallery(ROUTER_HERO_BANNER_FILENAME));
+        components.push(router_media_gallery(ROUTER_GUIDE_BANNER_FILENAME));
     }
     components.push(router_text_display(text.clone()));
     let fallback = BridgeReply {
@@ -1226,7 +1215,6 @@ mod tests {
             vec![
                 "attachment://router-hero.png",
                 "attachment://divider-lane-verwalten.png",
-                "attachment://divider-anleitung.png",
             ]
         );
         let text_displays: Vec<&str> = container_components
@@ -1242,9 +1230,6 @@ mod tests {
                 ROUTER_PANEL_MANAGE_INTRO,
                 ROUTER_PANEL_LANE_CAPTION,
                 ROUTER_PANEL_MOD_CAPTION,
-                ROUTER_PANEL_GUIDE_CREATE,
-                ROUTER_PANEL_GUIDE_OWNER,
-                ROUTER_PANEL_GUIDE_BUTTONS,
             ]
         );
         assert_eq!(
@@ -1252,14 +1237,13 @@ mod tests {
                 .iter()
                 .filter(|component| component["type"] == 14)
                 .count(),
-            4
+            1
         );
         assert_eq!(
             body.get("attachments").expect("attachments"),
             &json!([
                 {"id": 0, "filename": "router-hero.png"},
                 {"id": 1, "filename": "divider-lane-verwalten.png"},
-                {"id": 2, "filename": "divider-anleitung.png"},
             ])
         );
         let custom_ids: Vec<&str> = container_components
@@ -1284,6 +1268,17 @@ mod tests {
                 "tv_unban",
             ]
         );
+        let mode_styles: Vec<u64> = container_components
+            .iter()
+            .flat_map(|row| row["components"].as_array().into_iter().flatten())
+            .filter(|component| {
+                component["custom_id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("router_spawn_"))
+            })
+            .filter_map(|component| component["style"].as_u64())
+            .collect();
+        assert_eq!(mode_styles, vec![2, 2, 2]);
     }
 
     #[test]
@@ -1291,7 +1286,7 @@ mod tests {
         let reply = voice_guide_detail_reply();
         assert_eq!(reply.message_flags, Some(64 | ROUTER_COMPONENTS_V2_FLAG));
         assert_eq!(reply.attachments.len(), 1);
-        assert_eq!(reply.attachments[0].filename, ROUTER_HERO_BANNER_FILENAME);
+        assert_eq!(reply.attachments[0].filename, ROUTER_GUIDE_BANNER_FILENAME);
         let container = &reply
             .components
             .as_ref()
@@ -1302,7 +1297,7 @@ mod tests {
             .expect("container children");
         assert_eq!(
             children[0]["items"][0]["media"]["url"],
-            format!("attachment://{ROUTER_HERO_BANNER_FILENAME}")
+            format!("attachment://{ROUTER_GUIDE_BANNER_FILENAME}")
         );
         assert!(children
             .iter()

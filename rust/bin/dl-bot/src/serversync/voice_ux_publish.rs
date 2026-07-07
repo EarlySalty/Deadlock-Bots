@@ -16,7 +16,7 @@ pub const VOICE_UX_PAYLOAD_HASH_KEY_BASE: &str = "voice_ux_payload_hash_";
 pub const VOICE_UX_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const VOICE_UX_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const VOICE_UX_BANNER_DIR: &str = "assets/welcome-banners";
-pub const VOICE_UX_GUIDE_BANNER_FILENAME: &str = "router-hero.png";
+pub const VOICE_UX_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
 pub const VOICE_UX_LFG_BANNER_FILENAME: &str = "divider-mitspieler-finden.png";
 pub const VOICE_UX_SPAWN_BANNER_FILENAME: &str = "divider-lane-erstellen.png";
 pub const VOICE_UX_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
@@ -596,11 +596,7 @@ fn guide_container() -> Value {
         vec![
             text_display(
                 VOICE_UX_COMPONENT_ID_GUIDE_TEXT,
-                format!(
-                    "{}\n{}",
-                    dl_voice::router::VOICE_GUIDE_TITLE,
-                    dl_voice::router::VOICE_GUIDE_BODY
-                ),
+                dl_voice::router::VOICE_GUIDE_TITLE.to_string(),
             ),
             action_row(
                 VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
@@ -1055,14 +1051,11 @@ mod tests {
                 .allowed_mentions
                 .parse
                 .is_empty()));
-            assert_eq!(
-                target.messages[0].payload.components[0]["components"][1]["content"],
-                format!(
-                    "{}\n{}",
-                    dl_voice::router::VOICE_GUIDE_TITLE,
-                    dl_voice::router::VOICE_GUIDE_BODY
-                )
-            );
+            let guide_text = target.messages[0].payload.components[0]["components"][1]["content"]
+                .as_str()
+                .expect("guide text");
+            assert_eq!(guide_text, dl_voice::router::VOICE_GUIDE_TITLE);
+            assert!(!guide_text.contains(dl_voice::router::VOICE_GUIDE_BODY));
             // Message 1: Anleitung behält ⚙️ Voreinstellungen + Detail-Anleitung;
             // Mitspieler finden hat keine eigenen Buttons mehr, sondern verlinkt
             // den Forum-Post (Thread-ID aus dem KV, hier 555).

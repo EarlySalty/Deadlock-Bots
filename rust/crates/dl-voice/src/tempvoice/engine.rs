@@ -759,8 +759,10 @@ impl TempVoiceEngine {
                 if let Err(err) = self.store.set_owner(channel_id, new_owner).await {
                     tracing::warn!(%err, channel_id, "TempVoice: Owner-Transfer-Persist fehlgeschlagen");
                 }
-                // Bans des alten Owners von der Lane nehmen, neue anwenden
+                // Bans des alten Owners von der Lane nehmen, neuen Owner-Stand anwenden
                 self.clear_owner_bans(channel_id, user_id).await;
+                self.apply_owner_default_preset(guild_id, channel_id, new_owner)
+                    .await;
                 self.apply_owner_settings(guild_id, channel_id, new_owner)
                     .await;
                 tracing::info!(
@@ -1155,7 +1157,7 @@ impl TempVoiceEngine {
     }
 
     /// Owner-Wechsel (Claim/Transfer): State + DB + Bann-Swap.
-    pub async fn claim_owner(&self, guild_id: u64, channel_id: u64, new_owner: u64) {
+    pub async fn claim_owner(self: &Arc<Self>, guild_id: u64, channel_id: u64, new_owner: u64) {
         let previous = {
             let mut state = self.state.lock().await;
             let Some(lane) = state.lanes.get_mut(&channel_id) else {
@@ -1172,6 +1174,8 @@ impl TempVoiceEngine {
             tracing::warn!(%err, channel_id, "TempVoice: Claim-Persist fehlgeschlagen");
         }
         self.clear_owner_bans(channel_id, previous).await;
+        self.apply_owner_default_preset(guild_id, channel_id, new_owner)
+            .await;
         self.apply_owner_settings(guild_id, channel_id, new_owner)
             .await;
     }
@@ -1953,6 +1957,38 @@ impl TempVoiceEngine {
         self.apply_owner_bans(guild_id, channel_id, owner_id).await;
         self.apply_tag_filter(guild_id, channel_id, None, true)
             .await;
+    }
+
+    async fn apply_owner_default_preset(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        owner_id: u64,
+    ) {
+        let Some(default) = self.store.get_default_preset(owner_id).await.ok().flatten() else {
+            return;
+        };
+        if let Some(err) = self
+            .switch_lane_mode(guild_id, channel_id, owner_id, &default.mode)
+            .await
+        {
+            tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Modus nicht angewendet");
+            return;
+        }
+        if let Err(err) = self
+            .set_lane_template(guild_id, channel_id, &default.base_name, default.limit)
+            .await
+        {
+            tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Template nicht angewendet");
+        }
+        if default.min_rank != "unknown" {
+            if let Err(err) = self
+                .set_min_rank(guild_id, channel_id, &default.min_rank)
+                .await
+            {
+                tracing::debug!(%err, channel_id, owner_id, "TempVoice: Owner-Preset-Rang nicht angewendet");
+            }
+        }
     }
 
     async fn clear_owner_bans(&self, channel_id: u64, owner_id: u64) {
@@ -2810,6 +2846,59 @@ mod tests {
         let lanes = engine.store.all_lanes().await.expect("lanes");
         assert_eq!(lanes[0].owner_id, 200);
         assert_eq!(lanes[0].initial_owner_id, Some(100)); // bleibt erhalten
+    }
+
+    #[tokio::test]
+    async fn owner_claim_wendet_default_preset_des_neuen_owners_an() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: 1,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Alte Lane".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: Some(CASUAL_STAGING),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 200,
+                mode: "casual".to_string(),
+                base_name: "Neue Owner Lane".to_string(),
+                limit: 3,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default preset");
+        engine.rehydrate().await;
+
+        engine.claim_owner(1, lane_id, 200).await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        let lane = engine
+            .store
+            .all_lanes()
+            .await
+            .expect("lanes")
+            .into_iter()
+            .find(|lane| lane.channel_id == lane_id)
+            .expect("lane");
+        assert_eq!(lane.owner_id, 200);
+        assert_eq!(lane.base_name, "Neue Owner Lane");
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some("Neue Owner Lane".to_string())
+        );
+        assert_eq!(
+            port.limits.lock().expect("lock").last().copied(),
+            Some((lane_id, 3))
+        );
     }
 
     #[tokio::test]

@@ -1,3 +1,11 @@
+## #226 — Voice-Panel wird kompakter und Owner-Claim übernimmt Presets
+
+**Ausgangslage:** Im Voice-Panel war die ausführliche Anleitung weiterhin direkt in der Nachricht sichtbar, und die Modus-Knöpfe waren farbig. Beim Owner-Claim blieb die Lane außerdem auf alten/default Werten statt auf dem Standard-Preset des neuen Owners.
+
+**Was wurde geändert:** Das Panel zeigt nur noch den Anleitungsknopf; die Details öffnen sich dort mit dem Anleitung-Bild. Casual, Ranked und Street Brawl sind neutral grau. Wenn jemand eine Lane übernimmt, wird direkt das gespeicherte Standard-Preset dieses neuen Owners auf die Lane angewendet.
+
+**Wie es jetzt läuft:** Der Kanal bleibt schlank, die Anleitung erscheint nur bei Bedarf, und übernommene Lanes wechseln Name, Limit und Modus auf den neuen Owner.
+
 ## #225 — Voice-Panel zeigt Anleitung und Rang-Gate sauber
 
 **Ausgangslage:** Im Sprachkanal-Verwalten-Kanal lagen altes und neues Panel nebeneinander. Das übersichtlichere Panel hatte die bessere Button-Reihenfolge, aber das neue Rang-Gate fehlte dort, und die Anleitung war als eigene Nachricht zu präsent.

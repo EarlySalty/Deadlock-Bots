@@ -11950,14 +11950,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
                 );
             }
         }
-        assert_eq!(
-            messages[0]["payload"]["components"][0]["components"][1]["content"],
-            format!(
-                "{}\n{}",
-                dl_voice::router::VOICE_GUIDE_TITLE,
-                dl_voice::router::VOICE_GUIDE_BODY
-            )
-        );
+        let guide_text = messages[0]["payload"]["components"][0]["components"][1]["content"]
+            .as_str()
+            .expect("guide text");
+        assert_eq!(guide_text, dl_voice::router::VOICE_GUIDE_TITLE);
+        assert!(!guide_text.contains(dl_voice::router::VOICE_GUIDE_BODY));
         assert_eq!(
             messages[0]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
             "tv_prefs_open"
@@ -11975,6 +11972,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             messages[1]["payload"]["components"][0]["components"][2]["components"][0]["custom_id"],
             "router_spawn_casual"
         );
+        let mode_buttons = messages[1]["payload"]["components"][0]["components"][2]["components"]
+            .as_array()
+            .expect("mode buttons");
+        assert!(mode_buttons.iter().all(|button| button["style"] == 2));
         // Verwalten-Reihe endet ohne ⚙️ Voreinstellungen bei Rang-Gate.
         let lane_row = messages[1]["payload"]["components"][0]["components"][8]["components"]
             .as_array()
