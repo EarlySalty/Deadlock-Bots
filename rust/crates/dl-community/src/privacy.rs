@@ -1119,6 +1119,58 @@ pub async fn purge_expired_server_sync_rollback_exports(
     Ok(rows_to_i64(result.rows_affected()))
 }
 
+const MODERATION_CONTENT_RETENTION_DAYS: i64 = 90;
+
+pub async fn anonymize_expired_moderation_content(
+    pool: &PgPool,
+    now: chrono::DateTime<chrono::Utc>,
+) -> CommunityDbResult<u64> {
+    let cutoff = now - chrono::Duration::days(MODERATION_CONTENT_RETENTION_DAYS);
+    // ponytail: NULL created_at wird bewusst nicht erfasst; diese Altlast ist akzeptiert.
+    let cases = sqlx::query(
+        r#"
+        UPDATE moderation.ai_moderation_cases
+        SET original_content = NULL,
+            attachments = NULL,
+            user_tag = NULL,
+            ai_reason = NULL,
+            mod_deny_reason = NULL
+        WHERE created_at < $1
+          AND original_content IS NOT NULL
+        "#,
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let ragebait_hits = sqlx::query(
+        r#"
+        UPDATE moderation.ai_moderation_ragebait_hits
+        SET content_preview = NULL
+        WHERE created_at < $1
+          AND content_preview IS NOT NULL
+        "#,
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    let security_incidents = sqlx::query(
+        r#"
+        UPDATE moderation.security_guard_incidents
+        SET messages = NULL
+        WHERE created_at < $1
+          AND messages IS NOT NULL
+        "#,
+    )
+    .bind(cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected();
+
+    Ok(cases + ragebait_hits + security_incidents)
+}
+
 pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -1133,6 +1185,24 @@ pub fn spawn_server_sync_rollback_export_retention(pool: PgPool) -> tokio::task:
                 }
                 Err(err) => {
                     tracing::warn!(%err, "Server-Sync-Rollback-Export-Retention fehlgeschlagen");
+                }
+            }
+            tokio::time::sleep(PRIVACY_RETENTION_JOB_INTERVAL).await;
+        }
+    })
+}
+
+pub fn spawn_moderation_content_retention(pool: PgPool) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            match anonymize_expired_moderation_content(&pool, chrono::Utc::now()).await {
+                Ok(anonymized) => {
+                    if anonymized > 0 {
+                        tracing::info!(anonymized, "Moderation-Content-Retention abgeschlossen");
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "Moderation-Content-Retention fehlgeschlagen");
                 }
             }
             tokio::time::sleep(PRIVACY_RETENTION_JOB_INTERVAL).await;
@@ -1740,6 +1810,50 @@ mod tests {
                 .expect("hash");
         assert_eq!(remaining, 1);
         assert_eq!(newest_hash, "new");
+    }
+
+    #[tokio::test]
+    async fn moderation_content_retention_anonymisiert_nur_alte_inhalte() {
+        let db = mk_db().await;
+        let now = Utc::now();
+        sqlx::query(
+            r#"
+            INSERT INTO moderation.ai_moderation_cases(
+                case_id, guild_id, channel_id, message_id, user_id,
+                original_content, ai_category, created_at
+            )
+            VALUES
+              ('retention-old', 1, 2, 3, 4, 'geheim', 'spam', $1),
+              ('retention-new', 1, 2, 4, 5, 'frisch', NULL, $2)
+            "#,
+        )
+        .bind(now - chrono::Duration::days(91))
+        .bind(now - chrono::Duration::days(1))
+        .execute(db.pool())
+        .await
+        .expect("insert moderation cases");
+
+        let anonymized = anonymize_expired_moderation_content(db.pool(), now)
+            .await
+            .expect("anonymize");
+        assert_eq!(anonymized, 1);
+
+        let old: (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT original_content, ai_category FROM moderation.ai_moderation_cases WHERE case_id = 'retention-old'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("old case");
+        let fresh: Option<String> = sqlx::query_scalar(
+            "SELECT original_content FROM moderation.ai_moderation_cases WHERE case_id = 'retention-new'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("fresh case");
+
+        assert!(old.0.is_none());
+        assert_eq!(old.1.as_deref(), Some("spam"));
+        assert_eq!(fresh.as_deref(), Some("frisch"));
     }
 
     #[tokio::test]

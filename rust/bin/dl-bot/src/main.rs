@@ -1167,6 +1167,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             dl_community::privacy::spawn_server_sync_rollback_export_retention(
                 central_pool.clone(),
             );
+        let _moderation_content_retention =
+            dl_community::privacy::spawn_moderation_content_retention(central_pool.clone());
         let _journey_role_events =
             journeyglue::spawn_role_events(central_pool.clone(), &dispatcher);
         let _journey_native_onboarding_completed = journeyglue::spawn_native_onboarding_completed(

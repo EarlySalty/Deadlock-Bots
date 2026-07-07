@@ -1,3 +1,21 @@
+# Moderation-Retention 90d (2026-07-07)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feature/moderation-retention`; Vorgabe aus Worker-Regeln: kein Commit/Push, Änderungen bleiben uncommitted.
+- Umgesetzt: `anonymize_expired_moderation_content` mit 90-Tage-Cutoff fuer Moderationsinhalte, Retention-Loop und Bot-Wiring neben Server-Sync-Rollback-Retention.
+- Test ergaenzt: alter Moderationsinhalt wird genullt, `ai_category` und frischer Inhalt bleiben erhalten.
+
+## Verifikation aktuell
+- Gruen: `cargo build -p dl-community -p dl-bot`.
+- Gruen: `cargo test -p dl-community` (73 passed; 0 failed).
+- Gruen: `env -u SQLX_OFFLINE scripts/central_test_db.sh env -u SQLX_OFFLINE sh -c 'DATABASE_URL="$CENTRAL_TEST_DSN" cargo test -p dl-community --features testing moderation_content_retention_anonymisiert_nur_alte_inhalte -- --nocapture'` (1 passed).
+- Gruen: `cargo clippy -p dl-community --all-targets -- -D warnings`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- Keine Migration angelegt; Zielspalten sind bestehend nullable.
+- Kein Commit/Push ausgefuehrt.
+
 # W3.4c Sprachkanal-UX (2026-07-05)
 
 ## Fortschritt

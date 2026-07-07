@@ -1,3 +1,11 @@
+## #219 — Moderationsdaten werden nach 90 Tagen gelöscht
+
+**Ausgangslage:** Bei einem Regelverstoß speichert der Bot den gemeldeten Nachrichtentext zur Nachvollziehbarkeit. Bisher blieb dieser Inhalt unbegrenzt liegen.
+
+**Was wurde geändert:** Ein täglicher Job entfernt den gespeicherten Nachrichteninhalt aus Moderationsfällen automatisch nach 90 Tagen; die anonyme Fall-Statistik (Kategorie, Aktion, Zeitpunkt) bleibt erhalten.
+
+**Wie es jetzt läuft:** Inhalte verschwinden nach 90 Tagen von selbst. Wer sofort alles löschen will, nutzt weiterhin `/datenschutz`.
+
 ## #218 — Fireworks-Moderation antwortet strikt als JSON
 
 **Ausgangslage:** Fireworks erkannte grenzwertige Moderationsfälle, konnte aber trotz Prompt mit Fließtext antworten. Der Bot wertete das als Parse-Fehler und ignorierte den Fall.
