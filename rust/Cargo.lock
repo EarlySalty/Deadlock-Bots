@@ -646,6 +646,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-knowledge"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "dl-ai",
+ "dl-core",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tower",
+ "tracing",
+]
+
+[[package]]
 name = "dl-moderation"
 version = "0.1.0"
 dependencies = [
