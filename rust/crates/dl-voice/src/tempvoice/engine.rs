@@ -704,7 +704,6 @@ impl TempVoiceEngine {
         }
         self.apply_tag_filter(guild_id, channel_id, Some(vec![user_id]), true)
             .await;
-        self.refresh_name(guild_id, channel_id).await;
     }
 
     async fn on_leave(self: &Arc<Self>, guild_id: u64, user_id: u64, channel_id: u64) {
@@ -761,8 +760,6 @@ impl TempVoiceEngine {
                 }
                 // Bans des alten Owners von der Lane nehmen, neuen Owner-Stand anwenden
                 self.clear_owner_bans(channel_id, user_id).await;
-                self.apply_owner_default_preset(guild_id, channel_id, new_owner)
-                    .await;
                 self.apply_owner_settings(guild_id, channel_id, new_owner)
                     .await;
                 tracing::info!(
@@ -773,7 +770,6 @@ impl TempVoiceEngine {
                 );
             }
         }
-        self.refresh_name(guild_id, channel_id).await;
     }
 
     async fn is_managed_lane(&self, guild_id: u64, channel_id: u64) -> bool {
@@ -931,7 +927,6 @@ impl TempVoiceEngine {
                 }
             }
         }
-        self.refresh_name(guild_id, lane_id).await;
         tracing::debug!(user_id, mode, category_id, lane_id, "Router: Lane erstellt");
         Ok(Some(lane_id))
     }
@@ -2600,6 +2595,112 @@ mod tests {
                 .and_then(|lane| lane.source_staging_id),
             Some(STREET_STAGING)
         );
+    }
+
+    #[tokio::test]
+    async fn join_in_bestehender_chill_lane_renamed_nicht_automatisch() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        port.role_names.lock().expect("lock").clear();
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Chill Lane 1".to_string());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, CASUAL_CATEGORY);
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Chill Lane 1".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: Some(CASUAL_STAGING),
+            })
+            .await
+            .expect("lane");
+        engine.rehydrate().await;
+
+        engine
+            .handle_event(VoiceEvent::Join {
+                guild_id: engine.config.guild_id_hint,
+                user_id: 200,
+                channel_id: lane_id,
+            })
+            .await;
+
+        assert!(port.renamed.lock().expect("lock").is_empty());
+        assert_eq!(
+            port.names.lock().expect("lock").get(&lane_id).cloned(),
+            Some("Chill Lane 1".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn auto_owner_transfer_wendet_keinen_preset_rename_an() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Alte Lane".to_string());
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(lane_id, CASUAL_CATEGORY);
+        port.members
+            .lock()
+            .expect("lock")
+            .insert(lane_id, vec![200]);
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id: lane_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Alte Lane".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: Some(CASUAL_STAGING),
+            })
+            .await
+            .expect("lane");
+        engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 200,
+                mode: "casual".to_string(),
+                base_name: "Neue Owner Lane".to_string(),
+                limit: 3,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default preset");
+        engine.rehydrate().await;
+
+        engine
+            .handle_event(VoiceEvent::Leave {
+                guild_id: engine.config.guild_id_hint,
+                user_id: 100,
+                channel_id: lane_id,
+            })
+            .await;
+
+        assert_eq!(engine.lane_owner(lane_id).await, Some(200));
+        assert!(port.renamed.lock().expect("lock").is_empty());
+        let lane = engine
+            .store
+            .all_lanes()
+            .await
+            .expect("lanes")
+            .into_iter()
+            .find(|lane| lane.channel_id == lane_id)
+            .expect("lane");
+        assert_eq!(lane.base_name, "Alte Lane");
     }
 
     #[tokio::test]

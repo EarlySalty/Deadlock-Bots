@@ -1,12 +1,8 @@
 //! Deadlock-Voice-Status — Port von `cogs/deadlock_voice_status.py` +
 //! `service/deadlock_voice_cohort.py`.
 //!
-//! Hängt den Lanes in den überwachten Kategorien einen Live-Status an
-//! (`"Lane 1 - im Match Min 17 (4/6)"` / `"… - in der Lobby"`), gespeist aus
-//! `live_player_state` (Steam-Presence-Worker) und `deadlock_party_members`.
-//! Rename-Disziplin wie das Original: 6-min-Cooldown (10 min ab Match-Minute
-//! 25), Match-Ende/Status-Löschung umgehen den Cooldown, reine
-//! Member-Zahl-Änderungen ohne Spielstatus lösen NIE ein Rename aus.
+//! Trackt Voice-Status aus `live_player_state` (Steam-Presence-Worker) und
+//! `deadlock_party_members`. Kanalnamen werden nicht mehr automatisch geändert.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write as _;
@@ -945,54 +941,12 @@ impl VoiceStatusWorker {
         minutes_value: Option<i64>,
         server_id: Option<String>,
     ) {
-        let _ = server_id;
-        let base_clean = base_name.trim_end();
-        let target_name = match &desired_suffix {
-            Some(suffix) => format!("{base_clean} - {suffix}"),
-            None => base_clean.to_string(),
-        };
-        let (_, current_suffix) = split_suffix(current_name);
-        let now = chrono::Utc::now().timestamp() as f64;
-
-        let decision = {
-            let states = self.states.lock().await;
-            let state = states.get(&channel_id).cloned().unwrap_or_default();
-            decide_rename(
-                &state,
-                current_name,
-                &target_name,
-                base_clean,
-                desired_suffix.as_deref(),
-                current_suffix.as_deref(),
-                stage_label.as_deref(),
-                player_count,
-                minutes_value,
-                now,
-            )
-        };
-
+        let _ = (current_name, base_name, minutes_value, server_id);
         let mut states = self.states.lock().await;
         let state = states.entry(channel_id).or_default();
-        match decision {
-            RenameDecision::NoopTargetMatches | RenameDecision::NoopNoMeaningfulChange => {
-                state.stage = stage_label;
-                state.suffix = desired_suffix;
-                state.previous_member_count = player_count;
-            }
-            RenameDecision::Cooldown => {}
-            RenameDecision::Rename => {
-                drop(states);
-                if let Err(err) = self.port.rename(channel_id, &target_name).await {
-                    tracing::warn!(%err, channel_id, "VoiceStatus: Rename fehlgeschlagen");
-                }
-                let mut states = self.states.lock().await;
-                let state = states.entry(channel_id).or_default();
-                state.stage = stage_label;
-                state.suffix = desired_suffix;
-                state.last_rename = now;
-                state.previous_member_count = player_count;
-            }
-        }
+        state.stage = stage_label;
+        state.suffix = desired_suffix;
+        state.previous_member_count = player_count;
     }
 }
 
@@ -1119,6 +1073,39 @@ pub fn spawn_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex as StdMutex;
+
+    use sqlx::postgres::PgPoolOptions;
+
+    #[derive(Default)]
+    struct MockStatusPort {
+        renamed: StdMutex<Vec<(u64, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl StatusPort for MockStatusPort {
+        async fn monitored_channels(&self) -> Vec<(u64, u64, String, Vec<u64>)> {
+            Vec::new()
+        }
+
+        async fn channel_info(&self, _channel_id: u64) -> Option<(u64, String, Vec<u64>)> {
+            None
+        }
+
+        async fn rename(&self, channel_id: u64, name: &str) -> Result<(), String> {
+            self.renamed
+                .lock()
+                .expect("lock")
+                .push((channel_id, name.to_string()));
+            Ok(())
+        }
+    }
+
+    fn lazy_pool() -> PgPool {
+        PgPoolOptions::new()
+            .connect_lazy("postgres://voice-status-test.invalid/deadlock")
+            .expect("lazy pg pool")
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn row(
@@ -1228,6 +1215,37 @@ mod tests {
             assert_ne!(text, "Platzhalter");
             assert!(!text.is_empty());
         }
+    }
+
+    #[tokio::test]
+    async fn status_worker_aendert_keine_channelnamen_mehr() {
+        let port = Arc::new(MockStatusPort::default());
+        let worker = Arc::new(VoiceStatusWorker {
+            store: StatusStore { pool: lazy_pool() },
+            port: port.clone(),
+            states: tokio::sync::Mutex::new(HashMap::new()),
+            localized_slots_cache: tokio::sync::Mutex::new(HashMap::new()),
+        });
+
+        worker
+            .apply(
+                42,
+                "Chill Lane 1",
+                "Chill Lane 1",
+                Some("in der Lobby".to_string()),
+                Some("lobby".to_string()),
+                Some(2),
+                None,
+                None,
+            )
+            .await;
+
+        assert!(port.renamed.lock().expect("lock").is_empty());
+        let states = worker.states.lock().await;
+        assert_eq!(
+            states.get(&42).and_then(|s| s.stage.as_deref()),
+            Some("lobby")
+        );
     }
 
     #[test]

@@ -1,3 +1,11 @@
+## #229 — Voice-Lanes bleiben beim Namen ruhig
+
+**Ausgangslage:** Chill-Lanes konnten nach Beitritten, Wechseln oder Spielstatus-Updates wieder automatisch auf generische Namen wie „Lane 1" springen.
+
+**Was wurde geändert:** Automatische Umbenennungen durch Status-Updates, Join/Leave-Events und Auto-Owner-Wechsel sind abgeschaltet. Manuelle Änderungen, Voreinstellungen und bewusstes Owner-Übernehmen bleiben aktiv.
+
+**Wie es jetzt läuft:** Ein Lane-Name ändert sich nur noch durch eine Nutzeraktion wie Umbenennen, Preset/Modus anwenden oder Owner-Claim; Match-/Lobby-Erkennung läuft weiter intern, schreibt aber nicht mehr in den Kanalnamen.
+
 ## #228 — Voice-Panel erkennt vorhandene neue Panels wieder
 
 **Ausgangslage:** Im Sprachkanal-Verwalten-Kanal konnte beim Bot-Neustart ein zweites neues Panel entstehen, obwohl schon eins da war.
