@@ -390,6 +390,27 @@ fn build_request_embed_for_existing_request(
     }
 }
 
+fn build_request_embed_with_terminal_status(
+    request: &RequestData,
+    title: &str,
+    status_label: &str,
+    color: u32,
+) -> Value {
+    let mut embed = build_request_embed_for_existing_request(request, None, None, 0);
+    if let Some(map) = embed.as_object_mut() {
+        map.insert("title".into(), json!(title));
+        map.insert("color".into(), json!(color));
+        if let Some(fields) = map.get_mut("fields").and_then(Value::as_array_mut) {
+            fields.push(json!({
+                "name": "Status",
+                "value": status_label,
+                "inline": false,
+            }));
+        }
+    }
+    embed
+}
+
 pub fn claim_components(request_id: i64, author_id: u64) -> Value {
     json!([{ "type": 1, "components": [
         { "type": 2, "style": 3, "label": "Coaching übernehmen",
@@ -1189,6 +1210,31 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         });
     }
 
+    async fn update_request_message_terminal(
+        &self,
+        request_id: i64,
+        title: &str,
+        status_label: &str,
+        color: u32,
+    ) {
+        let Some((request, _, _, _, message_id, _)) = self.load_request(request_id).await else {
+            return;
+        };
+        let Some(message_id) = message_id else {
+            return;
+        };
+        let embed = build_request_embed_with_terminal_status(&request, title, status_label, color);
+        self.port
+            .edit_request_message(
+                REQUEST_CHANNEL_ID,
+                message_id,
+                &format!("📥 Anfrage von <@{}> – {status_label}", request.user_id),
+                embed,
+                json!([]),
+            )
+            .await;
+    }
+
     /// Analyse-Loop (wie _analyze_pending_requests, Claim via rowcount).
     pub async fn analyze_pending(&self) {
         let rows = sqlx::query_scalar!(
@@ -1577,6 +1623,13 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .execute(&self.pool)
             .await;
         }
+        self.update_request_message_terminal(
+            rid,
+            "✅ Coaching abgeschlossen",
+            "✅ abgeschlossen",
+            0x2ECC71,
+        )
+        .await;
         // Website-Mirror (Python `coaching_survey.py`:311): Session als
         // 'completed' spiegeln, inkl. bot_session_id.
         self.mirror_to_website(MirrorOpts {
@@ -2140,6 +2193,13 @@ impl InteractionHandler for CoachingHandler {
                 .await;
             // Website-Mirror (Python `CoachCancelButton`:213): Session als
             // 'cancelled' mit dem abbrechenden Coach spiegeln.
+            c.update_request_message_terminal(
+                request_id,
+                "🚫 Coaching abgebrochen",
+                "🚫 abgebrochen",
+                0xE74C3C,
+            )
+            .await;
             c.mirror_to_website(MirrorOpts {
                 request_id,
                 coach_discord_id: Some(interaction.user_id),
@@ -2289,10 +2349,36 @@ mod pg_tests {
         components: Value,
     }
 
+    #[derive(Debug, Clone)]
+    struct RequestMessageEdit {
+        channel_id: u64,
+        message_id: u64,
+        content: String,
+        embed: Value,
+        components: Value,
+    }
+
+    #[derive(Default)]
+    struct MockWebsiteSync {
+        payloads: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::coaching::CoachingWebsiteSyncClient for MockWebsiteSync {
+        async fn sync_coaching(&self, payload: &Value) -> bool {
+            self.payloads
+                .lock()
+                .expect("website payloads lock")
+                .push(payload.clone());
+            true
+        }
+    }
+
     #[derive(Default)]
     struct MockCoachingPort {
         coach_ids: Mutex<Vec<u64>>,
         request_messages: Mutex<Vec<RequestMessageCall>>,
+        request_edits: Mutex<Vec<RequestMessageEdit>>,
         role_ids: Mutex<Vec<(u64, Vec<u64>)>>,
         channel_texts: Mutex<Vec<(u64, String)>>,
         dm_texts: Mutex<Vec<(u64, String)>>,
@@ -2370,12 +2456,22 @@ mod pg_tests {
 
         async fn edit_request_message(
             &self,
-            _channel_id: u64,
-            _message_id: u64,
-            _content: &str,
-            _embed: Value,
-            _components: Value,
+            channel_id: u64,
+            message_id: u64,
+            content: &str,
+            embed: Value,
+            components: Value,
         ) {
+            self.request_edits
+                .lock()
+                .expect("request_edits lock")
+                .push(RequestMessageEdit {
+                    channel_id,
+                    message_id,
+                    content: content.to_string(),
+                    embed,
+                    components,
+                });
         }
 
         async fn send_channel_text(&self, channel_id: u64, content: &str) {
@@ -2742,13 +2838,16 @@ mod pg_tests {
             .await
             .expect("post request");
 
-        let messages = port.request_messages.lock().expect("request_messages lock");
+        let messages = port
+            .request_messages
+            .lock()
+            .expect("request_messages lock")
+            .clone();
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].channel_id, REQUEST_CHANNEL_ID);
         assert!(messages[0].content.contains("reserviert"));
         assert_eq!(messages[0].embed["title"], "🎮 Neue Coaching-Anfrage");
         assert_eq!(messages[0].components[0]["type"], 1);
-        drop(messages);
 
         let row = sqlx::query!(
             r#"
@@ -2803,6 +2902,114 @@ mod pg_tests {
             .await
             .expect("kv get");
         assert_eq!(value.as_deref(), Some("42"));
+    }
+
+    #[tokio::test]
+    async fn voice_abschluss_schliesst_request_post_und_website_status() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        let website = Arc::new(MockWebsiteSync::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((900, vec![COACHING_ACTIVE_ROLE_ID]));
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-complete', 1, 'web-complete', 900,
+                'Player900', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                'abends', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8800, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, voice_started_at, created_at
+            )
+            VALUES ('sess-complete', 1, '12345', 900, 'Player900', 500,
+                    'active', $1, $1)
+            "#,
+        )
+        .bind(now - chrono::Duration::minutes(5))
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        coaching
+            .process_survey_session(
+                SurveySession {
+                    id: "sess-complete".to_string(),
+                    coach_id: Some(12345),
+                    user_id: 900,
+                    voice_started_at: Some(now.timestamp() - 300),
+                    request_id: 1,
+                },
+                SurveyTrigger::VoiceTransition,
+            )
+            .await;
+
+        let request_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(request_status, "completed");
+
+        let edits = port
+            .request_edits
+            .lock()
+            .expect("request_edits lock")
+            .clone();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].channel_id, REQUEST_CHANNEL_ID);
+        assert_eq!(edits[0].message_id, 8800);
+        assert!(edits[0].content.contains("abgeschlossen"));
+        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
+        assert_eq!(edits[0].components, json!([]));
+
+        let payload = {
+            let mut found = None;
+            for _ in 0..20 {
+                found = website
+                    .payloads
+                    .lock()
+                    .expect("website payloads lock")
+                    .first()
+                    .cloned();
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("website payload")
+        };
+        assert_eq!(payload["website_request_id"], "web-complete");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["session_status"], "completed");
     }
 
     #[tokio::test]

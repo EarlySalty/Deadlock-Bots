@@ -1,3 +1,11 @@
+## #227 — Coaching-Abschlüsse schließen Anfrage und Website-Stand
+
+**Ausgangslage:** Abgeschlossene Coachings konnten im Anfrage-Post weiter wie laufende oder offene Anfragen wirken. Dadurch passte auch der Stand, den die Website aus dem Bot-Spiegel bekam, nicht zuverlässig zum echten Abschluss.
+
+**Was wurde geändert:** Wenn eine Coaching-Session endet oder abgebrochen wird, aktualisiert der Bot jetzt auch den ursprünglichen Anfrage-Post sichtbar auf abgeschlossen bzw. abgebrochen und entfernt die Aktionsknöpfe.
+
+**Wie es jetzt läuft:** Coachings wirken nach dem Ende im Discord abgeschlossen, und der Website-Abgleich bekommt beim Abschluss den abgeschlossenen Status mit.
+
 ## #226 — Voice-Panel wird kompakter und Owner-Claim übernimmt Presets
 
 **Ausgangslage:** Im Voice-Panel war die ausführliche Anleitung weiterhin direkt in der Nachricht sichtbar, und die Modus-Knöpfe waren farbig. Beim Owner-Claim blieb die Lane außerdem auf alten/default Werten statt auf dem Standard-Preset des neuen Owners.
