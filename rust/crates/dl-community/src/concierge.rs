@@ -24,7 +24,6 @@ pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
-pub const DEFAULT_CONCIERGE_MODEL: &str = "gpt-5.4-mini";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 pub const RETENTION_DAYS: i64 = 90;
 pub const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = 1426220702054355077;
@@ -37,52 +36,65 @@ pub const DEFAULT_ROUTER_VOICE_ID: u64 = 1513468587195633674;
 const KNOWLEDGE_TIMEOUT: StdDuration = StdDuration::from_secs(20);
 const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
 
-pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server,\nich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten\nWeg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich\nerstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nIch merk mir, was wir besprechen, damit ich nicht zweimal frage. Wenn du\ndas nicht willst, sag einfach stopp, dann lass ich dich in Ruhe.";
+pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server, ich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten Weg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich erstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nIch merk mir, was wir besprechen, damit ich nicht zweimal frage. Wenn du das nicht willst, sag einfach stopp, dann lass ich dich in Ruhe.";
 pub const T0_RANK_LINE: &str = "Deinen Rang hab ich schon gesehen, das macht es gleich einfacher.";
 pub const T0_BUTTON_TOUR: &str = "Zeig mir den Server";
 pub const T0_BUTTON_PLAY: &str = "Ich will direkt spielen";
 pub const T0_BUTTON_LATER: &str = "Später";
 pub const LATER_TEXT: &str =
-    "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach,\nich bin immer da.";
+    "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach, ich bin immer da.";
 
-pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang\nlohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein\nBlick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein.\nDa ist eigentlich immer wer live.\n\n<#1426220702054355077>\nStell hier alle deine Fragen zu Deadlock, egal wie basic. Und wenn\ndu das Spiel noch gar nicht hast, lässt du dich hier ins Game\ninviten.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier\ndeine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen\nwillst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich\nautomatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor,\ndann musst du nicht den ersten Schritt machen. Ich schreib dir was\nvor, du änderst es wie du willst, und gepostet wird nur, wenn du es\nfreigibst.";
+pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1426220702054355077>\nStell hier alle deine Fragen zu Deadlock, egal wie basic. Und wenn du das Spiel noch gar nicht hast, lässt du dich hier ins Game inviten.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
 pub const TOUR_BUTTON_DRAFT: &str = "Ja, schreib was vor";
 pub const TOUR_BUTTON_SKIP: &str = "Lieber nicht";
 pub const TOUR_SKIP_TEXT: &str =
-    "Kein Ding. Falls du es dir anders überlegst, sag einfach Bescheid.\nDie anderen beißen nicht, versprochen :)";
+    "Kein Ding. Falls du es dir anders überlegst, sag einfach Bescheid. Die anderen beißen nicht, versprochen :)";
 
-pub const STECKBRIEF_PREVIEW_TEXT: &str = "So könntest du dich vorstellen. Das ist nur ein Vorschlag, mach deins\ndraus. Gepostet wird erst, wenn du auf Posten drückst.";
+pub const STECKBRIEF_PREVIEW_TEXT: &str = "So könntest du dich vorstellen. Das ist nur ein Vorschlag, mach deins draus. Gepostet wird erst, wenn du auf Posten drückst.";
 pub const STECKBRIEF_BUTTON_POST: &str = "Posten";
 pub const STECKBRIEF_BUTTON_EDIT: &str = "Anpassen";
 pub const STECKBRIEF_BUTTON_NO: &str = "Lieber nicht";
 pub const STECKBRIEF_ROUTE_HELP: &str =
-    "Der Post geht in <#1426220702054355077>, da schauen die richtigen Leute\nrein.";
+    "Der Post geht in <#1426220702054355077>, da schauen die richtigen Leute rein.";
 pub const STECKBRIEF_ROUTE_CASUAL: &str =
     "Der Post geht in <#1289721245281292291>, mitten ins Geschehen.";
-pub const STECKBRIEF_HOLD_TEXT: &str = "Gerade ist hier wenig los. Ich poste deine Vorstellung, sobald wieder\nLeute unterwegs sind, dann geht sie nicht unter. Du musst nichts weiter\ntun.";
+pub const STECKBRIEF_HOLD_TEXT: &str = "Gerade ist hier wenig los. Ich poste deine Vorstellung, sobald wieder Leute unterwegs sind, dann geht sie nicht unter. Du musst nichts weiter tun.";
 pub const STECKBRIEF_REPLY_TEXT: &str =
     "Willkommen an Bord. Wer nimmt ihn mit in die nächste Lane?";
 
-pub const T2_NUDGE_TEXT: &str = "Hey, ich wollt nur kurz nachhören, ob du gut angekommen bist.\n{anlass}\n\nUnd falls du magst, hätte ich noch was: Wir haben hier Paten, das sind\nLeute aus der Community, die Neuen den Einstieg zeigen. Kein Programm,\nkein Termin, einfach ein Mensch, der dir alles zeigt und mit dir die\nersten Runden dreht. Soll ich dir jemanden an die Seite stellen?";
+pub const T2_NUDGE_TEXT: &str = "Hey, ich wollt nur kurz nachhören, ob du gut angekommen bist. {anlass}\n\nUnd falls du magst, hätte ich noch was: Wir haben hier Paten, das sind Leute aus der Community, die Neuen den Einstieg zeigen. Kein Programm, kein Termin, einfach ein Mensch, der dir alles zeigt und mit dir die ersten Runden dreht. Soll ich dir jemanden an die Seite stellen?";
 pub const T2_ANLASS_FALLBACK: &str =
-    "Heute Abend ist hier meistens am meisten los, so ab 20 Uhr füllen sich\ndie Lanes.";
+    "Heute Abend ist hier meistens am meisten los, so ab 20 Uhr füllen sich die Lanes.";
 pub const T2_BUTTON_YES: &str = "Ja, gern";
 pub const T2_BUTTON_NO: &str = "Nee, ich komm klar";
 pub const PATE_YES_TEXT: &str =
-    "Super, ich geb das an unsere Paten weiter. Es meldet sich bald jemand\nbei dir, versprochen.";
+    "Super, ich geb das an unsere Paten weiter. Es meldet sich bald jemand bei dir, versprochen.";
 pub const PATE_NO_TEXT: &str = "Alles klar. Wenn doch mal was ist, schreib mir einfach.";
 
-pub const T7_TEXT: &str = "Hey, du bist jetzt eine Woche dabei. Eine Frage hab ich noch, dann bin\nich auch still: War irgendwas verwirrend oder hat dich was abgeschreckt?\nDu kannst mir ehrlich schreiben, das landet direkt beim Team und macht\nden Server für die Nächsten besser.\n\nUnd wie immer gilt, wenn du mich brauchst, bin ich da.";
+pub const T7_TEXT: &str = "Hey, du bist jetzt eine Woche dabei. Eine Frage hab ich noch, dann bin ich auch still: War irgendwas verwirrend oder hat dich was abgeschreckt? Du kannst mir ehrlich schreiben, das landet direkt beim Team und macht den Server für die Nächsten besser.\n\nUnd wie immer gilt, wenn du mich brauchst, bin ich da.";
 pub const CONGRATS_MESSAGE_TEXT: &str =
     "Hab gesehen, du bist angekommen. Schön, dich hier zu lesen :)";
 pub const CONGRATS_VOICE_TEXT: &str = "Na also, erste Lane. Viel Spaß da drin, die Leute sind gut.";
 pub const OPTOUT_TEXT: &str =
-    "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal\nbrauchst, schreib mir einfach, ich antworte immer.";
-pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt\nhatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir\neinfach.";
+    "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal brauchst, schreib mir einfach, ich antworte immer.";
+pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt hatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir einfach.";
 pub const PATE_PING_TEMPLATE: &str =
     "Neuer Neuling sucht einen Paten: {user_mention}\n{kurz_destillat}\nWer übernimmt? Kurz hier melden, dann stelle ich euch vor.";
-pub const KNOWLEDGE_GAP_TEXT: &str = "Platzhalter";
-pub const MISSING_MODAL_TEXT: &str = "Platzhalter";
+pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch.";
+pub const PLAY_TEXT: &str = "Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also was und wie du spielen willst. Danach joinst du den Deadlock Router, der packt dich automatisch in eine passende Lane oder macht dir eine eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)";
+pub const STECKBRIEF_MODAL_TITLE: &str = "Deine Vorstellung";
+pub const STECKBRIEF_MODAL_LABEL: &str = "Dein Text";
+pub const STECKBRIEF_MODAL_PLACEHOLDER: &str = "Schreib es einfach so, wie du redest.";
+pub const MODAL_EMPTY_TEXT: &str =
+    "Da ist nichts angekommen. Drück nochmal auf Anpassen und probier es erneut.";
+pub const STECKBRIEF_LOST_TEXT: &str =
+    "Ich finde deinen Entwurf gerade nicht mehr. Klick nochmal auf Ja, schreib was vor, dann machen wir fix einen neuen.";
+pub const STECKBRIEF_POSTED_CONFIRM_TEMPLATE: &str =
+    "Ist draußen, deine Vorstellung steht in {channel}. Schau gleich mal rein, falls wer antwortet.";
+pub const STECKBRIEF_DRAFT_FALLBACK: &str =
+    "Hey, bin neu hier und hab Lust auf ein paar Runden Deadlock. Wer nimmt mich mit oder zeigt mir alles?";
+pub const PATE_DIGEST_FALLBACK: &str =
+    "Noch nichts Näheres bekannt, am besten einfach direkt anschreiben.";
 
 pub const SYSTEM_PROMPT: &str = r#"Du bist der Concierge des deutschen Deadlock-Discord-Servers. Du bist die
 erste Anlaufstelle für neue Mitglieder und hilfst ihnen beim Ankommen. Dein
@@ -128,7 +140,7 @@ pub struct ConciergeConfig {
     pub mod_ping_role_id: Option<u64>,
     pub brand_emoji: Option<String>,
     pub knowledge_url: String,
-    pub model: String,
+    pub model: Option<String>,
 }
 
 impl ConciergeConfig {
@@ -158,8 +170,7 @@ impl ConciergeConfig {
                 .unwrap_or_else(|| DEFAULT_KNOWLEDGE_URL.to_string()),
             model: lookup("DL_CONCIERGE_MODEL")
                 .map(|value| value.trim().to_string())
-                .filter(|value| !value.is_empty())
-                .unwrap_or_else(|| DEFAULT_CONCIERGE_MODEL.to_string()),
+                .filter(|value| !value.is_empty()),
         }
     }
 
@@ -268,6 +279,7 @@ pub struct ConciergeProfile {
     pub fallback_channel_id: Option<u64>,
     pub pending_steckbrief_text: Option<String>,
     pub pending_steckbrief_channel_id: Option<u64>,
+    pub pending_steckbrief_approved: bool,
     pub last_interaction_at: DateTime<Utc>,
 }
 
@@ -346,8 +358,21 @@ pub fn optout_intent(text: &str) -> bool {
 }
 
 pub fn forget_intent(text: &str) -> bool {
-    let lower = text.to_ascii_lowercase();
-    contains_any(&lower, &["vergiss mich", "vergiss das", "lösch", "loesch"])
+    matches!(
+        text.trim()
+            .trim_matches(['.', '!', '?'])
+            .to_ascii_lowercase()
+            .as_str(),
+        "vergiss mich"
+            | "vergiss das"
+            | "vergiss alles"
+            | "lösch meine daten"
+            | "loesch meine daten"
+            | "lösch alles"
+            | "loesch alles"
+            | "daten löschen"
+            | "daten loeschen"
+    )
 }
 
 pub fn steckbrief_route(text: &str, intent: Option<ConciergeIntent>) -> SteckbriefRoute {
@@ -405,7 +430,7 @@ pub fn tour_body() -> Map<String, Value> {
 }
 
 fn preview_body(draft: &str, route: SteckbriefRoute) -> Map<String, Value> {
-    let text = format!("{STECKBRIEF_PREVIEW_TEXT}\n\n{draft}\n\n{}", route.hint());
+    let text = preview_text(draft, route);
     v2_body(
         &text,
         vec![
@@ -414,6 +439,10 @@ fn preview_body(draft: &str, route: SteckbriefRoute) -> Map<String, Value> {
             button(STECKBRIEF_BUTTON_NO, 2, "concierge:steckbrief:no"),
         ],
     )
+}
+
+fn preview_text(draft: &str, route: SteckbriefRoute) -> String {
+    format!("{STECKBRIEF_PREVIEW_TEXT}\n\n{draft}\n\n{}", route.hint())
 }
 
 fn nudge_body(anlass: &str) -> Map<String, Value> {
@@ -448,13 +477,13 @@ fn button(label: &str, style: u8, custom_id: &str) -> Value {
     json!({ "type": 2, "style": style, "label": label, "custom_id": custom_id })
 }
 
-fn v2_reply(body: Map<String, Value>) -> BridgeReply {
+fn v2_reply(body: Map<String, Value>, fallback_content: &str) -> BridgeReply {
     BridgeReply {
         components: body.get("components").cloned(),
         message_flags: Some(CONCIERGE_COMPONENTS_V2_FLAG),
         allowed_mentions: body.get("allowed_mentions").cloned(),
         fallback: Some(Box::new(BridgeReply {
-            content: Some(MISSING_MODAL_TEXT.to_string()),
+            content: Some(fallback_content.to_string()),
             ..BridgeReply::default()
         })),
         ..BridgeReply::default()
@@ -462,7 +491,15 @@ fn v2_reply(body: Map<String, Value>) -> BridgeReply {
 }
 
 fn text_reply(text: &str) -> BridgeReply {
-    v2_reply(v2_body(text, Vec::new()))
+    v2_reply(v2_body(text, Vec::new()), text)
+}
+
+fn pending_steckbrief_candidate(profile: &ConciergeProfile) -> Option<(&str, u64)> {
+    profile.pending_steckbrief_approved.then_some(())?;
+    Some((
+        profile.pending_steckbrief_text.as_deref()?,
+        profile.pending_steckbrief_channel_id?,
+    ))
 }
 
 fn contains_any(text: &str, needles: &[&str]) -> bool {
@@ -579,7 +616,8 @@ impl ConciergeStore {
                    steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
                    unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
                    congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
-                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
+                   pending_steckbrief_text, pending_steckbrief_channel_id,
+                   pending_steckbrief_approved, last_interaction_at
               FROM bot.concierge_profiles
              WHERE user_id = $1
             "#,
@@ -674,6 +712,47 @@ impl ConciergeStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn set_intent_if_missing(
+        &self,
+        user_id: u64,
+        intent: ConciergeIntent,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET intent = $2, updated_at = $3
+              WHERE user_id = $1
+                AND intent IS NULL",
+        )
+        .bind(user_id)
+        .bind(intent.as_str())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn has_linked_rank(&self, user_id: u64) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(user_id, "core.steam_links.discord_id")?;
+        let exists = sqlx::query_scalar::<_, bool>(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM core.steam_links
+                 WHERE discord_id = $1
+                   AND verified = TRUE
+                   AND deadlock_rank_name IS NOT NULL
+                 LIMIT 1
+            )
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
     }
 
     pub async fn mark_unsolicited_sent(
@@ -805,6 +884,7 @@ impl ConciergeStore {
         user_id: u64,
         text: &str,
         channel_id: u64,
+        approved: bool,
         now: DateTime<Utc>,
     ) -> CommunityDbResult<()> {
         let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
@@ -816,13 +896,15 @@ impl ConciergeStore {
             "UPDATE bot.concierge_profiles
                 SET pending_steckbrief_text = $2,
                     pending_steckbrief_channel_id = $3,
-                    pending_steckbrief_requested_at = $4,
-                    updated_at = $4
+                    pending_steckbrief_approved = $4,
+                    pending_steckbrief_requested_at = $5,
+                    updated_at = $5
               WHERE user_id = $1",
         )
         .bind(user_id)
         .bind(text)
         .bind(channel_id)
+        .bind(approved)
         .bind(now)
         .execute(&self.pool)
         .await?;
@@ -840,6 +922,7 @@ impl ConciergeStore {
             "UPDATE bot.concierge_profiles
                 SET pending_steckbrief_text = NULL,
                     pending_steckbrief_channel_id = NULL,
+                    pending_steckbrief_approved = FALSE,
                     pending_steckbrief_requested_at = NULL,
                     steckbrief_posted = steckbrief_posted OR $2,
                     funnel_status = CASE WHEN $2 THEN 'steckbrief_posted' ELSE funnel_status END,
@@ -930,7 +1013,8 @@ impl ConciergeStore {
                    steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
                    unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
                    congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
-                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
+                   pending_steckbrief_text, pending_steckbrief_channel_id,
+                   pending_steckbrief_approved, last_interaction_at
               FROM bot.concierge_profiles
              WHERE t0_sent_at IS NOT NULL
                AND t0_sent_at >= $1
@@ -949,9 +1033,11 @@ impl ConciergeStore {
                    steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
                    unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
                    congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
-                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
-              FROM bot.concierge_profiles
+                   pending_steckbrief_text, pending_steckbrief_channel_id,
+                   pending_steckbrief_approved, last_interaction_at
+             FROM bot.concierge_profiles
              WHERE pending_steckbrief_text IS NOT NULL
+               AND pending_steckbrief_approved = TRUE
                AND opted_out = FALSE
             "#,
         )
@@ -1049,6 +1135,7 @@ fn row_to_profile(row: sqlx::postgres::PgRow) -> CommunityDbResult<ConciergeProf
         pending_steckbrief_channel_id: pending_steckbrief_channel_id
             .map(|value| pg_i64_to_u64(value, "concierge_profiles.pending_steckbrief_channel_id"))
             .transpose()?,
+        pending_steckbrief_approved: row.try_get("pending_steckbrief_approved")?,
         last_interaction_at: row.try_get("last_interaction_at")?,
     })
 }
@@ -1101,10 +1188,18 @@ impl Concierge {
                 return;
             }
         }
-        let sent = match self.port.send_dm_v2(user_id, t0_body(false)).await {
+        let has_rank = match self.store.has_linked_rank(user_id).await {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Rang-Lookup fehlgeschlagen");
+                false
+            }
+        };
+        let sent = match self.port.send_dm_v2(user_id, t0_body(has_rank)).await {
             ConciergeDmDelivery::Sent { .. } => true,
             ConciergeDmDelivery::CannotSend50007 => {
-                self.send_t0_fallback_channel(guild_id, user_id, now).await
+                self.send_t0_fallback_channel(guild_id, user_id, has_rank, now)
+                    .await
             }
             ConciergeDmDelivery::Failed(err) => {
                 tracing::warn!(%err, user_id, "Concierge: T0-DM fehlgeschlagen");
@@ -1121,6 +1216,7 @@ impl Concierge {
         &self,
         guild_id: u64,
         user_id: u64,
+        has_rank: bool,
         now: DateTime<Utc>,
     ) -> bool {
         let key = format!("{guild_id}:{user_id}");
@@ -1162,7 +1258,11 @@ impl Concierge {
         {
             tracing::warn!(%err, user_id, channel_id, "Concierge: Fallback-Kanal-ID konnte nicht gespeichert werden");
         }
-        match self.port.send_channel_v2(channel_id, t0_body(false)).await {
+        match self
+            .port
+            .send_channel_v2(channel_id, t0_body(has_rank))
+            .await
+        {
             Ok(_) => true,
             Err(err) => {
                 tracing::warn!(%err, user_id, channel_id, "Concierge: Fallback-T0 konnte nicht gesendet werden");
@@ -1196,13 +1296,13 @@ impl Concierge {
         user_id: u64,
         content: &str,
     ) -> bool {
+        if !self.config.user_allowed(user_id) {
+            return false;
+        }
         let Some(effective_guild_id) = self.effective_guild_id(channel_id, guild_id, user_id).await
         else {
             return false;
         };
-        if !self.config.user_allowed(user_id) {
-            return false;
-        }
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return true;
@@ -1239,7 +1339,7 @@ impl Concierge {
             return true;
         }
         let intent = classify_intent(trimmed);
-        if let Err(err) = self.store.set_intent(user_id, intent, now).await {
+        if let Err(err) = self.store.set_intent_if_missing(user_id, intent, now).await {
             tracing::warn!(%err, user_id, "Concierge: Intent konnte nicht gespeichert werden");
         }
         let answer = self
@@ -1359,7 +1459,7 @@ impl Concierge {
             }
         }
         let params = ChatParams {
-            model: Some(self.config.model.clone()),
+            model: self.config.model.clone(),
             max_tokens: Some(500),
             temperature: 0.2,
             system_prompt: None,
@@ -1443,10 +1543,7 @@ impl Concierge {
             match action {
                 CadenceAction::T2 => {
                     let body = nudge_body(T2_ANLASS_FALLBACK);
-                    if matches!(
-                        self.port.send_dm_v2(profile.user_id, body).await,
-                        ConciergeDmDelivery::Sent { .. }
-                    ) {
+                    if self.send_cadence_message(&profile, body, "T2").await {
                         self.after_unsolicited_sent(
                             profile.user_id,
                             profile.guild_id,
@@ -1465,12 +1562,10 @@ impl Concierge {
                     }
                 }
                 CadenceAction::T7 => {
-                    if matches!(
-                        self.port
-                            .send_dm_v2(profile.user_id, v2_body(T7_TEXT, Vec::new()))
-                            .await,
-                        ConciergeDmDelivery::Sent { .. }
-                    ) {
+                    if self
+                        .send_cadence_message(&profile, v2_body(T7_TEXT, Vec::new()), "T7")
+                        .await
+                    {
                         self.after_unsolicited_sent(
                             profile.user_id,
                             profile.guild_id,
@@ -1486,12 +1581,10 @@ impl Concierge {
                     } else {
                         CONGRATS_VOICE_TEXT
                     };
-                    if matches!(
-                        self.port
-                            .send_dm_v2(profile.user_id, v2_body(text, Vec::new()))
-                            .await,
-                        ConciergeDmDelivery::Sent { .. }
-                    ) {
+                    if self
+                        .send_cadence_message(&profile, v2_body(text, Vec::new()), "Gratulation")
+                        .await
+                    {
                         if let Err(err) = self.store.mark_congrats_sent(profile.user_id, now).await
                         {
                             tracing::warn!(%err, user_id = profile.user_id, "Concierge: Gratulation konnte nicht markiert werden");
@@ -1510,6 +1603,41 @@ impl Concierge {
         }
     }
 
+    async fn send_cadence_message(
+        &self,
+        profile: &ConciergeProfile,
+        body: Map<String, Value>,
+        label: &'static str,
+    ) -> bool {
+        match self.port.send_dm_v2(profile.user_id, body.clone()).await {
+            ConciergeDmDelivery::Sent { .. } => true,
+            ConciergeDmDelivery::CannotSend50007 => {
+                if let Some(channel_id) = profile.fallback_channel_id {
+                    if let Err(err) = self.port.send_channel_v2(channel_id, body).await {
+                        tracing::warn!(
+                            %err,
+                            user_id = profile.user_id,
+                            channel_id,
+                            label,
+                            "Concierge: Kadenz-Fallback fehlgeschlagen, wird nicht erneut versucht"
+                        );
+                    }
+                } else {
+                    tracing::warn!(
+                        user_id = profile.user_id,
+                        label,
+                        "Concierge: DM nicht zustellbar und kein Fallback-Kanal, wird nicht erneut versucht"
+                    );
+                }
+                true
+            }
+            ConciergeDmDelivery::Failed(err) => {
+                tracing::warn!(%err, user_id = profile.user_id, label, "Concierge: Kadenz-DM fehlgeschlagen");
+                false
+            }
+        }
+    }
+
     async fn flush_pending_steckbriefe(&self, now: DateTime<Utc>) {
         let last_activity = self
             .store
@@ -1524,10 +1652,7 @@ impl Concierge {
             return;
         };
         for profile in profiles {
-            let (Some(text), Some(channel_id)) = (
-                profile.pending_steckbrief_text.as_deref(),
-                profile.pending_steckbrief_channel_id,
-            ) else {
+            let Some((text, channel_id)) = pending_steckbrief_candidate(&profile) else {
                 continue;
             };
             self.post_steckbrief(profile.user_id, profile.guild_id, channel_id, text, now)
@@ -1542,7 +1667,7 @@ impl Concierge {
         channel_id: u64,
         text: &str,
         now: DateTime<Utc>,
-    ) {
+    ) -> bool {
         match self.port.send_channel_text(channel_id, text).await {
             Ok(message_id) => {
                 self.port.add_reaction(channel_id, message_id, "👋").await;
@@ -1572,9 +1697,11 @@ impl Concierge {
                     json!({ "channel_id": channel_id.to_string() }),
                 )
                 .await;
+                true
             }
             Err(err) => {
-                tracing::warn!(%err, user_id, channel_id, "Concierge: Steckbrief-Post fehlgeschlagen")
+                tracing::warn!(%err, user_id, channel_id, "Concierge: Steckbrief-Post fehlgeschlagen");
+                false
             }
         }
     }
@@ -1584,7 +1711,7 @@ impl Concierge {
         let intent = profile.as_ref().and_then(|profile| profile.intent);
         let draft = match self.draft_steckbrief(user_id).await {
             Some(text) => text,
-            None => "Platzhalter".to_string(),
+            None => STECKBRIEF_DRAFT_FALLBACK.to_string(),
         };
         let route = steckbrief_route(&draft, intent);
         (draft, route)
@@ -1601,7 +1728,7 @@ impl Concierge {
         ai.chat(
             &messages,
             ChatParams {
-                model: Some(self.config.model.clone()),
+                model: self.config.model.clone(),
                 max_tokens: Some(180),
                 temperature: 0.2,
                 system_prompt: None,
@@ -1626,7 +1753,7 @@ impl Concierge {
                 .ok()
                 .flatten()
                 .map(|profile| short_digest(&profile))
-                .unwrap_or_else(|| "Platzhalter".to_string());
+                .unwrap_or_else(|| PATE_DIGEST_FALLBACK.to_string());
             let content = PATE_PING_TEMPLATE
                 .replace("{user_mention}", &format!("<@{user_id}>"))
                 .replace("{kurz_destillat}", &digest);
@@ -1650,7 +1777,7 @@ fn short_digest(profile: &ConciergeProfile) -> String {
         parts.push(format!("Zeiten: {times}"));
     }
     if parts.is_empty() {
-        "Platzhalter".to_string()
+        PATE_DIGEST_FALLBACK.to_string()
     } else {
         parts.join("\n")
     }
@@ -1773,9 +1900,9 @@ impl InteractionHandler for ConciergeHandler {
                         json!({}),
                     )
                     .await;
-                v2_reply(tour_body())
+                v2_reply(tour_body(), TOUR_TEXT)
             }
-            "concierge:play" => text_reply(MISSING_MODAL_TEXT),
+            "concierge:play" => text_reply(PLAY_TEXT),
             "concierge:later" => text_reply(LATER_TEXT),
             "concierge:steckbrief:draft" => {
                 let (draft, route) = self
@@ -1785,22 +1912,28 @@ impl InteractionHandler for ConciergeHandler {
                 if let Err(err) = self
                     .concierge
                     .store
-                    .save_pending_steckbrief(interaction.user_id, &draft, route.channel_id(), now)
+                    .save_pending_steckbrief(
+                        interaction.user_id,
+                        &draft,
+                        route.channel_id(),
+                        false,
+                        now,
+                    )
                     .await
                 {
                     tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Entwurf konnte nicht gespeichert werden");
                 }
-                v2_reply(preview_body(&draft, route))
+                v2_reply(preview_body(&draft, route), &preview_text(&draft, route))
             }
             "concierge:steckbrief:skip" | "concierge:steckbrief:no" => text_reply(TOUR_SKIP_TEXT),
             "concierge:steckbrief:edit" => BridgeReply {
                 modal: Some(ModalSpec {
                     custom_id: "concierge:steckbrief:modal".to_string(),
-                    title: MISSING_MODAL_TEXT.to_string(),
+                    title: STECKBRIEF_MODAL_TITLE.to_string(),
                     fields: vec![ModalField {
                         custom_id: "text".to_string(),
-                        label: MISSING_MODAL_TEXT.to_string(),
-                        placeholder: MISSING_MODAL_TEXT.to_string(),
+                        label: STECKBRIEF_MODAL_LABEL.to_string(),
+                        placeholder: STECKBRIEF_MODAL_PLACEHOLDER.to_string(),
                         required: true,
                         min_length: 1,
                         max_length: 1000,
@@ -1814,19 +1947,28 @@ impl InteractionHandler for ConciergeHandler {
                     .options
                     .get("text")
                     .and_then(Value::as_str)
-                    .unwrap_or(MISSING_MODAL_TEXT)
+                    .unwrap_or("")
                     .trim()
                     .to_string();
+                if text.is_empty() {
+                    return text_reply(MODAL_EMPTY_TEXT);
+                }
                 let route = steckbrief_route(&text, None);
                 if let Err(err) = self
                     .concierge
                     .store
-                    .save_pending_steckbrief(interaction.user_id, &text, route.channel_id(), now)
+                    .save_pending_steckbrief(
+                        interaction.user_id,
+                        &text,
+                        route.channel_id(),
+                        false,
+                        now,
+                    )
                     .await
                 {
                     tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Anpassung konnte nicht gespeichert werden");
                 }
-                v2_reply(preview_body(&text, route))
+                v2_reply(preview_body(&text, route), &preview_text(&text, route))
             }
             "concierge:steckbrief:post" => {
                 let profile = self
@@ -1837,13 +1979,13 @@ impl InteractionHandler for ConciergeHandler {
                     .ok()
                     .flatten();
                 let Some(profile) = profile else {
-                    return text_reply(MISSING_MODAL_TEXT);
+                    return text_reply(STECKBRIEF_LOST_TEXT);
                 };
                 let (Some(text), Some(channel_id)) = (
                     profile.pending_steckbrief_text.as_deref(),
                     profile.pending_steckbrief_channel_id,
                 ) else {
-                    return text_reply(MISSING_MODAL_TEXT);
+                    return text_reply(STECKBRIEF_LOST_TEXT);
                 };
                 let last_activity = self
                     .concierge
@@ -1857,15 +1999,31 @@ impl InteractionHandler for ConciergeHandler {
                     now,
                     self.concierge.config.active_threshold_minutes,
                 ) {
-                    self.concierge
+                    if self
+                        .concierge
                         .post_steckbrief(profile.user_id, profile.guild_id, channel_id, text, now)
-                        .await;
-                    text_reply(MISSING_MODAL_TEXT)
+                        .await
+                    {
+                        text_reply(
+                            &STECKBRIEF_POSTED_CONFIRM_TEMPLATE
+                                .replace("{channel}", &format!("<#{channel_id}>")),
+                        )
+                    } else {
+                        if let Err(err) = self
+                            .concierge
+                            .store
+                            .save_pending_steckbrief(profile.user_id, text, channel_id, true, now)
+                            .await
+                        {
+                            tracing::warn!(%err, user_id = profile.user_id, "Concierge: Steckbrief-Retry konnte nicht gespeichert werden");
+                        }
+                        text_reply(STECKBRIEF_HOLD_TEXT)
+                    }
                 } else {
                     if let Err(err) = self
                         .concierge
                         .store
-                        .save_pending_steckbrief(profile.user_id, text, channel_id, now)
+                        .save_pending_steckbrief(profile.user_id, text, channel_id, true, now)
                         .await
                     {
                         tracing::warn!(%err, user_id = profile.user_id, "Concierge: Steckbrief-Halteinfo konnte nicht gespeichert werden");
@@ -1940,11 +2098,6 @@ pub fn spawn(
         loop {
             match messages.recv().await {
                 Ok(event) => {
-                    if event.guild_id.is_some() {
-                        message_concierge
-                            .mark_first_message(event.guild_id.unwrap_or_default(), event.author_id)
-                            .await;
-                    }
                     let handled = message_concierge
                         .handle_user_message(
                             event.channel_id,
@@ -1958,6 +2111,13 @@ pub fn spawn(
                             user_id = event.author_id,
                             "Concierge: Nachricht verarbeitet"
                         );
+                    }
+                    if !handled {
+                        if let Some(guild_id) = event.guild_id {
+                            message_concierge
+                                .mark_first_message(guild_id, event.author_id)
+                                .await;
+                        }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
@@ -2030,6 +2190,7 @@ mod tests {
             fallback_channel_id: None,
             pending_steckbrief_text: None,
             pending_steckbrief_channel_id: None,
+            pending_steckbrief_approved: false,
             last_interaction_at: t0,
         }
     }
@@ -2116,14 +2277,47 @@ mod tests {
         assert_eq!(buttons[0]["label"], json!(T0_BUTTON_TOUR));
         assert_eq!(buttons[1]["label"], json!(T0_BUTTON_PLAY));
         assert_eq!(buttons[2]["label"], json!(T0_BUTTON_LATER));
+        let content = body["components"][0]["components"][0]["content"]
+            .as_str()
+            .unwrap();
+        assert!(content.contains("Ich bin der Concierge hier auf dem Server, ich helf"));
     }
 
     #[test]
     fn optout_und_vergessen_keywords() {
         assert!(optout_intent("stopp"));
         assert!(optout_intent("bitte schreib mir nicht mehr"));
-        assert!(forget_intent("vergiss mich bitte"));
+        assert!(forget_intent("vergiss mich"));
+        assert!(forget_intent("daten löschen"));
         assert!(forget_intent("lösch alles"));
+        assert!(!forget_intent("wie kann ich meine Nachricht löschen?"));
+        assert!(!forget_intent("bitte vergiss mich"));
+    }
+
+    #[test]
+    fn v2_fallback_enthaelt_klartext_des_bodys() {
+        let reply = text_reply(PLAY_TEXT);
+        assert_eq!(
+            reply
+                .fallback
+                .as_ref()
+                .and_then(|fallback| fallback.content.as_deref()),
+            Some(PLAY_TEXT)
+        );
+    }
+
+    #[test]
+    fn pending_steckbrief_braucht_freigabe() {
+        let mut profile = profile_at(Utc::now());
+        profile.pending_steckbrief_text = Some("draft".to_string());
+        profile.pending_steckbrief_channel_id = Some(ALLGEMEIN_CHANNEL_ID);
+        assert!(pending_steckbrief_candidate(&profile).is_none());
+
+        profile.pending_steckbrief_approved = true;
+        assert_eq!(
+            pending_steckbrief_candidate(&profile),
+            Some(("draft", ALLGEMEIN_CHANNEL_ID))
+        );
     }
 
     #[test]

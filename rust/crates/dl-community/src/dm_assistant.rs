@@ -10,7 +10,7 @@
 //! Rest (FAQ, Moderation) den konfigurierten [`TextGenerator`] (MiniMax) — das
 //! sichtbare Verhalten (KI beantwortet DMs) bleibt gleich.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -60,22 +60,35 @@ pub struct DmAssistant {
     port: Arc<dyn DmPort>,
     /// Pro User die monotonen Zeitstempel der letzten Aufrufe (Cooldown).
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
+    ignore_users: HashSet<u64>,
     /// Monotone Referenz für die Cooldown-Sekunden.
     start: Instant,
 }
 
 impl DmAssistant {
     pub fn new(ai: Option<Arc<dyn TextGenerator>>, port: Arc<dyn DmPort>) -> Arc<Self> {
+        Self::new_with_ignore_users(ai, port, HashSet::new())
+    }
+
+    pub fn new_with_ignore_users(
+        ai: Option<Arc<dyn TextGenerator>>,
+        port: Arc<dyn DmPort>,
+        ignore_users: HashSet<u64>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             ai,
             port,
             cooldowns: Mutex::new(HashMap::new()),
+            ignore_users,
             start: Instant::now(),
         })
     }
 
     /// Verarbeitet eine DM. `now` = monotone Sekunden seit [`Self::start`].
     async fn handle_dm(&self, channel_id: u64, user_id: u64, content: &str, now: f64) {
+        if self.ignore_users.contains(&user_id) {
+            return;
+        }
         let trimmed = content.trim();
         if trimmed.is_empty() {
             return;
@@ -420,6 +433,14 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Community Bot"));
+    }
+
+    #[tokio::test]
+    async fn ignoriert_konfigurierte_user() {
+        let p = port();
+        let dm = DmAssistant::new_with_ignore_users(None, p.clone(), HashSet::from([1]));
+        dm.handle_dm(10, 1, "Hallo", 0.0).await;
+        assert!(p.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

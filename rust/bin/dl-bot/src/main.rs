@@ -1264,18 +1264,20 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         let _voice_change_hint_responder =
             dl_community::voice_change_hint::spawn(voice_hint_responder, &dispatcher);
         // KI-DM-Assistent: beantwortet Freitext-DMs an den Bot (MiniMax + Fallback).
-        let dm_assistant = dl_community::dm_assistant::DmAssistant::new(
+        let concierge_dm_ignore = if concierge_config.enabled {
+            concierge_config.test_user_allowlist.clone()
+        } else {
+            std::collections::HashSet::new()
+        };
+        let dm_assistant = dl_community::dm_assistant::DmAssistant::new_with_ignore_users(
             dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok())
                 .map(|client| client as Arc<dyn dl_ai::TextGenerator>),
             Arc::new(modglue::DmGlue {
                 adapter: adapter.clone(),
             }),
+            concierge_dm_ignore,
         );
-        if concierge.enabled() {
-            tracing::info!("Legacy-DM-Assistent deaktiviert, Concierge verarbeitet DMs");
-        } else {
-            dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
-        }
+        dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.

@@ -13,6 +13,7 @@ const DEFAULT_MAX_RETRIES: usize = 2;
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(250);
 const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
 pub const DEFAULT_OPENAI_CHAT_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.chat/v1";
 const DEFAULT_MINIMAX_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
 const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M3";
@@ -187,6 +188,7 @@ impl LlmDataClass {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LlmProviderKind {
     OpenAi,
+    Fireworks,
     MiniMax,
     Mistral,
     Mock,
@@ -196,6 +198,7 @@ impl LlmProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
+            Self::Fireworks => "fireworks",
             Self::MiniMax => "minimax",
             Self::Mistral => "mistral",
             Self::Mock => "mock",
@@ -209,6 +212,7 @@ impl std::str::FromStr for LlmProviderKind {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match normalize_provider_name(value).as_str() {
             "openai" => Ok(Self::OpenAi),
+            "fireworks" => Ok(Self::Fireworks),
             "minimax" => Ok(Self::MiniMax),
             "mistral" => Ok(Self::Mistral),
             "mock" => Ok(Self::Mock),
@@ -355,6 +359,8 @@ impl LlmProviderConfig {
         match self.provider_for(use_case, &lookup)? {
             LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
+            LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup)
+                .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::MiniMax => MiniMaxChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Mistral => MistralChatProvider::from_env(lookup)
@@ -364,12 +370,11 @@ impl LlmProviderConfig {
     }
 }
 
-// KI-Compliance-Gate (§5.6): Default ist Mistral Small 4. MiniMax darf nur per
-// explizitem Dev-Override und ausschliesslich mit synthetischen Daten genutzt
-// werden; echter User-Content wartet auf Mistral-DPA/ZDR und Cutover.
+// KI-Compliance-Gate (§5.6): MiniMax darf nur per explizitem Dev-Override und
+// ausschliesslich mit synthetischen Daten genutzt werden.
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
-        LlmUseCase::BotPate => LlmProviderKind::OpenAi,
+        LlmUseCase::BotPate => LlmProviderKind::Fireworks,
         LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
     }
 }
@@ -433,6 +438,26 @@ impl OpenAiChatProvider {
             .or_else(|| read_env(&lookup, "AI_OPENAI_MODEL"))
             .unwrap_or_else(|| DEFAULT_OPENAI_CHAT_MODEL.into());
         tracing::info!(provider = "openai", %model, "LLM-Chat-Provider initialisiert");
+        Ok(Self::new(base_url, api_key, model))
+    }
+
+    pub fn from_fireworks_env(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Arc<Self>, ChatProviderInitError> {
+        let api_key = read_env(&lookup, "FIREWORK_API_KEY")
+            .or_else(|| read_env(&lookup, "FIREWORKS_API_KEY"))
+            .ok_or(ChatProviderInitError::MissingApiKey {
+                provider: "fireworks",
+                env_key: "FIREWORK_API_KEY or FIREWORKS_API_KEY",
+            })?;
+        let base_url = read_env(&lookup, "FIREWORK_BASE_URL")
+            .or_else(|| read_env(&lookup, "FIREWORKS_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.into());
+        let model = read_env(&lookup, "DL_LLM_MODEL_BOT_PATE")
+            .or_else(|| read_env(&lookup, "FIREWORK_MODEL"))
+            .or_else(|| read_env(&lookup, "FIREWORKS_MODEL"))
+            .unwrap_or_else(|| crate::DEFAULT_FIREWORKS_MODEL.into());
+        tracing::info!(provider = "fireworks", %model, "LLM-Chat-Provider initialisiert");
         Ok(Self::new(base_url, api_key, model))
     }
 
@@ -1146,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn config_default_ist_openai_fuer_bot_pate_und_env_override_pro_use_case() {
+    fn config_default_ist_fireworks_fuer_bot_pate_und_env_override_pro_use_case() {
         let cfg = LlmProviderConfig::from_env(|key| match key {
             "DL_LLM_PROVIDER_DEFAULT" => Some("mistral".to_string()),
             "DL_LLM_PROVIDER_BOT_PATE" => Some("mock".to_string()),
@@ -1174,7 +1199,7 @@ mod tests {
         let defaults = LlmProviderConfig::default();
         for use_case in LlmUseCase::all() {
             let expected = match use_case {
-                LlmUseCase::BotPate => LlmProviderKind::OpenAi,
+                LlmUseCase::BotPate => LlmProviderKind::Fireworks,
                 LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
             };
             assert_eq!(
@@ -1188,6 +1213,31 @@ mod tests {
                 LlmDataClass::UserContent
             );
         }
+    }
+
+    #[test]
+    fn fireworks_from_env_nutzt_singular_keys_und_provider_default() {
+        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
+            "FIREWORK_API_KEY" => Some("fw-key".to_string()),
+            _ => None,
+        })
+        .expect("fireworks provider");
+
+        assert_eq!(provider.base_url, DEFAULT_FIREWORKS_BASE_URL);
+        assert_eq!(provider.default_model, crate::DEFAULT_FIREWORKS_MODEL);
+    }
+
+    #[test]
+    fn fireworks_from_env_nimmt_bot_pate_model_vor_fireworks_model() {
+        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
+            "FIREWORKS_API_KEY" => Some("fw-key".to_string()),
+            "DL_LLM_MODEL_BOT_PATE" => Some("bot-pate-model".to_string()),
+            "FIREWORK_MODEL" => Some("fireworks-model".to_string()),
+            _ => None,
+        })
+        .expect("fireworks provider");
+
+        assert_eq!(provider.default_model, "bot-pate-model");
     }
 
     #[test]
