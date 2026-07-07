@@ -24,6 +24,7 @@ members = [
     "crates/dl-central-etl",
     "crates/dl-server-as-code",
     "bin/dl-bot",
+    "bin/dl-knowledge",
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",
