@@ -8,6 +8,7 @@ pub mod ai_onboarding;
 pub mod clips;
 pub mod coaching;
 pub mod coaching_requests;
+pub mod concierge;
 mod db;
 pub mod dm_assistant;
 pub mod faq;

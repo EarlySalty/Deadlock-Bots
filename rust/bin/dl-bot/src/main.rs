@@ -746,6 +746,35 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_community::faq::register(&mut router, faq.clone());
 
+    // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
+    let concierge_config =
+        dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
+    let concierge_ai = if concierge_config.enabled {
+        match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
+            .map_err(anyhow::Error::from)
+            .and_then(|cfg| {
+                cfg.build_provider_for_env(dl_ai::LlmUseCase::BotPate, |k| std::env::var(k).ok())
+                    .map_err(anyhow::Error::from)
+            }) {
+            Ok(provider) => Some(provider),
+            Err(err) => {
+                tracing::warn!(%err, "Concierge-LLM inaktiv");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    let concierge = dl_community::concierge::Concierge::new(
+        central_pool.clone(),
+        Arc::new(modglue::ConciergeGlue {
+            adapter: adapter.clone(),
+        }),
+        concierge_ai,
+        concierge_config.clone(),
+    );
+    dl_community::concierge::register(&mut router, concierge.clone());
+
     // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
     // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente
     // custom_ids halten ein bereits gepostetes Panel über den Cutover hinweg.
@@ -1172,6 +1201,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             &dispatcher,
             onboardglue::MAIN_GUILD_ID,
         );
+        let _concierge_tasks = dl_community::concierge::spawn(concierge.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),
@@ -1241,7 +1271,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 adapter: adapter.clone(),
             }),
         );
-        dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
+        if concierge.enabled() {
+            tracing::info!("Legacy-DM-Assistent deaktiviert, Concierge verarbeitet DMs");
+        } else {
+            dl_community::dm_assistant::spawn_dm_assistant(dm_assistant, &dispatcher);
+        }
         // Coaching-Survey: Poll + Voice-Ende-Listener. Der Discord-Intake bleibt
         // website-driven (#17/#18), aber abgeschlossene Sessions muessen wie in
         // Python Reward-Rolle + Feedback-DM bekommen.

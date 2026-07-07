@@ -1,0 +1,2175 @@
+//! Concierge-Onboarding Slice A.
+//!
+//! Der Kern bleibt port-basiert: Discord-I/O, LLM und HTTP-Wissen sind von der
+//! Entscheidungslogik getrennt, damit die Slice-Vertraege ohne Gateway laufen.
+
+use std::collections::HashSet;
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+use async_trait::async_trait;
+use chrono::{DateTime, Duration, Utc};
+use dl_ai::{ChatMessage, ChatParams, ChatProvider};
+use dl_discord::interactions::{ModalField, ModalSpec};
+use dl_discord::{
+    BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter,
+};
+use serde::Deserialize;
+use serde_json::{json, Map, Value};
+use sqlx::{PgPool, Row};
+
+use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
+
+pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
+pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
+pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
+pub const DEFAULT_CONCIERGE_MODEL: &str = "gpt-5.4-mini";
+pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
+pub const RETENTION_DAYS: i64 = 90;
+pub const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = 1426220702054355077;
+pub const ALLGEMEIN_CHANNEL_ID: u64 = 1289721245281292291;
+pub const PATE_ROLE_ID: u64 = 1524047896297738311;
+pub const SPRACHKANAL_VERWALTEN_CHANNEL_ID: u64 = 1513468476365209670;
+pub const MITSPILER_SUCHE_CHANNEL_ID: u64 = 1522769149208821881;
+pub const COACHING_CHANNEL_ID: u64 = 1494373349944459355;
+pub const DEFAULT_ROUTER_VOICE_ID: u64 = 1513468587195633674;
+const KNOWLEDGE_TIMEOUT: StdDuration = StdDuration::from_secs(20);
+const SCHEDULER_INTERVAL: StdDuration = StdDuration::from_secs(5 * 60);
+
+pub const T0_TEXT: &str = "Hey, schön dass du da bist. Ich bin der Concierge hier auf dem Server,\nich helf dir beim Ankommen.\n\nErzähl mir kurz, was du hier vorhast, dann zeig ich dir den schnellsten\nWeg dahin. Egal ob du Mitspieler suchst, besser werden willst oder dich\nerstmal nur umschauen magst, schreib es mir einfach in deinen Worten.\n\nIch merk mir, was wir besprechen, damit ich nicht zweimal frage. Wenn du\ndas nicht willst, sag einfach stopp, dann lass ich dich in Ruhe.";
+pub const T0_RANK_LINE: &str = "Deinen Rang hab ich schon gesehen, das macht es gleich einfacher.";
+pub const T0_BUTTON_TOUR: &str = "Zeig mir den Server";
+pub const T0_BUTTON_PLAY: &str = "Ich will direkt spielen";
+pub const T0_BUTTON_LATER: &str = "Später";
+pub const LATER_TEXT: &str =
+    "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach,\nich bin immer da.";
+
+pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang\nlohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein\nBlick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein.\nDa ist eigentlich immer wer live.\n\n<#1426220702054355077>\nStell hier alle deine Fragen zu Deadlock, egal wie basic. Und wenn\ndu das Spiel noch gar nicht hast, lässt du dich hier ins Game\ninviten.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier\ndeine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen\nwillst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich\nautomatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor,\ndann musst du nicht den ersten Schritt machen. Ich schreib dir was\nvor, du änderst es wie du willst, und gepostet wird nur, wenn du es\nfreigibst.";
+pub const TOUR_BUTTON_DRAFT: &str = "Ja, schreib was vor";
+pub const TOUR_BUTTON_SKIP: &str = "Lieber nicht";
+pub const TOUR_SKIP_TEXT: &str =
+    "Kein Ding. Falls du es dir anders überlegst, sag einfach Bescheid.\nDie anderen beißen nicht, versprochen :)";
+
+pub const STECKBRIEF_PREVIEW_TEXT: &str = "So könntest du dich vorstellen. Das ist nur ein Vorschlag, mach deins\ndraus. Gepostet wird erst, wenn du auf Posten drückst.";
+pub const STECKBRIEF_BUTTON_POST: &str = "Posten";
+pub const STECKBRIEF_BUTTON_EDIT: &str = "Anpassen";
+pub const STECKBRIEF_BUTTON_NO: &str = "Lieber nicht";
+pub const STECKBRIEF_ROUTE_HELP: &str =
+    "Der Post geht in <#1426220702054355077>, da schauen die richtigen Leute\nrein.";
+pub const STECKBRIEF_ROUTE_CASUAL: &str =
+    "Der Post geht in <#1289721245281292291>, mitten ins Geschehen.";
+pub const STECKBRIEF_HOLD_TEXT: &str = "Gerade ist hier wenig los. Ich poste deine Vorstellung, sobald wieder\nLeute unterwegs sind, dann geht sie nicht unter. Du musst nichts weiter\ntun.";
+pub const STECKBRIEF_REPLY_TEXT: &str =
+    "Willkommen an Bord. Wer nimmt ihn mit in die nächste Lane?";
+
+pub const T2_NUDGE_TEXT: &str = "Hey, ich wollt nur kurz nachhören, ob du gut angekommen bist.\n{anlass}\n\nUnd falls du magst, hätte ich noch was: Wir haben hier Paten, das sind\nLeute aus der Community, die Neuen den Einstieg zeigen. Kein Programm,\nkein Termin, einfach ein Mensch, der dir alles zeigt und mit dir die\nersten Runden dreht. Soll ich dir jemanden an die Seite stellen?";
+pub const T2_ANLASS_FALLBACK: &str =
+    "Heute Abend ist hier meistens am meisten los, so ab 20 Uhr füllen sich\ndie Lanes.";
+pub const T2_BUTTON_YES: &str = "Ja, gern";
+pub const T2_BUTTON_NO: &str = "Nee, ich komm klar";
+pub const PATE_YES_TEXT: &str =
+    "Super, ich geb das an unsere Paten weiter. Es meldet sich bald jemand\nbei dir, versprochen.";
+pub const PATE_NO_TEXT: &str = "Alles klar. Wenn doch mal was ist, schreib mir einfach.";
+
+pub const T7_TEXT: &str = "Hey, du bist jetzt eine Woche dabei. Eine Frage hab ich noch, dann bin\nich auch still: War irgendwas verwirrend oder hat dich was abgeschreckt?\nDu kannst mir ehrlich schreiben, das landet direkt beim Team und macht\nden Server für die Nächsten besser.\n\nUnd wie immer gilt, wenn du mich brauchst, bin ich da.";
+pub const CONGRATS_MESSAGE_TEXT: &str =
+    "Hab gesehen, du bist angekommen. Schön, dich hier zu lesen :)";
+pub const CONGRATS_VOICE_TEXT: &str = "Na also, erste Lane. Viel Spaß da drin, die Leute sind gut.";
+pub const OPTOUT_TEXT: &str =
+    "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal\nbrauchst, schreib mir einfach, ich antworte immer.";
+pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt\nhatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir\neinfach.";
+pub const PATE_PING_TEMPLATE: &str =
+    "Neuer Neuling sucht einen Paten: {user_mention}\n{kurz_destillat}\nWer übernimmt? Kurz hier melden, dann stelle ich euch vor.";
+pub const KNOWLEDGE_GAP_TEXT: &str = "Platzhalter";
+pub const MISSING_MODAL_TEXT: &str = "Platzhalter";
+
+pub const SYSTEM_PROMPT: &str = r#"Du bist der Concierge des deutschen Deadlock-Discord-Servers. Du bist die
+erste Anlaufstelle für neue Mitglieder und hilfst ihnen beim Ankommen. Dein
+Ziel ist immer, den Menschen so schnell wie möglich zu anderen Menschen zu
+bringen: in einen Kanal, in eine Voice-Lane, zu einem Paten. Du bist der
+Weg dorthin, nie das Ziel.
+
+So klingst du: wie ein Freund, der sich hier auskennt, mit einem Hauch
+Hotel-Concierge, aufmerksam und dienstbereit, nie devot und nie förmlich.
+Du duzt. Kurze Sätze, Punkt und Komma, keine Gedankenstriche, keine
+Floskeln, keine Emojis außer höchstens einem :) an einer passenden Stelle.
+Führe mit der Hilfe, nie mit der Einschränkung. Rede nicht über dich
+selbst, deine Grenzen oder deine Funktionsweise. Wirst du direkt gefragt,
+ob du ein Bot bist, sagst du ehrlich ja, in einem Satz, und hilfst weiter.
+
+So arbeitest du: Stelle offene Fragen, geschlossene Fragen nur zum
+Präzisieren. Frag zuerst, was die Person vorhat, und steig dann konkret
+ein. Antworte immer mit einer Handlung am Ende: ein konkreter Kanal, ein
+konkreter Schritt, ein Mensch. Fakten über Server und Spiel kommen
+ausschließlich aus dem mitgelieferten Wissenskontext. Steht etwas nicht im
+Kontext, erfindest du es nicht, sondern verweist auf den Kanal
+frag-die-community, da antwortet ein Mensch. Behaupte nie, etwas
+nachgeschaut oder geprüft zu haben. Status (Rang verknüpft, Steam
+bestätigt) kennst du nur, wenn er dir explizit als Kontext mitgegeben
+wurde, dann nenne die Quelle. Versprich nichts über dein eigenes künftiges
+Verhalten, das technisch nicht existiert.
+
+Menschen vor Programm: Wenn jemand unsicher oder schüchtern wirkt, mach
+die Hürde kleiner statt zu schieben. Biete an, ihn vorzustellen, statt ihm
+zu sagen, er soll einfach schreiben. Erwähne, dass hier normale Leute
+sind, die selbst mal neu waren. Niemand muss in Voice, wenn er nicht will,
+Chat zählt genauso. Sagt jemand stopp oder will nicht mehr angeschrieben
+werden, bestätigst du das freundlich und hältst dich daran."#;
+
+#[derive(Debug, Clone)]
+pub struct ConciergeConfig {
+    pub enabled: bool,
+    pub main_guild_id: u64,
+    pub test_user_allowlist: HashSet<u64>,
+    pub fallback_category_id: u64,
+    pub active_threshold_minutes: i64,
+    pub pater_channel_id: Option<u64>,
+    pub mod_ping_role_id: Option<u64>,
+    pub brand_emoji: Option<String>,
+    pub knowledge_url: String,
+    pub model: String,
+}
+
+impl ConciergeConfig {
+    pub fn from_env(lookup: impl Fn(&str) -> Option<String>) -> Self {
+        let enabled = env_bool(&lookup, "DL_CONCIERGE_ENABLED", false);
+        let main_guild_id = env_u64(&lookup, "MAIN_GUILD_ID")
+            .or_else(|| env_u64(&lookup, "OUR_GUILD_ID"))
+            .unwrap_or(1289721245281292288);
+        Self {
+            enabled,
+            main_guild_id,
+            test_user_allowlist: parse_u64_set(
+                lookup("DL_CONCIERGE_TEST_USER_ALLOWLIST").as_deref(),
+            ),
+            fallback_category_id: env_u64(&lookup, "DL_CONCIERGE_FALLBACK_CATEGORY_ID")
+                .unwrap_or(crate::faq::FAQ_CATEGORY_ID),
+            active_threshold_minutes: env_i64(&lookup, "DL_CONCIERGE_ACTIVE_THRESHOLD_MINUTES")
+                .unwrap_or(30),
+            pater_channel_id: env_u64(&lookup, "DL_CONCIERGE_PATE_CHANNEL_ID"),
+            mod_ping_role_id: env_u64(&lookup, "DL_CONCIERGE_MOD_PING_ROLE_ID"),
+            brand_emoji: lookup("DL_CONCIERGE_BRAND_EMOJI")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
+            knowledge_url: lookup("DL_KNOWLEDGE_URL")
+                .map(|value| value.trim().trim_end_matches('/').to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_KNOWLEDGE_URL.to_string()),
+            model: lookup("DL_CONCIERGE_MODEL")
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| DEFAULT_CONCIERGE_MODEL.to_string()),
+        }
+    }
+
+    fn user_allowed(&self, user_id: u64) -> bool {
+        self.enabled
+            && !self.test_user_allowlist.is_empty()
+            && self.test_user_allowlist.contains(&user_id)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConciergeIntent {
+    Improve,
+    Mates,
+    Learn,
+    Casual,
+}
+
+impl ConciergeIntent {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Improve => "improve",
+            Self::Mates => "mates",
+            Self::Learn => "learn",
+            Self::Casual => "casual",
+        }
+    }
+
+    fn from_str(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "improve" => Some(Self::Improve),
+            "mates" => Some(Self::Mates),
+            "learn" => Some(Self::Learn),
+            "casual" => Some(Self::Casual),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SteckbriefRoute {
+    HelpOrInvite,
+    Casual,
+}
+
+impl SteckbriefRoute {
+    pub const fn channel_id(self) -> u64 {
+        match self {
+            Self::HelpOrInvite => FRAG_DIE_COMMUNITY_CHANNEL_ID,
+            Self::Casual => ALLGEMEIN_CHANNEL_ID,
+        }
+    }
+
+    pub const fn hint(self) -> &'static str {
+        match self {
+            Self::HelpOrInvite => STECKBRIEF_ROUTE_HELP,
+            Self::Casual => STECKBRIEF_ROUTE_CASUAL,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CadenceAction {
+    T2,
+    T7,
+    CongratsMessage,
+    CongratsVoice,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContactKind {
+    T0,
+    T2,
+    T7,
+}
+
+impl ContactKind {
+    fn journey_event(self) -> dl_activity::journey::JourneyEventType {
+        match self {
+            Self::T0 => dl_activity::journey::JourneyEventType::ConciergeT0Sent,
+            Self::T2 | Self::T7 => dl_activity::journey::JourneyEventType::NudgeSent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConciergeProfile {
+    pub user_id: u64,
+    pub guild_id: u64,
+    pub intent: Option<ConciergeIntent>,
+    pub rank_snapshot: Option<String>,
+    pub play_times: Option<String>,
+    pub funnel_status: String,
+    pub steckbrief_posted: bool,
+    pub tour_done: bool,
+    pub pate_offered: bool,
+    pub pate_requested: bool,
+    pub opted_out: bool,
+    pub unsolicited_contact_count: i32,
+    pub t0_sent_at: Option<DateTime<Utc>>,
+    pub t2_sent_at: Option<DateTime<Utc>>,
+    pub t7_sent_at: Option<DateTime<Utc>>,
+    pub congrats_sent_at: Option<DateTime<Utc>>,
+    pub first_message_at: Option<DateTime<Utc>>,
+    pub first_voice_at: Option<DateTime<Utc>>,
+    pub fallback_channel_id: Option<u64>,
+    pub pending_steckbrief_text: Option<String>,
+    pub pending_steckbrief_channel_id: Option<u64>,
+    pub last_interaction_at: DateTime<Utc>,
+}
+
+pub fn cadence_due(profile: &ConciergeProfile, now: DateTime<Utc>) -> Vec<CadenceAction> {
+    if profile.opted_out {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    if profile.congrats_sent_at.is_none() {
+        if profile.first_message_at.is_some() {
+            out.push(CadenceAction::CongratsMessage);
+        } else if profile.first_voice_at.is_some() {
+            out.push(CadenceAction::CongratsVoice);
+        }
+    }
+    let Some(t0) = profile.t0_sent_at else {
+        return out;
+    };
+    let null_activity = profile.first_message_at.is_none() && profile.first_voice_at.is_none();
+    if profile.unsolicited_contact_count < 3
+        && profile.t2_sent_at.is_none()
+        && null_activity
+        && now >= t0 + Duration::days(2)
+    {
+        out.push(CadenceAction::T2);
+    }
+    if profile.unsolicited_contact_count < 3
+        && profile.t7_sent_at.is_none()
+        && now >= t0 + Duration::days(7)
+    {
+        out.push(CadenceAction::T7);
+    }
+    out
+}
+
+pub fn classify_intent(text: &str) -> ConciergeIntent {
+    let lower = text.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &["coach", "lernen", "anfang", "einsteiger", "newbie"],
+    ) {
+        ConciergeIntent::Learn
+    } else if contains_any(
+        &lower,
+        &[
+            "mitspieler",
+            "mates",
+            "gruppe",
+            "regelmäßig",
+            "stack",
+            "team",
+        ],
+    ) {
+        ConciergeIntent::Mates
+    } else if contains_any(
+        &lower,
+        &["besser", "verbessern", "rank", "ranked", "tryhard"],
+    ) {
+        ConciergeIntent::Improve
+    } else {
+        ConciergeIntent::Casual
+    }
+}
+
+pub fn optout_intent(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    lower.split_whitespace().any(|word| word == "stopp")
+        || contains_any(
+            &lower,
+            &[
+                "schreib mir nicht",
+                "lass mich in ruhe",
+                "nicht mehr anschreiben",
+            ],
+        )
+}
+
+pub fn forget_intent(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    contains_any(&lower, &["vergiss mich", "vergiss das", "lösch", "loesch"])
+}
+
+pub fn steckbrief_route(text: &str, intent: Option<ConciergeIntent>) -> SteckbriefRoute {
+    let lower = text.to_ascii_lowercase();
+    if matches!(intent, Some(ConciergeIntent::Learn))
+        || contains_any(
+            &lower,
+            &["hilfe", "helfen", "coach", "invite", "mitnehmen", "lernen"],
+        )
+    {
+        SteckbriefRoute::HelpOrInvite
+    } else {
+        SteckbriefRoute::Casual
+    }
+}
+
+pub fn presence_allows_post(
+    last_activity_at: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+    threshold_minutes: i64,
+) -> bool {
+    last_activity_at
+        .map(|last| now - last <= Duration::minutes(threshold_minutes.max(1)))
+        .unwrap_or(false)
+}
+
+pub fn t0_body(has_rank: bool) -> Map<String, Value> {
+    let text = if has_rank {
+        let mut text = T0_TEXT.to_string();
+        if let Some((first, rest)) = text.split_once("\n\n") {
+            text = format!("{first}\n\n{T0_RANK_LINE}\n\n{rest}");
+        }
+        text
+    } else {
+        T0_TEXT.to_string()
+    };
+    v2_body(
+        &text,
+        vec![
+            button(T0_BUTTON_TOUR, 1, "concierge:tour"),
+            button(T0_BUTTON_PLAY, 1, "concierge:play"),
+            button(T0_BUTTON_LATER, 2, "concierge:later"),
+        ],
+    )
+}
+
+pub fn tour_body() -> Map<String, Value> {
+    v2_body(
+        TOUR_TEXT,
+        vec![
+            button(TOUR_BUTTON_DRAFT, 1, "concierge:steckbrief:draft"),
+            button(TOUR_BUTTON_SKIP, 2, "concierge:steckbrief:skip"),
+        ],
+    )
+}
+
+fn preview_body(draft: &str, route: SteckbriefRoute) -> Map<String, Value> {
+    let text = format!("{STECKBRIEF_PREVIEW_TEXT}\n\n{draft}\n\n{}", route.hint());
+    v2_body(
+        &text,
+        vec![
+            button(STECKBRIEF_BUTTON_POST, 1, "concierge:steckbrief:post"),
+            button(STECKBRIEF_BUTTON_EDIT, 2, "concierge:steckbrief:edit"),
+            button(STECKBRIEF_BUTTON_NO, 2, "concierge:steckbrief:no"),
+        ],
+    )
+}
+
+fn nudge_body(anlass: &str) -> Map<String, Value> {
+    v2_body(
+        &T2_NUDGE_TEXT.replace("{anlass}", anlass),
+        vec![
+            button(T2_BUTTON_YES, 1, "concierge:pate:yes"),
+            button(T2_BUTTON_NO, 2, "concierge:pate:no"),
+        ],
+    )
+}
+
+fn v2_body(content: &str, buttons: Vec<Value>) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("flags".into(), json!(CONCIERGE_COMPONENTS_V2_FLAG));
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": Vec::<String>::new() }),
+    );
+    let mut components = vec![json!({ "type": 10, "content": content })];
+    if !buttons.is_empty() {
+        components.push(json!({ "type": 1, "components": buttons }));
+    }
+    body.insert(
+        "components".into(),
+        json!([{ "type": 17, "accent_color": CONCIERGE_ACCENT_GOLD, "components": components }]),
+    );
+    body
+}
+
+fn button(label: &str, style: u8, custom_id: &str) -> Value {
+    json!({ "type": 2, "style": style, "label": label, "custom_id": custom_id })
+}
+
+fn v2_reply(body: Map<String, Value>) -> BridgeReply {
+    BridgeReply {
+        components: body.get("components").cloned(),
+        message_flags: Some(CONCIERGE_COMPONENTS_V2_FLAG),
+        allowed_mentions: body.get("allowed_mentions").cloned(),
+        fallback: Some(Box::new(BridgeReply {
+            content: Some(MISSING_MODAL_TEXT.to_string()),
+            ..BridgeReply::default()
+        })),
+        ..BridgeReply::default()
+    }
+}
+
+fn text_reply(text: &str) -> BridgeReply {
+    v2_reply(v2_body(text, Vec::new()))
+}
+
+fn contains_any(text: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| text.contains(needle))
+}
+
+fn env_bool(lookup: &impl Fn(&str) -> Option<String>, key: &str, default: bool) -> bool {
+    lookup(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn env_u64(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<u64> {
+    lookup(key).and_then(|value| value.trim().parse().ok())
+}
+
+fn env_i64(lookup: &impl Fn(&str) -> Option<String>, key: &str) -> Option<i64> {
+    lookup(key).and_then(|value| value.trim().parse().ok())
+}
+
+fn parse_u64_set(raw: Option<&str>) -> HashSet<u64> {
+    raw.unwrap_or_default()
+        .split([',', ' ', '\n', ';'])
+        .filter_map(|part| part.trim().parse::<u64>().ok())
+        .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConciergeDmDelivery {
+    Sent {
+        channel_id: Option<u64>,
+        message_id: u64,
+    },
+    CannotSend50007,
+    Failed(String),
+}
+
+#[async_trait]
+pub trait ConciergePort: Send + Sync {
+    async fn send_dm_v2(&self, user_id: u64, body: Map<String, Value>) -> ConciergeDmDelivery;
+    async fn create_private_channel(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        category_id: u64,
+        name: &str,
+    ) -> Result<u64, String>;
+    async fn send_channel_v2(
+        &self,
+        channel_id: u64,
+        body: Map<String, Value>,
+    ) -> Result<u64, String>;
+    async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String>;
+    async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str);
+    async fn reply_to_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+        allowed_role_id: Option<u64>,
+    );
+}
+
+#[derive(Clone)]
+pub struct ConciergeStore {
+    pool: PgPool,
+}
+
+impl ConciergeStore {
+    pub fn new(pool: PgPool) -> Self {
+        Self { pool }
+    }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
+
+    pub async fn ensure_profile(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let guild_id = u64_to_i64(guild_id, "concierge_profiles.guild_id")?;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.concierge_profiles(user_id, guild_id, last_interaction_at, created_at, updated_at)
+            VALUES($1, $2, $3, $3, $3)
+            ON CONFLICT(user_id) DO UPDATE SET
+              guild_id = EXCLUDED.guild_id,
+              last_interaction_at = GREATEST(bot.concierge_profiles.last_interaction_at, EXCLUDED.last_interaction_at),
+              updated_at = EXCLUDED.updated_at
+            "#,
+        )
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn profile(&self, user_id: u64) -> CommunityDbResult<Option<ConciergeProfile>> {
+        let user_id_i64 = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let Some(row) = sqlx::query(
+            r#"
+            SELECT user_id, guild_id, intent, rank_snapshot, play_times, funnel_status,
+                   steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
+                   unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
+                   congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
+                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
+              FROM bot.concierge_profiles
+             WHERE user_id = $1
+            "#,
+        )
+        .bind(user_id_i64)
+        .fetch_optional(&self.pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+        row_to_profile(row).map(Some)
+    }
+
+    pub async fn record_conversation(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        role: &str,
+        content: &str,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_conversations.user_id")?;
+        let guild_id = u64_to_i64(guild_id, "concierge_conversations.guild_id")?;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.concierge_conversations(user_id, guild_id, role, content, created_at)
+            VALUES($1, $2, $3, $4, $5)
+            "#,
+        )
+        .bind(user_id)
+        .bind(guild_id)
+        .bind(role)
+        .bind(content)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn recent_conversation(
+        &self,
+        user_id: u64,
+        limit: i64,
+    ) -> CommunityDbResult<Vec<ChatMessage>> {
+        let user_id = u64_to_i64(user_id, "concierge_conversations.user_id")?;
+        let rows = sqlx::query(
+            r#"
+            SELECT role, content
+              FROM (
+                    SELECT role, content, id
+                      FROM bot.concierge_conversations
+                     WHERE user_id = $1
+                     ORDER BY id DESC
+                     LIMIT $2
+                   ) recent
+             ORDER BY id ASC
+            "#,
+        )
+        .bind(user_id)
+        .bind(limit.max(1))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(|row| {
+                let role: String = row.try_get("role").ok()?;
+                let content: String = row.try_get("content").ok()?;
+                match role.as_str() {
+                    "user" => Some(ChatMessage::user(content)),
+                    "assistant" => Some(ChatMessage::assistant(content)),
+                    "system" => Some(ChatMessage::system(content)),
+                    _ => None,
+                }
+            })
+            .collect())
+    }
+
+    pub async fn set_intent(
+        &self,
+        user_id: u64,
+        intent: ConciergeIntent,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles SET intent = $2, updated_at = $3 WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(intent.as_str())
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_unsolicited_sent(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        kind: ContactKind,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let column = match kind {
+            ContactKind::T0 => "t0_sent_at",
+            ContactKind::T2 => "t2_sent_at",
+            ContactKind::T7 => "t7_sent_at",
+        };
+        let sql = format!(
+            "UPDATE bot.concierge_profiles
+                SET {column} = COALESCE({column}, $2),
+                    unsolicited_contact_count = LEAST(3, unsolicited_contact_count + 1),
+                    pate_offered = CASE WHEN $3 THEN TRUE ELSE pate_offered END,
+                    updated_at = $2
+              WHERE user_id = $1"
+        );
+        sqlx::query(&sql)
+            .bind(user_id)
+            .bind(now)
+            .bind(matches!(kind, ContactKind::T2))
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    pub async fn set_opted_out(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET opted_out = TRUE, funnel_status = 'opted_out', updated_at = $2
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn forget_user(&self, user_id: u64) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM bot.concierge_conversations WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM bot.concierge_profiles WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    pub async fn mark_first_message(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET first_message_at = COALESCE(first_message_at, $2), updated_at = $2
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_first_voice(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET first_voice_at = COALESCE(first_voice_at, $2), updated_at = $2
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn mark_congrats_sent(
+        &self,
+        user_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET congrats_sent_at = COALESCE(congrats_sent_at, $2), updated_at = $2
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn save_pending_steckbrief(
+        &self,
+        user_id: u64,
+        text: &str,
+        channel_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let channel_id = u64_to_i64(
+            channel_id,
+            "concierge_profiles.pending_steckbrief_channel_id",
+        )?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET pending_steckbrief_text = $2,
+                    pending_steckbrief_channel_id = $3,
+                    pending_steckbrief_requested_at = $4,
+                    updated_at = $4
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(text)
+        .bind(channel_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn clear_pending_steckbrief(
+        &self,
+        user_id: u64,
+        posted: bool,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET pending_steckbrief_text = NULL,
+                    pending_steckbrief_channel_id = NULL,
+                    pending_steckbrief_requested_at = NULL,
+                    steckbrief_posted = steckbrief_posted OR $2,
+                    funnel_status = CASE WHEN $2 THEN 'steckbrief_posted' ELSE funnel_status END,
+                    updated_at = $3
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(posted)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_tour_done(&self, user_id: u64, now: DateTime<Utc>) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles SET tour_done = TRUE, updated_at = $2 WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_pate_requested(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        self.ensure_profile(user_id, guild_id, now).await?;
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET pate_requested = TRUE, pate_offered = TRUE, updated_at = $2
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn fallback_owner(&self, channel_id: u64) -> CommunityDbResult<Option<u64>> {
+        let channel_id = u64_to_i64(channel_id, "concierge_profiles.fallback_channel_id")?;
+        let raw = sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM bot.concierge_profiles WHERE fallback_channel_id = $1 LIMIT 1",
+        )
+        .bind(channel_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        raw.map(|value| pg_i64_to_u64(value, "concierge_profiles.user_id"))
+            .transpose()
+    }
+
+    pub async fn save_fallback_channel(
+        &self,
+        user_id: u64,
+        channel_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
+        let channel_id = u64_to_i64(channel_id, "concierge_profiles.fallback_channel_id")?;
+        sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET fallback_channel_id = COALESCE(fallback_channel_id, $2), updated_at = $3
+              WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .bind(channel_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    pub async fn due_profiles(
+        &self,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<Vec<ConciergeProfile>> {
+        let cutoff = now - Duration::days(8);
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id, guild_id, intent, rank_snapshot, play_times, funnel_status,
+                   steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
+                   unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
+                   congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
+                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
+              FROM bot.concierge_profiles
+             WHERE t0_sent_at IS NOT NULL
+               AND t0_sent_at >= $1
+            "#,
+        )
+        .bind(cutoff)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_profile).collect()
+    }
+
+    pub async fn pending_steckbriefe(&self) -> CommunityDbResult<Vec<ConciergeProfile>> {
+        let rows = sqlx::query(
+            r#"
+            SELECT user_id, guild_id, intent, rank_snapshot, play_times, funnel_status,
+                   steckbrief_posted, tour_done, pate_offered, pate_requested, opted_out,
+                   unsolicited_contact_count, t0_sent_at, t2_sent_at, t7_sent_at,
+                   congrats_sent_at, first_message_at, first_voice_at, fallback_channel_id,
+                   pending_steckbrief_text, pending_steckbrief_channel_id, last_interaction_at
+              FROM bot.concierge_profiles
+             WHERE pending_steckbrief_text IS NOT NULL
+               AND opted_out = FALSE
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_profile).collect()
+    }
+
+    pub async fn last_server_activity(
+        &self,
+        guild_id: u64,
+    ) -> CommunityDbResult<Option<DateTime<Utc>>> {
+        let guild_id = u64_to_i64(guild_id, "activity.guild_id")?;
+        let row = sqlx::query(
+            r#"
+            SELECT GREATEST(
+                COALESCE((SELECT MAX(occurred_at) FROM activity.message_metadata_events WHERE guild_id = $1), '-infinity'::timestamptz),
+                COALESCE((SELECT MAX(occurred_at) FROM activity.voice_metadata_events WHERE guild_id = $1), '-infinity'::timestamptz)
+            ) AS last_at
+            "#,
+        )
+        .bind(guild_id)
+        .fetch_one(&self.pool)
+        .await?;
+        row.try_get("last_at").map_err(Into::into)
+    }
+
+    pub async fn claim_once(&self, ns: &str, key: &str, value: &str) -> CommunityDbResult<bool> {
+        let result = sqlx::query(
+            "INSERT INTO bot.kv_store(ns, k, v)
+             VALUES($1, $2, $3)
+             ON CONFLICT(ns, k) DO NOTHING",
+        )
+        .bind(ns)
+        .bind(key)
+        .bind(value)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn reap_retention(&self, now: DateTime<Utc>) -> CommunityDbResult<i64> {
+        let cutoff = now - Duration::days(RETENTION_DAYS);
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(
+            "DELETE FROM bot.concierge_conversations
+              WHERE user_id IN (
+                    SELECT user_id FROM bot.concierge_profiles WHERE last_interaction_at < $1
+              )",
+        )
+        .bind(cutoff)
+        .execute(&mut *tx)
+        .await?;
+        let deleted =
+            sqlx::query("DELETE FROM bot.concierge_profiles WHERE last_interaction_at < $1")
+                .bind(cutoff)
+                .execute(&mut *tx)
+                .await?
+                .rows_affected();
+        tx.commit().await?;
+        Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+    }
+}
+
+fn row_to_profile(row: sqlx::postgres::PgRow) -> CommunityDbResult<ConciergeProfile> {
+    let user_id: i64 = row.try_get("user_id")?;
+    let guild_id: i64 = row.try_get("guild_id")?;
+    let fallback_channel_id: Option<i64> = row.try_get("fallback_channel_id")?;
+    let pending_steckbrief_channel_id: Option<i64> =
+        row.try_get("pending_steckbrief_channel_id")?;
+    let intent_raw: Option<String> = row.try_get("intent")?;
+    Ok(ConciergeProfile {
+        user_id: pg_i64_to_u64(user_id, "concierge_profiles.user_id")?,
+        guild_id: pg_i64_to_u64(guild_id, "concierge_profiles.guild_id")?,
+        intent: intent_raw.as_deref().and_then(ConciergeIntent::from_str),
+        rank_snapshot: row.try_get("rank_snapshot")?,
+        play_times: row.try_get("play_times")?,
+        funnel_status: row.try_get("funnel_status")?,
+        steckbrief_posted: row.try_get("steckbrief_posted")?,
+        tour_done: row.try_get("tour_done")?,
+        pate_offered: row.try_get("pate_offered")?,
+        pate_requested: row.try_get("pate_requested")?,
+        opted_out: row.try_get("opted_out")?,
+        unsolicited_contact_count: row.try_get("unsolicited_contact_count")?,
+        t0_sent_at: row.try_get("t0_sent_at")?,
+        t2_sent_at: row.try_get("t2_sent_at")?,
+        t7_sent_at: row.try_get("t7_sent_at")?,
+        congrats_sent_at: row.try_get("congrats_sent_at")?,
+        first_message_at: row.try_get("first_message_at")?,
+        first_voice_at: row.try_get("first_voice_at")?,
+        fallback_channel_id: fallback_channel_id
+            .map(|value| pg_i64_to_u64(value, "concierge_profiles.fallback_channel_id"))
+            .transpose()?,
+        pending_steckbrief_text: row.try_get("pending_steckbrief_text")?,
+        pending_steckbrief_channel_id: pending_steckbrief_channel_id
+            .map(|value| pg_i64_to_u64(value, "concierge_profiles.pending_steckbrief_channel_id"))
+            .transpose()?,
+        last_interaction_at: row.try_get("last_interaction_at")?,
+    })
+}
+
+pub struct Concierge {
+    store: ConciergeStore,
+    port: Arc<dyn ConciergePort>,
+    ai: Option<Arc<dyn ChatProvider>>,
+    config: ConciergeConfig,
+}
+
+impl Concierge {
+    pub fn new(
+        pool: PgPool,
+        port: Arc<dyn ConciergePort>,
+        ai: Option<Arc<dyn ChatProvider>>,
+        config: ConciergeConfig,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            store: ConciergeStore::new(pool),
+            port,
+            ai,
+            config,
+        })
+    }
+
+    pub fn enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    pub async fn handle_native_onboarding_completed(&self, guild_id: u64, user_id: u64) {
+        if guild_id != self.config.main_guild_id || !self.config.user_allowed(user_id) {
+            return;
+        }
+        let now = Utc::now();
+        if let Err(err) = self.store.ensure_profile(user_id, guild_id, now).await {
+            tracing::warn!(%err, user_id, "Concierge: Profilanlage fehlgeschlagen");
+            return;
+        }
+        let claim_key = format!("{guild_id}:{user_id}");
+        match self
+            .store
+            .claim_once(CONCIERGE_T0_CLAIM_NS, &claim_key, "claimed")
+            .await
+        {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: T0-Claim fehlgeschlagen");
+                return;
+            }
+        }
+        let sent = match self.port.send_dm_v2(user_id, t0_body(false)).await {
+            ConciergeDmDelivery::Sent { .. } => true,
+            ConciergeDmDelivery::CannotSend50007 => {
+                self.send_t0_fallback_channel(guild_id, user_id, now).await
+            }
+            ConciergeDmDelivery::Failed(err) => {
+                tracing::warn!(%err, user_id, "Concierge: T0-DM fehlgeschlagen");
+                false
+            }
+        };
+        if sent {
+            self.after_unsolicited_sent(user_id, guild_id, ContactKind::T0, now)
+                .await;
+        }
+    }
+
+    async fn send_t0_fallback_channel(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let key = format!("{guild_id}:{user_id}");
+        let claimed = match self
+            .store
+            .claim_once(CONCIERGE_FALLBACK_CLAIM_NS, &key, "claimed")
+            .await
+        {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Fallback-Claim fehlgeschlagen");
+                return false;
+            }
+        };
+        if !claimed {
+            return false;
+        }
+        let channel_name = format!("concierge-{user_id}");
+        let channel_id = match self
+            .port
+            .create_private_channel(
+                guild_id,
+                user_id,
+                self.config.fallback_category_id,
+                &channel_name,
+            )
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Fallback-Kanal fehlgeschlagen");
+                return false;
+            }
+        };
+        if let Err(err) = self
+            .store
+            .save_fallback_channel(user_id, channel_id, now)
+            .await
+        {
+            tracing::warn!(%err, user_id, channel_id, "Concierge: Fallback-Kanal-ID konnte nicht gespeichert werden");
+        }
+        match self.port.send_channel_v2(channel_id, t0_body(false)).await {
+            Ok(_) => true,
+            Err(err) => {
+                tracing::warn!(%err, user_id, channel_id, "Concierge: Fallback-T0 konnte nicht gesendet werden");
+                false
+            }
+        }
+    }
+
+    async fn after_unsolicited_sent(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        kind: ContactKind,
+        now: DateTime<Utc>,
+    ) {
+        if let Err(err) = self
+            .store
+            .mark_unsolicited_sent(user_id, guild_id, kind, now)
+            .await
+        {
+            tracing::warn!(%err, user_id, "Concierge: Kontaktstatus konnte nicht gespeichert werden");
+        }
+        self.record_journey(user_id, guild_id, kind.journey_event(), now, json!({}))
+            .await;
+    }
+
+    pub async fn handle_user_message(
+        &self,
+        channel_id: u64,
+        guild_id: Option<u64>,
+        user_id: u64,
+        content: &str,
+    ) -> bool {
+        let Some(effective_guild_id) = self.effective_guild_id(channel_id, guild_id, user_id).await
+        else {
+            return false;
+        };
+        if !self.config.user_allowed(user_id) {
+            return false;
+        }
+        let trimmed = content.trim();
+        if trimmed.is_empty() {
+            return true;
+        }
+        let now = Utc::now();
+        if forget_intent(trimmed) {
+            if let Err(err) = self.store.forget_user(user_id).await {
+                tracing::warn!(%err, user_id, "Concierge: Vergessen fehlgeschlagen");
+            }
+            let _ = self
+                .port
+                .send_channel_v2(channel_id, v2_body(FORGET_TEXT, Vec::new()))
+                .await;
+            return true;
+        }
+        if let Err(err) = self
+            .store
+            .record_conversation(user_id, effective_guild_id, "user", trimmed, now)
+            .await
+        {
+            tracing::warn!(%err, user_id, "Concierge: User-Nachricht konnte nicht gespeichert werden");
+        }
+        self.record_journey(
+            user_id,
+            effective_guild_id,
+            dl_activity::journey::JourneyEventType::ConciergeReply,
+            now,
+            json!({}),
+        )
+        .await;
+        if optout_intent(trimmed) {
+            self.opt_out(user_id, effective_guild_id, channel_id, now)
+                .await;
+            return true;
+        }
+        let intent = classify_intent(trimmed);
+        if let Err(err) = self.store.set_intent(user_id, intent, now).await {
+            tracing::warn!(%err, user_id, "Concierge: Intent konnte nicht gespeichert werden");
+        }
+        let answer = self
+            .answer_with_knowledge_and_llm(user_id, effective_guild_id, trimmed)
+            .await;
+        if let Some(intent) = answer.intent {
+            if let Err(err) = self.store.set_intent(user_id, intent, now).await {
+                tracing::warn!(%err, user_id, "Concierge: LLM-Intent konnte nicht gespeichert werden");
+            }
+        }
+        if answer.opted_out {
+            self.opt_out(user_id, effective_guild_id, channel_id, now)
+                .await;
+            return true;
+        }
+        if answer.forget {
+            if let Err(err) = self.store.forget_user(user_id).await {
+                tracing::warn!(%err, user_id, "Concierge: Vergessen via LLM fehlgeschlagen");
+            }
+            let _ = self
+                .port
+                .send_channel_v2(channel_id, v2_body(FORGET_TEXT, Vec::new()))
+                .await;
+            return true;
+        }
+        let reply = answer
+            .reply
+            .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string());
+        if let Err(err) = self
+            .store
+            .record_conversation(user_id, effective_guild_id, "assistant", &reply, Utc::now())
+            .await
+        {
+            tracing::warn!(%err, user_id, "Concierge: Assistant-Nachricht konnte nicht gespeichert werden");
+        }
+        let _ = self
+            .port
+            .send_channel_v2(channel_id, v2_body(&reply, Vec::new()))
+            .await;
+        true
+    }
+
+    async fn effective_guild_id(
+        &self,
+        channel_id: u64,
+        guild_id: Option<u64>,
+        user_id: u64,
+    ) -> Option<u64> {
+        if let Some(guild_id) = guild_id {
+            let owner = self.store.fallback_owner(channel_id).await.ok().flatten();
+            return (owner == Some(user_id)).then_some(guild_id);
+        }
+        Some(self.config.main_guild_id)
+    }
+
+    async fn opt_out(&self, user_id: u64, guild_id: u64, channel_id: u64, now: DateTime<Utc>) {
+        if let Err(err) = self.store.set_opted_out(user_id, guild_id, now).await {
+            tracing::warn!(%err, user_id, "Concierge: Opt-out konnte nicht gespeichert werden");
+        }
+        self.record_journey(
+            user_id,
+            guild_id,
+            dl_activity::journey::JourneyEventType::ConciergeOptedOut,
+            now,
+            json!({}),
+        )
+        .await;
+        let _ = self
+            .port
+            .send_channel_v2(channel_id, v2_body(OPTOUT_TEXT, Vec::new()))
+            .await;
+    }
+
+    async fn answer_with_knowledge_and_llm(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        question: &str,
+    ) -> LlmAnswer {
+        if likely_knowledge_question(question) {
+            match ask_knowledge_at(&self.config.knowledge_url, question).await {
+                Some(answer) if answer.answerable => {
+                    return self
+                        .llm_answer(
+                            user_id,
+                            Some(format!(
+                                "Wissenskontext aus dl-knowledge:\n{}",
+                                answer.answer.unwrap_or_default()
+                            )),
+                        )
+                        .await;
+                }
+                _ => {
+                    return LlmAnswer {
+                        reply: Some(KNOWLEDGE_GAP_TEXT.to_string()),
+                        ..LlmAnswer::default()
+                    };
+                }
+            }
+        }
+        let _ = guild_id;
+        self.llm_answer(user_id, None).await
+    }
+
+    async fn llm_answer(&self, user_id: u64, extra_system: Option<String>) -> LlmAnswer {
+        let Some(ai) = &self.ai else {
+            return LlmAnswer {
+                reply: Some(KNOWLEDGE_GAP_TEXT.to_string()),
+                ..LlmAnswer::default()
+            };
+        };
+        let mut messages = vec![ChatMessage::system(llm_system(extra_system.as_deref()))];
+        match self.store.recent_conversation(user_id, 12).await {
+            Ok(recent) => messages.extend(recent),
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Verlauf konnte nicht geladen werden")
+            }
+        }
+        let params = ChatParams {
+            model: Some(self.config.model.clone()),
+            max_tokens: Some(500),
+            temperature: 0.2,
+            system_prompt: None,
+        };
+        match ai.chat(&messages, params).await {
+            Ok(response) => parse_llm_answer(&response.content),
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: LLM-Antwort fehlgeschlagen");
+                LlmAnswer {
+                    reply: Some(KNOWLEDGE_GAP_TEXT.to_string()),
+                    ..LlmAnswer::default()
+                }
+            }
+        }
+    }
+
+    async fn record_journey(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        event_type: dl_activity::journey::JourneyEventType,
+        occurred_at: DateTime<Utc>,
+        metadata: Value,
+    ) {
+        let mut input = dl_activity::journey::JourneyEventInput::new(
+            user_id,
+            guild_id,
+            event_type,
+            occurred_at,
+        );
+        input.event_source = "concierge";
+        input.actor_kind = Some(dl_activity::journey::ActorKind::Bot);
+        input.metadata = metadata;
+        if let Err(err) =
+            dl_activity::journey::record_external_journey_event(self.store.pool(), input).await
+        {
+            tracing::warn!(%err, user_id, "Concierge: Journey-Event fehlgeschlagen");
+        }
+    }
+
+    pub async fn mark_first_message(&self, guild_id: u64, user_id: u64) {
+        if !self.config.user_allowed(user_id) {
+            return;
+        }
+        let now = Utc::now();
+        if let Err(err) = self.store.mark_first_message(user_id, guild_id, now).await {
+            tracing::warn!(%err, user_id, "Concierge: first_message konnte nicht gespeichert werden");
+        }
+    }
+
+    pub async fn mark_first_voice(&self, guild_id: u64, user_id: u64) {
+        if !self.config.user_allowed(user_id) {
+            return;
+        }
+        let now = Utc::now();
+        if let Err(err) = self.store.mark_first_voice(user_id, guild_id, now).await {
+            tracing::warn!(%err, user_id, "Concierge: first_voice konnte nicht gespeichert werden");
+        }
+    }
+
+    pub async fn run_scheduler(&self) {
+        let now = Utc::now();
+        match self.store.due_profiles(now).await {
+            Ok(profiles) => {
+                for profile in profiles {
+                    self.run_profile_cadence(profile, now).await;
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, "Concierge: Scheduler-Profile konnten nicht geladen werden")
+            }
+        }
+        self.flush_pending_steckbriefe(now).await;
+        if let Err(err) = self.store.reap_retention(now).await {
+            tracing::warn!(%err, "Concierge: Retention-Reaper fehlgeschlagen");
+        }
+    }
+
+    async fn run_profile_cadence(&self, profile: ConciergeProfile, now: DateTime<Utc>) {
+        for action in cadence_due(&profile, now) {
+            match action {
+                CadenceAction::T2 => {
+                    let body = nudge_body(T2_ANLASS_FALLBACK);
+                    if matches!(
+                        self.port.send_dm_v2(profile.user_id, body).await,
+                        ConciergeDmDelivery::Sent { .. }
+                    ) {
+                        self.after_unsolicited_sent(
+                            profile.user_id,
+                            profile.guild_id,
+                            ContactKind::T2,
+                            now,
+                        )
+                        .await;
+                        self.record_journey(
+                            profile.user_id,
+                            profile.guild_id,
+                            dl_activity::journey::JourneyEventType::PateOffered,
+                            now,
+                            json!({}),
+                        )
+                        .await;
+                    }
+                }
+                CadenceAction::T7 => {
+                    if matches!(
+                        self.port
+                            .send_dm_v2(profile.user_id, v2_body(T7_TEXT, Vec::new()))
+                            .await,
+                        ConciergeDmDelivery::Sent { .. }
+                    ) {
+                        self.after_unsolicited_sent(
+                            profile.user_id,
+                            profile.guild_id,
+                            ContactKind::T7,
+                            now,
+                        )
+                        .await;
+                    }
+                }
+                CadenceAction::CongratsMessage | CadenceAction::CongratsVoice => {
+                    let text = if action == CadenceAction::CongratsMessage {
+                        CONGRATS_MESSAGE_TEXT
+                    } else {
+                        CONGRATS_VOICE_TEXT
+                    };
+                    if matches!(
+                        self.port
+                            .send_dm_v2(profile.user_id, v2_body(text, Vec::new()))
+                            .await,
+                        ConciergeDmDelivery::Sent { .. }
+                    ) {
+                        if let Err(err) = self.store.mark_congrats_sent(profile.user_id, now).await
+                        {
+                            tracing::warn!(%err, user_id = profile.user_id, "Concierge: Gratulation konnte nicht markiert werden");
+                        }
+                        self.record_journey(
+                            profile.user_id,
+                            profile.guild_id,
+                            dl_activity::journey::JourneyEventType::CongratsSent,
+                            now,
+                            json!({}),
+                        )
+                        .await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn flush_pending_steckbriefe(&self, now: DateTime<Utc>) {
+        let last_activity = self
+            .store
+            .last_server_activity(self.config.main_guild_id)
+            .await
+            .ok()
+            .flatten();
+        if !presence_allows_post(last_activity, now, self.config.active_threshold_minutes) {
+            return;
+        }
+        let Ok(profiles) = self.store.pending_steckbriefe().await else {
+            return;
+        };
+        for profile in profiles {
+            let (Some(text), Some(channel_id)) = (
+                profile.pending_steckbrief_text.as_deref(),
+                profile.pending_steckbrief_channel_id,
+            ) else {
+                continue;
+            };
+            self.post_steckbrief(profile.user_id, profile.guild_id, channel_id, text, now)
+                .await;
+        }
+    }
+
+    async fn post_steckbrief(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        channel_id: u64,
+        text: &str,
+        now: DateTime<Utc>,
+    ) {
+        match self.port.send_channel_text(channel_id, text).await {
+            Ok(message_id) => {
+                self.port.add_reaction(channel_id, message_id, "👋").await;
+                if let Some(emoji) = &self.config.brand_emoji {
+                    self.port.add_reaction(channel_id, message_id, emoji).await;
+                }
+                let reply = self
+                    .config
+                    .mod_ping_role_id
+                    .map(|role| format!("<@&{role}>\n{STECKBRIEF_REPLY_TEXT}"))
+                    .unwrap_or_else(|| STECKBRIEF_REPLY_TEXT.to_string());
+                self.port
+                    .reply_to_message(channel_id, message_id, &reply, self.config.mod_ping_role_id)
+                    .await;
+                if let Err(err) = self
+                    .store
+                    .clear_pending_steckbrief(user_id, true, now)
+                    .await
+                {
+                    tracing::warn!(%err, user_id, "Concierge: Steckbrief-Status konnte nicht gespeichert werden");
+                }
+                self.record_journey(
+                    user_id,
+                    guild_id,
+                    dl_activity::journey::JourneyEventType::SteckbriefPosted,
+                    now,
+                    json!({ "channel_id": channel_id.to_string() }),
+                )
+                .await;
+            }
+            Err(err) => {
+                tracing::warn!(%err, user_id, channel_id, "Concierge: Steckbrief-Post fehlgeschlagen")
+            }
+        }
+    }
+
+    async fn build_steckbrief_preview(&self, user_id: u64) -> (String, SteckbriefRoute) {
+        let profile = self.store.profile(user_id).await.ok().flatten();
+        let intent = profile.as_ref().and_then(|profile| profile.intent);
+        let draft = match self.draft_steckbrief(user_id).await {
+            Some(text) => text,
+            None => "Platzhalter".to_string(),
+        };
+        let route = steckbrief_route(&draft, intent);
+        (draft, route)
+    }
+
+    async fn draft_steckbrief(&self, user_id: u64) -> Option<String> {
+        let ai = self.ai.as_ref()?;
+        let mut messages = vec![ChatMessage::system(format!(
+            "{SYSTEM_PROMPT}\n\nSchreibe jetzt nur einen Steckbrief in Ich-Form nach diesem Gerüst: Satz 1 grob wer und was gespielt wird, Rang nur wenn Kontext vorliegt. Satz 2 Ziel aus dem Gespräch. Satz 3 optional Spielzeiten. Schluss konkrete Aufforderung an die Community. 2 bis 4 kurze Sätze."
+        ))];
+        if let Ok(recent) = self.store.recent_conversation(user_id, 8).await {
+            messages.extend(recent);
+        }
+        ai.chat(
+            &messages,
+            ChatParams {
+                model: Some(self.config.model.clone()),
+                max_tokens: Some(180),
+                temperature: 0.2,
+                system_prompt: None,
+            },
+        )
+        .await
+        .ok()
+        .map(|response| response.content.trim().to_string())
+        .filter(|text| !text.is_empty())
+    }
+
+    async fn request_pate(&self, user_id: u64, guild_id: u64, channel_id: u64) -> BridgeReply {
+        let now = Utc::now();
+        if let Err(err) = self.store.set_pate_requested(user_id, guild_id, now).await {
+            tracing::warn!(%err, user_id, "Concierge: Patenwunsch konnte nicht gespeichert werden");
+        }
+        if let Some(target) = self.config.pater_channel_id {
+            let digest = self
+                .store
+                .profile(user_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|profile| short_digest(&profile))
+                .unwrap_or_else(|| "Platzhalter".to_string());
+            let content = PATE_PING_TEMPLATE
+                .replace("{user_mention}", &format!("<@{user_id}>"))
+                .replace("{kurz_destillat}", &digest);
+            let content = format!("<@&{PATE_ROLE_ID}>\n{content}");
+            let _ = self.port.send_channel_text(target, &content).await;
+        }
+        let _ = channel_id;
+        text_reply(PATE_YES_TEXT)
+    }
+}
+
+fn short_digest(profile: &ConciergeProfile) -> String {
+    let mut parts = Vec::new();
+    if let Some(intent) = profile.intent {
+        parts.push(format!("Intent: {}", intent.as_str()));
+    }
+    if let Some(rank) = &profile.rank_snapshot {
+        parts.push(format!("Rang: {rank}"));
+    }
+    if let Some(times) = &profile.play_times {
+        parts.push(format!("Zeiten: {times}"));
+    }
+    if parts.is_empty() {
+        "Platzhalter".to_string()
+    } else {
+        parts.join("\n")
+    }
+}
+
+#[derive(Default)]
+struct LlmAnswer {
+    reply: Option<String>,
+    intent: Option<ConciergeIntent>,
+    opted_out: bool,
+    forget: bool,
+}
+
+#[derive(Deserialize)]
+struct LlmAnswerWire {
+    reply: Option<String>,
+    message: Option<String>,
+    intent: Option<String>,
+    opted_out: Option<bool>,
+    forget: Option<bool>,
+}
+
+fn parse_llm_answer(raw: &str) -> LlmAnswer {
+    let trimmed = raw.trim();
+    if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        if end >= start {
+            if let Ok(wire) = serde_json::from_str::<LlmAnswerWire>(&trimmed[start..=end]) {
+                let intent = wire.intent.as_deref().and_then(ConciergeIntent::from_str);
+                return LlmAnswer {
+                    reply: wire
+                        .reply
+                        .or(wire.message)
+                        .map(|text| text.trim().to_string())
+                        .filter(|text| !text.is_empty()),
+                    intent,
+                    opted_out: wire.opted_out.unwrap_or(false),
+                    forget: wire.forget.unwrap_or(false),
+                };
+            }
+        }
+    }
+    LlmAnswer {
+        reply: (!trimmed.is_empty()).then(|| trimmed.to_string()),
+        ..LlmAnswer::default()
+    }
+}
+
+fn llm_system(extra: Option<&str>) -> String {
+    let schema = format!(
+        "{SYSTEM_PROMPT}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
+    );
+    match extra {
+        Some(extra) => format!("{schema}\n\n{extra}"),
+        None => schema,
+    }
+}
+
+fn likely_knowledge_question(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    text.contains('?') || contains_any(&lower, &["wie ", "was ", "wo ", "warum ", "welch"])
+}
+
+#[derive(Debug, Deserialize)]
+struct KnowledgeAnswer {
+    answerable: bool,
+    answer: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct KnowledgeQuestion<'a> {
+    question: &'a str,
+}
+
+async fn ask_knowledge_at(base_url: &str, question: &str) -> Option<KnowledgeAnswer> {
+    let client = reqwest::Client::builder()
+        .timeout(KNOWLEDGE_TIMEOUT)
+        .build()
+        .ok()?;
+    let url = format!("{}/public/v1/ask", base_url.trim_end_matches('/'));
+    client
+        .post(url)
+        .json(&KnowledgeQuestion { question })
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<KnowledgeAnswer>()
+        .await
+        .ok()
+}
+
+struct ConciergeHandler {
+    concierge: Arc<Concierge>,
+}
+
+#[async_trait]
+impl InteractionHandler for ConciergeHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if !self.concierge.config.user_allowed(interaction.user_id) {
+            return BridgeReply::default();
+        }
+        let now = Utc::now();
+        match interaction.custom_id.as_str() {
+            "concierge:tour" => {
+                if let Err(err) = self
+                    .concierge
+                    .store
+                    .set_tour_done(interaction.user_id, now)
+                    .await
+                {
+                    tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Tourstatus fehlgeschlagen");
+                }
+                self.concierge
+                    .record_journey(
+                        interaction.user_id,
+                        self.concierge.config.main_guild_id,
+                        dl_activity::journey::JourneyEventType::ConciergeTourDone,
+                        now,
+                        json!({}),
+                    )
+                    .await;
+                v2_reply(tour_body())
+            }
+            "concierge:play" => text_reply(MISSING_MODAL_TEXT),
+            "concierge:later" => text_reply(LATER_TEXT),
+            "concierge:steckbrief:draft" => {
+                let (draft, route) = self
+                    .concierge
+                    .build_steckbrief_preview(interaction.user_id)
+                    .await;
+                if let Err(err) = self
+                    .concierge
+                    .store
+                    .save_pending_steckbrief(interaction.user_id, &draft, route.channel_id(), now)
+                    .await
+                {
+                    tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Entwurf konnte nicht gespeichert werden");
+                }
+                v2_reply(preview_body(&draft, route))
+            }
+            "concierge:steckbrief:skip" | "concierge:steckbrief:no" => text_reply(TOUR_SKIP_TEXT),
+            "concierge:steckbrief:edit" => BridgeReply {
+                modal: Some(ModalSpec {
+                    custom_id: "concierge:steckbrief:modal".to_string(),
+                    title: MISSING_MODAL_TEXT.to_string(),
+                    fields: vec![ModalField {
+                        custom_id: "text".to_string(),
+                        label: MISSING_MODAL_TEXT.to_string(),
+                        placeholder: MISSING_MODAL_TEXT.to_string(),
+                        required: true,
+                        min_length: 1,
+                        max_length: 1000,
+                        paragraph: true,
+                    }],
+                }),
+                ..BridgeReply::default()
+            },
+            "concierge:steckbrief:modal" => {
+                let text = interaction
+                    .options
+                    .get("text")
+                    .and_then(Value::as_str)
+                    .unwrap_or(MISSING_MODAL_TEXT)
+                    .trim()
+                    .to_string();
+                let route = steckbrief_route(&text, None);
+                if let Err(err) = self
+                    .concierge
+                    .store
+                    .save_pending_steckbrief(interaction.user_id, &text, route.channel_id(), now)
+                    .await
+                {
+                    tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Anpassung konnte nicht gespeichert werden");
+                }
+                v2_reply(preview_body(&text, route))
+            }
+            "concierge:steckbrief:post" => {
+                let profile = self
+                    .concierge
+                    .store
+                    .profile(interaction.user_id)
+                    .await
+                    .ok()
+                    .flatten();
+                let Some(profile) = profile else {
+                    return text_reply(MISSING_MODAL_TEXT);
+                };
+                let (Some(text), Some(channel_id)) = (
+                    profile.pending_steckbrief_text.as_deref(),
+                    profile.pending_steckbrief_channel_id,
+                ) else {
+                    return text_reply(MISSING_MODAL_TEXT);
+                };
+                let last_activity = self
+                    .concierge
+                    .store
+                    .last_server_activity(profile.guild_id)
+                    .await
+                    .ok()
+                    .flatten();
+                if presence_allows_post(
+                    last_activity,
+                    now,
+                    self.concierge.config.active_threshold_minutes,
+                ) {
+                    self.concierge
+                        .post_steckbrief(profile.user_id, profile.guild_id, channel_id, text, now)
+                        .await;
+                    text_reply(MISSING_MODAL_TEXT)
+                } else {
+                    if let Err(err) = self
+                        .concierge
+                        .store
+                        .save_pending_steckbrief(profile.user_id, text, channel_id, now)
+                        .await
+                    {
+                        tracing::warn!(%err, user_id = profile.user_id, "Concierge: Steckbrief-Halteinfo konnte nicht gespeichert werden");
+                    }
+                    text_reply(STECKBRIEF_HOLD_TEXT)
+                }
+            }
+            "concierge:pate:yes" => {
+                self.concierge
+                    .request_pate(
+                        interaction.user_id,
+                        self.concierge.config.main_guild_id,
+                        interaction.channel_id,
+                    )
+                    .await
+            }
+            "concierge:pate:no" => text_reply(PATE_NO_TEXT),
+            _ => BridgeReply::default(),
+        }
+    }
+}
+
+pub fn register(router: &mut InteractionRouter, concierge: Arc<Concierge>) {
+    let handler = Arc::new(ConciergeHandler { concierge });
+    for id in [
+        "concierge:tour",
+        "concierge:play",
+        "concierge:later",
+        "concierge:steckbrief:draft",
+        "concierge:steckbrief:skip",
+        "concierge:steckbrief:no",
+        "concierge:steckbrief:edit",
+        "concierge:steckbrief:modal",
+        "concierge:steckbrief:post",
+        "concierge:pate:yes",
+        "concierge:pate:no",
+    ] {
+        router.on_custom_id(id, handler.clone());
+    }
+}
+
+pub fn spawn(
+    concierge: Arc<Concierge>,
+    dispatcher: &Dispatcher,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    if !concierge.enabled() {
+        return Vec::new();
+    }
+    let mut handles = Vec::new();
+    let mut members = dispatcher.subscribe_members();
+    let member_concierge = concierge.clone();
+    handles.push(tokio::spawn(async move {
+        loop {
+            match members.recv().await {
+                Ok(dl_discord::MemberEvent::NativeOnboardingCompleted { guild_id, user_id }) => {
+                    member_concierge
+                        .handle_native_onboarding_completed(guild_id, user_id)
+                        .await;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Concierge: Member-Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }));
+
+    let mut messages = dispatcher.subscribe_messages();
+    let message_concierge = concierge.clone();
+    handles.push(tokio::spawn(async move {
+        loop {
+            match messages.recv().await {
+                Ok(event) => {
+                    if event.guild_id.is_some() {
+                        message_concierge
+                            .mark_first_message(event.guild_id.unwrap_or_default(), event.author_id)
+                            .await;
+                    }
+                    let handled = message_concierge
+                        .handle_user_message(
+                            event.channel_id,
+                            event.guild_id,
+                            event.author_id,
+                            &event.content,
+                        )
+                        .await;
+                    if handled {
+                        tracing::debug!(
+                            user_id = event.author_id,
+                            "Concierge: Nachricht verarbeitet"
+                        );
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Concierge: Message-Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }));
+
+    let mut voice = dispatcher.subscribe_voice();
+    let voice_concierge = concierge.clone();
+    handles.push(tokio::spawn(async move {
+        loop {
+            match voice.recv().await {
+                Ok(dl_discord::VoiceEvent::Join {
+                    guild_id, user_id, ..
+                })
+                | Ok(dl_discord::VoiceEvent::Move {
+                    guild_id, user_id, ..
+                }) => {
+                    voice_concierge.mark_first_voice(guild_id, user_id).await;
+                }
+                Ok(_) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                    tracing::warn!(missed, "Concierge: Voice-Events verpasst");
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    }));
+
+    let scheduler = concierge.clone();
+    handles.push(tokio::spawn(async move {
+        let mut interval = tokio::time::interval(SCHEDULER_INTERVAL);
+        loop {
+            interval.tick().await;
+            scheduler.run_scheduler().await;
+        }
+    }));
+    handles
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    fn profile_at(t0: DateTime<Utc>) -> ConciergeProfile {
+        ConciergeProfile {
+            user_id: 42,
+            guild_id: 1,
+            intent: None,
+            rank_snapshot: None,
+            play_times: None,
+            funnel_status: "new".to_string(),
+            steckbrief_posted: false,
+            tour_done: false,
+            pate_offered: false,
+            pate_requested: false,
+            opted_out: false,
+            unsolicited_contact_count: 1,
+            t0_sent_at: Some(t0),
+            t2_sent_at: None,
+            t7_sent_at: None,
+            congrats_sent_at: None,
+            first_message_at: None,
+            first_voice_at: None,
+            fallback_channel_id: None,
+            pending_steckbrief_text: None,
+            pending_steckbrief_channel_id: None,
+            last_interaction_at: t0,
+        }
+    }
+
+    #[test]
+    fn kadenz_t2_nur_bei_null_aktivitaet_und_max_drei_kontakte() {
+        let t0 = Utc::now() - Duration::days(3);
+        let mut profile = profile_at(t0);
+        assert!(cadence_due(&profile, Utc::now()).contains(&CadenceAction::T2));
+        profile.first_message_at = Some(Utc::now());
+        assert!(!cadence_due(&profile, Utc::now()).contains(&CadenceAction::T2));
+        profile.first_message_at = None;
+        profile.unsolicited_contact_count = 3;
+        assert!(!cadence_due(&profile, Utc::now()).contains(&CadenceAction::T2));
+    }
+
+    #[test]
+    fn gratulation_zaehlt_nicht_als_ungefragter_kontakt_und_nur_einmal() {
+        let t0 = Utc::now() - Duration::hours(1);
+        let mut profile = profile_at(t0);
+        profile.first_voice_at = Some(Utc::now());
+        assert_eq!(
+            cadence_due(&profile, Utc::now()),
+            vec![CadenceAction::CongratsVoice]
+        );
+        profile.congrats_sent_at = Some(Utc::now());
+        assert!(cadence_due(&profile, Utc::now()).is_empty());
+    }
+
+    #[test]
+    fn optout_stoppt_ungefragte_kontakte() {
+        let mut profile = profile_at(Utc::now() - Duration::days(8));
+        profile.opted_out = true;
+        assert!(cadence_due(&profile, Utc::now()).is_empty());
+    }
+
+    #[test]
+    fn steckbrief_routing_hilfe_invite_zu_frag_die_community_sonst_allgemein() {
+        assert_eq!(
+            steckbrief_route("ich brauche hilfe beim Einstieg", None),
+            SteckbriefRoute::HelpOrInvite
+        );
+        assert_eq!(
+            steckbrief_route(
+                "hi, ich stelle mich nur locker vor",
+                Some(ConciergeIntent::Casual)
+            ),
+            SteckbriefRoute::Casual
+        );
+        assert_eq!(
+            steckbrief_route("hi", Some(ConciergeIntent::Learn)),
+            SteckbriefRoute::HelpOrInvite
+        );
+    }
+
+    #[test]
+    fn presence_gate_haelt_ruhige_zeiten_zurueck() {
+        let now = Utc::now();
+        assert!(presence_allows_post(
+            Some(now - Duration::minutes(5)),
+            now,
+            30
+        ));
+        assert!(!presence_allows_post(
+            Some(now - Duration::minutes(31)),
+            now,
+            30
+        ));
+        assert!(!presence_allows_post(None, now, 30));
+    }
+
+    #[test]
+    fn t0_body_ist_components_v2_mit_gold_und_buttons() {
+        let body = t0_body(false);
+        assert_eq!(body["flags"], json!(CONCIERGE_COMPONENTS_V2_FLAG));
+        assert_eq!(body["components"][0]["type"], json!(17));
+        assert_eq!(
+            body["components"][0]["accent_color"],
+            json!(CONCIERGE_ACCENT_GOLD)
+        );
+        let buttons = body["components"][0]["components"][1]["components"]
+            .as_array()
+            .unwrap();
+        assert_eq!(buttons[0]["label"], json!(T0_BUTTON_TOUR));
+        assert_eq!(buttons[1]["label"], json!(T0_BUTTON_PLAY));
+        assert_eq!(buttons[2]["label"], json!(T0_BUTTON_LATER));
+    }
+
+    #[test]
+    fn optout_und_vergessen_keywords() {
+        assert!(optout_intent("stopp"));
+        assert!(optout_intent("bitte schreib mir nicht mehr"));
+        assert!(forget_intent("vergiss mich bitte"));
+        assert!(forget_intent("lösch alles"));
+    }
+
+    #[test]
+    fn llm_parse_akzeptiert_json_oder_rohtext() {
+        let parsed = parse_llm_answer(
+            r#"{"reply":"Hallo","intent":"learn","opted_out":false,"forget":false}"#,
+        );
+        assert_eq!(parsed.reply.as_deref(), Some("Hallo"));
+        assert_eq!(parsed.intent, Some(ConciergeIntent::Learn));
+        assert!(!parsed.opted_out);
+        let parsed = parse_llm_answer("nur text");
+        assert_eq!(parsed.reply.as_deref(), Some("nur text"));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn retention_refresh_und_reaper_loeschen_exakt_nach_neunzig_tagen() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let store = ConciergeStore::new(db.pool().clone());
+        let now = Utc::now();
+        store
+            .record_conversation(42, 1, "user", "alt", now - Duration::days(91))
+            .await
+            .unwrap();
+        store
+            .record_conversation(99, 1, "user", "frisch", now - Duration::days(89))
+            .await
+            .unwrap();
+        let deleted = store.reap_retention(now).await.unwrap();
+        assert_eq!(deleted, 1);
+        assert!(store.profile(42).await.unwrap().is_none());
+        assert!(store.profile(99).await.unwrap().is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn kv_claim_verhindert_doppelte_fallback_erstellung() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .claim_once(CONCIERGE_FALLBACK_CLAIM_NS, "1:42", "claimed")
+            .await
+            .unwrap());
+        assert!(!store
+            .claim_once(CONCIERGE_FALLBACK_CLAIM_NS, "1:42", "claimed")
+            .await
+            .unwrap());
+    }
+}
