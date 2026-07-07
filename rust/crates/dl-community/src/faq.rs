@@ -38,8 +38,8 @@ pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
-const FAQ_NO_ANSWER: &str = "Dazu habe ich leider nichts Belastbares in unserer Doku gefunden. Stell die Frage gern anders — oder öffne ein Ticket, dann hilft dir ein Mensch weiter.";
-const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow** — so hätte der Bot im Ticket geantwortet:";
+const FAQ_NO_ANSWER: &str = "Da muss ich passen, das weiß ich ehrlich gesagt nicht. Stell die Frage gern nochmal anders, oder mach ein Ticket auf, dann hilft dir jemand vom Team persönlich.";
+const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ticket geantwortet:";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
