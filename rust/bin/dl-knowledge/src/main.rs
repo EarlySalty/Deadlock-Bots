@@ -28,7 +28,7 @@ Regeln, ohne Ausnahme:
 So klingst du:
 - Deutsch, persönlich und direkt, "du"-Form. Wie ein Freund, der sich hier auskennt, nicht wie ein Callcenter. Aber kein aufgesetzter Slang.
 - Führe mit der Hilfe, nie mit einer Einschränkung. Sag, was Sache ist und was jetzt konkret weiterhilft.
-- Kurz: 1-4 Sätze, konkret zum nächsten Schritt. Kanal-Verweise aus den Chunks (<#...>) darfst du übernehmen.
+- Kurz: 2-3 knappe Sätze, nie mehr als 4. Ein einziger Fließtext-Absatz, keine Aufzählungen, keine Überschriften, kein Textblock. Nur der wichtigste nächste Schritt, nicht alle Details auf einmal. Kanal-Verweise aus den Chunks (<#...>) darfst du übernehmen.
 - Schreib mit Punkt und Komma. Keine Gedankenstriche als Einschub, keine Aufzählungen mitten im Satz.
 - Keine Floskeln ("Gerne helfe ich dir"), keine Meta-Kommentare über Chunks, Wissensbasis oder KI. Rede nie über dich selbst oder deine Grenzen.
 - Denk mit, was die Person gerade kann: Wer einen Timeout hat, kann auf dem Server nichts schreiben. Empfiehl nur Wege, die in ihrer Lage wirklich offen sind, und versprich nichts, was nicht sicher passiert.
@@ -205,7 +205,8 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
             prompt,
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
             model: None,
-            max_output_tokens: Some(700),
+            // ponytail: harte Kürzen-Bremse; reicht für 4 deutsche Sätze, ein Blocktext passt nicht durch
+            max_output_tokens: Some(350),
             temperature: 0.0,
         })
         .await;
@@ -223,9 +224,29 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
     };
     Json(AskResponse {
         answerable: true,
-        answer: Some(answer_text),
+        answer: Some(polish_answer(&answer_text)),
         sources: sources_for(&chunks),
     })
+}
+
+/// Ton-Regeln, die das Modell trotz Prompt verletzt, deterministisch nachziehen:
+/// Absätze/Aufzählungen werden Fließtext, eingeschobene Striche werden Kommas.
+fn polish_answer(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            line.trim()
+                .trim_start_matches("- ")
+                .trim_start_matches("• ")
+        })
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .replace(" — ", ", ")
+        .replace(" – ", ", ")
+        .replace(" - ", ", ")
 }
 
 fn unanswerable() -> AskResponse {
@@ -684,6 +705,15 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Ok((status, body))
+    }
+
+    #[test]
+    fn polish_glaettet_bloecke_bullets_und_striche() {
+        assert_eq!(
+            polish_answer("Erster Satz.\n\n- Punkt eins\n• Punkt zwei\nEnde – wirklich — jetzt."),
+            "Erster Satz. Punkt eins Punkt zwei Ende, wirklich, jetzt."
+        );
+        assert_eq!(polish_answer("Ohne Befund."), "Ohne Befund.");
     }
 
     #[test]
