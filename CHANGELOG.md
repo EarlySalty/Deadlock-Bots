@@ -1,3 +1,11 @@
+## #224 — Der Bot antwortet dir jetzt richtig per DM
+
+**Ausgangslage:** Wer dem Bot eine DM geschrieben hat, bekam oft nur ein Standard-Menü mit Buttons zurück. Für echte Fragen musste man in den Server ausweichen.
+
+**Was wurde geändert:** DMs an den Bot beantwortet jetzt der neue Concierge direkt und natürlich. Er kennt sich mit dem Server aus, merkt sich euer Gespräch und wenn er etwas nicht sicher weiß, schickt er dich zu den Leuten, die es wissen. Das alte Button-Menü ist raus. Wenn du nicht willst, dass er sich etwas merkt, sag ihm einfach stopp oder vergiss mich.
+
+**Wie es jetzt läuft:** Schreib dem Bot einfach eine DM wie einem Menschen. Neue Mitglieder begrüßt er ab jetzt auch von selbst und hilft beim Ankommen.
+
 ## #223 — Voice: Aufräumen greift jetzt immer + neue ⚙️-Ansicht
 
 **Ausgangslage:** Leere Lanes mit eigenem Namen (z. B. „Team Kekse") blieben manchmal als Geisterkanäle stehen — der Aufräumer hat sie am Namen nicht mehr als Bot-Lane erkannt. Und die ⚙️ Voreinstellungen kamen als schlichte Textwand daher.
