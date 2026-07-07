@@ -35,6 +35,7 @@ pub const VOICE_UX_COMPONENT_ID_GUIDE_CONTAINER: u64 = 34_001;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_TEXT: u64 = 34_002;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW: u64 = 34_003;
 pub const VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON: u64 = 34_005;
+pub const VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON: u64 = 34_006;
 pub const VOICE_UX_COMPONENT_ID_LFG_MEDIA: u64 = 34_009;
 pub const VOICE_UX_COMPONENT_ID_LFG_CONTAINER: u64 = 34_010;
 pub const VOICE_UX_COMPONENT_ID_LFG_TEXT: u64 = 34_011;
@@ -603,12 +604,20 @@ fn guide_container() -> Value {
             ),
             action_row(
                 VOICE_UX_COMPONENT_ID_GUIDE_ACTION_ROW,
-                vec![button_with_id(
-                    VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
-                    dl_voice::router::VOICE_PREFS_BUTTON,
-                    2,
-                    "tv_prefs_open",
-                )],
+                vec![
+                    button_with_id(
+                        VOICE_UX_COMPONENT_ID_GUIDE_PREFS_BUTTON,
+                        dl_voice::router::VOICE_PREFS_BUTTON,
+                        2,
+                        "tv_prefs_open",
+                    ),
+                    button_with_id(
+                        VOICE_UX_COMPONENT_ID_GUIDE_DETAIL_BUTTON,
+                        dl_voice::router::VOICE_GUIDE_DETAIL_BUTTON,
+                        1,
+                        "voice:guide:detail",
+                    ),
+                ],
             ),
         ],
     )
@@ -747,6 +756,7 @@ fn manage_container() -> Value {
                         "tv_mode_switch_btn",
                         dl_voice::router::ROUTER_EMOJI_MODE,
                     ),
+                    button("🔓 Rang-Gate", 2, "tv_rank_gate"),
                 ],
             ),
             text_display(
@@ -1053,21 +1063,28 @@ mod tests {
                     dl_voice::router::VOICE_GUIDE_BODY
                 )
             );
-            // Message 1: Anleitung behält nur ⚙️ Voreinstellungen; Mitspieler
-            // finden hat keine eigenen Buttons mehr, sondern verlinkt den
-            // Forum-Post (Thread-ID aus dem KV, hier 555).
+            // Message 1: Anleitung behält ⚙️ Voreinstellungen + Detail-Anleitung;
+            // Mitspieler finden hat keine eigenen Buttons mehr, sondern verlinkt
+            // den Forum-Post (Thread-ID aus dem KV, hier 555).
             let msg0_custom_ids =
                 collect_component_custom_ids(&target.messages[0].payload.components);
-            assert_eq!(msg0_custom_ids, vec!["tv_prefs_open".to_string()]);
+            assert_eq!(
+                msg0_custom_ids,
+                vec![
+                    "tv_prefs_open".to_string(),
+                    "voice:guide:detail".to_string()
+                ]
+            );
             let lfg_text = target.messages[0].payload.components[0]["components"][5]["content"]
                 .as_str()
                 .expect("lfg text");
             assert!(lfg_text.contains("/555/555"));
-            // Message 2: Verwalten-Reihe ohne ⚙️ Voreinstellungen.
+            // Message 2: Verwalten-Reihe ohne ⚙️ Voreinstellungen, aber mit Rang-Gate.
             let msg1_custom_ids =
                 collect_component_custom_ids(&target.messages[1].payload.components);
             assert!(!msg1_custom_ids.contains(&"tv_prefs_open".to_string()));
             assert!(msg1_custom_ids.contains(&"tv_owner_claim".to_string()));
+            assert!(msg1_custom_ids.contains(&"tv_rank_gate".to_string()));
             assert_eq!(target.messages[0].action, "planned_post");
         }
     }
