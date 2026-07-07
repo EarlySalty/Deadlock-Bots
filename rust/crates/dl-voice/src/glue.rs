@@ -9,7 +9,7 @@ use serenity::all::{
     CreateMessage, ForumTagId, GuildId, MessageId, PermissionOverwrite, PermissionOverwriteType,
     PremiumTier, RoleId, UserId,
 };
-use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread, GetMessages};
+use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread};
 
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
@@ -164,6 +164,97 @@ fn collect_component_custom_ids(value: &Value, custom_ids: &mut Vec<String>) {
         }
         _ => {}
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RawBotMessage {
+    message_id: u64,
+    has_embeds: bool,
+    has_components: bool,
+    embed_titles: Vec<String>,
+    custom_ids: Vec<String>,
+}
+
+fn raw_bot_messages_from_value(value: &Value, bot_id: u64) -> Vec<RawBotMessage> {
+    let Some(messages) = value.as_array() else {
+        return Vec::new();
+    };
+    let mut parsed: Vec<_> = messages
+        .iter()
+        .filter_map(|message| {
+            let author_id = message
+                .pointer("/author/id")
+                .and_then(Value::as_str)
+                .and_then(|id| id.parse::<u64>().ok())?;
+            if author_id != bot_id {
+                return None;
+            }
+            let message_id = message
+                .get("id")
+                .and_then(Value::as_str)
+                .and_then(|id| id.parse::<u64>().ok())?;
+            let embeds = message
+                .get("embeds")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let components = message
+                .get("components")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let mut custom_ids = Vec::new();
+            collect_component_custom_ids(&Value::Array(components.clone()), &mut custom_ids);
+            Some(RawBotMessage {
+                message_id,
+                has_embeds: !embeds.is_empty(),
+                has_components: !components.is_empty(),
+                embed_titles: embeds
+                    .iter()
+                    .filter_map(|embed| embed.get("title").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect(),
+                custom_ids,
+            })
+        })
+        .collect();
+    parsed.sort_by_key(|message| message.message_id);
+    parsed
+}
+
+async fn recent_raw_bot_messages(
+    adapter: &DiscordAdapter,
+    channel_id: u64,
+    limit: u8,
+) -> Result<Vec<RawBotMessage>, String> {
+    let bot_id = adapter
+        .http
+        .get_current_user()
+        .await
+        .map_err(|err| err.to_string())?
+        .id
+        .get();
+    let url = format!(
+        "{DISCORD_API_BASE}/channels/{channel_id}/messages?limit={}",
+        limit.min(100)
+    );
+    let response = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::AUTHORIZATION, adapter.http.token())
+        .send()
+        .await
+        .map_err(|err| err.to_string())?;
+    let status = response.status();
+    let body = response.text().await.map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        return Err(format!(
+            "Discord GET messages fehlgeschlagen: HTTP {}: {}",
+            status.as_u16(),
+            router_discord_body_preview(&body)
+        ));
+    }
+    let value: Value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
+    Ok(raw_bot_messages_from_value(&value, bot_id))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -887,31 +978,15 @@ impl crate::tempvoice::interface::TempVoiceInterfacePort for CacheSnapshot {
         channel_id: u64,
         limit: u8,
     ) -> Result<Vec<crate::tempvoice::interface::TempVoicePanelMessage>, String> {
-        let bot_id = self
-            .adapter
-            .http
-            .get_current_user()
-            .await
-            .map_err(|err| err.to_string())?
-            .id;
-        let mut messages = ChannelId::new(channel_id)
-            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
-            .await
-            .map_err(|err| err.to_string())?;
-        messages.sort_by_key(|message| message.id.get());
-        Ok(messages
+        Ok(recent_raw_bot_messages(&self.adapter, channel_id, limit)
+            .await?
             .into_iter()
-            .filter(|message| message.author.id == bot_id)
             .map(
                 |message| crate::tempvoice::interface::TempVoicePanelMessage {
-                    message_id: message.id.get(),
-                    has_embeds: !message.embeds.is_empty(),
-                    has_components: !message.components.is_empty(),
-                    embed_titles: message
-                        .embeds
-                        .into_iter()
-                        .filter_map(|embed| embed.title)
-                        .collect(),
+                    message_id: message.message_id,
+                    has_embeds: message.has_embeds,
+                    has_components: message.has_components,
+                    embed_titles: message.embed_titles,
                 },
             )
             .collect())
@@ -1657,32 +1732,14 @@ impl crate::router::RouterInterfacePort for RouterGlue {
         channel_id: u64,
         limit: u8,
     ) -> Result<Vec<crate::router::RouterPanelMessage>, String> {
-        let bot_id = self
-            .adapter
-            .http
-            .get_current_user()
-            .await
-            .map_err(|err| err.to_string())?
-            .id;
-        let mut messages = ChannelId::new(channel_id)
-            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
-            .await
-            .map_err(|err| err.to_string())?;
-        messages.sort_by_key(|message| message.id.get());
-        Ok(messages
+        Ok(recent_raw_bot_messages(&self.adapter, channel_id, limit)
+            .await?
             .into_iter()
-            .filter(|message| message.author.id == bot_id)
-            .map(|message| {
-                let mut custom_ids = Vec::new();
-                if let Ok(components) = serde_json::to_value(&message.components) {
-                    collect_component_custom_ids(&components, &mut custom_ids);
-                }
-                crate::router::RouterPanelMessage {
-                    message_id: message.id.get(),
-                    has_embeds: !message.embeds.is_empty(),
-                    has_components: !message.components.is_empty(),
-                    custom_ids,
-                }
+            .map(|message| crate::router::RouterPanelMessage {
+                message_id: message.message_id,
+                has_embeds: message.has_embeds,
+                has_components: message.has_components,
+                custom_ids: message.custom_ids,
             })
             .collect())
     }
@@ -1722,32 +1779,14 @@ impl crate::lfg_panel::LfgPanelPort for RouterGlue {
         channel_id: u64,
         limit: u8,
     ) -> Result<Vec<crate::lfg_panel::LfgPanelMessage>, String> {
-        let bot_id = self
-            .adapter
-            .http
-            .get_current_user()
-            .await
-            .map_err(|err| err.to_string())?
-            .id;
-        let mut messages = ChannelId::new(channel_id)
-            .messages(&self.adapter.http, GetMessages::new().limit(limit.min(100)))
-            .await
-            .map_err(|err| err.to_string())?;
-        messages.sort_by_key(|message| message.id.get());
-        Ok(messages
+        Ok(recent_raw_bot_messages(&self.adapter, channel_id, limit)
+            .await?
             .into_iter()
-            .filter(|message| message.author.id == bot_id)
-            .map(|message| {
-                let mut custom_ids = Vec::new();
-                if let Ok(components) = serde_json::to_value(&message.components) {
-                    collect_component_custom_ids(&components, &mut custom_ids);
-                }
-                crate::lfg_panel::LfgPanelMessage {
-                    message_id: message.id.get(),
-                    has_embeds: !message.embeds.is_empty(),
-                    has_components: !message.components.is_empty(),
-                    custom_ids,
-                }
+            .map(|message| crate::lfg_panel::LfgPanelMessage {
+                message_id: message.message_id,
+                has_embeds: message.has_embeds,
+                has_components: message.has_components,
+                custom_ids: message.custom_ids,
             })
             .collect())
     }
@@ -2209,5 +2248,51 @@ mod tests {
         assert_eq!(router_file_part_name(0), "files[0]");
         assert_eq!(router_file_part_name(1), "files[1]");
         assert_eq!(router_file_part_name(2), "files[2]");
+    }
+
+    #[test]
+    fn raw_bot_message_parser_findet_components_v2_custom_ids() {
+        let messages = json!([
+            {
+                "id": "1523272810825252944",
+                "author": {"id": "42", "bot": true},
+                "embeds": [],
+                "components": [{
+                    "type": 17,
+                    "components": [
+                        {"type": 1, "components": [
+                            {"type": 2, "custom_id": "router_spawn_casual"},
+                            {"type": 2, "custom_id": "router_spawn_ranked"}
+                        ]},
+                        {"type": 10, "content": "Text"}
+                    ]
+                }]
+            },
+            {
+                "id": "1523272798766628967",
+                "author": {"id": "7", "bot": false},
+                "embeds": [{"title": "Fremd"}],
+                "components": [{"type": 2, "custom_id": "router_spawn_foreign"}]
+            },
+            {
+                "id": "1439565280077545503",
+                "author": {"id": "42", "bot": true},
+                "embeds": [{"title": "🚧 Sprachkanal verwalten"}],
+                "components": [{"type": 1, "components": [{"type": 2, "custom_id": "tv_limit_btn"}]}]
+            }
+        ]);
+
+        let parsed = raw_bot_messages_from_value(&messages, 42);
+
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].message_id, 1439565280077545503);
+        assert_eq!(parsed[0].embed_titles, vec!["🚧 Sprachkanal verwalten"]);
+        assert_eq!(parsed[1].message_id, 1523272810825252944);
+        assert!(parsed[1]
+            .custom_ids
+            .contains(&"router_spawn_casual".to_string()));
+        assert!(parsed[1]
+            .custom_ids
+            .contains(&"router_spawn_ranked".to_string()));
     }
 }

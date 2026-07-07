@@ -635,6 +635,7 @@ pub fn tempvoice_announcement_body() -> Map<String, Value> {
 fn find_existing_tempvoice_global_panel(messages: &[TempVoicePanelMessage]) -> Option<u64> {
     messages
         .iter()
+        .rev()
         .find(|message| {
             message.has_embeds
                 && message.has_components
@@ -2403,9 +2404,15 @@ mod tests {
                 has_components: true,
                 embed_titles: vec!["Anderes Panel".to_string()],
             },
+            TempVoicePanelMessage {
+                message_id: 13,
+                has_embeds: true,
+                has_components: true,
+                embed_titles: vec![GLOBAL_PANEL_TITLE.to_string()],
+            },
         ];
 
-        assert_eq!(find_existing_tempvoice_global_panel(&messages), Some(11));
+        assert_eq!(find_existing_tempvoice_global_panel(&messages), Some(13));
     }
 
     struct ForeignLanePort;
