@@ -40,7 +40,10 @@ Funnel-Events (an bestehendes Journey/Insights-System):
    Doppel-Erstellung wie in `onboarding_bridge.rs`.
 3. **User antwortet frei** → ab jetzt LLM-Gespräch über
    `LlmUseCase::BotPate` (dl-ai). Start-Modell laut Owner-Entscheid vom
-   02.07.: `gpt-5.4-mini`, Provider per Env umschaltbar. Der System-Prompt
+   07.07.: **DeepSeek über Fireworks** (`deepseek-v4-flash`, Fireworks hat
+   laut Owner einen AVV/DPA; Nachweis wird als Launch-Gate abgelegt,
+   §10). Provider bleibt per Env umschaltbar (`DL_LLM_PROVIDER_BOT_PATE`);
+   der frühere Entscheid „gpt-5.4-mini" vom 02.07. ist damit überholt. Der System-Prompt
    kommt aus dem Textpaket (Concierge v0.3). Gesprächsprinzip:
    **immer offene Fragen zuerst, geschlossene Fragen und Buttons nur zum
    Präzisieren.**
@@ -162,8 +165,10 @@ kein Nice-to-have. Assets liefert Claude, Codex bindet nur ein.
 
 ## 10. Launch-Gates (vor Aktivierung für echte neue Joins)
 
-1. **OpenAI-DPA** abgelegt (Owner; Start-Modell mini). Bis dahin läuft der
-   Concierge im Testmodus hinter Config-Flag mit Test-Allowlist
+1. **Fireworks-DPA/AVV als Nachweis abgelegt** (Owner bestätigt 07.07.,
+   dass Fireworks das anbietet; Dokument sichern, §5.6-Anforderung
+   „Prozessor mit DPA + No-Training-Zusage" gilt weiter). Bis dahin läuft
+   der Concierge im Testmodus hinter Config-Flag mit Test-Allowlist
    (nur benannte Test-User bekommen T0).
 2. Texte final von Claude reviewt (Codex schreibt KEINE finalen
    user-sichtbaren Texte; fehlt ein Text, `"Platzhalter"` + Meldung).
