@@ -32,6 +32,7 @@ pub const REGELWERK_COMPONENT_ID_BUTTON_MODERATION: u64 = 32_007;
 pub const REGELWERK_COMPONENT_ID_BUTTON_WEGWEISER: u64 = 32_008;
 pub const REGELWERK_COMPONENT_ID_EPHEMERAL_CONTAINER: u64 = 32_009;
 pub const REGELWERK_COMPONENT_ID_EPHEMERAL_TEXT: u64 = 32_010;
+pub const REGELWERK_COMPONENT_ID_BUTTON_DATENSCHUTZ: u64 = 32_011;
 
 pub const REGELWERK_MARKER_COMPONENT_IDS: &[u64] = &[
     REGELWERK_COMPONENT_ID_HERO_MEDIA,
@@ -49,6 +50,7 @@ pub const REGELWERK_VERHALTEN_CUSTOM_ID: &str = "regelwerk:show:verhalten";
 pub const REGELWERK_SPIELKONTEXT_CUSTOM_ID: &str = "regelwerk:show:spielkontext";
 pub const REGELWERK_MODERATION_CUSTOM_ID: &str = "regelwerk:show:moderation";
 pub const REGELWERK_WEGWEISER_CUSTOM_ID: &str = "regelwerk:show:wegweiser";
+pub const REGELWERK_DATENSCHUTZ_CUSTOM_ID: &str = "regelwerk:show:datenschutz";
 pub const REGELWERK_SHOW_PREFIX: &str = "regelwerk:show:";
 
 pub const REGELWERK_MAIN_TITLE: &str = "**📜 Regelwerk · Deutsche Deadlock Community**";
@@ -57,11 +59,13 @@ pub const REGELWERK_BUTTON_VERHALTEN_LABEL: &str = "🤝 Verhalten";
 pub const REGELWERK_BUTTON_SPIELKONTEXT_LABEL: &str = "🎮 Ton & Trash-Talk";
 pub const REGELWERK_BUTTON_MODERATION_LABEL: &str = "🛡️ Moderation";
 pub const REGELWERK_BUTTON_WEGWEISER_LABEL: &str = "🧭 Wichtige Kanäle";
+pub const REGELWERK_BUTTON_DATENSCHUTZ_LABEL: &str = "🔒 Datenschutz";
 pub const REGELWERK_SECTION_VERHALTEN: &str = "**🤝 Verhalten**\n- Respekt gegenüber allen — keine Beleidigungen, Diskriminierung oder persönlichen Angriffe\n- Keine Hassrede. Kein NSFW außerhalb der dafür markierten Kanäle. Kein Spam, keine Fremdwerbung\n- Privatsphäre respektieren — keine fremden Daten posten\n- Schädliche Inhalte (Viren, IP-Grabber, Scam-Links) = sofortiger permanenter Bann";
 pub const REGELWERK_SECTION_SPIELKONTEXT: &str = r#"**🎮 Im Spielkontext erlaubt**
 Situatives Trash-Talking, Sarkasmus, Wortspiele sind okay — solange es nicht persönlich wird. Ohne Mimik und Tonfall kommt Geschriebenes schnell falsch an: check vorher ab, ob alle damit fein sind. Und wenn jemand sagt „lass gut sein" — dann ist gut."#;
 pub const REGELWERK_SECTION_MODERATION: &str = "**🛡️ Moderation & Konsequenzen**\nProbleme oder Streit? Ping @Moderator oder @Owner — oder mach ein Ticket in <#1483136301271355532> auf, wenn's diskreter sein soll.\nKonsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalte führen direkt zum permanenten Bann.";
 pub const REGELWERK_SECTION_WEGWEISER: &str = "**🧭 Schnell zurechtfinden**\n- <#1398021105339334666> — Steam verknüpfen, Rang eintragen\n- <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n- <#1426220702054355077> — jede Frage ist okay; auch dein Deadlock-Invite bekommst du hier\n- <#1522769149208821881> — Mitspieler finden";
+pub const REGELWERK_SECTION_DATENSCHUTZ: &str = "**🔒 Datenschutz & KI-Moderation**\n\n**Moderation & KI**\nNachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.\n\n**Speicherung**\nNormale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.\n\n**Rechte, Discord-ToS & Kontakt**\nAuskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner.";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegelwerkPublishOutput {
@@ -159,6 +163,7 @@ struct ResolvedRegelwerkTexts {
     spielkontext: String,
     moderation: String,
     wegweiser: String,
+    datenschutz: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -167,6 +172,7 @@ struct ResolvedRegelwerkButtons {
     spielkontext: String,
     moderation: String,
     wegweiser: String,
+    datenschutz: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -187,6 +193,7 @@ struct RegelwerkBodyTextsToml {
     spielkontext: Option<String>,
     moderation: Option<String>,
     wegweiser: Option<String>,
+    datenschutz: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -196,6 +203,7 @@ struct RegelwerkButtonsToml {
     spielkontext: Option<String>,
     moderation: Option<String>,
     wegweiser: Option<String>,
+    datenschutz: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -414,6 +422,7 @@ pub fn regelwerk_section_text_for_custom_id(custom_id: &str) -> Option<&'static 
         REGELWERK_SPIELKONTEXT_CUSTOM_ID => Some(REGELWERK_SECTION_SPIELKONTEXT),
         REGELWERK_MODERATION_CUSTOM_ID => Some(REGELWERK_SECTION_MODERATION),
         REGELWERK_WEGWEISER_CUSTOM_ID => Some(REGELWERK_SECTION_WEGWEISER),
+        REGELWERK_DATENSCHUTZ_CUSTOM_ID => Some(REGELWERK_SECTION_DATENSCHUTZ),
         _ => None,
     }
 }
@@ -508,12 +517,14 @@ impl ResolvedRegelwerkConfig {
                 spielkontext: REGELWERK_SECTION_SPIELKONTEXT.to_string(),
                 moderation: REGELWERK_SECTION_MODERATION.to_string(),
                 wegweiser: REGELWERK_SECTION_WEGWEISER.to_string(),
+                datenschutz: REGELWERK_SECTION_DATENSCHUTZ.to_string(),
             },
             buttons: ResolvedRegelwerkButtons {
                 verhalten: REGELWERK_BUTTON_VERHALTEN_LABEL.to_string(),
                 spielkontext: REGELWERK_BUTTON_SPIELKONTEXT_LABEL.to_string(),
                 moderation: REGELWERK_BUTTON_MODERATION_LABEL.to_string(),
                 wegweiser: REGELWERK_BUTTON_WEGWEISER_LABEL.to_string(),
+                datenschutz: REGELWERK_BUTTON_DATENSCHUTZ_LABEL.to_string(),
             },
         }
     }
@@ -525,11 +536,13 @@ impl ResolvedRegelwerkConfig {
         apply_optional(&mut self.texts.spielkontext, file.texts.spielkontext);
         apply_optional(&mut self.texts.moderation, file.texts.moderation);
         apply_optional(&mut self.texts.wegweiser, file.texts.wegweiser);
+        apply_optional(&mut self.texts.datenschutz, file.texts.datenschutz);
 
         apply_optional(&mut self.buttons.verhalten, file.buttons.verhalten);
         apply_optional(&mut self.buttons.spielkontext, file.buttons.spielkontext);
         apply_optional(&mut self.buttons.moderation, file.buttons.moderation);
         apply_optional(&mut self.buttons.wegweiser, file.buttons.wegweiser);
+        apply_optional(&mut self.buttons.datenschutz, file.buttons.datenschutz);
         self
     }
 }
@@ -587,6 +600,12 @@ fn regelwerk_messages(
                         &config.buttons.moderation,
                         2,
                         REGELWERK_MODERATION_CUSTOM_ID,
+                    ),
+                    button(
+                        REGELWERK_COMPONENT_ID_BUTTON_DATENSCHUTZ,
+                        &config.buttons.datenschutz,
+                        2,
+                        REGELWERK_DATENSCHUTZ_CUSTOM_ID,
                     ),
                     button(
                         REGELWERK_COMPONENT_ID_BUTTON_WEGWEISER,
@@ -883,7 +902,7 @@ moderation = "Runtime Moderation"
         let buttons = payload.components[1]["components"][1]["components"]
             .as_array()
             .expect("buttons");
-        assert_eq!(buttons.len(), 4);
+        assert_eq!(buttons.len(), 5);
         assert!(buttons.iter().all(|button| button["style"] == json!(2)));
         assert_eq!(
             collect_component_custom_ids(&payload.components),
@@ -891,6 +910,7 @@ moderation = "Runtime Moderation"
                 REGELWERK_VERHALTEN_CUSTOM_ID.to_string(),
                 REGELWERK_SPIELKONTEXT_CUSTOM_ID.to_string(),
                 REGELWERK_MODERATION_CUSTOM_ID.to_string(),
+                REGELWERK_DATENSCHUTZ_CUSTOM_ID.to_string(),
                 REGELWERK_WEGWEISER_CUSTOM_ID.to_string(),
             ]
         );
@@ -952,6 +972,10 @@ moderation = "Runtime Moderation"
         assert_eq!(
             regelwerk_section_text_for_custom_id(REGELWERK_WEGWEISER_CUSTOM_ID),
             Some(REGELWERK_SECTION_WEGWEISER)
+        );
+        assert_eq!(
+            regelwerk_section_text_for_custom_id(REGELWERK_DATENSCHUTZ_CUSTOM_ID),
+            Some(REGELWERK_SECTION_DATENSCHUTZ)
         );
         assert_eq!(
             regelwerk_section_text_for_custom_id("regelwerk:show:nope"),

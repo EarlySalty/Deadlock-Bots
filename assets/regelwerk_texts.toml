@@ -21,9 +21,20 @@ wegweiser = """**🧭 Schnell zurechtfinden**
 - <#1483136301271355532> — wenn irgendwas nicht funktioniert (Ticket aufmachen)
 - <#1426220702054355077> — jede Frage ist okay; auch dein Deadlock-Invite bekommst du hier
 - <#1522769149208821881> — Mitspieler finden"""
+datenschutz = """**🔒 Datenschutz & KI-Moderation**
+
+**Moderation & KI**
+Nachrichten in moderierten Kanälen werden automatisch auf Regelverstöße geprüft. Dazu wird der Nachrichtentext an externe KI-Dienstleister (u. a. Fireworks AI) übermittelt. Diese verarbeiten die Inhalte nur zur Analyse in unserem Auftrag und trainieren damit keine KI-Modelle.
+
+**Speicherung**
+Normale Nachrichten werden nicht gespeichert, nur im Moment geprüft. Nur bei einem Verstoß speichern wir einen Moderationsfall (Inhalt, User-ID, Zeitpunkt, Ergebnis). Der Nachrichteninhalt wird nach 90 Tagen automatisch gelöscht.
+
+**Rechte, Discord-ToS & Kontakt**
+Auskunft, Löschung und Opt-out jederzeit über /datenschutz oder einen Moderator/Owner. Zusätzlich gelten die Discord-Nutzungsbedingungen (https://discord.com/terms) und Community-Richtlinien (https://discord.com/guidelines). Fragen: <#1459628609705738539> oder an einen Moderator/Owner."""
 
 [buttons]
 verhalten = "🤝 Verhalten"
 spielkontext = "🎮 Ton & Trash-Talk"
 moderation = "🛡️ Moderation"
 wegweiser = "🧭 Wichtige Kanäle"
+datenschutz = "🔒 Datenschutz"
