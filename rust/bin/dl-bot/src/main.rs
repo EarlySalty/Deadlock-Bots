@@ -164,10 +164,6 @@ fn default_brain_bin() -> String {
     "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
 }
 
-fn default_brain_db() -> String {
-    "/home/naniadm/Documents/Deadlock-Brain/data/deadlock_brain.sqlite3".to_string()
-}
-
 async fn wait_for_gateway_cache_ready(
     events: &mut tokio::sync::broadcast::Receiver<dl_discord::GatewayEvent>,
     guild_id: u64,
@@ -700,13 +696,10 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             }
             let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
             let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
-            let brain_db = env("BRAIN_DB").unwrap_or_else(default_brain_db);
-            let brain_db_path = std::path::PathBuf::from(&brain_db);
             let channel_allowlist = env("BRAIN_CHANNEL_ALLOWLIST")
                 .and_then(|raw| modglue::parse_brain_channel_allowlist(&raw));
             tracing::info!(
                 bin = %brain_bin_path.display(),
-                db = %brain_db_path.display(),
                 cooldown_secs,
                 max_question_len,
                 channel_allowlist = channel_allowlist.as_ref().map(|ids| ids.len()).unwrap_or(0),
@@ -717,10 +710,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 cooldown_secs,
             });
             let retriever: Arc<dyn dl_brain::BrainRetriever> =
-                Arc::new(modglue::BrainRetrieverGlue {
-                    bin: brain_bin_path,
-                    db_path: Some(brain_db_path),
-                });
+                Arc::new(modglue::BrainRetrieverGlue { bin: brain_bin_path });
             let answerer: Arc<dyn dl_brain::AiAnswerer> = Arc::new(modglue::BrainAiGlue { client });
             Some(Arc::new(modglue::BrainHandler {
                 adapter: adapter.clone(),

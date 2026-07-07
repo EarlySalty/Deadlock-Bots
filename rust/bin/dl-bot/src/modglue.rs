@@ -63,7 +63,6 @@ pub struct ModGlue {
 
 pub struct BrainRetrieverGlue {
     pub bin: PathBuf,
-    pub db_path: Option<PathBuf>,
 }
 
 #[async_trait::async_trait]
@@ -72,13 +71,7 @@ impl dl_brain::BrainRetriever for BrainRetrieverGlue {
         &self,
         frage: &str,
     ) -> Result<dl_brain::BrainContext, dl_brain::BrainError> {
-        let output = run_brain_cli(
-            &self.bin,
-            self.db_path.as_deref(),
-            frage,
-            BRAIN_SUBPROCESS_TIMEOUT,
-        )
-        .await?;
+        let output = run_brain_cli(&self.bin, frage, BRAIN_SUBPROCESS_TIMEOUT).await?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -104,16 +97,13 @@ impl dl_brain::BrainRetriever for BrainRetrieverGlue {
 
 async fn run_brain_cli(
     bin: &Path,
-    db_path: Option<&Path>,
     frage: &str,
     timeout_duration: Duration,
 ) -> Result<Output, dl_brain::BrainError> {
     let mut command = Command::new(bin);
     command.kill_on_drop(true);
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    if let Some(db_path) = db_path {
-        command.arg("--db").arg(db_path);
-    }
+    // Kein --db mehr: deadlock-brain liest die zentrale Postgres via DEADLOCK_CENTRAL_DSN
     command.arg("ask-context").arg("--").arg(frage);
 
     let mut child = command.spawn().map_err(|err| {
@@ -3520,12 +3510,11 @@ mod tests {
 
     #[cfg(unix)]
     #[tokio::test]
-    async fn brain_retriever_uebergibt_db_und_separator_vor_dash_frage(
+    async fn brain_retriever_uebergibt_separator_vor_dash_frage_ohne_db_flag(
     ) -> Result<(), Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
         let script = dir.path().join("brain-cli");
         let argv_log = dir.path().join("argv.log");
-        let db_path = dir.path().join("brain.sqlite3");
         fs::write(
             &script,
             format!(
@@ -3535,27 +3524,13 @@ mod tests {
         )?;
         make_executable(&script)?;
 
-        let retriever = BrainRetrieverGlue {
-            bin: script,
-            db_path: Some(db_path.clone()),
-        };
+        let retriever = BrainRetrieverGlue { bin: script };
         let context = retriever.ask_context("- Spirit Lifesteal?").await?;
 
         assert_eq!(context.prompt, "ok");
         let argv = fs::read_to_string(argv_log)?;
         let lines = argv.lines().collect::<Vec<_>>();
-        let db_display = db_path.to_string_lossy().to_string();
-        assert_eq!(
-            lines,
-            vec![
-                "5",
-                "--db",
-                db_display.as_str(),
-                "ask-context",
-                "--",
-                "- Spirit Lifesteal?"
-            ]
-        );
+        assert_eq!(lines, vec!["3", "ask-context", "--", "- Spirit Lifesteal?"]);
         Ok(())
     }
 
@@ -3575,10 +3550,7 @@ mod tests {
         )?;
         make_executable(&script)?;
 
-        let retriever = BrainRetrieverGlue {
-            bin: script,
-            db_path: None,
-        };
+        let retriever = BrainRetrieverGlue { bin: script };
         let timed_out =
             tokio::time::timeout(Duration::from_millis(200), retriever.ask_context("frage")).await;
         assert!(timed_out.is_err());
