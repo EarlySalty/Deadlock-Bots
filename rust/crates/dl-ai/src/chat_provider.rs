@@ -11,6 +11,9 @@ use tokio::time::sleep;
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(45);
 const DEFAULT_MAX_RETRIES: usize = 2;
 const DEFAULT_BACKOFF: Duration = Duration::from_millis(250);
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+pub const DEFAULT_OPENAI_CHAT_MODEL: &str = "gpt-5.4-mini";
+const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1";
 const DEFAULT_MINIMAX_BASE_URL: &str = "https://api.minimax.chat/v1";
 const DEFAULT_MINIMAX_TOKEN_PLAN_BASE_URL: &str = "https://api.minimax.io/anthropic/v1";
 const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M3";
@@ -184,6 +187,8 @@ impl LlmDataClass {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LlmProviderKind {
+    OpenAi,
+    Fireworks,
     MiniMax,
     Mistral,
     Mock,
@@ -192,6 +197,8 @@ pub enum LlmProviderKind {
 impl LlmProviderKind {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::OpenAi => "openai",
+            Self::Fireworks => "fireworks",
             Self::MiniMax => "minimax",
             Self::Mistral => "mistral",
             Self::Mock => "mock",
@@ -204,6 +211,8 @@ impl std::str::FromStr for LlmProviderKind {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match normalize_provider_name(value).as_str() {
+            "openai" => Ok(Self::OpenAi),
+            "fireworks" => Ok(Self::Fireworks),
             "minimax" => Ok(Self::MiniMax),
             "mistral" => Ok(Self::Mistral),
             "mock" => Ok(Self::Mock),
@@ -348,6 +357,10 @@ impl LlmProviderConfig {
         lookup: impl Fn(&str) -> Option<String>,
     ) -> Result<Arc<dyn ChatProvider>, ChatProviderInitError> {
         match self.provider_for(use_case, &lookup)? {
+            LlmProviderKind::OpenAi => OpenAiChatProvider::from_env(lookup)
+                .map(|provider| provider as Arc<dyn ChatProvider>),
+            LlmProviderKind::Fireworks => OpenAiChatProvider::from_fireworks_env(lookup)
+                .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::MiniMax => MiniMaxChatProvider::from_env(lookup)
                 .map(|provider| provider as Arc<dyn ChatProvider>),
             LlmProviderKind::Mistral => MistralChatProvider::from_env(lookup)
@@ -357,11 +370,13 @@ impl LlmProviderConfig {
     }
 }
 
-// KI-Compliance-Gate (§5.6): Default ist Mistral Small 4. MiniMax darf nur per
-// explizitem Dev-Override und ausschliesslich mit synthetischen Daten genutzt
-// werden; echter User-Content wartet auf Mistral-DPA/ZDR und Cutover.
-fn default_provider_for(_use_case: LlmUseCase) -> LlmProviderKind {
-    LlmProviderKind::Mistral
+// KI-Compliance-Gate (§5.6): MiniMax darf nur per explizitem Dev-Override und
+// ausschliesslich mit synthetischen Daten genutzt werden.
+fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
+    match use_case {
+        LlmUseCase::BotPate => LlmProviderKind::Fireworks,
+        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
+    }
 }
 
 fn default_data_classes() -> HashMap<LlmUseCase, LlmDataClass> {
@@ -396,6 +411,111 @@ pub struct MistralChatProvider {
     api_key: String,
     default_model: String,
     retry: RetryConfig,
+}
+
+pub struct OpenAiChatProvider {
+    http: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    default_model: String,
+    retry: RetryConfig,
+}
+
+impl OpenAiChatProvider {
+    pub fn from_env(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Arc<Self>, ChatProviderInitError> {
+        let api_key = read_env(&lookup, "OPENAI_API_KEY")
+            .or_else(|| read_env(&lookup, "DEADLOCK_OPENAI_KEY"))
+            .ok_or(ChatProviderInitError::MissingApiKey {
+                provider: "openai",
+                env_key: "OPENAI_API_KEY or DEADLOCK_OPENAI_KEY",
+            })?;
+        let base_url =
+            read_env(&lookup, "OPENAI_BASE_URL").unwrap_or_else(|| DEFAULT_OPENAI_BASE_URL.into());
+        let model = read_env(&lookup, "DL_LLM_MODEL_BOT_PATE")
+            .or_else(|| read_env(&lookup, "OPENAI_MODEL"))
+            .or_else(|| read_env(&lookup, "AI_OPENAI_MODEL"))
+            .unwrap_or_else(|| DEFAULT_OPENAI_CHAT_MODEL.into());
+        tracing::info!(provider = "openai", %model, "LLM-Chat-Provider initialisiert");
+        Ok(Self::new(base_url, api_key, model))
+    }
+
+    pub fn from_fireworks_env(
+        lookup: impl Fn(&str) -> Option<String>,
+    ) -> Result<Arc<Self>, ChatProviderInitError> {
+        let api_key = read_env(&lookup, "FIREWORK_API_KEY")
+            .or_else(|| read_env(&lookup, "FIREWORKS_API_KEY"))
+            .ok_or(ChatProviderInitError::MissingApiKey {
+                provider: "fireworks",
+                env_key: "FIREWORK_API_KEY or FIREWORKS_API_KEY",
+            })?;
+        let base_url = read_env(&lookup, "FIREWORK_BASE_URL")
+            .or_else(|| read_env(&lookup, "FIREWORKS_BASE_URL"))
+            .unwrap_or_else(|| DEFAULT_FIREWORKS_BASE_URL.into());
+        let model = read_env(&lookup, "DL_LLM_MODEL_BOT_PATE")
+            .or_else(|| read_env(&lookup, "FIREWORK_MODEL"))
+            .or_else(|| read_env(&lookup, "FIREWORKS_MODEL"))
+            .unwrap_or_else(|| crate::DEFAULT_FIREWORKS_MODEL.into());
+        tracing::info!(provider = "fireworks", %model, "LLM-Chat-Provider initialisiert");
+        Ok(Self::new(base_url, api_key, model))
+    }
+
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        default_model: impl Into<String>,
+    ) -> Arc<Self> {
+        Self::new_with_retry(base_url, api_key, default_model, RetryConfig::default())
+    }
+
+    pub fn new_with_retry(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        default_model: impl Into<String>,
+        retry: RetryConfig,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            http: retry.http_client(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            default_model: default_model.into(),
+            retry,
+        })
+    }
+}
+
+#[async_trait]
+impl ChatProvider for OpenAiChatProvider {
+    async fn chat(
+        &self,
+        messages: &[ChatMessage],
+        params: ChatParams,
+    ) -> Result<ChatResponse, ChatProviderError> {
+        let model = params
+            .model
+            .clone()
+            .unwrap_or_else(|| self.default_model.clone());
+        let wire_messages = openai_messages(messages, params.system_prompt.as_deref())?;
+        let mut payload = json!({
+            "model": model,
+            "messages": wire_messages,
+            "temperature": params.temperature,
+        });
+        payload["max_tokens"] = json!(params.max_tokens.unwrap_or(DEFAULT_CHAT_MAX_TOKENS));
+
+        let url = format!("{}/chat/completions", self.base_url);
+        let result = send_json_with_retry("openai", &self.retry, || {
+            self.http
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", self.api_key))
+                .json(&payload)
+        })
+        .await?;
+        let response = parse_openai_chat_response(&result.body)?;
+        log_chat_success("openai", result.status, result.elapsed, &response.usage);
+        Ok(response)
+    }
 }
 
 impl MistralChatProvider {
@@ -1051,7 +1171,7 @@ mod tests {
     }
 
     #[test]
-    fn config_default_ist_mistral_und_env_override_pro_use_case() {
+    fn config_default_ist_fireworks_fuer_bot_pate_und_env_override_pro_use_case() {
         let cfg = LlmProviderConfig::from_env(|key| match key {
             "DL_LLM_PROVIDER_DEFAULT" => Some("mistral".to_string()),
             "DL_LLM_PROVIDER_BOT_PATE" => Some("mock".to_string()),
@@ -1078,17 +1198,46 @@ mod tests {
 
         let defaults = LlmProviderConfig::default();
         for use_case in LlmUseCase::all() {
+            let expected = match use_case {
+                LlmUseCase::BotPate => LlmProviderKind::Fireworks,
+                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
+            };
             assert_eq!(
                 defaults
                     .provider_for(*use_case, |_| None)
                     .expect("default provider"),
-                LlmProviderKind::Mistral
+                expected
             );
             assert_eq!(
                 defaults.data_class_for(*use_case),
                 LlmDataClass::UserContent
             );
         }
+    }
+
+    #[test]
+    fn fireworks_from_env_nutzt_singular_keys_und_provider_default() {
+        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
+            "FIREWORK_API_KEY" => Some("fw-key".to_string()),
+            _ => None,
+        })
+        .expect("fireworks provider");
+
+        assert_eq!(provider.base_url, DEFAULT_FIREWORKS_BASE_URL);
+        assert_eq!(provider.default_model, crate::DEFAULT_FIREWORKS_MODEL);
+    }
+
+    #[test]
+    fn fireworks_from_env_nimmt_bot_pate_model_vor_fireworks_model() {
+        let provider = OpenAiChatProvider::from_fireworks_env(|key| match key {
+            "FIREWORKS_API_KEY" => Some("fw-key".to_string()),
+            "DL_LLM_MODEL_BOT_PATE" => Some("bot-pate-model".to_string()),
+            "FIREWORK_MODEL" => Some("fireworks-model".to_string()),
+            _ => None,
+        })
+        .expect("fireworks provider");
+
+        assert_eq!(provider.default_model, "bot-pate-model");
     }
 
     #[test]

@@ -60,6 +60,14 @@ pub enum JourneyEventType {
     StreamerContactActivation,
     D7Activity,
     D14Activity,
+    ConciergeT0Sent,
+    ConciergeReply,
+    ConciergeTourDone,
+    SteckbriefPosted,
+    NudgeSent,
+    PateOffered,
+    ConciergeOptedOut,
+    CongratsSent,
 }
 
 impl JourneyEventType {
@@ -82,6 +90,14 @@ impl JourneyEventType {
             Self::StreamerContactActivation => "streamer_contact_activation",
             Self::D7Activity => "d7_activity",
             Self::D14Activity => "d14_activity",
+            Self::ConciergeT0Sent => "concierge_t0_sent",
+            Self::ConciergeReply => "concierge_reply",
+            Self::ConciergeTourDone => "concierge_tour_done",
+            Self::SteckbriefPosted => "steckbrief_posted",
+            Self::NudgeSent => "nudge_sent",
+            Self::PateOffered => "pate_offered",
+            Self::ConciergeOptedOut => "opted_out",
+            Self::CongratsSent => "congrats_sent",
         }
     }
 
@@ -104,6 +120,14 @@ impl JourneyEventType {
             Self::StreamerContactActivation,
             Self::D7Activity,
             Self::D14Activity,
+            Self::ConciergeT0Sent,
+            Self::ConciergeReply,
+            Self::ConciergeTourDone,
+            Self::SteckbriefPosted,
+            Self::NudgeSent,
+            Self::PateOffered,
+            Self::ConciergeOptedOut,
+            Self::CongratsSent,
         ]
     }
 }

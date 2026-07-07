@@ -101,6 +101,11 @@ Tiefentest (3 Dialoge à 4 Runden, inkl. Gaslighting-Drucktest).
   Anthropic-DPA + API-Guthaben (Konto aktuell leer — 400 „credit balance
   too low").
 
+> **Nachtrag 2026-07-07:** Modell-Entscheid §4 überholt. Owner-Entscheid:
+> Start-Modell für die DM-Persona ist DeepSeek über Fireworks
+> (AVV/DPA laut Owner vorhanden, Nachweis wird abgelegt). Details in
+> `docs/onboarding-concierge/2026-07-07-spec-slice-a.md` §2 und §10.
+
 ## 5. System-Prompt v0.2 (Referenz-Entwurf)
 
 v0.1 (Bake-off-Stand) plus drei Härtungen aus dem Multi-Turn-Test:

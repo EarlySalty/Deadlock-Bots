@@ -1965,6 +1965,140 @@ impl dl_community::dm_assistant::DmPort for DmGlue {
     }
 }
 
+// ── Concierge-Onboarding-Anbindung ─────────────────────────────────────────
+
+pub struct ConciergeGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+#[async_trait::async_trait]
+impl dl_community::concierge::ConciergePort for ConciergeGlue {
+    async fn send_dm_v2(
+        &self,
+        user_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> dl_community::concierge::ConciergeDmDelivery {
+        use dl_community::concierge::ConciergeDmDelivery;
+
+        let channel = match self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            Ok(channel) => channel,
+            Err(err) if is_discord_cannot_send_messages(&err) => {
+                return ConciergeDmDelivery::CannotSend50007;
+            }
+            Err(err) => return ConciergeDmDelivery::Failed(err.to_string()),
+        };
+        match self
+            .adapter
+            .send_raw_public_typed(channel.id.get(), &body)
+            .await
+        {
+            Ok(message_id) => ConciergeDmDelivery::Sent {
+                channel_id: Some(channel.id.get()),
+                message_id,
+            },
+            Err(err) if is_discord_cannot_send_messages(&err) => {
+                ConciergeDmDelivery::CannotSend50007
+            }
+            Err(err) => ConciergeDmDelivery::Failed(err.to_string()),
+        }
+    }
+
+    async fn create_private_channel(
+        &self,
+        guild_id: u64,
+        user_id: u64,
+        category_id: u64,
+        name: &str,
+    ) -> Result<u64, String> {
+        let bot_id = self.adapter.cache().current_user().id.get();
+        let body = json!({
+            "name": name,
+            "type": 0,
+            "parent_id": category_id.to_string(),
+            "permission_overwrites": [
+                { "id": guild_id.to_string(), "type": 0, "deny": "1024" },
+                { "id": user_id.to_string(), "type": 1, "allow": "68608" },
+                { "id": bot_id.to_string(), "type": 1, "allow": "68624" },
+            ],
+        });
+        let Some(body) = body.as_object() else {
+            return Err("invalid channel body".to_string());
+        };
+        self.adapter
+            .http
+            .create_channel(GuildId::new(guild_id), body, Some("Concierge Fallback"))
+            .await
+            .map(|channel| channel.id.get())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn send_channel_v2(
+        &self,
+        channel_id: u64,
+        body: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<u64, String> {
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert("allowed_mentions".into(), json!({ "parse": [] }));
+        self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) {
+        if let Err(err) = self
+            .adapter
+            .http
+            .create_reaction(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &ReactionType::Unicode(emoji.to_string()),
+            )
+            .await
+        {
+            tracing::warn!(%err, channel_id, message_id, emoji, "Concierge-Reaktion fehlgeschlagen");
+        }
+    }
+
+    async fn reply_to_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        content: &str,
+        allowed_role_id: Option<u64>,
+    ) {
+        let mut body = serde_json::Map::new();
+        body.insert("content".into(), json!(content));
+        body.insert(
+            "message_reference".into(),
+            json!({ "channel_id": channel_id.to_string(), "message_id": message_id.to_string() }),
+        );
+        body.insert(
+            "allowed_mentions".into(),
+            allowed_role_id.map_or_else(
+                || json!({ "parse": [], "replied_user": false }),
+                |role_id| {
+                    json!({
+                        "parse": [],
+                        "roles": [role_id.to_string()],
+                        "replied_user": false
+                    })
+                },
+            ),
+        );
+        if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
+            tracing::warn!(%err, channel_id, message_id, "Concierge-Reply fehlgeschlagen");
+        }
+    }
+}
+
 // ── Anonymes-Feedback-Anbindung ────────────────────────────────────────────
 
 pub struct FeedbackGlue {

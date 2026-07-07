@@ -30,6 +30,7 @@ tokio.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+dl-central-db = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
 
 [features]
