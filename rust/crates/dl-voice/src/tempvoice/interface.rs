@@ -27,8 +27,41 @@ pub const MIN_RANK_VERIFY_REQUIRED: &str =
 pub const MIN_RANK_BLOCKED_REPLY: &str =
     "Du kannst keinen Mindest-Rang über deinem eigenen setzen.";
 pub const RANK_PREF_UNKNOWN_LABEL: &str = "Kein Rang";
-const RANKED_CATEGORY_ID: u64 = 1412804540994162789;
 const GLOBAL_PANEL_TITLE: &str = "🚧 Sprachkanal verwalten";
+const TV_COMPONENTS_V2_FLAG: u64 = 1 << 15;
+const TV_EPHEMERAL_FLAG: u64 = 1 << 6;
+const TV_ACCENT_GOLD: u64 = 0xC8A86B;
+const TV_RANK_GATE_LABEL: &str = "🔓 Rang-Gate";
+const TV_RANK_GATE_EXPLANATION: &str = "## 🔓 Rang-Gate\n\
+Damit machst du deine Lane exklusiv für verifizierte Ränge in einem Fenster deiner Wahl.\n\
+- Nur wer eine **verifizierte Rang-Rolle** im Fenster hat, kann noch joinen — alle anderen sehen ab dann ein 🔒 an deiner Lane.\n\
+- **Niemand fliegt raus:** Wer schon drin ist, bleibt drin. Das Gate wirkt nur auf neue Joins.\n\
+- Unverifizierte können nicht mehr joinen, solange das Gate an ist.\n\n\
+Standard ist dein Rang **±1,5 Ränge**. Unten kannst du Mindestrang und Toleranz anpassen, dann bestätigen. Zum Ausschalten drückst du den 🔓-Knopf im Panel einfach nochmal.";
+const TV_RANK_GATE_CONFIRM_LABEL: &str = "✅ Gate aktivieren";
+const TV_RANK_GATE_ON: &str = "🔒 Rang-Gate ist an — nur verifizierte Ränge im gewählten Fenster können jetzt joinen. Wer schon drin ist, bleibt drin. Nochmal drücken schaltet es wieder aus.";
+const TV_RANK_GATE_OFF: &str = "🔓 Rang-Gate ist aus — deine Lane ist wieder für alle offen.";
+const TV_RANK_GATE_ONLY_RANKED: &str =
+    "Das Rang-Gate gibt es nur in Ranked-Lanes, und nur der Owner kann es schalten.";
+const TV_RANK_GATE_INVALID: &str = "Rang-Gate hat nicht geklappt";
+const TV_RANK_GATE_SELECT_RANK: &str = "Mindestrang wählen";
+const TV_RANK_GATE_SELECT_TOLERANCE: &str = "Toleranz wählen (± Subränge)";
+const TV_GUIDE_TEXT: &str = "## 📖 So funktionieren die Sprachkanäle\n\
+**Lane erstellen:** Geh in einen der (+)-Einstiegskanäle (Casual, Ranked oder Street Brawl) oder in den Router-Kanal — der Bot erstellt dir sofort eine eigene Lane und zieht dich rein. Du bist automatisch der Owner und steuerst alles über das Panel.\n\n\
+**Alles in einer Kategorie:** Alle Lanes stehen jetzt zusammen — oben Ranked (nach Rang sortiert, klein → groß), darunter Casual, unten Street Brawl. Der Name sagt dir, was drin läuft: *Ranked Phantom 3*, *Chill Lane 2 · Oracle*, *Street Brawl 1*.\n\n\
+**🎯 Mein Rang:** Damit stellst du im Panel ein, mit welchem Rang deine Lanes benannt werden. Bei Ranked ist dein Rang zusätzlich die Vorgabe fürs Rang-Gate.\n\n\
+**Ranked ist offen:** Zum Erstellen und Joinen von Ranked-Lanes brauchst du keine Verifizierung mehr.\n\n\
+**🔓 Rang-Gate (nur Ranked, nur Owner):** Ein Klick zeigt dir die Erklärung mit zwei Auswahlfeldern — Mindestrang und Toleranz, Standard: dein Rang ±1,5 Ränge. Nach dem Bestätigen können nur noch verifizierte Ränge im Fenster joinen, alle anderen sehen ein 🔒. Niemand wird gekickt. Nochmal klicken schaltet das Gate wieder aus.";
+const TV_GUIDE_BUTTON_LABEL: &str = "📖 Anleitung";
+const TV_ANNOUNCEMENT_TEXT: &str = "## 🔊 Voice-Umbau: Alle Lanes in einer Kategorie\n\
+Wir haben die Sprachkanäle umgebaut, damit Ranked nicht mehr abschreckt und ihr schneller zusammenfindet:\n\
+- **Eine Kategorie für alles:** Ranked, Casual und Street Brawl stehen jetzt zusammen — oben Ranked (nach Rang sortiert, klein → groß), darunter Casual, unten Street Brawl. Der Name sagt, was drin läuft: *Ranked Phantom 3*, *Chill Lane 2 · Oracle*, *Street Brawl 1*.\n\
+- **Ranked ist jetzt offen:** Kein Verifizierungs-Zwang und kein Dauer-Schloss mehr — jeder kann Ranked-Lanes aufmachen und joinen.\n\
+- **Ihr entscheidet selbst:** Der Lane-Owner kann übers Panel ein 🔓 **Rang-Gate** schalten. Dann können nur noch verifizierte Ränge in einem Fenster joinen (Standard: eigener Rang ±1,5 Ränge) und erst dann gibt es ein 🔒 — nur an dieser einen Lane. Wer schon drin ist, fliegt nie raus.\n\
+- **🎯 Mein Rang** im Panel bestimmt, mit welchem Rang deine Lanes benannt werden — bei Ranked ist er auch die Gate-Vorgabe.\n\n\
+Die Schritt-für-Schritt-Anleitung gibt es hier:";
+const TV_ANNOUNCEMENT_CONFIRM: &str = "TempVoice-Ankündigung gepostet.";
+const TV_ANNOUNCEMENT_FAILED: &str = "TempVoice-Ankündigung konnte nicht gepostet werden.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TempVoicePanelMessage {
@@ -240,10 +273,12 @@ impl TempVoiceInterface {
             };
             let owner_id = self.engine.lane_owner(lane_id).await;
             let category_id = (category_id > 0).then_some(category_id).or(row.category_id);
+            let include_ranked = self.engine.lane_is_ranked(lane_id).await;
             let body = lane_panel_body_for_cutover(
                 &lane_name,
                 owner_id,
                 category_id,
+                include_ranked,
                 self.lfg_cutover_active,
             );
             if let Err(err) = self
@@ -282,9 +317,10 @@ fn global_panel_body_for_cutover(
     category_id: Option<u64>,
     lfg_cutover_active: bool,
 ) -> Map<String, Value> {
+    let _ = category_id;
     panel_body(
         global_panel_embed(),
-        main_view_components(category_id, lfg_cutover_active),
+        main_view_components(false, lfg_cutover_active),
     )
 }
 
@@ -294,18 +330,26 @@ fn lane_panel_body(
     owner_id: Option<u64>,
     category_id: Option<u64>,
 ) -> Map<String, Value> {
-    lane_panel_body_for_cutover(lane_name, owner_id, category_id, false)
+    lane_panel_body_for_cutover(
+        lane_name,
+        owner_id,
+        category_id,
+        is_ranked_lane_name(lane_name),
+        false,
+    )
 }
 
 fn lane_panel_body_for_cutover(
     lane_name: &str,
     owner_id: Option<u64>,
     category_id: Option<u64>,
+    include_ranked: bool,
     lfg_cutover_active: bool,
 ) -> Map<String, Value> {
+    let _ = category_id;
     panel_body(
         lane_panel_embed(lane_name, owner_id),
-        main_view_components(category_id, lfg_cutover_active),
+        main_view_components(include_ranked, lfg_cutover_active),
     )
 }
 
@@ -366,8 +410,13 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
     })
 }
 
-fn main_view_components(category_id: Option<u64>, lfg_cutover_active: bool) -> Value {
-    let include_ranked = category_id == Some(RANKED_CATEGORY_ID);
+#[cfg(test)]
+fn is_ranked_lane_name(lane_name: &str) -> bool {
+    let lower = lane_name.trim().to_lowercase();
+    lower == "ranked" || lower.starts_with("ranked ")
+}
+
+fn main_view_components(include_ranked: bool, lfg_cutover_active: bool) -> Value {
     if include_ranked {
         let preset_button = if lfg_cutover_active {
             button("💾 Presets", 2, "tv_presets")
@@ -398,7 +447,7 @@ fn main_view_components(category_id: Option<u64>, lfg_cutover_active: bool) -> V
                 button("👻 Lurker", 2, "tv_lurker"),
                 button("🛡️ Tag-Filter", 2, "tv_tag_filter"),
             ]),
-            action_row(vec![min_rank_select()]),
+            action_row(vec![button(TV_RANK_GATE_LABEL, 2, "tv_rank_gate")]),
             action_row(vec![
                 button("Normale Lane", 2, "tv_tpl_reset"),
                 button("Duo Call (2)", 1, "tv_tpl_duo"),
@@ -406,7 +455,6 @@ fn main_view_components(category_id: Option<u64>, lfg_cutover_active: bool) -> V
                 preset_button,
                 final_button,
             ]),
-            action_row(vec![subrank_select()]),
         ])
     } else {
         let mut final_row = vec![
@@ -461,31 +509,126 @@ fn button(label: &str, style: u8, custom_id: &str) -> Value {
     })
 }
 
-fn min_rank_select() -> Value {
-    let labels = [
-        ("Initiate", "initiate"),
-        ("Seeker", "seeker"),
-        ("Alchemist", "alchemist"),
-        ("Arcanist", "arcanist"),
-        ("Ritualist", "ritualist"),
-        ("Emissary", "emissary"),
-        ("Archon", "archon"),
-        ("Oracle", "oracle"),
-        ("Phantom", "phantom"),
-        ("Ascendant", "ascendant"),
-        ("Eternus", "eternus"),
-    ];
+fn tv_container(id: u64, components: Vec<Value>) -> Value {
     json!({
-        "type": 3,
-        "custom_id": "tv_minrank",
-        "placeholder": "① Haupt-Rang wählen →",
-        "min_values": 1,
-        "max_values": 1,
-        "options": labels
-            .iter()
-            .map(|(label, value)| json!({"label": label, "value": value}))
-            .collect::<Vec<_>>(),
+        "type": 17,
+        "id": id,
+        "accent_color": TV_ACCENT_GOLD,
+        "components": components,
     })
+}
+
+fn tv_text_display(id: u64, content: &str) -> Value {
+    json!({
+        "type": 10,
+        "id": id,
+        "content": content,
+    })
+}
+
+fn empty_allowed_mentions() -> Value {
+    json!({ "parse": Vec::<String>::new() })
+}
+
+fn tv_v2_reply(components: Value, fallback_text: &str) -> BridgeReply {
+    BridgeReply {
+        components: Some(components),
+        ephemeral: true,
+        message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
+        allowed_mentions: Some(empty_allowed_mentions()),
+        fallback: Some(Box::new(BridgeReply::ephemeral_text(fallback_text))),
+        ..BridgeReply::default()
+    }
+}
+
+fn rank_gate_rank_options(current: &str) -> Vec<Value> {
+    super::logic::RANK_ORDER
+        .iter()
+        .skip(1)
+        .map(|rank| {
+            json!({
+                "label": super::logic::capitalize(rank),
+                "value": rank,
+                "default": current == *rank,
+            })
+        })
+        .collect()
+}
+
+fn rank_gate_tolerance_options(current: i64) -> Vec<Value> {
+    [3_i64, 6, 9, 12]
+        .into_iter()
+        .map(|value| {
+            json!({
+                "label": match value {
+                    3 => "±3 Subränge (± halber Rang)".to_string(),
+                    6 => "±6 Subränge (±1 Rang)".to_string(),
+                    9 => "±9 Subränge (±1,5 Ränge) — Standard".to_string(),
+                    12 => "±12 Subränge (±2 Ränge)".to_string(),
+                    _ => format!("±{value} Subränge"),
+                },
+                "value": value.to_string(),
+                "default": current == value,
+            })
+        })
+        .collect()
+}
+
+fn rank_gate_dialog(pending: &PendingRankGate) -> BridgeReply {
+    tv_v2_reply(
+        json!([tv_container(
+            1,
+            vec![
+                tv_text_display(2, TV_RANK_GATE_EXPLANATION),
+                action_row(vec![json!({
+                    "type": 3,
+                    "custom_id": "tv_rank_gate_rank",
+                    "placeholder": TV_RANK_GATE_SELECT_RANK,
+                    "min_values": 1,
+                    "max_values": 1,
+                    "options": rank_gate_rank_options(&pending.rank),
+                })]),
+                action_row(vec![json!({
+                    "type": 3,
+                    "custom_id": "tv_rank_gate_tolerance",
+                    "placeholder": TV_RANK_GATE_SELECT_TOLERANCE,
+                    "min_values": 1,
+                    "max_values": 1,
+                    "options": rank_gate_tolerance_options(pending.tolerance),
+                })]),
+                action_row(vec![button(
+                    TV_RANK_GATE_CONFIRM_LABEL,
+                    3,
+                    "tv_rank_gate_confirm"
+                )]),
+            ],
+        )]),
+        TV_RANK_GATE_EXPLANATION,
+    )
+}
+
+fn tv_guide_reply() -> BridgeReply {
+    tv_v2_reply(
+        json!([tv_container(10, vec![tv_text_display(11, TV_GUIDE_TEXT)])]),
+        TV_GUIDE_TEXT,
+    )
+}
+
+pub fn tempvoice_announcement_body() -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("flags".to_string(), json!(TV_COMPONENTS_V2_FLAG));
+    body.insert("allowed_mentions".to_string(), empty_allowed_mentions());
+    body.insert(
+        "components".to_string(),
+        json!([tv_container(
+            20,
+            vec![
+                tv_text_display(21, TV_ANNOUNCEMENT_TEXT),
+                action_row(vec![button(TV_GUIDE_BUTTON_LABEL, 1, "tv_guide")]),
+            ],
+        )]),
+    );
+    body
 }
 
 fn find_existing_tempvoice_global_panel(messages: &[TempVoicePanelMessage]) -> Option<u64> {
@@ -509,19 +652,6 @@ fn looks_missing_message(err: &str) -> bool {
         || err.contains("404")
 }
 
-fn subrank_select() -> Value {
-    json!({
-        "type": 3,
-        "custom_id": "tv_subrank_perm",
-        "placeholder": "② Sub-Rang wählen (1–6)",
-        "min_values": 1,
-        "max_values": 1,
-        "options": (1..=6)
-            .map(|n| json!({"label": format!("Sub-Rang {n}"), "value": n.to_string()}))
-            .collect::<Vec<_>>(),
-    })
-}
-
 struct PanelHandler {
     engine: Arc<TempVoiceEngine>,
     lfg: Option<Arc<crate::lfg_panel::LfgPanelInterface>>,
@@ -530,6 +660,14 @@ struct PanelHandler {
     /// RAM, geht — wie im Original — bei Neustart verloren.
     pending_main_rank: tokio::sync::Mutex<std::collections::HashMap<u64, String>>,
     pending_default_rank: tokio::sync::Mutex<std::collections::HashMap<u64, String>>,
+    pending_rank_gate: tokio::sync::Mutex<std::collections::HashMap<u64, PendingRankGate>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PendingRankGate {
+    rank: String,
+    subrank: i64,
+    tolerance: i64,
 }
 
 impl PanelHandler {
@@ -562,6 +700,64 @@ impl PanelHandler {
 
     async fn lane_owner_id(&self, lane: u64, actor_id: u64) -> u64 {
         self.engine.lane_owner_or_actor(lane, actor_id).await
+    }
+
+    fn rank_parts_from_label(label: &str) -> Option<(String, i64)> {
+        let lower = label.trim().to_lowercase();
+        for rank in super::logic::RANK_ORDER.iter().skip(1) {
+            if let Some(rest) = lower.strip_prefix(rank) {
+                if rest
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphanumeric())
+                {
+                    continue;
+                }
+                let subrank = rest
+                    .split_whitespace()
+                    .next()
+                    .and_then(|part| part.parse::<i64>().ok())
+                    .filter(|value| (1..=6).contains(value))
+                    .unwrap_or(3);
+                return Some((rank.to_string(), subrank));
+            }
+        }
+        None
+    }
+
+    async fn rank_gate_default(
+        &self,
+        interaction: &BridgeInteraction,
+        lane: u64,
+    ) -> PendingRankGate {
+        let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+        let (rank, subrank) = self
+            .engine
+            .owner_rank_anchor(interaction.guild_id, owner_id)
+            .await
+            .as_deref()
+            .and_then(Self::rank_parts_from_label)
+            .unwrap_or_else(|| ("initiate".to_string(), 1));
+        PendingRankGate {
+            rank,
+            subrank,
+            tolerance: crate::rank::RANKED_SUBRANK_TOLERANCE,
+        }
+    }
+
+    async fn ranked_owned_lane_of(
+        &self,
+        interaction: &BridgeInteraction,
+    ) -> Result<u64, BridgeReply> {
+        let lane = self.owned_lane_of(interaction).await?;
+        if self.engine.lane_snapshot(lane).await.is_none() {
+            return Err(BridgeReply::ephemeral_text(NOT_IN_LANE));
+        }
+        if self.engine.lane_is_ranked(lane).await {
+            Ok(lane)
+        } else {
+            Err(BridgeReply::ephemeral_text(TV_RANK_GATE_ONLY_RANKED))
+        }
     }
 
     /// Lane-Kontext für Ban/Unban: Nur wenn der Klickende die Lane besitzt
@@ -749,6 +945,119 @@ impl InteractionHandler for PanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let engine = &self.engine;
         match interaction.custom_id.as_str() {
+            "tv_guide" => tv_guide_reply(),
+            "tv_rank_gate" => {
+                let lane = match self.ranked_owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                if engine.rank_gate_active(lane).await {
+                    return match engine.clear_rank_gate(interaction.guild_id, lane).await {
+                        Ok(()) => BridgeReply::ephemeral_text(TV_RANK_GATE_OFF),
+                        Err(err) => {
+                            BridgeReply::ephemeral_text(format!("{TV_RANK_GATE_INVALID}: {err}"))
+                        }
+                    };
+                }
+                let pending = self.rank_gate_default(&interaction, lane).await;
+                self.pending_rank_gate
+                    .lock()
+                    .await
+                    .insert(lane, pending.clone());
+                rank_gate_dialog(&pending)
+            }
+            "tv_rank_gate_rank" => {
+                let lane = match self.ranked_owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(rank) = interaction.values.first().cloned() else {
+                    return BridgeReply::ephemeral_text(TV_RANK_GATE_INVALID);
+                };
+                if super::logic::rank_index(&rank) == 0 {
+                    return BridgeReply::ephemeral_text(TV_RANK_GATE_INVALID);
+                }
+                let mut pending = self
+                    .pending_rank_gate
+                    .lock()
+                    .await
+                    .get(&lane)
+                    .cloned()
+                    .unwrap_or_else(|| PendingRankGate {
+                        rank: rank.clone(),
+                        subrank: 3,
+                        tolerance: crate::rank::RANKED_SUBRANK_TOLERANCE,
+                    });
+                pending.rank = rank;
+                self.pending_rank_gate
+                    .lock()
+                    .await
+                    .insert(lane, pending.clone());
+                rank_gate_dialog(&pending)
+            }
+            "tv_rank_gate_tolerance" => {
+                let lane = match self.ranked_owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let Some(tolerance) = interaction
+                    .values
+                    .first()
+                    .and_then(|value| value.parse::<i64>().ok())
+                else {
+                    return BridgeReply::ephemeral_text(TV_RANK_GATE_INVALID);
+                };
+                let mut pending = self
+                    .pending_rank_gate
+                    .lock()
+                    .await
+                    .get(&lane)
+                    .cloned()
+                    .unwrap_or_else(|| PendingRankGate {
+                        rank: "initiate".to_string(),
+                        subrank: 1,
+                        tolerance,
+                    });
+                pending.tolerance = tolerance;
+                self.pending_rank_gate
+                    .lock()
+                    .await
+                    .insert(lane, pending.clone());
+                rank_gate_dialog(&pending)
+            }
+            "tv_rank_gate_confirm" => {
+                let lane = match self.ranked_owned_lane_of(&interaction).await {
+                    Ok(lane) => lane,
+                    Err(reply) => return reply,
+                };
+                let pending = self
+                    .pending_rank_gate
+                    .lock()
+                    .await
+                    .remove(&lane)
+                    .unwrap_or_else(|| PendingRankGate {
+                        rank: "initiate".to_string(),
+                        subrank: 1,
+                        tolerance: crate::rank::RANKED_SUBRANK_TOLERANCE,
+                    });
+                let owner_id = self.lane_owner_id(lane, interaction.user_id).await;
+                match engine
+                    .apply_rank_gate(
+                        interaction.guild_id,
+                        lane,
+                        owner_id,
+                        &pending.rank,
+                        pending.subrank,
+                        pending.tolerance,
+                    )
+                    .await
+                {
+                    Ok(()) => BridgeReply::ephemeral_text(TV_RANK_GATE_ON),
+                    Err(err) => {
+                        BridgeReply::ephemeral_text(format!("{TV_RANK_GATE_INVALID}: {err}"))
+                    }
+                }
+            }
             "tv_prefs_open" => self.prefs_open_reply(&interaction).await,
             "tv_prefs_mode_casual" | "tv_prefs_mode_ranked" | "tv_prefs_mode_street_brawl" => {
                 let mode = interaction
@@ -1720,6 +2029,7 @@ pub fn register(
         lfg,
         pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+        pending_rank_gate: tokio::sync::Mutex::new(std::collections::HashMap::new()),
     });
     for custom_id in [
         "tv_prefs_open",
@@ -1733,6 +2043,11 @@ pub fn register(
         "tv_prefs_rank_sub",
         "tv_prefs_delete",
         "tv_prefs_apply_lane",
+        "tv_guide",
+        "tv_rank_gate",
+        "tv_rank_gate_rank",
+        "tv_rank_gate_tolerance",
+        "tv_rank_gate_confirm",
         "tv_region_de",
         "tv_region_e",
         "tv_owner_claim",
@@ -1785,6 +2100,19 @@ fn is_tvpanel_command(content: &str) -> bool {
     )
 }
 
+fn tempvoice_announcement_target(content: &str, fallback_channel_id: u64) -> Option<u64> {
+    let mut parts = content.split_whitespace();
+    let root = parts.next()?.to_ascii_lowercase();
+    if !matches!(root.as_str(), "!tvumbau" | "!tempvoiceumbau") {
+        return None;
+    }
+    let Some(raw) = parts.next() else {
+        return Some(fallback_channel_id);
+    };
+    let digits: String = raw.chars().filter(char::is_ascii_digit).collect();
+    digits.parse().ok().or(Some(fallback_channel_id))
+}
+
 pub fn spawn_command(
     interface: Arc<TempVoiceInterface>,
     dispatcher: &Dispatcher,
@@ -1798,7 +2126,11 @@ pub fn spawn_command(
                     let Some(guild_id) = event.guild_id else {
                         continue;
                     };
-                    if !is_tvpanel_command(event.content.trim()) {
+                    let content = event.content.trim();
+                    let is_panel_command = is_tvpanel_command(content);
+                    let announcement_target =
+                        tempvoice_announcement_target(content, event.channel_id);
+                    if !is_panel_command && announcement_target.is_none() {
                         continue;
                     }
                     if !interface
@@ -1808,17 +2140,32 @@ pub fn spawn_command(
                     {
                         continue;
                     }
-                    let reply = match interface
-                        .ensure_interface_message(guild_id, event.channel_id, None)
-                        .await
-                    {
-                        Ok(_) => format!(
-                            "✅ TempVoice Interface erstellt/aktualisiert in <#{}>.",
-                            event.channel_id
-                        ),
-                        Err(err) => {
-                            tracing::warn!(%err, "tvpanel command failed");
-                            "❌ Konnte das Interface nicht erstellen (Fehler im Log).".to_string()
+                    let reply = if let Some(target_channel_id) = announcement_target {
+                        match interface
+                            .port
+                            .post_rich(target_channel_id, tempvoice_announcement_body())
+                            .await
+                        {
+                            Ok(_) => TV_ANNOUNCEMENT_CONFIRM.to_string(),
+                            Err(err) => {
+                                tracing::warn!(%err, target_channel_id, "TempVoice-Ankündigung fehlgeschlagen");
+                                TV_ANNOUNCEMENT_FAILED.to_string()
+                            }
+                        }
+                    } else {
+                        match interface
+                            .ensure_interface_message(guild_id, event.channel_id, None)
+                            .await
+                        {
+                            Ok(_) => format!(
+                                "✅ TempVoice Interface erstellt/aktualisiert in <#{}>.",
+                                event.channel_id
+                            ),
+                            Err(err) => {
+                                tracing::warn!(%err, "tvpanel command failed");
+                                "❌ Konnte das Interface nicht erstellen (Fehler im Log)."
+                                    .to_string()
+                            }
                         }
                     };
                     let _ = sender
@@ -1881,7 +2228,7 @@ mod tests {
         assert!(labels.contains(&"👢 Kick"));
         assert!(labels.contains(&"🛡️ Tag-Filter"));
 
-        let ranked = global_panel_body(Some(1412804540994162789));
+        let ranked = lane_panel_body("Ranked Phantom 3 1", Some(42), Some(1289721245281292290));
         let ranked_components = ranked
             .get("components")
             .and_then(serde_json::Value::as_array)
@@ -1891,23 +2238,15 @@ mod tests {
             .flat_map(|row| row["components"].as_array().into_iter().flatten())
             .filter_map(|component| component["custom_id"].as_str())
             .collect();
-        assert!(ranked_ids.contains(&"tv_minrank"));
+        assert!(!ranked_ids.contains(&"tv_minrank"));
+        assert!(!ranked_ids.contains(&"tv_subrank_perm"));
+        assert!(ranked_ids.contains(&"tv_rank_gate"));
         assert!(ranked_ids.contains(&"tv_preset_save"));
-        let min_rank_options: Vec<&str> = ranked_components
-            .iter()
-            .flat_map(|row| row["components"].as_array().into_iter().flatten())
-            .find(|component| component["custom_id"] == "tv_minrank")
-            .and_then(|component| component["options"].as_array())
-            .expect("minrank options")
-            .iter()
-            .filter_map(|option| option["value"].as_str())
-            .collect();
-        assert_eq!(min_rank_options.first().copied(), Some("initiate"));
     }
 
     #[test]
     fn flag_aus_ranked_panel_behaelt_preset_load_und_ohne_lfg_publish() {
-        let components = main_view_components(Some(RANKED_CATEGORY_ID), false);
+        let components = main_view_components(true, false);
         let custom_ids: Vec<&str> = components
             .as_array()
             .expect("components")
@@ -1923,7 +2262,7 @@ mod tests {
 
     #[test]
     fn cutover_ranked_panel_buendelt_presets_und_zeigt_lfg_publish() {
-        let components = main_view_components(Some(RANKED_CATEGORY_ID), true);
+        let components = main_view_components(true, true);
         let buttons: Vec<(&str, u64, &str)> = components
             .as_array()
             .expect("components")
@@ -1974,6 +2313,7 @@ mod tests {
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_rank_gate: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         let reply = handler
@@ -2135,6 +2475,17 @@ mod tests {
             Ok(())
         }
 
+        async fn apply_role_connect_overwrites(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+            _allowed_role_ids: &HashSet<u64>,
+            _denied_role_ids: &HashSet<u64>,
+            _clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
         async fn set_user_limit(
             &self,
             _channel_id: u64,
@@ -2275,6 +2626,7 @@ mod tests {
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_rank_gate: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
         (db, handler)
     }
@@ -2303,6 +2655,7 @@ mod tests {
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_rank_gate: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
         (db, handler)
     }
@@ -2706,6 +3059,7 @@ mod tests {
             lfg: None,
             pending_main_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
             pending_default_rank: tokio::sync::Mutex::new(std::collections::HashMap::new()),
+            pending_rank_gate: tokio::sync::Mutex::new(std::collections::HashMap::new()),
         };
 
         let reply = handler

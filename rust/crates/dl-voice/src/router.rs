@@ -5,8 +5,7 @@
 //! (ranked/casual/street_brawl + Auto-Join) in eine passende Lane gelotst:
 //! bevorzugt eine Lane mit bekannten Mitspielern (Co-Spieler-Graph), sonst
 //! die erste mit Platz (1–5 Mitglieder), sonst wird über die
-//! TempVoice-Engine eine neue Lane im Modus erstellt. Ranked verlangt eine
-//! verifizierte Rang-Rolle (sonst DM-Hinweis).
+//! TempVoice-Engine eine neue Lane im Modus erstellt.
 //!
 //! Panel-Buttons mit Original-custom_ids: `router_mode_{mode}` +
 //! `router_autojoin_toggle`. Bewusste Lücke (dokumentiert): der
@@ -36,6 +35,9 @@ pub const ROUTER_VC_ID: u64 = 1513468587195633674;
 pub const ROUTER_GUILD_ID: u64 = 1289721245281292288;
 pub const ROUTER_TEXT_CHANNEL_ID: u64 = 1513468476365209670;
 pub const RANKED_INFO_CHANNEL_ID: u64 = 1474827277610254570;
+pub const ROUTER_CATEGORY_CHILL: u64 = 1289721245281292290;
+pub const ROUTER_CATEGORY_RANKED_LEGACY: u64 = 1412804540994162789;
+pub const ROUTER_CATEGORY_STREET_BRAWL_LEGACY: u64 = 1357422957017698478;
 pub const MAX_LANE_MEMBERS: usize = 6;
 pub const ROUTER_PANEL_KV_NS: &str = "tempvoice_router";
 pub const ROUTER_PANEL_MESSAGE_KEY: &str = "components_v2_message_id";
@@ -88,17 +90,14 @@ pub const ROUTER_EMOJI_BAN: (&str, &str) = ("dl_ban", "1522518261290369034");
 pub const ROUTER_EMOJI_UNBAN: (&str, &str) = ("dl_unban", "1522518273827143751");
 pub const ROUTER_EMOJI_MODE: (&str, &str) = ("dl_mode", "1522518269456547962");
 
-pub const ROUTER_PANEL_MODE_HINT: &str =
-    "-# <:dl_ranked:1522518271306366996> Ranked nur mit verifiziertem Rang";
+pub const ROUTER_PANEL_MODE_HINT: &str = "-# Ranked ist offen; Rang-Gates setzt der Lane-Owner.";
 pub const ROUTER_PANEL_LANE_CAPTION: &str = "-# Deine Lane";
 pub const ROUTER_PANEL_MOD_CAPTION: &str = "-# Moderation";
-pub const ROUTER_PANEL_GUIDE_CREATE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane in der passenden Kategorie und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da. Für <:dl_ranked:1522518271306366996> Ranked brauchst du einen verifizierten Rang über die Steam-Verknüpfung.";
+pub const ROUTER_PANEL_GUIDE_CREATE: &str = "**Lane erstellen**\nKlick auf einen der drei Modus-Buttons — der Bot erstellt dir eine eigene Lane und zieht dich automatisch rüber. Du musst dafür in einem Sprachkanal sitzen; der Deadlock-Router-VC ist genau dafür da.";
 pub const ROUTER_PANEL_GUIDE_OWNER: &str = "**Deine Lane gehört dir**\nWer die Lane erstellt, ist ihr Owner: Nur der Owner kann umbenennen, das Limit setzen oder Leute rauswerfen. Verlässt der Owner die Lane, holt sie sich jemand anderes mit <:dl_crown:1522518265421631538> Owner übernehmen. Leere Lanes räumt der Bot automatisch weg.";
-pub const ROUTER_PANEL_GUIDE_BUTTONS: &str = "**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — zieht deine Lane in eine andere Kategorie um (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
+pub const ROUTER_PANEL_GUIDE_BUTTONS: &str = "**Die Buttons im Detail**\n<:dl_crown:1522518265421631538> **Owner übernehmen** — macht dich zum Owner, wenn der bisherige weg ist\n<:dl_rename:1522518272497418250> **Umbenennen** — gibt deiner Lane einen eigenen Namen\n<:dl_limit:1522518268345192588> **Limit setzen** — legt fest, wie viele Leute in die Lane passen\n<:dl_mode:1522518269456547962> **Modus wechseln** — ändert den Modus deiner Lane (Casual / Ranked / Street Brawl / Off Topic)\n<:dl_kick:1522518266298368073> **Kick** / <:dl_ban:1522518261290369034> **Ban** / <:dl_unban:1522518273827143751> **Unban** — wirft Störer raus bzw. sperrt und entsperrt sie für deine Lane";
 pub const ROUTER_REPLY_NOT_IN_VOICE: &str =
     "Du bist gerade in keinem Sprachkanal — geh zuerst in Voice, dann klappt's. Einstieg:";
-pub const ROUTER_REPLY_RANKED_VERIFY: &str =
-    "Für Ranked-Lanes brauchst du einen verifizierten Rang. Wie du den bekommst, steht hier:";
 pub const ROUTER_REPLY_UNKNOWN_MODE: &str =
     "Diesen Modus kennt der Bot nicht — nimm einen der Buttons im Panel.";
 pub const ROUTER_REPLY_CREATED_PREFIX: &str = "Deine Lane steht:";
@@ -124,7 +123,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
     RouterMode {
         id: "casual",
         label: ROUTER_BUTTON_CASUAL,
-        category_id: 1289721245281292290,
+        category_id: ROUTER_CATEGORY_CHILL,
         staging_id: 1501089974093873232,
         style: 1,
         emoji: ROUTER_EMOJI_CASUAL,
@@ -132,7 +131,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
     RouterMode {
         id: "ranked",
         label: ROUTER_BUTTON_RANKED,
-        category_id: 1412804540994162789,
+        category_id: ROUTER_CATEGORY_CHILL,
         staging_id: 1412804671432818890,
         style: 3,
         emoji: ROUTER_EMOJI_RANKED,
@@ -140,7 +139,7 @@ pub const ROUTER_MODES: [RouterMode; 3] = [
     RouterMode {
         id: "street_brawl",
         label: ROUTER_BUTTON_STREET_BRAWL,
-        category_id: 1357422957017698478,
+        category_id: ROUTER_CATEGORY_CHILL,
         staging_id: 1357422958544420944,
         style: 2,
         emoji: ROUTER_EMOJI_BRAWL,
@@ -749,7 +748,6 @@ pub enum RouterSpawnOutcome {
     AlreadyOwnLane { lane_id: u64 },
     FloodLimited,
     NotInVoice,
-    RankedVerifyRequired,
     NotCreated,
     UnknownMode,
 }
@@ -841,17 +839,6 @@ impl LaneRouter {
         let Some(default) = self.default_preset(user_id).await else {
             return; // ohne Präferenz: User bleibt im Router-VC (Panel hilft)
         };
-        if default.mode == "ranked" && !self.ranked_allowed(guild_id, user_id, &[]).await {
-            self.port
-                .send_dm(
-                    user_id,
-                    format!(
-                        "Für Ranked-Lanes musst du deinen Rang verifizieren. Mehr Infos: <#{RANKED_INFO_CHANNEL_ID}>"
-                    ),
-                )
-                .await;
-            return;
-        }
         if !self.flood_guard_allows(user_id).await {
             return;
         }
@@ -900,13 +887,7 @@ impl LaneRouter {
                 lane_id: current_channel_id,
             };
         }
-        if mode == "ranked"
-            && !self
-                .ranked_allowed(guild_id, user_id, interaction_role_ids)
-                .await
-        {
-            return RouterSpawnOutcome::RankedVerifyRequired;
-        }
+        let _ = interaction_role_ids;
         match self
             .engine
             .create_router_lane(guild_id, user_id, mode, current_channel_id)
@@ -946,24 +927,6 @@ impl LaneRouter {
         let entries = history.entry(user_id).or_default();
         entries.retain(|created_at| now.saturating_duration_since(*created_at) < window);
         entries.push(now);
-    }
-
-    async fn ranked_allowed(
-        &self,
-        guild_id: u64,
-        user_id: u64,
-        interaction_role_ids: &[u64],
-    ) -> bool {
-        if !interaction_role_ids.is_empty() {
-            return interaction_role_ids
-                .iter()
-                .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role));
-        }
-        self.port
-            .member_role_ids(guild_id, user_id)
-            .await
-            .iter()
-            .any(|role| VERIFIED_RANK_ROLE_IDS.contains(role))
     }
 
     pub async fn default_preset(&self, user_id: u64) -> Option<DefaultPresetRecord> {
@@ -1012,20 +975,6 @@ impl LaneRouter {
     /// Wie `_smart_route`: Ranked-Gate → Co-Spieler-Lane → erste passende
     /// → neue Lane über die TempVoice-Engine.
     pub async fn smart_route(self: &Arc<Self>, guild_id: u64, user_id: u64, mode: &str) {
-        if mode == "ranked" {
-            let roles = self.port.member_role_ids(guild_id, user_id).await;
-            if !roles.iter().any(|r| VERIFIED_RANK_ROLE_IDS.contains(r)) {
-                self.port
-                    .send_dm(
-                        user_id,
-                        format!(
-                            "Für Ranked-Lanes musst du deinen Rang verifizieren. Mehr Infos: <#{RANKED_INFO_CHANNEL_ID}>"
-                        ),
-                    )
-                    .await;
-                return;
-            }
-        }
         let category_id = mode_to_category(mode);
         let co_player_ids: std::collections::HashSet<u64> = match &self.analyzer {
             Some(analyzer) => analyzer
@@ -1102,12 +1051,6 @@ impl InteractionHandler for RouterPanelHandler {
                 RouterSpawnOutcome::NotInVoice => {
                     BridgeReply::ephemeral_text(router_reply_with_default_hint(
                         format!("{ROUTER_REPLY_NOT_IN_VOICE} <#{ROUTER_VC_ID}>"),
-                        default_saved,
-                    ))
-                }
-                RouterSpawnOutcome::RankedVerifyRequired => {
-                    BridgeReply::ephemeral_text(router_reply_with_default_hint(
-                        format!("{ROUTER_REPLY_RANKED_VERIFY} <#{RANKED_INFO_CHANNEL_ID}>"),
                         default_saved,
                     ))
                 }
@@ -1223,10 +1166,10 @@ mod tests {
 
     #[test]
     fn modus_zuordnung() {
-        assert_eq!(mode_to_category("ranked"), 1412804540994162789);
-        assert_eq!(mode_to_category("street_brawl"), 1357422957017698478);
-        assert_eq!(mode_to_category("casual"), 1289721245281292290);
-        assert_eq!(mode_to_category("quatsch"), 1289721245281292290);
+        assert_eq!(mode_to_category("ranked"), ROUTER_CATEGORY_CHILL);
+        assert_eq!(mode_to_category("street_brawl"), ROUTER_CATEGORY_CHILL);
+        assert_eq!(mode_to_category("casual"), ROUTER_CATEGORY_CHILL);
+        assert_eq!(mode_to_category("quatsch"), ROUTER_CATEGORY_CHILL);
         assert_eq!(mode_to_staging("ranked"), 1412804671432818890);
     }
 
@@ -1519,6 +1462,16 @@ mod tests {
             _guild_id: u64,
             _channel_id: u64,
             _allowed_role_ids: &HashSet<u64>,
+            _clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+        async fn apply_role_connect_overwrites(
+            &self,
+            _guild_id: u64,
+            _channel_id: u64,
+            _allowed_role_ids: &HashSet<u64>,
+            _denied_role_ids: &HashSet<u64>,
             _clear_role_ids: &HashSet<u64>,
         ) -> Result<(), String> {
             Ok(())
@@ -2160,7 +2113,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_join_ranked_ohne_verify_behaelt_default_und_moved_nicht() {
+    async fn router_join_ranked_ohne_verify_erstellt_lane() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -2186,7 +2139,9 @@ mod tests {
             })
             .await;
 
-        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].category_id, ROUTER_CATEGORY_CHILL);
         assert_eq!(
             engine
                 .store
