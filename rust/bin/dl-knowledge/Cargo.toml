@@ -1,0 +1,26 @@
+[package]
+name = "dl-knowledge"
+description = "Loopback-Wissensdienst mit BM25-Retrieval und Fireworks-Antworten"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+version = "0.1.0"
+
+[dependencies]
+anyhow.workspace = true
+axum.workspace = true
+dl-ai.workspace = true
+dl-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tempfile.workspace = true
+tower.workspace = true
+
+[lints]
+workspace = true

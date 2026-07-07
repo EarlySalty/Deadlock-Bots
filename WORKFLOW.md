@@ -22,6 +22,25 @@
 - Bestehendes untracked `docs/scrims.html` ist fremd und bleibt unangetastet.
 - Finale Platzhalter-Texte müssen durch den Orchestrator ersetzt werden.
 
+# dl-knowledge Dienst (2026-07-07)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feat/dl-knowledge`; verbindliche Vorgabe: kein Commit/Push, Aenderungen bleiben uncommitted.
+- Scope: neues Rust-Binary `rust/bin/dl-knowledge`, nur Workspace-Cargo.toml anfassen.
+- Umgesetzt: loopback-only HTTP-Dienst `127.0.0.1:8896` (8895 kam im Repo vor), rekursiver Markdown-Korpus ohne `internal/`, Frontmatter-Strip/Parse, `##`-Chunking, in-memory BM25 und Fireworks-`TextGenerator`-Ask-Flow fail-closed.
+- Umgesetzt: `GET /healthz`, `POST /internal/reload`, `POST /public/v1/ask` mit Quellen-Dedupe.
+
+## Verifikation aktuell
+- Gruen: `cargo test -p dl-knowledge` (6 passed).
+- Gruen: `cargo build --workspace`.
+- Gruen: `cargo clippy --workspace -- -D warnings`.
+- Gruen: `cargo fmt --all -- --check`.
+- Gruen: `git diff --check`.
+
+## Rest-Risiken
+- `SYSTEM_PROMPT` ist absichtlich Platzhalter fuer Claude-Finaltext.
+- Kein Commit/Push ausgefuehrt.
+
 # Moderation-Retention 90d (2026-07-07)
 
 ## Fortschritt
