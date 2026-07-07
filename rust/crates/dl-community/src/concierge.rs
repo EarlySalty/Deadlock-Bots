@@ -25,7 +25,9 @@ pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
+pub const CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
+pub const DEFAULT_PATE_CATEGORY_ID: u64 = 1465839366634209361;
 pub const RETENTION_DAYS: i64 = 90;
 pub const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = 1426220702054355077;
 pub const ALLGEMEIN_CHANNEL_ID: u64 = 1289721245281292291;
@@ -80,8 +82,18 @@ pub const OPTOUT_TEXT: &str =
     "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal brauchst, schreib mir einfach, ich antworte immer.";
 pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt hatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir einfach.";
 pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner letzten Nachricht. Gib mir einen kleinen Moment, dann bin ich wieder ganz für dich da.";
-pub const PATE_PING_TEMPLATE: &str =
-    "Neuer Neuling sucht einen Paten: {user_mention}\n{kurz_destillat}\nWer übernimmt? Kurz hier melden, dann stelle ich euch vor.";
+pub const PATE_CLAIM_FALLBACK_LINE: &str = "Wer Zeit und Lust hat, drückt auf Übernehmen.";
+pub const PATE_CLAIM_BUTTON_LABEL: &str = "Ich übernehme";
+pub const PATE_ROLE_RESERVED_TEXT: &str = "Der Knopf ist für unsere Paten reserviert. Wenn du selbst Pate werden willst, meld dich bei den Mods, wir freuen uns über jeden.";
+pub const PATE_ALREADY_CLAIMED_TEXT: &str =
+    "Da war jemand schneller, die Patenschaft ist schon vergeben. Danke dir fürs Draufdrücken.";
+pub const PATE_LOAD_LIMIT_TEXT: &str = "Du begleitest gerade schon drei Neulinge, das reicht erstmal. Lass diesmal jemand anderem den Vortritt und danke, dass du so aktiv bist.";
+pub const PATE_REQUEST_FALLBACK_TEXT: &str = "Klingt, als würde dir ein fester Ansprechpartner guttun. Soll ich einen unserer Paten für dich suchen?";
+pub const PATE_REQUEST_RULE: &str = "Wenn der User sich einen Paten, Mentor oder eine feste Bezugsperson wünscht, setze \"pate_request\": true. Setze es nicht, wenn er nur wissen will, was ein Pate ist.";
+pub const STEAM_NUDGE_MEMORY_MARKER: &str =
+    "[Ich habe dir eine DM mit dem Tipp zur Steam-Verknüpfung geschickt.]";
+pub const VOICE_FEEDBACK_MEMORY_MARKER: &str =
+    "[Ich habe dich per DM nach Feedback zu deinen Voice-Runden gefragt.]";
 pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch.";
 pub const PLAY_TEXT: &str = "Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also was und wie du spielen willst. Danach joinst du den Deadlock Router, der packt dich automatisch in eine passende Lane oder macht dir eine eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)";
 pub const STECKBRIEF_MODAL_TITLE: &str = "Deine Vorstellung";
@@ -137,6 +149,7 @@ pub struct ConciergeConfig {
     pub main_guild_id: u64,
     pub test_user_allowlist: HashSet<u64>,
     pub fallback_category_id: u64,
+    pub pate_category_id: u64,
     pub active_threshold_minutes: i64,
     pub pater_channel_id: Option<u64>,
     pub mod_ping_role_id: Option<u64>,
@@ -151,14 +164,17 @@ impl ConciergeConfig {
         let main_guild_id = env_u64(&lookup, "MAIN_GUILD_ID")
             .or_else(|| env_u64(&lookup, "OUR_GUILD_ID"))
             .unwrap_or(1289721245281292288);
+        let fallback_category_id = env_u64(&lookup, "DL_CONCIERGE_FALLBACK_CATEGORY_ID")
+            .unwrap_or(crate::faq::FAQ_CATEGORY_ID);
         Self {
             enabled,
             main_guild_id,
             test_user_allowlist: parse_u64_set(
                 lookup("DL_CONCIERGE_TEST_USER_ALLOWLIST").as_deref(),
             ),
-            fallback_category_id: env_u64(&lookup, "DL_CONCIERGE_FALLBACK_CATEGORY_ID")
-                .unwrap_or(crate::faq::FAQ_CATEGORY_ID),
+            fallback_category_id,
+            pate_category_id: env_u64(&lookup, "DL_CONCIERGE_PATE_CATEGORY_ID")
+                .unwrap_or(DEFAULT_PATE_CATEGORY_ID),
             active_threshold_minutes: env_i64(&lookup, "DL_CONCIERGE_ACTIVE_THRESHOLD_MINUTES")
                 .unwrap_or(30),
             pater_channel_id: env_u64(&lookup, "DL_CONCIERGE_PATE_CHANNEL_ID"),
@@ -461,6 +477,104 @@ fn nudge_body(anlass: &str) -> Map<String, Value> {
     )
 }
 
+fn pate_offer_body(text: &str) -> Map<String, Value> {
+    v2_body(
+        text,
+        vec![
+            button(T2_BUTTON_YES, 1, "concierge:pate:yes"),
+            button(T2_BUTTON_NO, 2, "concierge:pate:no"),
+        ],
+    )
+}
+
+fn pate_claim_body(user_id: u64, digest: &str, candidate_id: Option<u64>) -> Map<String, Value> {
+    let rank_line = candidate_id
+        .map(|id| {
+            format!(
+                "Vom Rang her würde <@{id}> am besten passen. Übernehmen darf, wer zuerst drückt."
+            )
+        })
+        .unwrap_or_else(|| PATE_CLAIM_FALLBACK_LINE.to_string());
+    let content = format!(
+        "<@&{PATE_ROLE_ID}> Ein Neuling hätte gern einen Paten an seiner Seite: <@{user_id}>\n{digest}\n{rank_line}"
+    );
+    let mut body = v2_body(
+        &content,
+        vec![button(
+            PATE_CLAIM_BUTTON_LABEL,
+            1,
+            &format!("concierge:pate:claim:{user_id}"),
+        )],
+    );
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "roles": [PATE_ROLE_ID.to_string()] }),
+    );
+    body
+}
+
+fn pate_intro_body(user_id: u64, pate_id: u64, digest: &str) -> Map<String, Value> {
+    let text = format!(
+        "Willkommen ihr beiden. <@{user_id}>, darf ich vorstellen: <@{pate_id}> kennt unseren Server und das Spiel und ist ab jetzt dein direkter Draht.\n\nKurz zu <@{user_id}>:\n{digest}\n\nDer Kanal hier gehört euch. Macht doch direkt mal eine Runde zusammen aus. Ich zieh mich zurück, wenn ihr mich braucht, bin ich per DM da."
+    );
+    v2_body(&text, Vec::new())
+}
+
+fn pate_match_dm_text(pate_name: &str, channel_id: u64) -> String {
+    format!(
+        "Gute Nachrichten: {pate_name} übernimmt deine Patenschaft. Ich hab euch einen eigenen Kanal eingerichtet: <#{channel_id}>. Schau rein, ihr könnt direkt loslegen."
+    )
+}
+
+fn pate_claim_reply_text(pate_id: u64) -> String {
+    format!("Erledigt, <@{pate_id}> übernimmt. Danke dir!")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PateCandidate {
+    user_id: u64,
+    rank_name: Option<String>,
+    active_count: i64,
+}
+
+fn rank_index(rank: &str) -> Option<usize> {
+    let normalized = rank.trim().to_ascii_lowercase();
+    dl_stats::RANK_ORDER
+        .iter()
+        .position(|candidate| *candidate == normalized)
+}
+
+fn best_pate_candidate(user_rank: Option<&str>, candidates: &[PateCandidate]) -> Option<u64> {
+    let user_idx = rank_index(user_rank?)?;
+    candidates
+        .iter()
+        .filter(|candidate| candidate.active_count < 3)
+        .filter_map(|candidate| {
+            let rank_idx = rank_index(candidate.rank_name.as_deref()?)?;
+            let distance = rank_idx.abs_diff(user_idx);
+            Some((distance, candidate.active_count, candidate.user_id))
+        })
+        .min()
+        .map(|(_, _, user_id)| user_id)
+}
+
+fn channel_slug(name: &str, fallback_id: u64) -> String {
+    let slug: String = name
+        .chars()
+        .flat_map(char::to_lowercase)
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .split('-')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
+    if slug.is_empty() {
+        fallback_id.to_string()
+    } else {
+        slug.chars().take(80).collect()
+    }
+}
+
 fn v2_body(content: &str, buttons: Vec<Value>) -> Map<String, Value> {
     let mut body = Map::new();
     body.insert("flags".into(), json!(CONCIERGE_COMPONENTS_V2_FLAG));
@@ -555,9 +669,11 @@ pub trait ConciergePort: Send + Sync {
         &self,
         guild_id: u64,
         user_id: u64,
+        extra_user_id: Option<u64>,
         category_id: u64,
         name: &str,
     ) -> Result<u64, String>;
+    async fn role_member_ids(&self, guild_id: u64, role_id: u64) -> Result<Vec<u64>, String>;
     async fn send_channel_v2(
         &self,
         channel_id: u64,
@@ -664,6 +780,16 @@ impl ConciergeStore {
         Ok(())
     }
 
+    pub async fn record_system_dm(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        marker: &str,
+    ) -> CommunityDbResult<()> {
+        self.record_conversation(user_id, guild_id, "assistant", marker, Utc::now())
+            .await
+    }
+
     pub async fn recent_conversation(
         &self,
         user_id: u64,
@@ -761,6 +887,25 @@ impl ConciergeStore {
         Ok(exists)
     }
 
+    pub async fn latest_rank_name(&self, user_id: u64) -> CommunityDbResult<Option<String>> {
+        let user_id = u64_to_i64(user_id, "core.steam_links.discord_id")?;
+        let rank = sqlx::query_scalar::<_, String>(
+            r#"
+            SELECT deadlock_rank_name
+              FROM core.steam_links
+             WHERE discord_id = $1
+               AND verified = TRUE
+               AND deadlock_rank_name IS NOT NULL
+             ORDER BY primary_account DESC, deadlock_rank_updated_at DESC NULLS LAST
+             LIMIT 1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(rank)
+    }
+
     pub async fn mark_unsolicited_sent(
         &self,
         user_id: u64,
@@ -815,6 +960,10 @@ impl ConciergeStore {
     pub async fn forget_user(&self, user_id: u64) -> CommunityDbResult<()> {
         let user_id = u64_to_i64(user_id, "concierge_profiles.user_id")?;
         let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM bot.concierge_patenschaften WHERE user_id = $1 OR pate_id = $1")
+            .bind(user_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM bot.concierge_conversations WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut *tx)
@@ -973,6 +1122,46 @@ impl ConciergeStore {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    pub async fn active_patenschaft_count(&self, pate_id: u64) -> CommunityDbResult<i64> {
+        let pate_id = u64_to_i64(pate_id, "concierge_patenschaften.pate_id")?;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_patenschaften WHERE pate_id = $1 AND released_at IS NULL",
+        )
+        .bind(pate_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count)
+    }
+
+    pub async fn create_patenschaft(
+        &self,
+        user_id: u64,
+        pate_id: u64,
+        guild_id: u64,
+        channel_id: u64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<bool> {
+        let user_id = u64_to_i64(user_id, "concierge_patenschaften.user_id")?;
+        let pate_id = u64_to_i64(pate_id, "concierge_patenschaften.pate_id")?;
+        let guild_id = u64_to_i64(guild_id, "concierge_patenschaften.guild_id")?;
+        let channel_id = u64_to_i64(channel_id, "concierge_patenschaften.channel_id")?;
+        let result = sqlx::query(
+            r#"
+            INSERT INTO bot.concierge_patenschaften(user_id, pate_id, guild_id, channel_id, created_at)
+            VALUES($1, $2, $3, $4, $5)
+            ON CONFLICT (user_id) WHERE released_at IS NULL DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(pate_id)
+        .bind(guild_id)
+        .bind(channel_id)
+        .bind(now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     pub async fn fallback_owner(&self, channel_id: u64) -> CommunityDbResult<Option<u64>> {
@@ -1152,6 +1341,7 @@ pub struct Concierge {
     ai: Option<Arc<dyn ChatProvider>>,
     config: ConciergeConfig,
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
+    pate_channel_slugs: Mutex<HashMap<u64, String>>,
     start: Instant,
 }
 
@@ -1168,6 +1358,7 @@ impl Concierge {
             ai,
             config,
             cooldowns: Mutex::new(HashMap::new()),
+            pate_channel_slugs: Mutex::new(HashMap::new()),
             start: Instant::now(),
         })
     }
@@ -1250,6 +1441,7 @@ impl Concierge {
             .create_private_channel(
                 guild_id,
                 user_id,
+                None,
                 self.config.fallback_category_id,
                 &channel_name,
             )
@@ -1390,9 +1582,15 @@ impl Concierge {
                 .await;
             return true;
         }
-        let reply = answer
-            .reply
-            .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string());
+        let reply = if answer.pate_request {
+            answer
+                .reply
+                .unwrap_or_else(|| PATE_REQUEST_FALLBACK_TEXT.to_string())
+        } else {
+            answer
+                .reply
+                .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string())
+        };
         if let Err(err) = self
             .store
             .record_conversation(user_id, effective_guild_id, "assistant", &reply, Utc::now())
@@ -1400,10 +1598,12 @@ impl Concierge {
         {
             tracing::warn!(%err, user_id, "Concierge: Assistant-Nachricht konnte nicht gespeichert werden");
         }
-        let _ = self
-            .port
-            .send_channel_v2(channel_id, v2_body(&reply, Vec::new()))
-            .await;
+        let body = if answer.pate_request {
+            pate_offer_body(&reply)
+        } else {
+            v2_body(&reply, Vec::new())
+        };
+        let _ = self.port.send_channel_v2(channel_id, body).await;
         true
     }
 
@@ -1765,11 +1965,15 @@ impl Concierge {
         .filter(|text| !text.is_empty())
     }
 
-    async fn request_pate(&self, user_id: u64, guild_id: u64, channel_id: u64) -> BridgeReply {
+    async fn request_pate(&self, user_id: u64, guild_id: u64, user_name: &str) -> BridgeReply {
         let now = Utc::now();
         if let Err(err) = self.store.set_pate_requested(user_id, guild_id, now).await {
             tracing::warn!(%err, user_id, "Concierge: Patenwunsch konnte nicht gespeichert werden");
         }
+        self.pate_channel_slugs
+            .lock()
+            .expect("pate slugs")
+            .insert(user_id, channel_slug(user_name, user_id));
         if let Some(target) = self.config.pater_channel_id {
             let digest = self
                 .store
@@ -1779,14 +1983,191 @@ impl Concierge {
                 .flatten()
                 .map(|profile| short_digest(&profile))
                 .unwrap_or_else(|| PATE_DIGEST_FALLBACK.to_string());
-            let content = PATE_PING_TEMPLATE
-                .replace("{user_mention}", &format!("<@{user_id}>"))
-                .replace("{kurz_destillat}", &digest);
-            let content = format!("<@&{PATE_ROLE_ID}>\n{content}");
-            let _ = self.port.send_channel_text(target, &content).await;
+            let candidate = self.recommended_pate(user_id, guild_id).await;
+            let _ = self
+                .port
+                .send_channel_v2(target, pate_claim_body(user_id, &digest, candidate))
+                .await;
         }
-        let _ = channel_id;
         text_reply(PATE_YES_TEXT)
+    }
+
+    async fn recommended_pate(&self, user_id: u64, guild_id: u64) -> Option<u64> {
+        let candidate_ids = match self.port.role_member_ids(guild_id, PATE_ROLE_ID).await {
+            Ok(ids) => ids,
+            Err(err) => {
+                tracing::warn!(%err, guild_id, "Concierge: Paten-Rollenmitglieder nicht abrufbar");
+                return None;
+            }
+        };
+        let user_rank = self.store.latest_rank_name(user_id).await.ok().flatten();
+        let mut candidates = Vec::new();
+        for candidate_id in candidate_ids.into_iter().filter(|id| *id != user_id) {
+            let rank_name = self
+                .store
+                .latest_rank_name(candidate_id)
+                .await
+                .ok()
+                .flatten();
+            let active_count = self
+                .store
+                .active_patenschaft_count(candidate_id)
+                .await
+                .unwrap_or(i64::MAX);
+            candidates.push(PateCandidate {
+                user_id: candidate_id,
+                rank_name,
+                active_count,
+            });
+        }
+        best_pate_candidate(user_rank.as_deref(), &candidates)
+    }
+
+    async fn claim_pate(&self, interaction: BridgeInteraction) -> BridgeReply {
+        if !interaction.role_ids.contains(&PATE_ROLE_ID) {
+            return BridgeReply::ephemeral_text(PATE_ROLE_RESERVED_TEXT);
+        }
+        let Some(raw_user_id) = interaction.custom_id.strip_prefix("concierge:pate:claim:") else {
+            return BridgeReply::default();
+        };
+        let Ok(user_id) = raw_user_id.parse::<u64>() else {
+            return BridgeReply::default();
+        };
+        let pate_id = interaction.user_id;
+        let guild_id = if interaction.guild_id == 0 {
+            self.config.main_guild_id
+        } else {
+            interaction.guild_id
+        };
+        match self.store.active_patenschaft_count(pate_id).await {
+            Ok(count) if count >= 3 => return BridgeReply::ephemeral_text(PATE_LOAD_LIMIT_TEXT),
+            Err(err) => {
+                tracing::warn!(%err, pate_id, "Concierge: Paten-Last konnte nicht geprüft werden");
+                return BridgeReply::default();
+            }
+            _ => {}
+        }
+        let claimed = match self
+            .store
+            .claim_once(
+                CONCIERGE_PATE_CLAIM_NS,
+                &user_id.to_string(),
+                &pate_id.to_string(),
+            )
+            .await
+        {
+            Ok(claimed) => claimed,
+            Err(err) => {
+                tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Claim fehlgeschlagen");
+                return BridgeReply::default();
+            }
+        };
+        if !claimed {
+            return BridgeReply::ephemeral_text(PATE_ALREADY_CLAIMED_TEXT);
+        }
+        let digest = self
+            .store
+            .profile(user_id)
+            .await
+            .ok()
+            .flatten()
+            .map(|profile| short_digest(&profile))
+            .unwrap_or_else(|| PATE_DIGEST_FALLBACK.to_string());
+        let slug = self
+            .pate_channel_slugs
+            .lock()
+            .expect("pate slugs")
+            .get(&user_id)
+            .cloned()
+            .unwrap_or_else(|| user_id.to_string());
+        let channel_name = format!("pate-{slug}");
+        let channel_id = match self
+            .port
+            .create_private_channel(
+                guild_id,
+                user_id,
+                Some(pate_id),
+                self.config.pate_category_id,
+                &channel_name,
+            )
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(err) if self.config.pate_category_id != self.config.fallback_category_id => {
+                tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Kanal in Paten-Kategorie fehlgeschlagen, versuche Fallback");
+                match self
+                    .port
+                    .create_private_channel(
+                        guild_id,
+                        user_id,
+                        Some(pate_id),
+                        self.config.fallback_category_id,
+                        &channel_name,
+                    )
+                    .await
+                {
+                    Ok(channel_id) => channel_id,
+                    Err(err) => {
+                        tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Kanal fehlgeschlagen");
+                        return BridgeReply::default();
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Kanal fehlgeschlagen");
+                return BridgeReply::default();
+            }
+        };
+        let now = Utc::now();
+        let inserted = match self
+            .store
+            .create_patenschaft(user_id, pate_id, guild_id, channel_id, now)
+            .await
+        {
+            Ok(inserted) => inserted,
+            Err(err) => {
+                tracing::warn!(%err, user_id, pate_id, "Concierge: Patenschaft konnte nicht gespeichert werden");
+                false
+            }
+        };
+        if !inserted {
+            return BridgeReply::ephemeral_text(PATE_ALREADY_CLAIMED_TEXT);
+        }
+        let _ = self
+            .port
+            .send_channel_v2(channel_id, pate_intro_body(user_id, pate_id, &digest))
+            .await;
+        let pate_name = if interaction.author_display_name.trim().is_empty() {
+            interaction.author_name.as_str()
+        } else {
+            interaction.author_display_name.as_str()
+        };
+        let _ = self
+            .port
+            .send_dm_v2(
+                user_id,
+                v2_body(&pate_match_dm_text(pate_name, channel_id), Vec::new()),
+            )
+            .await;
+        if let Some(message_id) = interaction.message_id {
+            self.port
+                .reply_to_message(
+                    interaction.channel_id,
+                    message_id,
+                    &pate_claim_reply_text(pate_id),
+                    None,
+                )
+                .await;
+        }
+        self.record_journey(
+            user_id,
+            guild_id,
+            dl_activity::journey::JourneyEventType::PateMatched,
+            now,
+            json!({ "pate_id": pate_id.to_string(), "channel_id": channel_id.to_string() }),
+        )
+        .await;
+        BridgeReply::default()
     }
 }
 
@@ -1814,6 +2195,7 @@ struct LlmAnswer {
     intent: Option<ConciergeIntent>,
     opted_out: bool,
     forget: bool,
+    pate_request: bool,
 }
 
 #[derive(Deserialize)]
@@ -1823,6 +2205,7 @@ struct LlmAnswerWire {
     intent: Option<String>,
     opted_out: Option<bool>,
     forget: Option<bool>,
+    pate_request: Option<bool>,
 }
 
 fn parse_llm_answer(raw: &str) -> LlmAnswer {
@@ -1840,6 +2223,7 @@ fn parse_llm_answer(raw: &str) -> LlmAnswer {
                     intent,
                     opted_out: wire.opted_out.unwrap_or(false),
                     forget: wire.forget.unwrap_or(false),
+                    pate_request: wire.pate_request.unwrap_or(false),
                 };
             }
         }
@@ -1852,7 +2236,7 @@ fn parse_llm_answer(raw: &str) -> LlmAnswer {
 
 fn llm_system(extra: Option<&str>) -> String {
     let schema = format!(
-        "{SYSTEM_PROMPT}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
+        "{SYSTEM_PROMPT}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
     );
     match extra {
         Some(extra) => format!("{schema}\n\n{extra}"),
@@ -2057,15 +2441,23 @@ impl InteractionHandler for ConciergeHandler {
                 }
             }
             "concierge:pate:yes" => {
+                let user_name = if interaction.author_display_name.trim().is_empty() {
+                    interaction.author_name.as_str()
+                } else {
+                    interaction.author_display_name.as_str()
+                };
                 self.concierge
                     .request_pate(
                         interaction.user_id,
                         self.concierge.config.main_guild_id,
-                        interaction.channel_id,
+                        user_name,
                     )
                     .await
             }
             "concierge:pate:no" => text_reply(PATE_NO_TEXT),
+            id if id.starts_with("concierge:pate:claim:") => {
+                self.concierge.claim_pate(interaction).await
+            }
             _ => BridgeReply::default(),
         }
     }
@@ -2088,6 +2480,7 @@ pub fn register(router: &mut InteractionRouter, concierge: Arc<Concierge>) {
     ] {
         router.on_custom_id(id, handler.clone());
     }
+    router.on_prefix("concierge:pate:claim:", handler);
 }
 
 pub fn spawn(
@@ -2245,10 +2638,15 @@ mod tests {
             &self,
             _guild_id: u64,
             _user_id: u64,
+            _extra_user_id: Option<u64>,
             _category_id: u64,
             _name: &str,
         ) -> Result<u64, String> {
             Ok(1)
+        }
+
+        async fn role_member_ids(&self, _guild_id: u64, _role_id: u64) -> Result<Vec<u64>, String> {
+            Ok(Vec::new())
         }
 
         async fn send_channel_v2(
@@ -2482,6 +2880,59 @@ mod tests {
         assert_eq!(parsed.reply.as_deref(), Some("nur text"));
     }
 
+    #[test]
+    fn llm_parse_erkennt_pate_request() {
+        let parsed = parse_llm_answer(
+            r#"{"reply":"","intent":"learn","opted_out":false,"forget":false,"pate_request":true}"#,
+        );
+        assert!(parsed.pate_request);
+        assert_eq!(parsed.reply, None);
+    }
+
+    #[test]
+    fn pate_offer_body_haengt_ja_nein_buttons_an() {
+        let body = pate_offer_body(PATE_REQUEST_FALLBACK_TEXT);
+        let buttons = body["components"][0]["components"][1]["components"]
+            .as_array()
+            .unwrap();
+        assert_eq!(buttons[0]["custom_id"], "concierge:pate:yes");
+        assert_eq!(buttons[1]["custom_id"], "concierge:pate:no");
+    }
+
+    #[test]
+    fn rang_empfehlung_nimmt_naechsten_rank_und_skippt_limit() {
+        let candidates = vec![
+            PateCandidate {
+                user_id: 10,
+                rank_name: Some("oracle".to_string()),
+                active_count: 3,
+            },
+            PateCandidate {
+                user_id: 11,
+                rank_name: Some("emissary".to_string()),
+                active_count: 0,
+            },
+            PateCandidate {
+                user_id: 12,
+                rank_name: Some("archon".to_string()),
+                active_count: 0,
+            },
+        ];
+        assert_eq!(best_pate_candidate(Some("oracle"), &candidates), Some(12));
+        assert_eq!(best_pate_candidate(None, &candidates), None);
+    }
+
+    #[test]
+    fn claim_body_nutzt_fallback_ohne_empfehlung() {
+        let body = pate_claim_body(42, "Digest", None);
+        let content = sent_v2_content(&body);
+        assert!(content.contains(PATE_CLAIM_FALLBACK_LINE));
+        assert_eq!(
+            body["components"][0]["components"][1]["components"][0]["label"],
+            PATE_CLAIM_BUTTON_LABEL
+        );
+    }
+
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn retention_refresh_und_reaper_loeschen_exakt_nach_neunzig_tagen() {
@@ -2515,6 +2966,129 @@ mod tests {
             .claim_once(CONCIERGE_FALLBACK_CLAIM_NS, "1:42", "claimed")
             .await
             .unwrap());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn record_system_dm_legt_profil_und_assistant_turn_an() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let store = ConciergeStore::new(db.pool().clone());
+        store
+            .record_system_dm(42, 1, STEAM_NUDGE_MEMORY_MARKER)
+            .await
+            .unwrap();
+
+        assert!(store.profile(42).await.unwrap().is_some());
+        let role: String = sqlx::query_scalar(
+            "SELECT role FROM bot.concierge_conversations WHERE user_id = 42 LIMIT 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .unwrap();
+        assert_eq!(role, "assistant");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn patenschaft_unique_und_journey_pate_matched() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let store = ConciergeStore::new(db.pool().clone());
+        let now = Utc::now();
+        assert!(store.create_patenschaft(42, 77, 1, 900, now).await.unwrap());
+        assert!(!store.create_patenschaft(42, 78, 1, 901, now).await.unwrap());
+        assert_eq!(store.active_patenschaft_count(77).await.unwrap(), 1);
+
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            test_config(true, &[]),
+        );
+        concierge
+            .record_journey(
+                42,
+                1,
+                dl_activity::journey::JourneyEventType::PateMatched,
+                now,
+                json!({}),
+            )
+            .await;
+        let event_type: String =
+            sqlx::query_scalar("SELECT event_type FROM activity.journey_events WHERE user_id = 42")
+                .fetch_one(db.pool())
+                .await
+                .unwrap();
+        assert_eq!(event_type, "pate_matched");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn claim_reihenfolge_reserviert_vergeben_und_load_limit() {
+        let db = dl_central_db::testing::test_pool().await.unwrap();
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            test_config(true, &[]),
+        );
+        let handler = ConciergeHandler {
+            concierge: concierge.clone(),
+        };
+
+        let no_role = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:pate:claim:42".to_string(),
+                user_id: 77,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(no_role.content.as_deref(), Some(PATE_ROLE_RESERVED_TEXT));
+
+        for user_id in 100..103 {
+            concierge
+                .store
+                .create_patenschaft(user_id, 77, 1, 900 + user_id, Utc::now())
+                .await
+                .unwrap();
+        }
+        let limited = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:pate:claim:42".to_string(),
+                user_id: 77,
+                role_ids: vec![PATE_ROLE_ID],
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(limited.content.as_deref(), Some(PATE_LOAD_LIMIT_TEXT));
+        let claimed: Option<String> =
+            sqlx::query_scalar("SELECT v FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(CONCIERGE_PATE_CLAIM_NS)
+                .bind("42")
+                .fetch_optional(db.pool())
+                .await
+                .unwrap();
+        assert!(claimed.is_none());
+
+        let first = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:pate:claim:42".to_string(),
+                user_id: 78,
+                role_ids: vec![PATE_ROLE_ID],
+                author_name: "pate".to_string(),
+                author_display_name: "Pate".to_string(),
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(first.content, None);
+        let second = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:pate:claim:42".to_string(),
+                user_id: 79,
+                role_ids: vec![PATE_ROLE_ID],
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(second.content.as_deref(), Some(PATE_ALREADY_CLAIMED_TEXT));
     }
 
     #[cfg(feature = "testing")]

@@ -472,13 +472,23 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_bridges::streamer_intent::register(&mut router, streamer_intents.clone());
 
+    let concierge_config =
+        dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
+    let concierge_memory_store = concierge_config
+        .enabled
+        .then(|| dl_community::concierge::ConciergeStore::new(central_pool.clone()));
+
     // Steam-Link-Nudge (4c) — Close-Button braucht den Router, Spawn ist gateway-gated
     let nudge = dl_voice::nudge::VoiceNudge::new(
         central_pool.clone(),
-        Arc::new(dl_voice::glue::NudgeGlue {
-            adapter: adapter.clone(),
-            steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
-            log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
+        Arc::new(modglue::VoiceNudgeGlue {
+            inner: dl_voice::glue::NudgeGlue {
+                adapter: adapter.clone(),
+                steam: dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok()),
+                log_channel_id: dl_voice::nudge::LOG_CHANNEL_ID,
+            },
+            concierge_store: concierge_memory_store.clone(),
+            concierge_guild_id: concierge_config.main_guild_id,
         }),
     );
     dl_voice::nudge::register(&mut router, nudge.clone());
@@ -570,8 +580,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     // Voice-Feedback-DMs (4a-Rest) — Button/Modal brauchen den Router
     let voice_feedback = dl_voice::feedback::VoiceFeedback::new(
         central_pool.clone(),
-        Arc::new(dl_voice::glue::FeedbackGlue {
-            adapter: adapter.clone(),
+        Arc::new(modglue::VoiceFeedbackGlue {
+            inner: dl_voice::glue::FeedbackGlue {
+                adapter: adapter.clone(),
+            },
+            concierge_store: concierge_memory_store.clone(),
+            concierge_guild_id: concierge_config.main_guild_id,
         }),
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
@@ -747,8 +761,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_community::faq::register(&mut router, faq.clone());
 
     // Concierge-Onboarding Slice A: default AUS, T0 nur fuer Test-Allowlist.
-    let concierge_config =
-        dl_community::concierge::ConciergeConfig::from_env(|k| std::env::var(k).ok());
     let concierge_ai = if concierge_config.enabled {
         match dl_ai::LlmProviderConfig::from_env(|k| std::env::var(k).ok())
             .map_err(anyhow::Error::from)

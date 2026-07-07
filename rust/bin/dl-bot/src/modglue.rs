@@ -1965,6 +1965,122 @@ impl dl_community::dm_assistant::DmPort for DmGlue {
     }
 }
 
+// ── Voice-DM-Anbindung mit Concierge-Gedächtnis ───────────────────────────
+
+async fn record_concierge_system_dm(
+    store: &Option<dl_community::concierge::ConciergeStore>,
+    guild_id: u64,
+    user_id: u64,
+    marker: &str,
+) {
+    if let Some(store) = store {
+        if let Err(err) = store.record_system_dm(user_id, guild_id, marker).await {
+            tracing::warn!(%err, user_id, "Concierge: System-DM-Marker konnte nicht gespeichert werden");
+        }
+    }
+}
+
+pub struct VoiceNudgeGlue {
+    pub inner: dl_voice::glue::NudgeGlue,
+    pub concierge_store: Option<dl_community::concierge::ConciergeStore>,
+    pub concierge_guild_id: u64,
+}
+
+#[async_trait::async_trait]
+impl dl_voice::nudge::NudgePort for VoiceNudgeGlue {
+    async fn is_in_voice(&self, guild_id: u64, user_id: u64) -> bool {
+        dl_voice::nudge::NudgePort::is_in_voice(&self.inner, guild_id, user_id).await
+    }
+
+    async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64> {
+        dl_voice::nudge::NudgePort::member_role_ids(&self.inner, guild_id, user_id).await
+    }
+
+    async fn send_dm(
+        &self,
+        user_id: u64,
+        embeds: &[serde_json::Value],
+        components: &serde_json::Value,
+    ) -> Result<(u64, u64), String> {
+        let sent =
+            dl_voice::nudge::NudgePort::send_dm(&self.inner, user_id, embeds, components).await?;
+        record_concierge_system_dm(
+            &self.concierge_store,
+            self.concierge_guild_id,
+            user_id,
+            dl_community::concierge::STEAM_NUDGE_MEMORY_MARKER,
+        )
+        .await;
+        Ok(sent)
+    }
+
+    async fn send_log(&self, text: String) {
+        dl_voice::nudge::NudgePort::send_log(&self.inner, text).await;
+    }
+
+    async fn fetch_steam_link_url(&self, user_id: u64) -> Option<String> {
+        dl_voice::nudge::NudgePort::fetch_steam_link_url(&self.inner, user_id).await
+    }
+
+    async fn delete_message(&self, channel_id: u64, message_id: u64) {
+        dl_voice::nudge::NudgePort::delete_message(&self.inner, channel_id, message_id).await;
+    }
+
+    async fn refresh_dm(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        embeds: &[serde_json::Value],
+        components: &serde_json::Value,
+    ) -> Result<bool, String> {
+        dl_voice::nudge::NudgePort::refresh_dm(
+            &self.inner,
+            channel_id,
+            message_id,
+            embeds,
+            components,
+        )
+        .await
+    }
+}
+
+pub struct VoiceFeedbackGlue {
+    pub inner: dl_voice::glue::FeedbackGlue,
+    pub concierge_store: Option<dl_community::concierge::ConciergeStore>,
+    pub concierge_guild_id: u64,
+}
+
+#[async_trait::async_trait]
+impl dl_voice::feedback::FeedbackPort for VoiceFeedbackGlue {
+    async fn send_feedback_dm(&self, user_id: u64, text: String) -> (String, Option<u64>) {
+        let sent =
+            dl_voice::feedback::FeedbackPort::send_feedback_dm(&self.inner, user_id, text).await;
+        if sent.0 == "sent" {
+            record_concierge_system_dm(
+                &self.concierge_store,
+                self.concierge_guild_id,
+                user_id,
+                dl_community::concierge::VOICE_FEEDBACK_MEMORY_MARKER,
+            )
+            .await;
+        }
+        sent
+    }
+
+    async fn forward_to_owner(&self, owner_id: u64, text: String) {
+        dl_voice::feedback::FeedbackPort::forward_to_owner(&self.inner, owner_id, text).await;
+    }
+
+    async fn delete_feedback_prompt(&self, user_id: u64, message_id: u64) {
+        dl_voice::feedback::FeedbackPort::delete_feedback_prompt(&self.inner, user_id, message_id)
+            .await;
+    }
+
+    async fn display_name(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        dl_voice::feedback::FeedbackPort::display_name(&self.inner, guild_id, user_id).await
+    }
+}
+
 // ── Concierge-Onboarding-Anbindung ─────────────────────────────────────────
 
 pub struct ConciergeGlue {
@@ -2012,19 +2128,27 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         &self,
         guild_id: u64,
         user_id: u64,
+        extra_user_id: Option<u64>,
         category_id: u64,
         name: &str,
     ) -> Result<u64, String> {
         let bot_id = self.adapter.cache().current_user().id.get();
+        let mut overwrites = vec![
+            json!({ "id": guild_id.to_string(), "type": 0, "deny": "1024" }),
+            json!({ "id": user_id.to_string(), "type": 1, "allow": "68608" }),
+            json!({ "id": bot_id.to_string(), "type": 1, "allow": "68624" }),
+        ];
+        if let Some(extra_user_id) = extra_user_id.filter(|id| *id != user_id) {
+            overwrites.insert(
+                2,
+                json!({ "id": extra_user_id.to_string(), "type": 1, "allow": "68608" }),
+            );
+        }
         let body = json!({
             "name": name,
             "type": 0,
             "parent_id": category_id.to_string(),
-            "permission_overwrites": [
-                { "id": guild_id.to_string(), "type": 0, "deny": "1024" },
-                { "id": user_id.to_string(), "type": 1, "allow": "68608" },
-                { "id": bot_id.to_string(), "type": 1, "allow": "68624" },
-            ],
+            "permission_overwrites": overwrites,
         });
         let Some(body) = body.as_object() else {
             return Err("invalid channel body".to_string());
@@ -2035,6 +2159,43 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             .await
             .map(|channel| channel.id.get())
             .map_err(|err| err.to_string())
+    }
+
+    async fn role_member_ids(&self, guild_id: u64, role_id: u64) -> Result<Vec<u64>, String> {
+        let guild = GuildId::new(guild_id);
+        let role = RoleId::new(role_id);
+        if let Some(cached) = self.adapter.cache().guild(guild) {
+            let ids = cached
+                .members
+                .values()
+                .filter(|member| member.roles.contains(&role))
+                .map(|member| member.user.id.get())
+                .collect::<Vec<_>>();
+            if !ids.is_empty() {
+                return Ok(ids);
+            }
+        }
+
+        let mut after = None;
+        let mut ids = Vec::new();
+        loop {
+            let page = self
+                .adapter
+                .http
+                .get_guild_members(guild, Some(1000), after)
+                .await
+                .map_err(|err| err.to_string())?;
+            if page.is_empty() {
+                break;
+            }
+            after = page.last().map(|member| member.user.id.get());
+            ids.extend(
+                page.into_iter()
+                    .filter(|member| member.roles.contains(&role))
+                    .map(|member| member.user.id.get()),
+            );
+        }
+        Ok(ids)
     }
 
     async fn send_channel_v2(
