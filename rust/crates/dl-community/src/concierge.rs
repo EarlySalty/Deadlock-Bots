@@ -1698,7 +1698,8 @@ impl Concierge {
         }
         let params = ChatParams {
             model: self.config.model.clone(),
-            max_tokens: Some(800),
+            // Owner-Entscheid: DM-Antworten uncapped, kein max_tokens an die API
+            max_tokens: None,
             json_mode: true,
             temperature: 0.2,
             system_prompt: None,
@@ -2354,7 +2355,7 @@ fn json_bool_true(raw: &str, key: &str) -> bool {
 
 fn llm_system(extra: Option<&str>) -> String {
     let schema = format!(
-        "{SYSTEM_PROMPT}\n{ANTI_INVENT_RULE}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Gib ausschließlich dieses eine JSON-Objekt aus, ohne Markdown und ohne Text davor oder danach, und halte reply unter 900 Zeichen. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
+        "{SYSTEM_PROMPT}\n{ANTI_INVENT_RULE}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
     );
     match extra {
         Some(extra) => format!("{schema}\n\n{extra}"),
@@ -3104,7 +3105,7 @@ mod tests {
         );
         assert!(first_system_prompt(&provider).contains("keinen belastbaren Wissenskontext"));
         let params = &provider.requests()[0].1;
-        assert_eq!(params.max_tokens, Some(800));
+        assert_eq!(params.max_tokens, None);
         assert!(params.json_mode);
     }
 
@@ -3138,7 +3139,6 @@ mod tests {
     #[test]
     fn llm_system_enthaelt_anti_invent_rule() {
         assert!(llm_system(None).contains("Erfinde niemals Befehle oder Abläufe."));
-        assert!(llm_system(None).contains("Gib ausschließlich dieses eine JSON-Objekt aus, ohne Markdown und ohne Text davor oder danach, und halte reply unter 900 Zeichen."));
     }
 
     #[test]

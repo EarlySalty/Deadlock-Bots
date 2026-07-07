@@ -504,7 +504,10 @@ impl ChatProvider for OpenAiChatProvider {
             "messages": wire_messages,
             "temperature": params.temperature,
         });
-        payload["max_tokens"] = json!(params.max_tokens.unwrap_or(DEFAULT_CHAT_MAX_TOKENS));
+        // max_tokens: None = Feld weglassen, das Modell-Maximum gilt (uncapped)
+        if let Some(max_tokens) = params.max_tokens {
+            payload["max_tokens"] = json!(max_tokens);
+        }
         if params.json_mode {
             payload["response_format"] = json!({ "type": "json_object" });
         }
@@ -1354,9 +1357,25 @@ mod tests {
             )
             .await
             .expect("chat response");
+        provider
+            .chat(
+                &[ChatMessage::user("Hallo")],
+                ChatParams {
+                    json_mode: true,
+                    max_tokens: None,
+                    ..ChatParams::default()
+                },
+            )
+            .await
+            .expect("chat response");
 
         let captured = captured.lock().expect("lock");
         assert_eq!(captured[0]["response_format"]["type"], "json_object");
+        assert!(captured[0].get("max_tokens").is_some());
+        assert!(
+            captured[1].get("max_tokens").is_none(),
+            "max_tokens: None muss das Feld komplett weglassen (uncapped)"
+        );
     }
 
     #[tokio::test]
