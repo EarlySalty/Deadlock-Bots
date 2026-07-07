@@ -53,7 +53,7 @@ pub const ROUTER_PAYLOAD_FORMAT: &str = "components_v2";
 pub const ROUTER_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const ROUTER_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const ROUTER_BANNER_DIR: &str = "assets/welcome-banners";
-pub const ROUTER_HERO_BANNER_FILENAME: &str = "router-hero.png";
+pub const ROUTER_CREATE_BANNER_FILENAME: &str = "divider-lane-erstellen.png";
 pub const ROUTER_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
 pub const ROUTER_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
 pub const ROUTER_FLOOD_WINDOW_SECS: u64 = 60;
@@ -199,7 +199,7 @@ pub fn router_repo_root() -> PathBuf {
 }
 
 pub fn router_panel_attachments() -> Vec<RouterPanelAttachment> {
-    [ROUTER_HERO_BANNER_FILENAME, ROUTER_MANAGE_BANNER_FILENAME]
+    [ROUTER_CREATE_BANNER_FILENAME, ROUTER_MANAGE_BANNER_FILENAME]
         .into_iter()
         .enumerate()
         .map(|(id, filename)| RouterPanelAttachment {
@@ -291,7 +291,7 @@ fn router_panel_body_for_attachments(attachments: &[RouterPanelAttachment]) -> M
     body.insert(
         "components".to_string(),
         json!([router_container(vec![
-            router_media_gallery(ROUTER_HERO_BANNER_FILENAME),
+            router_media_gallery(ROUTER_CREATE_BANNER_FILENAME),
             router_text_display(ROUTER_PANEL_INTRO.to_string()),
             router_action_row(
                 ROUTER_MODES
@@ -1214,7 +1214,7 @@ mod tests {
         assert_eq!(
             media_urls,
             vec![
-                "attachment://router-hero.png",
+                "attachment://divider-lane-erstellen.png",
                 "attachment://divider-lane-verwalten.png",
             ]
         );
@@ -1243,7 +1243,7 @@ mod tests {
         assert_eq!(
             body.get("attachments").expect("attachments"),
             &json!([
-                {"id": 0, "filename": "router-hero.png"},
+                {"id": 0, "filename": "divider-lane-erstellen.png"},
                 {"id": 1, "filename": "divider-lane-verwalten.png"},
             ])
         );
