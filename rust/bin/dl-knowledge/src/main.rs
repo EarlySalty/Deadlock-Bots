@@ -205,8 +205,9 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
             prompt,
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
             model: None,
-            // ponytail: harte Kürzen-Bremse; reicht für 4 deutsche Sätze, ein Blocktext passt nicht durch
-            max_output_tokens: Some(350),
+            // 700 nicht senken: DeepSeek-Reasoning-Tokens zählen mit rein,
+            // ein kleineres Limit schneidet das JSON ab und alles schweigt.
+            max_output_tokens: Some(700),
             temperature: 0.0,
         })
         .await;
