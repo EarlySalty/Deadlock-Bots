@@ -1,12 +1,12 @@
 //! FAQ-Chat — Port von `cogs/faq_chat.py`.
 //!
 //! Panel-Button (`faq_chat:start`) → privater Text-Kanal in der
-//! FAQ-Kategorie → Fragen werden mit Doku-Grounding (alle `docs/*.md`)
-//! über MiniMax beantwortet, mit Gesprächs-Gedächtnis (letzte 10
+//! FAQ-Kategorie → Fragen werden über den dl-knowledge-Dienst beantwortet,
+//! mit Gesprächs-Gedächtnis (letzte Nutzerfragen der Session).
 //! Nachrichten). Sessions schließen nach 24 h automatisch; der
 //! Close-Button (`faq_chat:close:{session}`) beendet sofort.
 //! Dazu der Ticket-Auto-Helfer: die erste Nachricht in einem neuen
-//! Ticket-Kanal wird gegen die Doku geprüft — kann der Bot klar helfen,
+//! Ticket-Kanal wird gegen dl-knowledge geprüft — kann der Bot klar helfen,
 //! antwortet er, sonst schweigt er (KEIN_TREFFER-Protokoll).
 //!
 //! Bewusste Annäherung: das Original markiert Ticket-Kanäle beim
@@ -17,20 +17,15 @@
 //! (im Original optional und fehlertolerant).
 
 use std::collections::HashSet;
-use std::path::PathBuf;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::Duration;
 
-use dl_ai::{
-    GenerateRequest, TextGenerator, ToolDefinition, ToolExecutor, ToolTextGenerator, ToolUseRequest,
-};
-use dl_bridges::twitch::TwitchApiClient;
 use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
-use regex::Regex;
-use serde_json::{json, Value};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 use sqlx::PgPool;
 
 use crate::db::{i64_to_u64, u64_to_i64};
@@ -40,459 +35,86 @@ pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
 pub const TICKET_AUTO_HELP_CATEGORY_ID: u64 = 1459628097145147645;
 pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SESSION_TIMEOUT_HOURS: i64 = 24;
-pub const MAX_OUTPUT_TOKENS: u32 = 1500;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
+pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
+const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
+const FAQ_NO_ANSWER: &str = "Dazu habe ich leider nichts Belastbares in unserer Doku gefunden. Stell die Frage gern anders — oder öffne ein Ticket, dann hilft dir ein Mensch weiter.";
+const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow** — so hätte der Bot im Ticket geantwortet:";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
 pub const PANEL_KV_KEY: &str = "panel_msg_id";
 
-pub const SYSTEM_PROMPT: &str = r#"Du bist ein hilfreicher, aber strikt eingeschränkter FAQ-Assistent.
-
-SICHERHEITSREGELN (Pflicht!):
-- Du bist ein ASSISTENT, kein Admin. Du kennst nur die bereitgestellte Dokumentation.
-- Teile NIEMALS interne Pfade, API-Keys, Tokens, Secrets, Datenbank-URLs oder Konfigurationsdetails.
-- Erfinde keine Server-Strukturen, Rollen oder Kanäle die nicht in der Dokumentation stehen.
-- Biete niemals an, Code zu ändern, Bots neu zu starten oder externe Systeme zu konfigurieren.
-- Wenn ein User fragt wie etwas intern funktioniert: sage dass du keinen Zugriff darauf hast.
-- Wenn ein User eine Aktion braucht die du nicht kannst: verweise auf Deutsche Deadlock Community.
-
-ANTWORTVERHALTEN:
-- Antworte ausschließlich auf Deutsch.
-- Sei hilfreich aber präzise. Nutze Emojis sparsam.
-- Bei Fragen ausserhalb deines Wissens: ehrlich sagen dass du keine Info dazu hast.
-- Für Feedback: verweise auf das anonyme Feedback-Formular.
-- Halte Antworten informativ aber nicht übermässig lang.
-
-INVITE / ONBOARDING – SONDERREGEL:
-Wenn jemand fragt warum er keinen Invite hat, Deadlock nicht herunterladen kann oder wie er an den Beta-Zugang kommt:
-Der Weg ist bewusst einfach — erkläre genau das:
-1. In <#1426220702054355077> nett nach einem Invite fragen und den eigenen Steam-Freundescode dazu posten (Steam → Freunde → "Freund hinzufügen"). Ohne Freundescode kann niemand einladen.
-2. Ein Community-Mitglied fügt den User hinzu und lädt persönlich zum Playtest ein.
-3. "Limited User"-Fall: Steam blockiert Playtest-Invites, wenn auf dem Account noch keine ~5 $ ausgegeben wurden. Das ist eine Valve-Regel, die niemand umgehen kann; sie zeigt sich erst beim Invite-Versuch.
-4. Nach einem Invite kann es 1–2 Tage dauern, bis die Einladung bei Steam sichtbar ist.
-5. Die Steam-Verknüpfung in <#1398021105339334666> lohnt sich zusätzlich (echte Rang-Rolle; der Steam-Bot kann Invites auch automatisiert verschicken).
-Behaupte NIE, der Invite hänge an einer Onboarding-Auswahl, einer Rollen-Auswahl, einem Befehl wie /betainvite oder einer 5-Euro-Vorabprüfung – das ist veraltet.
-
-COACHING – SONDERREGEL:
-Wenn jemand fragt wie er Coaching bekommt, wer die Coaches sind, wie Coaching funktioniert, ob es Coaching gibt, was es kostet oder wo er sich anmelden kann:
-1. Verweise direkt auf <#1494373349944459355> – das ist der Coaching-Channel.
-2. Erkläre knapp: kostenlos; der Button dort führt zur Coaching-Website (Login mit Discord, dann Anfrage-Formular) → ein Coach übernimmt die Anfrage und meldet sich. Mehrfache Anfragen sind erlaubt, Status per /coaching-status.
-3. Regeln: Kommunikation NUR im Coaching-Chat auf dem Server, keine DMs oder Freundschaftsanfragen an Coaches.
-4. Nach dem Coaching gibt es eine Feedback-Anfrage – User sollen sie ehrlich ausfüllen, das hilft dem Team.
-Erfinde keine Details zu Coaches, Wartezeiten oder Verfügbarkeit."#;
-
-pub const TICKET_AUTO_HELP_SYSTEM_PROMPT: &str = r##"Du bist ein automatischer Ticket-Helfer in einem bereits geöffneten Support-Ticket. Der User hat sein Anliegen gerade als erste Nachricht geschrieben. Entscheide anhand der Dokumentation, wie du reagierst.
-
-DU HILFST AKTIV (antworte direkt und hilfreich) bei:
-- Sach- und How-to-Fragen zum Server, zu Kanälen, Rollen, Bots, Abläufen.
-- Konkreten Problemen ("X funktioniert nicht", "ich habe Y gemacht, aber Z passiert"), z. B. Steam-Verknüpfung, Twitch-/Stream-Anbindung, Onboarding/Invite, Rang-Anzeige, Coaching-Zugang.
-- Bei solchen Problemen nennst du die dokumentierten Schritte und die häufigsten Ursachen. Wenn die Doku ein Thema nur teilweise abdeckt, gib trotzdem die sinnvollen Selbsthilfe-Schritte, solange du nichts erfindest.
-
-DU SCHWEIGST (antworte NUR mit dem Token KEIN_TREFFER und sonst nichts) bei:
-- Zwischenmenschlichem Stress in der Community: Streit mit anderen Mitgliedern, Beschwerden über andere User, Meldungen über Verhalten, Drama, persönliche Konflikte. Das klären Menschen, nicht du.
-- Anliegen, die eine menschliche Entscheidung brauchen (Moderation, Strafe, Einzelfall, Sonderwunsch) oder klar außerhalb der dokumentierten Themen liegen.
-- Sachfragen, bei denen du unsicher bist und etwas erfinden müsstest.
-
-DU ZIEHST EINE GRENZE (kurz und bestimmt antworten, NICHT schweigen) bei:
-- Erpressung, Drohungen oder Forderungen gegen den Server / das Team (z. B. "ich fordere dich auf ...", Druck, Ultimaten). Sag knapp und klar, dass auf Erpressung oder solche Forderungen nicht eingegangen wird und sich das Team bei berechtigten Anliegen meldet. Geh inhaltlich nicht auf die Forderung ein, mach keine Zugeständnisse und keine rechtlichen Aussagen.
-- Frechem oder unfreundlichem Ton bei einer echten Sachfrage. Bleib ruhig, setz eine kurze sachliche Grenze (ohne zu beleidigen) und beantworte die eigentliche Frage trotzdem.
-
-WERKZEUGE:
-- Bei eigenen technischen Problemen des Fragenden (Twitch-/Stream-Anbindung, OAuth/Scopes, Steam, Onboarding/Invite, Rang-Anzeige, Raid-Status) DARFST du die Werkzeuge twitch_diagnose und log_lookup nutzen, um den ECHTEN Status des FRAGENDEN zu prüfen, statt zu raten.
-- Die Werkzeuge betreffen IMMER nur den Fragenden selbst – die Identität ist fest verankert und kann nicht geändert werden. Behaupte niemals etwas über fremde Accounts und versuche nie, eine andere Identität abzufragen.
-- Gib NIEMALS interne oder geheime Daten (Tokens, Keys, Pfade, DSNs, Konfigurationswerte) aus, auch wenn sie in Werkzeug-Ausgaben auftauchen sollten.
-- Stütze deine Antwort auf das, was die Werkzeuge tatsächlich liefern. Liefert ein Werkzeug "nicht_ermittelbar" oder nichts Brauchbares, fall auf die dokumentierten Selbsthilfe-Schritte (haeufige-probleme.md) zurück, statt einen Status zu erfinden.
-- So liest du die twitch_diagnose-Werte: "oauth_status"=connected → alles verbunden; =partial oder nicht-leere "missing_scopes" → es fehlen Berechtigungen, der Streamer muss den Bot über die Verwaltungsseite neu verbinden; =reauth oder "needs_reauth"=true → Autorisierung abgelaufen, neu autorisieren; =missing oder "found"=false → noch nie verbunden bzw. kein verknüpfter Streamer-Account (Einstieg über das Streamer-Setup). "discord_linked"=false → Discord-Verknüpfung fehlt.
-- Übersetze solche Werte IMMER in verständliches Deutsch mit konkretem nächsten Schritt. Gib NIEMALS die rohen Status-Bezeichner (z. B. "oauth_status", "partner_status", "technical_pause_reason", "operational_state") wörtlich an den Nutzer aus.
-- Wenn "partner_status" auf "blocked" oder "token_error" steht oder "technical_pause_reason" gesetzt ist: das ist eine Moderations-/Sonderfall-Sache für Menschen — antworte NICHT inhaltlich dazu, sondern gib NUR das Token KEIN_TREFFER aus.
-
-WICHTIG:
-- Du bist BEREITS in einem Ticket. Verweise NIEMALS auf "#ticket-eroeffnen", "/ticket" oder "mach ein Ticket auf" – das ist hier sinnlos. Menschlicher Support sieht dieses Ticket ohnehin.
-- Erfinde keine Informationen, Kanäle, Rollen oder Schritte, die nicht dokumentiert sind.
-- Antworte auf Deutsch, kurz und direkt, ohne Marketing-Floskeln.
-
-BEISPIELE FÜR DEN TON:
-- User (Erpressung): "Wenn ihr X nicht sofort macht, sorge ich dafür, dass ..." → "Auf Forderungen oder Druck dieser Art gehen wir hier nicht ein. Wenn du ein echtes Anliegen hast, schildere es sachlich – das Team sieht das Ticket."
-- User (frech + Sachfrage): "Sag mir endlich wie ich den Bot verbinde, oder kriegt ihr das nicht hin?" → "Lass uns das sachlich klären, dann geht es schneller. Zum Verbinden: <die dokumentierten Schritte>.""##;
-
-/// Doku-Grounding wie `_load_docs`: alle *.md aus dem Docs-Verzeichnis.
-pub fn load_docs(docs_path: &std::path::Path) -> String {
-    let Ok(entries) = std::fs::read_dir(docs_path) else {
-        tracing::warn!(path = %docs_path.display(), "FAQ: Docs-Pfad nicht gefunden");
-        return String::new();
-    };
-    let mut files: Vec<std::path::PathBuf> = entries
-        .filter_map(|e| e.ok().map(|e| e.path()))
-        .filter(|p| p.extension().map(|ext| ext == "md").unwrap_or(false))
-        .collect();
-    files.sort();
-    let mut parts = Vec::new();
-    for file in files {
-        if let Ok(content) = std::fs::read_to_string(&file) {
-            let name = file
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            parts.push(format!("\n\n=== Dokument: {name} ===\n{content}"));
-        }
-    }
-    if parts.is_empty() {
-        return String::new();
-    }
-    format!(
-        "Du hast Zugriff auf folgende Server-Dokumentation. Nutze diese als Wissensbasis. Erfinde keine Informationen.\n{}",
-        parts.join("\n")
-    )
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct KnowledgeAnswer {
+    pub answerable: bool,
+    pub answer: Option<String>,
+    #[serde(default)]
+    pub sources: Vec<KnowledgeSource>,
 }
 
-/// Prompt-Aufbau wie `_generate_answer`.
-pub fn build_prompt(docs: &str, history: &[(String, String)], question: &str) -> String {
-    let mut parts = vec![docs.to_string()];
-    if !history.is_empty() {
-        let lines: Vec<String> = history
-            .iter()
-            .map(|(role, content)| {
-                let label = if role == "user" { "User" } else { "Assistent" };
-                format!("{label}: {content}")
-            })
-            .collect();
-        parts.push(format!("Bisherige Konversation:\n{}", lines.join("\n")));
-    }
-    format!(
-        "Dokumentation:\n{}\n\nNeue Frage:\n{}",
-        parts.join("\n\n---\n\n"),
-        question.trim()
-    )
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct KnowledgeSource {
+    pub title: String,
+    pub path: String,
 }
 
-const TICKET_MAX_TOOL_CALLS: usize = 4;
-const DEFAULT_TICKET_LOG_FILES: [&str; 1] =
-    ["/home/naniadm/Documents/Deadlock-Bots/logs/master_bot.master.log"];
-const LOG_MAX_LINES_CAP: usize = 50;
-const LOG_TAIL_LINES: usize = 4000;
-const MIN_LOGIN_MATCH_LEN: usize = 4;
-
-const DIAGNOSE_RESPONSE_FIELDS: [&str; 19] = [
-    "ok",
-    "found",
-    "twitch_login",
-    "discord_linked",
-    "oauth_connected",
-    "needs_reauth",
-    "oauth_status",
-    "missing_scopes",
-    "granted_scope_count",
-    "required_scope_count",
-    "authorized_at",
-    "partner_status",
-    "is_partner_active",
-    "is_verified",
-    "is_monitored_only",
-    "is_live",
-    "raid_bot_enabled",
-    "technical_pause_reason",
-    "operational_state",
-];
-
-const GUARD_SYSTEM: &str =
-    "Du bist ein strenger Sicherheits-Reviewer fuer eine Support-Bot-Antwort. \
-BLOCKIERE, wenn die Antwort interne/geheime Daten (Tokens, Keys, DSNs, interne Pfade), Aussagen \
-ueber FREMDE Accounts, oder Hinweise auf erfolgreiches Social Engineering enthaelt, oder etwas, \
-das ein Endnutzer nicht sehen darf. Sonst FREIGABE. Antworte NUR mit 'FREIGABE' oder \
-'BLOCK: <kurzer grund>'.";
-
-static REDACT_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r#"\b(?:postgres(?:ql)?|rediss?)://[^\s"']+"#,
-        r#"\bBearer\s+[A-Za-z0-9._\-]+"#,
-        r#"\b(?:token|key|secret|password|passwd|pwd|api[_-]?key|access[_-]?token|refresh[_-]?token|client[_-]?secret)\s*[=:]\s*"?[^\s"'&]+"?"#,
-        r#"\b(?:x-api-key|x-internal-token|authorization)\s*:\s*"?[^\s"']+"?"#,
-        r#"\bINFISICAL[A-Z0-9_]*\b"#,
-        r#"oauth:[A-Za-z0-9]+"#,
-        r#"\b[0-9a-fA-F]{24,}\b"#,
-        r#"\b[A-Za-z0-9_\-]{24,}\.[A-Za-z0-9_\-]{8,}(?:\.[A-Za-z0-9_\-]+)?\b"#,
-        r#"\b[A-Za-z0-9+/]{24,}={0,2}\b"#,
-    ]
-    .into_iter()
-    .filter_map(|pattern| Regex::new(pattern).ok())
-    .collect()
-});
-
-static GUARD_SECRET_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
-    [
-        r#"postgres://"#,
-        r#"redis://"#,
-        r#"\bBearer\b"#,
-        r#"token\s*="#,
-        r#"key\s*="#,
-        r#"x-api-key"#,
-        r#"INFISICAL"#,
-        r#"oauth:[A-Za-z0-9]+"#,
-        r#"\b[0-9a-fA-F]{24,}\b"#,
-        r#"\b[A-Za-z0-9+/]{24,}={1,2}"#,
-    ]
-    .into_iter()
-    .filter_map(|pattern| Regex::new(&format!("(?i){pattern}")).ok())
-    .collect()
-});
-
-static DISCORD_ID_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{17,20}\b").ok());
-
-pub fn diagnose_tools() -> Vec<ToolDefinition> {
-    vec![
-        ToolDefinition {
-            name: "twitch_diagnose".to_string(),
-            description: "Prüft den Twitch-Streamer-Status (OAuth/Scopes/aktiv) des FRAGENDEN selbst. Keine Parameter — die Identität ist fest.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false,
-            }),
-        },
-        ToolDefinition {
-            name: "log_lookup".to_string(),
-            description: "Sucht relevante, redigierte Log-Zeilen zum FRAGENDEN selbst (Twitch-/Bot-Logs).".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "max_lines": { "type": "integer" },
-                },
-                "additionalProperties": false,
-            }),
-        },
-    ]
+#[derive(Debug, Serialize)]
+struct KnowledgeQuestion<'a> {
+    question: &'a str,
 }
 
-fn redact(text: &str) -> String {
-    let mut result = text.to_string();
-    for pattern in REDACT_PATTERNS.iter() {
-        result = pattern.replace_all(&result, "[redacted]").into_owned();
-    }
-    result
+fn knowledge_url_from_env() -> String {
+    std::env::var("DL_KNOWLEDGE_URL")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_KNOWLEDGE_URL.to_string())
 }
 
-fn has_foreign_discord_id(text: &str, own_id: u64) -> bool {
-    let Some(re) = DISCORD_ID_RE.as_ref() else {
-        return false;
-    };
-    let own = own_id.to_string();
-    re.find_iter(text).any(|found| found.as_str() != own)
+pub async fn ask_knowledge(question: &str) -> Option<KnowledgeAnswer> {
+    ask_knowledge_with_timeout(&knowledge_url_from_env(), question, KNOWLEDGE_TIMEOUT).await
 }
 
-fn requested_log_lines(tool_input: &Value) -> usize {
-    let parsed = tool_input
-        .get("max_lines")
-        .and_then(|value| {
-            value
-                .as_u64()
-                .and_then(|n| usize::try_from(n).ok())
-                .or_else(|| value.as_str()?.trim().parse::<usize>().ok())
-        })
-        .filter(|n| *n > 0)
-        .unwrap_or(15);
-    parsed.min(LOG_MAX_LINES_CAP)
+async fn ask_knowledge_at(base_url: &str, question: &str) -> Option<KnowledgeAnswer> {
+    ask_knowledge_with_timeout(base_url, question, KNOWLEDGE_TIMEOUT).await
 }
 
-async fn read_tail_lines(path: &PathBuf) -> Vec<String> {
-    let Ok(content) = tokio::fs::read_to_string(path).await else {
-        return Vec::new();
-    };
-    let lines: Vec<&str> = content.lines().collect();
-    let start = lines.len().saturating_sub(LOG_TAIL_LINES);
-    lines[start..]
-        .iter()
-        .map(|line| (*line).to_string())
-        .collect()
+async fn ask_knowledge_with_timeout(
+    base_url: &str,
+    question: &str,
+    timeout: Duration,
+) -> Option<KnowledgeAnswer> {
+    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
+    let url = format!("{}/public/v1/ask", base_url.trim_end_matches('/'));
+    client
+        .post(url)
+        .json(&KnowledgeQuestion { question })
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<KnowledgeAnswer>()
+        .await
+        .ok()
 }
 
-#[derive(Clone)]
-pub struct TicketDiagnostics {
-    twitch: Option<Arc<TwitchApiClient>>,
-    log_files: Vec<PathBuf>,
-}
-
-impl TicketDiagnostics {
-    pub fn new(twitch: Option<Arc<TwitchApiClient>>) -> Arc<Self> {
-        Arc::new(Self {
-            twitch,
-            log_files: DEFAULT_TICKET_LOG_FILES.iter().map(PathBuf::from).collect(),
-        })
+fn answer_text(answer: Option<KnowledgeAnswer>) -> Option<String> {
+    let answer = answer?;
+    if !answer.answerable {
+        return None;
     }
-
-    #[cfg(test)]
-    fn with_log_files(twitch: Option<Arc<TwitchApiClient>>, log_files: Vec<PathBuf>) -> Arc<Self> {
-        Arc::new(Self { twitch, log_files })
-    }
-
-    async fn execute_tool(&self, author_id: u64, tool_name: &str, tool_input: &Value) -> Value {
-        match tool_name {
-            "twitch_diagnose" => self.collect_twitch_diagnose(author_id).await,
-            "log_lookup" => {
-                let diagnose = self.collect_twitch_diagnose(author_id).await;
-                let twitch_login = diagnose
-                    .get("twitch_login")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|login| !login.is_empty())
-                    .map(str::to_string);
-                self.collect_log_lookup(
-                    author_id,
-                    twitch_login.as_deref(),
-                    requested_log_lines(tool_input),
-                )
-                .await
-            }
-            _ => json!({ "error": "unknown_tool" }),
-        }
-    }
-
-    async fn collect_twitch_diagnose(&self, author_id: u64) -> Value {
-        let Some(twitch) = &self.twitch else {
-            return json!({ "status": "nicht_ermittelbar" });
-        };
-        let Ok(payload) = twitch.diagnose_discord_user(author_id).await else {
-            return json!({ "status": "nicht_ermittelbar" });
-        };
-        let Some(payload) = payload.as_object() else {
-            return json!({ "status": "nicht_ermittelbar" });
-        };
-        let mut sanitized = serde_json::Map::new();
-        for field in DIAGNOSE_RESPONSE_FIELDS {
-            sanitized.insert(
-                field.to_string(),
-                payload.get(field).cloned().unwrap_or(Value::Null),
-            );
-        }
-        Value::Object(sanitized)
-    }
-
-    async fn collect_log_lookup(
-        &self,
-        author_id: u64,
-        twitch_login: Option<&str>,
-        max_lines: usize,
-    ) -> Value {
-        let own_id = author_id.to_string();
-        let login_lower = twitch_login
-            .map(str::trim)
-            .filter(|login| login.len() >= MIN_LOGIN_MATCH_LEN)
-            .map(str::to_lowercase);
-
-        let mut matched = Vec::new();
-        for path in &self.log_files {
-            for line in read_tail_lines(path).await {
-                let mut relevant = line.contains(&own_id);
-                if !relevant {
-                    if let Some(login) = &login_lower {
-                        relevant = line.to_lowercase().contains(login);
-                    }
-                }
-                if !relevant || has_foreign_discord_id(&line, author_id) {
-                    continue;
-                }
-                matched.push(redact(&line));
-            }
-        }
-
-        if matched.len() > max_lines {
-            matched = matched.split_off(matched.len() - max_lines);
-        }
-        let note = if matched.is_empty() {
-            "Keine zuordenbaren Log-Zeilen gefunden.".to_string()
-        } else {
-            format!(
-                "{} redigierte Log-Zeile(n) zum Fragenden gefunden.",
-                matched.len()
-            )
-        };
-        json!({ "lines": matched, "note": note })
-    }
-}
-
-struct TicketToolExecutor {
-    diagnostics: Arc<TicketDiagnostics>,
-    author_id: u64,
-}
-
-#[async_trait::async_trait]
-impl ToolExecutor for TicketToolExecutor {
-    async fn execute(&self, tool_name: &str, tool_input: &Value) -> Result<Value, String> {
-        Ok(self
-            .diagnostics
-            .execute_tool(self.author_id, tool_name, tool_input)
-            .await)
-    }
-}
-
-fn deterministic_guard_scan(candidate_answer: &str, author_id: u64) -> Option<String> {
-    for pattern in GUARD_SECRET_PATTERNS.iter() {
-        if pattern.is_match(candidate_answer) {
-            return Some(format!("deterministic:secret_pattern:{}", pattern.as_str()));
-        }
-    }
-    if contains_mixed_long_token(candidate_answer) {
-        return Some("deterministic:secret_pattern:mixed_token".to_string());
-    }
-    if has_foreign_discord_id(candidate_answer, author_id) {
-        return Some("deterministic:foreign_discord_id".to_string());
-    }
-    None
-}
-
-fn contains_mixed_long_token(text: &str) -> bool {
-    text.split(|ch: char| !ch.is_ascii_alphanumeric() && !matches!(ch, '+' | '/' | '_' | '-'))
-        .any(|part| {
-            part.len() >= 24
-                && part.bytes().any(|b| b.is_ascii_digit())
-                && part.bytes().any(|b| b.is_ascii_alphabetic())
-        })
-}
-
-async fn diagnose_guard_check(
-    ai: &Arc<dyn TextGenerator>,
-    candidate_answer: &str,
-    ticket_text: &str,
-    author_id: u64,
-    _tool_trace: &[String],
-) -> (bool, String) {
-    if let Some(reason) = deterministic_guard_scan(candidate_answer, author_id) {
-        return (false, reason);
-    }
-
-    let prompt =
-        format!("Kandidatenantwort:\n{candidate_answer}\n\nTicket des Nutzers:\n{ticket_text}");
-    let text = ai
-        .generate_text(GenerateRequest {
-            prompt,
-            system_prompt: Some(GUARD_SYSTEM.to_string()),
-            model: None,
-            max_output_tokens: Some(200),
-            temperature: 0.0,
-        })
-        .await;
-    let Some(text) = text
+    answer
+        .answer
         .map(|text| text.trim().to_string())
         .filter(|text| !text.is_empty())
-    else {
-        return (false, "guard_error".to_string());
-    };
-    let upper = text.to_uppercase();
-    if upper.contains("BLOCK") {
-        return (false, text);
-    }
-    if upper.contains("FREIGABE") {
-        return (true, String::new());
-    }
-    (false, "guard_error".to_string())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TicketAutoOutcome {
     answer: Option<String>,
     decision: &'static str,
-    tool_calls: Vec<String>,
-    guard_reason: Option<String>,
 }
 
 impl TicketAutoOutcome {
@@ -500,10 +122,47 @@ impl TicketAutoOutcome {
         Self {
             answer: None,
             decision,
-            tool_calls: Vec::new(),
-            guard_reason: None,
         }
     }
+}
+
+fn knowledge_question_from_history(history: &[(String, String)], question: &str) -> String {
+    let mut questions: Vec<String> = history
+        .iter()
+        .filter(|(role, _)| role == "user")
+        .map(|(_, content)| content.trim())
+        .filter(|content| !content.is_empty())
+        .map(str::to_string)
+        .collect();
+    let question = question.trim();
+    if !question.is_empty() && questions.last().map(String::as_str) != Some(question) {
+        questions.push(question.to_string());
+    }
+    questions.join("\n")
+}
+
+fn ticket_auto_outcome_from_knowledge(answer: Option<KnowledgeAnswer>) -> TicketAutoOutcome {
+    match answer_text(answer) {
+        Some(answer) => TicketAutoOutcome {
+            answer: Some(answer),
+            decision: "answered",
+        },
+        None => TicketAutoOutcome::silence("kein_treffer"),
+    }
+}
+
+fn shadow_channel_from_env() -> Option<u64> {
+    std::env::var("DL_FAQ_SHADOW_CHANNEL_ID")
+        .ok()
+        .and_then(|value| value.trim().parse::<u64>().ok())
+}
+
+fn shadow_ticket_message(ticket_channel_id: u64, answer: &str) -> String {
+    format!("{TICKET_SHADOW_PREFIX}\nTicket: <#{ticket_channel_id}>\n\n{answer}")
+}
+
+fn ticket_answer_target(ticket_channel_id: u64, shadow_channel_id: Option<u64>) -> u64 {
+    shadow_channel_id.unwrap_or(ticket_channel_id)
 }
 
 /// Embed + „Frage stellen"-Button des FAQ-Panels (Port von `_build_panel_embed`
@@ -736,38 +395,32 @@ pub trait FaqPort: Send + Sync {
 pub struct FaqChat {
     pub store: FaqStore,
     pub port: Arc<dyn FaqPort>,
-    pub ai: Option<Arc<dyn TextGenerator>>,
-    pub tool_ai: Option<Arc<dyn ToolTextGenerator>>,
-    pub ticket_diagnostics: Option<Arc<TicketDiagnostics>>,
-    pub docs: String,
+    pub knowledge_url: String,
+    pub shadow_channel_id: Option<u64>,
     answered_tickets: tokio::sync::Mutex<HashSet<u64>>,
 }
 
 impl FaqChat {
-    pub fn new(
-        pool: PgPool,
-        port: Arc<dyn FaqPort>,
-        ai: Option<Arc<dyn TextGenerator>>,
-        docs: String,
-    ) -> Arc<Self> {
-        Self::new_with_ticket_support(pool, port, ai, None, None, docs)
+    pub fn new(pool: PgPool, port: Arc<dyn FaqPort>) -> Arc<Self> {
+        Self::new_with_config(
+            pool,
+            port,
+            knowledge_url_from_env(),
+            shadow_channel_from_env(),
+        )
     }
 
-    pub fn new_with_ticket_support(
+    fn new_with_config(
         pool: PgPool,
         port: Arc<dyn FaqPort>,
-        ai: Option<Arc<dyn TextGenerator>>,
-        tool_ai: Option<Arc<dyn ToolTextGenerator>>,
-        ticket_diagnostics: Option<Arc<TicketDiagnostics>>,
-        docs: String,
+        knowledge_url: String,
+        shadow_channel_id: Option<u64>,
     ) -> Arc<Self> {
         Arc::new(Self {
             store: FaqStore { pool },
             port,
-            ai,
-            tool_ai,
-            ticket_diagnostics,
-            docs,
+            knowledge_url,
+            shadow_channel_id,
             answered_tickets: tokio::sync::Mutex::new(HashSet::new()),
         })
     }
@@ -860,110 +513,14 @@ impl FaqChat {
     }
 
     async fn generate_answer(&self, session_id: &str, question: &str) -> String {
-        let Some(ai) = &self.ai else {
-            return "Der FAQ-Service ist aktuell nicht verfügbar.".to_string();
-        };
         let history = self.store.recent_messages(session_id).await;
-        let prompt = build_prompt(&self.docs, &history, question);
-        let answer = ai
-            .generate_text(GenerateRequest {
-                prompt,
-                system_prompt: Some(SYSTEM_PROMPT.to_string()),
-                model: None,
-                max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-                temperature: 0.3,
-            })
-            .await;
-        match answer {
-            Some(text) if !text.trim().is_empty() => text.trim().to_string(),
-            _ => "Ich konnte keine Antwort generieren.".to_string(),
-        }
+        let question = knowledge_question_from_history(&history, question);
+        answer_text(ask_knowledge_at(&self.knowledge_url, &question).await)
+            .unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
     }
 
-    async fn ticket_auto_answer(&self, problem: &str, author_id: u64) -> TicketAutoOutcome {
-        let Some(ai) = &self.ai else {
-            return TicketAutoOutcome::silence("no_ai");
-        };
-        let full_prompt = format!(
-            "Dokumentation:\n{}\n\nTicket-Inhalt:\n{}",
-            self.docs,
-            problem.trim()
-        );
-
-        let mut tool_calls = Vec::new();
-        let mut answer_text = None;
-        if let (Some(tool_ai), Some(diagnostics)) = (&self.tool_ai, &self.ticket_diagnostics) {
-            let tool_result = tool_ai
-                .generate_text_with_tools(
-                    ToolUseRequest {
-                        prompt: full_prompt.clone(),
-                        system_prompt: Some(TICKET_AUTO_HELP_SYSTEM_PROMPT.to_string()),
-                        model: None,
-                        max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-                        temperature: 0.2,
-                        tools: diagnose_tools(),
-                        max_tool_calls: TICKET_MAX_TOOL_CALLS,
-                    },
-                    Arc::new(TicketToolExecutor {
-                        diagnostics: diagnostics.clone(),
-                        author_id,
-                    }),
-                )
-                .await;
-            tool_calls = tool_result.tool_calls;
-            answer_text = tool_result.text;
-        }
-
-        if answer_text
-            .as_deref()
-            .map(str::trim)
-            .filter(|text| !text.is_empty())
-            .is_none()
-        {
-            answer_text = ai
-                .generate_text(GenerateRequest {
-                    prompt: full_prompt,
-                    system_prompt: Some(TICKET_AUTO_HELP_SYSTEM_PROMPT.to_string()),
-                    model: None,
-                    max_output_tokens: Some(MAX_OUTPUT_TOKENS),
-                    temperature: 0.2,
-                })
-                .await;
-        }
-
-        let Some(answer) = answer_text.map(|answer| answer.trim().to_string()) else {
-            let mut outcome = TicketAutoOutcome::silence("empty");
-            outcome.tool_calls = tool_calls;
-            return outcome;
-        };
-        if answer.is_empty() {
-            let mut outcome = TicketAutoOutcome::silence("empty");
-            outcome.tool_calls = tool_calls;
-            return outcome;
-        }
-        if answer.contains("KEIN_TREFFER") {
-            let mut outcome = TicketAutoOutcome::silence("kein_treffer");
-            outcome.tool_calls = tool_calls;
-            return outcome;
-        }
-
-        let (allowed, reason) =
-            diagnose_guard_check(ai, &answer, problem, author_id, &tool_calls).await;
-        if !allowed {
-            return TicketAutoOutcome {
-                answer: None,
-                decision: "guard_block",
-                tool_calls,
-                guard_reason: Some(reason),
-            };
-        }
-
-        TicketAutoOutcome {
-            answer: Some(answer),
-            decision: "answered",
-            tool_calls,
-            guard_reason: None,
-        }
+    async fn ticket_auto_answer(&self, problem: &str, _author_id: u64) -> TicketAutoOutcome {
+        ticket_auto_outcome_from_knowledge(ask_knowledge_at(&self.knowledge_url, problem).await)
     }
 
     /// Frage im FAQ-Kanal beantworten (vom Message-Subscriber gerufen).
@@ -1030,12 +587,16 @@ impl FaqChat {
             channel_id,
             author_id,
             decision = outcome.decision,
-            tool_calls = ?outcome.tool_calls,
-            guard_reason = outcome.guard_reason.as_deref().unwrap_or(""),
             "FAQ-Ticket-Auto-Hilfe entschieden"
         );
         if let Some(answer) = outcome.answer {
-            self.port.send_message(channel_id, &answer, None).await;
+            let target = ticket_answer_target(channel_id, self.shadow_channel_id);
+            let content = if self.shadow_channel_id.is_some() {
+                shadow_ticket_message(channel_id, &answer)
+            } else {
+                answer
+            };
+            self.port.send_message(target, &content, None).await;
         }
     }
 
@@ -1256,50 +817,140 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "testing")]
-    use dl_ai::ToolGeneration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
-    fn prompt_aufbau_wie_python() {
-        let docs = "DOCS".to_string();
+    fn knowledge_frage_nutzt_nur_nutzerfragen_als_kontext() {
         let history = vec![
-            ("user".to_string(), "Frage 1".to_string()),
+            ("user".to_string(), " Erste Frage ".to_string()),
             ("assistant".to_string(), "Antwort 1".to_string()),
+            ("user".to_string(), "Zweite Frage".to_string()),
         ];
-        let prompt = build_prompt(&docs, &history, "  Neue Frage?  ");
-        assert!(prompt.starts_with("Dokumentation:\nDOCS"));
-        assert!(prompt.contains("Bisherige Konversation:\nUser: Frage 1\nAssistent: Antwort 1"));
-        assert!(prompt.ends_with("Neue Frage:\nNeue Frage?"));
-        // ohne Verlauf kein Konversations-Block
-        let prompt = build_prompt(&docs, &[], "x");
-        assert!(!prompt.contains("Bisherige Konversation"));
+        assert_eq!(
+            knowledge_question_from_history(&history, " Neue Frage "),
+            "Erste Frage\nZweite Frage\nNeue Frage"
+        );
+        assert_eq!(
+            knowledge_question_from_history(&history, "Zweite Frage"),
+            "Erste Frage\nZweite Frage"
+        );
     }
 
     #[test]
-    fn docs_grounding() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        std::fs::write(dir.path().join("b.md"), "Inhalt B").expect("write");
-        std::fs::write(dir.path().join("a.md"), "Inhalt A").expect("write");
-        std::fs::write(dir.path().join("c.txt"), "ignoriert").expect("write");
-        let docs = load_docs(dir.path());
-        assert!(docs.contains("=== Dokument: a.md ===\nInhalt A"));
-        assert!(docs.contains("=== Dokument: b.md ===\nInhalt B"));
-        assert!(!docs.contains("ignoriert"));
-        // a vor b (sortiert)
-        assert!(docs.find("a.md").expect("a") < docs.find("b.md").expect("b"));
-        assert_eq!(load_docs(std::path::Path::new("/nope")), "");
+    fn ticket_auto_help_entscheidet_answerable_true_false_none() {
+        let answered = ticket_auto_outcome_from_knowledge(Some(KnowledgeAnswer {
+            answerable: true,
+            answer: Some("  Antwort aus Knowledge  ".to_string()),
+            sources: Vec::new(),
+        }));
+        assert_eq!(answered.decision, "answered");
+        assert_eq!(answered.answer.as_deref(), Some("Antwort aus Knowledge"));
+
+        let unanswerable = ticket_auto_outcome_from_knowledge(Some(KnowledgeAnswer {
+            answerable: false,
+            answer: None,
+            sources: Vec::new(),
+        }));
+        assert_eq!(unanswerable.decision, "kein_treffer");
+        assert_eq!(unanswerable.answer, None);
+
+        let none = ticket_auto_outcome_from_knowledge(None);
+        assert_eq!(none.decision, "kein_treffer");
+        assert_eq!(none.answer, None);
     }
 
     #[test]
-    fn ticket_prompt_enthaelt_status_uebersetzung_und_ticket_hinweis() {
-        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT.contains(
-            "Übersetze solche Werte IMMER in verständliches Deutsch mit konkretem nächsten Schritt"
-        ));
-        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT.contains("Gib NIEMALS die rohen Status-Bezeichner"));
-        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT
-            .contains("\"partner_status\" auf \"blocked\" oder \"token_error\""));
-        assert!(TICKET_AUTO_HELP_SYSTEM_PROMPT
-            .contains("Du bist BEREITS in einem Ticket. Verweise NIEMALS"));
+    fn shadow_mode_routing_entscheidung() {
+        assert_eq!(ticket_answer_target(10, None), 10);
+        assert_eq!(ticket_answer_target(10, Some(99)), 99);
+        let message = shadow_ticket_message(10, "Antwort");
+        assert!(message.contains(TICKET_SHADOW_PREFIX));
+        assert!(message.contains("<#10>"));
+        assert!(message.contains("Antwort"));
+    }
+
+    async fn knowledge_server(
+        status: u16,
+        body: &'static str,
+        delay: Duration,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let status_line = match status {
+                200 => "200 OK",
+                500 => "500 Internal Server Error",
+                _ => "400 Bad Request",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    #[tokio::test]
+    async fn ask_knowledge_liefert_answerable_true() {
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ja.","sources":[{"title":"T","path":"p.md"}]}"#,
+            Duration::ZERO,
+        )
+        .await;
+
+        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_secs(1))
+            .await
+            .expect("knowledge answer");
+        let _ = handle.await;
+
+        assert!(answer.answerable);
+        assert_eq!(answer.answer.as_deref(), Some("Ja."));
+        assert_eq!(answer.sources[0].title, "T");
+    }
+
+    #[tokio::test]
+    async fn ask_knowledge_liefert_answerable_false() {
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":false,"answer":null,"sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+
+        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_secs(1))
+            .await
+            .expect("knowledge answer");
+        let _ = handle.await;
+
+        assert!(!answer.answerable);
+        assert_eq!(answer.answer, None);
+    }
+
+    #[tokio::test]
+    async fn ask_knowledge_timeout_ist_none() {
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"zu spaet","sources":[]}"#,
+            Duration::from_millis(200),
+        )
+        .await;
+
+        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_millis(30)).await;
+        handle.abort();
+
+        assert_eq!(answer, None);
     }
 
     #[cfg(feature = "testing")]
@@ -1342,6 +993,8 @@ mod tests {
         posts: std::sync::Mutex<u32>,
         edits: std::sync::Mutex<u32>,
         deleted: std::sync::Mutex<Vec<u64>>,
+        sent: std::sync::Mutex<Vec<(u64, String)>>,
+        category: Option<u64>,
     }
 
     #[cfg(feature = "testing")]
@@ -1350,9 +1003,19 @@ mod tests {
         async fn create_faq_channel(&self, _g: u64, _u: u64, _n: &str) -> Result<u64, String> {
             Ok(1)
         }
-        async fn send_message(&self, _c: u64, _t: &str, _comp: Option<serde_json::Value>) {}
+        async fn send_message(
+            &self,
+            channel_id: u64,
+            text: &str,
+            _comp: Option<serde_json::Value>,
+        ) {
+            self.sent
+                .lock()
+                .unwrap()
+                .push((channel_id, text.to_string()));
+        }
         async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
-            None
+            self.category
         }
         async fn user_name(&self, _u: u64) -> String {
             "U".to_string()
@@ -1385,6 +1048,19 @@ mod tests {
             posts: std::sync::Mutex::new(0),
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
+            sent: std::sync::Mutex::new(Vec::new()),
+            category: None,
+        })
+    }
+
+    #[cfg(feature = "testing")]
+    fn ticket_port() -> Arc<MockPanelPort> {
+        Arc::new(MockPanelPort {
+            posts: std::sync::Mutex::new(0),
+            edits: std::sync::Mutex::new(0),
+            deleted: std::sync::Mutex::new(Vec::new()),
+            sent: std::sync::Mutex::new(Vec::new()),
+            category: Some(TICKET_AUTO_HELP_CATEGORY_ID),
         })
     }
 
@@ -1400,7 +1076,7 @@ mod tests {
     async fn panel_postet_einmal_dann_editiert() {
         let db = db_with_kv().await;
         let port = panel_port();
-        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
 
         // Erster ensure: ein Post, kein Edit; ID wird gemerkt.
         faq.ensure_panel().await;
@@ -1419,7 +1095,7 @@ mod tests {
     async fn faqpanel_command_meldet_bestehend_und_erstellt() {
         let db = db_with_kv().await;
         let port = panel_port();
-        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
 
         // Noch kein Panel → Command erstellt es und meldet „wurde erstellt".
         let reply = faq.faqpanel_command(42).await;
@@ -1449,7 +1125,7 @@ mod tests {
             .await
             .unwrap();
         let port = panel_port();
-        let faq = FaqChat::new(db.pool().clone(), port.clone(), None, String::new());
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
 
         faq.ensure_panel().await;
 
@@ -1467,150 +1143,49 @@ mod tests {
     }
 
     #[cfg(feature = "testing")]
-    struct SequenceAi {
-        responses: std::sync::Mutex<std::collections::VecDeque<Option<String>>>,
-    }
-
-    #[cfg(feature = "testing")]
-    impl SequenceAi {
-        fn new(responses: Vec<Option<&str>>) -> Arc<Self> {
-            Arc::new(Self {
-                responses: std::sync::Mutex::new(
-                    responses
-                        .into_iter()
-                        .map(|item| item.map(str::to_string))
-                        .collect(),
-                ),
-            })
-        }
-    }
-
-    #[cfg(feature = "testing")]
-    #[async_trait::async_trait]
-    impl TextGenerator for SequenceAi {
-        async fn generate_text(&self, _request: GenerateRequest) -> Option<String> {
-            self.responses
-                .lock()
-                .expect("responses lock")
-                .pop_front()
-                .flatten()
-        }
-    }
-
-    #[cfg(feature = "testing")]
-    struct StaticToolAi {
-        result: std::sync::Mutex<Option<ToolGeneration>>,
-    }
-
-    #[cfg(feature = "testing")]
-    impl StaticToolAi {
-        fn new(result: ToolGeneration) -> Arc<Self> {
-            Arc::new(Self {
-                result: std::sync::Mutex::new(Some(result)),
-            })
-        }
-    }
-
-    #[cfg(feature = "testing")]
-    #[async_trait::async_trait]
-    impl ToolTextGenerator for StaticToolAi {
-        async fn generate_text_with_tools(
-            &self,
-            _request: ToolUseRequest,
-            _tool_executor: Arc<dyn ToolExecutor>,
-        ) -> ToolGeneration {
-            self.result
-                .lock()
-                .expect("tool result lock")
-                .take()
-                .unwrap_or_default()
-        }
-    }
-
-    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn ticket_guard_fehler_schweigt_fail_closed() {
+    async fn ticket_auto_help_postet_answerable_true() {
         let db = db_with_kv().await;
-        let port = panel_port();
-        let ai: Arc<dyn TextGenerator> = SequenceAi::new(vec![
-            Some("Dokumentierte Antwort"),
-            None, // Guard-Reviewer leer/Fehler => fail-closed
-        ]);
-        let faq = FaqChat::new(db.pool().clone(), port, Some(ai), "DOCS".to_string());
-
-        let outcome = faq
-            .ticket_auto_answer("Steam geht nicht", 111111111111111111)
-            .await;
-
-        assert_eq!(outcome.decision, "guard_block");
-        assert_eq!(outcome.answer, None);
-        assert_eq!(outcome.guard_reason.as_deref(), Some("guard_error"));
-    }
-
-    #[cfg(feature = "testing")]
-    #[tokio::test]
-    async fn ticket_tool_loop_faellt_auf_textpfad_zurueck_und_behaelt_tool_trace() {
-        let db = db_with_kv().await;
-        let port = panel_port();
-        let ai: Arc<dyn TextGenerator> =
-            SequenceAi::new(vec![Some("Fallback Antwort"), Some("FREIGABE")]);
-        let tool_ai: Arc<dyn ToolTextGenerator> = StaticToolAi::new(ToolGeneration {
-            text: None,
-            tool_calls: vec!["twitch_diagnose".to_string()],
-        });
-        let faq = FaqChat::new_with_ticket_support(
-            db.pool().clone(),
-            port,
-            Some(ai),
-            Some(tool_ai),
-            Some(TicketDiagnostics::new(None)),
-            "DOCS".to_string(),
-        );
-
-        let outcome = faq
-            .ticket_auto_answer("Twitch ist kaputt", 111111111111111111)
-            .await;
-
-        assert_eq!(outcome.decision, "answered");
-        assert_eq!(outcome.answer.as_deref(), Some("Fallback Antwort"));
-        assert_eq!(outcome.tool_calls, vec!["twitch_diagnose"]);
-    }
-
-    #[tokio::test]
-    async fn log_lookup_filtert_fremde_ids_und_redigiert_secrets() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let own_id = 111111111111111111u64;
-        let other_id = 222222222222222222u64;
-        let log_path = dir.path().join("bot.log");
-        std::fs::write(
-            &log_path,
-            format!(
-                "irrelevant\n\
-                 own {own_id} token=secret12345678901234567890\n\
-                 mixed {own_id} and {other_id} should_skip\n\
-                 login naniworks oauth:abc123\n"
-            ),
+        let port = ticket_port();
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            Duration::ZERO,
         )
-        .expect("write log");
-        let diagnostics = TicketDiagnostics::with_log_files(None, vec![log_path]);
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
 
-        let result = diagnostics
-            .collect_log_lookup(own_id, Some("naniworks"), 10)
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
             .await;
+        let _ = handle.await;
 
-        let lines = result["lines"].as_array().expect("lines");
-        assert_eq!(lines.len(), 2);
-        let joined = lines
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(joined.contains("[redacted]"));
-        assert!(joined.contains("login naniworks"));
-        assert!(!joined.contains("should_skip"));
-        assert!(result["note"]
-            .as_str()
-            .expect("note")
-            .contains("2 redigierte Log-Zeile"));
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(222, "Ticket-Antwort".to_string())]
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn ticket_auto_help_shadow_postet_nicht_ins_ticket() {
+        let db = db_with_kv().await;
+        let port = ticket_port();
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, Some(999));
+
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
+            .await;
+        let _ = handle.await;
+
+        let sent = port.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, 999);
+        assert!(sent[0].1.contains("<#222>"));
+        assert!(sent[0].1.contains("Ticket-Antwort"));
     }
 }

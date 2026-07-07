@@ -737,23 +737,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     coaching_requests.ensure_panel().await;
 
     // FAQ-Chat (6) — Panel-Buttons brauchen den Router, Subscriber gateway-gated
-    let faq_docs_path = std::env::var("FAQ_DOCS_PATH").unwrap_or_else(|_| "docs".to_string());
-    let faq_ai = dl_ai::MiniMaxClient::from_env(|k| std::env::var(k).ok());
-    let faq_text_ai = faq_ai
-        .clone()
-        .map(|client| client as Arc<dyn dl_ai::TextGenerator>);
-    let faq_tool_ai = faq_ai.map(|client| client as Arc<dyn dl_ai::ToolTextGenerator>);
-    let faq = dl_community::faq::FaqChat::new_with_ticket_support(
+    let faq = dl_community::faq::FaqChat::new(
         central_pool.clone(),
         Arc::new(modglue::FaqGlue {
             adapter: adapter.clone(),
         }),
-        faq_text_ai,
-        faq_tool_ai,
-        Some(dl_community::faq::TicketDiagnostics::new(
-            twitch_client.clone(),
-        )),
-        dl_community::faq::load_docs(std::path::Path::new(&faq_docs_path)),
     );
     dl_community::faq::register(&mut router, faq.clone());
 
