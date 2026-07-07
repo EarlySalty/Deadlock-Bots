@@ -499,6 +499,7 @@ impl TextGenerator for FireworksClient {
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": request.temperature,
+                "response_format": { "type": "json_object" },
             }))
             .send()
             .await;
@@ -1374,6 +1375,7 @@ mod tests {
         assert_eq!(captured[0]["messages"][1]["content"], "pruefe");
         assert_eq!(captured[0]["max_tokens"], 300);
         assert_eq!(captured[0]["temperature"], 0.0);
+        assert_eq!(captured[0]["response_format"]["type"], "json_object");
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.

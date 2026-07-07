@@ -1,3 +1,11 @@
+## #218 — Fireworks-Moderation antwortet strikt als JSON
+
+**Ausgangslage:** Fireworks erkannte grenzwertige Moderationsfälle, konnte aber trotz Prompt mit Fließtext antworten. Der Bot wertete das als Parse-Fehler und ignorierte den Fall.
+
+**Was wurde geändert:** Der Fireworks-Aufruf nutzt jetzt den JSON-Modus der Chat-API.
+
+**Wie es jetzt läuft:** Textanalyse-Antworten sind stabil parsebar; die nachgelagerte GPT-nano-Prüfung bleibt unverändert.
+
 ## #217 — Twitch-Spam-Lernen läuft im Live-Bot
 
 **Ausgangslage:** Die Lernknöpfe für verdächtige Twitch-Spam-Alerts waren vorbereitet, aber der laufende Rust-Discord-Bot konnte die Klicks noch nicht selbst an den Twitch-Bot weitergeben.
