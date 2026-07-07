@@ -1,3 +1,11 @@
+## #231 — Concierge startet nur bei echtem Onboarding
+
+**Ausgangslage:** Wenn bestehenden Mitgliedern später Rollen gegeben wurden, konnte der Concierge sie wie neue Servermitglieder behandeln. Bei gesperrten DMs entstand dann ein privater Fallback-Kanal.
+
+**Was wurde geändert:** Der Bot wertet Discord-Onboarding jetzt nur noch als Auslöser, wenn das Onboarding-Flag wirklich neu dazukommt. Reine Rollenänderungen zählen nicht mehr.
+
+**Wie es jetzt läuft:** Coaching- oder andere Rollen können bestehenden Mitgliedern gegeben werden, ohne dass der Concierge neu loslegt.
+
 ## #230 — Voice-Panel nutzt wieder das Lane-Erstellen-Bild
 
 **Ausgangslage:** Das neu erzeugte Voice-Panel zeigte im Bereich „Lane erstellen" wieder das Deadlock-Router-Bild, obwohl dort der Lane-Erstellen-Divider hingehört.
