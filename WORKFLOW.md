@@ -1,3 +1,27 @@
+# TempVoice Ein-Kategorie-Umbau (2026-07-07)
+
+## Fortschritt
+- Implementierungsworker gestartet auf Branch `feature/tempvoice-one-category`; Vorgabe aus Worker-Regeln: kein Commit/Push, Änderungen bleiben uncommitted.
+- Verbindliche Spec vollständig gelesen: `rust/docs/tempvoice-one-category-umbau.md`.
+- Erste Codepfade geprüft: Router-Ranked-Verify, Router-/Staging-Kategorie-Mapping, TempVoice-Namensbau, Adaptive-Sortierung, RankVoice-Score-Fenster, Panel-UI.
+- TDD rot bestätigt: neue Tests referenzieren noch fehlende Unified-Sortier-Typen, Bulk-Positions-Call und Router-Namensanker.
+- Umgesetzt: gemeinsame Zielkategorie für Router/Staging-Lanes, Ranked ohne Verify-Gate, Anker-Namensbau, ein gemeinsamer Adaptive-Sortierer mit Bulk-Positions-Call.
+- Umgesetzt: Ranked-Rang-Gate als Owner-only Panel-Button mit ephemerem Components-V2-Dialog, Toggle-Apply per Channel-PATCH, keine Disconnects.
+- Umgesetzt: Panel-UI ohne dauerhafte Minrank/Subrank-Selects, Ankündigungs-/Anleitungsmechanik mit `PLATZHALTER:`-Texten, LFG-Modusableitung für One-Category-Lanes.
+- Spec um Abschnitt `Implementierung` ergänzt.
+
+## Verifikation aktuell
+- Grün: `cargo fmt --all`.
+- Grün: `cargo fmt --all -- --check`.
+- Grün: `SQLX_OFFLINE=true rust/scripts/central_test_db.sh env SQLX_OFFLINE=true cargo test -p dl-voice -- --nocapture` (201 passed).
+- Grün: `SQLX_OFFLINE=true cargo build` im Rust-Workspace.
+- Grün: `SQLX_OFFLINE=true cargo clippy -p dl-voice --all-targets -- -D warnings`.
+- Grün: `git diff --check`.
+
+## Rest-Risiken
+- Bestehendes untracked `docs/scrims.html` ist fremd und bleibt unangetastet.
+- Finale Platzhalter-Texte müssen durch den Orchestrator ersetzt werden.
+
 # Moderation-Retention 90d (2026-07-07)
 
 ## Fortschritt

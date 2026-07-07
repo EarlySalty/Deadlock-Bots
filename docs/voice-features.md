@@ -4,10 +4,10 @@
 Diese Doku fasst die Voice-Funktionen zusammen, die du direkt im Server merkst: TempVoice-Lanes, den Router-Kanal, automatische Lane-Verteilung, Rang- und Statuslogik, Voice-Statistiken und die Steam-Link-Erinnerung per DM. Ziel ist, dass du schneller in passende Runden kommst und deine Lane ohne Moderation selbst steuern kannst.
 
 ## Wie nutze ich das?
-- **TempVoice:** Betritt einen `(+)`-Staging-Channel in Chill, Ranked oder Street Brawl. Deine Lane wird automatisch erstellt (Chill 8, Ranked 6, Street Brawl 4 Plätze) und verschwindet wieder, wenn alle raus sind.
+- **TempVoice:** Betritt einen `(+)`-Staging-Channel für Chill, Ranked oder Street Brawl. Deine Lane wird automatisch erstellt (Chill 8, Ranked 6, Street Brawl 4 Plätze) und verschwindet wieder, wenn alle raus sind. **Alle Lanes landen in einer gemeinsamen Kategorie** — oben Ranked (nach Rang aufsteigend sortiert), darunter Casual, unten Street Brawl. Der Name verrät den Inhalt: *Ranked Phantom 3*, *Chill Lane 2 · Oracle*, *Street Brawl 1*. Für Ranked ist keine Verifizierung mehr nötig.
 - **Router-Kanal:** Alternativ gibt es einen Router-Voice — dort landest du kurz und wählst per Panel `Casual`, `Ranked`, `Street Brawl` oder `Auto-Join`. Bei Auto-Join steckt dich der Bot bevorzugt in eine Lane mit Leuten, mit denen du öfter spielst, und mit 1–5 Mitgliedern.
 - **Lane steuern:** Öffne <#1439564934592729161>. Dort findest du je nach Lane-Typ: `🇩🇪 DE`, `🇪🇺 EU`, `Owner übernehmen`, `🎚️ Limit setzen`, `🎯 Mein Rang`, `👢 Kick`, `🚫 Ban`, `♻️ Unban`, `👻 Lurker`, `🛡️ Tag-Filter`, `Duo Call`, `Trio Call`, `Normale Lane` — und bei Nicht-Ranked-Lanes zusätzlich `Umbenennen` und `Modus wechseln`.
-- **Ranked-Lanes:** In Ranked setzt du den Mindest-Rang immer in zwei Schritten: erst `① Haupt-Rang`, dann `② Sub-Rang`. Zusätzlich kannst du `💾 Preset speichern` und `🗂 Preset laden`.
+- **Ranked-Lanes:** Der Owner kann per `🔓 Rang-Gate` die Lane exklusiv für verifizierte Ränge in einem Fenster machen (Dialog mit Mindestrang + Toleranz, Standard: eigener Rang ±1,5 Ränge). Erst dann erscheint ein 🔒 für alle außerhalb des Fensters; niemand wird entfernt, das Gate wirkt nur auf neue Joins, nochmal drücken schaltet es aus. Zusätzlich kannst du `💾 Preset speichern` und `🗂 Preset laden`.
 - **Lane-Routing:** Neue oder niedrige Ränge landen bevorzugt in `🆕Neue Spieler Lane`. Dort erweitert der Bot die Zahl der Lanes automatisch, sobald eine Lane voll wird. `🗨️Off Topic Voice` erweitert sich ebenfalls automatisch, wenn genug Leute drin sind.
 - **Street Brawl:** Nutze die Street-Brawl-Staging-Lane, wenn du genau diesen Modus willst. Diese Lanes sind fest auf 4 Plätze gedeckelt.
 - **Voice-Status & Rank Voice Manager:** Verknüpfe Steam und sitze in einer Ranked/Comp-Lane. Der Bot ergänzt dann automatisch den Kanalstatus wie Lobby oder Match-Minuten und richtet Rangfenster bzw. Kanalnamen an der relevanten Gruppe aus.
@@ -24,7 +24,7 @@ TempVoice speichert Owner, Presets, Bans, Lurker-Status und Tag-Filter serversei
 ## Grenzen & häufige Fragen
 - TempVoice-Buttons wirken nur, wenn du gerade selbst in einer passenden Lane sitzt. Kick, Ban und Tag-Filter sind Owner-/Mod-Funktionen.
 - `Owner übernehmen` ist für den Fall gedacht, dass der ursprüngliche Owner weg ist — dann dürfen bevorzugt die aktivsten Mitglieder der Lane übernehmen, nach 20 Minuten jeder in der Lane. Die Rang-Basis einer Lane bleibt intern trotzdem stabil.
-- Mindest-Rang gibt es nur in Ranked/Comp. Du musst dafür verifiziert sein und kannst keinen höheren Rang setzen als deinen eigenen. Der Mindest-Rang wirkt als echte Zutritts-Beschränkung und steht als Suffix im Kanalnamen.
+- Das Rang-Gate gibt es nur in Ranked-Lanes und nur für den Owner. Aktiv wirkt es als echte Zutritts-Beschränkung über verifizierte Rang-Rollen; wer beim Aktivieren schon drin ist, bleibt drin. Ranked-Lanes erstellen und joinen geht ohne Verifizierung, solange kein Gate aktiv ist.
 - Beim Tag-Filter werden Mindestalter und `Ragebaiter-Free` durchgesetzt; die Ton-Präferenz (`Banter-OK`) ist eine Info und sperrt niemanden aus.
 - Street-Brawl-Lanes ignorieren Rang-Caps und Mindest-Rang, haben aber immer maximal 4 Slots.
 - Neue-Spieler-Routing greift nur für niedrige Ränge bzw. passende unverifizierte Einsteiger-Rollen.

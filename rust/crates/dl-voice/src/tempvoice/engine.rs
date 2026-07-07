@@ -19,6 +19,9 @@ use super::store::{DefaultPresetRecord, LaneRecord, TempVoiceStore};
 pub const PURGE_INTERVAL_SECONDS: u64 = 180;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
 pub const MIN_RANK_DISABLED_REPLY: &str = "Mindest-Rang ist hier deaktiviert.";
+pub const TEMPVOICE_ONE_CATEGORY_ID: u64 = 1289721245281292290;
+pub const LEGACY_RANKED_CATEGORY_ID: u64 = 1412804540994162789;
+pub const LEGACY_STREET_BRAWL_CATEGORY_ID: u64 = 1357422957017698478;
 
 fn router_lane_limit(mode: &str, preset: Option<&DefaultPresetRecord>) -> i64 {
     match (mode, preset.map(|preset| preset.limit)) {
@@ -26,6 +29,27 @@ fn router_lane_limit(mode: &str, preset: Option<&DefaultPresetRecord>) -> i64 {
         ("street_brawl", None) => 4,
         (_, Some(limit)) => limit.clamp(0, 99),
         _ => 6,
+    }
+}
+
+fn rank_label(rank: &str, subrank: i64) -> Option<String> {
+    if rank == "unknown" || logic::rank_index(rank) == 0 {
+        return None;
+    }
+    let label = logic::capitalize(rank);
+    if (1..=6).contains(&subrank) {
+        Some(format!("{label} {subrank}"))
+    } else {
+        Some(label)
+    }
+}
+
+fn mode_for_staging_id(staging_id: u64) -> Option<&'static str> {
+    match staging_id {
+        1501089974093873232 => Some("casual"),
+        1412804671432818890 => Some("ranked"),
+        1357422958544420944 => Some("street_brawl"),
+        _ => None,
     }
 }
 
@@ -96,6 +120,14 @@ pub trait LanePort: Send + Sync {
         guild_id: u64,
         channel_id: u64,
         allowed_role_ids: &HashSet<u64>,
+        clear_role_ids: &HashSet<u64>,
+    ) -> Result<(), String>;
+    async fn apply_role_connect_overwrites(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        allowed_role_ids: &HashSet<u64>,
+        denied_role_ids: &HashSet<u64>,
         clear_role_ids: &HashSet<u64>,
     ) -> Result<(), String>;
     async fn set_user_limit(&self, channel_id: u64, limit: i64, reason: &str)
@@ -181,9 +213,9 @@ impl TempVoiceConfig {
         let staging_casual = 1501089974093873232;
         let staging_street_brawl = 1357422958544420944;
         let staging_comp = 1412804671432818890;
-        let category_chill = 1289721245281292290;
-        let category_comp = 1412804540994162789;
-        let category_street_brawl = 1357422957017698478;
+        let category_chill = TEMPVOICE_ONE_CATEGORY_ID;
+        let category_comp = LEGACY_RANKED_CATEGORY_ID;
+        let category_street_brawl = LEGACY_STREET_BRAWL_CATEGORY_ID;
 
         let mut staging_rules = HashMap::new();
         staging_rules.insert(
@@ -239,6 +271,14 @@ impl TempVoiceConfig {
             logic::DEFAULT_RANKED_CAP
         } else {
             logic::DEFAULT_CASUAL_CAP
+        }
+    }
+
+    fn target_category_for_staging(&self, staging_id: u64) -> Option<u64> {
+        if self.staging_channels.contains(&staging_id) {
+            Some(TEMPVOICE_ONE_CATEGORY_ID)
+        } else {
+            None
         }
     }
 }
@@ -397,6 +437,41 @@ impl TempVoiceEngine {
             .await
             .minrank_blocked
             .contains(&channel_id)
+    }
+
+    pub async fn owner_rank_anchor(&self, guild_id: u64, user_id: u64) -> Option<String> {
+        if let Ok((rank, subrank)) = self.store.rank_pref(user_id).await {
+            if let Some(label) = rank_label(&rank, subrank) {
+                return Some(label);
+            }
+        }
+        let roles = self.port.member_role_names(guild_id, user_id).await;
+        logic::rank_prefix_for(&roles)
+    }
+
+    async fn tempvoice_mode_name(&self, guild_id: u64, user_id: u64, mode: &str) -> String {
+        let existing = self
+            .port
+            .category_voice_channel_names(guild_id, TEMPVOICE_ONE_CATEGORY_ID)
+            .await;
+        match mode {
+            "ranked" => {
+                let prefix = self
+                    .owner_rank_anchor(guild_id, user_id)
+                    .await
+                    .map(|rank| format!("Ranked {rank}"))
+                    .unwrap_or_else(|| "Ranked".to_string());
+                logic::next_name(&existing, &prefix)
+            }
+            "street_brawl" => logic::next_name(&existing, "Street Brawl"),
+            _ => {
+                let name = logic::next_name(&existing, "Chill Lane");
+                match self.owner_rank_anchor(guild_id, user_id).await {
+                    Some(rank) => format!("{name} · {rank}"),
+                    None => name,
+                }
+            }
+        }
     }
 
     /// Lanes aus der DB rehydrieren (Bot-Neustart).
@@ -781,34 +856,16 @@ impl TempVoiceEngine {
         ) {
             return Ok(None);
         }
-        let category_id = match mode {
-            "ranked" => 1412804540994162789,
-            "street_brawl" => 1357422957017698478,
-            _ => 1289721245281292290,
-        };
+        let category_id = TEMPVOICE_ONE_CATEGORY_ID;
         let default_preset = self.store.get_default_preset(user_id).await.ok().flatten();
         let matching_default = default_preset
             .as_ref()
             .filter(|preset| preset.mode == mode)
             .cloned();
-        let base = if let Some(preset) = matching_default.as_ref() {
-            preset.base_name.clone()
-        } else if mode == "ranked" {
-            let roles = self.port.member_role_names(guild_id, user_id).await;
-            logic::rank_prefix_for(&roles).unwrap_or_else(|| "Ranked".to_string())
-        } else if mode == "street_brawl" {
-            "Street Brawl".to_string()
-        } else {
-            "Chill Lane".to_string()
-        };
-        let index = self
-            .port
-            .category_voice_channel_names(guild_id, category_id)
-            .await
-            .len()
-            + 1;
-        let create_name = format!("{base} {index}");
+        let create_name = self.tempvoice_mode_name(guild_id, user_id, mode).await;
+        let base = create_name.clone();
         let cap = router_lane_limit(mode, matching_default.as_ref());
+        let source_staging_id = crate::router::router_mode(mode).map(|mode| mode.staging_id);
         let lane_id = self
             .port
             .create_voice_channel(guild_id, Some(category_id), &create_name, cap)
@@ -824,7 +881,7 @@ impl TempVoiceEngine {
                     min_rank: "unknown".to_string(),
                     category_id: Some(category_id),
                     prefix_from_rank: false,
-                    source_staging_id: Some(crate::router::ROUTER_VC_ID),
+                    source_staging_id,
                 },
             );
             state.join_time.entry(lane_id).or_default();
@@ -838,7 +895,7 @@ impl TempVoiceEngine {
                 initial_owner_id: Some(user_id),
                 base_name: base.clone(),
                 category_id,
-                source_staging_id: Some(crate::router::ROUTER_VC_ID),
+                source_staging_id,
             })
             .await
         {
@@ -893,51 +950,61 @@ impl TempVoiceEngine {
             return Ok(());
         }
         let rules = self.config.rules_for_staging(staging_id);
-        let category_id = self.port.channel_category(guild_id, staging_id).await;
+        let category_id = match self.config.target_category_for_staging(staging_id) {
+            Some(category_id) => Some(category_id),
+            None => self.port.channel_category(guild_id, staging_id).await,
+        };
+        let mode = mode_for_staging_id(staging_id);
         let in_minrank = category_id
             .map(|c| self.config.minrank_categories.contains(&c))
             .unwrap_or(false);
-        let use_rank_name = rules.prefix_from_rank || in_minrank;
+        let use_rank_name = mode.is_none() && (rules.prefix_from_rank || in_minrank);
 
-        // Basis-Name: Rang (Pref → Rollen) oder "Prefix N"
-        let base = if use_rank_name {
-            let (pref_rank, pref_sub) = self
-                .store
-                .rank_pref(user_id)
-                .await
-                .unwrap_or(("unknown".to_string(), 0));
-            if pref_rank != "unknown" && logic::rank_index(&pref_rank) > 0 {
-                if pref_sub > 0 {
-                    Some(format!("{} {}", logic::capitalize(&pref_rank), pref_sub))
+        let base = if let Some(mode) = mode {
+            self.tempvoice_mode_name(guild_id, user_id, mode).await
+        } else {
+            // Basis-Name: Rang (Pref → Rollen) oder "Prefix N"
+            let rank_base = if use_rank_name {
+                let (pref_rank, pref_sub) = self
+                    .store
+                    .rank_pref(user_id)
+                    .await
+                    .unwrap_or(("unknown".to_string(), 0));
+                if pref_rank != "unknown" && logic::rank_index(&pref_rank) > 0 {
+                    if pref_sub > 0 {
+                        Some(format!("{} {}", logic::capitalize(&pref_rank), pref_sub))
+                    } else {
+                        Some(logic::capitalize(&pref_rank))
+                    }
                 } else {
-                    Some(logic::capitalize(&pref_rank))
+                    let roles = self.port.member_role_names(guild_id, user_id).await;
+                    logic::rank_prefix_for(&roles)
                 }
             } else {
-                let roles = self.port.member_role_names(guild_id, user_id).await;
-                logic::rank_prefix_for(&roles)
-            }
-        } else {
-            None
-        };
-        let base = match base {
-            Some(base) => base,
-            None => {
-                let prefix = rules.prefix.clone().unwrap_or_else(|| "Lane".to_string());
-                let existing = match category_id {
-                    Some(category) => {
-                        self.port
-                            .category_voice_channel_names(guild_id, category)
-                            .await
-                    }
-                    None => Vec::new(),
-                };
-                logic::next_name(&existing, &prefix)
+                None
+            };
+            match rank_base {
+                Some(base) => base,
+                None => {
+                    let prefix = rules.prefix.clone().unwrap_or_else(|| "Lane".to_string());
+                    let existing = match category_id {
+                        Some(category) => {
+                            self.port
+                                .category_voice_channel_names(guild_id, category)
+                                .await
+                        }
+                        None => Vec::new(),
+                    };
+                    logic::next_name(&existing, &prefix)
+                }
             }
         };
 
-        let cap = rules
-            .user_limit
-            .unwrap_or_else(|| self.config.default_cap(category_id));
+        let cap = rules.user_limit.unwrap_or_else(|| match mode {
+            Some("ranked") => logic::DEFAULT_RANKED_CAP,
+            Some("street_brawl") => 4,
+            _ => self.config.default_cap(category_id),
+        });
         let lane_id = self
             .port
             .create_voice_channel(guild_id, category_id, &base, cap)
@@ -945,7 +1012,8 @@ impl TempVoiceEngine {
 
         {
             let mut state = self.state.lock().await;
-            if rules.disable_min_rank {
+            let disable_min_rank = rules.disable_min_rank || mode == Some("street_brawl");
+            if disable_min_rank {
                 state.minrank_blocked.insert(lane_id);
             }
             state.lanes.insert(
@@ -956,7 +1024,7 @@ impl TempVoiceEngine {
                     base_name: base.clone(),
                     min_rank: "unknown".to_string(),
                     category_id,
-                    prefix_from_rank: rules.prefix_from_rank,
+                    prefix_from_rank: mode.is_none() && rules.prefix_from_rank,
                     source_staging_id: Some(staging_id),
                 },
             );
@@ -1142,6 +1210,18 @@ impl TempVoiceEngine {
             .lanes
             .get(&channel_id)
             .map(|lane| (lane.base_name.clone(), lane.category_id.unwrap_or(0)))
+    }
+
+    pub async fn lane_is_ranked(&self, channel_id: u64) -> bool {
+        let state = self.state.lock().await;
+        let Some(lane) = state.lanes.get(&channel_id) else {
+            return false;
+        };
+        if let Some(source_staging_id) = lane.source_staging_id {
+            return mode_for_staging_id(source_staging_id) == Some("ranked");
+        }
+        let lower = lane.base_name.trim().to_ascii_lowercase();
+        lower == "ranked" || lower.starts_with("ranked ")
     }
 
     pub async fn lane_preset_snapshot(&self, channel_id: u64) -> Option<(String, u64, String)> {
@@ -1609,6 +1689,91 @@ impl TempVoiceEngine {
         Ok(())
     }
 
+    pub async fn rank_gate_active(&self, channel_id: u64) -> bool {
+        crate::rank::RankStore {
+            pool: self.store.pool.clone(),
+        }
+        .load_anchors()
+        .await
+        .contains_key(&channel_id)
+    }
+
+    pub async fn apply_rank_gate(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        owner_id: u64,
+        rank: &str,
+        subrank: i64,
+        tolerance: i64,
+    ) -> Result<(), String> {
+        let rank = rank.trim().to_lowercase();
+        let rank_value = logic::rank_index(&rank) as i64;
+        if rank_value == 0 {
+            return Err(format!("Unbekannter Rang: {rank}"));
+        }
+        let subrank = subrank.clamp(1, 6);
+        let tolerance = tolerance.clamp(0, 24);
+        let (score_min, score_max, allowed_min, allowed_max) =
+            crate::rank::anchor_range_with_tolerance(rank_value, subrank, tolerance);
+        let guild_roles = self.port.guild_role_names(guild_id).await;
+        let allowed = crate::rank::allowed_subrank_roles(&guild_roles, score_min, score_max);
+        let mut rank_roles: HashSet<u64> = guild_roles
+            .iter()
+            .filter_map(|(role_id, name)| (logic::rank_score(name) > 0).then_some(*role_id))
+            .collect();
+        rank_roles.extend(crate::rank::major_rank_roles().keys().copied());
+        let clear: HashSet<u64> = rank_roles.difference(&allowed).copied().collect();
+        let denied = HashSet::from([guild_id]);
+        self.port
+            .apply_role_connect_overwrites(guild_id, channel_id, &allowed, &denied, &clear)
+            .await?;
+        crate::rank::RankStore {
+            pool: self.store.pool.clone(),
+        }
+        .upsert_anchor(
+            channel_id,
+            guild_id,
+            crate::rank::Anchor {
+                user_id: owner_id,
+                rank_name: logic::capitalize(&rank),
+                rank_value,
+                allowed_min,
+                allowed_max,
+                subrank,
+                score_min,
+                score_max,
+            },
+        )
+        .await;
+        Ok(())
+    }
+
+    pub async fn clear_rank_gate(&self, guild_id: u64, channel_id: u64) -> Result<(), String> {
+        let guild_roles = self.port.guild_role_names(guild_id).await;
+        let mut clear: HashSet<u64> = guild_roles
+            .iter()
+            .filter_map(|(role_id, name)| (logic::rank_score(name) > 0).then_some(*role_id))
+            .collect();
+        clear.extend(crate::rank::major_rank_roles().keys().copied());
+        clear.insert(guild_id);
+        self.port
+            .apply_role_connect_overwrites(
+                guild_id,
+                channel_id,
+                &HashSet::new(),
+                &HashSet::new(),
+                &clear,
+            )
+            .await?;
+        crate::rank::RankStore {
+            pool: self.store.pool.clone(),
+        }
+        .delete_anchor(channel_id)
+        .await;
+        Ok(())
+    }
+
     /// Lane in einen anderen Modus umziehen (wie `switch_lane_mode`).
     /// Rückgabe: Fehlertext oder None bei Erfolg.
     pub async fn switch_lane_mode(
@@ -1619,21 +1784,10 @@ impl TempVoiceEngine {
         new_mode: &str,
     ) -> Option<String> {
         let category_id = match new_mode {
-            "ranked" => 1412804540994162789,
-            "casual" => 1289721245281292290,
-            "street_brawl" => 1357422957017698478,
+            "ranked" | "casual" | "street_brawl" => TEMPVOICE_ONE_CATEGORY_ID,
             "off_topic" => 1513468298728308757,
             _ => return Some("Unbekannter Modus.".to_string()),
         };
-        if new_mode == "ranked" {
-            let roles = self.port.member_role_names(guild_id, owner_id).await;
-            if logic::member_rank_index(&roles) == 0 {
-                return Some(
-                    "Ranked braucht einen verifizierten Rang. Info: <#1474827277610254570>"
-                        .to_string(),
-                );
-            }
-        }
         if let Err(err) = self
             .port
             .set_channel_category(
@@ -1645,15 +1799,37 @@ impl TempVoiceEngine {
         {
             return Some(format!("Fehler beim Verschieben: {err}"));
         }
-        let rules = self.apply_category_source(channel_id, category_id).await;
-        let desired_limit = rules
-            .user_limit
-            .unwrap_or_else(|| self.config.default_cap(Some(category_id)));
+        if matches!(new_mode, "ranked" | "casual" | "street_brawl") {
+            let source_staging_id =
+                crate::router::router_mode(new_mode).map(|mode| mode.staging_id);
+            let mut state = self.state.lock().await;
+            if let Some(lane) = state.lanes.get_mut(&channel_id) {
+                lane.category_id = Some(category_id);
+                lane.prefix_from_rank = false;
+                lane.source_staging_id = source_staging_id;
+                lane.min_rank = "unknown".to_string();
+            }
+            if new_mode == "street_brawl" {
+                state.minrank_blocked.insert(channel_id);
+            } else {
+                state.minrank_blocked.remove(&channel_id);
+            }
+            drop(state);
+            let _ = self
+                .store
+                .set_lane_category_source(channel_id, category_id, source_staging_id)
+                .await;
+        } else {
+            self.apply_category_source(channel_id, category_id).await;
+        }
+        let desired_limit = match new_mode {
+            "street_brawl" => 4,
+            "ranked" => logic::DEFAULT_RANKED_CAP,
+            _ => self.config.default_cap(Some(category_id)),
+        };
         let _ = self.set_limit(channel_id, desired_limit).await;
-        // Name: Ranked → Rang des Owners, sonst gespeicherter Basisname
-        let new_name = if new_mode == "ranked" {
-            let roles = self.port.member_role_names(guild_id, owner_id).await;
-            logic::rank_prefix_for(&roles).unwrap_or_else(|| "Ranked Lane".to_string())
+        let new_name = if matches!(new_mode, "ranked" | "casual" | "street_brawl") {
+            self.tempvoice_mode_name(guild_id, owner_id, new_mode).await
         } else {
             let snapshot = self.lane_snapshot(channel_id).await;
             snapshot
@@ -1895,8 +2071,12 @@ mod tests {
         renamed: StdMutex<Vec<(u64, String)>>,
         overwrites: StdMutex<Vec<(u64, u64, Option<bool>)>>,
         role_batches: StdMutex<Vec<RoleBatch>>,
+        role_overwrite_batches: StdMutex<Vec<RoleOverwriteBatch>>,
         member_batches: StdMutex<Vec<MemberBatch>>,
         limits: StdMutex<Vec<(u64, i64)>>,
+        role_names: StdMutex<Vec<String>>,
+        guild_roles: StdMutex<Vec<(u64, String)>>,
+        disconnects: StdMutex<Vec<u64>>,
         next_channel_id: StdMutex<u64>,
     }
 
@@ -1911,6 +2091,14 @@ mod tests {
     #[derive(Debug, Clone, PartialEq, Eq)]
     struct MemberBatch {
         channel_id: u64,
+        denied: HashSet<u64>,
+        cleared: HashSet<u64>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct RoleOverwriteBatch {
+        channel_id: u64,
+        allowed: HashSet<u64>,
         denied: HashSet<u64>,
         cleared: HashSet<u64>,
     }
@@ -2042,6 +2230,25 @@ mod tests {
             });
             Ok(())
         }
+        async fn apply_role_connect_overwrites(
+            &self,
+            _guild_id: u64,
+            channel_id: u64,
+            allowed_role_ids: &HashSet<u64>,
+            denied_role_ids: &HashSet<u64>,
+            clear_role_ids: &HashSet<u64>,
+        ) -> Result<(), String> {
+            self.role_overwrite_batches
+                .lock()
+                .expect("lock")
+                .push(RoleOverwriteBatch {
+                    channel_id,
+                    allowed: allowed_role_ids.clone(),
+                    denied: denied_role_ids.clone(),
+                    cleared: clear_role_ids.clone(),
+                });
+            Ok(())
+        }
         async fn set_user_limit(
             &self,
             channel_id: u64,
@@ -2054,9 +2261,10 @@ mod tests {
         async fn disconnect_member(
             &self,
             _guild_id: u64,
-            _user_id: u64,
+            user_id: u64,
             _reason: &str,
         ) -> Result<(), String> {
+            self.disconnects.lock().expect("lock").push(user_id);
             Ok(())
         }
         async fn member_display_name(&self, _guild_id: u64, user_id: u64) -> Option<String> {
@@ -2096,12 +2304,7 @@ mod tests {
             Some(6)
         }
         async fn guild_role_names(&self, _guild_id: u64) -> Vec<(u64, String)> {
-            vec![
-                (1, "Phantom".to_string()),
-                (2, "Seeker".to_string()),
-                (3, "Ascendant".to_string()),
-                (4, "Eternus".to_string()),
-            ]
+            self.guild_roles.lock().expect("lock").clone()
         }
         async fn set_channel_category(
             &self,
@@ -2123,7 +2326,12 @@ mod tests {
                 .copied()
         }
         async fn member_role_names(&self, _guild_id: u64, _user_id: u64) -> Vec<String> {
-            vec!["Phantom 2".to_string()]
+            let roles = self.role_names.lock().expect("lock").clone();
+            if roles.is_empty() {
+                Vec::new()
+            } else {
+                roles
+            }
         }
         async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
             vec![VERIFIED_ROLE_ID]
@@ -2195,6 +2403,13 @@ mod tests {
         let config = TempVoiceConfig::production();
         let staging = CASUAL_STAGING; // casual (prefix_from_rank)
         let port = Arc::new(MockPort::default());
+        *port.role_names.lock().expect("lock") = vec!["Phantom 2".to_string()];
+        *port.guild_roles.lock().expect("lock") = vec![
+            (1, "Phantom".to_string()),
+            (2, "Seeker".to_string()),
+            (3, "Ascendant".to_string()),
+            (4, "Eternus".to_string()),
+        ];
         // Staging liegt in der Chill-Kategorie
         port.categories
             .lock()
@@ -2218,10 +2433,10 @@ mod tests {
             })
             .await;
 
-        // prefix_from_rank: Rollen liefern "Phantom 2" → Lane heißt "Phantom"
+        // Rollen liefern "Phantom 2" → Casual zeigt den Rang informativ am Ende.
         let created = port.created.lock().expect("lock").clone();
         assert_eq!(created.len(), 1);
-        assert_eq!(created[0].0, "Phantom");
+        assert_eq!(created[0].0, "Chill Lane 1 · Phantom");
         assert_eq!(created[0].1, logic::DEFAULT_CASUAL_CAP);
         let moved = port.moved.lock().expect("lock").clone();
         assert_eq!(moved.len(), 1);
@@ -2266,8 +2481,11 @@ mod tests {
         );
 
         let lanes = engine.store.all_lanes().await.expect("lanes");
-        assert_eq!(lanes[0].category_id, RANKED_CATEGORY);
-        assert_eq!(lanes[0].source_staging_id, None);
+        assert_eq!(lanes[0].category_id, CASUAL_CATEGORY);
+        assert_eq!(
+            lanes[0].source_staging_id,
+            Some(crate::router::mode_to_staging("ranked"))
+        );
         assert!(!engine.is_min_rank_blocked(lane_id).await);
         assert_eq!(
             port.limits.lock().expect("lock").last().copied(),
@@ -2384,6 +2602,44 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn rank_gate_toggle_setzt_und_entfernt_overwrites_ohne_disconnect() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        *port.guild_roles.lock().expect("lock") = vec![
+            (10, "Ritualist 6".to_string()),
+            (11, "Emissary 1".to_string()),
+            (12, "Oracle 6".to_string()),
+            (13, "Phantom 1".to_string()),
+        ];
+
+        engine
+            .apply_rank_gate(1, lane_id, 100, "archon", 3, 9)
+            .await
+            .expect("gate on");
+        assert!(engine.rank_gate_active(lane_id).await);
+
+        let batches = port.role_overwrite_batches.lock().expect("lock").clone();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].channel_id, lane_id);
+        assert_eq!(batches[0].denied, HashSet::from([1]));
+        assert_eq!(batches[0].allowed, HashSet::from([10, 11, 12]));
+        assert!(batches[0].cleared.contains(&13));
+        assert!(port.disconnects.lock().expect("lock").is_empty());
+
+        engine.clear_rank_gate(1, lane_id).await.expect("gate off");
+        assert!(!engine.rank_gate_active(lane_id).await);
+
+        let batches = port.role_overwrite_batches.lock().expect("lock").clone();
+        assert_eq!(batches.len(), 2);
+        assert!(batches[1].allowed.is_empty());
+        assert!(batches[1].denied.is_empty());
+        assert!(batches[1].cleared.contains(&1));
+        assert!(batches[1].cleared.contains(&10));
+        assert!(batches[1].cleared.contains(&13));
+        assert!(port.disconnects.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
     async fn rank_pref_schlaegt_rollen() {
         let (_dir, engine, port, staging) = setup().await;
         engine
@@ -2400,7 +2656,7 @@ mod tests {
             })
             .await;
         let created = port.created.lock().expect("lock").clone();
-        assert_eq!(created[0].0, "Ascendant 3");
+        assert_eq!(created[0].0, "Chill Lane 1 · Ascendant 3");
     }
 
     #[tokio::test]
@@ -2522,5 +2778,84 @@ mod tests {
                 cleared: HashSet::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn router_lane_namen_nutzen_pref_vor_rolle_vor_leer() {
+        let router_vc = 777;
+
+        let (_db, engine, port, _staging) = setup().await;
+        engine
+            .store
+            .set_rank_pref(100, "ascendant", 3)
+            .await
+            .expect("pref");
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+        let ranked = engine
+            .create_router_lane(1, 100, "ranked", router_vc)
+            .await
+            .expect("ranked lane");
+        assert_eq!(
+            port.created.lock().expect("lock")[0].0,
+            "Ranked Ascendant 3 1"
+        );
+        assert_eq!(
+            port.categories.lock().expect("lock").get(&ranked).copied(),
+            Some(CASUAL_CATEGORY)
+        );
+        let lanes = engine.store.all_lanes().await.expect("lanes");
+        assert_eq!(
+            lanes[0].source_staging_id,
+            Some(crate::router::mode_to_staging("ranked"))
+        );
+        engine.set_base_name(ranked, "Custom Name").await;
+        assert!(engine.lane_is_ranked(ranked).await);
+
+        let (_db, engine, port, _staging) = setup().await;
+        engine
+            .store
+            .set_rank_pref(100, "ascendant", 3)
+            .await
+            .expect("pref");
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+        engine
+            .create_router_lane(1, 100, "casual", router_vc)
+            .await
+            .expect("casual lane");
+        assert_eq!(
+            port.created.lock().expect("lock")[0].0,
+            "Chill Lane 1 · Ascendant 3"
+        );
+
+        let (_db, engine, port, _staging) = setup().await;
+        engine
+            .store
+            .set_rank_pref(100, "ascendant", 3)
+            .await
+            .expect("pref");
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+        engine
+            .create_router_lane(1, 100, "street_brawl", router_vc)
+            .await
+            .expect("street lane");
+        assert_eq!(port.created.lock().expect("lock")[0].0, "Street Brawl 1");
+
+        let (_db, engine, port, _staging) = setup().await;
+        *port.role_names.lock().expect("lock") = vec!["Phantom 2".to_string()];
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+        engine
+            .create_router_lane(1, 100, "ranked", router_vc)
+            .await
+            .expect("ranked lane");
+        assert_eq!(port.created.lock().expect("lock")[0].0, "Ranked Phantom 1");
+
+        let (_db, engine, port, _staging) = setup().await;
+        *port.role_names.lock().expect("lock") = Vec::new();
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+        engine
+            .create_router_lane(1, 100, "casual", router_vc)
+            .await
+            .expect("casual lane");
+        assert_eq!(port.created.lock().expect("lock")[0].0, "Chill Lane 1");
     }
 }

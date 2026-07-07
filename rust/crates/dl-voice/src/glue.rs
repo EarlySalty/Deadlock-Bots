@@ -565,6 +565,47 @@ impl LanePort for CacheSnapshot {
             .map_err(|e| e.to_string())
     }
 
+    async fn apply_role_connect_overwrites(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        allowed_role_ids: &std::collections::HashSet<u64>,
+        denied_role_ids: &std::collections::HashSet<u64>,
+        clear_role_ids: &std::collections::HashSet<u64>,
+    ) -> Result<(), String> {
+        if allowed_role_ids.is_empty() && denied_role_ids.is_empty() && clear_role_ids.is_empty() {
+            return Ok(());
+        }
+        let mut changes = HashMap::new();
+        for role_id in clear_role_ids {
+            changes.insert(*role_id, None);
+        }
+        for role_id in denied_role_ids {
+            changes.insert(*role_id, Some(false));
+        }
+        for role_id in allowed_role_ids {
+            changes.insert(*role_id, Some(true));
+        }
+        let member_changes = HashMap::new();
+        let overwrites = build_connect_batch_payload(
+            &self.adapter,
+            Some(guild_id),
+            channel_id,
+            &changes,
+            &member_changes,
+        )?;
+        self.adapter
+            .http
+            .edit_channel(
+                ChannelId::new(channel_id),
+                &json!({ "permission_overwrites": overwrites }),
+                Some("TempVoice: Rang-Gate-Batch"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
     async fn set_user_limit(
         &self,
         channel_id: u64,
@@ -2043,6 +2084,25 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
             )
             .await
             .map(|_| ())
+            .map_err(|e| e.to_string())
+    }
+
+    async fn set_channel_positions(
+        &self,
+        guild_id: u64,
+        positions: &[(u64, i64)],
+    ) -> Result<(), String> {
+        let channels = positions
+            .iter()
+            .map(|(channel_id, position)| {
+                u64::try_from(*position)
+                    .map(|position| (ChannelId::new(*channel_id), position))
+                    .map_err(|_| format!("ungueltige Channel-Position: {position}"))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        GuildId::new(guild_id)
+            .reorder_channels(&self.adapter.http, channels)
+            .await
             .map_err(|e| e.to_string())
     }
 }

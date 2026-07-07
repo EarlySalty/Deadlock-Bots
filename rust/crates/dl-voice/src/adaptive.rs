@@ -243,6 +243,94 @@ pub fn plan_lane_reorder(entries: &[SortSnapshot]) -> Vec<(u64, i64)> {
         .collect()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaneSortBlock {
+    Ranked,
+    Casual,
+    StreetBrawl,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedSortSnapshot {
+    pub lane_id: u64,
+    pub current_position: i64,
+    pub block: LaneSortBlock,
+    pub rank_index: usize,
+    pub subrank: i64,
+    pub stable_order: usize,
+}
+
+fn block_order(block: LaneSortBlock) -> usize {
+    match block {
+        LaneSortBlock::Ranked => 0,
+        LaneSortBlock::Casual => 1,
+        LaneSortBlock::StreetBrawl => 2,
+    }
+}
+
+pub fn plan_unified_category_reorder(entries: &[UnifiedSortSnapshot]) -> Vec<(u64, i64)> {
+    if entries.len() <= 1 {
+        return Vec::new();
+    }
+    let mut slot_positions: Vec<i64> = entries.iter().map(|entry| entry.current_position).collect();
+    slot_positions.sort_unstable();
+    let mut ordered: Vec<&UnifiedSortSnapshot> = entries.iter().collect();
+    ordered.sort_by_key(|entry| {
+        let rank_index = if entry.block == LaneSortBlock::Ranked && entry.rank_index == 0 {
+            usize::MAX
+        } else {
+            entry.rank_index
+        };
+        (
+            block_order(entry.block),
+            rank_index,
+            entry.subrank,
+            entry.stable_order,
+            entry.lane_id,
+        )
+    });
+    ordered
+        .iter()
+        .zip(slot_positions)
+        .filter(|(entry, target)| entry.current_position != *target)
+        .map(|(entry, target)| (entry.lane_id, target))
+        .collect()
+}
+
+fn sort_snapshot_from_name(
+    lane_id: u64,
+    name: &str,
+    current_position: i64,
+    stable_order: usize,
+) -> Option<UnifiedSortSnapshot> {
+    let lower = name.trim().to_lowercase();
+    let (block, rank_label) = if lower == "ranked" || lower.starts_with("ranked ") {
+        (
+            LaneSortBlock::Ranked,
+            lower.strip_prefix("ranked").unwrap_or("").trim(),
+        )
+    } else if lower == "street brawl" || lower.starts_with("street brawl ") {
+        (LaneSortBlock::StreetBrawl, "")
+    } else if lower == "chill lane" || lower.starts_with("chill lane ") {
+        (LaneSortBlock::Casual, "")
+    } else {
+        return None;
+    };
+    let (rank_index, subrank) = if block == LaneSortBlock::Ranked {
+        parse_rank_label(rank_label)
+    } else {
+        (0, 0)
+    };
+    Some(UnifiedSortSnapshot {
+        lane_id,
+        current_position,
+        block,
+        rank_index,
+        subrank,
+        stable_order,
+    })
+}
+
 // ── Engine ─────────────────────────────────────────────────────────────────
 
 /// Discord-Seite (Tests mocken sie).
@@ -267,12 +355,16 @@ pub trait AdaptivePort: Send + Sync {
         name: &str,
     ) -> Result<u64, String>;
     async fn set_channel_position(&self, channel_id: u64, position: i64) -> Result<(), String>;
+    async fn set_channel_positions(
+        &self,
+        guild_id: u64,
+        positions: &[(u64, i64)],
+    ) -> Result<(), String>;
 }
 
 pub struct AdaptiveLanes {
     pub port: Arc<dyn AdaptivePort>,
     routed_at: tokio::sync::Mutex<HashMap<u64, i64>>,
-    tempvoice: tokio::sync::RwLock<Option<Arc<TempVoiceEngine>>>,
 }
 
 impl AdaptiveLanes {
@@ -280,12 +372,11 @@ impl AdaptiveLanes {
         Arc::new(Self {
             port,
             routed_at: tokio::sync::Mutex::new(HashMap::new()),
-            tempvoice: tokio::sync::RwLock::new(None),
         })
     }
 
-    pub async fn set_tempvoice(&self, engine: Arc<TempVoiceEngine>) {
-        *self.tempvoice.write().await = Some(engine);
+    pub async fn set_tempvoice(&self, _engine: Arc<TempVoiceEngine>) {
+        // Sortierung liest den Rang seit dem Ein-Kategorie-Umbau aus dem Namen.
     }
 
     /// Anfänger beim Staging-Join umleiten (wie `maybe_route_new_player`):
@@ -452,81 +543,39 @@ impl AdaptiveLanes {
 
     /// Chill-Lanes nach Rang-Label sortieren (wie lane_sorting).
     pub async fn sort_chill_lanes(&self, guild_id: u64) {
+        self.sort_tempvoice_category(guild_id).await;
+    }
+
+    pub async fn sort_tempvoice_category(&self, guild_id: u64) {
         const SKIP_IDS: [u64; 3] = [CASUAL_STAGING_ID, PERMANENT_CHILL_ID, PINNED_CHILL_END_ID];
-        self.sort_ranked_category(guild_id, CHILL_CATEGORY_ID, &SKIP_IDS)
+        let channels = self
+            .port
+            .category_channels(guild_id, CHILL_CATEGORY_ID)
             .await;
+        let entries: Vec<_> = channels
+            .iter()
+            .enumerate()
+            .filter(|(_, (id, _, _, _))| !SKIP_IDS.contains(id) && *id != DUO_ANCHOR_CHANNEL_ID)
+            .filter_map(|(stable_order, (id, name, _, position))| {
+                sort_snapshot_from_name(*id, name, *position, stable_order)
+            })
+            .collect();
+        let plan = plan_unified_category_reorder(&entries);
+        if !plan.is_empty() {
+            tracing::info!(
+                tempvoice_lanes = entries.len(),
+                reorders = plan.len(),
+                category_id = CHILL_CATEGORY_ID,
+                "TempVoiceSort: ordne gemischte Kategorie neu"
+            );
+            if let Err(err) = self.port.set_channel_positions(guild_id, &plan).await {
+                tracing::warn!(%err, guild_id, "TempVoiceSort: Bulk-Positionen fehlgeschlagen");
+            }
+        }
     }
 
     pub async fn sort_comp_ranked_lanes(&self, guild_id: u64) {
-        self.sort_ranked_category(guild_id, COMP_RANKED_CATEGORY_ID, &[])
-            .await;
-    }
-
-    async fn sort_ranked_category(&self, guild_id: u64, category_id: u64, skip_ids: &[u64]) {
-        // NOTE(tempvoice-blocking-rework): deeper Python tie-break parity is deferred;
-        // current ordering depth has no known prod-risk for cutover.
-        let channels = self.port.category_channels(guild_id, category_id).await;
-        let mut entries = Vec::new();
-        for (stable_order, (id, name, _, position)) in channels.iter().enumerate() {
-            if skip_ids.contains(id) || *id == DUO_ANCHOR_CHANNEL_ID {
-                continue;
-            }
-            let (rank_index, subrank) = self.rank_sort_key(guild_id, *id, name).await;
-            if rank_index > 0 {
-                entries.push(SortSnapshot {
-                    lane_id: *id,
-                    current_position: *position,
-                    rank_index,
-                    subrank,
-                    stable_order,
-                });
-            }
-        }
-        let plan = plan_lane_reorder(&entries);
-        if !plan.is_empty() {
-            tracing::info!(
-                rang_lanes = entries.len(),
-                reorders = plan.len(),
-                category_id,
-                "RankSort: ordne Lanes nach Rang neu"
-            );
-        }
-        for (lane_id, target) in plan {
-            if let Err(err) = self.port.set_channel_position(lane_id, target).await {
-                tracing::warn!(%err, lane_id, target, "RankSort: Position setzen fehlgeschlagen");
-            }
-        }
-    }
-
-    async fn rank_sort_key(
-        &self,
-        guild_id: u64,
-        channel_id: u64,
-        fallback_name: &str,
-    ) -> (usize, i64) {
-        let Some(engine) = self.tempvoice.read().await.clone() else {
-            return parse_rank_label(fallback_name);
-        };
-        let Some(owner_id) = engine.lane_owner(channel_id).await else {
-            return parse_rank_label(fallback_name);
-        };
-        if let Ok((rank, subrank)) = engine.store.rank_pref(owner_id).await {
-            if rank != "unknown" {
-                return (logic::rank_index(&rank), subrank);
-            }
-        }
-        let roles = self.port.member_role_pairs(guild_id, owner_id).await;
-        let mut best = (0usize, 0i64);
-        for (_, role_name) in roles {
-            let candidate = parse_rank_label(&role_name);
-            if candidate.0 > best.0 || (candidate.0 == best.0 && candidate.1 > best.1) {
-                best = candidate;
-            }
-        }
-        if best.0 > 0 {
-            return best;
-        }
-        parse_rank_label(fallback_name)
+        let _ = guild_id;
     }
 }
 
@@ -634,6 +683,7 @@ mod tests {
         create_results: StdMutex<Vec<Result<u64, String>>>,
         create_calls: StdMutex<Vec<CreateCall>>,
         position_calls: StdMutex<Vec<(u64, i64)>>,
+        bulk_position_calls: StdMutex<Vec<Vec<(u64, i64)>>>,
         rename_calls: StdMutex<Vec<(u64, String)>>,
         delete_calls: StdMutex<Vec<u64>>,
     }
@@ -646,6 +696,7 @@ mod tests {
                 create_results: StdMutex::new(Vec::new()),
                 create_calls: StdMutex::new(Vec::new()),
                 position_calls: StdMutex::new(Vec::new()),
+                bulk_position_calls: StdMutex::new(Vec::new()),
                 rename_calls: StdMutex::new(Vec::new()),
                 delete_calls: StdMutex::new(Vec::new()),
             }
@@ -725,6 +776,18 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push((channel_id, position));
+            Ok(())
+        }
+
+        async fn set_channel_positions(
+            &self,
+            _guild_id: u64,
+            positions: &[(u64, i64)],
+        ) -> Result<(), String> {
+            self.bulk_position_calls
+                .lock()
+                .expect("lock")
+                .push(positions.to_vec());
             Ok(())
         }
     }
@@ -931,5 +994,83 @@ mod tests {
 
         assert_eq!(port.create_calls.lock().expect("lock").len(), 1);
         assert!(port.position_calls.lock().expect("lock").is_empty());
+    }
+
+    #[test]
+    fn tempvoice_one_category_sortiert_gemischte_bloecke_stabil() {
+        let entries = vec![
+            UnifiedSortSnapshot {
+                lane_id: 10,
+                current_position: 10,
+                block: LaneSortBlock::Casual,
+                rank_index: 0,
+                subrank: 0,
+                stable_order: 0,
+            },
+            UnifiedSortSnapshot {
+                lane_id: 11,
+                current_position: 11,
+                block: LaneSortBlock::StreetBrawl,
+                rank_index: 0,
+                subrank: 0,
+                stable_order: 1,
+            },
+            UnifiedSortSnapshot {
+                lane_id: 12,
+                current_position: 12,
+                block: LaneSortBlock::Ranked,
+                rank_index: 9,
+                subrank: 3,
+                stable_order: 2,
+            },
+            UnifiedSortSnapshot {
+                lane_id: 13,
+                current_position: 13,
+                block: LaneSortBlock::Ranked,
+                rank_index: 2,
+                subrank: 1,
+                stable_order: 3,
+            },
+            UnifiedSortSnapshot {
+                lane_id: 14,
+                current_position: 14,
+                block: LaneSortBlock::Ranked,
+                rank_index: 0,
+                subrank: 0,
+                stable_order: 4,
+            },
+            UnifiedSortSnapshot {
+                lane_id: 15,
+                current_position: 15,
+                block: LaneSortBlock::Casual,
+                rank_index: 0,
+                subrank: 0,
+                stable_order: 5,
+            },
+        ];
+
+        assert_eq!(
+            plan_unified_category_reorder(&entries),
+            vec![(13, 10), (12, 11), (14, 12), (10, 13), (15, 14), (11, 15)]
+        );
+    }
+
+    #[tokio::test]
+    async fn tempvoice_one_category_sortierung_nutzt_genau_einen_bulk_call() {
+        let port = Arc::new(MockAdaptivePort::new(vec![
+            (10, "Chill Lane 1".to_string(), 1, 10),
+            (11, "Street Brawl 1".to_string(), 1, 11),
+            (12, "Ranked Phantom 3 1".to_string(), 1, 12),
+            (13, "Ranked Seeker 1 1".to_string(), 1, 13),
+        ]));
+        let adaptive = AdaptiveLanes::new(port.clone());
+
+        adaptive.sort_tempvoice_category(MAIN_GUILD_ID).await;
+
+        assert!(port.position_calls.lock().expect("lock").is_empty());
+        assert_eq!(
+            *port.bulk_position_calls.lock().expect("lock"),
+            vec![vec![(13, 10), (12, 11), (10, 12), (11, 13)]]
+        );
     }
 }

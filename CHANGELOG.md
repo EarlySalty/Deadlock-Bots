@@ -1,3 +1,11 @@
+## #221 — Voice-Umbau: Alle Lanes in einer Kategorie, Ranked offen
+
+**Ausgangslage:** Ranked-Voice hatte eine eigene Kategorie mit Dauer-Schloss für alle Unverifizierten — das hat viele vom Joinen abgehalten, und drei getrennte Voice-Kategorien machten es unübersichtlich.
+
+**Was wurde geändert:** Alle Lanes (Ranked, Casual, Street Brawl) stehen jetzt in einer gemeinsamen, offenen Kategorie — oben Ranked nach Rang sortiert, darunter Casual, unten Street Brawl. Ranked-Lanes kann jetzt jeder ohne Verifizierung erstellen und joinen. Neu ist das 🔓 Rang-Gate: Der Lane-Owner kann seine Ranked-Lane exklusiv für verifizierte Ränge in einem Fenster machen (Standard: eigener Rang ±1,5 Ränge) — erst dann gibt es ein Schloss, und nur an dieser Lane. Wer schon drin ist, fliegt dabei nie raus.
+
+**Wie es jetzt läuft:** Der Name sagt, was in einer Lane läuft (*Ranked Phantom 3*, *Chill Lane 2 · Oracle*), die Sortierung führt dich zu Runden auf deinem Niveau, und ob eine Lane offen oder rang-exklusiv ist, entscheiden die Spieler selbst.
+
 ## #220 — Datenschutz-Hinweis im Regelwerk per Knopf
 
 **Ausgangslage:** Wie der Bot Nachrichten per KI prüft, was dabei gespeichert wird und welche Rechte du hast, stand bisher nirgends kompakt im Server.

@@ -1603,15 +1603,51 @@ fn mode_default_capacity(mode: LfgMode) -> i64 {
 }
 
 fn mode_from_category_id(category_id: u64) -> Option<LfgMode> {
-    if category_id == crate::router::mode_to_category("ranked") {
+    if category_id == crate::router::ROUTER_CATEGORY_RANKED_LEGACY {
         Some(LfgMode::Ranked)
-    } else if category_id == crate::router::mode_to_category("street_brawl") {
+    } else if category_id == crate::router::ROUTER_CATEGORY_STREET_BRAWL_LEGACY {
         Some(LfgMode::StreetBrawl)
-    } else if category_id == crate::router::mode_to_category("casual") {
+    } else if category_id == crate::router::ROUTER_CATEGORY_CHILL {
         Some(LfgMode::Casual)
     } else {
         None
     }
+}
+
+fn mode_from_staging_id(staging_id: u64) -> Option<LfgMode> {
+    if staging_id == crate::router::mode_to_staging("ranked") {
+        Some(LfgMode::Ranked)
+    } else if staging_id == crate::router::mode_to_staging("street_brawl") {
+        Some(LfgMode::StreetBrawl)
+    } else if staging_id == crate::router::mode_to_staging("casual") {
+        Some(LfgMode::Casual)
+    } else {
+        None
+    }
+}
+
+fn mode_from_lane_base(base_name: &str) -> Option<LfgMode> {
+    let lower = base_name.trim().to_ascii_lowercase();
+    if lower.starts_with("ranked") {
+        Some(LfgMode::Ranked)
+    } else if lower.starts_with("street brawl") {
+        Some(LfgMode::StreetBrawl)
+    } else if lower.starts_with("chill lane") {
+        Some(LfgMode::Casual)
+    } else {
+        None
+    }
+}
+
+fn mode_from_lane_record(
+    category_id: u64,
+    source_staging_id: Option<u64>,
+    base_name: &str,
+) -> Option<LfgMode> {
+    source_staging_id
+        .and_then(mode_from_staging_id)
+        .or_else(|| mode_from_lane_base(base_name))
+        .or_else(|| mode_from_category_id(category_id))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1717,12 +1753,6 @@ fn lfg_post_draft(
     }
 }
 
-fn has_verified_rank_role(role_ids: &[u64]) -> bool {
-    role_ids
-        .iter()
-        .any(|role_id| crate::router::VERIFIED_RANK_ROLE_IDS.contains(role_id))
-}
-
 fn discord_id_i64(id: u64, field: &str) -> Result<i64, String> {
     i64::try_from(id).map_err(|_| format!("{field} ist keine gueltige BIGINT-Discord-ID"))
 }
@@ -1806,18 +1836,8 @@ impl LfgPanelInterface {
         guild_id: u64,
         mode: LfgMode,
     ) -> bool {
-        if mode != LfgMode::Ranked {
-            return true;
-        }
-        if !interaction.role_ids.is_empty() {
-            return has_verified_rank_role(&interaction.role_ids);
-        }
-        has_verified_rank_role(
-            &self
-                .port
-                .member_role_ids(guild_id, interaction.user_id)
-                .await,
-        )
+        let _ = (interaction, guild_id, mode);
+        true
     }
 
     async fn handle_start(&self) -> BridgeReply {
@@ -2541,25 +2561,36 @@ impl LfgPanelInterface {
     }
 
     async fn lane_mode(&self, guild_id: u64, lane_id: u64) -> Option<LfgMode> {
-        if let Some(category_id) = self.port.channel_category(guild_id, lane_id).await {
-            return mode_from_category_id(category_id);
-        }
-        let category_id: Option<i64> = sqlx::query_scalar(
-            "SELECT category_id FROM voice.tempvoice_lanes WHERE channel_id = $1",
+        let row = sqlx::query(
+            "SELECT category_id, base_name, source_staging_id
+               FROM voice.tempvoice_lanes
+              WHERE channel_id = $1",
         )
         .bind(discord_id_i64(lane_id, "lane_id").ok()?)
         .fetch_optional(&self.pool)
         .await
         .ok()
         .flatten();
-        category_id
-            .and_then(|id| db_i64_to_u64(id, "tempvoice_lanes.category_id").ok())
+        if let Some(row) = row {
+            let category_id = row
+                .try_get("category_id")
+                .ok()
+                .and_then(|id| db_i64_to_u64(id, "tempvoice_lanes.category_id").ok())?;
+            let base_name: String = row.try_get("base_name").ok()?;
+            let source_staging_id: Option<i64> = row.try_get("source_staging_id").ok()?;
+            let source_staging_id = source_staging_id
+                .and_then(|id| db_i64_to_u64(id, "tempvoice_lanes.source_staging_id").ok());
+            return mode_from_lane_record(category_id, source_staging_id, &base_name);
+        }
+        self.port
+            .channel_category(guild_id, lane_id)
+            .await
             .and_then(mode_from_category_id)
     }
 
     async fn lane_owner_and_mode(&self, lane_id: u64) -> Result<Option<(u64, LfgMode)>, String> {
         let Some(row) = sqlx::query(
-            "SELECT guild_id, owner_id, category_id
+            "SELECT guild_id, owner_id, category_id, base_name, source_staging_id
                FROM voice.tempvoice_lanes
               WHERE channel_id = $1",
         )
@@ -2582,10 +2613,21 @@ impl LfgPanelInterface {
             row.try_get("category_id").map_err(|err| err.to_string())?,
             "tempvoice_lanes.category_id",
         )?;
-        let mode = self
-            .lane_mode(guild_id, lane_id)
-            .await
-            .or_else(|| mode_from_category_id(category_id));
+        let base_name: String = row.try_get("base_name").map_err(|err| err.to_string())?;
+        let source_staging_id: Option<i64> = row
+            .try_get("source_staging_id")
+            .map_err(|err| err.to_string())?;
+        let source_staging_id = source_staging_id
+            .map(|id| db_i64_to_u64(id, "tempvoice_lanes.source_staging_id"))
+            .transpose()?;
+        let mode = match mode_from_lane_record(category_id, source_staging_id, &base_name) {
+            Some(mode) => Some(mode),
+            None => self
+                .port
+                .channel_category(guild_id, lane_id)
+                .await
+                .and_then(mode_from_category_id),
+        };
         Ok(mode.map(|mode| (owner_id, mode)))
     }
 
@@ -2676,9 +2718,6 @@ impl LfgPanelInterface {
             }
             crate::router::RouterSpawnOutcome::AlreadyOwnLane { .. } => {
                 BridgeReply::ephemeral_text(LFG_ERR_OPEN_LANE_SCHON_VERKNUEPFT)
-            }
-            crate::router::RouterSpawnOutcome::RankedVerifyRequired => {
-                BridgeReply::ephemeral_text(LFG_ERR_KEIN_RANKED_RANG)
             }
             crate::router::RouterSpawnOutcome::FloodLimited
             | crate::router::RouterSpawnOutcome::NotCreated
@@ -3838,8 +3877,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lfg_one_category_mode_nutzt_source_staging_vor_namen() {
+        assert_eq!(
+            mode_from_lane_record(
+                crate::router::ROUTER_CATEGORY_CHILL,
+                Some(crate::router::mode_to_staging("ranked")),
+                "Custom Name"
+            ),
+            Some(LfgMode::Ranked)
+        );
+        assert_eq!(
+            mode_from_lane_record(
+                crate::router::ROUTER_CATEGORY_CHILL,
+                Some(crate::router::mode_to_staging("street_brawl")),
+                "Custom Name"
+            ),
+            Some(LfgMode::StreetBrawl)
+        );
+    }
+
     #[tokio::test]
-    async fn lfg_ranked_mode_ohne_rankrolle_blockt_ephemeral() {
+    async fn lfg_ranked_mode_ohne_rankrolle_rendert_select_draft() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -3855,8 +3914,14 @@ mod tests {
             })
             .await;
 
-        assert!(reply.ephemeral);
-        assert_eq!(reply.content.as_deref(), Some(LFG_ERR_KEIN_RANKED_RANG));
+        assert!(reply.update_message);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some(
+                "**Ranked** · Rang egal · Plätze offen\nWähl Rang-Bereich und Plätze, dann **Suche veröffentlichen**."
+            )
+        );
+        assert!(reply.components.is_some());
         assert!(reply.modal.is_none());
     }
 

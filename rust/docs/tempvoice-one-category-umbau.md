@@ -124,3 +124,21 @@ Wir wollen messen, ob das die Ranked-Nutzung erhöht.
 2. `CHANGELOG.md` (user-sichtbar) ergänzen.
 3. Merge auf main, Deploy, Restart, Live-Beweis (PID, /proc/exe, Journal).
 4. Ankündigung mit finalen Texten in Discord posten.
+
+## Implementierung
+
+- Neue TempVoice-Lanes aus Router-Buttons und Staging-Join landen in der
+  gemeinsamen Kategorie `1289721245281292290`; Legacy-Kategorie-IDs bleiben
+  als Konstanten für bestehende Lanes erhalten.
+- Ranked-Verifizierung ist aus Router/LFG-Startpfaden entfernt; LFG leitet den
+  Modus bei One-Category-Lanes aus `source_staging_id`/`base_name` ab und nutzt
+  Kategorie-IDs nur noch als Legacy-Fallback.
+- Lane-Namen nutzen den Anker aus Panel-Rangpräferenz vor Rangrolle vor leer;
+  Ranked/Casual/Street-Brawl folgen den neuen Namensregeln.
+- Adaptive sortiert die gemeinsame Kategorie in einem Bulk-Positions-Apply:
+  Ranked nach Rang aufsteigend, dann Casual, dann Street Brawl.
+- Ranked-Lanes haben einen Owner-only Rang-Gate-Button; Aktivieren/Deaktivieren
+  setzt bzw. entfernt Gate-Overwrites in einem Channel-PATCH und disconnected
+  keine Member.
+- Ankündigung, Anleitung und neue Gate-Texte sind als deutsche
+  `PLATZHALTER:`-Strings umgesetzt; finale Texte bleiben offen.

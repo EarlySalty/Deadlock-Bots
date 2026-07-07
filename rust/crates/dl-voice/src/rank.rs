@@ -157,9 +157,17 @@ pub fn user_rank_from_roles(roles: &[(u64, String)]) -> (String, i64, Option<i64
 
 /// Score-Fenster + grobe Tier-Grenzen (Referenzwerte aus CPython im Test).
 pub fn anchor_range(rank_value: i64, subrank: i64) -> (i64, i64, i64, i64) {
+    anchor_range_with_tolerance(rank_value, subrank, RANKED_SUBRANK_TOLERANCE)
+}
+
+pub fn anchor_range_with_tolerance(
+    rank_value: i64,
+    subrank: i64,
+    tolerance: i64,
+) -> (i64, i64, i64, i64) {
     let anchor_score = rank_value * 6 + subrank;
-    let score_min = (anchor_score - RANKED_SUBRANK_TOLERANCE).max(SCORE_MIN_ABSOLUTE);
-    let score_max = (anchor_score + RANKED_SUBRANK_TOLERANCE).min(SCORE_MAX_ABSOLUTE);
+    let score_min = (anchor_score - tolerance).max(SCORE_MIN_ABSOLUTE);
+    let score_max = (anchor_score + tolerance).min(SCORE_MAX_ABSOLUTE);
     let allowed_min = ((score_min - 1) / 6).max(1);
     let allowed_max = ((score_max - 1) / 6).min(11);
     (score_min, score_max, allowed_min, allowed_max)
@@ -1698,6 +1706,24 @@ mod tests {
 
     fn role(role_id: u64, name: &str) -> (u64, String) {
         (role_id, name.to_string())
+    }
+
+    #[test]
+    fn tempvoice_rank_gate_standardfenster_ist_plus_minus_neun_subraenge() {
+        let (score_min, score_max, allowed_min, allowed_max) = anchor_range(7, 3);
+        assert_eq!((score_min, score_max), (36, 54));
+        assert_eq!((allowed_min, allowed_max), (5, 8));
+
+        let roles = vec![
+            role(1, "Ritualist 6"),
+            role(2, "Emissary 1"),
+            role(3, "Oracle 6"),
+            role(4, "Phantom 1"),
+        ];
+        assert_eq!(
+            allowed_subrank_roles(&roles, score_min, score_max),
+            HashSet::from([1, 2, 3])
+        );
     }
 
     fn owner_for(channel_id: u64, owner_id: u64) -> Arc<dyn Fn(u64) -> Option<u64> + Send + Sync> {
