@@ -524,6 +524,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     dl_voice::router::register(&mut router, lane_router.clone());
     let router_interface =
         dl_voice::router::RouterInterface::new(central_pool.clone(), router_glue.clone());
+    router_interface.ensure_panel().await;
     serversync_concrete
         .set_router_interface(router_interface.clone())
         .await;

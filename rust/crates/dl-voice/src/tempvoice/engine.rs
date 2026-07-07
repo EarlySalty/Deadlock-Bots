@@ -531,11 +531,19 @@ impl TempVoiceEngine {
     pub async fn purge_empty_lanes(&self) {
         let mut lanes: HashSet<u64> = {
             let state = self.state.lock().await;
-            state.lanes.keys().copied().collect()
+            state
+                .lanes
+                .keys()
+                .copied()
+                .filter(|channel_id| {
+                    !self.config.fixed_lane_ids.contains(channel_id)
+                        && !self.config.staging_channels.contains(channel_id)
+                })
+                .collect()
         };
         let guild_id = self.config.guild_id_hint;
         for category_id in &self.config.tempvoice_categories {
-            for (channel_id, name) in self
+            for (channel_id, _) in self
                 .port
                 .category_voice_channels(guild_id, *category_id)
                 .await
@@ -545,9 +553,7 @@ impl TempVoiceEngine {
                 {
                     continue;
                 }
-                if logic::is_managed_lane_name(&name) {
-                    lanes.insert(channel_id);
-                }
+                lanes.insert(channel_id);
             }
         }
         let mut purged = 0usize;
@@ -774,16 +780,13 @@ impl TempVoiceEngine {
         {
             return false;
         }
-        let Some(category) = self.port.channel_category(guild_id, channel_id).await else {
-            return false;
-        };
-        if !self.config.tempvoice_categories.contains(&category) {
-            return false;
+        if self.state.lock().await.lanes.contains_key(&channel_id) {
+            return true;
         }
-        let Some(name) = self.port.channel_name(guild_id, channel_id).await else {
-            return false;
-        };
-        logic::is_managed_lane_name(&name)
+        self.port
+            .channel_category(guild_id, channel_id)
+            .await
+            .is_some_and(|category| self.config.tempvoice_categories.contains(&category))
     }
 
     /// Join-to-create (Kern von `_create_lane`).
@@ -2710,6 +2713,62 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].channel_id, channel_id);
         assert!(port.deleted.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn startup_purge_loescht_custom_lane_aber_nie_staging_oder_fixed() {
+        let (_dir, engine, port, staging) = setup().await;
+        let custom_channel = 4242;
+        let fixed_channel = 1493690350580138114;
+        {
+            let mut categories = port.categories.lock().expect("lock");
+            categories.insert(custom_channel, CASUAL_CATEGORY);
+            categories.insert(fixed_channel, CASUAL_CATEGORY);
+            categories.insert(staging, CASUAL_CATEGORY);
+        }
+        {
+            let mut names = port.names.lock().expect("lock");
+            names.insert(custom_channel, "Team Kekse".to_string());
+            names.insert(fixed_channel, "Fester Treffpunkt".to_string());
+            names.insert(staging, "(+) Casual".to_string());
+        }
+
+        engine.purge_empty_lanes().await;
+
+        assert_eq!(
+            port.deleted.lock().expect("lock").clone(),
+            vec![custom_channel]
+        );
+    }
+
+    #[tokio::test]
+    async fn leave_loescht_getrackte_custom_lane_auch_bei_category_cache_miss() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let channel_id = 4242;
+        engine
+            .store
+            .upsert_lane(LaneRecord {
+                channel_id,
+                guild_id: engine.config.guild_id_hint,
+                owner_id: 100,
+                initial_owner_id: Some(100),
+                base_name: "Team Kekse".to_string(),
+                category_id: CASUAL_CATEGORY,
+                source_staging_id: None,
+            })
+            .await
+            .expect("lane");
+        engine.rehydrate().await;
+
+        engine
+            .handle_event(VoiceEvent::Leave {
+                guild_id: engine.config.guild_id_hint,
+                user_id: 100,
+                channel_id,
+            })
+            .await;
+
+        assert_eq!(port.deleted.lock().expect("lock").clone(), vec![channel_id]);
     }
 
     #[tokio::test]

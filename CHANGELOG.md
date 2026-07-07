@@ -1,3 +1,11 @@
+## #223 — Voice: Aufräumen greift jetzt immer + neue ⚙️-Ansicht
+
+**Ausgangslage:** Leere Lanes mit eigenem Namen (z. B. „Team Kekse") blieben manchmal als Geisterkanäle stehen — der Aufräumer hat sie am Namen nicht mehr als Bot-Lane erkannt. Und die ⚙️ Voreinstellungen kamen als schlichte Textwand daher.
+
+**Was wurde geändert:** Der Aufräumer erkennt Bot-Lanes jetzt an ihrem Platz in der Voice-Kategorie statt am Namen — egal wie du deine Lane nennst, sie wird nach dem Verlassen abgebaut. Die zwei festen Kanäle in der Kategorie bleiben davon unberührt. Die ⚙️ Voreinstellungen stecken jetzt im gleichen goldenen Look wie das Voice-Panel, mit klarer Übersicht zu Modus, Name, Limit und Rang.
+
+**Wie es jetzt läuft:** Lane leer = Lane weg, ausnahmslos — und beim Bot-Start werden liegengebliebene Geisterkanäle gleich mit entsorgt.
+
 ## #222 — Brain-Ingestion-Migration ist im Hauptzweig
 
 **Ausgangslage:** Die zentrale Brain-Postgres-Migration fuer die fehlenden Ingestion-Tabellen war produktiv angewandt, lag aber nur auf einem separaten Branch.
