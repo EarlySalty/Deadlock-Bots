@@ -93,11 +93,13 @@ fn screening_completed_from_member_update(
 fn completed_onboarding_from_member_update(
     guild_id: u64,
     user_id: u64,
-    flags: Option<GuildMemberFlags>,
+    before_flags: GuildMemberFlags,
+    after_flags: Option<GuildMemberFlags>,
 ) -> Option<MemberEvent> {
-    flags
-        .is_some_and(|flags| flags.contains(GuildMemberFlags::COMPLETED_ONBOARDING))
-        .then_some(MemberEvent::NativeOnboardingCompleted { guild_id, user_id })
+    let after_flags = after_flags?;
+    (!before_flags.contains(GuildMemberFlags::COMPLETED_ONBOARDING)
+        && after_flags.contains(GuildMemberFlags::COMPLETED_ONBOARDING))
+    .then_some(MemberEvent::NativeOnboardingCompleted { guild_id, user_id })
 }
 
 fn is_self_reaction_user(
@@ -472,16 +474,17 @@ impl EventHandler for Handler {
         );
         let guild_id = event.guild_id.get();
         let user_id = event.user.id.get();
-        if let Some(event) = completed_onboarding_from_member_update(guild_id, user_id, event.flags)
-        {
-            self.dispatcher.publish_member(event);
-        }
 
         // Rollen und Member-Screening diffen. Vorher-Zustand kommt aus dem
         // Cache (old); ohne Cache kein sicherer Übergang möglich.
         let Some(old) = old else {
             return;
         };
+        if let Some(event) =
+            completed_onboarding_from_member_update(guild_id, user_id, old.flags, event.flags)
+        {
+            self.dispatcher.publish_member(event);
+        }
         if let Some(event) = screening_completed_from_member_update(
             guild_id,
             user_id,
@@ -726,10 +729,11 @@ mod tests {
     }
 
     #[test]
-    fn completed_onboarding_flag_liefert_event_ohne_cache_altzustand() {
+    fn completed_onboarding_flag_liefert_nur_echten_uebergang() {
         let event = completed_onboarding_from_member_update(
             1,
             2,
+            serenity::all::GuildMemberFlags::empty(),
             Some(serenity::all::GuildMemberFlags::COMPLETED_ONBOARDING),
         );
 
@@ -740,7 +744,23 @@ mod tests {
                 user_id: 2,
             })
         ));
-        assert!(completed_onboarding_from_member_update(1, 2, None).is_none());
+        assert!(
+            completed_onboarding_from_member_update(
+                1,
+                2,
+                serenity::all::GuildMemberFlags::COMPLETED_ONBOARDING,
+                Some(serenity::all::GuildMemberFlags::COMPLETED_ONBOARDING),
+            )
+            .is_none(),
+            "Rollenupdates bestehender Mitglieder duerfen kein Onboarding ausloesen"
+        );
+        assert!(completed_onboarding_from_member_update(
+            1,
+            2,
+            serenity::all::GuildMemberFlags::empty(),
+            None
+        )
+        .is_none());
     }
 
     #[test]
