@@ -1,3 +1,11 @@
+## #232 — FAQ-Helfer ignoriert Nachrichten ohne Server-Kontext
+
+**Ausgangslage:** Einzelne Nachrichten ohne Server-Zuordnung konnten im FAQ-Ticket-Helfer einen internen Fehler auslösen.
+
+**Was wurde geändert:** Der FAQ-Helfer verarbeitet Ticket-Autohilfe nur noch, wenn Discord einen echten Server mitliefert.
+
+**Wie es jetzt läuft:** Nachrichten ohne Server-Kontext werden ignoriert statt einen Hintergrundtask zu crashen.
+
 ## #231 — Concierge startet nur bei echtem Onboarding
 
 **Ausgangslage:** Wenn bestehenden Mitgliedern später Rollen gegeben wurden, konnte der Concierge sie wie neue Servermitglieder behandeln. Bei gesperrten DMs entstand dann ein privater Fallback-Kanal.
