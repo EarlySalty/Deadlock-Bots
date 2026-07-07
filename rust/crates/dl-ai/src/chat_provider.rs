@@ -81,6 +81,7 @@ impl ChatRole {
 pub struct ChatParams {
     pub model: Option<String>,
     pub max_tokens: Option<u32>,
+    pub json_mode: bool,
     pub temperature: f64,
     pub system_prompt: Option<String>,
 }
@@ -90,6 +91,7 @@ impl Default for ChatParams {
         Self {
             model: None,
             max_tokens: Some(DEFAULT_CHAT_MAX_TOKENS),
+            json_mode: false,
             temperature: 0.2,
             system_prompt: None,
         }
@@ -503,6 +505,9 @@ impl ChatProvider for OpenAiChatProvider {
             "temperature": params.temperature,
         });
         payload["max_tokens"] = json!(params.max_tokens.unwrap_or(DEFAULT_CHAT_MAX_TOKENS));
+        if params.json_mode {
+            payload["response_format"] = json!({ "type": "json_object" });
+        }
 
         let url = format!("{}/chat/completions", self.base_url);
         let result = send_json_with_retry("openai", &self.retry, || {
@@ -1318,6 +1323,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn openai_sendet_response_format_bei_json_mode() {
+        use axum::{routing::post, Json, Router};
+        let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = captured.clone();
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |Json(body): Json<Value>| {
+                let cap = cap.clone();
+                async move {
+                    cap.lock().expect("lock").push(body);
+                    Json(json!({
+                        "model": "gpt-test",
+                        "choices": [{ "message": { "content": "{}" } }]
+                    }))
+                }
+            }),
+        );
+        let base = spawn_json_server(app).await;
+        let provider =
+            OpenAiChatProvider::new_with_retry(base, "openai-key", "gpt-test", fast_retry(0));
+
+        provider
+            .chat(
+                &[ChatMessage::user("Hallo")],
+                ChatParams {
+                    json_mode: true,
+                    ..ChatParams::default()
+                },
+            )
+            .await
+            .expect("chat response");
+
+        let captured = captured.lock().expect("lock");
+        assert_eq!(captured[0]["response_format"]["type"], "json_object");
+    }
+
+    #[tokio::test]
     async fn mistral_sendet_openai_kompatibles_chat_completion_wire_format() {
         use axum::{routing::post, Json, Router};
         let captured: Arc<Mutex<Vec<Value>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1362,6 +1404,7 @@ mod tests {
                 ChatParams {
                     model: None,
                     max_tokens: Some(123),
+                    json_mode: false,
                     temperature: 0.3,
                     system_prompt: Some("System".to_string()),
                 },

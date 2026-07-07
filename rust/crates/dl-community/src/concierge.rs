@@ -1698,7 +1698,8 @@ impl Concierge {
         }
         let params = ChatParams {
             model: self.config.model.clone(),
-            max_tokens: Some(500),
+            max_tokens: Some(800),
+            json_mode: true,
             temperature: 0.2,
             system_prompt: None,
         };
@@ -1968,6 +1969,7 @@ impl Concierge {
             ChatParams {
                 model: self.config.model.clone(),
                 max_tokens: Some(180),
+                json_mode: false,
                 temperature: 0.2,
                 system_prompt: None,
             },
@@ -2241,15 +2243,118 @@ fn parse_llm_answer(raw: &str) -> LlmAnswer {
             }
         }
     }
+    let salvaged = LlmAnswer {
+        reply: json_string_field(trimmed, "reply", false)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty()),
+        intent: json_string_field(trimmed, "intent", true)
+            .and_then(|text| ConciergeIntent::from_str(&text)),
+        opted_out: json_bool_true(trimmed, "opted_out"),
+        forget: json_bool_true(trimmed, "forget"),
+        pate_request: json_bool_true(trimmed, "pate_request"),
+    };
+    if salvaged.reply.is_some() {
+        return salvaged;
+    }
+    if trimmed.starts_with('{') || trimmed.contains("\"reply\"") {
+        return salvaged;
+    }
     LlmAnswer {
         reply: (!trimmed.is_empty()).then(|| trimmed.to_string()),
         ..LlmAnswer::default()
     }
 }
 
+fn json_field_tail<'a>(raw: &'a str, key: &str) -> Option<&'a str> {
+    let pattern = format!("\"{key}\"");
+    let mut offset = 0;
+    while let Some(pos) = raw[offset..].find(&pattern) {
+        let key_end = offset + pos + pattern.len();
+        let after_key = raw[key_end..].trim_start();
+        if let Some(after_colon) = after_key.strip_prefix(':') {
+            return Some(after_colon.trim_start());
+        }
+        offset = key_end;
+    }
+    None
+}
+
+fn json_string_field(raw: &str, key: &str, require_closed: bool) -> Option<String> {
+    let tail = json_field_tail(raw, key)?;
+    let content = tail.strip_prefix('"')?;
+    match unescaped_quote(content) {
+        Some(end) => serde_json::from_str::<String>(&tail[..end + 2]).ok(),
+        None if !require_closed => Some(unescape_jsonish(content).trim().to_string()),
+        None => None,
+    }
+}
+
+fn unescaped_quote(text: &str) -> Option<usize> {
+    let mut escaped = false;
+    for (idx, ch) in text.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(idx);
+        }
+    }
+    None
+}
+
+fn unescape_jsonish(text: &str) -> String {
+    let mut out = String::new();
+    let mut chars = text.chars();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('"') => out.push('"'),
+            Some('\\') => out.push('\\'),
+            Some('/') => out.push('/'),
+            Some('n') => out.push('\n'),
+            Some('r') => out.push('\r'),
+            Some('t') => out.push('\t'),
+            Some('b') => out.push('\u{0008}'),
+            Some('f') => out.push('\u{000c}'),
+            Some('u') => {
+                let hex: String = chars.by_ref().take(4).collect();
+                if hex.len() == 4 {
+                    if let Ok(code) = u32::from_str_radix(&hex, 16) {
+                        if let Some(ch) = char::from_u32(code) {
+                            out.push(ch);
+                            continue;
+                        }
+                    }
+                }
+                out.push_str("\\u");
+                out.push_str(&hex);
+            }
+            Some(other) => out.push(other),
+            None => out.push('\\'),
+        }
+    }
+    out
+}
+
+fn json_bool_true(raw: &str, key: &str) -> bool {
+    json_field_tail(raw, key).is_some_and(|tail| {
+        tail.strip_prefix("true").is_some_and(|after| {
+            after
+                .chars()
+                .next()
+                .map(|ch| ch.is_whitespace() || matches!(ch, ',' | '}'))
+                .unwrap_or(true)
+        })
+    })
+}
+
 fn llm_system(extra: Option<&str>) -> String {
     let schema = format!(
-        "{SYSTEM_PROMPT}\n{ANTI_INVENT_RULE}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
+        "{SYSTEM_PROMPT}\n{ANTI_INVENT_RULE}\n{PATE_REQUEST_RULE}\n\nAntworte als JSON: {{\"reply\":\"Text fuer den User\", \"intent\":\"improve|mates|learn|casual\", \"opted_out\":false, \"forget\":false, \"pate_request\":false}}. Gib ausschließlich dieses eine JSON-Objekt aus, ohne Markdown und ohne Text davor oder danach, und halte reply unter 900 Zeichen. Das Feld intent muss genau einen der vier Werte haben. reply ist die einzige sichtbare Antwort."
     );
     match extra {
         Some(extra) => format!("{schema}\n\n{extra}"),
@@ -2922,6 +3027,32 @@ mod tests {
     }
 
     #[test]
+    fn llm_parse_rettet_abgeschnittenes_json_ohne_rohtext_leak() {
+        let parsed = parse_llm_answer(
+            r#"{"reply":"So alt wie Deadlock – noch ganz frisch! :) Aber genug von mir: suchst du ein Spiel oder Leute zum Zocken?","intent":"casual","opted_out":false"#,
+        );
+        assert_eq!(
+            parsed.reply.as_deref(),
+            Some(
+                "So alt wie Deadlock – noch ganz frisch! :) Aber genug von mir: suchst du ein Spiel oder Leute zum Zocken?"
+            )
+        );
+        assert_eq!(parsed.intent, Some(ConciergeIntent::Casual));
+
+        let parsed = parse_llm_answer(r#"{"reply":"Hallo du"#);
+        assert_eq!(parsed.reply.as_deref(), Some("Hallo du"));
+
+        let parsed = parse_llm_answer(r#"{"repl"#);
+        assert_eq!(parsed.reply, None);
+
+        let parsed = parse_llm_answer("nur text ohne marker");
+        assert_eq!(parsed.reply.as_deref(), Some("nur text ohne marker"));
+
+        let parsed = parse_llm_answer(r#"{"reply":"Er sagt \"hi\" und"#);
+        assert_eq!(parsed.reply.as_deref(), Some(r#"Er sagt "hi" und"#));
+    }
+
+    #[test]
     fn llm_parse_erkennt_pate_request() {
         let parsed = parse_llm_answer(
             r#"{"reply":"","intent":"learn","opted_out":false,"forget":false,"pate_request":true}"#,
@@ -2972,6 +3103,9 @@ mod tests {
             "Normale Antwort"
         );
         assert!(first_system_prompt(&provider).contains("keinen belastbaren Wissenskontext"));
+        let params = &provider.requests()[0].1;
+        assert_eq!(params.max_tokens, Some(800));
+        assert!(params.json_mode);
     }
 
     #[tokio::test]
@@ -3004,6 +3138,7 @@ mod tests {
     #[test]
     fn llm_system_enthaelt_anti_invent_rule() {
         assert!(llm_system(None).contains("Erfinde niemals Befehle oder Abläufe."));
+        assert!(llm_system(None).contains("Gib ausschließlich dieses eine JSON-Objekt aus, ohne Markdown und ohne Text davor oder danach, und halte reply unter 900 Zeichen."));
     }
 
     #[test]
