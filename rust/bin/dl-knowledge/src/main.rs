@@ -193,6 +193,9 @@ async fn reload(State(state): State<AppState>) -> Response {
 async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> Json<AskResponse> {
     let ranked = {
         let knowledge = state.knowledge.read().await;
+        if let Some(response) = character_count_response(&request.question, &knowledge) {
+            return Json(response);
+        }
         knowledge.search(&request.question, 6)
     };
     if ranked.is_empty() {
@@ -304,6 +307,50 @@ fn unanswerable() -> AskResponse {
         answer: None,
         sources: Vec::new(),
     }
+}
+
+fn character_count_response(question: &str, knowledge: &KnowledgeBase) -> Option<AskResponse> {
+    let lower = question.to_ascii_lowercase();
+    let asks_count = lower.contains("wie viele")
+        || lower.contains("wieviele")
+        || lower.contains("anzahl")
+        || lower.contains("count");
+    let asks_heroes = ["charakter", "held", "hero", "heroes", "champ"]
+        .iter()
+        .any(|needle| lower.contains(needle));
+    if !asks_count || !asks_heroes {
+        return None;
+    }
+    let hero_count = knowledge
+        .chunks
+        .iter()
+        .filter_map(|chunk| {
+            chunk
+                .path
+                .strip_prefix("deadlock-helden/")
+                .and_then(|_| chunk.path.strip_suffix(".md"))
+                .map(|_| chunk.path.as_str())
+        })
+        .collect::<HashSet<_>>()
+        .len();
+    if hero_count == 0 {
+        return None;
+    }
+    let asks_items = lower.contains("item");
+    let mut answer = format!(
+        "Bei uns sind aktuell {hero_count} Heldenseiten hinterlegt. Wenn du Details zu einem bestimmten Helden willst, frag einfach nach dem Namen."
+    );
+    if asks_items {
+        answer.push_str(" Eine verlässliche vollständige Item-Zählung haben wir hier gerade nicht, schau dafür lieber in die aktuellen Build- oder Patch-Seiten.");
+    }
+    Some(AskResponse {
+        answerable: true,
+        answer: Some(answer),
+        sources: vec![Source {
+            title: "Deadlock-Helden".to_string(),
+            path: "deadlock-helden/".to_string(),
+        }],
+    })
 }
 
 fn parse_llm_answer(raw: &str) -> Option<LlmAnswer> {
@@ -876,6 +923,27 @@ Frag im Support.
 
         assert_eq!(steambot[0].0.path, "steam.md");
         assert_eq!(ascii[0].0.path, "steam.md");
+    }
+
+    #[test]
+    fn helden_count_kommt_deterministisch_aus_dem_korpus() {
+        let knowledge = KnowledgeBase::from_chunks(vec![
+            test_chunk("Abrams", "Abrams", "deadlock-helden/abrams.md", "Abrams"),
+            test_chunk("Abrams", "Build", "deadlock-helden/abrams.md", "Build"),
+            test_chunk("Bebop", "Bebop", "deadlock-helden/bebop.md", "Bebop"),
+            test_chunk("Steam", "Steam", "discord-server/steam.md", "Steam"),
+        ]);
+
+        let response = character_count_response("wie viele charaktere/items gibt es?", &knowledge)
+            .expect("count question should be answered from hero corpus");
+
+        assert!(response.answerable);
+        assert_eq!(response.sources[0].path, "deadlock-helden/");
+        let answer = response
+            .answer
+            .expect("count response should contain answer");
+        assert!(answer.contains("2 Heldenseiten"));
+        assert!(answer.contains("Item-Zählung"));
     }
 
     #[tokio::test]
