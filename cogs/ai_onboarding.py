@@ -231,7 +231,7 @@ class QuickActionsView(discord.ui.View):
         )
         self.add_item(
             discord.ui.Button(
-                label="Temp Voice Panel",
+                label="Sprachkanal-Panel",
                 url=TEMPVOICE_PANEL_URL,
                 style=discord.ButtonStyle.link,
                 emoji="🛠️",
@@ -576,7 +576,7 @@ class AIOnboarding(commands.Cog):
             f"- Interessen: {answers.interests or '-'}\n"
             f"- Erwartungen: {answers.expectations or '-'}\n"
             f"- Stil: {answers.style or 'locker'}\n\n"
-            "Starte gern mit #spieler-suche, schau im Temp Voice Panel vorbei und gönn dir einen Blick in #ankündigungen. "
+            "Starte gern mit #spieler-suche, schau im Sprachkanal-Panel vorbei und gönn dir einen Blick in #ankündigungen. "
             "Für Fragen: /faq. Steam kannst du mit /account_verknüpfen koppeln. Viel Spaß! :)"
         )
         meta.setdefault("provider", "fallback")

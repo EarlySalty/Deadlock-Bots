@@ -312,7 +312,7 @@ class RulesPanel(commands.Cog):
                 description=(
                     "Das Onboarding ist gerade nicht verfügbar.\n"
                     "Schau in #ankündigungen, finde Mitspieler in #spieler-suche "
-                    "und richte dir im Temp Voice Panel eine eigene Lane ein.\n"
+                    "und richte dir im Sprachkanal-Panel einen eigenen Sprachkanal ein.\n"
                     "Fragen? Nutze /faq oder ping das Team. 😊"
                 ),
                 color=0x5865F2,
@@ -365,7 +365,7 @@ class RulesPanel(commands.Cog):
             description=(
                 "Das Onboarding ist gerade nicht verfügbar.\n"
                 "Schau in #ankündigungen, finde Mitspieler in #spieler-suche "
-                "und richte dir im Temp Voice Panel eine eigene Lane ein.\n"
+                "und richte dir im Sprachkanal-Panel einen eigenen Sprachkanal ein.\n"
                 "Fragen? Nutze /faq oder ping das Team. 😊"
             ),
             color=0x5865F2,

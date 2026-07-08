@@ -20,7 +20,7 @@ use serde_json::{json, Map, Value};
 use super::engine::{TempVoiceEngine, VERIFIED_ROLE_ID};
 use super::store::{DefaultPresetRecord, InterfaceRecord, PresetRecord};
 
-const NOT_IN_LANE: &str = "Du musst dafür in einer TempVoice-Lane sein.";
+const NOT_IN_LANE: &str = "Du musst dafür in einem Sprachkanal sein.";
 const NOT_OWNER: &str = "Nur der Lane-Owner kann das.";
 pub const MIN_RANK_VERIFY_REQUIRED: &str =
     "Du kannst den Mindest-Rang nur setzen, wenn du verifiziert bist.";
@@ -60,8 +60,8 @@ Wir haben die Sprachkanäle umgebaut, damit Ranked nicht mehr abschreckt und ihr
 - **Ihr entscheidet selbst:** Der Lane-Owner kann übers Panel ein 🔓 **Rang-Gate** schalten. Dann können nur noch verifizierte Ränge in einem Fenster joinen (Standard: eigener Rang ±1,5 Ränge) und erst dann gibt es ein 🔒 — nur an dieser einen Lane. Wer schon drin ist, fliegt nie raus.\n\
 - **🎯 Mein Rang** im Panel bestimmt, mit welchem Rang deine Lanes benannt werden — bei Ranked ist er auch die Gate-Vorgabe.\n\n\
 Die Schritt-für-Schritt-Anleitung gibt es hier:";
-const TV_ANNOUNCEMENT_CONFIRM: &str = "TempVoice-Ankündigung gepostet.";
-const TV_ANNOUNCEMENT_FAILED: &str = "TempVoice-Ankündigung konnte nicht gepostet werden.";
+const TV_ANNOUNCEMENT_CONFIRM: &str = "Sprachkanal-Ankündigung gepostet.";
+const TV_ANNOUNCEMENT_FAILED: &str = "Sprachkanal-Ankündigung konnte nicht gepostet werden.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TempVoicePanelMessage {
@@ -364,8 +364,8 @@ fn global_panel_embed() -> Value {
     json!({
         "title": "🚧 Sprachkanal verwalten",
         "description": concat!(
-            "So funktioniert Temp Voice:\n",
-            "• Betritt einen **(+) Sprachkanal**, deine eigene Lane wird automatisch erstellt.\n",
+            "So funktionieren Sprachkanäle:\n",
+            "• Betritt einen **(+) Sprachkanal**, dein eigener Sprachkanal wird automatisch erstellt.\n",
             "• Passe deine Lane hier an; die Buttons wirken sofort, wenn du Owner bist.\n\n",
             "Was ihr hier machen könnt:\n",
             "• **Kick:** Jemand AFK oder stört? Entferne die Person, wenn Reden nicht reicht.\n",
@@ -379,7 +379,7 @@ fn global_panel_embed() -> Value {
             "• **🔓 Rang-Gate** *(nur Ranked)*: Mach deine Lane exklusiv für verifizierte Ränge in einem Fenster (Standard: dein Rang ±1,5). Niemand fliegt raus — wirkt nur auf neue Joins."
         ),
         "color": 0x2ECC71,
-        "footer": {"text": "Deutsche Deadlock Community • TempVoice"},
+        "footer": {"text": "Deutsche Deadlock Community • Sprachkanäle"},
     })
 }
 
@@ -388,7 +388,7 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
         .map(|id| format!("<@{id}>"))
         .unwrap_or_else(|| "Unbekannt".to_string());
     json!({
-        "title": format!("🎙️ TempVoice – {lane_name}"),
+        "title": format!("🎙️ Sprachkanal – {lane_name}"),
         "description": format!(
             concat!(
                 "**Owner:** {}\n\n",
@@ -407,7 +407,7 @@ fn lane_panel_embed(lane_name: &str, owner_id: Option<u64>) -> Value {
             owner_display
         ),
         "color": 0x2ECC71,
-        "footer": {"text": "Deutsche Deadlock Community • TempVoice"},
+        "footer": {"text": "Deutsche Deadlock Community • Sprachkanäle"},
     })
 }
 
@@ -1776,7 +1776,7 @@ impl InteractionHandler for PanelHandler {
             // Lurker-Status (kein Owner-Check — Original-Verhalten).
             "tv_lurker" => {
                 let Some(lane) = self.lane_of(&interaction).await else {
-                    return BridgeReply::ephemeral_text("Du musst in einer Lane sein.");
+                    return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
                 let (_, msg) = engine
                     .toggle_lurker(interaction.guild_id, lane, interaction.user_id)
@@ -1854,7 +1854,7 @@ impl InteractionHandler for PanelHandler {
             // modul-globalem `_pending_main_rank`).
             "tv_minrank" => {
                 let Some(lane) = self.lane_of(&interaction).await else {
-                    return BridgeReply::ephemeral_text("Tritt zuerst deiner Lane bei.");
+                    return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
                 let in_minrank = match engine.lane_snapshot(lane).await {
                     Some((_, category_id)) => {
@@ -1905,7 +1905,7 @@ impl InteractionHandler for PanelHandler {
             }
             "tv_subrank_perm" | "tv_subrank" => {
                 let Some(lane) = self.lane_of(&interaction).await else {
-                    return BridgeReply::ephemeral_text("Tritt zuerst deiner Lane bei.");
+                    return BridgeReply::ephemeral_text(NOT_IN_LANE);
                 };
                 let main_rank = self.pending_main_rank.lock().await.get(&lane).cloned();
                 let Some(main_rank) = main_rank else {
@@ -2166,7 +2166,7 @@ pub fn spawn_command(
                             .await
                         {
                             Ok(_) => format!(
-                                "✅ TempVoice Interface erstellt/aktualisiert in <#{}>.",
+                                "✅ Sprachkanal-Panel erstellt/aktualisiert in <#{}>.",
                                 event.channel_id
                             ),
                             Err(err) => {
@@ -2204,14 +2204,14 @@ mod tests {
             .expect("embeds");
         assert_eq!(embeds[0]["title"], "🚧 Sprachkanal verwalten");
         let description = embeds[0]["description"].as_str().expect("description");
-        assert!(description.contains("So funktioniert Temp Voice:\n"));
+        assert!(description.contains("So funktionieren Sprachkanäle:\n"));
         assert!(description.contains(
-            "• Betritt einen **(+) Sprachkanal**, deine eigene Lane wird automatisch erstellt."
+            "• Betritt einen **(+) Sprachkanal**, dein eigener Sprachkanal wird automatisch erstellt."
         ));
         assert!(description.contains("• **🔓 Rang-Gate** *(nur Ranked)*"));
         assert_eq!(
             embeds[0]["footer"]["text"],
-            "Deutsche Deadlock Community • TempVoice"
+            "Deutsche Deadlock Community • Sprachkanäle"
         );
 
         let components = body
@@ -2367,11 +2367,16 @@ mod tests {
             .get("embeds")
             .and_then(serde_json::Value::as_array)
             .expect("embeds")[0];
-        assert_eq!(embed["title"], "🎙️ TempVoice – Lane 1");
+        assert_eq!(embed["title"], "🎙️ Sprachkanal – Lane 1");
         let description = embed["description"].as_str().expect("description");
         assert!(description.contains("**Owner:** <@42>"));
         assert!(description.contains("👻 Lurker – stumm beitreten ohne Limit-Slot zu belegen"));
         assert!(description.contains("**🔓 Rang-Gate** *(nur Ranked, nur Owner)*"));
+    }
+
+    #[test]
+    fn not_in_lane_reply_nennt_sprachkanal() {
+        assert_eq!(NOT_IN_LANE, "Du musst dafür in einem Sprachkanal sein.");
     }
 
     #[test]

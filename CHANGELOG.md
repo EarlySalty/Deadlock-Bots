@@ -1,3 +1,11 @@
+## #233 — Voice-Texte sagen Sprachkanal statt TempVoice
+
+**Ausgangslage:** Einige Hinweise im Sprachkanal-Panel sprachen noch von TempVoice oder Lane. Gerade bei Ablehnungen war dadurch nicht sofort klar, dass man dafür einfach in einem Sprachkanal sein muss.
+
+**Was wurde geändert:** Die sichtbaren Panel-Titel, Fußzeilen und Ablehnungen verwenden jetzt Sprachkanal als Begriff. Der Hinweis beim Rang-Gate und bei anderen Aktionen sagt direkt, dass man dafür in einem Sprachkanal sein muss.
+
+**Wie es jetzt läuft:** Nutzer sehen im Voice-Panel durchgehend den Sprachkanal-Begriff und bekommen bei falschem Kontext eine klare Ansage.
+
 ## #232 — FAQ-Helfer ignoriert Nachrichten ohne Server-Kontext
 
 **Ausgangslage:** Einzelne Nachrichten ohne Server-Zuordnung konnten im FAQ-Ticket-Helfer einen internen Fehler auslösen.

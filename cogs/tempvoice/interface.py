@@ -158,8 +158,8 @@ class TempVoiceInterface(commands.Cog):
         embed = discord.Embed(
             title="🚧 Sprachkanal verwalten",
             description=(
-                "So funktioniert Temp Voice:\n"
-                "• Betritt einen **(+) Sprachkanal**, deine eigene Lane wird automatisch erstellt.\n"
+                "So funktionieren Sprachkanäle:\n"
+                "• Betritt einen **(+) Sprachkanal**, dein eigener Sprachkanal wird automatisch erstellt.\n"
                 "• Passe deine Lane hier an; die Buttons wirken sofort, wenn du Owner bist.\n\n"
                 "Was ihr hier machen könnt:\n"
                 "• **Kick:** Jemand AFK oder stört? Entferne die Person, wenn Reden nicht reicht.\n"
@@ -173,7 +173,7 @@ class TempVoiceInterface(commands.Cog):
             ),
             color=0x2ECC71,
         )
-        embed.set_footer(text="Deutsche Deadlock Community • TempVoice")
+        embed.set_footer(text="Deutsche Deadlock Community • Sprachkanäle")
 
         view = self._view_for_category(category_id)
 
@@ -232,7 +232,7 @@ class TempVoiceInterface(commands.Cog):
         try:
             if isinstance(ch, discord.TextChannel):
                 await ctx.reply(
-                    f"✅ TempVoice Interface erstellt/aktualisiert in {ch.mention}.",
+                    f"✅ Sprachkanal-Panel erstellt/aktualisiert in {ch.mention}.",
                     mention_author=False,
                 )
             else:
@@ -298,7 +298,7 @@ class TempVoiceInterface(commands.Cog):
             else:
                 owner_display = f"<@{owner_id}>"
         embed = discord.Embed(
-            title=f"🎙️ TempVoice – {lane.name}",
+            title=f"🎙️ Sprachkanal – {lane.name}",
             description=(
                 f"**Owner:** {owner_display}\n\n"
                 "**Steuerung** *(nur wenn du in dieser Lane bist)*\n"
@@ -315,7 +315,7 @@ class TempVoiceInterface(commands.Cog):
             ),
             color=0x2ECC71,
         )
-        embed.set_footer(text="Deutsche Deadlock Community • TempVoice")
+        embed.set_footer(text="Deutsche Deadlock Community • Sprachkanäle")
         return embed
 
     async def ensure_lane_interface(self, lane: discord.VoiceChannel, owner_id: int | None = None):
@@ -607,7 +607,7 @@ class RegionDEButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -637,7 +637,7 @@ class RegionEUButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -667,7 +667,7 @@ class OwnerClaimButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         # Interaction sofort bestätigen, damit das Token nicht abläuft
         await itx.response.defer(ephemeral=True)
@@ -689,7 +689,7 @@ class LimitButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -757,7 +757,7 @@ class QuickTemplateButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -788,7 +788,7 @@ class TagFilterButton(discord.ui.Button):
         member: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         if not _is_owner_or_mod(self.core, lane, member):
             await itx.response.send_message(
@@ -983,7 +983,7 @@ class ResetLaneButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -1014,7 +1014,7 @@ class SavePresetButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = self.core.lane_owner.get(lane.id, m.id)
         perms = lane.permissions_for(m)
@@ -1077,7 +1077,7 @@ class LoadPresetButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         if lane.category_id != RANKED_CATEGORY_ID:
             await itx.response.send_message(
@@ -1191,7 +1191,7 @@ class MinRankSelect(discord.ui.Select):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         verified_role_id = getattr(settings, "verified_role_id", None)
         if verified_role_id:
@@ -1258,7 +1258,7 @@ class SubRankSelectPermanent(discord.ui.Select):
     async def callback(self, itx: discord.Interaction):
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Tritt zuerst deiner Lane bei.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
 
         main_rank = _pending_main_rank.get(lane.id)
@@ -1362,7 +1362,7 @@ class KickButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Du musst in einer Lane sein.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = itx.client.get_cog("TempVoiceCore").lane_owner.get(lane.id, m.id)  # type: ignore
         perms = lane.permissions_for(m)
@@ -1502,7 +1502,7 @@ class BanButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Du musst in einer Lane sein.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         owner_id = itx.client.get_cog("TempVoiceCore").lane_owner.get(lane.id)  # type: ignore
         if owner_id is None:
@@ -1538,7 +1538,7 @@ class UnbanButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Du musst in einer Lane sein.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         core = itx.client.get_cog("TempVoiceCore")  # type: ignore
         owner_id = core.lane_owner.get(lane.id)
@@ -1620,7 +1620,7 @@ class LurkerButton(discord.ui.Button):
         m: discord.Member = itx.user  # type: ignore
         lane = MainView.lane_of(itx)
         if not lane:
-            await itx.response.send_message("Du musst in einer Lane sein.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
 
         await itx.response.defer(ephemeral=True, thinking=False)
@@ -1736,7 +1736,7 @@ class RenameModal(discord.ui.Modal, title="Lane umbenennen"):
     async def on_submit(self, itx: discord.Interaction) -> None:
         lane = MainView.lane_of(itx)
         if lane is None:
-            await itx.response.send_message("Keine Lane.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         name = self.name_input.value.strip()
         await db.execute_async(
@@ -1784,7 +1784,7 @@ class ModeSwitchSelect(discord.ui.Select):
     async def callback(self, itx: discord.Interaction) -> None:
         lane = MainView.lane_of(itx)
         if lane is None:
-            await itx.response.send_message("Keine Lane.", ephemeral=True)
+            await itx.response.send_message("Du musst dafür in einem Sprachkanal sein.", ephemeral=True)
             return
         if (
             self.core.lane_owner.get(lane.id) != itx.user.id
