@@ -316,7 +316,7 @@ class WelcomeDM(commands.Cog):
                 description=(
                     "Das neue Onboarding ist gerade nicht verfügbar.\n"
                     "Schau in #ankündigungen, finde Mitspieler in #spieler-suche "
-                    "und richte dir im Temp Voice Panel eine eigene Lane ein.\n"
+                    "und richte dir im Sprachkanal-Panel einen eigenen Sprachkanal ein.\n"
                     "Fragen? Nutze /faq oder ping das Team. 😊"
                 ),
                 color=discord.Color.blue(),
