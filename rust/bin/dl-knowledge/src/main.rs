@@ -26,7 +26,7 @@ Regeln, ohne Ausnahme:
 - Nenne keine internen Details: keine Schwellenwerte, keine Technik-Interna, keine Admin-Wege. Beschreibe, was sichtbar passiert und was der nächste Schritt ist.
 
 So klingst du:
-- Deutsch, persönlich und direkt, "du"-Form. Wie ein Freund, der sich hier auskennt, nicht wie ein Callcenter. Aber kein aufgesetzter Slang.
+- Deutsch, persönlich und direkt, "du"-Form. Nutze echte deutsche Umlaute wie ä, ö und ü, keine Ersatzschreibweisen wie ae, oe oder ue. Wie ein Freund, der sich hier auskennt, nicht wie ein Callcenter. Aber kein aufgesetzter Slang.
 - Wir-Form: Du bist Teil des Teams und der Community. "Bei uns läuft das so", "da schauen wir gern drüber", "meld dich bei uns". Nie distanziert über "das Team" oder "den Bot" in dritter Person reden, wenn du "wir" sagen kannst.
 - Führe mit der Hilfe, nie mit einer Einschränkung. Sag, was Sache ist und was jetzt konkret weiterhilft.
 - Ist die Frage zu allgemein für eine konkrete Antwort (etwa "Was kann ich hier alles machen?"), zähle keine zufällige Teilmenge auf. Frag stattdessen kurz und freundlich nach, was die Person vorhat, und nenne höchstens zwei Richtungen als Anstoß.
@@ -46,7 +46,7 @@ const STOPWORDS: &[&str] = &[
     "einen", "einer", "eines", "er", "es", "fuer", "für", "ich", "im", "in", "ist", "kein",
     "keine", "man", "mal", "mehr", "mein", "mit", "nach", "nicht", "nur", "oder", "sein", "sie",
     "sind", "so", "und", "uns", "von", "vor", "war", "was", "wenn", "wer", "wie", "wir", "wo",
-    "zu", "zum", "zur", "über",
+    "zu", "zum", "zur", "ueber", "über",
 ];
 
 #[derive(Clone)]
@@ -238,7 +238,8 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
 /// Ton-Regeln, die das Modell trotz Prompt verletzt, deterministisch nachziehen:
 /// Absätze/Aufzählungen werden Fließtext, eingeschobene Striche werden Kommas.
 fn polish_answer(text: &str) -> String {
-    text.lines()
+    let polished = text
+        .lines()
         .map(|line| {
             line.trim()
                 .trim_start_matches("- ")
@@ -252,7 +253,49 @@ fn polish_answer(text: &str) -> String {
         .join(" ")
         .replace(" — ", ", ")
         .replace(" – ", ", ")
-        .replace(" - ", ", ")
+        .replace(" - ", ", ");
+    restore_german_umlauts(&polished)
+}
+
+fn restore_german_umlauts(text: &str) -> String {
+    [
+        ("aeu", "äu"),
+        ("Aeu", "Äu"),
+        ("fuer", "für"),
+        ("Fuer", "Für"),
+        ("ueber", "über"),
+        ("Ueber", "Über"),
+        ("verknuepf", "verknüpf"),
+        ("Verknuepf", "Verknüpf"),
+        ("pruef", "prüf"),
+        ("Pruef", "Prüf"),
+        ("koenn", "könn"),
+        ("Koenn", "Könn"),
+        ("moech", "möch"),
+        ("Moech", "Möch"),
+        ("zurueck", "zurück"),
+        ("Zurueck", "Zurück"),
+        ("spaeter", "später"),
+        ("Spaeter", "Später"),
+        ("loesch", "lösch"),
+        ("Loesch", "Lösch"),
+        ("oeffentlich", "öffentlich"),
+        ("Oeffentlich", "Öffentlich"),
+        ("haeufig", "häufig"),
+        ("Haeufig", "Häufig"),
+        ("waehl", "wähl"),
+        ("Waehl", "Wähl"),
+        ("naechst", "nächst"),
+        ("Naechst", "Nächst"),
+        ("laeuft", "läuft"),
+        ("Laeuft", "Läuft"),
+        ("ausloes", "auslös"),
+        ("Ausloes", "Auslös"),
+        ("zusaetz", "zusätz"),
+        ("Zusaetz", "Zusätz"),
+    ]
+    .into_iter()
+    .fold(text.to_string(), |acc, (from, to)| acc.replace(from, to))
 }
 
 fn unanswerable() -> AskResponse {
@@ -294,7 +337,7 @@ fn sources_for(chunks: &[Chunk]) -> Vec<Source> {
 
 fn build_prompt(question: &str, chunks: &[Chunk]) -> String {
     let mut prompt = format!(
-        "Frage:\n{question}\n\nNutze ausschliesslich diese Chunks. Antworte strikt als JSON-Objekt mit answerable und answer.\n"
+        "Frage:\n{question}\n\nNutze ausschließlich diese Chunks. Antworte strikt als JSON-Objekt mit answerable und answer.\n"
     );
     for (idx, chunk) in chunks.iter().enumerate() {
         prompt.push_str(&format!(
@@ -523,12 +566,31 @@ impl KnowledgeBase {
     }
 
     fn search(&self, query: &str, limit: usize) -> Vec<(Chunk, f64)> {
+        let query = expand_query(query);
         self.index
-            .search(query, limit)
+            .search(&query, limit)
             .into_iter()
             .map(|(idx, score)| (self.chunks[idx].clone(), score))
             .collect()
     }
+}
+
+fn expand_query(query: &str) -> String {
+    let lower = query.to_ascii_lowercase();
+    let mut expanded = query.to_string();
+    for (needle, alias) in [
+        ("steambot", " steam bot steam-bot steam dienst"),
+        ("twitchbot", " twitch bot twitch-bot"),
+        ("heroes", " helden hero tierlist builds winrate"),
+        ("champs", " helden hero heroes tierlist builds winrate"),
+        ("charaktere", " helden hero heroes"),
+        ("items", " item build builds"),
+    ] {
+        if lower.contains(needle) {
+            expanded.push_str(alias);
+        }
+    }
+    expanded
 }
 
 impl Bm25Index {
@@ -628,11 +690,27 @@ fn tokenize(text: &str) -> Vec<String> {
 }
 
 fn push_token(tokens: &mut Vec<String>, current: &mut String) {
-    if current.chars().count() > 1 && !STOPWORDS.contains(&current.as_str()) {
-        tokens.push(std::mem::take(current));
+    let token = normalize_token(current);
+    if token.chars().count() > 1 && !STOPWORDS.contains(&token.as_str()) {
+        tokens.push(token);
+        current.clear();
     } else {
         current.clear();
     }
+}
+
+fn normalize_token(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            'ä' => out.push_str("ae"),
+            'ö' => out.push_str("oe"),
+            'ü' => out.push_str("ue"),
+            'ß' => out.push_str("ss"),
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -716,8 +794,10 @@ mod tests {
     #[test]
     fn polish_glaettet_bloecke_bullets_und_striche() {
         assert_eq!(
-            polish_answer("Erster Satz.\n\n- Punkt eins\n• Punkt zwei\nEnde – wirklich — jetzt."),
-            "Erster Satz. Punkt eins Punkt zwei Ende, wirklich, jetzt."
+            polish_answer(
+                "Erster Satz.\n\n- Punkt eins\n• Punkt zwei\nEnde – wirklich — jetzt. Steam verknuepfst du ueber den Link."
+            ),
+            "Erster Satz. Punkt eins Punkt zwei Ende, wirklich, jetzt. Steam verknüpfst du über den Link."
         );
         assert_eq!(polish_answer("Ohne Befund."), "Ohne Befund.");
     }
@@ -782,6 +862,22 @@ Frag im Support.
         assert_eq!(results[1].0.path, "voice.md");
     }
 
+    #[test]
+    fn bm25_findet_steambot_alias_und_umlaut_ascii() {
+        let knowledge = KnowledgeBase::from_chunks(vec![test_chunk(
+            "Steam Bot",
+            "Steam verknüpfen",
+            "steam.md",
+            "Der Steam-Bot hilft beim Verknüpfen, Rang prüfen und Invite.",
+        )]);
+
+        let steambot = knowledge.search("wie funktioniert der steambot?", 1);
+        let ascii = knowledge.search("wie kann ich steam verknuepfen?", 1);
+
+        assert_eq!(steambot[0].0.path, "steam.md");
+        assert_eq!(ascii[0].0.path, "steam.md");
+    }
+
     #[tokio::test]
     async fn ask_handler_liefert_antwort_mit_sources() -> Result<()> {
         let generator = Arc::new(MockGenerator::new(vec![Some(
@@ -807,10 +903,7 @@ Frag im Support.
 
         assert_eq!(status, 200);
         assert_eq!(body["answerable"], true);
-        assert_eq!(
-            body["answer"],
-            "Steam verknuepfst du ueber den Account-Link."
-        );
+        assert_eq!(body["answer"], "Steam verknüpfst du über den Account-Link.");
         assert_eq!(body["sources"][0]["title"], "Steam Guide");
         assert_eq!(body["sources"][0]["path"], "steam.md");
         assert_eq!(generator.calls(), 1);
