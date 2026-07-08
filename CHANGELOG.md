@@ -1,3 +1,11 @@
+## #238 — Concierge drängt sich nicht mehr auf
+
+**Ausgangslage:** Der Concierge meldete sich nach kurzer Zeit von selbst mit einer Glückwunsch-Nachricht, obwohl das gerade noch nicht gewollt ist. In der Roomtour war der Deadlock Router nur fett geschrieben statt anklickbar, und der Vorstellungs-Vorschlag kippte manchmal in eine sinnlose Liste aus lauter Verboten.
+
+**Was wurde geändert:** Die selbständigen Nachfass-Nachrichten sind vorerst abgeschaltet, der Concierge reagiert nur noch. Der Deadlock Router ist jetzt ein klickbarer Kanal. Der Vorstellungstext wird enger geführt und ein kaputter Vorschlag durch einen sauberen Standardtext ersetzt.
+
+**Wie es jetzt läuft:** Er begrüßt dich und antwortet, wenn du schreibst, fängt aber nicht mehr von allein an. Der Router lässt sich direkt aus der Tour antippen, und die vorgeschlagene Vorstellung liest sich wie von dir.
+
 ## #237 — Concierge verweist auf den richtigen Fragekanal
 
 **Ausgangslage:** Einige sichtbare Concierge-, FAQ- und Regelwerk-Texte verwiesen allgemeine Bot- und Serverfragen noch in den Community-Fragekanal. Support-Tickets und Invite-Fragen waren dadurch nicht sauber getrennt.
