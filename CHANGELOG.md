@@ -2,7 +2,7 @@
 
 **Ausgangslage:** Wenn die öffentliche Doku nichts fand, konnte der Concierge wieder in eine freie KI-Antwort fallen. Dabei wurden Prompt-Tests, Links, knapper Smalltalk oder Alias-Schreibweisen wie „steambot" nicht sauber genug behandelt.
 
-**Was wurde geändert:** Der Concierge antwortet jetzt nur noch lokal, aus der öffentlichen Wissensbasis oder aus vorhandenem Brain-Wissen. Ohne belastbaren Kontext gibt es den klaren Hinweis auf menschliche Hilfe. Die Wissenssuche versteht außerdem typische Nutzer-Schreibweisen wie „steambot", „twitchbot", „heroes" und „verknuepfen". Sichtbare Antworten werden wieder mit echten Umlauten formuliert.
+**Was wurde geändert:** Der Concierge antwortet jetzt nur noch lokal, aus der öffentlichen Wissensbasis oder aus vorhandenem Brain-Wissen. Ohne belastbaren Kontext gibt es den klaren Hinweis auf menschliche Hilfe. Die Wissenssuche versteht außerdem typische Nutzer-Schreibweisen wie „steambot", „twitchbot", „heroes" und „verknuepfen". Sichtbare Antworten werden wieder mit echten Umlauten formuliert. Fragen nach der Heldenanzahl werden direkt aus den öffentlichen Heldenseiten gezählt.
 
 **Wie es jetzt läuft:** Prompt-Injection, Technikfragen und fremde Aufgaben bleiben kurze Concierge-Konter. Normale Serverfragen werden zuerst lokal gesucht, und Lücken fallen kontrolliert aus statt frei erfunden zu werden.
 
