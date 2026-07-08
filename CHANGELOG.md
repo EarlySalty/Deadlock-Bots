@@ -1,3 +1,11 @@
+## #236 — Tickets verlinken wieder den Ticketkanal
+
+**Ausgangslage:** Mehrere sichtbare Hinweise auf Tickets führten auf den Bereich für Server-Unterstützung, obwohl dort Boosts, Spenden und Unterstützer-Extras hingehören.
+
+**Was wurde geändert:** Ticket-, FAQ-, Regelwerk- und Schnellstart-Verweise zeigen jetzt auf den echten Ticketkanal. Der Bereich für Server-Unterstützung wird wieder als Spenden-/Boost-Bereich beschrieben.
+
+**Wie es jetzt läuft:** Wer Hilfe oder Moderation braucht, landet beim Ticketkanal. Wer den Server finanziell unterstützen will, bleibt im separaten Unterstützerbereich.
+
 ## #235 — Concierge bleibt im Wissenspfad
 
 **Ausgangslage:** Wenn die öffentliche Doku nichts fand, konnte der Concierge wieder in eine freie KI-Antwort fallen. Dabei wurden Prompt-Tests, Links, knapper Smalltalk oder Alias-Schreibweisen wie „steambot" nicht sauber genug behandelt.
