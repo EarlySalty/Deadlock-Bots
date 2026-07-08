@@ -48,7 +48,7 @@ pub const T0_BUTTON_LATER: &str = "Später";
 pub const LATER_TEXT: &str =
     "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach, ich bin immer da.";
 
-pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1491953161747955853>\nHier fragst du alles über den Server, Bots und mich als Concierge.\n\n<#1426220702054355077>\nHier stellst du offene Fragen an die Community. Und wenn du das Spiel noch gar nicht hast, fragst du hier nett nach einem Invite.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
+pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1491953161747955853>\nHier fragst du alles über den Server, Bots und mich als Concierge.\n\n<#1426220702054355077>\nHier stellst du offene Fragen an die Community. Und wenn du das Spiel noch gar nicht hast, fragst du hier nett nach einem Invite.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n<#1513468587195633674>\nDanach joinst du einfach diesen Voice-Kanal, den Deadlock Router. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
 pub const TOUR_BUTTON_DRAFT: &str = "Ja, schreib was vor";
 pub const TOUR_BUTTON_SKIP: &str = "Lieber nicht";
 pub const TOUR_SKIP_TEXT: &str =
@@ -108,7 +108,7 @@ pub const LINK_ONLY_TEXT: &str =
     "Links kann ich hier nicht sinnvoll auswerten. Sag mir kurz in Worten, was du suchst.";
 pub const FAVORITE_TEXT: &str =
     "Ein guter Concierge behandelt alle Gäste gleich. Ich habe keine Favoriten, aber ich helfe dir gern, passende Leute zum Spielen zu finden.";
-pub const PLAY_TEXT: &str = "Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also was und wie du spielen willst. Danach joinst du den Deadlock Router, der packt dich automatisch in eine passende Lane oder macht dir eine eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)";
+pub const PLAY_TEXT: &str = "Läuft. Stell dir in <#1513468476365209670> kurz dein Preset ein, also was und wie du spielen willst. Danach joinst du <#1513468587195633674>, den Deadlock Router, der packt dich automatisch in eine passende Lane oder macht dir eine eigene auf. Viel Spaß, und wenn was hakt, schreib mir :)";
 pub const STECKBRIEF_MODAL_TITLE: &str = "Deine Vorstellung";
 pub const STECKBRIEF_MODAL_LABEL: &str = "Dein Text";
 pub const STECKBRIEF_MODAL_PLACEHOLDER: &str = "Schreib es einfach so, wie du redest.";
@@ -180,6 +180,9 @@ pub struct ConciergeConfig {
     pub brand_emoji: Option<String>,
     pub knowledge_url: String,
     pub model: Option<String>,
+    /// Proaktive Kadenz (Gratulation nach erster Aktivität, T2/T7-Nudges).
+    /// Aus per Default: der Concierge reagiert nur, statt sich von selbst zu melden.
+    pub proactive_cadence: bool,
 }
 
 impl ConciergeConfig {
@@ -213,6 +216,7 @@ impl ConciergeConfig {
             model: lookup("DL_CONCIERGE_MODEL")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            proactive_cadence: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
         }
     }
 
@@ -636,6 +640,15 @@ fn v2_reply(body: Map<String, Value>, fallback_content: &str) -> BridgeReply {
 
 fn text_reply(text: &str) -> BridgeReply {
     v2_reply(v2_body(text, Vec::new()), text)
+}
+
+/// Fängt entartete LLM-Steckbriefe ab (z. B. eine Endlosliste aus "Keine ..."),
+/// damit sie nie als Vorschlag oder gar öffentlicher Post landen. Greift der Guard,
+/// wird der Entwurf verworfen und der neutrale Fallback benutzt.
+/// ponytail: Länge + "Keine "-Häufung genügen für den beobachteten Loop; bei neuen
+/// Entartungsmustern hier ergänzen.
+fn steckbrief_looks_degenerate(text: &str) -> bool {
+    text.chars().count() > 450 || text.matches("Keine ").count() >= 3
 }
 
 fn pending_steckbrief_candidate(profile: &ConciergeProfile) -> Option<(&str, u64)> {
@@ -1757,14 +1770,16 @@ impl Concierge {
 
     pub async fn run_scheduler(&self) {
         let now = Utc::now();
-        match self.store.due_profiles(now).await {
-            Ok(profiles) => {
-                for profile in profiles {
-                    self.run_profile_cadence(profile, now).await;
+        if self.config.proactive_cadence {
+            match self.store.due_profiles(now).await {
+                Ok(profiles) => {
+                    for profile in profiles {
+                        self.run_profile_cadence(profile, now).await;
+                    }
                 }
-            }
-            Err(err) => {
-                tracing::warn!(%err, "Concierge: Scheduler-Profile konnten nicht geladen werden")
+                Err(err) => {
+                    tracing::warn!(%err, "Concierge: Scheduler-Profile konnten nicht geladen werden")
+                }
             }
         }
         self.flush_pending_steckbriefe(now).await;
@@ -1954,9 +1969,13 @@ impl Concierge {
 
     async fn draft_steckbrief(&self, user_id: u64) -> Option<String> {
         let ai = self.ai.as_ref()?;
-        let mut messages = vec![ChatMessage::system(format!(
-            "{SYSTEM_PROMPT}\n\nSchreibe jetzt nur einen Steckbrief in Ich-Form nach diesem Gerüst: Satz 1 grob wer und was gespielt wird, Rang nur wenn Kontext vorliegt. Satz 2 Ziel aus dem Gespräch. Satz 3 optional Spielzeiten. Schluss konkrete Aufforderung an die Community. 2 bis 4 kurze Sätze."
-        ))];
+        // Eigener, enger Prompt: der Steckbrief spricht in der Stimme des NEUEN MITGLIEDS,
+        // nicht des Concierge. Das volle Chat-SYSTEM_PROMPT (voller "keine X"-Regeln, gedacht
+        // fürs Gespräch) kippt hier bei leerem Kontext in eine "Keine Erwähnung von ..."-Endlosliste.
+        // Positiv formuliert plus Beispiel statt Verbotsliste, das entartet deutlich seltener.
+        let mut messages = vec![ChatMessage::system(
+            "Du hilfst einem neuen Mitglied eines deutschen Deadlock-Discord-Servers, sich kurz vorzustellen. Schreibe die Vorstellung in Ich-Form, so wie die Person sie selbst in den Server posten würde: locker, per Du, kurze Sätze. Nutze nur, was die Person im Gespräch wirklich gesagt hat. Weißt du wenig, halte es allgemein und einladend. Gerüst: Satz 1 grob wer und was gespielt wird, Rang nur wenn bekannt. Satz 2 Ziel. Satz 3 optional Spielzeiten. Schluss eine konkrete Einladung an die Community, mit wem zu spielen. 2 bis 4 kurze Sätze. Beispiel, wenn du wenig weißt: Hey, bin neu hier und hab Lust auf ein paar Runden Deadlock. Spiele meistens abends. Wer nimmt mich mit oder zeigt mir alles? Gib nur die Vorstellung aus, sonst nichts.".to_string(),
+        )];
         if let Ok(recent) = self.store.recent_conversation(user_id, 8).await {
             messages.extend(recent);
         }
@@ -1973,7 +1992,7 @@ impl Concierge {
         .await
         .ok()
         .map(|response| response.content.trim().to_string())
-        .filter(|text| !text.is_empty())
+        .filter(|text| !text.is_empty() && !steckbrief_looks_degenerate(text))
     }
 
     async fn request_pate(&self, user_id: u64, guild_id: u64, user_name: &str) -> BridgeReply {
@@ -3055,6 +3074,24 @@ mod tests {
             steckbrief_route("hi", Some(ConciergeIntent::Learn)),
             SteckbriefRoute::HelpOrInvite
         );
+    }
+
+    #[test]
+    fn steckbrief_entartung_wird_verworfen() {
+        // Genau der Live-Leak aus dem Tester-Screenshot: Prohibitions-Liste statt Vorstellung.
+        let leak = "So könntest du dich vorstellen. Keine Emojis. Keine Anführungszeichen. \
+                    Keine Formatierung. Keine Erwähnung von Deadlock. Keine Erwähnung von Discord.";
+        assert!(steckbrief_looks_degenerate(leak));
+        let echt = "Hey, bin neu hier und hab Lust auf ein paar Runden Deadlock. \
+                    Spiele meistens abends. Wer nimmt mich mit oder zeigt mir alles?";
+        assert!(!steckbrief_looks_degenerate(echt));
+    }
+
+    #[test]
+    fn tour_verlinkt_den_deadlock_router_klickbar() {
+        assert!(TOUR_TEXT.contains("<#1513468587195633674>"));
+        assert!(!TOUR_TEXT.contains("**Deadlock Router**"));
+        assert!(PLAY_TEXT.contains("<#1513468587195633674>"));
     }
 
     #[test]
