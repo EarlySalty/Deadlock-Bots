@@ -180,9 +180,10 @@ pub struct ConciergeConfig {
     pub brand_emoji: Option<String>,
     pub knowledge_url: String,
     pub model: Option<String>,
-    /// Proaktive Kadenz (Gratulation nach erster Aktivität, T2/T7-Nudges).
-    /// Aus per Default: der Concierge reagiert nur, statt sich von selbst zu melden.
-    pub proactive_cadence: bool,
+    /// Proaktive DMs (Begrüßung beim Join, Gratulation, T2/T7-Nudges).
+    /// Aus per Default: der Concierge schickt nichts von selbst und antwortet nur,
+    /// wenn ihn jemand direkt anschreibt.
+    pub proactive: bool,
 }
 
 impl ConciergeConfig {
@@ -216,7 +217,7 @@ impl ConciergeConfig {
             model: lookup("DL_CONCIERGE_MODEL")
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
-            proactive_cadence: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
+            proactive: env_bool(&lookup, "DL_CONCIERGE_PROACTIVE", false),
         }
     }
 
@@ -1409,6 +1410,12 @@ impl Concierge {
         if guild_id != self.config.main_guild_id || !self.config.user_allowed(user_id) {
             return;
         }
+        // Proaktiv aus: keine ungefragte Begrüßungs-DM beim Join. Der Concierge
+        // meldet sich nur noch, wenn ihn jemand direkt anschreibt; der reaktive
+        // Pfad legt das Profil bei der ersten Nachricht selbst an.
+        if !self.config.proactive {
+            return;
+        }
         let now = Utc::now();
         if let Err(err) = self.store.ensure_profile(user_id, guild_id, now).await {
             tracing::warn!(%err, user_id, "Concierge: Profilanlage fehlgeschlagen");
@@ -1770,7 +1777,7 @@ impl Concierge {
 
     pub async fn run_scheduler(&self) {
         let now = Utc::now();
-        if self.config.proactive_cadence {
+        if self.config.proactive {
             match self.store.due_profiles(now).await {
                 Ok(profiles) => {
                     for profile in profiles {
@@ -2857,6 +2864,7 @@ mod tests {
 
     #[derive(Default)]
     struct MockConciergePort {
+        sent_dm_v2: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
         brain_answer: std::sync::Mutex<Option<String>>,
         brain_questions: std::sync::Mutex<Vec<String>>,
@@ -2866,9 +2874,10 @@ mod tests {
     impl ConciergePort for MockConciergePort {
         async fn send_dm_v2(
             &self,
-            _user_id: u64,
+            user_id: u64,
             _body: Map<String, Value>,
         ) -> ConciergeDmDelivery {
+            self.sent_dm_v2.lock().unwrap().push(user_id);
             ConciergeDmDelivery::Sent {
                 channel_id: Some(1),
                 message_id: 1,
@@ -2942,6 +2951,7 @@ mod tests {
 
     fn mock_port(brain_answer: Option<&str>) -> Arc<MockConciergePort> {
         Arc::new(MockConciergePort {
+            sent_dm_v2: std::sync::Mutex::new(Vec::new()),
             sent_channel_v2: std::sync::Mutex::new(Vec::new()),
             brain_answer: std::sync::Mutex::new(brain_answer.map(str::to_string)),
             brain_questions: std::sync::Mutex::new(Vec::new()),
@@ -2995,6 +3005,22 @@ mod tests {
         assert_eq!(sent_v2_content(&sent[1]), COOLDOWN_TEXT);
         assert_eq!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
         assert!(provider.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn join_ohne_proaktiv_schickt_keine_begruessung() {
+        // test_config setzt DL_CONCIERGE_PROACTIVE nicht -> proactive = false (Default).
+        let config = test_config(true, &[]);
+        assert!(!config.proactive);
+        let guild = config.main_guild_id;
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+
+        concierge.handle_native_onboarding_completed(guild, 123).await;
+
+        // Kein ungefragter Kontakt: weder DM noch Fallback-Kanal (bricht vor jedem DB-Zugriff ab).
+        assert!(port.sent_dm_v2.lock().unwrap().is_empty());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
     }
 
     fn profile_at(t0: DateTime<Utc>) -> ConciergeProfile {

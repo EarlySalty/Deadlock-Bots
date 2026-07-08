@@ -1,3 +1,11 @@
+## #239 — Concierge meldet sich nur noch auf Ansprache
+
+**Ausgangslage:** Solange am Concierge noch gebaut wird, soll er niemanden von sich aus anschreiben, auch nicht mit der Begrüßung beim Beitritt.
+
+**Was wurde geändert:** Alle selbst gestarteten DMs sind vorerst aus, inklusive der Willkommensnachricht. Er antwortet weiterhin ganz normal, sobald ihm jemand direkt schreibt.
+
+**Wie es jetzt läuft:** Wer eine Frage hat, schreibt ihn einfach an und bekommt Antwort. Von allein bleibt er still, bis er wieder freigeschaltet wird.
+
 ## #238 — Concierge drängt sich nicht mehr auf
 
 **Ausgangslage:** Der Concierge meldete sich nach kurzer Zeit von selbst mit einer Glückwunsch-Nachricht, obwohl das gerade noch nicht gewollt ist. In der Roomtour war der Deadlock Router nur fett geschrieben statt anklickbar, und der Vorstellungs-Vorschlag kippte manchmal in eine sinnlose Liste aus lauter Verboten.
