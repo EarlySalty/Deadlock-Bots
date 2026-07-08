@@ -38,7 +38,7 @@ pub const ONBOARDING_TRANSIENT_START_HINT: &str =
 /// Welle 2b: Antwort auf Alt-Panel-Interaktionen nach der Wizard-Stilllegung.
 pub const LEGACY_PANEL_RETIRED_HINT: &str = "Der alte Einstiegs-Assistent ist Geschichte — den \
 Einstieg übernimmt jetzt das Discord-Onboarding. Alles Wichtige findest du in <#1315684135175716975>, \
-Fragen beantwortet dir gern die Community in #frag-die-community.";
+Fragen zu Server, Bots und Concierge stellst du in <#1491953161747955853>.";
 pub const ONBOARDING_RECHECK_UNVERIFIED_HINT: &str =
     "Du hast die **Verified**-Rolle noch nicht. Bitte stelle sicher, dass du deinen Account verknüpft hast \
 und dem Steam-Bot (Freundescode 820142646) eine Freundschaftsanfrage geschickt und angenommen hast. \

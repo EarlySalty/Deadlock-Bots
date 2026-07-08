@@ -38,7 +38,7 @@ pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
-const FAQ_NO_ANSWER: &str = "Da müssen wir passen, das haben wir gerade selbst nicht parat. Stell die Frage gern nochmal anders, oder mach ein Ticket auf, dann schaut sich das jemand von uns persönlich an.";
+const FAQ_NO_ANSWER: &str = "Da müssen wir passen, das haben wir gerade selbst nicht parat. Stell die Frage gern nochmal anders oder in <#1491953161747955853>. Bei Support oder Moderation öffnest du ein Ticket in <#1459628609705738539>.";
 const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ticket geantwortet:";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
@@ -169,13 +169,13 @@ fn ticket_answer_target(ticket_channel_id: u64, shadow_channel_id: Option<u64>) 
 /// + `FAQPanelView`).
 fn panel_body() -> serde_json::Map<String, serde_json::Value> {
     let embed = json!({
-        "title": "FAQ - Häufig gestellte Fragen",
-        "description": "Stell eine Frage zum Server, zu Kanälen, Rollen oder Deadlock.\n\
-                        Klicke auf den Button – **ein Bot** versucht deine Frage zu beantworten.\n\
+        "title": "Concierge - Fragen zum Server",
+        "description": "Stell eine Frage zum Server, zu Kanälen, Rollen, Bots oder Deadlock.\n\
+                        Klicke auf den Button – **der Concierge** versucht deine Frage zu beantworten.\n\
                         Deine Frage geht **nicht** an die Community.\n\n\
                         ⏱️ Chats werden nach 24 Stunden automatisch geschlossen.",
         "color": 0x5865F2, // blurple
-        "footer": { "text": "Deadlock Master Bot • FAQ Chat" }
+        "footer": { "text": "Deadlock Master Bot • Concierge Chat" }
     });
     let components = json!([{ "type": 1, "components": [{
         "type": 2, "style": 1, "label": "Frage stellen",
@@ -681,7 +681,7 @@ impl InteractionHandler for FaqHandler {
                 )
                 .await;
             let welcome = format!(
-                "👋 **{user_name}**, willkommen zum FAQ-Chat!\n\n\
+                "👋 **{user_name}**, willkommen zum Concierge-Chat!\n\n\
 Stell mir Fragen zum Server, zu Kanälen, Rollen, Bots oder Deadlock.\n\
 Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stellen.\n\n\
 ⏱️ Dieser Chat wird nach 24 Stunden automatisch geschlossen.\n\
@@ -696,7 +696,7 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
                 .send_message(channel_id, &welcome, Some(close_button))
                 .await;
             return BridgeReply::ephemeral_text(format!(
-                "✅ Dein FAQ-Chat wurde erstellt: <#{channel_id}>\n\nStell deine Frage(n) dort."
+                "✅ Dein Concierge-Chat wurde erstellt: <#{channel_id}>\n\nStell deine Frage(n) dort."
             ));
         }
 
@@ -742,7 +742,7 @@ pub fn register(router: &mut InteractionRouter, faq: Arc<FaqChat>) {
         CommandSpec {
             definition: json!({
                 "name": "faq",
-                "description": "Startet einen FAQ-Chat mit dem Server-Assistenten.",
+                "description": "Startet einen Concierge-Chat mit dem Server-Assistenten.",
                 "type": 1,
                 "dm_permission": false,
             }),

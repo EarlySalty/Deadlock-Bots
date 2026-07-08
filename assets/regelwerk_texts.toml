@@ -19,7 +19,8 @@ Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban. Schädliche Inhalt
 wegweiser = """**🧭 Schnell zurechtfinden**
 - <#1398021105339334666> — Steam verknüpfen, Rang eintragen
 - <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)
-- <#1426220702054355077> — jede Frage ist okay; auch dein Deadlock-Invite bekommst du hier
+- <#1491953161747955853> — Fragen über Server, Bots und Concierge
+- <#1426220702054355077> — Community-Fragen und Deadlock-Invite
 - <#1522769149208821881> — Mitspieler finden"""
 datenschutz = """**🔒 Datenschutz & KI-Moderation**
 
