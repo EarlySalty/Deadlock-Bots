@@ -1,7 +1,7 @@
 [texts]
 title = '**❓ Server-FAQ · Deutsche Deadlock Community**'
 body = '''Wähl unten deine Frage aus — die Antwort siehst nur du.
-Nichts Passendes dabei? Stell deine Frage in <#1426220702054355077> oder mach ein Ticket in <#1459628609705738539> auf.'''
+Nichts Passendes dabei? Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für Support oder Moderation öffnest du ein Ticket in <#1459628609705738539>.'''
 placeholder = 'Wähl deine Frage …'
 
 [[options]]
@@ -30,7 +30,7 @@ value = 'f4'
 label = 'Mein Invite hängt — was tun?'
 emoji = '🛠️'
 answer = '''**🛠️ Mein Invite hängt — was tun?**
-Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, schreib in <#1426220702054355077> oder mach ein Ticket in <#1459628609705738539> auf: Da schaut ein Mensch drauf.'''
+Fast immer liegt es an einem von drei Punkten: Steam ist noch nicht verknüpft (<#1398021105339334666>), die Freundschaftsanfrage des Bots wurde auf Steam noch nicht angenommen, oder dein Steam-Account ist „limited" (siehe die Frage dazu). Geh die drei kurz durch — wenn es dann immer noch klemmt, frag in <#1426220702054355077> nach. Bei einem konkreten technischen Problem öffnest du ein Ticket in <#1459628609705738539>.'''
 
 [[options]]
 value = 'f5'
@@ -107,4 +107,4 @@ value = 'f15'
 label = 'Wo fange ich an — und wo kann ich fragen?'
 emoji = '🧭'
 answer = '''**🧭 Wo fange ich an — und wo kann ich fragen?**
-Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Und für alles andere gilt: <#1426220702054355077> ist genau dafür da. Es gibt keine dummen Fragen, und hier antworten dir echte Menschen — normalerweise noch am selben Tag.'''
+Folg einfach der Server-Guide-Checkliste oben im Kanalbaum: Sag Hallo in <#1426220702054355077>, verknüpf deinen Steam-Account, such dir Mitspieler — in der Reihenfolge, ohne Zeitdruck. Server-, Bot- und Concierge-Fragen stellst du in <#1491953161747955853>. Für offene Community-Fragen oder einen Deadlock-Invite passt <#1426220702054355077>.'''

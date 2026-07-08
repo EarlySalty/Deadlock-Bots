@@ -30,6 +30,7 @@ pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 pub const DEFAULT_PATE_CATEGORY_ID: u64 = 1465839366634209361;
 pub const RETENTION_DAYS: i64 = 90;
 pub const FRAG_DIE_COMMUNITY_CHANNEL_ID: u64 = 1426220702054355077;
+pub const SERVER_BOT_FRAGEN_CHANNEL_ID: u64 = 1491953161747955853;
 pub const ALLGEMEIN_CHANNEL_ID: u64 = 1289721245281292291;
 pub const PATE_ROLE_ID: u64 = 1524047896297738311;
 pub const SPRACHKANAL_VERWALTEN_CHANNEL_ID: u64 = 1513468476365209670;
@@ -47,7 +48,7 @@ pub const T0_BUTTON_LATER: &str = "Später";
 pub const LATER_TEXT: &str =
     "Alles gut, lass dir Zeit. Wenn du mich brauchst, schreib mir einfach, ich bin immer da.";
 
-pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1426220702054355077>\nStell hier alle deine Fragen zu Deadlock, egal wie basic. Und wenn du das Spiel noch gar nicht hast, lässt du dich hier ins Game inviten.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
+pub const TOUR_TEXT: &str = "Gern, hier die kleine Roomtour. Das sind die Ecken, die sich am Anfang lohnen.\n\n<#1326973956825284628>\nHier landen alle Patchnotes auf Deutsch, direkt aufbereitet. Ein Blick vor der ersten Runde lohnt sich.\n\n<#1304169815505637458>\nSag doch mal hallo oder lurk bei unseren Streamer-Partnern rein. Da ist eigentlich immer wer live.\n\n<#1491953161747955853>\nHier fragst du alles über den Server, Bots und mich als Concierge.\n\n<#1426220702054355077>\nHier stellst du offene Fragen an die Community. Und wenn du das Spiel noch gar nicht hast, fragst du hier nett nach einem Invite.\n\n<#1494373349944459355>\nDu willst, dass dir jemand beim Einstieg hilft? Dann stell hier deine Coaching-Anfrage, unsere Coaches machen das gern.\n\n<#1513468476365209670>\nHier stellst du dein Preset ein, also was und wie du gern spielen willst.\n\n**Deadlock Router**\nDanach joinst du einfach den **Deadlock Router**. Der verteilt dich automatisch in eine passende Lane oder macht dir eine eigene auf.\n\nDas war die Tour. Wenn du magst, stell ich dich den anderen kurz vor, dann musst du nicht den ersten Schritt machen. Ich schreib dir was vor, du änderst es wie du willst, und gepostet wird nur, wenn du es freigibst.";
 pub const TOUR_BUTTON_DRAFT: &str = "Ja, schreib was vor";
 pub const TOUR_BUTTON_SKIP: &str = "Lieber nicht";
 pub const TOUR_SKIP_TEXT: &str =
@@ -90,13 +91,13 @@ pub const PATE_ALREADY_CLAIMED_TEXT: &str =
 pub const PATE_LOAD_LIMIT_TEXT: &str = "Du begleitest gerade schon drei Neulinge, das reicht erstmal. Lass diesmal jemand anderem den Vortritt und danke, dass du so aktiv bist.";
 pub const PATE_REQUEST_FALLBACK_TEXT: &str = "Klingt, als würde dir ein fester Ansprechpartner guttun. Soll ich einen unserer Paten für dich suchen?";
 pub const PATE_REQUEST_RULE: &str = "Wenn der User sich einen Paten, Mentor oder eine feste Bezugsperson wünscht, setze \"pate_request\": true. Setze es nicht, wenn er nur wissen will, was ein Pate ist.";
-pub const ANTI_INVENT_RULE: &str = "Nenne nur Befehle, Kanäle, Rollen und Features, die im Wissenskontext oder in deinen Anweisungen vorkommen. Wenn du etwas nicht sicher weißt, sag das ehrlich und verweise auf <#1426220702054355077>. Erfinde niemals Befehle oder Abläufe.";
+pub const ANTI_INVENT_RULE: &str = "Nenne nur Befehle, Kanäle, Rollen und Features, die im Wissenskontext oder in deinen Anweisungen vorkommen. Wenn du etwas nicht sicher weißt, sag das ehrlich und verweise auf <#1491953161747955853>. Erfinde niemals Befehle oder Abläufe.";
 pub const STEAM_NUDGE_MEMORY_MARKER: &str =
     "[Ich habe dir eine DM mit dem Tipp zur Steam-Verknüpfung geschickt.]";
 pub const VOICE_FEEDBACK_MEMORY_MARKER: &str =
     "[Ich habe dich per DM nach Feedback zu deinen Voice-Runden gefragt.]";
-pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch.";
-pub const GAP_GUIDANCE: &str = "Zu dieser Frage gibt es keinen belastbaren Wissenskontext. Erfinde keine Server-Fakten, Befehle, Kanäle oder Features. Wenn die Frage solche Fakten braucht, antworte sinngemäß: Da will ich dir nichts Falsches erzählen, stell die Frage am besten in <#1426220702054355077>, da antwortet dir ein echter Mensch. Gesprächsfragen, persönliche Fragen und Smalltalk beantwortest du ganz normal. Meinungs- und Geschmacksfragen (Lieblingsspieler, Favoriten, was du magst) sind KEIN Fall für diesen Verweis-Satz: Da antwortest du charmant und mit Augenzwinkern in deiner Rolle, etwa dass ein guter Concierge alle Gäste gleich behandelt, und drehst die Frage zurück an dein Gegenüber. Nenne dabei keine echten Membernamen als Favoriten.";
+pub const KNOWLEDGE_GAP_TEXT: &str = "Da will ich dir nichts Falsches erzählen. Stell die Frage am besten in <#1491953161747955853>, da antwortet dir ein echter Mensch.";
+pub const GAP_GUIDANCE: &str = "Zu dieser Frage gibt es keinen belastbaren Wissenskontext. Erfinde keine Server-Fakten, Befehle, Kanäle oder Features. Wenn die Frage solche Fakten braucht, antworte sinngemäß: Da will ich dir nichts Falsches erzählen, stell die Frage am besten in <#1491953161747955853>, da antwortet dir ein echter Mensch. Gesprächsfragen, persönliche Fragen und Smalltalk beantwortest du ganz normal. Meinungs- und Geschmacksfragen (Lieblingsspieler, Favoriten, was du magst) sind KEIN Fall für diesen Verweis-Satz: Da antwortest du charmant und mit Augenzwinkern in deiner Rolle, etwa dass ein guter Concierge alle Gäste gleich behandelt, und drehst die Frage zurück an dein Gegenüber. Nenne dabei keine echten Membernamen als Favoriten.";
 pub const SELF_DISCLOSURE_BLOCK_TEXT: &str =
     "Netter Versuch, aber der Generalschlüssel bleibt an meinem Gürtel. Womit kann ich dir hier auf dem Server helfen?";
 pub const SMALLTALK_TEXT: &str =
@@ -141,8 +142,8 @@ Präzisieren. Frag zuerst, was die Person vorhat, und steig dann konkret
 ein. Antworte immer mit einer Handlung am Ende: ein konkreter Kanal, ein
 konkreter Schritt, ein Mensch. Fakten über Server und Spiel kommen
 ausschließlich aus dem mitgelieferten Wissenskontext. Steht etwas nicht im
-Kontext, erfindest du es nicht, sondern verweist auf den Kanal
-frag-die-community, da antwortet ein Mensch. Behaupte nie, etwas
+Kontext, erfindest du es nicht, sondern verweist auf <#1491953161747955853>,
+da antwortet ein Mensch. Behaupte nie, etwas
 nachgeschaut oder geprüft zu haben. Status (Rang verknüpft, Steam
 bestätigt) kennst du nur, wenn er dir explizit als Kontext mitgegeben
 wurde, dann nenne die Quelle. Versprich nichts über dein eigenes künftiges

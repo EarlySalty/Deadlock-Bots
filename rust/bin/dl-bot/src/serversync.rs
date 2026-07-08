@@ -5531,8 +5531,8 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
 
 fn build_regelwerk_text(model: &GuildModel) -> ServerSyncResult<String> {
     let deadlock_rang = require_channel_mention(model, "deadlock-rang")?;
-    let deadlock_invite = require_channel_mention(model, "deadlock-invite")?;
     let support_ticket = format!("<#{SUPPORT_TICKET_CHANNEL_ID}>");
+    let server_bot_fragen = format!("<#{}>", faq_publish::FAQ_CHANNEL_ID);
     let frag_die_community = require_channel_mention(model, "frag-die-community")?;
 
     Ok(format!(
@@ -5547,9 +5547,9 @@ Situatives Trash-Talking, Sarkasmus, Wortspiele — solange es nicht persönlich
 **Universalregel:** Sei kein Arschloch 😄\n\n\
 **Schnell zurechtfinden**\n\
 - {deadlock_rang} — Steam verknüpfen, Rang eintragen\n\
-- {deadlock_invite} — du hast Deadlock noch nicht? Hier bekommst du deinen Invite\n\
 - {support_ticket} — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n\
-- {frag_die_community} — jede Frage ist okay\n\n\
+- {server_bot_fragen} — Fragen über Server, Bots und Concierge\n\
+- {frag_die_community} — Community-Fragen und Deadlock-Invite\n\n\
 **Moderation**\n\
 Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's diskreter sein soll. Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban."
     ))
@@ -5607,7 +5607,7 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
         enabled: true,
         welcome_message: ServerGuideWelcomeMessage {
             author_ids: vec!["662995601738170389".to_string()],
-            message: "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, holst du dir in #deadlock-invite deinen Invite.".to_string(),
+            message: "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, fragst du in #frag-die-community nach einem Invite.".to_string(),
         },
         new_member_actions: vec![
             ServerGuideAction {
@@ -9706,12 +9706,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let text = build_regelwerk_text(&onboarding_model()).expect("regelwerk text");
 
         assert!(text.contains("- <#6007> — Steam verknüpfen, Rang eintragen"));
-        assert!(text
-            .contains("- <#6008> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite"));
         assert!(text.contains(
             "- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"
         ));
-        assert!(text.contains("- <#6002> — jede Frage ist okay"));
+        assert!(text.contains("- <#1491953161747955853> — Fragen über Server, Bots und Concierge"));
+        assert!(text.contains("- <#6002> — Community-Fragen und Deadlock-Invite"));
         assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
         assert!(!text.contains("#deadlock-rang"));
         assert!(!text.contains("<@&"));
@@ -9821,7 +9820,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert_eq!(
             config.welcome_message.message,
-            "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, holst du dir in #deadlock-invite deinen Invite."
+            "Schön, dass du da bist! Schau dich in Ruhe um — und wenn du Deadlock noch nicht hast, fragst du in #frag-die-community nach einem Invite."
         );
         assert_eq!(config.new_member_actions.len(), 3);
         assert_eq!(config.new_member_actions[0].title, "Sag Hallo");

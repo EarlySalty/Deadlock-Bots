@@ -1,3 +1,11 @@
+## #237 — Concierge verweist auf den richtigen Fragekanal
+
+**Ausgangslage:** Einige sichtbare Concierge-, FAQ- und Regelwerk-Texte verwiesen allgemeine Bot- und Serverfragen noch in den Community-Fragekanal. Support-Tickets und Invite-Fragen waren dadurch nicht sauber getrennt.
+
+**Was wurde geändert:** Server-, Bot- und Concierge-Fragen zeigen jetzt auf den dafür vorgesehenen Fragekanal. Support und Moderation bleiben im Ticketkanal, Invite-Fragen bleiben im Community-Fragekanal.
+
+**Wie es jetzt läuft:** Der Concierge hilft nur aus der Doku. Wenn er nichts Sicheres weiß, verweist er auf den Server-/Bot-Fragekanal; im Ticket antwortet er nur, wenn er wirklich helfen kann.
+
 ## #236 — Tickets verlinken wieder den Ticketkanal
 
 **Ausgangslage:** Mehrere sichtbare Hinweise auf Tickets führten auf den Bereich für Server-Unterstützung, obwohl dort Boosts, Spenden und Unterstützer-Extras hingehören.
