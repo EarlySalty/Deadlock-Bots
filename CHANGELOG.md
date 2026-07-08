@@ -1,3 +1,11 @@
+## #234 — Concierge nutzt öffentliche Doku zuerst
+
+**Ausgangslage:** Der Concierge konnte bei Architektur-, Modell- oder Code-Fragen zu lange am KI-Verlauf hängen. Öffentliche Serverfragen wurden außerdem nicht immer direkt aus der Wissensbasis beantwortet.
+
+**Was wurde geändert:** Der Concierge blockt interne Technik- und Code-Aufgaben lokal und fragt bei allen normalen Fragen zuerst die öffentliche Wissensbasis. Findet sie eine sichere Antwort, wird diese direkt genutzt.
+
+**Wie es jetzt läuft:** Fragen aus der öffentlichen Doku werden schneller und ohne Chat-Verlauf beantwortet. Interne Bot-Details, Terminal- und Code-Aufgaben bleiben beim kurzen Concierge-Konter.
+
 ## #233 — Voice-Texte sagen Sprachkanal statt TempVoice
 
 **Ausgangslage:** Einige Hinweise im Sprachkanal-Panel sprachen noch von TempVoice oder Lane. Gerade bei Ablehnungen war dadurch nicht sofort klar, dass man dafür einfach in einem Sprachkanal sein muss.
