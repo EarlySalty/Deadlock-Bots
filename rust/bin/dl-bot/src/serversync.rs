@@ -58,6 +58,7 @@ const SERVERSYNC_KV_NS: &str = "serversync";
 const WELLE2B_ARCHIVE_ENABLED_KEY: &str = "welle2b_archive_enabled";
 const REGELWERK_MESSAGE_ID_KEY: &str = "regelwerk_message_id";
 const RULES_CHANNEL_ID: u64 = dl_community::onboarding::RULES_CHANNEL_ID;
+const SUPPORT_TICKET_CHANNEL_ID: u64 = 1_459_628_609_705_738_539;
 const SERVER_GUIDE_DIFF_MESSAGE_KEY: &str = "server-guide";
 const SERVER_GUIDE_DIFF_OBJECT_ID: u64 = GUILD_ID;
 const SERVER_GUIDE_UNAVAILABLE_MESSAGE: &str =
@@ -5531,7 +5532,7 @@ fn apply_output(report: ApplyReport) -> ServerSyncResult<ApplyOutput> {
 fn build_regelwerk_text(model: &GuildModel) -> ServerSyncResult<String> {
     let deadlock_rang = require_channel_mention(model, "deadlock-rang")?;
     let deadlock_invite = require_channel_mention(model, "deadlock-invite")?;
-    let server_support = require_channel_mention(model, "server-support")?;
+    let support_ticket = format!("<#{SUPPORT_TICKET_CHANNEL_ID}>");
     let frag_die_community = require_channel_mention(model, "frag-die-community")?;
 
     Ok(format!(
@@ -5547,7 +5548,7 @@ Situatives Trash-Talking, Sarkasmus, Wortspiele — solange es nicht persönlich
 **Schnell zurechtfinden**\n\
 - {deadlock_rang} — Steam verknüpfen, Rang eintragen\n\
 - {deadlock_invite} — du hast Deadlock noch nicht? Hier bekommst du deinen Invite\n\
-- {server_support} — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n\
+- {support_ticket} — wenn irgendwas nicht funktioniert (Ticket aufmachen)\n\
 - {frag_die_community} — jede Frage ist okay\n\n\
 **Moderation**\n\
 Probleme? @Moderator oder @Owner pingen — oder ein Ticket aufmachen, wenn's diskreter sein soll. Konsequenzen je nach Schwere: Verwarnung → Timeout → Ban."
@@ -5570,7 +5571,12 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
     let deadlock_rang = require_serverguide_channel_id(model, "deadlock-rang", &mut blockers);
     let mitspieler_suche = require_serverguide_channel_id(model, "mitspieler-suche", &mut blockers);
     let patchnotes = require_serverguide_channel_id(model, "patchnotes", &mut blockers);
-    let server_support = require_serverguide_channel_id(model, "server-support", &mut blockers);
+    let support_ticket = require_serverguide_channel_id_by_id(
+        model,
+        SUPPORT_TICKET_CHANNEL_ID,
+        "Support-Tickets",
+        &mut blockers,
+    );
     let regelwerk =
         require_serverguide_channel_id_by_id(model, RULES_CHANNEL_ID, "Regelwerk", &mut blockers);
 
@@ -5579,14 +5585,14 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
         Some(deadlock_rang),
         Some(mitspieler_suche),
         Some(patchnotes),
-        Some(server_support),
+        Some(support_ticket),
         Some(regelwerk),
     ) = (
         frag_die_community,
         deadlock_rang,
         mitspieler_suche,
         patchnotes,
-        server_support,
+        support_ticket,
         regelwerk,
     )
     else {
@@ -5637,7 +5643,7 @@ fn build_server_guide_config(_live_config: &Value, model: &GuildModel) -> Server
                 description: Some(String::new()),
             },
             ServerGuideResourceChannel {
-                channel_id: server_support.to_string(),
+                channel_id: support_ticket.to_string(),
                 title: "Hilfe & Support".to_string(),
                 description: Some(String::new()),
             },
@@ -9702,7 +9708,9 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(text.contains("- <#6007> — Steam verknüpfen, Rang eintragen"));
         assert!(text
             .contains("- <#6008> — du hast Deadlock noch nicht? Hier bekommst du deinen Invite"));
-        assert!(text.contains("- <#6009> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"));
+        assert!(text.contains(
+            "- <#1459628609705738539> — wenn irgendwas nicht funktioniert (Ticket aufmachen)"
+        ));
         assert!(text.contains("- <#6002> — jede Frage ist okay"));
         assert!(text.contains("Probleme? @Moderator oder @Owner pingen"));
         assert!(!text.contains("#deadlock-rang"));
@@ -9730,6 +9738,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         model.channels.insert(
             RULES_CHANNEL_ID,
             onboarding_channel(RULES_CHANNEL_ID, "regelwerk"),
+        );
+        model.channels.insert(
+            SUPPORT_TICKET_CHANNEL_ID,
+            onboarding_channel(SUPPORT_TICKET_CHANNEL_ID, "ticket-eröffnen"),
         );
         model
     }
@@ -9836,6 +9848,10 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         );
         assert_eq!(config.resource_channels[1].title, "Patchnotes");
         assert_eq!(config.resource_channels[2].title, "Hilfe & Support");
+        assert_eq!(
+            config.resource_channels[2].channel_id,
+            SUPPORT_TICKET_CHANNEL_ID.to_string()
+        );
     }
 
     #[test]

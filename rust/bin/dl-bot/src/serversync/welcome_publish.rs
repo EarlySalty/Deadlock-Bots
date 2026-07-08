@@ -16,6 +16,7 @@ pub const WELCOME_PAYLOAD_FORMAT: &str = "2";
 pub const WELCOME_PAYLOAD_FORMAT_KEY: &str = "welcome_payload_format";
 pub const WELCOME_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const WELCOME_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const WELCOME_SUPPORT_TICKET_CHANNEL_ID: u64 = 1_459_628_609_705_738_539;
 
 const NAVIGATION_TEXT_CHAR_BUDGET: usize = 3500;
 const NAVIGATION_COMPONENT_BUDGET: usize = 35;
@@ -56,7 +57,7 @@ pub const WELCOME_TEXTS: WelcomeTextTable = WelcomeTextTable {
         },
         WelcomeChannelDescription {
             channel_key: "server-support",
-            description: "Fragen oder Probleme mit dem Server? Hier entlang.",
+            description: "Server unterstützen: Boosts, Spenden und Extras.",
         },
         WelcomeChannelDescription {
             channel_key: "deadlock-invite",
@@ -1464,7 +1465,7 @@ fn quickstart_buttons(
         channel_link_button(
             &texts.buttons.support,
             model.guild_id,
-            require_channel_id(model, "server-support")?,
+            WELCOME_SUPPORT_TICKET_CHANNEL_ID,
         ),
     ])
 }
