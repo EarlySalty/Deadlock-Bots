@@ -30,8 +30,6 @@ pub const PANEL_CUSTOM_IDS: [&str; 5] = [
     "linkpanel_rank_check",
 ];
 
-pub const BETAINVITE_PANEL_CUSTOM_ID: &str = "betainvite:panel:start";
-
 /// custom_ids, die lokal das Freundescode-Modal öffnen statt zu forwarden.
 const FRIEND_CODE_MODAL_IDS: [&str; 2] = ["steam_link_panel:friend_code", "linkpanel_friend_code"];
 const RANKCHECK_IDS: [&str; 2] = ["steam_link_panel:rankcheck", "linkpanel_rank_check"];
@@ -39,9 +37,6 @@ const FRIEND_CODE_MODAL_CUSTOM_ID: &str = "steam_bridge:friend_code_modal";
 const FRIEND_CODE_SUBMIT_CUSTOM_ID: &str = "steam_link_panel:friend_code:submit";
 pub const STEAM_PANEL_KV_NS: &str = "steam_link_panel";
 pub const STEAM_PANEL_KV_KEY: &str = "panel_ref";
-pub const BRD08_BETAINVITE_PANEL_POSTED_MSG: &str = "✅ Invite-Panel gepostet.";
-pub const BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC: &str =
-    "Zielkanal fürs Panel (Standard: aktueller Kanal)";
 pub const BRD09_STEAM_PANEL_POSTED_MSG: &str = "✅ Steam-Panel gepostet.";
 pub const BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC: &str =
     "ID einer bestehenden Message, die editiert werden soll (optional)";
@@ -574,12 +569,6 @@ fn steam_panel_components() -> Value {
     ]}])
 }
 
-fn betainvite_panel_components() -> Value {
-    json!([{ "type": 1, "components": [
-        { "type": 2, "style": 1, "label": "🎟️ Einladung starten", "custom_id": BETAINVITE_PANEL_CUSTOM_ID },
-    ]}])
-}
-
 // ── Registrierung ──────────────────────────────────────────────────────────
 
 /// Registriert alle Steam-Bridge-Routen am InteractionRouter.
@@ -712,36 +701,6 @@ fn register_inner(
     );
 
     // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
-    router.on_command(
-        "publish_betainvite_panel",
-        spec(json!({
-            "name": "publish_betainvite_panel",
-            "description": "Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
-            "default_member_permissions": "32",
-            "options": [{
-                "type": 7,
-                "name": "channel",
-                "description": BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC,
-                "required": false
-            }],
-        })),
-        Arc::new(PublishPanel {
-            client: client.clone(),
-            wire_name: "publish_betainvite_panel",
-            panel_buttons: betainvite_panel_components(),
-            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
-            panel_store: None,
-        }),
-    );
-    router.on_command(
-        "betainvite_stats",
-        spec(json!({
-            "name": "betainvite_stats",
-            "description": "Zeigt Funnel-Metriken des Playtest-Invite-Systems (nur Admins).",
-            "default_member_permissions": "32",
-        })),
-        forward_slash("betainvite_stats", &[], 15),
-    );
     router.on_command(
         "invite",
         spec(json!({
@@ -1113,29 +1072,6 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn betainvite_panel_nutzt_optionalen_zielkanal() {
-        let (url, _received, server) = mock_steam_bot(json!({
-            "reply_embed": { "title": "Invite" },
-        }))
-        .await;
-        let handler = PublishPanel {
-            client: SteamBotClient::new(url, None),
-            wire_name: "publish_betainvite_panel",
-            panel_buttons: betainvite_panel_components(),
-            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
-            panel_store: None,
-        };
-        let mut itx = interaction("");
-        itx.options.insert("channel".to_string(), json!(12345));
-        let reply = handler.handle(itx).await;
-        let panel = reply.channel_message.expect("panel");
-
-        assert_eq!(panel.target_channel_id, Some(12345));
-        assert_eq!(panel.confirmation, BRD08_BETAINVITE_PANEL_POSTED_MSG);
-        server.abort();
-    }
-
     #[cfg(feature = "testing")]
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
@@ -1217,14 +1153,12 @@ mod tests {
             "subrank_sync",
             "sync_steam_friends",
             "publish_steam_panel",
-            "publish_betainvite_panel",
-            "betainvite_stats",
             "invite",
         ] {
             assert!(router.resolve_command(name).is_some(), "{name}");
         }
-        // 14 Routen, aber nur 11 Top-Level-Definitionen (steam-Gruppe dedupliziert)
-        assert_eq!(router.command_definitions().len(), 11);
+        // 12 Routen, aber nur 9 Top-Level-Definitionen (steam-Gruppe dedupliziert)
+        assert_eq!(router.command_definitions().len(), 9);
     }
 
     #[test]
