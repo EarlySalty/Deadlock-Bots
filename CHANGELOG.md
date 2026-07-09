@@ -1,3 +1,11 @@
+## #240 — Coaching-Rolle kommt wieder direkt nach Website-Anfrage
+
+**Ausgangslage:** Neue Coaching-Anfragen über die Website wurden zwar im Coaching-Bereich sichtbar, aber die anfragende Person bekam die aktive Coaching-Rolle nicht mehr direkt. Dadurch fehlten Schreibrechte.
+
+**Was wurde geändert:** Nach einer erfolgreich geposteten Anfrage wird die aktive Coaching-Rolle wieder vergeben und mit Ablaufzeit gespeichert.
+
+**Wie es jetzt läuft:** Wer Coaching über die Website startet, kann direkt im Coaching-Bereich schreiben; die Rolle läuft wie bisher automatisch ab.
+
 ## #239 — Concierge meldet sich nur noch auf Ansprache
 
 **Ausgangslage:** Solange am Concierge noch gebaut wird, soll er niemanden von sich aus anschreiben, auch nicht mit der Begrüßung beim Beitritt.
