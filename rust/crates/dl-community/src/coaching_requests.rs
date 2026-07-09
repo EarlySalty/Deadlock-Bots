@@ -910,7 +910,8 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             .transpose()
             .map_err(|err| err.to_string())?;
         let updated_at = chrono::Utc::now();
-        sqlx::query!(
+        let role_expires_at = updated_at + chrono::Duration::hours(ROLE_EXPIRY_HOURS);
+        sqlx::query(
             r#"
             UPDATE coaching.requests
                SET message_id = $1,
@@ -919,20 +920,30 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                    status = 'analyzed',
                    assigned_coach_id = $4,
                    reserved_until = $5,
+                   role_assigned_at = COALESCE(role_assigned_at, $6),
+                   role_expires_at = COALESCE(role_expires_at, $7),
                    updated_at = $6
-             WHERE bot_request_id = $7
+             WHERE bot_request_id = $8
             "#,
-            message_id_i64,
-            channel_id_i64,
-            ai_summary,
-            assigned_coach_id,
-            reserved_until_dt,
-            updated_at,
-            request_id_i32,
         )
+        .bind(message_id_i64)
+        .bind(channel_id_i64)
+        .bind(ai_summary)
+        .bind(assigned_coach_id)
+        .bind(reserved_until_dt)
+        .bind(updated_at)
+        .bind(role_expires_at)
+        .bind(request_id_i32)
         .execute(&self.pool)
         .await
         .map_err(|err| err.to_string())?;
+        self.add_role_if_missing(
+            self.guild_id,
+            request.user_id,
+            COACHING_ACTIVE_ROLE_ID,
+            "Coaching-Anfrage analysiert",
+        )
+        .await;
         if let Some(coach) = assigned {
             sqlx::query!(
                 r#"
@@ -2890,6 +2901,55 @@ mod pg_tests {
         .expect("rotation row");
         assert_eq!(rotation.coach_id, "12345");
         assert!(rotation.last_assigned_at <= chrono::Utc::now());
+    }
+
+    #[tokio::test]
+    async fn post_request_to_channel_vergibt_active_role_und_expiry() {
+        let (db, port, coaching) = test_coaching().await;
+        let data = notification("web-role", 901);
+        let upsert = coaching
+            .upsert_request_created_notification(&data)
+            .await
+            .expect("upsert");
+        let mut request = data.request_data(upsert.local_request_id);
+
+        coaching
+            .post_request_to_channel(
+                &mut request,
+                String::new(),
+                false,
+                json!([{ "type": 1, "components": [] }]),
+            )
+            .await
+            .expect("post request");
+
+        assert_eq!(
+            port.added_roles
+                .lock()
+                .expect("added_roles lock")
+                .as_slice(),
+            &[(
+                1,
+                901,
+                COACHING_ACTIVE_ROLE_ID,
+                "Coaching-Anfrage analysiert".to_string()
+            )]
+        );
+
+        let row = sqlx::query!(
+            r#"
+            SELECT role_assigned_at, role_expires_at
+              FROM coaching.requests
+             WHERE bot_request_id = $1
+            "#,
+            i32::try_from(upsert.local_request_id).expect("request id fits i32"),
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("posted row");
+        let assigned_at = row.role_assigned_at.expect("role assigned at");
+        let expires_at = row.role_expires_at.expect("role expires at");
+        assert!(expires_at - assigned_at >= chrono::Duration::hours(ROLE_EXPIRY_HOURS - 1));
     }
 
     #[tokio::test]
