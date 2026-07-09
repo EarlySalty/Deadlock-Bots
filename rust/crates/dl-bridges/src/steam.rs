@@ -742,6 +742,19 @@ fn register_inner(
         })),
         forward_slash("betainvite_stats", &[], 15),
     );
+    router.on_command(
+        "invite",
+        spec(json!({
+            "name": "invite",
+            "description": "Platzhalter",
+            "default_member_permissions": "8",
+            "options": [
+                {"type": 3, "name": "freundescode", "description": "Platzhalter", "required": true},
+                {"type": 6, "name": "user", "description": "Platzhalter", "required": false}
+            ],
+        })),
+        forward_slash("invite", &["freundescode", "user"], 30),
+    );
     for (name, description) in [
         (
             "steam_rank_sync",
@@ -1206,11 +1219,34 @@ mod tests {
             "publish_steam_panel",
             "publish_betainvite_panel",
             "betainvite_stats",
+            "invite",
         ] {
             assert!(router.resolve_command(name).is_some(), "{name}");
         }
-        // 13 Routen, aber nur 10 Top-Level-Definitionen (steam-Gruppe dedupliziert)
-        assert_eq!(router.command_definitions().len(), 10);
+        // 14 Routen, aber nur 11 Top-Level-Definitionen (steam-Gruppe dedupliziert)
+        assert_eq!(router.command_definitions().len(), 11);
+    }
+
+    #[test]
+    fn invite_command_ist_admin_command_mit_freundescode_und_user_option() {
+        let mut router = InteractionRouter::new();
+        register(&mut router, SteamBotClient::new("http://x", None));
+
+        assert!(router.resolve_command("invite").is_some());
+        let definitions = router.command_definitions();
+        let invite = definitions
+            .iter()
+            .find(|definition| definition["name"] == "invite")
+            .expect("invite command definition");
+
+        assert_eq!(invite["default_member_permissions"], json!("8"));
+        assert_eq!(
+            invite["options"],
+            json!([
+                {"type": 3, "name": "freundescode", "description": "Platzhalter", "required": true},
+                {"type": 6, "name": "user", "description": "Platzhalter", "required": false}
+            ])
+        );
     }
 
     #[test]
