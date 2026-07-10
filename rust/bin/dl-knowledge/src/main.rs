@@ -3,13 +3,14 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, bail, ensure, Context, Result};
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use dl_ai::{FireworksClient, GenerateRequest, TextGenerator};
+use scraper::{ElementRef, Html, Selector};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
@@ -111,6 +112,16 @@ struct Source {
 #[derive(Debug, Serialize)]
 struct HealthResponse {
     chunks: usize,
+    html_sources: usize,
+    non_html_sources: usize,
+    internal_sources: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SourceStats {
+    html_sources: usize,
+    non_html_sources: usize,
+    internal_sources: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -167,8 +178,12 @@ fn router(state: AppState) -> Router {
 
 async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let knowledge = state.knowledge.read().await;
+    let stats = knowledge.source_stats();
     Json(HealthResponse {
         chunks: knowledge.chunks.len(),
+        html_sources: stats.html_sources,
+        non_html_sources: stats.non_html_sources,
+        internal_sources: stats.internal_sources,
     })
 }
 
@@ -325,11 +340,13 @@ fn character_count_response(question: &str, knowledge: &KnowledgeBase) -> Option
         .chunks
         .iter()
         .filter_map(|chunk| {
-            chunk
-                .path
-                .strip_prefix("deadlock-helden/")
-                .and_then(|_| chunk.path.strip_suffix(".md"))
-                .map(|_| chunk.path.as_str())
+            chunk.path.strip_prefix("deadlock-helden/").and_then(|_| {
+                chunk
+                    .path
+                    .strip_suffix(".html")
+                    .or_else(|| chunk.path.strip_suffix(".md"))
+                    .map(|_| chunk.path.as_str())
+            })
         })
         .collect::<HashSet<_>>()
         .len();
@@ -400,20 +417,31 @@ fn build_prompt(question: &str, chunks: &[Chunk]) -> String {
 }
 
 fn load_corpus(root: &Path) -> Result<KnowledgeBase> {
-    let mut files = Vec::new();
-    collect_markdown_files(root, &mut files)?;
+    let mut html_files = Vec::new();
+    collect_corpus_files(root, "html", &mut html_files)?;
+    let (mut files, html_mode) = if html_files.is_empty() {
+        let mut markdown_files = Vec::new();
+        collect_corpus_files(root, "md", &mut markdown_files)?;
+        (markdown_files, false)
+    } else {
+        (html_files, true)
+    };
     files.sort();
 
     let mut chunks = Vec::new();
     for path in files {
         let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("Markdown lesen: {}", path.display()))?;
-        chunks.extend(parse_markdown_file(root, &path, &raw));
+            .with_context(|| format!("Korpusdatei lesen: {}", path.display()))?;
+        if html_mode {
+            chunks.extend(parse_html_file(root, &path, &raw)?);
+        } else {
+            chunks.extend(parse_markdown_file(root, &path, &raw));
+        }
     }
     Ok(KnowledgeBase::from_chunks(chunks))
 }
 
-fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_corpus_files(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
     for entry in
         std::fs::read_dir(dir).with_context(|| format!("Verzeichnis lesen: {}", dir.display()))?
     {
@@ -427,13 +455,147 @@ fn collect_markdown_files(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
             if path.file_name().and_then(|name| name.to_str()) == Some("internal") {
                 continue;
             }
-            collect_markdown_files(&path, files)?;
-        } else if file_type.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("md")
+            collect_corpus_files(&path, extension, files)?;
+        } else if file_type.is_file()
+            && path.extension().and_then(|ext| ext.to_str()) == Some(extension)
         {
             files.push(path);
         }
     }
     Ok(())
+}
+
+fn parse_html_file(root: &Path, path: &Path, raw: &str) -> Result<Vec<Chunk>> {
+    let document = Html::parse_document(raw);
+    let title_selector = html_selector("title")?;
+    let main_selector = html_selector("main")?;
+    let meta_selector = html_selector("meta")?;
+    let script_selector = html_selector("script")?;
+    let h1_selector = html_selector("h1")?;
+    let h2_selector = html_selector("h2")?;
+
+    let mut titles = document.select(&title_selector);
+    let title_element = titles.next().context("HTML-Titel fehlt")?;
+    ensure!(titles.next().is_none(), "HTML enthält mehr als einen Titel");
+    let title = html_text(&title_element);
+    ensure!(!title.is_empty(), "HTML-Titel ist leer");
+
+    let tags_raw = required_meta(&document, &meta_selector, "tags")?;
+    let _stand = required_meta(&document, &meta_selector, "stand")?;
+    let _quelle = required_meta(&document, &meta_selector, "quelle")?;
+    let tags = tags_raw
+        .split(',')
+        .map(str::trim)
+        .filter(|tag| !tag.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    ensure!(!tags.is_empty(), "HTML-Tags sind leer");
+
+    let mut mains = document.select(&main_selector);
+    let main = mains.next().context("HTML-main fehlt")?;
+    ensure!(mains.next().is_none(), "HTML enthält mehr als ein main");
+    ensure!(
+        main.select(&script_selector).next().is_none(),
+        "Script innerhalb von main ist nicht erlaubt"
+    );
+    ensure!(
+        main.select(&h1_selector).count() == 1,
+        "HTML-main benötigt genau ein h1"
+    );
+
+    let direct_children = main
+        .children()
+        .filter_map(ElementRef::wrap)
+        .collect::<Vec<_>>();
+    let h1_elements = direct_children
+        .iter()
+        .filter(|element| element.value().name() == "h1")
+        .collect::<Vec<_>>();
+    ensure!(
+        h1_elements.len() == 1,
+        "HTML-main benötigt genau ein direktes h1"
+    );
+    let h1 = html_text(h1_elements[0]);
+    ensure!(!h1.is_empty(), "HTML-h1 ist leer");
+
+    let rel_path = relative_path(root, path);
+    let intro_text = direct_children
+        .iter()
+        .filter(|element| matches!(element.value().name(), "h1" | "p"))
+        .map(|element| html_text(element))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut chunks = vec![Chunk {
+        title: title.clone(),
+        section: h1,
+        path: rel_path.clone(),
+        tags: tags.clone(),
+        text: intro_text,
+    }];
+
+    for section in direct_children
+        .iter()
+        .filter(|element| element.value().name() == "section")
+    {
+        let heading = section
+            .select(&h2_selector)
+            .map(|element| html_text(&element))
+            .find(|text| !text.is_empty());
+        let section_name = heading
+            .or_else(|| {
+                section
+                    .value()
+                    .attr("id")
+                    .map(str::trim)
+                    .map(str::to_string)
+            })
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| anyhow!("HTML-section benötigt h2 oder id"))?;
+        let text = html_text(section);
+        if text.is_empty() {
+            bail!("HTML-section {section_name} ist leer");
+        }
+        chunks.push(Chunk {
+            title: title.clone(),
+            section: section_name,
+            path: rel_path.clone(),
+            tags: tags.clone(),
+            text,
+        });
+    }
+
+    Ok(chunks)
+}
+
+fn html_selector(value: &str) -> Result<Selector> {
+    Selector::parse(value).map_err(|_| anyhow!("Ungültiger interner HTML-Selector: {value}"))
+}
+
+fn required_meta(document: &Html, selector: &Selector, name: &str) -> Result<String> {
+    let matching = document
+        .select(selector)
+        .filter(|element| element.value().attr("name") == Some(name))
+        .collect::<Vec<_>>();
+    ensure!(
+        matching.len() == 1,
+        "HTML benötigt genau ein meta-Feld {name}"
+    );
+    let value = matching[0]
+        .value()
+        .attr("content")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .with_context(|| format!("HTML-meta {name} benötigt content"))?;
+    Ok(value.to_string())
+}
+
+fn html_text(element: &ElementRef<'_>) -> String {
+    element
+        .text()
+        .flat_map(str::split_whitespace)
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn parse_markdown_file(root: &Path, path: &Path, raw: &str) -> Vec<Chunk> {
@@ -620,6 +782,25 @@ impl KnowledgeBase {
             .map(|(idx, score)| (self.chunks[idx].clone(), score))
             .collect()
     }
+
+    fn source_stats(&self) -> SourceStats {
+        let mut seen = HashSet::new();
+        let mut stats = SourceStats::default();
+        for path in self.chunks.iter().map(|chunk| chunk.path.as_str()) {
+            if !seen.insert(path) {
+                continue;
+            }
+            if path.ends_with(".html") {
+                stats.html_sources += 1;
+            } else {
+                stats.non_html_sources += 1;
+            }
+            if path.split('/').any(|segment| segment == "internal") {
+                stats.internal_sources += 1;
+            }
+        }
+        stats
+    }
 }
 
 fn expand_query(query: &str) -> String {
@@ -770,6 +951,17 @@ mod tests {
     use std::sync::Mutex;
     use tower::ServiceExt;
 
+    const HTML_FIXTURE: &str = r#"<!doctype html>
+<html lang="de"><head>
+<meta charset="utf-8"><title>Steam-Bot</title>
+<meta name="tags" content="steam, rang">
+<meta name="stand" content="2026-07-10">
+<meta name="quelle" content="Steam-Bot-Code">
+</head><body><main>
+<h1>Steam-Bot</h1><p>Öffentliche Zusammenfassung.</p>
+<section id="verknuepfen"><h2>Steam verknüpfen</h2><p>Nutze das öffentliche Panel.</p></section>
+</main></body></html>"#;
+
     struct MockGenerator {
         responses: Mutex<Vec<Option<String>>>,
         calls: AtomicUsize,
@@ -836,6 +1028,147 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Ok((status, body))
+    }
+
+    async fn get_json(app: Router, path: &str) -> Result<(u16, Value)> {
+        let response = app.oneshot(Request::get(path).body(Body::empty())?).await?;
+        let status = response.status().as_u16();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        Ok((status, body))
+    }
+
+    #[test]
+    fn parse_html_liefert_nur_semantischen_main_inhalt() -> Result<()> {
+        let root = Path::new("/docs/public");
+        let path = root.join("guide/steam.html");
+
+        let chunks = parse_html_file(root, &path, HTML_FIXTURE)?;
+
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].title, "Steam-Bot");
+        assert_eq!(chunks[0].section, "Steam-Bot");
+        assert_eq!(chunks[0].path, "guide/steam.html");
+        assert_eq!(chunks[0].tags, ["steam", "rang"]);
+        assert!(chunks[0].text.contains("Öffentliche Zusammenfassung."));
+        assert_eq!(chunks[1].section, "Steam verknüpfen");
+        assert!(chunks[1].text.contains("Nutze das öffentliche Panel."));
+        assert!(chunks
+            .iter()
+            .all(|chunk| !chunk.text.contains("Steam-Bot-Code")));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_nutzt_section_id_ohne_h2() -> Result<()> {
+        let raw = HTML_FIXTURE.replace("<h2>Steam verknüpfen</h2>", "");
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert_eq!(chunks[1].section, "verknuepfen");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_lehnt_vertragsverletzungen_ab() {
+        let cases = [
+            ("main fehlt", HTML_FIXTURE.replace("<main>", "<div>")),
+            (
+                "title fehlt",
+                HTML_FIXTURE.replace("<title>Steam-Bot</title>", ""),
+            ),
+            (
+                "tags fehlen",
+                HTML_FIXTURE.replace("<meta name=\"tags\" content=\"steam, rang\">", ""),
+            ),
+            (
+                "stand fehlt",
+                HTML_FIXTURE.replace("<meta name=\"stand\" content=\"2026-07-10\">", ""),
+            ),
+            (
+                "quelle fehlt",
+                HTML_FIXTURE.replace("<meta name=\"quelle\" content=\"Steam-Bot-Code\">", ""),
+            ),
+            ("h1 fehlt", HTML_FIXTURE.replace("<h1>Steam-Bot</h1>", "")),
+            (
+                "zweites h1 im main",
+                HTML_FIXTURE.replace(
+                    "<p>Nutze das öffentliche Panel.</p>",
+                    "<h1>Falsch verschachtelt</h1><p>Nutze das öffentliche Panel.</p>",
+                ),
+            ),
+            (
+                "script im main",
+                HTML_FIXTURE.replace(
+                    "<h1>Steam-Bot</h1>",
+                    "<h1>Steam-Bot</h1><script>alert(1)</script>",
+                ),
+            ),
+            (
+                "zweiter title",
+                HTML_FIXTURE.replace(
+                    "<title>Steam-Bot</title>",
+                    "<title>Steam-Bot</title><title>Doppelt</title>",
+                ),
+            ),
+        ];
+
+        for (label, raw) in cases {
+            assert!(
+                parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw).is_err(),
+                "{label} muss abgelehnt werden"
+            );
+        }
+    }
+
+    #[test]
+    fn load_corpus_bevorzugt_html_und_ignoriert_internal() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path();
+        std::fs::write(public.join("legacy.md"), "# Legacy\n\nNicht laden")?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        std::fs::create_dir(public.join("internal"))?;
+        std::fs::write(public.join("internal/secret.html"), HTML_FIXTURE)?;
+
+        let knowledge = load_corpus(public)?;
+        let stats = knowledge.source_stats();
+
+        assert_eq!(knowledge.chunks.len(), 2);
+        assert!(knowledge
+            .chunks
+            .iter()
+            .all(|chunk| chunk.path == "visible.html"));
+        assert_eq!(stats.html_sources, 1);
+        assert_eq!(stats.non_html_sources, 0);
+        assert_eq!(stats.internal_sources, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_fehler_behaelt_letzten_gueltigen_index_und_health() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path();
+        let page = public.join("visible.html");
+        std::fs::write(&page, HTML_FIXTURE)?;
+        let initial = load_corpus(public)?;
+        let knowledge = Arc::new(RwLock::new(initial));
+        let state = AppState {
+            docs_path: public.to_path_buf(),
+            knowledge: knowledge.clone(),
+            generator: None,
+        };
+        let app = router(state);
+
+        let (_, health_before) = get_json(app.clone(), "/healthz").await?;
+        std::fs::write(&page, "<html><body>kaputt</body></html>")?;
+        let (status, body) = post_json(app.clone(), "/internal/reload", json!({})).await?;
+        let (_, health_after) = get_json(app, "/healthz").await?;
+
+        assert_eq!(status, 500);
+        assert_eq!(body["error"], "reload_failed");
+        assert_eq!(health_after, health_before);
+        assert_eq!(knowledge.read().await.chunks.len(), 2);
+        Ok(())
     }
 
     #[test]
@@ -928,8 +1261,8 @@ Frag im Support.
     #[test]
     fn helden_count_kommt_deterministisch_aus_dem_korpus() {
         let knowledge = KnowledgeBase::from_chunks(vec![
-            test_chunk("Abrams", "Abrams", "deadlock-helden/abrams.md", "Abrams"),
-            test_chunk("Abrams", "Build", "deadlock-helden/abrams.md", "Build"),
+            test_chunk("Abrams", "Abrams", "deadlock-helden/abrams.html", "Abrams"),
+            test_chunk("Abrams", "Build", "deadlock-helden/abrams.html", "Build"),
             test_chunk("Bebop", "Bebop", "deadlock-helden/bebop.md", "Bebop"),
             test_chunk("Steam", "Steam", "discord-server/steam.md", "Steam"),
         ]);
