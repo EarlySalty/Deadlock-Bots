@@ -634,6 +634,7 @@ name = "dl-discord"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "chrono",
  "dl-broker",
  "dl-central-db",
  "dl-changelog",
