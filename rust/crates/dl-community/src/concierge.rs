@@ -2872,11 +2872,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ConciergePort for MockConciergePort {
-        async fn send_dm_v2(
-            &self,
-            user_id: u64,
-            _body: Map<String, Value>,
-        ) -> ConciergeDmDelivery {
+        async fn send_dm_v2(&self, user_id: u64, _body: Map<String, Value>) -> ConciergeDmDelivery {
             self.sent_dm_v2.lock().unwrap().push(user_id);
             ConciergeDmDelivery::Sent {
                 channel_id: Some(1),
@@ -3016,7 +3012,9 @@ mod tests {
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
 
-        concierge.handle_native_onboarding_completed(guild, 123).await;
+        concierge
+            .handle_native_onboarding_completed(guild, 123)
+            .await;
 
         // Kein ungefragter Kontakt: weder DM noch Fallback-Kanal (bricht vor jedem DB-Zugriff ab).
         assert!(port.sent_dm_v2.lock().unwrap().is_empty());
