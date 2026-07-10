@@ -40,7 +40,6 @@ pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
-const LOG_QUESTION_MAX_CHARS: usize = 240;
 const FAQ_NO_ANSWER: &str = "Da müssen wir passen, das haben wir gerade selbst nicht parat. Stell die Frage gern nochmal anders oder in <#1491953161747955853>. Bei Support oder Moderation öffnest du ein Ticket in <#1459628609705738539>.";
 const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ticket geantwortet:";
 const SHADOW_NOT_CONFIGURED: &str = "shadow_not_configured";
@@ -128,20 +127,6 @@ fn shadow_channel_from_env() -> Option<u64> {
     std::env::var("DL_FAQ_SHADOW_CHANNEL_ID")
         .ok()
         .and_then(|value| value.trim().parse::<u64>().ok())
-}
-
-fn safe_log_question(question: &str) -> String {
-    question
-        .chars()
-        .take(LOG_QUESTION_MAX_CHARS)
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect()
 }
 
 fn shadow_ticket_message(ticket_channel_id: u64, decision: &str, answer: &str) -> String {
@@ -571,7 +556,7 @@ impl FaqChat {
             return;
         }
         let Some(shadow_channel_id) = self.shadow_channel_id else {
-            let question = safe_log_question(problem);
+            let question = knowledge_client::safe_log_question(problem);
             let (verdict, confidence, absent) = ("uncertain", "none", "absent");
             tracing::warn!(
                 question = %question,
@@ -821,50 +806,9 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
-    use std::sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex,
-    };
+    use crate::knowledge_client::test_logging::LogCapture;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    #[derive(Clone, Default)]
-    struct LogCapture {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl LogCapture {
-        fn text(&self) -> String {
-            String::from_utf8_lossy(&self.bytes.lock().expect("log capture")).to_string()
-        }
-    }
-
-    struct LogCaptureWriter {
-        bytes: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl std::io::Write for LogCaptureWriter {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.bytes
-                .lock()
-                .expect("log capture")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
-        type Writer = LogCaptureWriter;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            LogCaptureWriter {
-                bytes: self.bytes.clone(),
-            }
-        }
-    }
 
     fn lazy_pool() -> PgPool {
         sqlx::postgres::PgPoolOptions::new()
@@ -1280,10 +1224,8 @@ mod tests {
         assert!(!sent[0].1.contains("kein json"));
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
     async fn ticket_auto_help_ignoriert_events_ohne_guild() {
-        let db = db_with_kv().await;
         let port = ticket_port();
         let (url, handle, knowledge_called) = knowledge_server(
             200,
@@ -1291,7 +1233,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, None);
 
         faq.handle_ticket_message(0, 222, 111111111111111111, "Steam geht nicht")
             .await;
