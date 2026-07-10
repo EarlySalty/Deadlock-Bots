@@ -24,11 +24,13 @@ use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::PgPool;
 
 use crate::db::{i64_to_u64, u64_to_i64};
+use crate::knowledge_client::{self, KnowledgeLookup};
+
+pub use crate::knowledge_client::{KnowledgeAnswer, KnowledgeSource};
 
 pub const PANEL_CHANNEL_ID: u64 = 1491953161747955853;
 pub const FAQ_CATEGORY_ID: u64 = 1310153243795390475;
@@ -45,25 +47,6 @@ const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ti
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
 pub const PANEL_KV_KEY: &str = "panel_msg_id";
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct KnowledgeAnswer {
-    pub answerable: bool,
-    pub answer: Option<String>,
-    #[serde(default)]
-    pub sources: Vec<KnowledgeSource>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct KnowledgeSource {
-    pub title: String,
-    pub path: String,
-}
-
-#[derive(Debug, Serialize)]
-struct KnowledgeQuestion<'a> {
-    question: &'a str,
-}
-
 fn knowledge_url_from_env() -> String {
     std::env::var("DL_KNOWLEDGE_URL")
         .ok()
@@ -73,38 +56,20 @@ fn knowledge_url_from_env() -> String {
 }
 
 pub async fn ask_knowledge(question: &str) -> Option<KnowledgeAnswer> {
-    ask_knowledge_with_timeout(&knowledge_url_from_env(), question, KNOWLEDGE_TIMEOUT).await
-}
-
-async fn ask_knowledge_at(base_url: &str, question: &str) -> Option<KnowledgeAnswer> {
-    ask_knowledge_with_timeout(base_url, question, KNOWLEDGE_TIMEOUT).await
-}
-
-async fn ask_knowledge_with_timeout(
-    base_url: &str,
-    question: &str,
-    timeout: Duration,
-) -> Option<KnowledgeAnswer> {
-    let client = reqwest::Client::builder().timeout(timeout).build().ok()?;
-    let url = format!("{}/public/v1/ask", base_url.trim_end_matches('/'));
-    client
-        .post(url)
-        .json(&KnowledgeQuestion { question })
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<KnowledgeAnswer>()
-        .await
-        .ok()
-}
-
-fn answer_text(answer: Option<KnowledgeAnswer>) -> Option<String> {
-    let answer = answer?;
-    if !answer.answerable {
-        return None;
+    match knowledge_client::ask(&knowledge_url_from_env(), question, KNOWLEDGE_TIMEOUT).await {
+        KnowledgeLookup::Answer(answer) => Some(answer),
+        _ => None,
     }
+}
+
+async fn ask_knowledge_at(base_url: &str, question: &str) -> KnowledgeLookup {
+    knowledge_client::ask(base_url, question, KNOWLEDGE_TIMEOUT).await
+}
+
+fn answer_text(answer: KnowledgeLookup) -> Option<String> {
+    let KnowledgeLookup::Answer(answer) = answer else {
+        return None;
+    };
     answer
         .answer
         .map(|text| text.trim().to_string())
@@ -141,7 +106,7 @@ fn knowledge_question_from_history(history: &[(String, String)], question: &str)
     questions.join("\n")
 }
 
-fn ticket_auto_outcome_from_knowledge(answer: Option<KnowledgeAnswer>) -> TicketAutoOutcome {
+fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutcome {
     match answer_text(answer) {
         Some(answer) => TicketAutoOutcome {
             answer: Some(answer),
@@ -820,7 +785,6 @@ pub fn spawn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn knowledge_frage_nutzt_nur_nutzerfragen_als_kontext() {
@@ -841,23 +805,20 @@ mod tests {
 
     #[test]
     fn ticket_auto_help_entscheidet_answerable_true_false_none() {
-        let answered = ticket_auto_outcome_from_knowledge(Some(KnowledgeAnswer {
-            answerable: true,
-            answer: Some("  Antwort aus Knowledge  ".to_string()),
-            sources: Vec::new(),
-        }));
+        let answered =
+            ticket_auto_outcome_from_knowledge(KnowledgeLookup::Answer(KnowledgeAnswer {
+                answerable: true,
+                answer: Some("  Antwort aus Knowledge  ".to_string()),
+                sources: Vec::new(),
+            }));
         assert_eq!(answered.decision, "answered");
         assert_eq!(answered.answer.as_deref(), Some("Antwort aus Knowledge"));
 
-        let unanswerable = ticket_auto_outcome_from_knowledge(Some(KnowledgeAnswer {
-            answerable: false,
-            answer: None,
-            sources: Vec::new(),
-        }));
+        let unanswerable = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Unanswerable);
         assert_eq!(unanswerable.decision, "kein_treffer");
         assert_eq!(unanswerable.answer, None);
 
-        let none = ticket_auto_outcome_from_knowledge(None);
+        let none = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Transport);
         assert_eq!(none.decision, "kein_treffer");
         assert_eq!(none.answer, None);
     }
@@ -870,90 +831,6 @@ mod tests {
         assert!(message.contains(TICKET_SHADOW_PREFIX));
         assert!(message.contains("<#10>"));
         assert!(message.contains("Antwort"));
-    }
-
-    async fn knowledge_server(
-        status: u16,
-        body: &'static str,
-        delay: Duration,
-    ) -> (String, tokio::task::JoinHandle<()>) {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("bind test server");
-        let addr = listener.local_addr().expect("local addr");
-        let handle = tokio::spawn(async move {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            let mut request = [0_u8; 2048];
-            let _ = stream.read(&mut request).await;
-            if !delay.is_zero() {
-                tokio::time::sleep(delay).await;
-            }
-            let status_line = match status {
-                200 => "200 OK",
-                500 => "500 Internal Server Error",
-                _ => "400 Bad Request",
-            };
-            let response = format!(
-                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            );
-            let _ = stream.write_all(response.as_bytes()).await;
-        });
-        (format!("http://{addr}"), handle)
-    }
-
-    #[tokio::test]
-    async fn ask_knowledge_liefert_answerable_true() {
-        let (url, handle) = knowledge_server(
-            200,
-            r#"{"answerable":true,"answer":"Ja.","sources":[{"title":"T","path":"p.md"}]}"#,
-            Duration::ZERO,
-        )
-        .await;
-
-        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_secs(1))
-            .await
-            .expect("knowledge answer");
-        let _ = handle.await;
-
-        assert!(answer.answerable);
-        assert_eq!(answer.answer.as_deref(), Some("Ja."));
-        assert_eq!(answer.sources[0].title, "T");
-    }
-
-    #[tokio::test]
-    async fn ask_knowledge_liefert_answerable_false() {
-        let (url, handle) = knowledge_server(
-            200,
-            r#"{"answerable":false,"answer":null,"sources":[]}"#,
-            Duration::ZERO,
-        )
-        .await;
-
-        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_secs(1))
-            .await
-            .expect("knowledge answer");
-        let _ = handle.await;
-
-        assert!(!answer.answerable);
-        assert_eq!(answer.answer, None);
-    }
-
-    #[tokio::test]
-    async fn ask_knowledge_timeout_ist_none() {
-        let (url, handle) = knowledge_server(
-            200,
-            r#"{"answerable":true,"answer":"zu spaet","sources":[]}"#,
-            Duration::from_millis(200),
-        )
-        .await;
-
-        let answer = ask_knowledge_with_timeout(&url, "Frage?", Duration::from_millis(30)).await;
-        handle.abort();
-
-        assert_eq!(answer, None);
     }
 
     #[cfg(feature = "testing")]

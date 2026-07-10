@@ -15,6 +15,7 @@ pub mod faq;
 pub mod feedback_hub;
 pub mod invite_lounge;
 pub mod invites;
+mod knowledge_client;
 pub mod leave_survey;
 pub mod onboarding;
 pub mod onboarding_bridge;

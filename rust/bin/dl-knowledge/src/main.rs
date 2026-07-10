@@ -209,16 +209,45 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
     let ranked = {
         let knowledge = state.knowledge.read().await;
         if let Some(response) = character_count_response(&request.question, &knowledge) {
+            log_decision(
+                &request.question,
+                "yes",
+                "source_grounded",
+                None,
+                "character_count",
+                &response.sources,
+                None,
+            );
             return Json(response);
         }
         knowledge.search(&request.question, 6)
     };
     if ranked.is_empty() {
+        log_decision(
+            &request.question,
+            "no",
+            "none",
+            None,
+            "no_retrieval",
+            &[],
+            None,
+        );
         return Json(unanswerable());
     }
 
+    let retrieval_score = ranked.first().map(|(_, score)| *score);
     let chunks: Vec<Chunk> = ranked.into_iter().map(|(chunk, _score)| chunk).collect();
+    let sources = sources_for(&chunks);
     let Some(generator) = &state.generator else {
+        log_decision(
+            &request.question,
+            "error",
+            "none",
+            retrieval_score,
+            "generator_missing",
+            &sources,
+            Some("generator_unavailable"),
+        );
         return Json(unanswerable());
     };
     let prompt = build_prompt(&request.question, &chunks);
@@ -235,22 +264,117 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
         })
         .await;
     let Some(raw) = raw else {
+        log_decision(
+            &request.question,
+            "error",
+            "none",
+            retrieval_score,
+            "model_empty",
+            &sources,
+            Some("empty_output"),
+        );
         return Json(unanswerable());
     };
     let Some(answer) = parse_llm_answer(&raw) else {
+        log_decision(
+            &request.question,
+            "error",
+            "none",
+            retrieval_score,
+            "model_invalid_json",
+            &sources,
+            Some("invalid_response"),
+        );
         return Json(unanswerable());
     };
     if !answer.answerable {
+        log_decision(
+            &request.question,
+            "uncertain",
+            "none",
+            retrieval_score,
+            "model_rejected",
+            &sources,
+            None,
+        );
         return Json(unanswerable());
     }
     let Some(answer_text) = answer.answer else {
+        log_decision(
+            &request.question,
+            "error",
+            "none",
+            retrieval_score,
+            "model_invalid_json",
+            &sources,
+            Some("invalid_response"),
+        );
         return Json(unanswerable());
     };
-    Json(AskResponse {
+    let response = AskResponse {
         answerable: true,
         answer: Some(polish_answer(&answer_text)),
-        sources: sources_for(&chunks),
-    })
+        sources,
+    };
+    log_decision(
+        &request.question,
+        "yes",
+        "source_grounded",
+        retrieval_score,
+        "answered",
+        &response.sources,
+        None,
+    );
+    Json(response)
+}
+
+fn log_decision(
+    question: &str,
+    verdict: &str,
+    confidence: &str,
+    retrieval_score: Option<f64>,
+    reason: &str,
+    sources: &[Source],
+    error_class: Option<&str>,
+) {
+    let question: String = question
+        .chars()
+        .take(240)
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    let retrieval_score = retrieval_score
+        .map(|score| score.to_string())
+        .unwrap_or_else(|| "absent".to_string());
+    let mut seen = HashSet::new();
+    let sources = sources
+        .iter()
+        .filter_map(|source| {
+            seen.insert(source.path.as_str())
+                .then_some(source.path.as_str())
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    let sources = if sources.is_empty() {
+        "absent"
+    } else {
+        &sources
+    };
+    tracing::info!(
+        question = %question,
+        verdict = %verdict,
+        confidence = %confidence,
+        retrieval_score = %retrieval_score,
+        reason = %reason,
+        sources = %sources,
+        error_class = %error_class.unwrap_or("absent"),
+        "dl-knowledge decision"
+    );
 }
 
 /// Ton-Regeln, die das Modell trotz Prompt verletzt, deterministisch nachziehen:
@@ -994,6 +1118,46 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Default)]
+    struct LogCapture {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl LogCapture {
+        fn text(&self) -> String {
+            let bytes = self.bytes.lock().expect("log capture").clone();
+            String::from_utf8_lossy(&bytes).to_string()
+        }
+    }
+
+    struct LogCaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for LogCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("log capture")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogCaptureWriter {
+                bytes: self.bytes.clone(),
+            }
+        }
+    }
+
     #[async_trait::async_trait]
     impl TextGenerator for MockGenerator {
         async fn generate_text(&self, _request: GenerateRequest) -> Option<String> {
@@ -1042,6 +1206,55 @@ mod tests {
         let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
         let body = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
         Ok((status, body))
+    }
+
+    async fn ask_with_logs(
+        chunks: Vec<Chunk>,
+        generator: Option<Arc<dyn TextGenerator>>,
+        question: &str,
+    ) -> Result<String> {
+        let log_capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(log_capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let (app, _) = test_app(chunks, generator);
+        let (status, _) = post_json(app, "/public/v1/ask", json!({"question": question})).await?;
+        drop(guard);
+        assert_eq!(status, 200);
+        Ok(log_capture.text())
+    }
+
+    fn assert_decision(
+        logs: &str,
+        verdict: &str,
+        confidence: &str,
+        reason: &str,
+        retrieval_score: bool,
+        source: &str,
+        error_class: &str,
+    ) {
+        assert_eq!(logs.matches("dl-knowledge decision").count(), 1, "{logs}");
+        assert!(logs.contains(&format!("verdict={verdict}")), "{logs}");
+        assert!(logs.contains(&format!("confidence={confidence}")), "{logs}");
+        assert!(logs.contains(&format!("reason={reason}")), "{logs}");
+        assert!(logs.contains("question="), "{logs}");
+        assert!(logs.contains("sources="), "{logs}");
+        assert!(logs.contains(&format!("sources={source}")), "{logs}");
+        assert!(logs.contains("error_class="), "{logs}");
+        assert!(
+            logs.contains(&format!("error_class={error_class}")),
+            "{logs}"
+        );
+        if retrieval_score {
+            assert!(logs.contains("retrieval_score="), "{logs}");
+            assert!(!logs.contains("retrieval_score=absent"), "{logs}");
+        } else {
+            assert!(logs.contains("retrieval_score=absent"), "{logs}");
+        }
     }
 
     async fn get_json(app: Router, path: &str) -> Result<(u16, Value)> {
@@ -1396,6 +1609,154 @@ Frag im Support.
         assert_eq!(body["answerable"], false);
         assert!(body["answer"].is_null());
         assert_eq!(generator.calls(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_handler_loggt_alle_entscheidungsgruende_ohne_inhaltsleaks() -> Result<()> {
+        let hero_chunks = vec![test_chunk(
+            "Abrams",
+            "Abrams",
+            "deadlock-helden/abrams.html",
+            "Abrams",
+        )];
+        let logs = ask_with_logs(hero_chunks, None, "Wie viele Charaktere gibt es?").await?;
+        assert_decision(
+            &logs,
+            "yes",
+            "source_grounded",
+            "character_count",
+            false,
+            "deadlock-helden/",
+            "absent",
+        );
+
+        let chunks = vec![test_chunk(
+            "Steam",
+            "Steam",
+            "steam.md",
+            "Steam verknüpfen. CORPUS_MUST_NOT_LEAK",
+        )];
+        let logs = ask_with_logs(
+            chunks.clone(),
+            Some(Arc::new(MockGenerator::new(vec![Some(
+                r#"{"answerable":true,"answer":"Soll nicht passieren."}"#.to_string(),
+            )]))),
+            "Bananenbrot Rezept",
+        )
+        .await?;
+        assert_decision(
+            &logs,
+            "no",
+            "none",
+            "no_retrieval",
+            false,
+            "absent",
+            "absent",
+        );
+
+        let long_question = format!("Wie Steam verknüpfen? {}", "ä".repeat(300));
+        let truncated_question: String = long_question.chars().take(240).collect();
+        let logs = ask_with_logs(chunks.clone(), None, &long_question).await?;
+        assert_decision(
+            &logs,
+            "error",
+            "none",
+            "generator_missing",
+            true,
+            "steam.md",
+            "generator_unavailable",
+        );
+        assert!(logs.contains(&truncated_question), "{logs}");
+        assert!(!logs.contains(&long_question), "{logs}");
+
+        let logs = ask_with_logs(
+            chunks.clone(),
+            Some(Arc::new(MockGenerator::new(vec![None]))),
+            "Wie Steam verknüpfen?",
+        )
+        .await?;
+        assert_decision(
+            &logs,
+            "error",
+            "none",
+            "model_empty",
+            true,
+            "steam.md",
+            "empty_output",
+        );
+
+        let logs = ask_with_logs(
+            chunks.clone(),
+            Some(Arc::new(MockGenerator::new(vec![Some(
+                "MODEL_OUTPUT_MUST_NOT_LEAK".to_string(),
+            )]))),
+            "Wie Steam verknüpfen?",
+        )
+        .await?;
+        assert_decision(
+            &logs,
+            "error",
+            "none",
+            "model_invalid_json",
+            true,
+            "steam.md",
+            "invalid_response",
+        );
+        assert!(!logs.contains("MODEL_OUTPUT_MUST_NOT_LEAK"), "{logs}");
+
+        let logs = ask_with_logs(
+            chunks.clone(),
+            Some(Arc::new(MockGenerator::new(vec![Some(
+                r#"{"answerable":false,"answer":null}"#.to_string(),
+            )]))),
+            "Wie Steam verknüpfen?",
+        )
+        .await?;
+        assert_decision(
+            &logs,
+            "uncertain",
+            "none",
+            "model_rejected",
+            true,
+            "steam.md",
+            "absent",
+        );
+
+        let duplicate_path_chunks = vec![
+            test_chunk(
+                "Steam A",
+                "Steam",
+                "steam.md",
+                "Steam verknüpfen. CORPUS_MUST_NOT_LEAK",
+            ),
+            test_chunk(
+                "Steam B",
+                "Account",
+                "steam.md",
+                "Steam Account verknüpfen. CORPUS_MUST_NOT_LEAK",
+            ),
+        ];
+        let logs = ask_with_logs(
+            duplicate_path_chunks,
+            Some(Arc::new(MockGenerator::new(vec![Some(
+                r#"{"answerable":true,"answer":"MODEL_ANSWER_MUST_NOT_LEAK"}"#.to_string(),
+            )]))),
+            "Wie Steam verknüpfen?",
+        )
+        .await?;
+        assert_decision(
+            &logs,
+            "yes",
+            "source_grounded",
+            "answered",
+            true,
+            "steam.md",
+            "absent",
+        );
+        assert_eq!(logs.matches("steam.md").count(), 1, "{logs}");
+        assert!(!logs.contains("CORPUS_MUST_NOT_LEAK"), "{logs}");
+        assert!(!logs.contains("MODEL_ANSWER_MUST_NOT_LEAK"), "{logs}");
         Ok(())
     }
 

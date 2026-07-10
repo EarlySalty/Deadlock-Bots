@@ -14,12 +14,12 @@ use dl_discord::interactions::{ModalField, ModalSpec};
 use dl_discord::{
     BridgeInteraction, BridgeReply, Dispatcher, InteractionHandler, InteractionRouter,
 };
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sqlx::{PgPool, Row};
 
 use crate::db::{pg_i64_to_u64, u64_to_i64, CommunityDbResult};
 use crate::dm_assistant::check_cooldown;
+use crate::knowledge_client::{self, KnowledgeLookup};
 
 pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
@@ -1696,18 +1696,17 @@ impl Concierge {
         if let Some(answer) = local_concierge_answer(question) {
             return answer;
         }
-        match ask_knowledge_at(&self.config.knowledge_url, question).await {
-            Some(answer) if answer.answerable => {
-                return LlmAnswer {
-                    reply: answer
-                        .answer
-                        .map(|text| text.trim().to_string())
-                        .filter(|text| !text.is_empty()),
-                    intent: Some(classify_intent(question)),
-                    ..LlmAnswer::default()
-                };
-            }
-            _ => {}
+        if let KnowledgeLookup::Answer(answer) =
+            knowledge_client::ask(&self.config.knowledge_url, question, KNOWLEDGE_TIMEOUT).await
+        {
+            return LlmAnswer {
+                reply: answer
+                    .answer
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty()),
+                intent: Some(classify_intent(question)),
+                ..LlmAnswer::default()
+            };
         }
         let _ = guild_id;
         if let Some(answer) = self
@@ -2236,7 +2235,7 @@ struct LlmAnswer {
 }
 
 #[cfg(test)]
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct LlmAnswerWire {
     reply: Option<String>,
     message: Option<String>,
@@ -2492,36 +2491,6 @@ fn short_smalltalk(lower: &str) -> bool {
         lower.trim(),
         "hi" | "hey" | "heyy" | "hallo" | "moin" | "ok" | "okay" | "test"
     )
-}
-
-#[derive(Debug, Deserialize)]
-struct KnowledgeAnswer {
-    answerable: bool,
-    answer: Option<String>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct KnowledgeQuestion<'a> {
-    question: &'a str,
-}
-
-async fn ask_knowledge_at(base_url: &str, question: &str) -> Option<KnowledgeAnswer> {
-    let client = reqwest::Client::builder()
-        .timeout(KNOWLEDGE_TIMEOUT)
-        .build()
-        .ok()?;
-    let url = format!("{}/public/v1/ask", base_url.trim_end_matches('/'));
-    client
-        .post(url)
-        .json(&KnowledgeQuestion { question })
-        .send()
-        .await
-        .ok()?
-        .error_for_status()
-        .ok()?
-        .json::<KnowledgeAnswer>()
-        .await
-        .ok()
 }
 
 struct ConciergeHandler {
