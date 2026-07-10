@@ -33,6 +33,7 @@ tracing.workspace = true
 [dev-dependencies]
 dl-central-db = { workspace = true, features = ["testing"] }
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 
 [features]
 testing = ["dl-central-db/testing"]
