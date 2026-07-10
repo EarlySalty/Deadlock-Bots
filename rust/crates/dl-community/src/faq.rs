@@ -43,6 +43,7 @@ const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
 const FAQ_NO_ANSWER: &str = "Da müssen wir passen, das haben wir gerade selbst nicht parat. Stell die Frage gern nochmal anders oder in <#1491953161747955853>. Bei Support oder Moderation öffnest du ein Ticket in <#1459628609705738539>.";
 const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ticket geantwortet:";
 const SHADOW_NOT_CONFIGURED: &str = "shadow_not_configured";
+const SHADOW_EQUALS_TICKET: &str = "shadow_equals_ticket";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
@@ -572,6 +573,25 @@ impl FaqChat {
             );
             return;
         };
+        // Fehlkonfiguration: Shadow-Kanal == Ticket-Kanal. Ein Post würde die Bot-Antwort
+        // sichtbar ins Mitglieder-Ticket schreiben. Fail-closed: kein Knowledge, kein Post.
+        if shadow_channel_id == channel_id {
+            let question = knowledge_client::safe_log_question(problem);
+            let (verdict, confidence, absent) = ("uncertain", "none", "absent");
+            tracing::warn!(
+                question = %question,
+                verdict = %verdict,
+                confidence = %confidence,
+                retrieval_score = %absent,
+                reason = %SHADOW_EQUALS_TICKET,
+                sources = %absent,
+                error_class = %SHADOW_EQUALS_TICKET,
+                channel_id,
+                author_id,
+                "FAQ-Ticket-Auto-Hilfe fail-closed"
+            );
+            return;
+        }
         let outcome = self.ticket_auto_answer(problem, author_id).await;
         tracing::info!(
             channel_id,
@@ -1222,6 +1242,46 @@ mod tests {
         assert!(sent[0].1.contains(FAQ_NO_ANSWER));
         assert!(!sent[0].1.contains("InvalidResponse"));
         assert!(!sent[0].1.contains("kein json"));
+    }
+
+    #[tokio::test]
+    async fn ticket_auto_help_shadow_gleich_ticket_bleibt_fail_closed() {
+        // Fehlkonfiguration: der Shadow-Kanal ist derselbe wie der aktuelle Ticket-Kanal.
+        // Dann darf weder Knowledge gefragt noch etwas gepostet werden (sonst landet die
+        // Bot-Antwort sichtbar im Mitglieder-Ticket). Die Entscheidung wird sicher geloggt.
+        let port = ticket_port();
+        let (url, handle, knowledge_called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(222));
+
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
+            .await;
+        drop(guard);
+        handle.abort();
+
+        assert!(
+            !knowledge_called.load(Ordering::SeqCst),
+            "bei Shadow==Ticket darf kein Knowledge-Request starten"
+        );
+        assert!(
+            port.sent.lock().unwrap().is_empty(),
+            "bei Shadow==Ticket darf nichts gepostet werden"
+        );
+        let logs = capture.text();
+        assert!(logs.contains("reason=shadow_equals_ticket"), "{logs}");
+        assert!(logs.contains("error_class=shadow_equals_ticket"), "{logs}");
     }
 
     #[tokio::test]
