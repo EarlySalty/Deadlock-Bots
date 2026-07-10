@@ -1,3 +1,11 @@
+## #241 — Freundescode-Tipp nur noch für neue Mitglieder
+
+**Ausgangslage:** In der Invite-Lounge entschied allein der Text darüber, ob der Bot den Freundescode-Hinweis schickt. Wer jemandem beim Invite helfen wollte und dabei "einladen" schrieb, bekam den Tipp ebenfalls, obwohl er seit Monaten auf dem Server ist.
+
+**Was wurde geändert:** Der Hinweis geht nur noch an Leute, die seit weniger als sieben Tagen auf dem Server sind. Lässt sich das Beitrittsdatum nicht bestimmen, bleibt der Bot still.
+
+**Wie es jetzt läuft:** Neue Mitglieder werden weiterhin an den Steam-Freundescode erinnert, alle anderen können in der Invite-Lounge ungestört antworten und helfen.
+
 ## #240 — Coaching-Rolle kommt wieder direkt nach Website-Anfrage
 
 **Ausgangslage:** Neue Coaching-Anfragen über die Website wurden zwar im Coaching-Bereich sichtbar, aber die anfragende Person bekam die aktive Coaching-Rolle nicht mehr direkt. Dadurch fehlten Schreibrechte.
