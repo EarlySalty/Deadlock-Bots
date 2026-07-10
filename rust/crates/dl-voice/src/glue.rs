@@ -1679,6 +1679,21 @@ impl crate::router::RouterPort for RouterGlue {
             let _ = self.adapter.send_raw_public(channel.id.get(), &body).await;
         }
     }
+
+    async fn send_dm_components(&self, user_id: u64, body: serde_json::Value) {
+        let Some(map) = body.as_object() else {
+            tracing::warn!(user_id, "Router: Intro-DM-Body ist kein JSON-Objekt");
+            return;
+        };
+        if let Ok(channel) = self
+            .adapter
+            .http
+            .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
+            .await
+        {
+            let _ = self.adapter.send_raw_public(channel.id.get(), map).await;
+        }
+    }
 }
 
 #[async_trait::async_trait]

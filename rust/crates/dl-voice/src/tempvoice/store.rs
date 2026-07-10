@@ -688,6 +688,34 @@ impl TempVoiceStore {
         Ok(())
     }
 
+    // ── Router-Onboarding-DM-Marker (router_intro_dm) ──────────────────────
+    // ponytail: Runtime-Query wie delete_default_preset oben — kein query!-Makro,
+    // damit der Offline-Build (SQLX_OFFLINE) ohne neuen .sqlx-Cache-Eintrag baut.
+
+    /// Ob dem User schon einmal die Router-Erst-DM geschickt wurde.
+    pub async fn router_intro_dm_sent(&self, user_id: u64) -> VoiceDbResult<bool> {
+        let user_id = u64_to_i64("router_intro_dm.user_id", user_id)?;
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM voice.router_intro_dm WHERE user_id = $1)",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(exists)
+    }
+
+    /// Markiert idempotent, dass die Router-Erst-DM an den User versucht wurde.
+    pub async fn mark_router_intro_dm_sent(&self, user_id: u64) -> VoiceDbResult<()> {
+        let user_id = u64_to_i64("router_intro_dm.user_id", user_id)?;
+        sqlx::query(
+            "INSERT INTO voice.router_intro_dm (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+        )
+        .bind(user_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     // ── Persistente Interface-Messages (tempvoice_interface) ───────────────
 
     pub async fn ensure_interface_schema(&self) -> VoiceDbResult<()> {
