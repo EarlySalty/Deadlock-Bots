@@ -826,16 +826,28 @@ impl PanelHandler {
         interaction.values.first().and_then(|v| v.parse().ok())
     }
 
-    fn prefs_reply(content: String, components: Value) -> BridgeReply {
+    fn prefs_reply(content: String, components: Value, is_dm: bool) -> BridgeReply {
         let mut container_components = vec![tv_text_display(30, &content), json!({ "type": 14 })];
         container_components.extend(components.as_array().cloned().unwrap_or_default());
-        BridgeReply {
-            components: Some(json!([tv_container(29, container_components)])),
-            ephemeral: true,
-            message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
-            allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
-            fallback: Some(Box::new(BridgeReply::ephemeral_text(content))),
-            ..BridgeReply::default()
+        let body = json!([tv_container(29, container_components)]);
+        if is_dm {
+            // In einer DM gibt es kein Ephemeral — das Panel wird in-place editiert.
+            BridgeReply {
+                components: Some(body),
+                update_message: true,
+                message_flags: Some(TV_COMPONENTS_V2_FLAG),
+                allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                ..BridgeReply::default()
+            }
+        } else {
+            BridgeReply {
+                components: Some(body),
+                ephemeral: true,
+                message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
+                allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                fallback: Some(Box::new(BridgeReply::ephemeral_text(content))),
+                ..BridgeReply::default()
+            }
         }
     }
 
@@ -894,6 +906,7 @@ impl PanelHandler {
         Self::prefs_reply(
             Self::prefs_text(default.as_ref()),
             Self::prefs_components(default.is_some(), can_apply_lane),
+            interaction.guild_id == 0,
         )
     }
 
@@ -1161,6 +1174,7 @@ impl InteractionHandler for PanelHandler {
                         "options": options,
                         "min_values": 1, "max_values": 1,
                     }]}]),
+                    interaction.guild_id == 0,
                 )
             }
             "tv_prefs_rank_main" => {
@@ -1188,6 +1202,7 @@ impl InteractionHandler for PanelHandler {
                             .chain((1..=6).map(|n| json!({"label": format!("Sub-Rang {n}"), "value": n.to_string()})))
                             .collect::<Vec<_>>(),
                     }]}]),
+                    interaction.guild_id == 0,
                 )
             }
             "tv_prefs_rank_sub" => {
@@ -1246,6 +1261,7 @@ impl InteractionHandler for PanelHandler {
                     return Self::prefs_reply(
                         Self::prefs_text(None),
                         Self::prefs_components(false, false),
+                        interaction.guild_id == 0,
                     );
                 };
                 if let Some(err) = self
@@ -2194,6 +2210,24 @@ mod tests {
     use crate::tempvoice::{TempVoiceConfig, TempVoiceEngine, TempVoiceStore};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+
+    #[test]
+    fn prefs_reply_dm_updatet_in_place_ohne_ephemeral() {
+        // DM (guild_id 0): in-place Update, kein Ephemeral (in DMs unmöglich).
+        let dm = PanelHandler::prefs_reply("x".to_string(), json!([]), true);
+        assert!(dm.update_message);
+        assert!(!dm.ephemeral);
+        assert_eq!(dm.message_flags, Some(TV_COMPONENTS_V2_FLAG));
+
+        // Guild-Kontext bleibt unverändert ephemeral.
+        let guild = PanelHandler::prefs_reply("x".to_string(), json!([]), false);
+        assert!(!guild.update_message);
+        assert!(guild.ephemeral);
+        assert_eq!(
+            guild.message_flags,
+            Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG)
+        );
+    }
 
     #[test]
     fn global_panel_body_enthaelt_python_embed_und_buttons() {

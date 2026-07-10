@@ -1,3 +1,11 @@
+## #242 — Router erklärt sich beim ersten Mal per DM
+
+**Ausgangslage:** Wer zum ersten Mal in den Deadlock Router ging, wurde nicht automatisch in eine Lane sortiert und wusste oft nicht warum. Der Router braucht erst einen gewählten Modus, und das war vielen nicht klar.
+
+**Was wurde geändert:** Beim ersten Router-Besuch ohne gespeicherten Modus schickt der Bot einmalig eine DM, die erklärt wie der Router funktioniert. Den Modus setzt man direkt in der DM und lässt sich mit einem Klick auf Fertig sofort seine eigene Lane bauen.
+
+**Wie es jetzt läuft:** Modus einmal wählen, Fertig drücken, ab dann sortiert der Router bei jedem Join automatisch ein. Name, Limit und Rang passt man direkt in der DM oder jederzeit im Panel an.
+
 ## #241 — Freundescode-Tipp nur noch für neue Mitglieder
 
 **Ausgangslage:** In der Invite-Lounge entschied allein der Text darüber, ob der Bot den Freundescode-Hinweis schickt. Wer jemandem beim Invite helfen wollte und dabei "einladen" schrieb, bekam den Tipp ebenfalls, obwohl er seit Monaten auf dem Server ist.

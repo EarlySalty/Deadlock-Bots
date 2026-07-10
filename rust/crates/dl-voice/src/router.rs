@@ -449,6 +449,8 @@ pub trait RouterPort: Send + Sync {
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
         -> Result<(), String>;
     async fn send_dm(&self, user_id: u64, text: String);
+    /// Volle Components-V2-DM (flags + components) roh an den User senden.
+    async fn send_dm_components(&self, user_id: u64, body: serde_json::Value);
 }
 
 #[async_trait::async_trait]
@@ -850,8 +852,14 @@ impl LaneRouter {
         if channel_id != ROUTER_VC_ID {
             return;
         }
-        let Some(default) = self.default_preset(user_id).await else {
-            return; // ohne Präferenz: User bleibt im Router-VC (Panel hilft)
+        let default = match self.default_preset(user_id).await {
+            Some(default) => default,
+            None => {
+                // Erst-Join ohne Standard: einmalig die Onboarding-DM schicken,
+                // damit klar ist, dass man erst einen Modus wählen muss.
+                self.maybe_send_intro_dm(user_id).await;
+                return;
+            }
         };
         if !self.flood_guard_allows(user_id).await {
             return;
@@ -863,6 +871,33 @@ impl LaneRouter {
             .is_some()
         {
             self.mark_spawn_created(user_id).await;
+        }
+    }
+
+    /// Einmalige Router-Onboarding-DM beim Erst-Join ohne gespeicherten Standard.
+    /// Jede Entscheidung wird geloggt (gesendet / schon gesendet / Marker-Fehler).
+    async fn maybe_send_intro_dm(&self, user_id: u64) {
+        let already_sent = match self.engine.store.router_intro_dm_sent(user_id).await {
+            Ok(sent) => sent,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht lesbar — überspringe");
+                return;
+            }
+        };
+        match intro_dm_decision(already_sent) {
+            IntroDmDecision::SkipAlreadySent => {
+                tracing::debug!(user_id, "Router: Intro-DM übersprungen (schon gesendet)");
+            }
+            IntroDmDecision::Send => {
+                self.port
+                    .send_dm_components(user_id, router_intro_dm_body())
+                    .await;
+                // Mark nach dem Versuch: strikt einmalig, auch wenn DMs zu sind.
+                if let Err(err) = self.engine.store.mark_router_intro_dm_sent(user_id).await {
+                    tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht setzbar");
+                }
+                tracing::info!(user_id, "Router: Intro-DM gesendet (Erst-Join ohne Standard)");
+            }
         }
     }
 
@@ -1021,6 +1056,90 @@ fn router_reply_with_default_hint(base: String, default_saved: bool) -> String {
     }
 }
 
+/// Entscheidung über die Router-Erst-DM. Rein testbar; Seiteneffekte (DB,
+/// Senden) liegen im Aufrufer (siehe [`LaneRouter::maybe_send_intro_dm`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntroDmDecision {
+    Send,
+    SkipAlreadySent,
+}
+
+pub fn intro_dm_decision(already_sent: bool) -> IntroDmDecision {
+    if already_sent {
+        IntroDmDecision::SkipAlreadySent
+    } else {
+        IntroDmDecision::Send
+    }
+}
+
+/// Components-V2-Onboarding-DM für den Erst-Join ohne Standard. Bettet das
+/// echte Voreinstellungen-Panel (`tv_prefs_*`) plus den `router_dm_done`-Fertig-
+/// Button ein, damit der User seinen Modus direkt in der DM setzen kann.
+pub fn router_intro_dm_body() -> Value {
+    json!({
+        "flags": ROUTER_COMPONENTS_V2_FLAG,
+        "allowed_mentions": { "parse": [] },
+        "components": [{
+            "type": 17,
+            "accent_color": ROUTER_ACCENT_GOLD,
+            "components": [
+                { "type": 10, "content": "## <:dl_mode:1522518269456547962> Willkommen im Deadlock Router\n-# Modus einstellen, Fertig klicken, sofort in deiner eigenen Lane." },
+                { "type": 14, "divider": true, "spacing": 2 },
+                { "type": 10, "content": "**Warum bist du noch nicht in einer eigenen Lane?**\nDer Bot kennt deinen Modus noch nicht. Stell ihn unten ein und klick **Fertig**, dann baut er dir sofort deine Lane und zieht dich rein. Kein Fehler, du machst das genau einmal. Ab dem nächsten Join in den <#1513468587195633674> läuft es automatisch." },
+                { "type": 14, "divider": true, "spacing": 2 },
+                { "type": 10, "content": "### <:dl_mode:1522518269456547962> Deine Voreinstellungen\nModus wählen, Name, Limit und Rang optional anpassen, dann **Fertig**. Alles wird als dein Standard gespeichert." },
+                { "type": 1, "components": [
+                    { "type": 2, "style": 2, "label": "Casual", "custom_id": "tv_prefs_mode_casual", "emoji": { "name": "dl_casual", "id": "1522518264088100995" } },
+                    { "type": 2, "style": 2, "label": "Ranked", "custom_id": "tv_prefs_mode_ranked", "emoji": { "name": "dl_ranked", "id": "1522518271306366996" } },
+                    { "type": 2, "style": 2, "label": "Street Brawl", "custom_id": "tv_prefs_mode_street_brawl", "emoji": { "name": "dl_brawl", "id": "1522518262708174928" } }
+                ]},
+                { "type": 14, "divider": false, "spacing": 2 },
+                { "type": 14, "divider": false, "spacing": 2 },
+                { "type": 1, "components": [
+                    { "type": 2, "style": 2, "label": "Name+Limit ändern", "custom_id": "tv_prefs_name_limit" },
+                    { "type": 2, "style": 2, "label": "Rang ändern", "custom_id": "tv_prefs_rank" },
+                    { "type": 2, "style": 3, "label": "Fertig", "custom_id": "router_dm_done", "emoji": { "name": "dl_crown", "id": "1522518265421631538" } }
+                ]},
+                { "type": 14, "divider": true, "spacing": 2 },
+                { "type": 10, "content": "Deine Lane gehört dir: <:dl_rename:1522518272497418250> Name, <:dl_limit:1522518268345192588> Limit, <:dl_crown:1522518265421631538> Owner, dazu Rang-Gate und Kick. Alles änderst du jederzeit auch im Panel: <#1513468476365209670>" }
+            ]
+        }]
+    })
+}
+
+/// In-place-Update der Router-DM (bleibt Components-V2, kein `content`-Feld).
+fn router_dm_reply(text: impl Into<String>) -> BridgeReply {
+    BridgeReply {
+        components: Some(json!([{
+            "type": 17,
+            "accent_color": ROUTER_ACCENT_GOLD,
+            "components": [{ "type": 10, "content": text.into() }],
+        }])),
+        update_message: true,
+        message_flags: Some(ROUTER_COMPONENTS_V2_FLAG),
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        ..BridgeReply::default()
+    }
+}
+
+/// Mappt das Spawn-Ergebnis des Fertig-Buttons auf die DM-Antwort (rein testbar).
+fn router_dm_done_reply(outcome: &RouterSpawnOutcome) -> BridgeReply {
+    match outcome {
+        RouterSpawnOutcome::Created { lane_id } => {
+            router_dm_reply(format!("Fertig, du bist in deiner Lane <#{lane_id}>. Viel Spaß."))
+        }
+        RouterSpawnOutcome::AlreadyOwnLane { lane_id } => {
+            router_dm_reply(format!("Du bist schon in deiner Lane <#{lane_id}>."))
+        }
+        RouterSpawnOutcome::NotInVoice => router_dm_reply(format!(
+            "Geh in den <#{ROUTER_VC_ID}>, dann bau ich dir deine Lane. Dein Standard ist gespeichert."
+        )),
+        RouterSpawnOutcome::FloodLimited => router_dm_reply(ROUTER_REPLY_FLOOD_GUARD),
+        RouterSpawnOutcome::UnknownMode => router_dm_reply(ROUTER_REPLY_UNKNOWN_MODE),
+        RouterSpawnOutcome::NotCreated => router_dm_reply(ROUTER_REPLY_NOT_CREATED),
+    }
+}
+
 /// Panel-Buttons: router_mode_{mode} + router_autojoin_toggle.
 struct RouterPanelHandler {
     router: Arc<LaneRouter>,
@@ -1031,6 +1150,28 @@ impl InteractionHandler for RouterPanelHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         if interaction.custom_id == "voice:guide:detail" {
             return voice_guide_detail_reply();
+        }
+        if interaction.custom_id == "router_dm_done" {
+            // Fertig aus der Onboarding-DM: DM hat guild_id 0 → auf die Guild
+            // auflösen und mit dem gespeicherten Standard eine Lane spawnen.
+            let guild_id = if interaction.guild_id == 0 {
+                ROUTER_GUILD_ID
+            } else {
+                interaction.guild_id
+            };
+            let Some(default) = self.router.default_preset(interaction.user_id).await else {
+                return router_dm_reply("Wähl oben zuerst einen Modus, dann klappt Fertig.");
+            };
+            let outcome = self
+                .router
+                .spawn_lane_from_current_voice_with_role_ids(
+                    guild_id,
+                    interaction.user_id,
+                    &default.mode,
+                    &interaction.role_ids,
+                )
+                .await;
+            return router_dm_done_reply(&outcome);
         }
         if let Some(mode) = interaction.custom_id.strip_prefix("router_spawn_") {
             let default_saved = self
@@ -1132,6 +1273,7 @@ pub fn register(router_panel: &mut InteractionRouter, router: Arc<LaneRouter>) {
     router_panel.on_prefix("router_spawn_", handler.clone());
     router_panel.on_prefix("router_mode_", handler.clone());
     router_panel.on_custom_id("router_autojoin_toggle", handler.clone());
+    router_panel.on_custom_id("router_dm_done", handler.clone());
     router_panel.on_custom_id("voice:guide:detail", handler);
 }
 
@@ -1159,6 +1301,46 @@ mod tests {
     use serde_json::Map;
     use std::collections::{HashMap, HashSet};
     use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn intro_dm_decision_sendet_nur_beim_ersten_mal() {
+        assert_eq!(intro_dm_decision(false), IntroDmDecision::Send);
+        assert_eq!(intro_dm_decision(true), IntroDmDecision::SkipAlreadySent);
+    }
+
+    #[test]
+    fn intro_dm_body_ist_components_v2_mit_prefs_panel() {
+        let body = router_intro_dm_body();
+        assert_eq!(body["flags"], json!(32768));
+        let text = serde_json::to_string(&body).expect("json");
+        // Enthält die echten Voreinstellungen-Buttons + den Fertig-Button.
+        assert!(text.contains("tv_prefs_mode_casual"));
+        assert!(text.contains("tv_prefs_mode_ranked"));
+        assert!(text.contains("tv_prefs_mode_street_brawl"));
+        assert!(text.contains("tv_prefs_name_limit"));
+        assert!(text.contains("tv_prefs_rank"));
+        assert!(text.contains("router_dm_done"));
+        // Kernbotschaft für den User ohne Standard.
+        assert!(text.contains("Willkommen im Deadlock Router"));
+        assert!(text.contains("Warum bist du noch nicht in einer eigenen Lane"));
+    }
+
+    #[test]
+    fn router_dm_done_reply_updatet_die_dm_in_place() {
+        let created = router_dm_done_reply(&RouterSpawnOutcome::Created { lane_id: 42 });
+        assert!(created.update_message, "Fertig muss die DM in-place updaten");
+        assert!(!created.ephemeral, "DM-Antwort darf nicht ephemeral sein");
+        assert_eq!(created.message_flags, Some(ROUTER_COMPONENTS_V2_FLAG));
+        let text = serde_json::to_string(&created.components).expect("json");
+        assert!(text.contains("Fertig"));
+        assert!(text.contains("42"));
+
+        let not_in_voice = router_dm_done_reply(&RouterSpawnOutcome::NotInVoice);
+        assert!(not_in_voice.update_message);
+        let text = serde_json::to_string(&not_in_voice.components).expect("json");
+        assert!(text.contains(&ROUTER_VC_ID.to_string()));
+        assert!(text.contains("Standard ist gespeichert"));
+    }
 
     #[test]
     fn lane_wahl_wie_python() {
@@ -1412,12 +1594,14 @@ mod tests {
             Ok(())
         }
         async fn send_dm(&self, _user_id: u64, _text: String) {}
+        async fn send_dm_components(&self, _user_id: u64, _body: serde_json::Value) {}
     }
 
     #[derive(Default)]
     struct StaticRouterPort {
         voice_channel: StdMutex<Option<u64>>,
         role_ids: StdMutex<Vec<u64>>,
+        dm_components: StdMutex<Vec<serde_json::Value>>,
     }
 
     #[async_trait::async_trait]
@@ -1444,6 +1628,9 @@ mod tests {
         }
 
         async fn send_dm(&self, _user_id: u64, _text: String) {}
+        async fn send_dm_components(&self, _user_id: u64, body: serde_json::Value) {
+            self.dm_components.lock().expect("dm").push(body);
+        }
     }
 
     struct NoopLanePort;
