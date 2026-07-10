@@ -593,14 +593,13 @@ fn register_inner(
     client: Arc<SteamBotClient>,
     panel_store: Option<SteamPanelStore>,
 ) {
-    // Persistente Buttons: Panels + kompletter Betainvite-Funnel via Präfix
+    // Persistente Panel-Buttons
     let forward = Arc::new(ForwardComponent {
         client: client.clone(),
     });
     for id in PANEL_CUSTOM_IDS {
         router.on_custom_id(id, forward.clone());
     }
-    router.on_prefix("betainvite:", forward.clone());
     router.on_custom_id(
         FRIEND_CODE_MODAL_CUSTOM_ID,
         Arc::new(FriendCodeSubmit {
@@ -969,7 +968,7 @@ mod tests {
             "reply_text": "Hallo!",
             "ephemeral": false,
             "link_button": { "label": "Login", "url": "https://example.com/x" },
-            "buttons": [{ "custom_id": "betainvite:link:continue", "label": "Weiter", "style": "primary" }],
+            "buttons": [{ "custom_id": "steam_link_panel:rankcheck", "label": "Weiter", "style": "primary" }],
         }))
         .await;
         let client = SteamBotClient::new(url, Some("tok".to_string()));
@@ -983,7 +982,7 @@ mod tests {
         let components = reply.components.expect("components");
         let row = &components[0]["components"];
         assert_eq!(row[0]["style"], 5); // Link-Button zuerst
-        assert_eq!(row[1]["custom_id"], "betainvite:link:continue");
+        assert_eq!(row[1]["custom_id"], "steam_link_panel:rankcheck");
 
         let sent = received.lock().expect("lock");
         assert_eq!(sent[0]["kind"], "interaction");
@@ -1130,13 +1129,12 @@ mod tests {
     fn router_registrierung_vollstaendig() {
         let mut router = InteractionRouter::new();
         register(&mut router, SteamBotClient::new("http://x", None));
-        // Panels + Legacy + Betainvite-Präfix + Modal
+        // Panels + Legacy + Modal
         for id in PANEL_CUSTOM_IDS {
             assert!(router.resolve_component(id).is_some(), "{id}");
         }
-        assert!(router
-            .resolve_component("betainvite:intent:community")
-            .is_some());
+        let removed_funnel_id = ["beta", "invite:intent:community"].concat();
+        assert!(router.resolve_component(&removed_funnel_id).is_none());
         assert!(router
             .resolve_component(FRIEND_CODE_MODAL_CUSTOM_ID)
             .is_some());
