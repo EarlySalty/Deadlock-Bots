@@ -20,6 +20,9 @@ pub const INVITE_LOUNGE_HINT_TEXT: &str = "Kleiner Tipp: pack noch deinen Steam-
 
 const COOLDOWN_SECONDS: i64 = 24 * 60 * 60;
 const COOLDOWN_KV_NS: &str = "invite_lounge:cooldown";
+/// Gleiches 7-Tage-Fenster wie dl-moderation NEW_MEMBER_MAX_JOIN_HOURS=168;
+/// lokal, weil dl-community nicht von dl-moderation abhaengt.
+pub const NEWCOMER_MAX_JOIN_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 static FRIEND_CODE_RE: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"\b\d{6,12}\b").ok());
 static STEAM_LINK_RE: LazyLock<Option<Regex>> = LazyLock::new(|| {
@@ -82,11 +85,12 @@ impl InviteLoungeWatcher {
         if event.guild_id.is_none() || event.channel_id != INVITE_LOUNGE_CHANNEL_ID {
             return;
         }
-        if !should_reply_to_content(&event.content) {
+
+        let now = chrono::Utc::now().timestamp();
+        if !should_reply(&event.content, event.author_joined_at, now) {
             return;
         }
 
-        let now = chrono::Utc::now().timestamp();
         match self.cooldown_allows(event.author_id, now).await {
             Ok(true) => {}
             Ok(false) => return,
@@ -176,6 +180,14 @@ pub fn should_reply_to_content(content: &str) -> bool {
     is_invite_request(content) && !has_friend_code(content)
 }
 
+pub fn should_reply(content: &str, author_joined_at: Option<i64>, now: i64) -> bool {
+    is_newcomer(author_joined_at, now) && should_reply_to_content(content)
+}
+
+fn is_newcomer(joined_at: Option<i64>, now: i64) -> bool {
+    joined_at.is_some_and(|joined| now.saturating_sub(joined) < NEWCOMER_MAX_JOIN_SECONDS)
+}
+
 fn is_invite_request(content: &str) -> bool {
     let lower = content.to_lowercase();
     let folded = fold_german_umlauts(&lower);
@@ -244,6 +256,55 @@ mod tests {
         ));
         assert!(!should_reply_to_content(
             "Wer hat einen Invite fuer mich? s.team/p/abc-def"
+        ));
+    }
+
+    #[test]
+    fn veteran_mit_invite_frage_triggert_nicht() {
+        let now = 1_700_000_000;
+        let content = "Hast du schon eine Einladung bekommen? Ich kann dich gerne im Laufe des Tages einladen";
+
+        assert!(!should_reply(content, Some(now - 400 * 24 * 60 * 60), now));
+    }
+
+    #[test]
+    fn neuling_mit_invite_frage_triggert() {
+        let now = 1_700_000_000;
+        let content = "Hast du schon eine Einladung bekommen? Ich kann dich gerne im Laufe des Tages einladen";
+
+        assert!(should_reply(content, Some(now - 2 * 24 * 60 * 60), now));
+    }
+
+    #[test]
+    fn unbekanntes_beitrittsdatum_triggert_nicht() {
+        let now = 1_700_000_000;
+
+        assert!(!should_reply(
+            "Hey, kann mich jemand bitte zu Deadlock inviten?",
+            None,
+            now,
+        ));
+    }
+
+    #[test]
+    fn grenzfall_genau_sieben_tage_triggert_nicht() {
+        let now = 1_700_000_000;
+
+        assert!(!should_reply(
+            "Hey, kann mich jemand bitte zu Deadlock inviten?",
+            Some(now - NEWCOMER_MAX_JOIN_SECONDS),
+            now,
+        ));
+    }
+
+    #[test]
+    fn neuling_mit_freundescode_triggert_nicht() {
+        let now = 1_700_000_000;
+
+        assert!(!should_reply(
+            "Kann mich jemand inviten? Mein Code ist 123456789",
+            Some(now - 60),
+            now,
         ));
     }
 }
