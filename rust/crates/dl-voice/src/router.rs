@@ -1122,6 +1122,16 @@ fn router_dm_reply(text: impl Into<String>) -> BridgeReply {
     }
 }
 
+/// Hinweis als NEUE DM-Nachricht, ohne das Panel zu ersetzen — die Buttons
+/// (inkl. Fertig) bleiben stehen, damit der User es gleich nochmal versuchen kann.
+fn router_dm_hint(text: impl Into<String>) -> BridgeReply {
+    BridgeReply {
+        content: Some(text.into()),
+        allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+        ..BridgeReply::default()
+    }
+}
+
 /// Mappt das Spawn-Ergebnis des Fertig-Buttons auf die DM-Antwort (rein testbar).
 fn router_dm_done_reply(outcome: &RouterSpawnOutcome) -> BridgeReply {
     match outcome {
@@ -1131,12 +1141,12 @@ fn router_dm_done_reply(outcome: &RouterSpawnOutcome) -> BridgeReply {
         RouterSpawnOutcome::AlreadyOwnLane { lane_id } => {
             router_dm_reply(format!("Du bist schon in deiner Lane <#{lane_id}>."))
         }
-        RouterSpawnOutcome::NotInVoice => router_dm_reply(format!(
+        RouterSpawnOutcome::NotInVoice => router_dm_hint(format!(
             "Geh in den <#{ROUTER_VC_ID}>, dann bau ich dir deine Lane. Dein Standard ist gespeichert."
         )),
-        RouterSpawnOutcome::FloodLimited => router_dm_reply(ROUTER_REPLY_FLOOD_GUARD),
-        RouterSpawnOutcome::UnknownMode => router_dm_reply(ROUTER_REPLY_UNKNOWN_MODE),
-        RouterSpawnOutcome::NotCreated => router_dm_reply(ROUTER_REPLY_NOT_CREATED),
+        RouterSpawnOutcome::FloodLimited => router_dm_hint(ROUTER_REPLY_FLOOD_GUARD),
+        RouterSpawnOutcome::UnknownMode => router_dm_hint(ROUTER_REPLY_UNKNOWN_MODE),
+        RouterSpawnOutcome::NotCreated => router_dm_hint(ROUTER_REPLY_NOT_CREATED),
     }
 }
 
@@ -1160,7 +1170,7 @@ impl InteractionHandler for RouterPanelHandler {
                 interaction.guild_id
             };
             let Some(default) = self.router.default_preset(interaction.user_id).await else {
-                return router_dm_reply("Wähl oben zuerst einen Modus, dann klappt Fertig.");
+                return router_dm_hint("Wähl oben zuerst einen Modus, dann klappt Fertig.");
             };
             let outcome = self
                 .router
@@ -1335,9 +1345,13 @@ mod tests {
         assert!(text.contains("Fertig"));
         assert!(text.contains("42"));
 
+        // NotInVoice ist ein Hinweis, der das Panel STEHEN lässt (kein Update).
         let not_in_voice = router_dm_done_reply(&RouterSpawnOutcome::NotInVoice);
-        assert!(not_in_voice.update_message);
-        let text = serde_json::to_string(&not_in_voice.components).expect("json");
+        assert!(
+            !not_in_voice.update_message,
+            "Hinweis darf das Panel nicht ersetzen"
+        );
+        let text = not_in_voice.content.clone().expect("content");
         assert!(text.contains(&ROUTER_VC_ID.to_string()));
         assert!(text.contains("Standard ist gespeichert"));
     }
