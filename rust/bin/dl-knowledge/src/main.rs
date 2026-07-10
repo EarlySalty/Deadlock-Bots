@@ -591,11 +591,25 @@ fn required_meta(document: &Html, selector: &Selector, name: &str) -> Result<Str
 }
 
 fn html_text(element: &ElementRef<'_>) -> String {
-    element
-        .text()
-        .flat_map(str::split_whitespace)
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut visible = String::new();
+    for fragment in element.text() {
+        let normalized = fragment.split_whitespace().collect::<Vec<_>>().join(" ");
+        if normalized.is_empty() {
+            continue;
+        }
+        let first = normalized.chars().next().unwrap_or_default();
+        let last = visible.chars().last().unwrap_or_default();
+        let attaches_to_previous = matches!(
+            first,
+            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%' | '-' | '–' | '—' | '/'
+        );
+        let follows_opening = matches!(last, '(' | '[' | '{' | '/' | '„' | '“');
+        if !visible.is_empty() && !attaches_to_previous && !follows_opening {
+            visible.push(' ');
+        }
+        visible.push_str(&normalized);
+    }
+    visible
 }
 
 fn parse_markdown_file(root: &Path, path: &Path, raw: &str) -> Vec<Chunk> {
@@ -1066,6 +1080,23 @@ mod tests {
         let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
 
         assert_eq!(chunks[1].section, "verknuepfen");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_bewahrt_inline_linktext_mentions_und_satzzeichen() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "<p>Nutze das <a href=\"/panel\">öffentliche Panel</a>. Schreib &lt;@123&gt;.</p>",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert!(chunks[1]
+            .text
+            .contains("Nutze das öffentliche Panel. Schreib <@123>."));
+        assert!(!chunks[1].text.contains("Panel ."));
+        assert!(!chunks[1].text.contains("<@123> ."));
         Ok(())
     }
 
