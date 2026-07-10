@@ -1663,6 +1663,9 @@ impl Concierge {
         user_id: u64,
     ) -> Option<u64> {
         if let Some(guild_id) = guild_id {
+            if guild_id == self.config.main_guild_id && channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID {
+                return Some(guild_id);
+            }
             let owner = self.store.fallback_owner(channel_id).await.ok().flatten();
             return (owner == Some(user_id)).then_some(guild_id);
         }
@@ -2834,6 +2837,7 @@ mod tests {
     #[derive(Default)]
     struct MockConciergePort {
         sent_dm_v2: std::sync::Mutex<Vec<u64>>,
+        sent_channel_ids: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
         brain_answer: std::sync::Mutex<Option<String>>,
         brain_questions: std::sync::Mutex<Vec<String>>,
@@ -2866,9 +2870,10 @@ mod tests {
 
         async fn send_channel_v2(
             &self,
-            _channel_id: u64,
+            channel_id: u64,
             body: Map<String, Value>,
         ) -> Result<u64, String> {
+            self.sent_channel_ids.lock().unwrap().push(channel_id);
             let mut sent = self.sent_channel_v2.lock().unwrap();
             sent.push(body);
             Ok(sent.len() as u64)
@@ -2917,6 +2922,7 @@ mod tests {
     fn mock_port(brain_answer: Option<&str>) -> Arc<MockConciergePort> {
         Arc::new(MockConciergePort {
             sent_dm_v2: std::sync::Mutex::new(Vec::new()),
+            sent_channel_ids: std::sync::Mutex::new(Vec::new()),
             sent_channel_v2: std::sync::Mutex::new(Vec::new()),
             brain_answer: std::sync::Mutex::new(brain_answer.map(str::to_string)),
             brain_questions: std::sync::Mutex::new(Vec::new()),
@@ -2929,10 +2935,10 @@ mod tests {
         config
     }
 
-    async fn knowledge_server(json: &'static str) -> String {
+    async fn knowledge_server(json: &'static str) -> (String, tokio::task::JoinHandle<()>) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        let handle = tokio::spawn(async move {
             let Ok((mut socket, _)) = listener.accept().await else {
                 return;
             };
@@ -2945,7 +2951,7 @@ mod tests {
             );
             let _ = socket.write_all(response.as_bytes()).await;
         });
-        format!("http://{addr}")
+        (format!("http://{addr}"), handle)
     }
 
     #[tokio::test]
@@ -3256,10 +3262,11 @@ mod tests {
         let ai: Arc<dyn ChatProvider> = provider.clone();
         let port = mock_port(Some("Soll nicht gefragt werden."));
         let mut config = fast_knowledge_config();
-        config.knowledge_url = knowledge_server(
+        let (knowledge_url, handle) = knowledge_server(
             r#"{"answerable":true,"answer":"Die Regeln stehen in <#1315684135175716975>."}"#,
         )
         .await;
+        config.knowledge_url = knowledge_url;
         let concierge = Concierge::new(lazy_pool(), port.clone(), Some(ai), config);
 
         assert!(
@@ -3267,6 +3274,7 @@ mod tests {
                 .handle_user_message(10, None, 42, "Was sind die Regeln vom Discord?")
                 .await
         );
+        handle.await.unwrap();
 
         assert_eq!(
             sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
@@ -3274,6 +3282,57 @@ mod tests {
         );
         assert!(provider.requests().is_empty());
         assert!(port.brain_questions.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn serverfragen_nur_im_hauptserver_nutzt_den_wissenspfad() {
+        let port = mock_port(Some("Soll nicht gefragt werden."));
+        let mut config = fast_knowledge_config();
+        let main_guild_id = config.main_guild_id;
+        let (knowledge_url, handle) =
+            knowledge_server(r#"{"answerable":true,"answer":"Antwort aus der Wissensbasis."}"#)
+                .await;
+        config.knowledge_url = knowledge_url;
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+
+        assert!(
+            concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(main_guild_id),
+                    42,
+                    "Wo stehen die Serverregeln?",
+                )
+                .await
+        );
+        handle.await.unwrap();
+        assert_eq!(
+            *port.sent_channel_ids.lock().unwrap(),
+            vec![SERVER_BOT_FRAGEN_CHANNEL_ID]
+        );
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            "Antwort aus der Wissensbasis."
+        );
+        assert!(port.brain_questions.lock().unwrap().is_empty());
+
+        assert!(
+            !concierge
+                .handle_user_message(123, Some(main_guild_id), 43, "Gewöhnlicher Kanal")
+                .await
+        );
+        assert!(
+            !concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(main_guild_id + 1),
+                    44,
+                    "Falscher Server",
+                )
+                .await
+        );
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]

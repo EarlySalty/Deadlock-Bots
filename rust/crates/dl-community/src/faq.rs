@@ -107,12 +107,18 @@ fn knowledge_question_from_history(history: &[(String, String)], question: &str)
 }
 
 fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutcome {
-    match answer_text(answer) {
-        Some(answer) => TicketAutoOutcome {
-            answer: Some(answer),
-            decision: "answered",
+    match answer {
+        KnowledgeLookup::Unanswerable => TicketAutoOutcome::silence("no"),
+        KnowledgeLookup::Timeout
+        | KnowledgeLookup::Transport
+        | KnowledgeLookup::InvalidResponse => TicketAutoOutcome::silence("uncertain"),
+        answer => match answer_text(answer) {
+            Some(answer) => TicketAutoOutcome {
+                answer: Some(answer),
+                decision: "answered",
+            },
+            None => TicketAutoOutcome::silence("uncertain"),
         },
-        None => TicketAutoOutcome::silence("kein_treffer"),
     }
 }
 
@@ -551,13 +557,16 @@ impl FaqChat {
             return;
         }
         let outcome = self.ticket_auto_answer(problem, author_id).await;
-        tracing::debug!(
+        tracing::info!(
             channel_id,
             author_id,
             decision = outcome.decision,
             "FAQ-Ticket-Auto-Hilfe entschieden"
         );
-        if let Some(answer) = outcome.answer {
+        if let Some(answer) = outcome
+            .answer
+            .or_else(|| self.shadow_channel_id.map(|_| FAQ_NO_ANSWER.to_string()))
+        {
             let target = ticket_answer_target(channel_id, self.shadow_channel_id);
             let content = if self.shadow_channel_id.is_some() {
                 shadow_ticket_message(channel_id, &answer)
@@ -784,7 +793,48 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn lazy_pool() -> PgPool {
+        sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://faq-ticket-test.invalid/deadlock")
+            .expect("lazy pg pool")
+    }
+
+    async fn knowledge_server(
+        status: u16,
+        body: &'static str,
+        delay: Duration,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let handle = tokio::spawn(async move {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await;
+            if !delay.is_zero() {
+                tokio::time::sleep(delay).await;
+            }
+            let status_line = match status {
+                200 => "200 OK",
+                500 => "500 Internal Server Error",
+                _ => "400 Bad Request",
+            };
+            let response = format!(
+                "HTTP/1.1 {status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
 
     #[test]
     fn knowledge_frage_nutzt_nur_nutzerfragen_als_kontext() {
@@ -804,7 +854,7 @@ mod tests {
     }
 
     #[test]
-    fn ticket_auto_help_entscheidet_answerable_true_false_none() {
+    fn ticket_auto_help_entscheidet_answerable_no_und_uncertain() {
         let answered =
             ticket_auto_outcome_from_knowledge(KnowledgeLookup::Answer(KnowledgeAnswer {
                 answerable: true,
@@ -815,11 +865,11 @@ mod tests {
         assert_eq!(answered.answer.as_deref(), Some("Antwort aus Knowledge"));
 
         let unanswerable = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Unanswerable);
-        assert_eq!(unanswerable.decision, "kein_treffer");
+        assert_eq!(unanswerable.decision, "no");
         assert_eq!(unanswerable.answer, None);
 
         let none = ticket_auto_outcome_from_knowledge(KnowledgeLookup::Transport);
-        assert_eq!(none.decision, "kein_treffer");
+        assert_eq!(none.decision, "uncertain");
         assert_eq!(none.answer, None);
     }
 
@@ -868,7 +918,6 @@ mod tests {
     }
 
     // Port-Mock, der Panel-Post/-Edit/-Delete zählt.
-    #[cfg(feature = "testing")]
     struct MockPanelPort {
         posts: std::sync::Mutex<u32>,
         edits: std::sync::Mutex<u32>,
@@ -877,7 +926,6 @@ mod tests {
         category: Option<u64>,
     }
 
-    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl FaqPort for MockPanelPort {
         async fn create_faq_channel(&self, _g: u64, _u: u64, _n: &str) -> Result<u64, String> {
@@ -933,7 +981,6 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "testing")]
     fn ticket_port() -> Arc<MockPanelPort> {
         Arc::new(MockPanelPort {
             posts: std::sync::Mutex::new(0),
@@ -1045,10 +1092,8 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn ticket_auto_help_shadow_postet_nicht_ins_ticket() {
-        let db = db_with_kv().await;
+    async fn ticket_auto_help_shadow_postet_antwort_nur_ins_shadow() {
         let port = ticket_port();
         let (url, handle) = knowledge_server(
             200,
@@ -1056,7 +1101,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, Some(999));
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
 
         faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
             .await;
@@ -1065,8 +1110,35 @@ mod tests {
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, 999);
+        assert_ne!(sent[0].0, 222);
+        assert_ne!(sent[0].0, 111111111111111111);
         assert!(sent[0].1.contains("<#222>"));
         assert!(sent[0].1.contains("Ticket-Antwort"));
+    }
+
+    #[tokio::test]
+    async fn ticket_auto_help_shadow_verweist_bei_no_nur_dort_auf_menschen() {
+        let port = ticket_port();
+        let (url, handle) = knowledge_server(
+            200,
+            r#"{"answerable":false,"answer":null,"sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
+
+        faq.handle_ticket_message(1, 222, 111111111111111111, "Unbekanntes Problem")
+            .await;
+        handle.await.unwrap();
+
+        let sent = port.sent.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, 999);
+        assert_ne!(sent[0].0, 222);
+        assert_ne!(sent[0].0, 111111111111111111);
+        assert!(sent[0].1.contains(TICKET_SHADOW_PREFIX));
+        assert!(sent[0].1.contains("<#222>"));
+        assert!(sent[0].1.contains(FAQ_NO_ANSWER));
     }
 
     #[cfg(feature = "testing")]
