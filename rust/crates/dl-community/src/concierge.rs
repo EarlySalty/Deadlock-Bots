@@ -81,6 +81,10 @@ pub const CONGRATS_MESSAGE_TEXT: &str =
 pub const CONGRATS_VOICE_TEXT: &str = "Na also, erste Lane. Viel Spaß da drin, die Leute sind gut.";
 pub const OPTOUT_TEXT: &str =
     "Alles klar, ich meld mich nicht mehr von selbst. Wenn du mich doch mal brauchst, schreib mir einfach, ich antworte immer.";
+/// Fail-closed-Antwort, wenn die Opt-out-Einstellung gerade nicht zuverlässig gespeichert werden
+/// konnte. Ehrlich, ohne falsche Zusage: erneuter Versuch oder der sichtbare Supportweg.
+pub const OPTOUT_PERSIST_ERROR_TEXT: &str =
+    "Das konnte ich gerade nicht zuverlässig speichern, deshalb sag ich dir lieber ehrlich Bescheid, statt dir etwas Falsches zu versprechen. Schreib mir gleich nochmal stopp, dann versuch ich es erneut. Klappt es weiter nicht, meld dich in <#1491953161747955853>, da hilft dir ein Mensch.";
 pub const FORGET_TEXT: &str = "Erledigt, ich hab unsere Unterhaltung und alles, was ich mir gemerkt hatte, gelöscht. Wenn du nochmal von vorn anfangen willst, schreib mir einfach.";
 pub const COOLDOWN_TEXT: &str = "Immer mit der Ruhe, ich bin noch bei deiner letzten Nachricht. Gib mir einen kleinen Moment, dann bin ich wieder ganz für dich da.";
 pub const PATE_CLAIM_FALLBACK_LINE: &str = "Wer Zeit und Lust hat, drückt auf Übernehmen.";
@@ -401,22 +405,54 @@ const OPTOUT_POLITE_PREFIX: [&str; 12] = [
     "bitte", "hey", "hi", "hallo", "moin", "servus", "ok", "okay", "so", "also", "ey", "sorry",
 ];
 
+/// Kurze Höflichkeitstoken, die INNERHALB einer Opt-out-Phrase stehen dürfen ("schreib mir bitte
+/// nicht mehr", "lass mich bitte in Ruhe"), ohne sie zu entwerten. Bewusst schmal, damit keine
+/// Themenwörter verschluckt werden.
+const OPTOUT_INTERIOR_POLITE: [&str; 4] = ["bitte", "doch", "mal", "halt"];
+
+/// Themenmarker, die eine "schreib mir nicht mehr"-Bitte scoped/quantitativ machen ("... über
+/// Steam", "... nicht mehr als einen Satz") und damit KEINEN globalen Opt-out bedeuten.
+const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
+    "über",
+    "ueber",
+    "zu",
+    "zum",
+    "zur",
+    "dazu",
+    "darüber",
+    "darueber",
+    "bezüglich",
+    "bezueglich",
+    "von",
+    "davon",
+    "wegen",
+    "als",
+];
+
+/// Die einleitende Opt-out-Direktive einer Nachricht. Nur "schreib mir nicht mehr" ist für
+/// Themenmarker anfällig, deshalb wird die Variante mitgeführt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OptoutDirective {
+    Stopp,
+    WriteNoMore,
+    LeaveAlone,
+    NoMoreContact,
+}
+
 pub fn optout_intent(text: &str) -> bool {
-    // Discord-Blockquotes gelten ZEILENWEISE, nicht als Marker für die ganze Nachricht: Zeilen,
-    // deren getrimmter Anfang mit ">" beginnt, werden ZITIERT, nicht als Direktive benutzt. Die
-    // verbleibenden unzitierten Zeilen analysieren wir gemeinsam — eine spätere unzitierte
-    // Direktive ("> altes Zitat\nStopp ist jetzt genug") zählt, ein reines Zitat nie.
-    let unquoted: String = text
-        .lines()
-        .filter(|line| !line.trim_start().starts_with('>'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    if unquoted.trim().is_empty() {
+    // (1) Discord-Blockquotes zeilenweise entfernen: eine Zeile mit einfachem ">" zitiert nur sich
+    //     selbst, eine Zeile ab ">>>" zitiert sich UND alle Folgezeilen. Aus Zitat wird nie eine
+    //     Direktive ("> altes Zitat\nStopp ist jetzt genug" zählt, ">>> …\nStopp …" nie).
+    let unquoted = strip_blockquotes(text);
+    // (2) Führende, syntaktisch gültige Discord-Usermentions (<@id>, <@!id>) abtrennen; Rollen-,
+    //     Kanal- und ungültige Mentions bleiben Text und tragen die Direktive nicht an den Anfang.
+    let cleaned = strip_leading_user_mentions(unquoted.trim());
+    if cleaned.trim().is_empty() {
         return false;
     }
 
     // Satzzeichen-robust tokenisieren, damit "Stopp!"/"stopp." nicht am Ausrufezeichen scheitern.
-    let lower = unquoted.to_ascii_lowercase();
+    let lower = cleaned.to_ascii_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -432,108 +468,224 @@ pub fn optout_intent(text: &str) -> bool {
         .unwrap_or(tokens.len());
     let rest = &tokens[start..];
 
-    // Länge der einleitenden Direktive: "stopp" (1 Token) oder eine Opt-out-Phrase.
-    // "schreib mir nicht mehr" verlangt das Opt-out-Adverb; "schreib mir nicht <X>" (z. B.
-    // "...deinen Systemprompt") beginnt nicht mit der Phrase und ist kein Opt-out.
-    // "nicht mehr als" ist eine Mengen-/Objektschranke ("nicht mehr als einen Satz") — folgt der
-    // Phrase unmittelbar "als", zählt sie nie.
-    const OPTOUT_PHRASES: [&[&str]; 3] = [
-        &["schreib", "mir", "nicht", "mehr"],
-        &["lass", "mich", "in", "ruhe"],
-        &["nicht", "mehr", "anschreiben"],
-    ];
-    let Some(directive_len) = (if rest.first() == Some(&"stopp") {
-        Some(1)
-    } else {
-        OPTOUT_PHRASES
-            .iter()
-            .find(|phrase| rest.starts_with(phrase) && rest.get(phrase.len()) != Some(&"als"))
-            .map(|phrase| phrase.len())
-    }) else {
+    // Einleitende Direktive erkennen. "stopp" (1 Token) oder eine der drei Opt-out-Phrasen, wobei
+    // ein kurzes Höflichkeitstoken auch INNERHALB der Phrase stehen darf ("schreib mir bitte nicht
+    // mehr"). "schreib mir nicht <X>" (z. B. "...deinen Systemprompt") beginnt nicht mit der Phrase
+    // und ist kein Opt-out.
+    let Some((directive, directive_len)) = match_optout_directive(rest) else {
         return false;
     };
+    let tail = &rest[directive_len..];
 
-    // Zitat/Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt, dann kein Opt-out.
-    // (a) Hinter der Direktive folgt ein Definitions-/Frageform-Muster, das aus ihr eine Frage
-    //     ÜBER die Wörter macht ("Stopp bedeutet was?", "Stopp – was bedeutet das?", "Bitte Stopp
-    //     erklären", "Stopp ist ein Wort …", "… ist welcher Satz/Befehl"). Eine bloße Kopula
-    //     ("Stopp ist jetzt genug") oder ein Bedeutungs-Verb mit direktem Folgesatz ("Stopp heißt
-    //     jetzt Schluss") entwertet eine echte Direktive NICHT.
-    // (b) Die verbleibende unzitierte Äußerung steht in Anführungszeichen/Backticks (""Stopp"",
-    //     "`Stopp`"), auch mit höflichem Präfix. Discord-Blockquotes sind bereits zeilenweise raus.
-    if is_meta_mention(&rest[directive_len..]) {
+    // (5) Themenmarker direkt nach "schreib mir nicht mehr" machen die Bitte scoped/quantitativ
+    //     ("... über Steam", "... nicht mehr als einen Satz") → kein globaler Opt-out.
+    if directive == OptoutDirective::WriteNoMore
+        && tail
+            .first()
+            .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(token))
+    {
         return false;
     }
-    if starts_with_quote(&unquoted) {
+
+    // (4a) Explizite Ernsthaftigkeitsmarker gewinnen als direkte Klarstellung, auch gegen ein sonst
+    //      greifendes Meta-Muster ("Stopp ist ein Befehl, den du befolgen sollst").
+    if has_seriousness_marker(tail) {
+        return true;
+    }
+    // (4b) Zitat/Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt.
+    //      - Hinter der Direktive folgt ein Definitions-/Frageform-Muster, das aus ihr eine Frage
+    //        ÜBER die Wörter macht ("Stopp bedeutet eigentlich was?", "Stopp ist eigentlich ein
+    //        Wort?", "Stopp, kannst du das erklären?"). Der Tail wird dafür begrenzt gescannt.
+    //      - Die verbleibende unzitierte Äußerung steht in Anführungszeichen/Backticks (""Stopp"",
+    //        "`Stopp`"), auch mit höflichem Präfix. Blockquotes sind bereits zeilenweise raus.
+    if is_meta_mention(tail) {
+        return false;
+    }
+    if starts_with_quote(cleaned) {
         return false;
     }
     true
 }
 
-/// True, wenn hinter der Direktive ein Definitions-/Frageform-Muster folgt, das die Phrase zum
-/// Gesprächsgegenstand macht, statt sie als Anweisung zu meinen. Rein tokenbasiert, ohne NLP.
+/// Entfernt Discord-Markdown-Blockquotes zeilenweise. Eine Zeile, deren getrimmter Anfang mit ">>>"
+/// beginnt, zitiert sich UND alle Folgezeilen (Discord-Mehrzeilenzitat); eine Zeile mit einfachem
+/// ">" nur sich selbst.
+fn strip_blockquotes(text: &str) -> String {
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(">>>") {
+            break;
+        }
+        if trimmed.starts_with('>') {
+            continue;
+        }
+        kept.push(line);
+    }
+    kept.join("\n")
+}
+
+/// Trennt führende, syntaktisch gültige Discord-Usermentions ab: "<@123>" oder "<@!123>", ggf.
+/// mehrere hintereinander mit Whitespace dazwischen. Rollen- ("<@&…>"), Kanal- ("<#…>") und
+/// ungültige Mentions ("<@abc>") bleiben unangetastet.
+fn strip_leading_user_mentions(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    while let Some(after) = strip_one_user_mention(rest) {
+        rest = after.trim_start();
+    }
+    rest
+}
+
+fn strip_one_user_mention(text: &str) -> Option<&str> {
+    let inner = text.strip_prefix("<@")?;
+    let inner = inner.strip_prefix('!').unwrap_or(inner);
+    // Erst nach mindestens einer Ziffer muss unmittelbar ">" folgen; sonst keine gültige
+    // User-Mention (z. B. Rolle "<@&…>" oder "<@abc>").
+    let digits_end = inner.find(|c: char| !c.is_ascii_digit())?;
+    if digits_end == 0 {
+        return None;
+    }
+    inner[digits_end..].strip_prefix('>')
+}
+
+/// Erkennt die einleitende Opt-out-Direktive und gibt Variante plus Zahl der verbrauchten Token
+/// zurück, damit der Tail exakt hinter der Direktive beginnt.
+fn match_optout_directive(rest: &[&str]) -> Option<(OptoutDirective, usize)> {
+    if rest.first() == Some(&"stopp") {
+        return Some((OptoutDirective::Stopp, 1));
+    }
+    const PHRASES: [(OptoutDirective, &[&str]); 3] = [
+        (
+            OptoutDirective::WriteNoMore,
+            &["schreib", "mir", "nicht", "mehr"],
+        ),
+        (OptoutDirective::LeaveAlone, &["lass", "mich", "in", "ruhe"]),
+        (
+            OptoutDirective::NoMoreContact,
+            &["nicht", "mehr", "anschreiben"],
+        ),
+    ];
+    PHRASES.iter().find_map(|(directive, phrase)| {
+        match_phrase_with_polite(rest, phrase).map(|len| (*directive, len))
+    })
+}
+
+/// Matcht `phrase` gegen den Anfang von `rest` und erlaubt einzelne kurze Höflichkeitstoken ZWISCHEN
+/// den Phrasentoken ("schreib mir bitte nicht mehr"). Themenwörter werden nie übersprungen. Gibt die
+/// Zahl der verbrauchten rest-Token zurück, damit der Tail hinter der Direktive beginnt.
+fn match_phrase_with_polite(rest: &[&str], phrase: &[&str]) -> Option<usize> {
+    let mut ri = 0;
+    for &word in phrase {
+        while rest
+            .get(ri)
+            .is_some_and(|token| OPTOUT_INTERIOR_POLITE.contains(token))
+        {
+            ri += 1;
+        }
+        if rest.get(ri) != Some(&word) {
+            return None;
+        }
+        ri += 1;
+    }
+    Some(ri)
+}
+
+/// True, wenn im Tail ein expliziter Ernsthaftigkeitsmarker steht, der eine Direktive als
+/// Klarstellung bestätigt ("… den du befolgen sollst", "… ich meine es ernst", "ernst gemeint",
+/// "… nicht mehr anschreiben", "jetzt Schluss/genug"). Gewinnt gegen die Meta-Erkennung.
+fn has_seriousness_marker(tail: &[&str]) -> bool {
+    const MARKERS: [&[&str]; 4] = [
+        &["befolgen", "sollst"],
+        &["meine", "es", "ernst"],
+        &["ernst", "gemeint"],
+        &["nicht", "mehr", "anschreiben"],
+    ];
+    const EMPHASIS_AFTER_JETZT: [&str; 2] = ["schluss", "genug"];
+    MARKERS.iter().any(|marker| contains_subslice(tail, marker))
+        || tail
+            .windows(2)
+            .any(|w| w[0] == "jetzt" && EMPHASIS_AFTER_JETZT.contains(&w[1]))
+}
+
+fn contains_subslice(haystack: &[&str], needle: &[&str]) -> bool {
+    !needle.is_empty()
+        && needle.len() <= haystack.len()
+        && haystack
+            .windows(needle.len())
+            .any(|window| window == needle)
+}
+
+/// True, wenn der Tail hinter der Direktive ein Definitions-/Frageform-Muster trägt, das die Phrase
+/// zum Gesprächsgegenstand macht, statt sie als Anweisung zu meinen. Rein tokenbasiert, ohne NLP.
 ///
-/// Erklär-Aufforderungen und Bedeutungs-Verben werden getrennt behandelt:
-/// - "erklären"/"erklaeren" (nach optionalem höflichem Token) ist IMMER Meta ("Stopp bitte erklären");
-/// - "bedeutet"/"heißt"/"heisst"/"meint"/"meinst" sind NICHT pauschal Meta, sondern nur mit echter
-///   Frage-/Definitionsform: Bedeutungs-Verb + Interrogativ ("stopp bedeutet was"), "was" +
-///   Bedeutungs-Verb ("stopp – was bedeutet das"), "als" + Kategoriewort ("stopp als wort …") oder
-///   Kopula + optionaler Artikel + Kategoriewort ("stopp ist ein wort …") bzw. Kopula + Interrogativ
-///   ("… ist welcher satz").
+/// Der Tail wird begrenzt gescannt (nicht nur zwei feste Slots), damit Füllwörter ("eigentlich")
+/// und verschobene Verben die Meta-Form nicht verstecken:
+/// - "erklären"/"erklaeren" irgendwo im Tail ist IMMER Meta ("Stopp, kannst du das erklären?");
+/// - Bedeutungs-Verb ("bedeutet"/"heißt"/…) zusammen mit einem Interrogativ ("bedeutet eigentlich
+///   was", "was bedeutet das") ist Meta;
+/// - "als" + Kategoriewort ("als Wort …") ist Meta;
+/// - Kopula + optionale Füller/Artikel + Kategoriewort ("ist ein Wort", "ist eigentlich ein Wort")
+///   bzw. Kopula + Interrogativ ("ist welcher Satz") ist Meta.
 ///
-/// Ein direkter Folgesatz mit "dass"/"jetzt"/"Schluss"/"Ernst" oder eine bloße Kopula ("stopp ist
-/// jetzt genug", "stopp heißt jetzt schluss") bleibt Direktive — sonst würden ernst gemeinte
-/// Klarstellungen fälschlich entwertet.
+/// Ernsthaftigkeitsmarker und eine bloße Kopula ohne Kategoriewort ("Stopp ist jetzt genug", "Stopp
+/// heißt jetzt Schluss") bleiben Direktive — sie werden im Aufrufer bereits vorher abgefangen.
 fn is_meta_mention(tail: &[&str]) -> bool {
     const MEANING_VERB: [&str; 5] = ["bedeutet", "heißt", "heisst", "meint", "meinst"];
     const EXPLAIN_VERB: [&str; 2] = ["erklären", "erklaeren"];
     const INTERROGATIVE: [&str; 5] = ["welcher", "welche", "welchen", "welches", "was"];
     const CATEGORY: [&str; 5] = ["wort", "satz", "befehl", "ausdruck", "phrase"];
     const COPULA: [&str; 4] = ["ist", "sind", "war", "waren"];
-    const ARTICLE: [&str; 8] = [
-        "ein", "eine", "einen", "einem", "einer", "der", "die", "das",
+    // Artikel und kurze Füllwörter, die zwischen Kopula und Kategoriewort stehen dürfen.
+    const ARTICLE_OR_FILLER: [&str; 13] = [
+        "ein",
+        "eine",
+        "einen",
+        "einem",
+        "einer",
+        "der",
+        "die",
+        "das",
+        "eigentlich",
+        "denn",
+        "wohl",
+        "halt",
+        "einfach",
     ];
 
-    // Ein optionales höfliches Token im Tail darf die Meta-Form nicht verstecken ("Stopp bitte
-    // erklären"). "Stopp, bitte." bleibt danach mit leerem Tail eine echte Direktive.
-    let tail = match tail.split_first() {
-        Some((first, rest)) if OPTOUT_POLITE_PREFIX.contains(first) => rest,
-        _ => tail,
-    };
+    let has = |set: &[&str]| tail.iter().any(|token| set.contains(token));
 
-    let first = tail.first().copied();
-    let second = tail.get(1).copied();
-    let is_in = |slot: Option<&str>, set: &[&str]| slot.is_some_and(|w| set.contains(&w));
-
-    // Erklär-Aufforderung ist immer Meta.
-    if is_in(first, &EXPLAIN_VERB) {
+    // Erklär-Aufforderung irgendwo im Tail ist immer Meta.
+    if has(&EXPLAIN_VERB) {
         return true;
     }
-    // Bedeutungs-Verb NUR mit echter Frage-/Definitionsform ("bedeutet was").
-    if is_in(first, &MEANING_VERB) && is_in(second, &INTERROGATIVE) {
+    // Bedeutungs-Verb zusammen mit einem Interrogativ ("bedeutet eigentlich was", "was bedeutet das").
+    if has(&MEANING_VERB) && has(&INTERROGATIVE) {
         return true;
     }
-    // Zwischenwort "was" + Bedeutungs-Verb ("was bedeutet das").
-    if first == Some("was") && is_in(second, &MEANING_VERB) {
-        return true;
-    }
-    // Zwischenwort "als" + Kategoriewort ("als wort …").
-    if first == Some("als") && is_in(second, &CATEGORY) {
-        return true;
-    }
-    // Kopula NUR mit echter Frage-/Definitionsform, nie allein.
-    if is_in(first, &COPULA) {
-        // Kopula + optionaler Artikel + Kategoriewort ("ist ein wort", "ist wort").
-        let after_copula = &tail[1..];
-        let after_article = match after_copula.split_first() {
-            Some((word, rest)) if ARTICLE.contains(word) => rest,
-            _ => after_copula,
-        };
-        if is_in(after_article.first().copied(), &CATEGORY) {
+    // "als" + Kategoriewort ("als Wort …").
+    if let Some(pos) = tail.iter().position(|token| *token == "als") {
+        if tail
+            .get(pos + 1)
+            .is_some_and(|token| CATEGORY.contains(token))
+        {
             return true;
         }
-        // Kopula + Interrogativ/Bedeutungs-Verb ("ist welcher satz").
-        if is_in(second, &INTERROGATIVE) || is_in(second, &MEANING_VERB) {
+    }
+    // Kopula + optionale Füller/Artikel + Kategoriewort ("ist ein Wort", "ist eigentlich ein Wort")
+    // oder Kopula + direkt folgendes Interrogativ ("ist welcher Satz").
+    if let Some(pos) = tail.iter().position(|token| COPULA.contains(token)) {
+        let after = &tail[pos + 1..];
+        let landed = after
+            .iter()
+            .find(|token| !ARTICLE_OR_FILLER.contains(*token))
+            .copied();
+        if landed.is_some_and(|token| CATEGORY.contains(&token)) {
+            return true;
+        }
+        if after
+            .first()
+            .is_some_and(|token| INTERROGATIVE.contains(token))
+        {
             return true;
         }
     }
@@ -561,6 +713,17 @@ fn starts_with_quote(text: &str) -> bool {
             }
             _ => return false,
         }
+    }
+}
+
+/// Wählt die sichtbare Opt-out-Antwort abhängig vom Persistenz-Ergebnis. Fail-closed: die
+/// Erfolgsbestätigung (OPTOUT_TEXT) gehört ausschließlich in den Ok-Zweig; schlägt die DB fehl,
+/// bestätigt der Concierge nichts, sondern meldet ehrlich den Fehler.
+fn optout_reply_text(persisted: bool) -> &'static str {
+    if persisted {
+        OPTOUT_TEXT
+    } else {
+        OPTOUT_PERSIST_ERROR_TEXT
     }
 }
 
@@ -1828,20 +1991,32 @@ impl Concierge {
     }
 
     async fn opt_out(&self, user_id: u64, guild_id: u64, channel_id: u64, now: DateTime<Utc>) {
-        if let Err(err) = self.store.set_opted_out(user_id, guild_id, now).await {
-            tracing::warn!(%err, user_id, "Concierge: Opt-out konnte nicht gespeichert werden");
+        // Fail-closed: Journey-Erfolg und OPTOUT_TEXT (die Zusage "ich meld mich nicht mehr") NUR
+        // nach erfolgreicher DB-Persistenz. Schlägt die DB fehl, wird nichts falsch zugesagt: eine
+        // ehrliche Fehlermeldung, kein Erfolgs-Journey.
+        let persisted = match self.store.set_opted_out(user_id, guild_id, now).await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Opt-out konnte nicht gespeichert werden");
+                false
+            }
+        };
+        if persisted {
+            self.record_journey(
+                user_id,
+                guild_id,
+                dl_activity::journey::JourneyEventType::ConciergeOptedOut,
+                now,
+                json!({}),
+            )
+            .await;
         }
-        self.record_journey(
-            user_id,
-            guild_id,
-            dl_activity::journey::JourneyEventType::ConciergeOptedOut,
-            now,
-            json!({}),
-        )
-        .await;
         let _ = self
             .port
-            .send_channel_v2(channel_id, v2_body(OPTOUT_TEXT, Vec::new()))
+            .send_channel_v2(
+                channel_id,
+                v2_body(optout_reply_text(persisted), Vec::new()),
+            )
             .await;
     }
 
@@ -3173,7 +3348,10 @@ mod tests {
         let sent = port.sent_channel_v2.lock().unwrap();
         assert_eq!(sent_v2_content(&sent[0]), SMALLTALK_TEXT);
         assert_eq!(sent_v2_content(&sent[1]), COOLDOWN_TEXT);
-        assert_eq!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
+        // "stopp" wird als Opt-out erkannt, aber der Test-Pool ist unerreichbar: fail-closed meldet
+        // ehrlich den Persistenzfehler, statt einen nie gespeicherten Opt-out zu bestätigen.
+        assert_eq!(sent_v2_content(&sent[2]), OPTOUT_PERSIST_ERROR_TEXT);
+        assert_ne!(sent_v2_content(&sent[2]), OPTOUT_TEXT);
         assert!(provider.requests().is_empty());
     }
 
@@ -4015,10 +4193,90 @@ mod tests {
         assert!(!optout_intent("> Stopp ist jetzt genug"));
     }
 
+    #[test]
+    fn optout_intent_hoeflichkeit_innerhalb_der_phrase() {
+        // Ein kurzes Höflichkeitstoken DARF innerhalb der drei direkten Phrasen stehen, ohne
+        // die Direktive zu entwerten.
+        assert!(optout_intent("Lass mich bitte in Ruhe"));
+        assert!(optout_intent("Schreib mir bitte nicht mehr"));
+        // Themenwörter dürfen dabei nicht verschluckt werden.
+        assert!(!optout_intent(
+            "Schreib mir bitte nicht mehr als drei Nachrichten"
+        ));
+    }
+
+    #[test]
+    fn optout_intent_fuehrende_usermention_wird_ignoriert() {
+        // Eine führende, syntaktisch gültige Discord-Usermention wird vor der Analyse entfernt.
+        assert!(optout_intent("<@123456789> Stopp"));
+        assert!(optout_intent("<@!123456789> Bitte stopp"));
+        // Nur gültige numerische User-Mentions: Rollen-, Kanal- und ungültige Mentions bleiben
+        // Text und tragen die Direktive damit nicht mehr an den Satzanfang.
+        assert!(!optout_intent("<@&123456789> Stopp"));
+        assert!(!optout_intent("<#123456789> Stopp"));
+        assert!(!optout_intent("<@abc> Stopp"));
+    }
+
+    #[test]
+    fn optout_intent_ernsthaftigkeitsmarker_gewinnt() {
+        // Explizite Ernsthaftigkeitsmarker schlagen ein sonst greifendes Meta-Muster
+        // (Kopula + Artikel + Kategoriewort) und bleiben echte Klarstellung → Opt-out.
+        assert!(optout_intent(
+            "Stopp ist ein Befehl, den du befolgen sollst"
+        ));
+        assert!(optout_intent("Stopp ist ein Wort, aber ich meine es ernst"));
+    }
+
+    #[test]
+    fn optout_intent_meta_mit_fuellwort_kein_optout() {
+        // Meta-/Definitionsfragen bleiben auch mit Füllwort ("eigentlich") oder verschobenem
+        // Erklär-/Bedeutungs-Verb kein Opt-out.
+        assert!(!optout_intent("Stopp bedeutet eigentlich was?"));
+        assert!(!optout_intent("Stopp ist eigentlich ein Wort?"));
+        assert!(!optout_intent("Stopp, kannst du das erklären?"));
+    }
+
+    #[test]
+    fn optout_intent_themenmarker_macht_bitte_scoped() {
+        // Nach "schreib mir nicht mehr" macht ein Themenmarker die Bitte scoped/quantitativ →
+        // kein globaler Opt-out.
+        assert!(!optout_intent(
+            "Schreib mir nicht mehr über Steam, sondern nur über Discord"
+        ));
+        assert!(!optout_intent("Schreib mir nicht mehr dazu"));
+        assert!(!optout_intent("Schreib mir nicht mehr darüber"));
+        assert!(!optout_intent("Schreib mir nicht mehr bezüglich Steam"));
+        assert!(!optout_intent("Schreib mir nicht mehr davon"));
+        assert!(!optout_intent("Schreib mir nicht mehr zum Thema"));
+        // Mengenschranke "nicht mehr als" bleibt kein Opt-out.
+        assert!(!optout_intent("Schreib mir nicht mehr als einen Satz"));
+    }
+
+    #[test]
+    fn optout_intent_dreifach_blockquote_ist_komplett_zitat() {
+        // ">>>" zitiert die Zeile UND alle Folgezeilen: die spätere "Direktive" ist Teil des
+        // Zitats → kein Opt-out.
+        assert!(!optout_intent(">>> alte Nachricht\nStopp ist jetzt genug"));
+        // Einfaches ">" zitiert nur eine Zeile, die spätere unzitierte Direktive zählt.
+        assert!(optout_intent("> alte Nachricht\nStopp ist jetzt genug"));
+    }
+
+    #[test]
+    fn optout_reply_text_bestaetigt_nur_bei_persistenz() {
+        // Fail-closed: die Erfolgsbestätigung liegt ausschließlich im Ok-Zweig, der Fehlerfall
+        // liefert die ehrliche Fehlermeldung.
+        assert_eq!(optout_reply_text(true), OPTOUT_TEXT);
+        assert_eq!(optout_reply_text(false), OPTOUT_PERSIST_ERROR_TEXT);
+        // Die Fehlermeldung ist keine falsche Zusage und verweist auf den sichtbaren Supportweg.
+        assert_ne!(OPTOUT_PERSIST_ERROR_TEXT, OPTOUT_TEXT);
+        assert!(OPTOUT_PERSIST_ERROR_TEXT.contains("<#1491953161747955853>"));
+        assert!(!OPTOUT_PERSIST_ERROR_TEXT.contains("ich meld mich nicht mehr von selbst"));
+    }
+
     #[tokio::test]
-    async fn stopp_klarstellung_loest_optout_seiteneffekt_aus() {
-        // "Stopp ist jetzt genug" betont eine echte Direktive: der Seiteneffekt sendet OPTOUT_TEXT
-        // und nichts sonst — die Kopula "ist" darf das Opt-out nicht als Meta-Frage entwerten.
+    async fn stopp_klarstellung_ohne_persistenz_meldet_fehler_statt_optout() {
+        // "Stopp ist jetzt genug" wird als echte Direktive erkannt. Der Test-Pool ist unerreichbar:
+        // fail-closed meldet ehrlich den Persistenzfehler und bestätigt gerade KEIN Opt-out.
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(lazy_pool(), port.clone(), None, test_config(true, &[]));
 
@@ -4030,13 +4288,15 @@ mod tests {
 
         let sent = port.sent_channel_v2.lock().unwrap();
         assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
-        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_PERSIST_ERROR_TEXT);
+        assert_ne!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
     }
 
     #[tokio::test]
-    async fn zitierte_zeile_vor_stopp_direktive_loest_optout_seiteneffekt_aus() {
+    async fn zitierte_zeile_vor_stopp_direktive_ohne_persistenz_meldet_fehler_statt_optout() {
         // Erste Zeile ist ein Discord-Zitat, die zweite unzitierte Zeile "Stopp ist jetzt genug"
-        // ist eine echte Direktive: der Seiteneffekt sendet OPTOUT_TEXT und nichts sonst.
+        // ist eine echte Direktive. Der Test-Pool ist unerreichbar: fail-closed meldet ehrlich den
+        // Persistenzfehler und bestätigt gerade KEIN Opt-out.
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(lazy_pool(), port.clone(), None, test_config(true, &[]));
 
@@ -4048,7 +4308,8 @@ mod tests {
 
         let sent = port.sent_channel_v2.lock().unwrap();
         assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
-        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_PERSIST_ERROR_TEXT);
+        assert_ne!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
     }
 
     #[tokio::test]
@@ -4128,9 +4389,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stopp_mit_satzzeichen_loest_optout_seiteneffekt_aus() {
-        // "Stopp!" ist ein echtes Opt-out: der Seiteneffekt sendet OPTOUT_TEXT und nichts sonst,
-        // kein Cooldown-, Wissens- oder LLM-Pfad.
+    async fn stopp_mit_satzzeichen_ohne_persistenz_meldet_fehler_statt_optout() {
+        // "Stopp!" ist ein echtes Opt-out und geht sofort in den Opt-out-Pfad, kein Cooldown-,
+        // Wissens- oder LLM-Pfad. Der Test-Pool ist unerreichbar: fail-closed meldet ehrlich den
+        // Persistenzfehler und bestätigt gerade KEIN Opt-out.
         let port = Arc::new(MockConciergePort::default());
         let concierge = Concierge::new(lazy_pool(), port.clone(), None, test_config(true, &[]));
 
@@ -4138,7 +4400,8 @@ mod tests {
 
         let sent = port.sent_channel_v2.lock().unwrap();
         assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
-        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_PERSIST_ERROR_TEXT);
+        assert_ne!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
     }
 
     #[tokio::test]
