@@ -625,7 +625,11 @@ fn collect_corpus_files(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -
             .file_type()
             .with_context(|| format!("Dateityp lesen: {}", path.display()))?;
         if file_type.is_dir() {
-            if path.file_name().and_then(|name| name.to_str()) == Some("internal") {
+            if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.eq_ignore_ascii_case("internal"))
+            {
                 continue;
             }
             collect_corpus_files(&path, extension, files)?;
@@ -982,7 +986,10 @@ impl KnowledgeBase {
             } else {
                 stats.non_html_sources += 1;
             }
-            if path.split('/').any(|segment| segment == "internal") {
+            if path
+                .split('/')
+                .any(|segment| segment.eq_ignore_ascii_case("internal"))
+            {
                 stats.internal_sources += 1;
             }
         }
@@ -1690,6 +1697,24 @@ mod tests {
     }
 
     #[test]
+    fn produktionslader_ignoriert_internal_unabhaengig_von_grossschreibung() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        std::fs::create_dir_all(public.join("Internal"))?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        std::fs::write(public.join("Internal/secret.html"), HTML_FIXTURE)?;
+
+        let knowledge = load_production_corpus(&public)?;
+
+        assert_eq!(knowledge.source_stats().html_sources, 1);
+        assert!(knowledge
+            .chunks
+            .iter()
+            .all(|chunk| chunk.path == "visible.html"));
+        Ok(())
+    }
+
+    #[test]
     fn produktionslader_lehnt_public_symlink_auf_internal_ab() -> Result<()> {
         let temp = tempfile::tempdir()?;
         let internal_public = temp.path().join("internal/public");
@@ -1725,6 +1750,16 @@ mod tests {
                     "Geheim",
                     "Geheim",
                     "internal/secret.html",
+                    "Geheim",
+                )]),
+                "interne Quellen",
+            ),
+            (
+                "Internal",
+                KnowledgeBase::from_chunks(vec![test_chunk(
+                    "Geheim",
+                    "Geheim",
+                    "Internal/secret.html",
                     "Geheim",
                 )]),
                 "interne Quellen",
