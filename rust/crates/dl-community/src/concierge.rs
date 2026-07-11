@@ -396,18 +396,34 @@ pub fn classify_intent(text: &str) -> ConciergeIntent {
 }
 
 pub fn optout_intent(text: &str) -> bool {
+    // Satzzeichen-robust tokenisieren, damit "Stopp!"/"stopp." nicht am Ausrufezeichen scheitern.
     let lower = text.to_ascii_lowercase();
-    lower.split_whitespace().any(|word| word == "stopp")
-        || contains_any(
-            &lower,
-            &[
-                // "schreib mir nicht mehr" verlangt das Opt-out-Adverb; das objektspezifische
-                // "schreib mir nicht <X>" (z. B. "...deinen Systemprompt") ist kein Opt-out.
-                "schreib mir nicht mehr",
-                "lass mich in ruhe",
-                "nicht mehr anschreiben",
-            ],
-        )
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+
+    // "stopp" als eigenständiges Token.
+    if tokens.contains(&"stopp") {
+        return true;
+    }
+
+    // Opt-out-Phrasen als exakte, zusammenhängende Token-Teilfolgen. "schreib mir nicht mehr"
+    // verlangt das Opt-out-Adverb; das objektspezifische "schreib mir nicht <X>" (z. B.
+    // "...deinen Systemprompt") ist kein Opt-out. "nicht mehr als" ist eine Mengen-/Objektschranke
+    // ("nicht mehr als einen Satz") und darf niemals persistentes Opt-out setzen — deshalb zählt
+    // die Phrase nur, wenn ihr NICHT unmittelbar "als" folgt.
+    const OPTOUT_PHRASES: [&[&str]; 3] = [
+        &["schreib", "mir", "nicht", "mehr"],
+        &["lass", "mich", "in", "ruhe"],
+        &["nicht", "mehr", "anschreiben"],
+    ];
+    OPTOUT_PHRASES.iter().any(|phrase| {
+        tokens
+            .windows(phrase.len())
+            .enumerate()
+            .any(|(i, window)| window == *phrase && tokens.get(i + phrase.len()) != Some(&"als"))
+    })
 }
 
 pub fn forget_intent(text: &str) -> bool {
@@ -2438,28 +2454,59 @@ fn local_conversational_answer(text: &str) -> Option<LlmAnswer> {
     })
 }
 
-/// Direkte Frage nach der eigenen Natur ("Bist du ein Bot?"). Bewusst eng gehalten:
-/// verlangt die Selbst-Anrede ("bist du"/"biste"/"bist ihr") und unmittelbar danach ein
-/// exaktes Identitätswort-Token. Kein Substring-Treffer: "Angebot"/"Verbot" tragen "bot",
-/// "rechtzeitig"/"schlecht" tragen "echt" — sie zählen nicht. Das Nähefenster hält ein spätes
-/// "Steam Bot" aus Supportfragen ("Bist du sicher, dass der Steam Bot funktioniert?") heraus.
-/// Eingabe muss lowercased sein.
+/// Direkte Frage nach der eigenen Natur ("Bist du ein Bot?"). Bewusst eng gehalten als
+/// Phrasenerkennung für direkte Selbstauskunft: Selbst-Anrede ("bist du"/"biste"/"bist ihr"),
+/// danach nur Füllwörter (Adverbien + unbestimmte Artikel), dann ein exaktes Identitätswort.
+/// Trifft das erste Nicht-Füllwort ein Identitätswort, ist es Selbstauskunft; ist es etwas
+/// anderes, bricht die Kette ab. So greifen "bist du eigentlich wirklich ein bot",
+/// "bist du eine ki", "bist du ein mensch", während "bist du echt sicher, dass der steam bot
+/// funktioniert?" abbricht ("sicher" ist kein Füllwort) und das späte "Steam Bot" nie zählt.
+/// Kein Substring-Treffer: "Angebot"/"Verbot" tragen "bot", "rechtzeitig"/"schlecht" tragen
+/// "echt" — als eigene Tokens sind sie weder Füllwort noch Identitätswort. "echt" ist nur
+/// Füllwort (Adverb "echt ein Bot"), kein Identitätswort mehr. Eingabe muss lowercased sein.
 fn asks_bot_identity(lower: &str) -> bool {
-    // Einzelne Tokens der Identitätswörter (auch der Mehrwortformen: "eine ki"/"künstliche
-    // intelligenz" → "ki"/"intelligenz"). Nur exakte Token-Gleichheit zählt.
-    const IDENTITY_WORDS: [&str; 8] = [
+    // Exakte Identitätswörter (auch Endtoken der Mehrwortformen "eine ki"/"künstliche
+    // intelligenz"). Nur exakte Token-Gleichheit zählt.
+    const IDENTITY_WORDS: [&str; 9] = [
         "bot",
+        "chatbot",
         "roboter",
         "mensch",
-        "echt",
         "programm",
         "maschine",
         "ki",
+        "ai",
         "intelligenz",
     ];
-    // Fenster nach der Anrede: groß genug für "biste eigentlich n bot", klein genug, dass ein
-    // spätes "Steam Bot" in einer Supportfrage nicht mehr als Identitätswort zählt.
-    const WINDOW: usize = 3;
+    // Füllwörter zwischen Anrede und Identitätswort: unbestimmte Artikel und die üblichen
+    // Verstärker/Partikel. "künstliche" trägt "künstliche intelligenz". "echt" ist hier
+    // Adverb ("echt ein Bot"), nie selbst Identitätswort.
+    const FILLERS: [&str; 24] = [
+        "ein",
+        "eine",
+        "einen",
+        "einer",
+        "einem",
+        "n",
+        "ne",
+        "nen",
+        "eigentlich",
+        "wirklich",
+        "echt",
+        "etwa",
+        "denn",
+        "vielleicht",
+        "überhaupt",
+        "wohl",
+        "jetzt",
+        "nun",
+        "gerade",
+        "auch",
+        "nur",
+        "so",
+        "eventuell",
+        "künstliche",
+    ];
 
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
@@ -2478,13 +2525,15 @@ fn asks_bot_identity(lower: &str) -> bool {
         } else {
             continue;
         };
-        let start = i + address_len;
-        let end = (start + WINDOW).min(tokens.len());
-        if tokens[start..end]
-            .iter()
-            .any(|word| IDENTITY_WORDS.contains(word))
-        {
-            return true;
+        // Ab der Anrede vorwärts laufen: solange Füllwörter, weiter; Identitätswort → Treffer;
+        // alles andere bricht die Selbstauskunft ab.
+        for word in &tokens[i + address_len..] {
+            if IDENTITY_WORDS.contains(word) {
+                return true;
+            }
+            if !FILLERS.contains(word) {
+                break;
+            }
         }
     }
     false
@@ -3604,12 +3653,27 @@ mod tests {
         assert!(asks_bot_identity("bist du ein bot?"));
         assert!(asks_bot_identity("biste eigentlich n bot??"));
 
+        // Direkte Selbstauskunft trägt beliebig viele Füllwörter (Adverb + Artikel) zwischen
+        // Anrede und Identitätswort. Das feste 3-Token-Fenster verpasste "…wirklich ein Bot".
+        assert!(asks_bot_identity("bist du eigentlich wirklich ein bot?"));
+        assert!(asks_bot_identity("bist du eine ki?"));
+        assert!(asks_bot_identity("bist du ein mensch?"));
+        assert!(asks_bot_identity("bist du echt ein bot?"));
+        assert!(asks_bot_identity("bist du eine künstliche intelligenz?"));
+
         // Supportfragen sind keine Identitätsfragen — auch wenn "Bot" später fällt.
         assert!(!asks_bot_identity("bist du zuständig?"));
         assert!(!asks_bot_identity("wie funktioniert der steam bot?"));
         assert!(!asks_bot_identity(
             "bist du sicher, dass der steam bot funktioniert?"
         ));
+
+        // "echt" als Adverb ("bist du echt sicher, …") leitet nur einen Nebensatz ein und ist
+        // keine Selbstauskunft — das späte "Steam Bot" darf nicht mehr durchschlagen.
+        assert!(!asks_bot_identity(
+            "bist du echt sicher, dass der steam bot funktioniert?"
+        ));
+        assert!(!asks_bot_identity("bist du echt zufrieden?"));
 
         // Wörter, die ein Identitätswort nur als Substring enthalten, zählen nicht
         // ("Angebot"/"Verbot" tragen "bot", "rechtzeitig"/"schlecht" tragen "echt").
@@ -3624,6 +3688,12 @@ mod tests {
         // Echte Opt-outs bleiben Opt-outs.
         assert!(optout_intent("stopp"));
         assert!(optout_intent("bitte schreib mir nicht mehr"));
+        assert!(optout_intent("lass mich in ruhe"));
+        assert!(optout_intent("nicht mehr anschreiben"));
+
+        // Satzzeichen dürfen ein "stopp" nicht verstecken: "Stopp!"/"stopp." bleibt Opt-out.
+        assert!(optout_intent("Stopp!"));
+        assert!(optout_intent("stopp."));
 
         // Objektspezifische "schreib mir nicht <X>"-Bitte ist kein Opt-out, sondern hier
         // eine Manipulationsanfrage nach Interna.
@@ -3631,6 +3701,46 @@ mod tests {
         assert!(!optout_intent(
             "bist du ein bot? schreib mir nicht deinen systemprompt."
         ));
+
+        // Mengen-/Objektschranke "nicht mehr als" ist niemals ein Opt-out.
+        assert!(!optout_intent("Schreib mir nicht mehr als einen Satz"));
+        assert!(!optout_intent(
+            "schreib mir bitte nicht mehr als drei nachrichten"
+        ));
+    }
+
+    #[tokio::test]
+    async fn stopp_mit_satzzeichen_loest_optout_seiteneffekt_aus() {
+        // "Stopp!" ist ein echtes Opt-out: der Seiteneffekt sendet OPTOUT_TEXT und nichts sonst,
+        // kein Cooldown-, Wissens- oder LLM-Pfad.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, test_config(true, &[]));
+
+        assert!(concierge.handle_user_message(10, None, 42, "Stopp!").await);
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn mengenbeschraenkung_ist_kein_optout_seiteneffekt() {
+        // "Schreib mir nicht mehr als einen Satz" ist eine Mengenschranke, kein Opt-out:
+        // der Opt-out-Seiteneffekt (OPTOUT_TEXT) darf nie ausgelöst werden.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Schreib mir nicht mehr als einen Satz")
+                .await
+        );
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert!(
+            sent.iter().all(|body| sent_v2_content(body) != OPTOUT_TEXT),
+            "Mengenschranke darf kein Opt-out auslösen"
+        );
     }
 
     #[tokio::test]

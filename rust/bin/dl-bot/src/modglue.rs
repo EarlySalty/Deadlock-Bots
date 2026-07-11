@@ -1838,6 +1838,23 @@ impl dl_community::clips::ClipPort for ClipGlue {
 
 // ── FAQ-Chat-Anbindung ─────────────────────────────────────────────────────
 
+/// Gemeinsamer Payload für alle sichtbaren FAQ/Knowledge/Shadow-Nachrichten (rohe Nutzerfrage,
+/// Modelltext, Shadow-Ausgabe). Ein Sendepfad, ein Kontrakt.
+fn faq_message_body(content: &str, components: Option<serde_json::Value>) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("content".into(), json!(content));
+    if let Some(components) = components {
+        body.insert("components".into(), components);
+    }
+    // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe dürfen niemals Rollen, @everyone oder
+    // einzelne User pingen: leeres parse, kein replied_user.
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "replied_user": false }),
+    );
+    body
+}
+
 pub struct FaqGlue {
     pub adapter: Arc<DiscordAdapter>,
 }
@@ -1880,11 +1897,7 @@ impl dl_community::faq::FaqPort for FaqGlue {
         content: &str,
         components: Option<serde_json::Value>,
     ) {
-        let mut body = serde_json::Map::new();
-        body.insert("content".into(), json!(content));
-        if let Some(components) = components {
-            body.insert("components".into(), components);
-        }
+        let body = faq_message_body(content, components);
         let _ = self.adapter.send_raw_public(channel_id, &body).await;
     }
 
@@ -3670,6 +3683,33 @@ mod tests {
         assert_eq!(
             body.get("allowed_mentions"),
             Some(&json!({ "parse": [], "replied_user": false }))
+        );
+    }
+
+    #[test]
+    fn faq_message_body_deaktiviert_mentions() {
+        // Rohe Nutzerfrage, Modelltext und Shadow-Ausgabe laufen alle durch diesen einen
+        // Sendepfad: er muss standardmäßig Rollen, @everyone und User-Pings unterbinden.
+        let body = faq_message_body("@everyone <@123> <@&456>", None);
+        assert_eq!(
+            body.get("content"),
+            Some(&json!("@everyone <@123> <@&456>"))
+        );
+        assert_eq!(
+            body.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
+        assert!(body.get("components").is_none());
+
+        // Mit Components (z. B. Close-Button) bleibt der Mention-Schutz erhalten.
+        let with_components = faq_message_body("Antwort", Some(json!([{ "type": 1 }])));
+        assert_eq!(
+            with_components.get("allowed_mentions"),
+            Some(&json!({ "parse": [], "replied_user": false }))
+        );
+        assert_eq!(
+            with_components.get("components"),
+            Some(&json!([{ "type": 1 }]))
         );
     }
 
