@@ -1,10 +1,22 @@
-## #245 — Concierge antwortet aus geprüftem Supportwissen
+## #246 — Concierge antwortet aus geprüftem Supportwissen
 
 **Ausgangslage:** Fragen zu Discord und den Bots konnte der Concierge nicht belastbar beantworten, und es war unklar, was er dabei speichert oder an Menschen weitergibt.
 
 **Was wurde geändert:** In DMs, im festen Fragenkanal und in privaten FAQ-Chats antwortet er nur noch aus dem veröffentlichten Supportwissen; unsichere oder undokumentierte Fälle gehen an Menschen, und aus Tickets entstehen höchstens interne Prüfkandidaten statt direkter Bot-Antworten oder Diagnosen.
 
 **Wie es jetzt läuft:** „stopp“ beendet nur in einer echten DM an den Concierge neue Concierge-Verlaufsspeicherung und ungefragte Concierge-Kontakte, direkte Fragen beantwortet er danach ohne Verlauf; „vergiss mich“ löscht nur seine Concierge-Daten, während der Datenschutz-Befehl der umfassendere Weg bleibt. Einen Patenwunsch bestätigt er erst nach der internen Übergabe und nicht doppelt; unklare Discord-Zustände kennzeichnet er sichtbar, statt möglicherweise vorhandene Antworten oder Kanäle blind zu löschen, und Debug, Neustarts oder andere Live-Aktionen führt er nicht aus.
+
+---
+
+## #245 — Spam-Korrektur-Buttons überleben jetzt jeden Neustart
+
+**Problem:** Die Lern-Buttons unter Twitch-Spam-Meldungen wurden nach einem Bot-Neustart tot und meldeten nur noch „Dieser Lernfall ist nicht mehr aktiv".
+
+**Änderung:** Der Twitch-Bot lernt jetzt selbst und meldet, was er gelernt hat. Die Buttons korrigieren nur noch: „Als harmlos korrigieren" macht ein gelerntes Muster rückgängig, „Als Spam korrigieren" lernt eines nach. Alles Nötige steckt im Button selbst, es gibt keinen internen Zwischenspeicher mehr.
+
+**Aktuelles Verhalten:** Korrekturen funktionieren auch Tage später noch, egal wie oft der Bot neu gestartet wurde. Alte Buttons aus früheren Meldungen antworten mit einem freundlichen Hinweis statt mit einem Fehler.
+
+---
 
 ## #244 — Neue Sprachkanäle heißen sofort so, wie ihr sie haben wollt
 
