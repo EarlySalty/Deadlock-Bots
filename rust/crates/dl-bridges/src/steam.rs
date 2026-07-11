@@ -418,7 +418,7 @@ impl SteamPanelStore {
 
     async fn clear(&self) {
         if let Err(err) = kv::delete(&self.pool, STEAM_PANEL_KV_NS, STEAM_PANEL_KV_KEY).await {
-            tracing::debug!(%err, "Steam-Panel-Referenz konnte nicht geloescht werden");
+            tracing::debug!(%err, "Steam-Panel-Referenz konnte nicht gelöscht werden");
         }
     }
 }
@@ -1187,14 +1187,14 @@ mod tests {
         );
 
         // Discord zeigt jede description im Command-Picker. Ein durchgerutschter
-        // Platzhalter waere damit user-sichtbar, der Test haelt das auf.
+        // Platzhalter wäre damit user-sichtbar, der Test hält das auf.
         for text in std::iter::once(&invite["description"])
             .chain(options.iter().map(|option| &option["description"]))
         {
             let text = text.as_str().expect("description ist ein String");
             assert_ne!(text, "Platzhalter");
             assert!(!text.is_empty());
-            // Discord zaehlt Zeichen, nicht Bytes: len() waere bei Umlauten zu streng.
+            // Discord zaehlt Zeichen, nicht Bytes: len() wäre bei Umlauten zu streng.
             assert!(text.chars().count() <= 100, "Discord-Limit: {text}");
         }
     }
