@@ -357,7 +357,7 @@ impl VoiceFeedback {
         }
         let result = self.delete_feedback_requests_for_user(user_id).await;
         if let Err(err) = result {
-            tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht geloescht werden");
+            tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht gelöscht werden");
         }
     }
 
@@ -1130,9 +1130,19 @@ mod tests {
             .await;
         let dms = port.dms.lock().expect("lock");
         assert_eq!(dms.len(), 2);
-        assert!(dms[1]
-            .1
-            .contains("danke, dass du wieder in den Lanes warst"));
+        // Vertrag: die zweite DM ist die Wiederkehrer-Variante ("second"), nicht
+        // nochmal die Erst-DM. Gegen build_message gebunden statt gegen ein
+        // Textliteral — sonst bricht der Test bei jeder Neuformulierung des
+        // Textes, obwohl das Verhalten stimmt (genau so ist er rot geworden).
+        let (_, second_tail) = super::build_message("Name", "second", &[])
+            .split_once(',')
+            .map(|(head, tail)| (head.to_string(), tail.to_string()))
+            .expect("build_message beginnt mit der Anrede");
+        assert!(
+            dms[1].1.ends_with(&second_tail),
+            "zweite DM ist nicht die second-Variante: {}",
+            dms[1].1
+        );
     }
 
     #[tokio::test]

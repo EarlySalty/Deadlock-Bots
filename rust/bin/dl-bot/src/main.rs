@@ -674,9 +674,6 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     }
     dl_community::ai_onboarding::register(&mut router, ai_onboarding);
 
-    // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
-    dl_community::privacy_ui::register(&mut router, central_pool.clone());
-
     // Brain-RAG Prefix-Command: echter Textcommand ueber MessageEvent-Subscriber
     // (InteractionRouter::on_prefix ist custom_id-Routing fuer Komponenten).
     let brain_handler = {
@@ -782,19 +779,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         central_pool.clone(),
         Arc::new(modglue::ConciergeGlue {
             adapter: adapter.clone(),
-            brain: brain_handler
-                .as_ref()
-                .map(|handler| modglue::ConciergeBrain {
-                    config: handler.config.clone(),
-                    cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                    retriever: handler.retriever.clone(),
-                    answerer: handler.answerer.clone(),
-                }),
         }),
         concierge_ai,
         concierge_config.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
+    // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
+    dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
+        let concierge = concierge.clone();
+        Arc::new(move |user_id| concierge.clear_user_runtime(user_id))
+    });
 
     // Anonymes Feedback (6) — Button + Modal; DM an den Empfänger.
     // !fhub-Panel-Post folgt mit der Prefix-Dispatch-Infra; persistente

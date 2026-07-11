@@ -30,11 +30,8 @@ else
   PYTHON_BIN="${PYTHON_BIN:-python3}"
 fi
 
-INFISICAL_EXPORT="$("$PYTHON_BIN" "$ROOT_DIR/scripts/export_infisical_env.py" --format shell)"
-eval "$INFISICAL_EXPORT"
-
 export RUST_LOG="${RUST_LOG:-info}"
-export DL_DOCS_PATH="${DL_DOCS_PATH:-$HOME/.local/share/dl-knowledge/current/public/}"
 
 cd "$ROOT_DIR"
-exec "$ROOT_DIR/rust/target/release/dl-knowledge"
+exec "$PYTHON_BIN" "$ROOT_DIR/scripts/export_infisical_env.py" \
+  --exec "$ROOT_DIR/rust/target/release/dl-knowledge"

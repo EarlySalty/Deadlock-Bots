@@ -187,8 +187,12 @@ pub async fn claim_native_onboarding_once(
     pool: &PgPool,
     guild_id: u64,
     user_id: u64,
-) -> Result<bool, sqlx::Error> {
+) -> anyhow::Result<bool> {
     let mut tx = pool.begin().await?;
+    if dl_activity::journey::lock_user_privacy_and_is_opted_out_tx(&mut tx, user_id).await? {
+        tx.commit().await?;
+        return Ok(false);
+    }
     let claimed = claim_native_onboarding_once_tx(&mut tx, guild_id, user_id).await?;
     tx.commit().await?;
     Ok(claimed)
@@ -251,6 +255,10 @@ async fn record_native_onboarding_completed_once(
 ) -> anyhow::Result<bool> {
     let occurred_at = Utc::now();
     let mut tx = pool.begin().await?;
+    if dl_activity::journey::lock_user_privacy_and_is_opted_out_tx(&mut tx, user_id).await? {
+        tx.commit().await?;
+        return Ok(false);
+    }
     if !claim_native_onboarding_once_tx(&mut tx, guild_id, user_id).await? {
         tx.commit().await?;
         return Ok(false);
@@ -659,6 +667,51 @@ mod tests {
 
         assert_eq!(kv_count, 1);
         assert_eq!(event_count, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn native_onboarding_tombstone_blockiert_claim_und_journey_gemeinsam(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(pool)
+        .await?;
+
+        assert!(
+            !record_native_onboarding_completed_once(
+                pool,
+                1,
+                42,
+                NativeOnboardingChoice::Player,
+                None,
+                0,
+            )
+            .await?
+        );
+
+        let kv_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::int8 FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(NATIVE_ONBOARDING_DEDUPE_NS)
+                .bind(native_onboarding_dedupe_key(1, 42))
+                .fetch_one(pool)
+                .await?;
+        let event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)::int8
+               FROM activity.journey_events
+              WHERE guild_id = 1
+                AND user_id = 42
+                AND event_type = 'native_onboarding_completed'",
+        )
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!((kv_count, event_count), (0, 0));
         Ok(())
     }
 

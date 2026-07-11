@@ -1684,7 +1684,7 @@ impl crate::router::RouterPort for RouterGlue {
         &self,
         user_id: u64,
         body: serde_json::Value,
-    ) -> Result<(), String> {
+    ) -> Result<(u64, u64), String> {
         let map = body
             .as_object()
             .ok_or_else(|| "Router: Intro-DM-Body ist kein JSON-Objekt".to_string())?;
@@ -1694,10 +1694,23 @@ impl crate::router::RouterPort for RouterGlue {
             .create_private_channel(&json!({ "recipient_id": user_id.to_string() }))
             .await
             .map_err(|err| err.to_string())?;
-        self.adapter
+        let message_id = self
+            .adapter
             .send_raw_public(channel.id.get(), map)
             .await
-            .map(|_| ())
+            .map_err(|err| err.to_string())?;
+        Ok((channel.id.get(), message_id))
+    }
+
+    async fn delete_dm_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Router: Intro-DM-Transaktion fehlgeschlagen"),
+            )
+            .await
             .map_err(|err| err.to_string())
     }
 }

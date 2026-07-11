@@ -481,6 +481,17 @@ const USER_TABLES: &[TableSpec] = &[
         "user_id",
         ColumnType::I64,
     ),
+    // Offener `/invite`-Request, adressiert über die Discord-ID des
+    // Eingeladenen. MUSS hier stehen und nicht nur in STEAM_SIDE_TABLES:
+    // eingeladen wird jemand, der noch KEINEN core.steam_links-Eintrag hat,
+    // über den steam_ids_for_user ihn finden könnte.
+    TableSpec::new(
+        "invite_requests_target",
+        "target_discord_id",
+        "steam.invite_requests",
+        "target_discord_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "tempvoice_presets",
         "user_id",
@@ -884,11 +895,25 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "steam_id64",
         ColumnType::I64,
     ),
+    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthält neben der
+    // Steam-ID auch die Discord-ID des Eingeladenen — gehoert damit in die
+    // Erasure-Kette, nicht nur in den Poller.
+    TableSpec::new(
+        "invite_requests",
+        "steam_id64",
+        "steam.invite_requests",
+        "steam_id64",
+        ColumnType::I64,
+    ),
 ];
 
 const USER_CO_PLAYERS_REL: &str = "activity.user_co_players";
 const KV_REL: &str = "bot.kv_store";
 const KV_NATIVE_ONBOARDING_COMPLETED_NS: &str = "native_onboarding:completed";
+const KV_CONCIERGE_T0_NS: &str = "concierge:t0";
+const KV_CONCIERGE_FALLBACK_NS: &str = "concierge:fallback_channel";
+const KV_CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
+const KV_CONCIERGE_STECKBRIEF_REVOKED_NS: &str = "concierge:steckbrief_revoked";
 const USER_PRIVACY_REL: &str = "core.user_privacy";
 const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
@@ -924,6 +949,101 @@ fn coerce_i64(v: &Value) -> Option<i64> {
         Value::String(s) => s.trim().parse().ok(),
         _ => None,
     }
+}
+
+fn value_mentions_user(value: &Value, user_id: i64) -> bool {
+    if coerce_i64(value) == Some(user_id) {
+        return true;
+    }
+    match value {
+        Value::Array(values) => values
+            .iter()
+            .any(|value| value_mentions_user(value, user_id)),
+        Value::Object(values) => values.iter().any(|(key, value)| {
+            key.trim().parse::<i64>().ok() == Some(user_id) || value_mentions_user(value, user_id)
+        }),
+        _ => false,
+    }
+}
+
+fn raw_value_mentions_user(raw: &str, user_id: i64) -> bool {
+    raw.trim().parse::<i64>().ok() == Some(user_id)
+        || serde_json::from_str::<Value>(raw)
+            .ok()
+            .is_some_and(|value| value_mentions_user(&value, user_id))
+}
+
+fn key_mentions_user(key: &str, user_id: i64) -> bool {
+    let user_id = user_id.to_string();
+    key == user_id
+        || key
+            .rsplit_once(':')
+            .is_some_and(|(_, tail)| tail == user_id)
+}
+
+fn concierge_claim_belongs_to_user(ns: &str, key: &str, raw: &str, user_id: i64) -> bool {
+    match ns {
+        KV_CONCIERGE_T0_NS | KV_CONCIERGE_FALLBACK_NS | KV_CONCIERGE_STECKBRIEF_REVOKED_NS => {
+            key_mentions_user(key, user_id)
+        }
+        KV_CONCIERGE_PATE_CLAIM_NS => {
+            key_mentions_user(key, user_id) || raw_value_mentions_user(raw, user_id)
+        }
+        _ => false,
+    }
+}
+
+fn concierge_claim_export(ns: &str, key: String, raw: String, user_id: i64) -> Value {
+    let value = serde_json::from_str::<Value>(&raw).unwrap_or(Value::String(raw));
+    if ns != KV_CONCIERGE_PATE_CLAIM_NS {
+        return serde_json::json!({ "namespace": ns, "key": key, "value": value });
+    }
+    let key = if key_mentions_user(&key, user_id) {
+        Value::String(key)
+    } else {
+        Value::String("redacted".to_string())
+    };
+    let value = if coerce_i64(&value) == Some(user_id) {
+        Value::from(user_id)
+    } else {
+        Value::String("redacted".to_string())
+    };
+    serde_json::json!({ "namespace": ns, "key": key, "value": value })
+}
+
+pub(crate) async fn delete_concierge_claims(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<i64> {
+    let claims = sqlx::query(
+        "SELECT ns, k, v
+           FROM bot.kv_store
+          WHERE ns IN ($1, $2, $3, $4)",
+    )
+    .bind(KV_CONCIERGE_T0_NS)
+    .bind(KV_CONCIERGE_FALLBACK_NS)
+    .bind(KV_CONCIERGE_PATE_CLAIM_NS)
+    .bind(KV_CONCIERGE_STECKBRIEF_REVOKED_NS)
+    .fetch_all(&mut **tx)
+    .await?
+    .into_iter()
+    .filter_map(|row| {
+        let ns: String = row.try_get("ns").ok()?;
+        let key: String = row.try_get("k").ok()?;
+        let raw: String = row.try_get("v").ok()?;
+        concierge_claim_belongs_to_user(&ns, &key, &raw, user_id).then_some((ns, key))
+    })
+    .collect::<Vec<_>>();
+    let mut deleted = 0i64;
+    for (ns, key) in claims {
+        let result = sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+            .bind(ns)
+            .bind(key)
+            .execute(&mut **tx)
+            .await?;
+        deleted += rows_to_i64(result.rows_affected());
+    }
+    Ok(deleted)
 }
 
 fn rows_to_i64(rows: u64) -> i64 {
@@ -976,6 +1096,30 @@ async fn steam_ids_for_user(pool: &PgPool, user_id: i64) -> Result<Vec<SteamId>,
         .map(|row| SteamId {
             numeric: row.steam_id64.or_else(|| row.steam_id.trim().parse().ok()),
             text: row.steam_id.trim().to_string(),
+        })
+        .filter(|sid| !sid.text.is_empty())
+        .collect())
+}
+
+async fn steam_ids_for_user_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> Result<Vec<SteamId>, sqlx::Error> {
+    let rows = sqlx::query(
+        "SELECT steam_id, steam_id64 FROM core.steam_links WHERE discord_id = $1 ORDER BY steam_id",
+    )
+    .bind(user_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|row| {
+            let text: String = row.try_get("steam_id").ok()?;
+            let numeric: Option<i64> = row.try_get("steam_id64").ok()?;
+            Some(SteamId {
+                numeric: numeric.or_else(|| text.trim().parse().ok()),
+                text: text.trim().to_string(),
+            })
         })
         .filter(|sid| !sid.text.is_empty())
         .collect())
@@ -1246,7 +1390,7 @@ pub fn spawn_moderation_content_retention(pool: PgPool) -> tokio::task::JoinHand
 }
 
 pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
-    sqlx::query!(
+    match sqlx::query!(
         r#"
         SELECT opted_out
           FROM core.user_privacy
@@ -1256,10 +1400,17 @@ pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
     )
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
-    .map(|row| row.opted_out)
-    .unwrap_or(false)
+    {
+        Ok(row) => {
+            let opted_out = row.is_some_and(|row| row.opted_out);
+            tracing::debug!(user_id, opted_out, "Datenschutz-Opt-out-Entscheidung");
+            opted_out
+        }
+        Err(err) => {
+            tracing::error!(user_id, %err, opted_out = true, "Datenschutz-Opt-out-Status nicht lesbar; fail-closed");
+            true
+        }
+    }
 }
 
 /// Serialisiert Privacy-Erasure und neue nutzerbezogene Writes fuer denselben User.
@@ -1271,8 +1422,62 @@ pub async fn lock_user_privacy(
     Ok(())
 }
 
+pub(crate) async fn erasure_completed_under_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM core.user_privacy
+              WHERE user_id = $1 AND deleted_at IS NOT NULL
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+pub(crate) async fn scrub_pate_journey_metadata(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<(i64, i64)> {
+    let user_id = user_id.to_string();
+    let events = sqlx::query(
+        "UPDATE activity.journey_events
+            SET metadata = metadata - 'pate_id' - 'channel_id'
+          WHERE metadata ->> 'pate_id' = $1",
+    )
+    .bind(&user_id)
+    .execute(&mut **tx)
+    .await?;
+    let states = sqlx::query(
+        "UPDATE activity.journey_user_state AS state
+            SET metadata = CASE
+                WHEN EXISTS (
+                    SELECT 1
+                      FROM activity.journey_events AS event
+                     WHERE event.user_id = state.user_id
+                       AND event.guild_id = state.guild_id
+                       AND event.event_type = 'steckbrief_posted'
+                       AND event.metadata ->> 'channel_id' = state.metadata ->> 'channel_id'
+                ) THEN state.metadata - 'pate_id'
+                ELSE state.metadata - 'pate_id' - 'channel_id'
+            END
+          WHERE state.metadata ->> 'pate_id' = $1",
+    )
+    .bind(&user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok((
+        rows_to_i64(events.rows_affected()),
+        rows_to_i64(states.rows_affected()),
+    ))
+}
+
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
     let now = utc_from_unix(now)?;
+    let mut tx = pool.begin().await?;
+    lock_user_privacy(&mut tx, user_id).await?;
     sqlx::query!(
         r#"
         INSERT INTO core.user_privacy(user_id, opted_out, deleted_at, reason, updated_at)
@@ -1286,8 +1491,9 @@ pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbRes
         user_id,
         now,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -1300,7 +1506,6 @@ pub async fn delete_user_data(
     let now = utc_from_unix(now)?;
     let expired_rollback_exports = purge_expired_server_sync_rollback_exports(pool, now).await?;
     let relations = existing_relations(pool).await?;
-    let steam_ids = steam_ids_for_user(pool, user_id).await?;
     let user_key = user_id.to_string();
     let mut counts: BTreeMap<String, i64> = BTreeMap::new();
     counts.insert(
@@ -1309,9 +1514,27 @@ pub async fn delete_user_data(
     );
 
     let mut tx = pool.begin().await?;
+    dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
     lock_user_privacy(&mut tx, user_id).await?;
+    let steam_ids = if relations.contains("core.steam_links") {
+        steam_ids_for_user_tx(&mut tx, user_id).await?
+    } else {
+        Vec::new()
+    };
 
     for &spec in USER_TABLES {
+        if spec.relation == "activity.message_metadata_events" {
+            let (journey_events, journey_states) =
+                scrub_pate_journey_metadata(&mut tx, user_id).await?;
+            counts.insert(
+                "journey_events.metadata.pate_id".to_string(),
+                journey_events,
+            );
+            counts.insert(
+                "journey_user_state.metadata.pate_id".to_string(),
+                journey_states,
+            );
+        }
         if !relations.contains(spec.relation) {
             continue;
         }
@@ -1419,6 +1642,9 @@ pub async fn delete_user_data(
             "kv_native_onboarding_completed".to_string(),
             rows_to_i64(native_onboarding.rows_affected()),
         );
+
+        let deleted_claims = delete_concierge_claims(&mut tx, user_id).await?;
+        counts.insert("kv_concierge_claims".to_string(), deleted_claims);
     }
 
     if relations.contains(USER_PRIVACY_REL) {
@@ -1472,6 +1698,23 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             spec.count_key(),
             Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
         );
+    }
+
+    if relations.contains("bot.faq_chat_sessions")
+        && relation_exists(pool, "bot.faq_chat_messages").await?
+    {
+        let rows: Value = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(jsonb_agg(to_jsonb(message) ORDER BY message.id), '[]'::jsonb)
+              FROM bot.faq_chat_messages message
+              JOIN bot.faq_chat_sessions session USING (session_id)
+             WHERE session.user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        tbl.insert("faq_chat_messages.session_id".into(), rows);
     }
 
     if relations.contains(USER_CO_PLAYERS_REL) {
@@ -1539,6 +1782,12 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     if let Some(Value::Array(rows)) = tbl.get_mut("tempvoice_bans.banned_id") {
         redact_other_id(rows, user_id, "owner_id");
     }
+    if let Some(Value::Array(rows)) = tbl.get_mut("concierge_patenschaften_user.user_id") {
+        redact_other_id(rows, user_id, "pate_id");
+    }
+    if let Some(Value::Array(rows)) = tbl.get_mut("concierge_patenschaften_pate.pate_id") {
+        redact_other_id(rows, user_id, "user_id");
+    }
 
     let mut kv_out = serde_json::Map::new();
     if relations.contains(KV_REL) {
@@ -1595,6 +1844,29 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             })
             .collect::<Vec<_>>();
         kv_out.insert("native_onboarding_completed".into(), Value::Array(values));
+
+        let claims = sqlx::query(
+            "SELECT ns, k, v
+               FROM bot.kv_store
+              WHERE ns IN ($1, $2, $3, $4)
+              ORDER BY ns, k",
+        )
+        .bind(KV_CONCIERGE_T0_NS)
+        .bind(KV_CONCIERGE_FALLBACK_NS)
+        .bind(KV_CONCIERGE_PATE_CLAIM_NS)
+        .bind(KV_CONCIERGE_STECKBRIEF_REVOKED_NS)
+        .fetch_all(pool)
+        .await?
+        .into_iter()
+        .filter_map(|row| {
+            let ns: String = row.try_get("ns").ok()?;
+            let key: String = row.try_get("k").ok()?;
+            let raw: String = row.try_get("v").ok()?;
+            concierge_claim_belongs_to_user(&ns, &key, &raw, user_id)
+                .then(|| concierge_claim_export(&ns, key, raw, user_id))
+        })
+        .collect::<Vec<_>>();
+        kv_out.insert("concierge_claims".into(), Value::Array(claims));
     }
 
     let user_privacy = if relations.contains(USER_PRIVACY_REL) {
@@ -1674,8 +1946,8 @@ mod privacy_contract_tests {
         // `server_config.*`: Audit-Referenzen auf Mod-/Admin-AKTIONEN am
         // Server-Soll-Modell (wer hat Diff erstellt / Apply angefordert /
         // Drift adoptiert). Kein Community-Verhaltensdatum; Aufbewahrung zur
-        // Nachvollziehbarkeit administrativer Server-Aenderungen
-        // (berechtigtes Interesse). Ein Opt-out darf die Aenderungs-
+        // Nachvollziehbarkeit administrativer Server-Änderungen
+        // (berechtigtes Interesse). Ein Opt-out darf die Änderungs-
         // Historie des Servers nicht zerstoeren.
         out.insert((
             "server_config.diff_previews".to_string(),
@@ -1689,14 +1961,26 @@ mod privacy_contract_tests {
             "server_config.adoption_events".to_string(),
             "adopted_by_user_id".to_string(),
         ));
-        // Rollback-Artefakte koennen verschachtelte Member-IDs im JSON
-        // enthalten; sie sind deshalb ueber `expires_at` auf 180 Tage
-        // begrenzt und werden durch den Privacy-Retention-Purge geloescht.
+        // Rollback-Artefakte können verschachtelte Member-IDs im JSON
+        // enthalten; sie sind deshalb über `expires_at` auf 180 Tage
+        // begrenzt und werden durch den Privacy-Retention-Purge gelöscht.
         // Die Admin-ID bleibt nur als Ersteller-Auditreferenz allowlisted.
         out.insert((
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
         ));
+        // `core.discord_audit_log.user_id` ist der AUSFÜHRENDE einer Moderations-
+        // aktion (Discord-Semantik: user_id handelt, target_id ist betroffen).
+        // Gleiche Kategorie wie server_config.*: Audit einer Admin-Aktion,
+        // Aufbewahrung im berechtigten Interesse. Ein Opt-out des Moderators darf
+        // die Moderationshistorie des Servers nicht löschen.
+        out.insert(("core.discord_audit_log".to_string(), "user_id".to_string()));
+        // `steam.invite_requests.admin_id` ist der Admin, der `/invite` ausgeloest
+        // hat — Audit-Referenz auf eine Admin-AKTION, gleiche Kategorie wie
+        // server_config.*. Sein Opt-out darf den offenen Invite eines Dritten
+        // nicht mitreissen; der Eingeladene selbst wird über `target_discord_id`
+        // in USER_TABLES gelöscht, und die Zeile lebt ohnehin nur 24 h.
+        out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
         out
     }
 
@@ -1898,16 +2182,82 @@ mod privacy_contract_tests {
             "User-ID-Spalten fehlen in privacy.rs USER_TABLES oder Allowlist: {missing:?}"
         );
     }
+
+    #[tokio::test]
+    async fn is_opted_out_sperrt_bei_nicht_erreichbarem_privacy_status() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@localhost/privacy_test")
+            .expect("lazy pool");
+        pool.close().await;
+
+        assert!(is_opted_out(&pool, 7).await);
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use chrono::{Duration, Utc};
+    use dl_activity::journey::compact_raw_events;
     use dl_central_db::testing::{test_pool, TestDb};
 
     async fn mk_db() -> TestDb {
         test_pool().await.expect("test_pool")
+    }
+
+    async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
+        let query_pattern = format!("%{query_fragment}%");
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND pid <> pg_backend_pid()
+                           AND state = 'active'
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE $1
+                           AND ($2::TEXT IS NULL OR wait_event = $2)
+                    )",
+                )
+                .bind(&query_pattern)
+                .bind(wait_event)
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DB-Lock-Wait fuer {query_fragment} nicht sichtbar"));
+    }
+
+    async fn wait_for_db_lock_count(pool: &PgPool, minimum: i64) {
+        tokio::time::timeout(StdDuration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting >= minimum {
+                    return;
+                }
+                tokio::time::sleep(StdDuration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("nur weniger als {minimum} DB-Lock-Waits sichtbar"));
     }
 
     async fn set_opt_out_for_test(pool: &PgPool, uid: i64) {
@@ -1925,7 +2275,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_opted_out_fail_open_und_wertbasiert() {
+    async fn is_opted_out_ist_wertbasiert() {
         let db = mk_db().await;
         assert!(!is_opted_out(db.pool(), 7).await);
 
@@ -1953,6 +2303,174 @@ mod tests {
         assert!(is_opted_out(db.pool(), 5).await);
         set_opt_in(db.pool(), 5, 2000).await.expect("opt in");
         assert!(!is_opted_out(db.pool(), 5).await);
+    }
+
+    /// Legt einen offenen `/invite`-Request an: eingeladen wurde `target`,
+    /// ausgeloest hat ihn `admin`. Bewusst OHNE `core.steam_links`-Eintrag —
+    /// genau so sieht der Normalfall aus, denn eingeladen wird jemand, der
+    /// noch nicht verknuepft ist.
+    async fn seed_invite_request(pool: &PgPool, admin: i64, target: i64) {
+        sqlx::query(
+            r#"
+            INSERT INTO steam.invite_requests
+                (steam_id64, account_id, admin_id, target_discord_id, created_at)
+            VALUES (76561199813018551, 1852752823, $1, $2, 1000)
+            "#,
+        )
+        .bind(admin)
+        .bind(target)
+        .execute(pool)
+        .await
+        .expect("seed invite request");
+    }
+
+    async fn invite_requests_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::int8 FROM steam.invite_requests")
+            .fetch_one(pool)
+            .await
+            .expect("count invite requests")
+    }
+
+    #[tokio::test]
+    async fn erasure_loescht_offenen_invite_auch_ohne_steam_link() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 4242, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // Über STEAM_SIDE_TABLES allein wäre die Zeile unerreichbar:
+        // steam_ids_for_user liest nur core.steam_links, und der Eingeladene
+        // hat dort (noch) nichts stehen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            0,
+            "offener Invite überlebt die Löschanfrage des Eingeladenen"
+        );
+    }
+
+    #[tokio::test]
+    async fn erasure_des_admins_loescht_fremde_invites_nicht() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 999, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // `admin_id` ist eine Audit-Referenz auf eine Admin-AKTION (allowlisted).
+        // Ein Opt-out des Admins darf den offenen Invite eines Dritten nicht
+        // mitreissen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            1,
+            "Löschanfrage des Admins hat den Invite eines Dritten gelöscht"
+        );
+    }
+
+    #[tokio::test]
+    async fn opt_in_wartet_hinter_laufender_loeschung_und_bestimmt_endzustand() {
+        let db = mk_db().await;
+        let pool = db.pool().clone();
+        sqlx::query(
+            "INSERT INTO bot.concierge_profiles(
+                 user_id, guild_id, last_interaction_at, created_at, updated_at
+             ) VALUES(42, 1, now(), now(), now())",
+        )
+        .execute(&pool)
+        .await
+        .expect("profile");
+        let mut blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query("SELECT user_id FROM bot.concierge_profiles WHERE user_id = 42 FOR UPDATE")
+            .fetch_one(&mut *blocker)
+            .await
+            .expect("profile row lock");
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(
+            &pool,
+            "DELETE FROM bot.concierge_profiles",
+            Some("transactionid"),
+        )
+        .await;
+        let optin_pool = pool.clone();
+        let optin = tokio::spawn(async move { set_opt_in(&optin_pool, 42, 2_000).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        blocker.commit().await.expect("release profile row");
+
+        erase.await.expect("erase task").expect("erase");
+        optin.await.expect("optin task").expect("optin");
+        let state = sqlx::query_as::<_, (bool, Option<chrono::DateTime<Utc>>, String)>(
+            "SELECT opted_out, deleted_at, reason FROM core.user_privacy WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("privacy state");
+        assert_eq!(state, (false, None, "user_opt_in".to_string()));
+    }
+
+    #[tokio::test]
+    async fn loeschung_sieht_write_first_steam_link_erst_nach_privacy_lock() {
+        let db = mk_db().await;
+        let pool = db.pool().clone();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES(42)")
+            .execute(&pool)
+            .await
+            .expect("core user");
+        let started = std::sync::Arc::new(tokio::sync::Notify::new());
+        let release = std::sync::Arc::new(tokio::sync::Notify::new());
+        let writer_pool = pool.clone();
+        let writer_started = started.clone();
+        let writer_release = release.clone();
+        let writer = tokio::spawn(async move {
+            let mut tx = writer_pool.begin().await.expect("writer tx");
+            lock_user_privacy(&mut tx, 42).await.expect("privacy lock");
+            sqlx::query(
+                "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+                 VALUES(42, 'STEAM_RACE_42', 4242)",
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("steam link");
+            sqlx::query(
+                "INSERT INTO activity.live_player_state(steam_id, last_gameid)
+                 VALUES('STEAM_RACE_42', 'race')",
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("steam side row");
+            writer_started.notify_one();
+            writer_release.notified().await;
+            tx.commit().await.expect("writer commit");
+        });
+        tokio::time::timeout(StdDuration::from_secs(5), started.notified())
+            .await
+            .expect("writer start");
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        release.notify_one();
+
+        writer.await.expect("writer task");
+        erase.await.expect("erase task").expect("erase");
+        let links = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM core.steam_links WHERE discord_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("links");
+        let side_rows = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.live_player_state WHERE steam_id = 'STEAM_RACE_42'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("side rows");
+        assert_eq!((links, side_rows), (0, 0));
     }
 
     #[tokio::test]
@@ -2329,6 +2847,295 @@ mod tests {
             .await
             .expect("delete");
         assert_eq!(second.counts.get("voice_stats.user_id").copied(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn delete_entfernt_paten_id_aus_fremden_journey_metadaten() {
+        let db = mk_db().await;
+        let metadata = serde_json::json!({
+            "pate_id": "42",
+            "channel_id": "900",
+            "keep": "yes",
+        });
+        sqlx::query(
+            "INSERT INTO activity.journey_events(
+                user_id, guild_id, event_type, event_source, metadata
+             ) VALUES (99, 1, 'join', 'privacy_test', $1)",
+        )
+        .bind(&metadata)
+        .execute(db.pool())
+        .await
+        .expect("journey event");
+        sqlx::query(
+            "INSERT INTO activity.journey_user_state(
+                 user_id, guild_id, joined_at, last_event_at, last_event_type, metadata
+             ) VALUES
+                 (99, 1, now(), now(), 'first_message', $1),
+                 (100, 1, now(), now(), 'concierge_reply',
+                  '{\"pate_id\":\"42\",\"channel_id\":\"901\",\"keep\":\"yes\"}'::jsonb)",
+        )
+        .bind(&metadata)
+        .execute(db.pool())
+        .await
+        .expect("journey state");
+        sqlx::query(
+            "INSERT INTO activity.journey_events(
+                 user_id, guild_id, event_type, event_source, metadata
+             ) VALUES (
+                 100, 1, 'steckbrief_posted', 'privacy_test',
+                 '{\"channel_id\":\"901\"}'::jsonb
+             )",
+        )
+        .execute(db.pool())
+        .await
+        .expect("proven later channel event");
+
+        let summary = delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+
+        assert_eq!(
+            summary.counts.get("journey_events.metadata.pate_id"),
+            Some(&1)
+        );
+        assert_eq!(
+            summary.counts.get("journey_user_state.metadata.pate_id"),
+            Some(&2)
+        );
+        let remaining_event: Value = sqlx::query_scalar(
+            "SELECT metadata FROM activity.journey_events WHERE user_id = 99 AND guild_id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("foreign journey event remains");
+        assert_eq!(remaining_event, serde_json::json!({ "keep": "yes" }));
+
+        let later_state: Value = sqlx::query_scalar(
+            "SELECT metadata FROM activity.journey_user_state WHERE user_id = 99 AND guild_id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("later foreign journey state remains");
+        assert_eq!(later_state, serde_json::json!({ "keep": "yes" }));
+
+        let pate_state: Value = sqlx::query_scalar(
+            "SELECT metadata FROM activity.journey_user_state WHERE user_id = 100 AND guild_id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("pate journey state remains");
+        assert_eq!(
+            pate_state,
+            serde_json::json!({ "channel_id": "901", "keep": "yes" })
+        );
+    }
+
+    #[tokio::test]
+    async fn pate_scrub_und_raw_retention_deadlocken_nicht_cross_user(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = mk_db().await;
+        let pool = db.pool().clone();
+        let old = Utc::now() - Duration::days(181);
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO activity.journey_events(
+                 user_id, guild_id, event_type, event_source, occurred_at, metadata
+             ) VALUES(99, 1, 'pate_matched', 'privacy_lock_test', $1,
+                      '{\"pate_id\":\"42\",\"channel_id\":\"900\"}'::jsonb)",
+        )
+        .bind(old)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO activity.message_metadata_events(
+                 user_id, guild_id, channel_id, message_id, occurred_at,
+                 message_length, has_attachment, attachment_count, is_reply
+             ) VALUES(42, 1, 20, 100, $1, 5, FALSE, 0, FALSE)",
+        )
+        .bind(old)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO activity.journey_daily_aggregates(
+                 day, guild_id, event_type, actor_kind, event_count, distinct_user_count
+             ) VALUES($1, 1, 'pate_matched', '', 5, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1
+               FROM activity.journey_daily_aggregates
+              WHERE day = $1 AND guild_id = 1
+                AND event_type = 'pate_matched' AND actor_kind = ''
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let retention_pool = pool.clone();
+        let retention = tokio::spawn(async move { compact_raw_events(&retention_pool, now).await });
+        wait_for_db_lock(&pool, "INSERT INTO activity.journey_daily_aggregates", None).await;
+
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            delete_user_data(&erase_pool, 42, "test".to_string(), now.timestamp()).await
+        });
+        wait_for_db_lock_count(&pool, 2).await;
+        aggregate_blocker.commit().await?;
+
+        let (retention, erase) = tokio::time::timeout(StdDuration::from_secs(10), async {
+            tokio::join!(retention, erase)
+        })
+        .await?;
+        retention??;
+        erase??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn raw_retention_serialisiert_am_gemeinsamen_erasure_lock(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = mk_db().await;
+        let pool = db.pool().clone();
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES(42)")
+            .execute(&pool)
+            .await?;
+        let mut row_blocker = pool.begin().await?;
+        sqlx::query("SELECT 1 FROM core.users WHERE discord_id = 42 FOR UPDATE")
+            .fetch_one(&mut *row_blocker)
+            .await?;
+
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            delete_user_data(&erase_pool, 42, "test".to_string(), Utc::now().timestamp()).await
+        });
+        wait_for_db_lock(&pool, "DELETE FROM core.users", Some("transactionid")).await;
+
+        let retention_pool = pool.clone();
+        let retention =
+            tokio::spawn(async move { compact_raw_events(&retention_pool, Utc::now()).await });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        row_blocker.commit().await?;
+
+        erase.await??;
+        retention.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn concierge_claims_werden_exportiert_und_fuer_beide_patenrollen_geloescht() {
+        let db = mk_db().await;
+        sqlx::query(
+            "INSERT INTO bot.kv_store(ns, k, v) VALUES
+             ('concierge:t0', '1:42', 'claimed'),
+             ('concierge:fallback_channel', '1:42', 'claimed'),
+             ('concierge:steckbrief_revoked', '42', 'revoked'),
+             ('concierge:pate_claim', '42', '77'),
+             ('concierge:pate_claim', '99', '42'),
+             ('concierge:pate_claim', '100', '77')",
+        )
+        .execute(db.pool())
+        .await
+        .expect("concierge claims");
+
+        let export = export_user_data(db.pool(), 42, 1_000)
+            .await
+            .expect("privacy export");
+        let claims = export["kv"]["concierge_claims"]
+            .as_array()
+            .expect("concierge claims array");
+        assert_eq!(claims.len(), 5);
+        let claims_json = serde_json::to_string(claims).expect("claims json");
+        assert!(!claims_json.contains("77"));
+        assert!(!claims_json.contains("99"));
+
+        let summary = delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+        assert_eq!(summary.counts.get("kv_concierge_claims"), Some(&5));
+        let remaining = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.kv_store WHERE ns LIKE 'concierge:%'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("remaining claims");
+        assert_eq!(remaining, 1);
+    }
+
+    #[tokio::test]
+    async fn export_enthaelt_nur_faq_nachrichten_eigener_sessions() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.faq_chat_sessions(
+                session_id, user_id, user_name, channel_id, guild_id, expires_at
+            )
+            VALUES
+              ('privacy-faq-own-a', 42, 'me', 1, 1, now() + interval '1 hour'),
+              ('privacy-faq-own-b', 42, 'me', 2, 1, now() + interval '1 hour'),
+              ('privacy-faq-foreign', 99, 'DO_NOT_EXPORT', 3, 1, now() + interval '1 hour')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("faq sessions");
+        sqlx::query(
+            r#"
+            INSERT INTO bot.faq_chat_messages(session_id, role, content)
+            VALUES
+              ('privacy-faq-own-a', 'user', 'own question'),
+              ('privacy-faq-own-b', 'assistant', 'own answer'),
+              ('privacy-faq-foreign', 'user', 'DO_NOT_EXPORT')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("faq messages");
+
+        let snap = export_user_data(db.pool(), 42, 5000).await.expect("export");
+        let messages = snap["tables"]["faq_chat_messages.session_id"]
+            .as_array()
+            .expect("faq messages in export");
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|row| row["session_id"].as_str().expect("session id"))
+                .collect::<Vec<_>>(),
+            ["privacy-faq-own-a", "privacy-faq-own-b"]
+        );
+        assert!(!snap.to_string().contains("DO_NOT_EXPORT"));
+    }
+
+    #[tokio::test]
+    async fn export_redigiert_gegenparteien_in_patenschaften() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.concierge_patenschaften(
+                user_id, pate_id, guild_id, channel_id, created_at
+            )
+            VALUES (42, 99, 1, 420, now()), (77, 42, 1, 421, now())
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("patenschaften");
+
+        let snap = export_user_data(db.pool(), 42, 5000).await.expect("export");
+        let als_user = &snap["tables"]["concierge_patenschaften_user.user_id"][0];
+        let als_pate = &snap["tables"]["concierge_patenschaften_pate.pate_id"][0];
+
+        assert_eq!(als_user["user_id"], serde_json::json!(42));
+        assert_eq!(als_user["pate_id"], serde_json::json!("redacted"));
+        assert_eq!(als_user["channel_id"], serde_json::json!(420));
+        assert_eq!(als_pate["pate_id"], serde_json::json!(42));
+        assert_eq!(als_pate["user_id"], serde_json::json!("redacted"));
+        assert_eq!(als_pate["channel_id"], serde_json::json!(421));
     }
 
     #[tokio::test]

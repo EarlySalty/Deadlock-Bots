@@ -13,7 +13,8 @@ use dl_ai::TextGenerator;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
-    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, ReactionType, RoleId, UserId,
+    ChannelId, CreateAttachment, GuildId, Http, Message, MessageId, PermissionOverwriteType,
+    Permissions, ReactionType, RoleId, UserId,
 };
 use serenity::builder::GetMessages;
 use serenity::http::HttpError;
@@ -56,6 +57,59 @@ const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
 const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
 const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
 const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
+
+fn private_channel_overwrites_are_owner_only(
+    guild_id: u64,
+    owner_id: u64,
+    bot_id: u64,
+    overwrites: &[serenity::all::PermissionOverwrite],
+) -> bool {
+    let mut everyone_denied = false;
+    let mut owner_allowed = false;
+    let mut bot_allowed = false;
+
+    for overwrite in overwrites {
+        match overwrite.kind {
+            PermissionOverwriteType::Role(role_id) if role_id == RoleId::new(guild_id) => {
+                if overwrite.allow.contains(Permissions::VIEW_CHANNEL) {
+                    return false;
+                }
+                everyone_denied |= overwrite.deny.contains(Permissions::VIEW_CHANNEL);
+            }
+            PermissionOverwriteType::Role(_) => {
+                if overwrite.allow.contains(Permissions::VIEW_CHANNEL) {
+                    return false;
+                }
+            }
+            PermissionOverwriteType::Member(member_id) => {
+                let member_id = member_id.get();
+                if member_id != owner_id
+                    && member_id != bot_id
+                    && overwrite.allow.contains(Permissions::VIEW_CHANNEL)
+                {
+                    return false;
+                }
+                let required = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES;
+                if member_id == owner_id {
+                    if overwrite.deny.intersects(required) {
+                        return false;
+                    }
+                    owner_allowed |= overwrite.allow.contains(required);
+                }
+                if member_id == bot_id {
+                    if overwrite.deny.intersects(required) {
+                        return false;
+                    }
+                    bot_allowed |= overwrite.allow.contains(required);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    everyone_denied && owner_allowed && bot_allowed
+}
+
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
@@ -1896,9 +1950,9 @@ impl dl_community::faq::FaqPort for FaqGlue {
         channel_id: u64,
         content: &str,
         components: Option<serde_json::Value>,
-    ) {
+    ) -> Result<u64, String> {
         let body = faq_message_body(content, components);
-        let _ = self.adapter.send_raw_public(channel_id, &body).await;
+        self.adapter.send_raw_public(channel_id, &body).await
     }
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
@@ -1910,12 +1964,58 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .and_then(|c| c.parent_id.map(|p| p.get()))
     }
 
+    async fn private_faq_channel_owned_by_user(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> bool {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return false;
+        };
+        let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+            return false;
+        };
+        let bot_id = self.adapter.cache().current_user().id.get();
+        channel.parent_id == Some(ChannelId::new(dl_community::faq::FAQ_CATEGORY_ID))
+            && private_channel_overwrites_are_owner_only(
+                guild_id,
+                user_id,
+                bot_id,
+                &channel.permission_overwrites,
+            )
+    }
+
     async fn user_name(&self, user_id: u64) -> String {
         self.adapter
             .cache()
             .user(UserId::new(user_id))
             .map(|u| u.name.to_string())
             .unwrap_or_else(|| format!("user-{user_id}"))
+    }
+
+    async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_channel(
+                ChannelId::new(channel_id),
+                Some("FAQ-Transaktion fehlgeschlagen"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("FAQ-Transaktion fehlgeschlagen"),
+            )
+            .await
+            .map_err(|err| err.to_string())
     }
 
     async fn post_rich(
@@ -2091,14 +2191,6 @@ impl dl_voice::feedback::FeedbackPort for VoiceFeedbackGlue {
 
 pub struct ConciergeGlue {
     pub adapter: Arc<DiscordAdapter>,
-    pub brain: Option<ConciergeBrain>,
-}
-
-pub struct ConciergeBrain {
-    pub config: Arc<dl_brain::BrainConfig>,
-    pub cooldowns: Arc<dl_brain::BrainCooldowns>,
-    pub retriever: Arc<dyn dl_brain::BrainRetriever>,
-    pub answerer: Arc<dyn dl_brain::AiAnswerer>,
 }
 
 #[async_trait::async_trait]
@@ -2128,7 +2220,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             .await
         {
             Ok(message_id) => ConciergeDmDelivery::Sent {
-                channel_id: Some(channel.id.get()),
+                channel_id: channel.id.get(),
                 message_id,
             },
             Err(err) if is_discord_cannot_send_messages(&err) => {
@@ -2162,6 +2254,11 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             "name": name,
             "type": 0,
             "parent_id": category_id.to_string(),
+            "topic": if extra_user_id.is_none() {
+                Some(format!("dl-concierge-owner:{user_id}"))
+            } else {
+                None
+            },
             "permission_overwrites": overwrites,
         });
         let Some(body) = body.as_object() else {
@@ -2212,6 +2309,31 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         Ok(ids)
     }
 
+    async fn private_channel_owned_by_user(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+        category_id: u64,
+    ) -> bool {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return false;
+        };
+        let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+            return false;
+        };
+        let bot_id = self.adapter.cache().current_user().id.get();
+        let expected_topic = format!("dl-concierge-owner:{user_id}");
+        channel.parent_id == Some(ChannelId::new(category_id))
+            && channel.topic.as_deref() == Some(expected_topic.as_str())
+            && private_channel_overwrites_are_owner_only(
+                guild_id,
+                user_id,
+                bot_id,
+                &channel.permission_overwrites,
+            )
+    }
+
     async fn send_channel_v2(
         &self,
         channel_id: u64,
@@ -2225,6 +2347,30 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         body.insert("content".into(), json!(content));
         body.insert("allowed_mentions".into(), json!({ "parse": [] }));
         self.adapter.send_raw_public(channel_id, &body).await
+    }
+
+    async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_channel(
+                ChannelId::new(channel_id),
+                Some("Concierge-Transaktion fehlgeschlagen"),
+            )
+            .await
+            .map(|_| ())
+            .map_err(|err| err.to_string())
+    }
+
+    async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+        self.adapter
+            .http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some("Concierge-Transaktion fehlgeschlagen"),
+            )
+            .await
+            .map_err(|err| err.to_string())
     }
 
     async fn add_reaction(&self, channel_id: u64, message_id: u64, emoji: &str) {
@@ -2248,7 +2394,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         message_id: u64,
         content: &str,
         allowed_role_id: Option<u64>,
-    ) {
+    ) -> Result<u64, String> {
         let mut body = serde_json::Map::new();
         body.insert("content".into(), json!(content));
         body.insert(
@@ -2268,30 +2414,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
                 },
             ),
         );
-        if let Err(err) = self.adapter.send_raw_public(channel_id, &body).await {
-            tracing::warn!(%err, channel_id, message_id, "Concierge-Reply fehlgeschlagen");
-        }
-    }
-
-    async fn brain_answer(&self, question: &str) -> Option<String> {
-        let brain = self.brain.as_ref()?;
-        let config = dl_brain::BrainConfig {
-            cooldown_secs: 0,
-            ..*brain.config
-        };
-        match dl_brain::handle_brain_query(
-            question,
-            0,
-            &config,
-            brain.cooldowns.as_ref(),
-            brain.retriever.as_ref(),
-            brain.answerer.as_ref(),
-        )
-        .await
-        {
-            dl_brain::BrainOutcome::Answer(answer) if !answer.trim().is_empty() => Some(answer),
-            _ => None,
-        }
+        self.adapter.send_raw_public(channel_id, &body).await
     }
 }
 
@@ -3353,38 +3476,6 @@ mod tests {
         assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
     }
 
-    #[tokio::test]
-    async fn concierge_brain_answer_nutzt_eigene_cooldowns_und_nur_answers() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let glue = ConciergeGlue {
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
-            brain: Some(ConciergeBrain {
-                config: Arc::new(dl_brain::BrainConfig {
-                    max_question_len: 300,
-                    cooldown_secs: 999,
-                }),
-                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                retriever: Arc::new(CountingBrainRetriever {
-                    calls: calls.clone(),
-                }),
-                answerer: Arc::new(StaticBrainAnswerer(Some("Antwort"))),
-            }),
-        };
-
-        let first = <ConciergeGlue as dl_community::concierge::ConciergePort>::brain_answer(
-            &glue, "Abrams",
-        )
-        .await;
-        let second = <ConciergeGlue as dl_community::concierge::ConciergePort>::brain_answer(
-            &glue, "Abrams",
-        )
-        .await;
-
-        assert_eq!(first.as_deref(), Some("Antwort"));
-        assert_eq!(second.as_deref(), Some("Antwort"));
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 2);
-    }
-
     #[test]
     fn attachment_rendering_erkennt_bilder_mit_ungenauem_content_type() {
         let mut embed = json!({});
@@ -3711,6 +3802,83 @@ mod tests {
             with_components.get("components"),
             Some(&json!([{ "type": 1 }]))
         );
+    }
+
+    fn private_overwrite_fixture() -> Vec<serenity::all::PermissionOverwrite> {
+        vec![
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::VIEW_CHANNEL,
+                kind: PermissionOverwriteType::Role(RoleId::new(1)),
+            },
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(UserId::new(42)),
+            },
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(UserId::new(99)),
+            },
+        ]
+    }
+
+    #[test]
+    fn private_overwrites_erlauben_nur_owner_und_bot() {
+        assert!(private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &private_overwrite_fixture(),
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_brauchen_everyone_view_deny() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.remove(0);
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_verbieten_breite_rollensicht() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.push(serenity::all::PermissionOverwrite {
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+            kind: PermissionOverwriteType::Role(RoleId::new(7)),
+        });
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_verbieten_fremde_membersicht() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.push(serenity::all::PermissionOverwrite {
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+            kind: PermissionOverwriteType::Member(UserId::new(7)),
+        });
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
     }
 
     #[test]
