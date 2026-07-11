@@ -21,6 +21,26 @@ pub const DEFAULT_API_URL: &str = "http://127.0.0.1:8783";
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(15);
 const RANKCHECK_FORWARD_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// `/invite` wartet steam-seitig synchron auf ZWEI Steam-Tasks (erst der
+/// Freundschafts-Check, dann der Invite), jeder mit bis zu 45 s Budget.
+/// Der Bridge-Timeout muss echt darüber liegen. Bei den ursprünglichen 30 s
+/// brach die Bridge mitten im Vorgang ab, während der Invite-Task bei Steam
+/// weiterlief: der Admin sah einen Fehler, die Einladung ging trotzdem raus,
+/// und der Poller schickte sie später ein zweites Mal.
+const INVITE_FORWARD_TIMEOUT_SECS: u64 = 120;
+/// Worst Case auf der Steam-Seite: `steam-flows::invite::TASK_WAIT` (45 s) mal
+/// die zwei Tasks, die `/invite` nacheinander abwartet. Liegt drüben in einem
+/// anderen Repo, deshalb hier als Vertrag festgehalten statt importiert.
+const STEAM_INVITE_WORST_CASE_SECS: u64 = 45 * 2;
+
+// Der Vertrag gilt zur Compile-Zeit: wer das Bridge-Timeout senkt oder das
+// Steam-Budget hebt, bekommt keinen roten Test, sondern gar kein Binary.
+const _: () = assert!(
+    INVITE_FORWARD_TIMEOUT_SECS > STEAM_INVITE_WORST_CASE_SECS,
+    "Bridge-Timeout für /invite liegt unter dem Steam-Worst-Case: die Bridge \
+     bricht ab, während der Invite-Task bei Steam noch läuft"
+);
+
 /// custom_ids der persistenten Panels (inkl. Legacy-IDs alter Posts).
 pub const PANEL_CUSTOM_IDS: [&str; 5] = [
     "steam_link_panel:open",
@@ -711,7 +731,7 @@ fn register_inner(
                 {"type": 6, "name": "user", "description": "Das Discord-Mitglied dazu, damit die Einladung in der Historie steht", "required": false}
             ],
         })),
-        forward_slash("invite", &["freundescode", "user"], 30),
+        forward_slash("invite", &["freundescode", "user"], INVITE_FORWARD_TIMEOUT_SECS),
     );
     for (name, description) in [
         (
