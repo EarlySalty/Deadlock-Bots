@@ -293,6 +293,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "bot_event_log",
+        "discord_id",
+        "steam.bot_event_log",
+        "discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "beta_invite_pending_payments",
         "discord_id",
         "steam.beta_invite_pending_payments",
@@ -903,6 +910,13 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "steam_id64",
         "steam.invite_requests",
         "steam_id64",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
+        "bot_event_log",
+        "steam_id",
+        "steam.bot_event_log",
+        "steam_id",
         ColumnType::I64,
     ),
 ];
@@ -1998,15 +2012,50 @@ mod privacy_contract_tests {
         identifier.trim().trim_matches('"').replace('"', "")
     }
 
+    fn create_table_columns_from_sql(raw: &str) -> BTreeSet<(String, String)> {
+        let without_line_comments = raw
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let create = Regex::new(
+            r#"(?is)\bCREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?((?:"[^"]+"|[a-z_][a-z0-9_$]*)\s*\.\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))\s*\((.*?)\)\s*;"#,
+        )
+        .expect("CREATE TABLE regex");
+        let mut columns = BTreeSet::new();
+        for captures in create.captures_iter(&without_line_comments) {
+            let relation = normalize_sql_ident(&captures[1])
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            for line in captures[2].lines() {
+                let Some(column) = line.trim().trim_end_matches(',').split_whitespace().next()
+                else {
+                    continue;
+                };
+                let column = normalize_sql_ident(column.trim_end_matches(','));
+                if ![
+                    "CHECK",
+                    "CONSTRAINT",
+                    "EXCLUDE",
+                    "FOREIGN",
+                    "PRIMARY",
+                    "UNIQUE",
+                ]
+                .iter()
+                .any(|keyword| column.eq_ignore_ascii_case(keyword))
+                {
+                    columns.insert((relation.clone(), column));
+                }
+            }
+        }
+        columns
+    }
+
     fn table_columns_from_sql(raw: &str, relation: &str) -> BTreeSet<String> {
-        let create = format!("CREATE TABLE IF NOT EXISTS {relation} (\n");
-        let mut columns = raw
-            .split_once(&create)
-            .and_then(|(_, rest)| rest.split_once("\n);").map(|(body, _)| body))
+        let mut columns = create_table_columns_from_sql(raw)
             .into_iter()
-            .flat_map(str::lines)
-            .filter_map(|line| line.split_whitespace().next())
-            .map(|column| normalize_sql_ident(column.trim_end_matches(',')))
+            .filter_map(|(table, column)| table.eq_ignore_ascii_case(relation).then_some(column))
             .collect::<BTreeSet<_>>();
 
         let without_line_comments = raw
@@ -2088,25 +2137,11 @@ mod privacy_contract_tests {
             }
             let raw = fs::read_to_string(&path)
                 .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-            for chunk in raw.split("CREATE TABLE IF NOT EXISTS ").skip(1) {
-                let Some((relation, rest)) = chunk.split_once(" (") else {
-                    continue;
-                };
-                let relation = normalize_sql_ident(relation);
-                let Some((body, _)) = rest.split_once("\n);") else {
-                    continue;
-                };
-                for line in body.lines() {
-                    let trimmed = line.trim().trim_end_matches(',');
-                    let Some(column) = trimmed.split_whitespace().next() else {
-                        continue;
-                    };
-                    let column = normalize_sql_ident(column);
-                    if is_user_id_like_column(&column) {
-                        out.insert((relation.clone(), column));
-                    }
-                }
-            }
+            out.extend(
+                create_table_columns_from_sql(&raw)
+                    .into_iter()
+                    .filter(|(_, column)| is_user_id_like_column(column)),
+            );
         }
         out
     }
@@ -2168,6 +2203,67 @@ mod privacy_contract_tests {
     }
 
     #[test]
+    fn migrationsscanner_erkennt_create_table_mit_und_ohne_if_not_exists() {
+        let sql = r#"
+            CREATE TABLE core.plain_events (
+                id BIGSERIAL PRIMARY KEY,
+                discord_id BIGINT NULL
+            );
+            CREATE TABLE IF NOT EXISTS core.guarded_events (
+                id BIGSERIAL PRIMARY KEY,
+                owner_id BIGINT NULL
+            );
+        "#;
+
+        assert_eq!(
+            table_columns_from_sql(sql, "core.plain_events"),
+            BTreeSet::from(["discord_id".to_string(), "id".to_string()])
+        );
+        assert_eq!(
+            table_columns_from_sql(sql, "core.guarded_events"),
+            BTreeSet::from(["id".to_string(), "owner_id".to_string()])
+        );
+    }
+
+    #[test]
+    fn steam_bot_event_log_steam_id_index_liegt_in_additiver_migration() {
+        let migration_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dl-community under crates")
+            .join("dl-central-db/migrations");
+        let published = migration_dir.join("2026071111_steam_bot_event_log.sql");
+        let published_raw = fs::read_to_string(&published)
+            .unwrap_or_else(|err| panic!("read {}: {err}", published.display()));
+        assert!(!published_raw.contains("bot_event_log_steam_id_idx"));
+
+        let migration = migration_dir.join("2026071124_steam_bot_event_log_steam_id_idx.sql");
+        assert!(
+            migration.exists(),
+            "Steam-ID-Index muss als neue additive Migration vorliegen"
+        );
+        let raw = fs::read_to_string(&migration)
+            .unwrap_or_else(|err| panic!("read {}: {err}", migration.display()));
+        assert_eq!(
+            raw,
+            "CREATE INDEX IF NOT EXISTS bot_event_log_steam_id_idx\n    ON steam.bot_event_log (steam_id);\n"
+        );
+    }
+
+    #[test]
+    fn steam_bot_event_log_ist_ueber_beide_identitaeten_im_privacy_vertrag() {
+        assert!(USER_TABLES
+            .iter()
+            .any(|spec| { spec.relation == "steam.bot_event_log" && spec.col == "discord_id" }));
+        assert!(STEAM_SIDE_TABLES
+            .iter()
+            .any(|spec| { spec.relation == "steam.bot_event_log" && spec.col == "steam_id" }));
+
+        let allowlist = privacy_contract_allowlist();
+        assert!(!allowlist.contains(&("steam.bot_event_log".to_string(), "discord_id".to_string())));
+        assert!(!allowlist.contains(&("steam.bot_event_log".to_string(), "steam_id".to_string())));
+    }
+
+    #[test]
     fn alle_migration_user_id_spalten_sind_im_privacy_vertrag() {
         let schema_tables = migration_user_id_columns();
         let privacy_tables = privacy_user_table_columns();
@@ -2200,6 +2296,7 @@ mod tests {
     use chrono::{Duration, Utc};
     use dl_activity::journey::compact_raw_events;
     use dl_central_db::testing::{test_pool, TestDb};
+    use std::collections::BTreeSet;
 
     async fn mk_db() -> TestDb {
         test_pool().await.expect("test_pool")
@@ -2367,6 +2464,74 @@ mod tests {
             1,
             "Löschanfrage des Admins hat den Invite eines Dritten gelöscht"
         );
+    }
+
+    #[tokio::test]
+    async fn steam_bot_event_log_wird_exportiert_und_einmal_vollstaendig_geloescht() {
+        let db = mk_db().await;
+        sqlx::query("INSERT INTO core.users(discord_id) VALUES (42)")
+            .execute(db.pool())
+            .await
+            .expect("core user");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, steam_id64)
+             VALUES (42, '4242', 4242)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("steam link");
+        sqlx::query(
+            "INSERT INTO steam.bot_event_log(event_type, decision, discord_id, steam_id) VALUES
+             ('discord-only', 'yes', 42, NULL),
+             ('steam-only', 'yes', NULL, 4242),
+             ('both', 'yes', 42, 4242),
+             ('foreign', 'yes', 99, 9999)",
+        )
+        .execute(db.pool())
+        .await
+        .expect("event log");
+
+        let export = export_user_data(db.pool(), 42, 1_000)
+            .await
+            .expect("privacy export");
+        let discord_rows = export["tables"]["bot_event_log.discord_id"]
+            .as_array()
+            .expect("Discord Event-Log im Export");
+        let steam_rows = export["tables"]["bot_event_log:4242"]
+            .as_array()
+            .expect("Steam Event-Log im Export");
+        assert_eq!(
+            discord_rows
+                .iter()
+                .map(|row| row["event_type"].as_str().expect("event type"))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["both", "discord-only"])
+        );
+        assert_eq!(
+            steam_rows
+                .iter()
+                .map(|row| row["event_type"].as_str().expect("event type"))
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["both", "steam-only"])
+        );
+
+        let summary = delete_user_data(db.pool(), 42, "test".into(), 2_000)
+            .await
+            .expect("privacy delete");
+        assert_eq!(summary.counts.get("bot_event_log.discord_id"), Some(&2));
+        assert_eq!(summary.counts.get("bot_event_log:4242"), Some(&1));
+        assert_eq!(
+            summary.sum(&["bot_event_log.discord_id", "bot_event_log:4242"]),
+            3,
+            "eine Zeile mit beiden IDs darf im Lösch-Summary nicht doppelt zählen"
+        );
+        let remaining = sqlx::query_scalar::<_, String>(
+            "SELECT event_type FROM steam.bot_event_log ORDER BY id",
+        )
+        .fetch_all(db.pool())
+        .await
+        .expect("remaining event log");
+        assert_eq!(remaining, ["foreign"]);
     }
 
     #[tokio::test]
