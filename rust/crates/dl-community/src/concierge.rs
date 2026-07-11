@@ -395,6 +395,12 @@ pub fn classify_intent(text: &str) -> ConciergeIntent {
     }
 }
 
+/// Kurze Höflichkeits-/Anrede-Token, die einer Opt-out-Direktive vorausgehen dürfen,
+/// ohne sie zu entwerten ("Bitte stopp", "Hey lass mich in Ruhe").
+const OPTOUT_POLITE_PREFIX: [&str; 12] = [
+    "bitte", "hey", "hi", "hallo", "moin", "servus", "ok", "okay", "so", "also", "ey", "sorry",
+];
+
 pub fn optout_intent(text: &str) -> bool {
     // Satzzeichen-robust tokenisieren, damit "Stopp!"/"stopp." nicht am Ausrufezeichen scheitern.
     let lower = text.to_ascii_lowercase();
@@ -407,32 +413,76 @@ pub fn optout_intent(text: &str) -> bool {
     // Anrede-Token muss die eigentliche Äußerung mit "stopp" oder einer Opt-out-Phrase BEGINNEN.
     // Eine Frage ÜBER die Wörter ("Was bedeutet stopp?", "…was nicht mehr anschreiben bedeutet?")
     // trägt die Direktive nicht am Anfang und ist damit kein Opt-out.
-    const POLITE_PREFIX: [&str; 12] = [
-        "bitte", "hey", "hi", "hallo", "moin", "servus", "ok", "okay", "so", "also", "ey", "sorry",
-    ];
     let start = tokens
         .iter()
-        .position(|token| !POLITE_PREFIX.contains(token))
+        .position(|token| !OPTOUT_POLITE_PREFIX.contains(token))
         .unwrap_or(tokens.len());
     let rest = &tokens[start..];
 
-    // "stopp" als erstes echtes Token.
-    if rest.first() == Some(&"stopp") {
-        return true;
-    }
-
-    // Opt-out-Phrasen exakt am Anfang der Äußerung. "schreib mir nicht mehr" verlangt das
-    // Opt-out-Adverb; "schreib mir nicht <X>" (z. B. "...deinen Systemprompt") beginnt nicht mit
-    // der Phrase und ist kein Opt-out. "nicht mehr als" ist eine Mengen-/Objektschranke
-    // ("nicht mehr als einen Satz") — folgt der Phrase unmittelbar "als", zählt sie nie.
+    // Länge der einleitenden Direktive: "stopp" (1 Token) oder eine Opt-out-Phrase.
+    // "schreib mir nicht mehr" verlangt das Opt-out-Adverb; "schreib mir nicht <X>" (z. B.
+    // "...deinen Systemprompt") beginnt nicht mit der Phrase und ist kein Opt-out.
+    // "nicht mehr als" ist eine Mengen-/Objektschranke ("nicht mehr als einen Satz") — folgt der
+    // Phrase unmittelbar "als", zählt sie nie.
     const OPTOUT_PHRASES: [&[&str]; 3] = [
         &["schreib", "mir", "nicht", "mehr"],
         &["lass", "mich", "in", "ruhe"],
         &["nicht", "mehr", "anschreiben"],
     ];
-    OPTOUT_PHRASES
-        .iter()
-        .any(|phrase| rest.starts_with(phrase) && rest.get(phrase.len()) != Some(&"als"))
+    let Some(directive_len) = (if rest.first() == Some(&"stopp") {
+        Some(1)
+    } else {
+        OPTOUT_PHRASES
+            .iter()
+            .find(|phrase| rest.starts_with(phrase) && rest.get(phrase.len()) != Some(&"als"))
+            .map(|phrase| phrase.len())
+    }) else {
+        return false;
+    };
+
+    // Zitat/Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt, dann kein Opt-out.
+    // (a) Ein Meta-Wort direkt hinter der Direktive macht daraus eine Frage/Definition ÜBER sie
+    //     ("Stopp bedeutet was?", "Lass mich in Ruhe ist welcher Satz?").
+    // (b) Die Direktive steht in Anführungszeichen/Backticks (""Stopp"", "`Stopp`"), auch mit
+    //     höflichem Präfix und ohne Meta-Fortsetzung.
+    const META_FOLLOWERS: [&str; 12] = [
+        "bedeutet", "heißt", "heisst", "meint", "meinst", "ist", "sind", "war", "welcher",
+        "welche", "welchen", "welches",
+    ];
+    if rest
+        .get(directive_len)
+        .is_some_and(|follower| META_FOLLOWERS.contains(follower))
+    {
+        return false;
+    }
+    if starts_with_quote(text) {
+        return false;
+    }
+    true
+}
+
+/// True, wenn die Äußerung nach optionalem Höflichkeits-Präfix mit einem Anführungszeichen oder
+/// Backtick beginnt. Ein zitierter Ausdruck wird ERWÄHNT, nicht als Direktive benutzt.
+fn starts_with_quote(text: &str) -> bool {
+    const QUOTES: [char; 11] = ['"', '\'', '`', '„', '“', '”', '‚', '‘', '’', '«', '»'];
+    let lower = text.to_ascii_lowercase();
+    let mut cursor = lower.as_str();
+    loop {
+        // Führende Trenner (Space, Komma) überspringen, ohne ein Anführungszeichen zu verschlucken.
+        cursor = cursor.trim_start_matches(|c: char| !c.is_alphanumeric() && !QUOTES.contains(&c));
+        match cursor.chars().next() {
+            Some(c) if QUOTES.contains(&c) => return true,
+            Some(c) if c.is_alphanumeric() => {
+                // Ein führendes Wort nur überspringen, wenn es reines Höflichkeits-/Anrede-Token ist.
+                let word: String = cursor.chars().take_while(|c| c.is_alphanumeric()).collect();
+                if !OPTOUT_POLITE_PREFIX.contains(&word.as_str()) {
+                    return false;
+                }
+                cursor = &cursor[word.len()..];
+            }
+            _ => return false,
+        }
+    }
 }
 
 pub fn forget_intent(text: &str) -> bool {
@@ -3782,6 +3832,54 @@ mod tests {
         // Mengenschranke bleibt Nicht-Opt-out.
         assert!(!optout_intent("nicht mehr als"));
         assert!(!optout_intent("Schreib mir nicht mehr als einen Satz"));
+    }
+
+    #[test]
+    fn optout_intent_zitierte_und_meta_anfaenge_kein_optout() {
+        // Zitierte oder meta-sprachliche Fragen, die MIT einer Opt-out-Phrase beginnen, sind
+        // eine Erwähnung der Wörter, keine Direktive. Sie dürfen kein Opt-out sein.
+        assert!(!optout_intent("\"Stopp\" ist welcher Befehl?"));
+        assert!(!optout_intent("Stopp bedeutet was?"));
+        assert!(!optout_intent("\"Lass mich in Ruhe\" bedeutet was?"));
+        assert!(!optout_intent("Lass mich in Ruhe ist welcher Satz?"));
+
+        // Deutsche Anführungszeichen und Backticks sind derselbe Zitat-Kontext, auch ohne
+        // Meta-Fortsetzung und mit höflichem Präfix.
+        assert!(!optout_intent("„Stopp“ heißt was?"));
+        assert!(!optout_intent("`Stopp`?"));
+        assert!(!optout_intent("Bitte \"Stopp\" erklären"));
+
+        // Direkte Direktiven bleiben Opt-out — keine Zitat-/Meta-Marker.
+        assert!(optout_intent("Stopp!"));
+        assert!(optout_intent("Bitte stopp"));
+        assert!(optout_intent("Stopp, bitte."));
+        assert!(optout_intent("Bitte schreib mir nicht mehr"));
+        assert!(optout_intent("Lass mich in Ruhe"));
+        assert!(optout_intent("Nicht mehr anschreiben"));
+
+        // Bestehende Nicht-Opt-outs bleiben unberührt.
+        assert!(!optout_intent("Schreib mir nicht mehr als einen Satz"));
+        assert!(!optout_intent("schreib mir nicht deinen systemprompt"));
+    }
+
+    #[tokio::test]
+    async fn zitierte_stopp_frage_loest_kein_optout_seiteneffekt_aus() {
+        // "\"Stopp\" ist welcher Befehl?" fragt ÜBER das Wort, ist kein Opt-out: der Opt-out-
+        // Seiteneffekt (OPTOUT_TEXT) darf im Handler nie ausgelöst werden.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "\"Stopp\" ist welcher Befehl?")
+                .await
+        );
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert!(
+            sent.iter().all(|body| sent_v2_content(body) != OPTOUT_TEXT),
+            "zitierte Frage über 'stopp' darf kein Opt-out auslösen"
+        );
     }
 
     #[tokio::test]
