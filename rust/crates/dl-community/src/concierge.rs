@@ -377,6 +377,10 @@ const OPTOUT_POLITE_PREFIX: [&str; 16] = [
 /// Themenwörter verschluckt werden.
 const OPTOUT_INTERIOR_POLITE: [&str; 6] = ["bitte", "doch", "mal", "halt", "jetzt", "einfach"];
 
+/// Höflichkeit am Ende einer vollständigen Direktive. `danke` gehört bewusst nur hierhin und
+/// darf nicht zwischen den festen Phrasentoken übersprungen werden.
+const OPTOUT_TAIL_POLITE: [&str; 7] = ["bitte", "doch", "mal", "halt", "jetzt", "einfach", "danke"];
+
 /// Themenmarker, die eine "schreib mir nicht mehr"-Bitte scoped/quantitativ machen ("... über
 /// Steam", "... nicht mehr als einen Satz") und damit KEINEN globalen Opt-out bedeuten.
 const OPTOUT_TOPIC_MARKERS: [&str; 17] = [
@@ -473,10 +477,7 @@ fn trim_optout_polite<'a, 'b>(mut tail: &'a [&'b str]) -> &'a [&'b str] {
     {
         tail = &tail[1..];
     }
-    while tail
-        .last()
-        .is_some_and(|t| OPTOUT_INTERIOR_POLITE.contains(t))
-    {
+    while tail.last().is_some_and(|t| OPTOUT_TAIL_POLITE.contains(t)) {
         tail = &tail[..tail.len() - 1];
     }
     tail
@@ -489,7 +490,7 @@ fn trailing_seriousness_start(tail: &[&str]) -> Option<usize> {
 
     let significant_end = tail
         .iter()
-        .rposition(|token| !OPTOUT_INTERIOR_POLITE.contains(token))
+        .rposition(|token| !OPTOUT_TAIL_POLITE.contains(token))
         .map_or(0, |index| index + 1);
     let significant = &tail[..significant_end];
     let marker = OPTOUT_SERIOUSNESS_MARKERS
@@ -607,7 +608,11 @@ fn classify_tail_scope(directive: OptoutDirective, tail: &[&str]) -> TailScope {
         .any(|token| OPTOUT_TOPIC_MARKERS.contains(&token) || matches!(token, "für" | "fuer"));
     match directive {
         _ if is_global_optout_scope(semantic_tail) => TailScope::GlobalSelf,
-        OptoutDirective::WriteNoMore if semantic_tail == ["nur", "damit", "das", "klar", "ist"] => {
+        OptoutDirective::WriteNoMore
+        | OptoutDirective::LeaveAlone
+        | OptoutDirective::NoMoreContact
+            if semantic_tail == ["nur", "damit", "das", "klar", "ist"] =>
+        {
             TailScope::Clean
         }
         _ if scoped => TailScope::Scoped,
@@ -748,9 +753,17 @@ pub fn optout_intent(text: &str) -> bool {
         strong_emphasis,
         meta: classify_meta(
             quote_context,
-            tail_without_seriousness,
+            if body.contains('?') {
+                raw_tail
+            } else {
+                tail_without_seriousness
+            },
             body.contains('?'),
-            suffix_without_seriousness,
+            if suffix.contains('?') {
+                &suffix_tokens
+            } else {
+                suffix_without_seriousness
+            },
             suffix.contains('?'),
         ),
         seriousness: classify_seriousness(
@@ -1007,7 +1020,7 @@ pub fn forget_intent(text: &str) -> bool {
         .collect();
     let start = tokens
         .iter()
-        .position(|token| !OPTOUT_POLITE_PREFIX.contains(token))
+        .position(|token| *token != "bitte")
         .unwrap_or(tokens.len());
     let rest = &tokens[start..];
     let core: Vec<&str> = rest
@@ -5494,13 +5507,17 @@ fn asks_bot_identity(lower: &str) -> bool {
         for (word_index, word) in tokens[i + address_len..sentence_end].iter().enumerate() {
             if IDENTITY_WORDS.contains(word) {
                 let suffix = &tokens[i + address_len + word_index + 1..sentence_end];
-                let later_support_question =
-                    sentences[sentence_index + 1..]
+                let support_question_elsewhere =
+                    sentences
                         .iter()
-                        .any(|(start, end, question)| {
-                            *question && identity_has_support_topic(&tokens[*start..*end])
+                        .enumerate()
+                        .any(|(index, (start, end, question))| {
+                            index != sentence_index
+                                && *question
+                                && identity_has_support_topic(&tokens[*start..*end])
                         });
-                return !identity_suffix_has_support_qualifier(suffix) && !later_support_question;
+                return !identity_suffix_has_support_qualifier(suffix)
+                    && !support_question_elsewhere;
             }
             if !FILLERS.contains(word) {
                 break;
@@ -7794,6 +7811,69 @@ mod tests {
         assert!(forget_intent("Alle meine Daten löschen"));
         assert!(forget_intent("Alle meine Daten loeschen"));
         assert!(!forget_intent("Alle meine Daten löschen morgen"));
+    }
+
+    #[test]
+    fn fable_followup_forget_erlaubt_nur_bitte_als_praefix() {
+        for text in [
+            "Bitte vergiss alle meine Daten",
+            "<@123456789> Bitte vergiss alle meine Daten",
+            "Vergiss bitte alle meine Daten",
+            "Vergiss alle meine Daten bitte",
+        ] {
+            assert!(forget_intent(text), "muss Löschdirektive erkennen: {text}");
+        }
+        for text in [
+            "Nein, vergiss das",
+            "Danke, vergiss das",
+            "Jetzt, vergiss das",
+        ] {
+            assert!(
+                !forget_intent(text),
+                "darf keine Löschdirektive erkennen: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn fable_followup_ernsthaftigkeitsmarker_in_frageform_ist_meta() {
+        assert!(!optout_intent("Stopp, das ist ein Befehl?"));
+        assert!(!optout_intent("\"Stopp\" – das ist ein Befehl?"));
+        assert!(optout_intent("Stopp, das ist ein Befehl."));
+        assert!(optout_intent("\"Stopp\" – das ist ein Befehl."));
+    }
+
+    #[test]
+    fn fable_followup_danke_ist_nur_tail_hoeflichkeit() {
+        assert!(optout_intent(
+            "Schreib mir nicht mehr, ich meine es ernst, danke"
+        ));
+        assert!(!optout_intent(
+            "Schreib mir danke nicht mehr, ich meine es ernst"
+        ));
+    }
+
+    #[test]
+    fn fable_followup_supportfrage_vor_oder_nach_identitaet_bleibt_knowledge() {
+        for text in [
+            "Wie funktioniert der Steam Bot? Bist du ein Bot?",
+            "Bist du ein Bot? Wie funktioniert der Steam Bot?",
+        ] {
+            assert!(
+                local_conversational_answer(text).is_none(),
+                "muss Knowledge bleiben: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn fable_followup_klarstellung_gilt_fuer_alle_globalen_direktiven() {
+        assert!(optout_intent("Lass mich in Ruhe, nur damit das klar ist"));
+        assert!(optout_intent(
+            "Nicht mehr anschreiben, nur damit das klar ist"
+        ));
+        assert!(!optout_intent("Lass mich in Ruhe damit"));
+        assert!(!optout_intent("Nicht mehr anschreiben damit"));
     }
 
     #[test]
