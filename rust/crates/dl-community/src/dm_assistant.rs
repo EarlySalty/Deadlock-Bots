@@ -234,12 +234,17 @@ fn streamer_embed() -> Value {
 }
 
 fn beta_embed() -> Value {
+    // Kanal-ID aus invite_lounge ziehen, nicht abschreiben: die aeltere ID aus
+    // den Python-Cogs war veraltet und wanderte so in die Nutzerfuehrung.
+    let lounge = crate::invite_lounge::INVITE_LOUNGE_CHANNEL_ID;
     json!({
         "title": "🎟️ Deadlock Playtest-Invite",
-        "description": "So kommst du in den Playtest:\n\n\
-                        **1.** Betritt unseren Discord-Server\n\
-                        **2.** Poste deinen Steam-Freundescode in <#1428745737323155679>\n\n\
-                        Ein Admin lädt dich dann persönlich ein. Du bekommst eine Steam-Freundschaftsanfrage, und sobald du die annimmst, ist die Einladung raus.",
+        "description": format!(
+            "So kommst du in den Playtest:\n\n\
+             **1.** Betritt unseren Discord-Server\n\
+             **2.** Poste deinen Steam-Freundescode in <#{lounge}>\n\n\
+             Ein Admin lädt dich dann persönlich ein. Du bekommst eine Steam-Freundschaftsanfrage, und sobald du die annimmst, ist die Einladung raus."
+        ),
         "color": 0x3498DB
     })
 }
@@ -323,14 +328,22 @@ mod tests {
         "/kofi",
     ];
 
-    #[test]
-    fn nutzerfuehrung_nennt_keine_abgeschafften_commands() {
+    /// Die alte Invite-Kanal-ID aus den Python-Cogs. Sie zeigt nicht mehr auf die
+    /// Invite-Lounge, sah aber jahrelang plausibel aus und wanderte so von Text
+    /// zu Text weiter.
+    const VERALTETE_INVITE_KANAL_ID: &str = "1428745737323155679";
+
+    fn nutzerfuehrungs_texte() -> Vec<String> {
         let mut texte = vec![SYSTEM_PROMPT.to_string()];
         for embed in [streamer_embed(), beta_embed(), steam_embed()] {
             texte.push(embed.to_string());
         }
+        texte
+    }
 
-        for text in &texte {
+    #[test]
+    fn nutzerfuehrung_nennt_keine_abgeschafften_commands() {
+        for text in nutzerfuehrungs_texte() {
             for tot in ABGESCHAFFTE_COMMANDS {
                 assert!(
                     !text.contains(tot),
@@ -338,6 +351,19 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn invite_hilfe_zeigt_auf_die_echte_lounge() {
+        let beta = beta_embed().to_string();
+        assert!(
+            !beta.contains(VERALTETE_INVITE_KANAL_ID),
+            "Invite-Hilfe schickt Nutzer in den veralteten Kanal"
+        );
+        assert!(
+            beta.contains(&crate::invite_lounge::INVITE_LOUNGE_CHANNEL_ID.to_string()),
+            "Invite-Hilfe nennt die Invite-Lounge nicht"
+        );
     }
 
     #[test]
