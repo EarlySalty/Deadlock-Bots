@@ -30,8 +30,6 @@ pub const PANEL_CUSTOM_IDS: [&str; 5] = [
     "linkpanel_rank_check",
 ];
 
-pub const BETAINVITE_PANEL_CUSTOM_ID: &str = "betainvite:panel:start";
-
 /// custom_ids, die lokal das Freundescode-Modal öffnen statt zu forwarden.
 const FRIEND_CODE_MODAL_IDS: [&str; 2] = ["steam_link_panel:friend_code", "linkpanel_friend_code"];
 const RANKCHECK_IDS: [&str; 2] = ["steam_link_panel:rankcheck", "linkpanel_rank_check"];
@@ -39,9 +37,6 @@ const FRIEND_CODE_MODAL_CUSTOM_ID: &str = "steam_bridge:friend_code_modal";
 const FRIEND_CODE_SUBMIT_CUSTOM_ID: &str = "steam_link_panel:friend_code:submit";
 pub const STEAM_PANEL_KV_NS: &str = "steam_link_panel";
 pub const STEAM_PANEL_KV_KEY: &str = "panel_ref";
-pub const BRD08_BETAINVITE_PANEL_POSTED_MSG: &str = "✅ Invite-Panel gepostet.";
-pub const BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC: &str =
-    "Zielkanal fürs Panel (Standard: aktueller Kanal)";
 pub const BRD09_STEAM_PANEL_POSTED_MSG: &str = "✅ Steam-Panel gepostet.";
 pub const BRD09_STEAM_PANEL_MESSAGE_ID_OPTION_DESC: &str =
     "ID einer bestehenden Message, die editiert werden soll (optional)";
@@ -574,12 +569,6 @@ fn steam_panel_components() -> Value {
     ]}])
 }
 
-fn betainvite_panel_components() -> Value {
-    json!([{ "type": 1, "components": [
-        { "type": 2, "style": 1, "label": "🎟️ Einladung starten", "custom_id": BETAINVITE_PANEL_CUSTOM_ID },
-    ]}])
-}
-
 // ── Registrierung ──────────────────────────────────────────────────────────
 
 /// Registriert alle Steam-Bridge-Routen am InteractionRouter.
@@ -604,14 +593,13 @@ fn register_inner(
     client: Arc<SteamBotClient>,
     panel_store: Option<SteamPanelStore>,
 ) {
-    // Persistente Buttons: Panels + kompletter Betainvite-Funnel via Präfix
+    // Persistente Panel-Buttons
     let forward = Arc::new(ForwardComponent {
         client: client.clone(),
     });
     for id in PANEL_CUSTOM_IDS {
         router.on_custom_id(id, forward.clone());
     }
-    router.on_prefix("betainvite:", forward.clone());
     router.on_custom_id(
         FRIEND_CODE_MODAL_CUSTOM_ID,
         Arc::new(FriendCodeSubmit {
@@ -713,34 +701,17 @@ fn register_inner(
 
     // Admin-Commands (default_member_permissions: 32 = Manage Guild, 8 = Administrator)
     router.on_command(
-        "publish_betainvite_panel",
+        "invite",
         spec(json!({
-            "name": "publish_betainvite_panel",
-            "description": "Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
-            "default_member_permissions": "32",
-            "options": [{
-                "type": 7,
-                "name": "channel",
-                "description": BRD08_BETAINVITE_PANEL_CHANNEL_OPTION_DESC,
-                "required": false
-            }],
+            "name": "invite",
+            "description": "Lädt jemanden per Steam-Freundescode zum Playtest ein.",
+            "default_member_permissions": "8",
+            "options": [
+                {"type": 3, "name": "freundescode", "description": "Steam-Freundescode, nur Ziffern, zum Beispiel 1852752823", "required": true},
+                {"type": 6, "name": "user", "description": "Das Discord-Mitglied dazu, damit die Einladung in der Historie steht", "required": false}
+            ],
         })),
-        Arc::new(PublishPanel {
-            client: client.clone(),
-            wire_name: "publish_betainvite_panel",
-            panel_buttons: betainvite_panel_components(),
-            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
-            panel_store: None,
-        }),
-    );
-    router.on_command(
-        "betainvite_stats",
-        spec(json!({
-            "name": "betainvite_stats",
-            "description": "Zeigt Funnel-Metriken des Playtest-Invite-Systems (nur Admins).",
-            "default_member_permissions": "32",
-        })),
-        forward_slash("betainvite_stats", &[], 15),
+        forward_slash("invite", &["freundescode", "user"], 30),
     );
     for (name, description) in [
         (
@@ -997,7 +968,7 @@ mod tests {
             "reply_text": "Hallo!",
             "ephemeral": false,
             "link_button": { "label": "Login", "url": "https://example.com/x" },
-            "buttons": [{ "custom_id": "betainvite:link:continue", "label": "Weiter", "style": "primary" }],
+            "buttons": [{ "custom_id": "steam_link_panel:rankcheck", "label": "Weiter", "style": "primary" }],
         }))
         .await;
         let client = SteamBotClient::new(url, Some("tok".to_string()));
@@ -1011,7 +982,7 @@ mod tests {
         let components = reply.components.expect("components");
         let row = &components[0]["components"];
         assert_eq!(row[0]["style"], 5); // Link-Button zuerst
-        assert_eq!(row[1]["custom_id"], "betainvite:link:continue");
+        assert_eq!(row[1]["custom_id"], "steam_link_panel:rankcheck");
 
         let sent = received.lock().expect("lock");
         assert_eq!(sent[0]["kind"], "interaction");
@@ -1100,29 +1071,6 @@ mod tests {
         server.abort();
     }
 
-    #[tokio::test]
-    async fn betainvite_panel_nutzt_optionalen_zielkanal() {
-        let (url, _received, server) = mock_steam_bot(json!({
-            "reply_embed": { "title": "Invite" },
-        }))
-        .await;
-        let handler = PublishPanel {
-            client: SteamBotClient::new(url, None),
-            wire_name: "publish_betainvite_panel",
-            panel_buttons: betainvite_panel_components(),
-            confirmation: BRD08_BETAINVITE_PANEL_POSTED_MSG,
-            panel_store: None,
-        };
-        let mut itx = interaction("");
-        itx.options.insert("channel".to_string(), json!(12345));
-        let reply = handler.handle(itx).await;
-        let panel = reply.channel_message.expect("panel");
-
-        assert_eq!(panel.target_channel_id, Some(12345));
-        assert_eq!(panel.confirmation, BRD08_BETAINVITE_PANEL_POSTED_MSG);
-        server.abort();
-    }
-
     #[cfg(feature = "testing")]
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
@@ -1181,13 +1129,12 @@ mod tests {
     fn router_registrierung_vollstaendig() {
         let mut router = InteractionRouter::new();
         register(&mut router, SteamBotClient::new("http://x", None));
-        // Panels + Legacy + Betainvite-Präfix + Modal
+        // Panels + Legacy + Modal
         for id in PANEL_CUSTOM_IDS {
             assert!(router.resolve_component(id).is_some(), "{id}");
         }
-        assert!(router
-            .resolve_component("betainvite:intent:community")
-            .is_some());
+        let removed_funnel_id = ["beta", "invite:intent:community"].concat();
+        assert!(router.resolve_component(&removed_funnel_id).is_none());
         assert!(router
             .resolve_component(FRIEND_CODE_MODAL_CUSTOM_ID)
             .is_some());
@@ -1204,13 +1151,52 @@ mod tests {
             "subrank_sync",
             "sync_steam_friends",
             "publish_steam_panel",
-            "publish_betainvite_panel",
-            "betainvite_stats",
+            "invite",
         ] {
             assert!(router.resolve_command(name).is_some(), "{name}");
         }
-        // 13 Routen, aber nur 10 Top-Level-Definitionen (steam-Gruppe dedupliziert)
-        assert_eq!(router.command_definitions().len(), 10);
+        // 12 Routen, aber nur 9 Top-Level-Definitionen (steam-Gruppe dedupliziert)
+        assert_eq!(router.command_definitions().len(), 9);
+    }
+
+    #[test]
+    fn invite_command_ist_admin_command_mit_freundescode_und_user_option() {
+        let mut router = InteractionRouter::new();
+        register(&mut router, SteamBotClient::new("http://x", None));
+
+        assert!(router.resolve_command("invite").is_some());
+        let definitions = router.command_definitions();
+        let invite = definitions
+            .iter()
+            .find(|definition| definition["name"] == "invite")
+            .expect("invite command definition");
+
+        assert_eq!(invite["default_member_permissions"], json!("8"));
+
+        let options = invite["options"].as_array().expect("invite options");
+        let shape: Vec<_> = options
+            .iter()
+            .map(|option| (&option["type"], &option["name"], &option["required"]))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                (&json!(3), &json!("freundescode"), &json!(true)),
+                (&json!(6), &json!("user"), &json!(false)),
+            ]
+        );
+
+        // Discord zeigt jede description im Command-Picker. Ein durchgerutschter
+        // Platzhalter waere damit user-sichtbar, der Test haelt das auf.
+        for text in std::iter::once(&invite["description"])
+            .chain(options.iter().map(|option| &option["description"]))
+        {
+            let text = text.as_str().expect("description ist ein String");
+            assert_ne!(text, "Platzhalter");
+            assert!(!text.is_empty());
+            // Discord zaehlt Zeichen, nicht Bytes: len() waere bei Umlauten zu streng.
+            assert!(text.chars().count() <= 100, "Discord-Limit: {text}");
+        }
     }
 
     #[test]

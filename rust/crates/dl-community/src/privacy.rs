@@ -475,6 +475,24 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "router_intro_dm",
+        "user_id",
+        "voice.router_intro_dm",
+        "user_id",
+        ColumnType::I64,
+    ),
+    // Offener `/invite`-Request, adressiert ueber die Discord-ID des
+    // Eingeladenen. MUSS hier stehen und nicht nur in STEAM_SIDE_TABLES:
+    // eingeladen wird jemand, der noch KEINEN core.steam_links-Eintrag hat,
+    // ueber den steam_ids_for_user ihn finden koennte.
+    TableSpec::new(
+        "invite_requests_target",
+        "target_discord_id",
+        "steam.invite_requests",
+        "target_discord_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "tempvoice_presets",
         "user_id",
         "voice.tempvoice_presets",
@@ -874,6 +892,16 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "beta_invite_audit",
         "steam_id64",
         "steam.beta_invite_audit",
+        "steam_id64",
+        ColumnType::I64,
+    ),
+    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthaelt neben der
+    // Steam-ID auch die Discord-ID des Eingeladenen — gehoert damit in die
+    // Erasure-Kette, nicht nur in den Poller.
+    TableSpec::new(
+        "invite_requests",
+        "steam_id64",
+        "steam.invite_requests",
         "steam_id64",
         ColumnType::I64,
     ),
@@ -1658,6 +1686,18 @@ mod privacy_contract_tests {
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
         ));
+        // `core.discord_audit_log.user_id` ist der AUSFUEHRENDE einer Moderations-
+        // aktion (Discord-Semantik: user_id handelt, target_id ist betroffen).
+        // Gleiche Kategorie wie server_config.*: Audit einer Admin-Aktion,
+        // Aufbewahrung im berechtigten Interesse. Ein Opt-out des Moderators darf
+        // die Moderationshistorie des Servers nicht loeschen.
+        out.insert(("core.discord_audit_log".to_string(), "user_id".to_string()));
+        // `steam.invite_requests.admin_id` ist der Admin, der `/invite` ausgeloest
+        // hat — Audit-Referenz auf eine Admin-AKTION, gleiche Kategorie wie
+        // server_config.*. Sein Opt-out darf den offenen Invite eines Dritten
+        // nicht mitreissen; der Eingeladene selbst wird ueber `target_discord_id`
+        // in USER_TABLES geloescht, und die Zeile lebt ohnehin nur 24 h.
+        out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
         out
     }
 
@@ -1798,6 +1838,70 @@ mod tests {
         assert!(is_opted_out(db.pool(), 5).await);
         set_opt_in(db.pool(), 5, 2000).await.expect("opt in");
         assert!(!is_opted_out(db.pool(), 5).await);
+    }
+
+    /// Legt einen offenen `/invite`-Request an: eingeladen wurde `target`,
+    /// ausgeloest hat ihn `admin`. Bewusst OHNE `core.steam_links`-Eintrag —
+    /// genau so sieht der Normalfall aus, denn eingeladen wird jemand, der
+    /// noch nicht verknuepft ist.
+    async fn seed_invite_request(pool: &PgPool, admin: i64, target: i64) {
+        sqlx::query(
+            r#"
+            INSERT INTO steam.invite_requests
+                (steam_id64, account_id, admin_id, target_discord_id, created_at)
+            VALUES (76561199813018551, 1852752823, $1, $2, 1000)
+            "#,
+        )
+        .bind(admin)
+        .bind(target)
+        .execute(pool)
+        .await
+        .expect("seed invite request");
+    }
+
+    async fn invite_requests_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::int8 FROM steam.invite_requests")
+            .fetch_one(pool)
+            .await
+            .expect("count invite requests")
+    }
+
+    #[tokio::test]
+    async fn erasure_loescht_offenen_invite_auch_ohne_steam_link() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 4242, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // Ueber STEAM_SIDE_TABLES allein waere die Zeile unerreichbar:
+        // steam_ids_for_user liest nur core.steam_links, und der Eingeladene
+        // hat dort (noch) nichts stehen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            0,
+            "offener Invite ueberlebt die Loeschanfrage des Eingeladenen"
+        );
+    }
+
+    #[tokio::test]
+    async fn erasure_des_admins_loescht_fremde_invites_nicht() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 999, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // `admin_id` ist eine Audit-Referenz auf eine Admin-AKTION (allowlisted).
+        // Ein Opt-out des Admins darf den offenen Invite eines Dritten nicht
+        // mitreissen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            1,
+            "Loeschanfrage des Admins hat den Invite eines Dritten geloescht"
+        );
     }
 
     #[tokio::test]

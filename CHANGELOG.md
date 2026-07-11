@@ -1,3 +1,11 @@
+## #243 — Einladungs-Panel entfernt, Admins laden per Befehl ein
+
+**Ausgangslage:** Das Panel für Playtest-Einladungen war der einzige Weg ins Spiel und lief komplett ohne menschlichen Kontakt. Wer im Trichter feststeckte, bekam davon nichts mit.
+
+**Änderung:** Das Panel und die zugehörigen Knöpfe sind entfernt. Stattdessen gibt es einen Einladungs-Befehl, den nur Admins sehen und benutzen können. Die Antwort darauf sieht ebenfalls nur der Admin.
+
+**Aktuelles Verhalten:** Wer eine Einladung möchte, postet seinen Steam-Freundescode und wird von einem Admin persönlich eingeladen. Alte Panel-Nachrichten reagieren nicht mehr, sie werden entfernt.
+
 ## #242 — Router erklärt sich beim ersten Mal per DM
 
 **Ausgangslage:** Wer zum ersten Mal in den Deadlock Router ging, wurde nicht automatisch in eine Lane sortiert und wusste oft nicht warum. Der Router braucht erst einen gewählten Modus, und das war vielen nicht klar.
