@@ -4,7 +4,7 @@
 
 **Was wurde geändert:** Er nutzt jetzt ausschließlich die öffentliche dokumentierte Wissensbasis für DMs, private FAQ und Serverfragen; in Tickets wird eine mögliche Antwort nur im vorgesehenen Prüfbereich sichtbar und nie direkt vom Bot gepostet.
 
-**Wie es jetzt läuft:** Interne Details, Debug-, Neustart- oder andere Aktionen führt er nicht aus; bei Unsicherheit übernimmt menschlicher Support. Ein Opt-out bestätigt er erst, nachdem es erfolgreich gespeichert wurde.
+**Wie es jetzt läuft:** Interne Details, Debug-, Neustart- oder andere Aktionen führt er nicht aus; bei Unsicherheit übernimmt menschlicher Support. Ein Datenschutz-Opt-out bestätigt er erst nach erfolgreicher Speicherung und unterdrückt danach auch die einmalige Router-Hilfe per DM; lässt sich der Datenschutzstatus nicht sicher lesen, bleibt diese DM vorsichtshalber aus.
 
 ## #242 — Router erklärt sich beim ersten Mal per DM
 

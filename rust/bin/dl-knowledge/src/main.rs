@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 
-const DEFAULT_DOCS_PATH: &str = "/home/naniadm/Documents/Deadlock-Docs/public/";
+const DEFAULT_DOCS_PATH: &str = "/home/naniadm/.local/share/dl-knowledge/current/public/";
 const BIND_ADDR: &str = "127.0.0.1:8896";
 
 const SYSTEM_PROMPT: &str = r#"Du bist der FAQ-Helfer der deutschen Deadlock-Community (Discord). Du beantwortest Fragen von Mitgliedern ausschließlich anhand der mitgelieferten Wissens-Chunks.
@@ -951,6 +951,8 @@ fn expand_query(query: &str) -> String {
         ("champs", " helden hero heroes tierlist builds winrate"),
         ("charaktere", " helden hero heroes"),
         ("items", " item build builds"),
+        ("melde", " anmeldung anmelden registrierung"),
+        ("woher", " quelle quellen ursprung"),
     ] {
         if lower.contains(needle) {
             expanded.push_str(alias);
@@ -1089,6 +1091,337 @@ mod tests {
     use std::sync::Mutex;
     use tower::ServiceExt;
 
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GoldenCase {
+        question: String,
+        answerable: bool,
+        expected_sources: Vec<String>,
+        context_terms: Vec<String>,
+        answer_terms: Vec<String>,
+        forbidden_terms: Vec<String>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GoldenLiveResponse {
+        answerable: bool,
+        answer: Value,
+        sources: Vec<GoldenLiveSource>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct GoldenLiveSource {
+        #[serde(rename = "title")]
+        _title: String,
+        path: String,
+    }
+
+    const GOLDEN_FILES: [&str; 6] = [
+        "public-discord-core.json",
+        "public-discord-tools.json",
+        "public-integration.json",
+        "public-patchnotes-turniere.json",
+        "public-steam-website.json",
+        "public-twitch.json",
+    ];
+
+    fn required_env_path(name: &str) -> Result<PathBuf> {
+        let path = std::env::var_os(name)
+            .map(PathBuf::from)
+            .with_context(|| format!("{name} fehlt"))?;
+        ensure!(!path.as_os_str().is_empty(), "{name} ist leer");
+        Ok(path)
+    }
+
+    fn load_golden_cases(golden_dir: &Path, docs_path: &Path) -> Result<Vec<GoldenCase>> {
+        let mut files = Vec::new();
+        for entry in std::fs::read_dir(golden_dir)
+            .with_context(|| format!("Golden-Verzeichnis lesen: {}", golden_dir.display()))?
+        {
+            let entry = entry.with_context(|| {
+                format!("Golden-Verzeichniseintrag lesen: {}", golden_dir.display())
+            })?;
+            let path = entry.path();
+            if entry
+                .file_type()
+                .with_context(|| format!("Golden-Dateityp lesen: {}", path.display()))?
+                .is_file()
+                && path.extension() == Some(std::ffi::OsStr::new("json"))
+            {
+                files.push(path);
+            }
+        }
+        files.sort();
+        let names = files
+            .iter()
+            .map(|path| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .context("Golden-Datei ohne Dateiname")
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let expected_names = GOLDEN_FILES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<_>>();
+        ensure!(
+            names == expected_names,
+            "Golden-Dateien stimmen nicht: erwartet {expected_names:?}, gefunden {names:?}"
+        );
+
+        let mut cases = Vec::new();
+        let mut questions = HashSet::new();
+        for file in files {
+            let raw = std::fs::read_to_string(&file)
+                .with_context(|| format!("Golden-Datei lesen: {}", file.display()))?;
+            let file_cases = serde_json::from_str::<Vec<GoldenCase>>(&raw)
+                .with_context(|| format!("Golden-Datei parsen: {}", file.display()))?;
+            ensure!(
+                !file_cases.is_empty(),
+                "Golden-Datei ist leer: {}",
+                file.display()
+            );
+
+            for case in file_cases {
+                let question = case.question.trim();
+                ensure!(
+                    !question.is_empty(),
+                    "Golden-Frage ist leer: {}",
+                    file.display()
+                );
+                ensure!(
+                    questions.insert(question.to_string()),
+                    "Doppelte Golden-Frage: {question:?}"
+                );
+                if case.answerable {
+                    ensure!(
+                        !case.expected_sources.is_empty()
+                            && !case.context_terms.is_empty()
+                            && !case.answer_terms.is_empty(),
+                        "Antwortbarer Fall benoetigt Quellen, Kontext- und Antwortterme: {question:?}"
+                    );
+                } else {
+                    ensure!(
+                        case.expected_sources.is_empty()
+                            && case.context_terms.is_empty()
+                            && case.answer_terms.is_empty(),
+                        "Nicht antwortbarer Fall darf keine Quellen, Kontext- oder Antwortterme haben: {question:?}"
+                    );
+                }
+                for source in &case.expected_sources {
+                    let path = Path::new(source);
+                    ensure!(!path.is_absolute(), "Absolute Golden-Quelle: {source:?}");
+                    ensure!(
+                        path.extension() == Some(std::ffi::OsStr::new("html")),
+                        "Golden-Quelle ist kein HTML: {source:?}"
+                    );
+                    ensure!(
+                        !path
+                            .components()
+                            .any(|part| matches!(part, std::path::Component::ParentDir)),
+                        "Golden-Quelle enthaelt ParentDir: {source:?}"
+                    );
+                    ensure!(
+                        !path.components().any(|part| matches!(
+                            part,
+                            std::path::Component::Normal(segment)
+                                if segment.to_string_lossy().eq_ignore_ascii_case("internal")
+                        )),
+                        "Golden-Quelle verweist auf internal: {source:?}"
+                    );
+                    ensure!(
+                        docs_path.join(path).is_file(),
+                        "Golden-Quelle fehlt im Korpus: {source:?}"
+                    );
+                }
+                cases.push(case);
+            }
+        }
+        ensure!(
+            cases.len() >= 176,
+            "Golden-Suite hat nur {} statt mindestens 176 Faellen",
+            cases.len()
+        );
+        Ok(cases)
+    }
+
+    fn contains_case_insensitive(text: &str, term: &str) -> bool {
+        text.to_lowercase().contains(&term.to_lowercase())
+    }
+
+    #[test]
+    fn golden_case_schema_ist_strikt() -> Result<()> {
+        let valid = r#"{
+            "question":"Wie funktioniert das?",
+            "answerable":true,
+            "expected_sources":["hilfe.html"],
+            "context_terms":["Kontext"],
+            "answer_terms":["Antwort"],
+            "forbidden_terms":[]
+        }"#;
+        serde_json::from_str::<GoldenCase>(valid)?;
+
+        let unknown = valid.replace(
+            "\"forbidden_terms\":[]",
+            "\"forbidden_terms\":[],\"extra\":true",
+        );
+        assert!(serde_json::from_str::<GoldenCase>(&unknown).is_err());
+
+        let missing = valid.replace("\"answer_terms\":[\"Antwort\"],", "");
+        assert!(serde_json::from_str::<GoldenCase>(&missing).is_err());
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "benoetigt DL_DOCS_PATH und DL_GOLDEN_DIR"]
+    fn golden_retrieval_corpus() -> Result<()> {
+        let docs_path = required_env_path("DL_DOCS_PATH")?;
+        let golden_dir = required_env_path("DL_GOLDEN_DIR")?;
+        let cases = load_golden_cases(&golden_dir, &docs_path)?;
+        let knowledge = load_corpus(&docs_path)?;
+        let stats = knowledge.source_stats();
+        ensure!(!knowledge.chunks.is_empty(), "Korpus ist leer");
+        ensure!(stats.html_sources > 0, "Korpus enthaelt keine HTML-Quellen");
+        ensure!(
+            stats.non_html_sources == 0,
+            "Korpus enthaelt {} Nicht-HTML-Quellen",
+            stats.non_html_sources
+        );
+        ensure!(
+            stats.internal_sources == 0,
+            "Korpus enthaelt {} interne Quellen",
+            stats.internal_sources
+        );
+
+        for case in cases {
+            if character_count_response(&case.question, &knowledge).is_some() {
+                continue;
+            }
+            let chunks = knowledge
+                .search(&case.question, 6)
+                .into_iter()
+                .map(|(chunk, _score)| chunk)
+                .collect::<Vec<_>>();
+            let sources = sources_for(&chunks);
+            let context = build_prompt("", &chunks);
+
+            for term in &case.forbidden_terms {
+                ensure!(
+                    !contains_case_insensitive(&context, term),
+                    "Verbotener Kontextterm {term:?} fuer Frage {:?}",
+                    case.question
+                );
+            }
+            if case.answerable {
+                ensure!(
+                    sources.iter().any(|source| case
+                        .expected_sources
+                        .iter()
+                        .any(|expected| expected == &source.path)),
+                    "Keine erwartete Quelle fuer Frage {:?}; gefunden: {:?}",
+                    case.question,
+                    sources
+                );
+                for term in &case.context_terms {
+                    ensure!(
+                        contains_case_insensitive(&context, term),
+                        "Kontextterm {term:?} fehlt fuer Frage {:?}; gefunden: {:?}",
+                        case.question,
+                        sources
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "benoetigt DL_DOCS_PATH, DL_GOLDEN_DIR und laufende DL_GOLDEN_API_URL"]
+    async fn golden_live_api() -> Result<()> {
+        let docs_path = required_env_path("DL_DOCS_PATH")?;
+        let golden_dir = required_env_path("DL_GOLDEN_DIR")?;
+        let url = std::env::var("DL_GOLDEN_API_URL").context("DL_GOLDEN_API_URL fehlt")?;
+        ensure!(!url.trim().is_empty(), "DL_GOLDEN_API_URL ist leer");
+        let cases = load_golden_cases(&golden_dir, &docs_path)?;
+        let client = reqwest::Client::new();
+
+        for case in cases {
+            let response = client
+                .post(&url)
+                .json(&json!({ "question": case.question }))
+                .send()
+                .await
+                .with_context(|| format!("Live-Anfrage fuer {:?}", case.question))?;
+            let status = response.status();
+            ensure!(
+                status.is_success(),
+                "Live-Anfrage fuer {:?} lieferte {status}",
+                case.question
+            );
+            let response = response
+                .json::<GoldenLiveResponse>()
+                .await
+                .with_context(|| format!("Live-Schema fuer {:?}", case.question))?;
+
+            if case.answerable {
+                ensure!(
+                    response.answerable,
+                    "Antwortbare Frage wurde abgelehnt: {:?}",
+                    case.question
+                );
+                let answer = response.answer.as_str().with_context(|| {
+                    format!("Antwort fehlt oder ist kein String: {:?}", case.question)
+                })?;
+                ensure!(
+                    !answer.trim().is_empty(),
+                    "Antwort ist leer: {:?}",
+                    case.question
+                );
+                ensure!(
+                    response.sources.iter().any(|source| case
+                        .expected_sources
+                        .iter()
+                        .any(|expected| expected == &source.path)),
+                    "Keine erwartete Live-Quelle fuer Frage {:?}",
+                    case.question
+                );
+                for term in &case.answer_terms {
+                    ensure!(
+                        contains_case_insensitive(answer, term),
+                        "Antwortterm {term:?} fehlt fuer Frage {:?}",
+                        case.question
+                    );
+                }
+                for term in &case.forbidden_terms {
+                    ensure!(
+                        !contains_case_insensitive(answer, term),
+                        "Verbotener Antwortterm {term:?} fuer Frage {:?}",
+                        case.question
+                    );
+                }
+            } else {
+                ensure!(
+                    !response.answerable,
+                    "Nicht antwortbare Frage wurde beantwortet: {:?}",
+                    case.question
+                );
+                ensure!(
+                    response.answer.is_null(),
+                    "Nicht antwortbare Frage hat eine Antwort: {:?}",
+                    case.question
+                );
+                ensure!(
+                    response.sources.is_empty(),
+                    "Nicht antwortbare Frage hat Quellen: {:?}",
+                    case.question
+                );
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn system_prompt_erzwingt_grenzen_und_breite_uebersicht() {
         // B06: reine Prompt-Injektion/Manipulation ohne echte Frage ist nicht beantwortbar.
@@ -1140,6 +1473,14 @@ mod tests {
         assert!(
             !SYSTEM_PROMPT.contains("höchstens zwei Richtungen"),
             "die Zwei-Punkte-Begrenzung darf eine belegte Uebersicht nicht mehr kappen"
+        );
+    }
+
+    #[test]
+    fn standardkorpus_ist_der_committete_public_snapshot() {
+        assert_eq!(
+            DEFAULT_DOCS_PATH,
+            "/home/naniadm/.local/share/dl-knowledge/current/public/"
         );
     }
 
@@ -1574,6 +1915,61 @@ Frag im Support.
 
         assert_eq!(steambot[0].0.path, "steam.md");
         assert_eq!(ascii[0].0.path, "steam.md");
+    }
+
+    #[test]
+    fn bm25_findet_quellenabschnitt_bei_woher_frage() {
+        let mut chunks = (0..6)
+            .map(|index| {
+                test_chunk(
+                    "Patchnotes-Bot",
+                    "Überblick",
+                    &format!("patchnotes-{index}.html"),
+                    "Der Patchnotes-Bot zeigt Patchnotes in Discord.",
+                )
+            })
+            .collect::<Vec<_>>();
+        chunks.push(test_chunk(
+            "Patchnotes-Bot",
+            "Quellen",
+            "patchnotes-bot.html",
+            "Die Quellen sind das Deadlock-Forum und die Steam-News.",
+        ));
+        let knowledge = KnowledgeBase::from_chunks(chunks);
+
+        let results = knowledge.search("Woher nimmt der Bot die Patchnotes?", 6);
+
+        assert!(results.iter().any(|(chunk, _)| chunk.section == "Quellen"));
+    }
+
+    #[test]
+    fn bm25_findet_anmeldung_bei_turnier_meldefrage() {
+        let mut chunks = (0..6)
+            .map(|index| {
+                test_chunk(
+                    "Turniere",
+                    "Kurzhinweis",
+                    &format!("hinweis-{index}.html"),
+                    "Ich melde mich zum Turnier und brauche eine Einwilligung.",
+                )
+            })
+            .collect::<Vec<_>>();
+        chunks.push(test_chunk(
+            "Turniere",
+            "Anmeldung und Einwilligung",
+            "turniere.html",
+            "Die Anmeldung erfolgt im Turnierportal. Für die aktive Teilnahme bestätigst du dort die sichtbare Einwilligung.",
+        ));
+        let knowledge = KnowledgeBase::from_chunks(chunks);
+
+        let results = knowledge.search(
+            "Wie melde ich mich zu einem Turnier an und welche Einwilligung brauche ich?",
+            6,
+        );
+
+        assert!(results
+            .iter()
+            .any(|(chunk, _)| chunk.section == "Anmeldung und Einwilligung"));
     }
 
     #[test]

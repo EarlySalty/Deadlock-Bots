@@ -701,6 +701,7 @@ dependencies = [
  "axum",
  "dl-ai",
  "dl-core",
+ "reqwest",
  "scraper",
  "serde",
  "serde_json",

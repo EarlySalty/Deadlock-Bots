@@ -1130,7 +1130,9 @@ mod tests {
             .await;
         let dms = port.dms.lock().expect("lock");
         assert_eq!(dms.len(), 2);
-        assert!(dms[1].1.contains("danke für deine Voice-Runden"));
+        assert!(dms[1]
+            .1
+            .contains("danke, dass du wieder in den Lanes warst"));
     }
 
     #[tokio::test]

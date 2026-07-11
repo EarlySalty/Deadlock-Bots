@@ -510,7 +510,13 @@ fn button(label: &str, style: u8, custom_id: &str) -> Value {
     })
 }
 
-fn emoji_button(label: &str, style: u8, custom_id: &str, emoji_name: &str, emoji_id: &str) -> Value {
+fn emoji_button(
+    label: &str,
+    style: u8,
+    custom_id: &str,
+    emoji_name: &str,
+    emoji_id: &str,
+) -> Value {
     json!({
         "type": 2,
         "style": style,
@@ -888,8 +894,20 @@ impl PanelHandler {
         let (mode_row, second_row) = if is_dm {
             (
                 action_row(vec![
-                    emoji_button("Casual", 2, "tv_prefs_mode_casual", "dl_casual", "1522518264088100995"),
-                    emoji_button("Ranked", 2, "tv_prefs_mode_ranked", "dl_ranked", "1522518271306366996"),
+                    emoji_button(
+                        "Casual",
+                        2,
+                        "tv_prefs_mode_casual",
+                        "dl_casual",
+                        "1522518264088100995",
+                    ),
+                    emoji_button(
+                        "Ranked",
+                        2,
+                        "tv_prefs_mode_ranked",
+                        "dl_ranked",
+                        "1522518271306366996",
+                    ),
                     emoji_button(
                         "Street Brawl",
                         2,
@@ -901,7 +919,13 @@ impl PanelHandler {
                 action_row(vec![
                     button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
                     button("Rang ändern", 2, "tv_prefs_rank"),
-                    emoji_button("Fertig", 3, "router_dm_done", "dl_crown", "1522518265421631538"),
+                    emoji_button(
+                        "Fertig",
+                        3,
+                        "router_dm_done",
+                        "dl_crown",
+                        "1522518265421631538",
+                    ),
                 ]),
             )
         } else {
@@ -2267,10 +2291,16 @@ mod tests {
     #[test]
     fn prefs_components_dm_behaelt_fertig_statt_loeschen() {
         // Re-Render nach Modus-Klick in der DM MUSS Fertig behalten (Regression).
-        let dm =
-            serde_json::to_string(&PanelHandler::prefs_components(true, false, true)).expect("json");
-        assert!(dm.contains("router_dm_done"), "DM-Panel muss Fertig behalten");
-        assert!(!dm.contains("tv_prefs_delete"), "DM-Panel zeigt kein Default löschen");
+        let dm = serde_json::to_string(&PanelHandler::prefs_components(true, false, true))
+            .expect("json");
+        assert!(
+            dm.contains("router_dm_done"),
+            "DM-Panel muss Fertig behalten"
+        );
+        assert!(
+            !dm.contains("tv_prefs_delete"),
+            "DM-Panel zeigt kein Default löschen"
+        );
         // Guild-Panel unverändert: Default löschen, kein Fertig.
         let guild = serde_json::to_string(&PanelHandler::prefs_components(true, false, false))
             .expect("json");
