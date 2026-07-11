@@ -6,8 +6,8 @@
 //! Nachrichten). Sessions schließen nach 24 h automatisch; der
 //! Close-Button (`faq_chat:close:{session}`) beendet sofort.
 //! Dazu der Ticket-Auto-Helfer: die erste Nachricht in einem neuen
-//! Ticket-Kanal wird gegen dl-knowledge geprüft — kann der Bot klar helfen,
-//! antwortet er, sonst schweigt er (KEIN_TREFFER-Protokoll).
+//! Ticket-Kanal wird gegen dl-knowledge geprüft. Das Ergebnis erscheint nur im
+//! fest verdrahteten internen Log-Kanal und nie als direkte Ticket-Antwort.
 //!
 //! Bewusste Annäherung: das Original markiert Ticket-Kanäle beim
 //! `channel_create`-Event als „wartend"; Rust triggert auf die erste
@@ -16,8 +16,8 @@
 //! Patchnote-Anreicherung der Antworten ist eine dokumentierte Lücke
 //! (im Original optional und fehlertolerant).
 
-use std::collections::HashSet;
-use std::sync::Arc;
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use dl_central_db::kv;
@@ -25,9 +25,9 @@ use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use serde_json::json;
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 
-use crate::db::{i64_to_u64, u64_to_i64};
+use crate::db::{i64_to_u64, u64_to_i64, CommunityDbError, CommunityDbResult};
 use crate::knowledge_client::{self, KnowledgeLookup};
 
 pub use crate::knowledge_client::{KnowledgeAnswer, KnowledgeSource};
@@ -39,22 +39,28 @@ pub const LOG_CHANNEL_ID: u64 = 1374364800817303632;
 pub const SESSION_TIMEOUT_HOURS: i64 = 24;
 pub const PANEL_KV_NS: &str = "faq_chat:panel";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
-const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(20);
+const KNOWLEDGE_TIMEOUT: Duration = Duration::from_secs(8);
+const FAQ_DISCORD_IO_TIMEOUT: Duration = Duration::from_secs(3);
+const FAQ_DISCORD_CLEANUP_TIMEOUT: Duration = Duration::from_secs(3);
 const FAQ_NO_ANSWER: &str = "Da müssen wir passen, das haben wir gerade selbst nicht parat. Stell die Frage gern nochmal anders oder in <#1491953161747955853>. Bei Support oder Moderation öffnest du ein Ticket in <#1459628609705738539>.";
+const FAQ_PRIVACY_BLOCK_TEXT: &str = "Dein globaler Datenschutz-Opt-out ist aktiv, deshalb lege ich keinen neuen FAQ-Chat an – der würde Verlauf speichern. Falls du schon einen FAQ-Kanal hast, kannst du dort direkt fragen: Ich antworte ohne Speichern und ohne Verlauf, genauso wenn du mir einfach direkt schreibst. Willst du wieder einen Chat mit Verlauf, aktivier ihn mit `/datenschutz-optin`; lieber ein Mensch? Dann mach ein Ticket in <#1459628609705738539> auf.";
+const FAQ_SESSION_ERROR_TEXT: &str = "Beim Speichern gab es einen technischen Fehler, deshalb ist der Chat nicht aktiv, auch wenn der Kanal schon sichtbar sein kann. Versuch es später noch einmal, und wenn es wieder passiert, mach bitte ein Ticket in <#1459628609705738539>.";
+const FAQ_SESSION_UNCERTAIN_TEXT: &str = "Die Chat-Anlage wurde technisch nicht sicher abgeschlossen. Möglicherweise ist bereits ein Kanal oder eine aktive Session sichtbar; starte bitte keinen zweiten Chat, sondern öffne ein Ticket in <#1459628609705738539>, damit ein Mensch den Zustand prüft.";
+const FAQ_MESSAGE_ERROR_TEXT: &str = "Die sichere Verarbeitung deiner Frage ist technisch fehlgeschlagen. Ich kann gerade nicht zuverlässig sagen, ob davon etwas gespeichert wurde, und sende deshalb keine automatische Sachantwort. Versuch es später nochmal oder öffne ein Ticket in <#1459628609705738539>.";
+const FAQ_MESSAGE_UNCERTAIN_TEXT: &str = "Die Antwort wurde technisch nicht sicher abgeschlossen. Möglicherweise ist bereits eine automatische Sachantwort sichtbar; ich kann gerade nicht bestätigen, ob sie vollständig zurückgenommen wurde. Verlass dich bitte nicht darauf und öffne ein Ticket in <#1459628609705738539>.";
+const FAQ_CLOSE_ERROR_TEXT: &str = "Der Chat konnte technisch nicht sicher beendet werden, deshalb bestätige ich keinen Abschluss. Versuch es später nochmal oder öffne ein Ticket in <#1459628609705738539>.";
+const FAQ_TIMEOUT_PENDING_TEXT: &str = "Hier war 24 Stunden nichts los, deshalb hab ich das Beenden dieses Chats angestoßen. Falls ich hier trotzdem noch antworte, hat es technisch nicht geklappt – dann drück nochmal auf „Chat beenden“ oder mach ein Ticket in <#1459628609705738539> auf.";
 const TICKET_SHADOW_PREFIX: &str = "🧪 **FAQ-Shadow**: so hätte der Bot im Ticket geantwortet:";
 const SHADOW_NOT_CONFIGURED: &str = "shadow_not_configured";
 const SHADOW_EQUALS_TICKET: &str = "shadow_equals_ticket";
+const SHADOW_NOT_ALLOWLISTED: &str = "shadow_not_allowlisted";
 /// KV-Schlüssel der gemerkten Panel-Message-ID — MUSS exakt Pythons
 /// `_store_panel_msg_id`/`_get_stored_panel_msg_id` entsprechen (`panel_msg_id`),
 /// damit Rust das bestehende Panel übernimmt statt ein Duplikat zu posten.
 pub const PANEL_KV_KEY: &str = "panel_msg_id";
 
 fn knowledge_url_from_env() -> String {
-    std::env::var("DL_KNOWLEDGE_URL")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| DEFAULT_KNOWLEDGE_URL.to_string())
+    DEFAULT_KNOWLEDGE_URL.to_string()
 }
 
 pub async fn ask_knowledge(question: &str) -> Option<KnowledgeAnswer> {
@@ -124,12 +130,6 @@ fn ticket_auto_outcome_from_knowledge(answer: KnowledgeLookup) -> TicketAutoOutc
     }
 }
 
-fn shadow_channel_from_env() -> Option<u64> {
-    std::env::var("DL_FAQ_SHADOW_CHANNEL_ID")
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-}
-
 fn shadow_ticket_message(ticket_channel_id: u64, decision: &str, answer: &str) -> String {
     format!(
         "{TICKET_SHADOW_PREFIX}\nEntscheidung: {decision}\nTicket: <#{ticket_channel_id}>\n\n{answer}"
@@ -164,7 +164,153 @@ pub struct FaqStore {
     pub pool: PgPool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaqMessageWrite {
+    Stored,
+    PrivacyBlocked,
+    Inactive,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FaqSessionCommitResolution {
+    Committed,
+    RolledBack,
+    Uncertain,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum FaqAnswerDeliveryError {
+    #[error(transparent)]
+    Database(#[from] CommunityDbError),
+    #[error("Antwort-Cleanup nach DB-Fehler fehlgeschlagen: {0}")]
+    CleanupUncertain(String),
+}
+
+impl From<sqlx::Error> for FaqAnswerDeliveryError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Database(error.into())
+    }
+}
+
+async fn privacy_write_allowed(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<bool> {
+    let opted_out = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out = TRUE
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    Ok(!opted_out)
+}
+
+async fn active_session_of_user_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<Option<(String, u64)>> {
+    let row = sqlx::query(
+        "SELECT session_id, channel_id
+           FROM bot.faq_chat_sessions
+          WHERE user_id = $1 AND status = 'active'",
+    )
+    .bind(user_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    Ok(row.and_then(|row| {
+        use sqlx::Row;
+        let session_id: String = row.try_get("session_id").ok()?;
+        let channel_id: i64 = row.try_get("channel_id").ok()?;
+        Some((session_id, i64_to_u64(channel_id, "channel_id")?))
+    }))
+}
+
+async fn create_session_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    session_id: &str,
+    user_id: i64,
+    user_name: &str,
+    channel_id: i64,
+    guild_id: i64,
+) -> CommunityDbResult<()> {
+    let expires = chrono::Utc::now() + chrono::Duration::hours(SESSION_TIMEOUT_HOURS);
+    let inserted = sqlx::query(
+        "INSERT INTO bot.faq_chat_sessions(
+             session_id, user_id, user_name, channel_id, guild_id, expires_at
+         )
+         VALUES ($1, $2, $3, $4, $5, $6)",
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .bind(user_name)
+    .bind(channel_id)
+    .bind(guild_id)
+    .bind(expires)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if inserted != 1 {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    Ok(())
+}
+
+async fn reconcile_faq_session_commit(
+    pool: &PgPool,
+    session_id: &str,
+    user_id: i64,
+    channel_id: i64,
+    guild_id: i64,
+) -> CommunityDbResult<FaqSessionCommitResolution> {
+    let mut tx = pool.begin().await?;
+    crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+    let (exact, any_active) = sqlx::query_as::<_, (bool, bool)>(
+        "SELECT
+            EXISTS(
+                SELECT 1 FROM bot.faq_chat_sessions
+                 WHERE session_id = $1
+                   AND user_id = $2
+                   AND channel_id = $3
+                   AND guild_id = $4
+                   AND status = 'active'
+            ),
+            EXISTS(
+                SELECT 1 FROM bot.faq_chat_sessions
+                 WHERE user_id = $2 AND status = 'active'
+            )",
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .bind(channel_id)
+    .bind(guild_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    let resolution = match (exact, any_active) {
+        (true, true) => FaqSessionCommitResolution::Committed,
+        (false, false) => FaqSessionCommitResolution::RolledBack,
+        _ => FaqSessionCommitResolution::Uncertain,
+    };
+    tx.commit().await?;
+    Ok(resolution)
+}
+
 impl FaqStore {
+    async fn begin_session_action(
+        &self,
+        user_id: u64,
+    ) -> CommunityDbResult<Option<(i64, Transaction<'static, Postgres>)>> {
+        let user_id = u64_to_i64(user_id, "user_id")?;
+        let mut tx = self.pool.begin().await?;
+        crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+        if !privacy_write_allowed(&mut tx, user_id).await? {
+            return Ok(None);
+        }
+        Ok(Some((user_id, tx)))
+    }
+
     pub async fn ensure_schema(&self) -> Result<(), sqlx::Error> {
         sqlx::query!(
             r#"
@@ -193,19 +339,39 @@ impl FaqStore {
     }
 
     pub async fn active_session_in_channel(&self, channel_id: u64) -> Option<(String, u64)> {
-        let channel_id = u64_to_i64(channel_id, "channel_id").ok()?;
-        let row = sqlx::query!(
+        self.active_session_in_channel_checked(channel_id)
+            .await
+            .ok()
+            .flatten()
+            .filter(|(_, _, status)| status == "active")
+            .map(|(session_id, user_id, _)| (session_id, user_id))
+    }
+
+    async fn active_session_in_channel_checked(
+        &self,
+        channel_id: u64,
+    ) -> CommunityDbResult<Option<(String, u64, String)>> {
+        let channel_id = u64_to_i64(channel_id, "channel_id")?;
+        let row = sqlx::query(
             r#"
-            SELECT session_id, user_id
+            SELECT session_id, user_id, status
               FROM bot.faq_chat_sessions
-             WHERE channel_id = $1 AND status = 'active'
+             WHERE channel_id = $1
+             ORDER BY created_at DESC
+             LIMIT 1
             "#,
-            channel_id,
         )
+        .bind(channel_id)
         .fetch_optional(&self.pool)
-        .await
-        .ok()??;
-        Some((row.session_id, i64_to_u64(row.user_id, "user_id")?))
+        .await?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        use sqlx::Row;
+        let session_id: String = row.try_get("session_id")?;
+        let user_id: i64 = row.try_get("user_id")?;
+        let status: String = row.try_get("status")?;
+        Ok(i64_to_u64(user_id, "user_id").map(|user_id| (session_id, user_id, status)))
     }
 
     pub async fn create_session(
@@ -215,40 +381,62 @@ impl FaqStore {
         user_name: String,
         channel_id: u64,
         guild_id: u64,
-    ) {
-        let (Ok(user_id), Ok(channel_id), Ok(guild_id)) = (
-            u64_to_i64(user_id, "user_id"),
-            u64_to_i64(channel_id, "channel_id"),
-            u64_to_i64(guild_id, "guild_id"),
-        ) else {
-            return;
+    ) -> CommunityDbResult<bool> {
+        let channel_id = u64_to_i64(channel_id, "channel_id")?;
+        let guild_id = u64_to_i64(guild_id, "guild_id")?;
+        let Some((user_id, mut tx)) = self.begin_session_action(user_id).await? else {
+            return Ok(false);
         };
-        let expires = chrono::Utc::now() + chrono::Duration::hours(SESSION_TIMEOUT_HOURS);
-        let _ = sqlx::query!(
-            r#"
-            INSERT INTO bot.faq_chat_sessions(
-                session_id, user_id, user_name, channel_id, guild_id, expires_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6)
-            "#,
-            session_id,
+        create_session_tx(
+            &mut tx,
+            &session_id,
             user_id,
-            user_name,
+            &user_name,
             channel_id,
             guild_id,
-            expires,
         )
-        .execute(&self.pool)
-        .await;
+        .await?;
+        tx.commit().await?;
+        Ok(true)
     }
 
-    pub async fn add_message(&self, session_id: &str, role: &str, content: &str) {
+    pub async fn add_message(
+        &self,
+        session_id: &str,
+        role: &str,
+        content: &str,
+    ) -> CommunityDbResult<FaqMessageWrite> {
         let (session_id, role, content) = (
             session_id.to_string(),
             role.to_string(),
             content.to_string(),
         );
-        let _ = sqlx::query!(
+        let mut tx = self.pool.begin().await?;
+        let Some(user_id) = sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM bot.faq_chat_sessions WHERE session_id = $1",
+        )
+        .bind(&session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(FaqMessageWrite::Missing);
+        };
+        crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+        if !privacy_write_allowed(&mut tx, user_id).await? {
+            return Ok(FaqMessageWrite::PrivacyBlocked);
+        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.faq_chat_sessions WHERE session_id = $1",
+        )
+        .bind(&session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            Some("active") => {}
+            Some(_) => return Ok(FaqMessageWrite::Inactive),
+            None => return Ok(FaqMessageWrite::Missing),
+        }
+        let inserted = sqlx::query!(
             r#"
             INSERT INTO bot.faq_chat_messages(session_id, role, content)
             VALUES ($1, $2, $3)
@@ -257,18 +445,25 @@ impl FaqStore {
             role,
             content,
         )
-        .execute(&self.pool)
-        .await;
-        let _ = sqlx::query!(
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let updated = sqlx::query(
             r#"
             UPDATE bot.faq_chat_sessions
                SET last_activity_at = now()
-             WHERE session_id = $1
+             WHERE session_id = $1 AND status = 'active'
             "#,
-            session_id,
         )
-        .execute(&self.pool)
-        .await;
+        .bind(&session_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if inserted != 1 || updated != 1 {
+            return Ok(FaqMessageWrite::Inactive);
+        }
+        tx.commit().await?;
+        Ok(FaqMessageWrite::Stored)
     }
 
     /// Letzte 10 Nachrichten (chronologisch) für das Gesprächs-Gedächtnis.
@@ -295,34 +490,67 @@ impl FaqStore {
         .collect()
     }
 
-    pub async fn close_session(&self, session_id: &str) {
-        let _ = sqlx::query!(
-            r#"
-            UPDATE bot.faq_chat_sessions
-               SET status = 'closed'
-             WHERE session_id = $1
-            "#,
-            session_id,
+    pub async fn close_session(&self, session_id: &str) -> CommunityDbResult<bool> {
+        let mut tx = self.pool.begin().await?;
+        let Some((user_id, status)) = sqlx::query_as::<_, (i64, String)>(
+            "SELECT user_id, status FROM bot.faq_chat_sessions WHERE session_id = $1",
         )
-        .execute(&self.pool)
-        .await;
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(false);
+        };
+        crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+        if !privacy_write_allowed(&mut tx, user_id).await? {
+            sqlx::query("DELETE FROM bot.faq_chat_sessions WHERE session_id = $1")
+                .bind(session_id)
+                .execute(&mut *tx)
+                .await?;
+            tx.commit().await?;
+            return Ok(true);
+        }
+        if status == "active" {
+            let updated = sqlx::query(
+                "UPDATE bot.faq_chat_sessions SET status = 'closed' WHERE session_id = $1",
+            )
+            .bind(session_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            if updated != 1 {
+                return Ok(false);
+            }
+        }
+        tx.commit().await?;
+        Ok(true)
     }
 
-    /// (session_id, channel_id) aller abgelaufenen aktiven Sessions.
-    pub async fn expired_sessions(&self) -> Vec<(String, u64)> {
-        let rows = sqlx::query!(
+    /// (session_id, channel_id, user_id) aller abgelaufenen aktiven Sessions.
+    pub async fn expired_sessions(&self) -> Vec<(String, u64, u64)> {
+        let rows = sqlx::query(
             r#"
-            SELECT session_id, channel_id
+            SELECT session_id, channel_id, user_id
               FROM bot.faq_chat_sessions
              WHERE status = 'active' AND expires_at <= $1
             "#,
-            chrono::Utc::now(),
         )
+        .bind(chrono::Utc::now())
         .fetch_all(&self.pool)
         .await
         .unwrap_or_default();
         rows.into_iter()
-            .filter_map(|row| Some((row.session_id, i64_to_u64(row.channel_id, "channel_id")?)))
+            .filter_map(|row| {
+                use sqlx::Row;
+                let session_id: String = row.try_get("session_id").ok()?;
+                let channel_id: i64 = row.try_get("channel_id").ok()?;
+                let user_id: i64 = row.try_get("user_id").ok()?;
+                Some((
+                    session_id,
+                    i64_to_u64(channel_id, "channel_id")?,
+                    i64_to_u64(user_id, "user_id")?,
+                ))
+            })
             .collect()
     }
 }
@@ -343,9 +571,11 @@ pub trait FaqPort: Send + Sync {
         channel_id: u64,
         content: &str,
         components: Option<serde_json::Value>,
-    );
+    ) -> Result<u64, String>;
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
     async fn user_name(&self, user_id: u64) -> String;
+    async fn delete_channel(&self, channel_id: u64) -> Result<(), String>;
+    async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
     /// Postet eine Rich-Nachricht (Embed + Components) → message_id (fürs Panel).
     async fn post_rich(
         &self,
@@ -367,18 +597,14 @@ pub struct FaqChat {
     pub store: FaqStore,
     pub port: Arc<dyn FaqPort>,
     pub knowledge_url: String,
-    pub shadow_channel_id: Option<u64>,
+    shadow_channel_id: Option<u64>,
     answered_tickets: tokio::sync::Mutex<HashSet<u64>>,
+    chat_actions: std::sync::Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl FaqChat {
     pub fn new(pool: PgPool, port: Arc<dyn FaqPort>) -> Arc<Self> {
-        Self::new_with_config(
-            pool,
-            port,
-            knowledge_url_from_env(),
-            shadow_channel_from_env(),
-        )
+        Self::new_with_config(pool, port, knowledge_url_from_env(), Some(LOG_CHANNEL_ID))
     }
 
     fn new_with_config(
@@ -393,7 +619,19 @@ impl FaqChat {
             knowledge_url,
             shadow_channel_id,
             answered_tickets: tokio::sync::Mutex::new(HashSet::new()),
+            chat_actions: std::sync::Mutex::new(HashMap::new()),
         })
+    }
+
+    fn chat_action_lock(&self, channel_id: u64) -> Arc<tokio::sync::Mutex<()>> {
+        let mut actions = self.chat_actions.lock().expect("FAQ chat actions");
+        actions.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = actions.get(&channel_id).and_then(Weak::upgrade) {
+            return lock;
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        actions.insert(channel_id, Arc::downgrade(&lock));
+        lock
     }
 
     /// Postet/editiert das FAQ-Panel im [`PANEL_CHANNEL_ID`] (Port von
@@ -483,11 +721,139 @@ impl FaqChat {
         let _ = kv::delete(&self.store.pool, PANEL_KV_NS, LEGACY_KEY).await;
     }
 
-    async fn generate_answer(&self, session_id: &str, question: &str) -> String {
-        let history = self.store.recent_messages(session_id).await;
-        let question = knowledge_question_from_history(&history, question);
-        answer_text(ask_knowledge_at(&self.knowledge_url, &question).await)
+    async fn generate_stateless_answer(&self, question: &str) -> String {
+        answer_text(ask_knowledge_at(&self.knowledge_url, question).await)
             .unwrap_or_else(|| FAQ_NO_ANSWER.to_string())
+    }
+
+    async fn answer_statefully(
+        &self,
+        session_id: &str,
+        channel_id: u64,
+        question: &str,
+    ) -> Result<FaqMessageWrite, FaqAnswerDeliveryError> {
+        let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+        let mut tx = self.store.pool.begin().await?;
+        let Some(user_id) = sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM bot.faq_chat_sessions WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(FaqMessageWrite::Missing);
+        };
+        crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
+        if !privacy_write_allowed(&mut tx, user_id).await? {
+            return Ok(FaqMessageWrite::PrivacyBlocked);
+        }
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.faq_chat_sessions WHERE session_id = $1",
+        )
+        .bind(session_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        match status.as_deref() {
+            Some("active") => {}
+            Some(_) => return Ok(FaqMessageWrite::Inactive),
+            None => return Ok(FaqMessageWrite::Missing),
+        }
+        let inserted_user = sqlx::query(
+            "INSERT INTO bot.faq_chat_messages(session_id, role, content)
+             VALUES($1, 'user', $2)",
+        )
+        .bind(session_id)
+        .bind(question)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if inserted_user != 1 {
+            return Ok(FaqMessageWrite::Inactive);
+        }
+        let history = sqlx::query_as::<_, (String, String)>(
+            "SELECT role, content
+               FROM (
+                     SELECT role, content, id
+                       FROM bot.faq_chat_messages
+                      WHERE session_id = $1 AND role = 'user'
+                      ORDER BY id DESC
+                      LIMIT 5
+                    ) recent
+              ORDER BY id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let knowledge_question = knowledge_question_from_history(&history, question);
+        let answer = answer_text(ask_knowledge_at(&self.knowledge_url, &knowledge_question).await)
+            .unwrap_or_else(|| FAQ_NO_ANSWER.to_string());
+        let inserted = sqlx::query(
+            "INSERT INTO bot.faq_chat_messages(session_id, role, content)
+             VALUES($1, 'assistant', $2)",
+        )
+        .bind(session_id)
+        .bind(&answer)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        let updated = sqlx::query(
+            "UPDATE bot.faq_chat_sessions
+                SET last_activity_at = now()
+              WHERE session_id = $1 AND status = 'active'",
+        )
+        .bind(session_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if inserted != 1 || updated != 1 {
+            return Ok(FaqMessageWrite::Inactive);
+        }
+        let message_id = match tokio::time::timeout(
+            FAQ_DISCORD_IO_TIMEOUT,
+            self.port.send_message(channel_id, &answer, None),
+        )
+        .await
+        {
+            Ok(Ok(message_id)) => message_id,
+            Ok(Err(err)) => {
+                return Err(FaqAnswerDeliveryError::CleanupUncertain(format!(
+                    "answer delivery uncertain: {err}"
+                )))
+            }
+            Err(_) => {
+                return Err(FaqAnswerDeliveryError::CleanupUncertain(
+                    "answer delivery timeout".to_string(),
+                ))
+            }
+        };
+        if let Err(err) = tx.commit().await {
+            tracing::error!(channel_id, message_id, %err, "FAQ: Antwort-Commit unsicher; sichtbare Antwort wird nicht destruktiv entfernt");
+            return Err(FaqAnswerDeliveryError::CleanupUncertain(err.to_string()));
+        }
+        Ok(FaqMessageWrite::Stored)
+    }
+
+    async fn discard_created_channel(&self, channel_id: u64) -> bool {
+        match tokio::time::timeout(
+            FAQ_DISCORD_CLEANUP_TIMEOUT,
+            self.port.delete_channel(channel_id),
+        )
+        .await
+        {
+            Ok(Ok(())) => true,
+            Ok(Err(err)) => {
+                tracing::warn!(%err, channel_id, "FAQ: Verwaisten Kanal konnte nicht entfernt werden");
+                false
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id,
+                    timeout_secs = FAQ_DISCORD_CLEANUP_TIMEOUT.as_secs(),
+                    "FAQ: Kanal-Cleanup hat Zeitlimit ueberschritten"
+                );
+                false
+            }
+        }
     }
 
     async fn ticket_auto_answer(&self, problem: &str, _author_id: u64) -> TicketAutoOutcome {
@@ -497,14 +863,57 @@ impl FaqChat {
     /// Frage im FAQ-Kanal beantworten (vom Message-Subscriber gerufen).
     pub async fn handle_chat_message(
         self: &Arc<Self>,
+        guild_id: u64,
         channel_id: u64,
         author_id: u64,
         author_name: &str,
         content: &str,
     ) -> bool {
-        let Some((session_id, owner_id)) = self.store.active_session_in_channel(channel_id).await
-        else {
-            return false;
+        let action = self.chat_action_lock(channel_id);
+        let _guard = action.lock().await;
+        self.handle_chat_message_inner(guild_id, channel_id, author_id, author_name, content)
+            .await
+    }
+
+    async fn handle_chat_message_inner(
+        self: &Arc<Self>,
+        guild_id: u64,
+        channel_id: u64,
+        author_id: u64,
+        _author_name: &str,
+        content: &str,
+    ) -> bool {
+        let (session_id, owner_id) = match self
+            .store
+            .active_session_in_channel_checked(channel_id)
+            .await
+        {
+            Ok(Some((session_id, owner_id, status))) if status == "active" => {
+                (session_id, owner_id)
+            }
+            Ok(Some(_)) => return true,
+            Ok(None) => {
+                if self.port.channel_category(guild_id, channel_id).await != Some(FAQ_CATEGORY_ID) {
+                    return false;
+                }
+                let question = content.trim();
+                if !question.is_empty() {
+                    let answer = self.generate_stateless_answer(question).await;
+                    let _ = self.port.send_message(channel_id, &answer, None).await;
+                }
+                return true;
+            }
+            Err(err) => {
+                tracing::warn!(%err, channel_id, "FAQ: Session konnte nicht sicher geprueft werden");
+                if self.port.channel_category(guild_id, channel_id).await != Some(FAQ_CATEGORY_ID) {
+                    return false;
+                }
+                let _ = self
+                    .port
+                    .send_message(channel_id, FAQ_MESSAGE_ERROR_TEXT, None)
+                    .await;
+                return true;
+            }
         };
         if author_id != owner_id {
             return true; // Kanal gehört dem FAQ-System, aber fremde Nachricht
@@ -513,19 +922,37 @@ impl FaqChat {
         if question.is_empty() {
             return true;
         }
-        self.store.add_message(&session_id, "user", question).await;
-        self.port
-            .send_message(
-                LOG_CHANNEL_ID,
-                &format!("❓ FAQ-Frage von **{author_name}** (<#{channel_id}>): {question}"),
-                None,
-            )
-            .await;
-        let answer = self.generate_answer(&session_id, question).await;
-        self.store
-            .add_message(&session_id, "assistant", &answer)
-            .await;
-        self.port.send_message(channel_id, &answer, None).await;
+        match self
+            .answer_statefully(&session_id, channel_id, question)
+            .await
+        {
+            Ok(FaqMessageWrite::Stored) => {}
+            Ok(FaqMessageWrite::PrivacyBlocked | FaqMessageWrite::Missing) => {
+                let stateless_answer = self.generate_stateless_answer(question).await;
+                let _ = self
+                    .port
+                    .send_message(channel_id, &stateless_answer, None)
+                    .await;
+                return true;
+            }
+            Ok(FaqMessageWrite::Inactive) => return true,
+            Err(FaqAnswerDeliveryError::CleanupUncertain(err)) => {
+                tracing::error!(%err, author_id, "FAQ: Antwort-Cleanup ist unsicher");
+                let _ = self
+                    .port
+                    .send_message(channel_id, FAQ_MESSAGE_UNCERTAIN_TEXT, None)
+                    .await;
+                return true;
+            }
+            Err(err) => {
+                tracing::warn!(%err, author_id, "FAQ: Assistant-Nachricht konnte nicht gespeichert werden");
+                let _ = self
+                    .port
+                    .send_message(channel_id, FAQ_MESSAGE_ERROR_TEXT, None)
+                    .await;
+                return true;
+            }
+        }
         true
     }
 
@@ -556,11 +983,11 @@ impl FaqChat {
         if problem.is_empty() {
             return;
         }
+        let question_chars = problem.chars().count();
         let Some(shadow_channel_id) = self.shadow_channel_id else {
-            let question = knowledge_client::safe_log_question(problem);
             let (verdict, confidence, absent) = ("uncertain", "none", "absent");
             tracing::warn!(
-                question = %question,
+                question_chars,
                 verdict = %verdict,
                 confidence = %confidence,
                 retrieval_score = %absent,
@@ -576,10 +1003,9 @@ impl FaqChat {
         // Fehlkonfiguration: Shadow-Kanal == Ticket-Kanal. Ein Post würde die Bot-Antwort
         // sichtbar ins Mitglieder-Ticket schreiben. Fail-closed: kein Knowledge, kein Post.
         if shadow_channel_id == channel_id {
-            let question = knowledge_client::safe_log_question(problem);
             let (verdict, confidence, absent) = ("uncertain", "none", "absent");
             tracing::warn!(
-                question = %question,
+                question_chars,
                 verdict = %verdict,
                 confidence = %confidence,
                 retrieval_score = %absent,
@@ -588,6 +1014,23 @@ impl FaqChat {
                 error_class = %SHADOW_EQUALS_TICKET,
                 channel_id,
                 author_id,
+                "FAQ-Ticket-Auto-Hilfe fail-closed"
+            );
+            return;
+        }
+        if shadow_channel_id != LOG_CHANNEL_ID {
+            let (verdict, confidence, absent) = ("uncertain", "none", "absent");
+            tracing::warn!(
+                question_chars,
+                verdict = %verdict,
+                confidence = %confidence,
+                retrieval_score = %absent,
+                reason = %SHADOW_NOT_ALLOWLISTED,
+                sources = %absent,
+                error_class = %SHADOW_NOT_ALLOWLISTED,
+                channel_id,
+                author_id,
+                shadow_channel_id,
                 "FAQ-Ticket-Auto-Hilfe fail-closed"
             );
             return;
@@ -602,22 +1045,153 @@ impl FaqChat {
         let decision = outcome.decision;
         let answer = outcome.answer.unwrap_or_else(|| FAQ_NO_ANSWER.to_string());
         let content = shadow_ticket_message(channel_id, decision, &answer);
-        self.port
+        let _ = self
+            .port
             .send_message(shadow_channel_id, &content, None)
             .await;
     }
 
     /// Abgelaufene Sessions schließen (1-h-Loop).
     pub async fn cleanup_expired(&self) {
-        for (session_id, channel_id) in self.store.expired_sessions().await {
-            self.store.close_session(&session_id).await;
-            self.port
-                .send_message(
-                    channel_id,
-                    "⏱️ Chat wurde automatisch geschlossen (24h Timeout).",
-                    None,
+        for (session_id, channel_id, user_id) in self.store.expired_sessions().await {
+            let chat_action = self.chat_action_lock(channel_id);
+            let _chat_guard = chat_action.lock().await;
+            let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+            let mut tx = match self.store.pool.begin().await {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-Transaktion konnte nicht gestartet werden");
+                    continue;
+                }
+            };
+            let db_user_id = match u64_to_i64(user_id, "user_id") {
+                Ok(user_id) => user_id,
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-User-ID ungueltig");
+                    continue;
+                }
+            };
+            let db_channel_id = match u64_to_i64(channel_id, "channel_id") {
+                Ok(channel_id) => channel_id,
+                Err(err) => {
+                    tracing::warn!(%err, channel_id, "FAQ: Timeout-Channel-ID ungueltig");
+                    continue;
+                }
+            };
+            if let Err(err) = crate::privacy::lock_user_privacy(&mut tx, db_user_id).await {
+                tracing::warn!(%err, user_id, "FAQ: Timeout-Privacy-Lock fehlgeschlagen");
+                continue;
+            }
+            match privacy_write_allowed(&mut tx, db_user_id).await {
+                Ok(false) => {
+                    if let Err(err) = sqlx::query(
+                        "DELETE FROM bot.faq_chat_sessions WHERE session_id = $1 AND user_id = $2",
+                    )
+                    .bind(&session_id)
+                    .bind(db_user_id)
+                    .execute(&mut *tx)
+                    .await
+                    {
+                        tracing::warn!(%err, user_id, "FAQ: Tombstone-Session konnte nicht entfernt werden");
+                        continue;
+                    }
+                    if let Err(err) = tx.commit().await {
+                        tracing::warn!(%err, user_id, "FAQ: Tombstone-Session-Loeschung konnte nicht abgeschlossen werden");
+                    }
+                    continue;
+                }
+                Ok(true) => {}
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-Privacy-Status konnte nicht geprueft werden");
+                    continue;
+                }
+            }
+            let updated = match sqlx::query(
+                "UPDATE bot.faq_chat_sessions
+                    SET status = 'closed'
+                  WHERE session_id = $1 AND user_id = $2 AND status = 'active'",
+            )
+            .bind(&session_id)
+            .bind(db_user_id)
+            .execute(&mut *tx)
+            .await
+            {
+                Ok(result) => result.rows_affected(),
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-Session konnte nicht geschlossen werden");
+                    continue;
+                }
+            };
+            if updated != 1 {
+                continue;
+            }
+            if let Err(err) = tx.commit().await {
+                tracing::warn!(%err, user_id, "FAQ: Timeout-Transaktion konnte nicht abgeschlossen werden");
+            }
+
+            // Erst nach einem frischen Read-back unter dem Privacy-Lock senden. So kann
+            // weder ein unklarer Commit eine sichtbare Doppel-Nachricht erzeugen noch
+            // ein gleichzeitig laufendes Opt-out zwischen Pruefung und Nachricht geraten.
+            let mut verify_tx = match self.store.pool.begin().await {
+                Ok(tx) => tx,
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-Abschluss konnte nicht verifiziert werden");
+                    continue;
+                }
+            };
+            if let Err(err) = crate::privacy::lock_user_privacy(&mut verify_tx, db_user_id).await {
+                tracing::warn!(%err, user_id, "FAQ: Timeout-Verifikation konnte Privacy-Lock nicht setzen");
+                continue;
+            }
+            let may_notify = match privacy_write_allowed(&mut verify_tx, db_user_id).await {
+                Ok(true) => match sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM bot.faq_chat_sessions
+                          WHERE session_id = $1
+                            AND user_id = $2
+                            AND channel_id = $3
+                            AND status = 'closed'
+                     )",
                 )
-                .await;
+                .bind(&session_id)
+                .bind(db_user_id)
+                .bind(db_channel_id)
+                .fetch_one(&mut *verify_tx)
+                .await
+                {
+                    Ok(closed) => closed,
+                    Err(err) => {
+                        tracing::warn!(%err, user_id, "FAQ: Timeout-Abschluss konnte nicht gelesen werden");
+                        false
+                    }
+                },
+                Ok(false) => false,
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "FAQ: Timeout-Privacy-Status konnte nicht erneut geprueft werden");
+                    false
+                }
+            };
+            if !may_notify {
+                continue;
+            }
+            match tokio::time::timeout(
+                FAQ_DISCORD_IO_TIMEOUT,
+                self.port
+                    .send_message(channel_id, FAQ_TIMEOUT_PENDING_TEXT, None),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, user_id, channel_id, "FAQ: Timeout-Nachricht-Zustellung unsicher; Session ist geschlossen");
+                }
+                Err(_) => {
+                    tracing::warn!(user_id, channel_id, timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(), "FAQ: Timeout-Nachricht hat Zeitlimit ueberschritten; Session ist geschlossen");
+                }
+            }
+            if let Err(err) = verify_tx.commit().await {
+                tracing::warn!(%err, user_id, "FAQ: Read-only Timeout-Verifikation konnte nicht abgeschlossen werden");
+            }
         }
     }
 }
@@ -644,29 +1218,75 @@ impl InteractionHandler for FaqHandler {
             if interaction.guild_id == 0 {
                 return BridgeReply::ephemeral_text("❌ Das funktioniert nur auf dem Server.");
             }
-            if let Some((_, channel_id)) = self
+            let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
+            let (db_user_id, mut tx) = match self
                 .faq
                 .store
-                .active_session_of_user(interaction.user_id)
+                .begin_session_action(interaction.user_id)
                 .await
             {
+                Ok(Some(action)) => action,
+                Ok(None) => return BridgeReply::ephemeral_text(FAQ_PRIVACY_BLOCK_TEXT),
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Privacy-Status konnte nicht geprüft werden");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+            };
+            let active = match active_session_of_user_tx(&mut tx, db_user_id).await {
+                Ok(active) => active,
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Aktive Session konnte nicht geprüft werden");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+            };
+            if let Some((_, channel_id)) = active {
+                if let Err(err) = tx.commit().await {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session-Prüfung konnte nicht abgeschlossen werden");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
                 return BridgeReply::ephemeral_text(format!(
                     "❌ Du hast bereits einen aktiven Chat: <#{channel_id}>"
                 ));
             }
-            let user_name = self.faq.port.user_name(interaction.user_id).await;
-            let channel_name = format!("faq-{}", user_name.to_lowercase().replace(' ', "-"));
-            let channel_id = match self
-                .faq
-                .port
-                .create_faq_channel(interaction.guild_id, interaction.user_id, &channel_name)
-                .await
+            let user_name = match tokio::time::timeout(
+                FAQ_DISCORD_IO_TIMEOUT,
+                self.faq.port.user_name(interaction.user_id),
+            )
+            .await
             {
-                Ok(id) => id,
-                Err(err) => {
-                    return BridgeReply::ephemeral_text(format!(
-                        "❌ Konnte keinen Chat erstellen: {err}"
-                    ))
+                Ok(user_name) => user_name,
+                Err(_) => {
+                    tracing::warn!(
+                        user_id = interaction.user_id,
+                        timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(),
+                        "FAQ: Username-Lookup hat Zeitlimit ueberschritten"
+                    );
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+            };
+            let channel_name = format!("faq-{}", user_name.to_lowercase().replace(' ', "-"));
+            let channel_id = match tokio::time::timeout(
+                FAQ_DISCORD_IO_TIMEOUT,
+                self.faq.port.create_faq_channel(
+                    interaction.guild_id,
+                    interaction.user_id,
+                    &channel_name,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(id)) => id,
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Kanalanlage fehlgeschlagen oder unsicher");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT);
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        user_id = interaction.user_id,
+                        timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(),
+                        "FAQ: Kanalanlage hat Zeitlimit ueberschritten; Zustand unsicher"
+                    );
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT);
                 }
             };
             let session_id = format!(
@@ -674,16 +1294,54 @@ impl InteractionHandler for FaqHandler {
                 interaction.user_id,
                 chrono::Utc::now().format("%Y%m%d%H%M%S")
             );
-            self.faq
-                .store
-                .create_session(
-                    session_id.clone(),
-                    interaction.user_id,
-                    user_name.clone(),
-                    channel_id,
-                    interaction.guild_id,
-                )
-                .await;
+            let db_channel_id = match u64_to_i64(channel_id, "channel_id") {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, channel_id, "FAQ: Kanal-ID ist ungueltig");
+                    drop(tx);
+                    return BridgeReply::ephemeral_text(
+                        if self.faq.discard_created_channel(channel_id).await {
+                            FAQ_SESSION_ERROR_TEXT
+                        } else {
+                            FAQ_SESSION_UNCERTAIN_TEXT
+                        },
+                    );
+                }
+            };
+            let db_guild_id = match u64_to_i64(interaction.guild_id, "guild_id") {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, guild_id = interaction.guild_id, "FAQ: Guild-ID ist ungueltig");
+                    drop(tx);
+                    return BridgeReply::ephemeral_text(
+                        if self.faq.discard_created_channel(channel_id).await {
+                            FAQ_SESSION_ERROR_TEXT
+                        } else {
+                            FAQ_SESSION_UNCERTAIN_TEXT
+                        },
+                    );
+                }
+            };
+            if let Err(err) = create_session_tx(
+                &mut tx,
+                &session_id,
+                db_user_id,
+                &user_name,
+                db_channel_id,
+                db_guild_id,
+            )
+            .await
+            {
+                tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session konnte nicht gespeichert werden");
+                drop(tx);
+                return BridgeReply::ephemeral_text(
+                    if self.faq.discard_created_channel(channel_id).await {
+                        FAQ_SESSION_ERROR_TEXT
+                    } else {
+                        FAQ_SESSION_UNCERTAIN_TEXT
+                    },
+                );
+            }
             let welcome = format!(
                 "👋 **{user_name}**, willkommen zum Concierge-Chat!\n\n\
 Stell mir Fragen zum Server, zu Kanälen, Rollen, Bots oder Deadlock.\n\
@@ -695,10 +1353,76 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
                 "type": 2, "style": 4, "label": "Chat beenden",
                 "custom_id": format!("faq_chat:close:{session_id}"),
             }]}]);
-            self.faq
-                .port
-                .send_message(channel_id, &welcome, Some(close_button))
-                .await;
+            match tokio::time::timeout(
+                FAQ_DISCORD_IO_TIMEOUT,
+                self.faq
+                    .port
+                    .send_message(channel_id, &welcome, Some(close_button)),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, channel_id, "FAQ: Willkommen-Zustellung fehlgeschlagen oder unsicher");
+                    drop(tx);
+                    return BridgeReply::ephemeral_text(
+                        if self.faq.discard_created_channel(channel_id).await {
+                            FAQ_SESSION_ERROR_TEXT
+                        } else {
+                            FAQ_SESSION_UNCERTAIN_TEXT
+                        },
+                    );
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        user_id = interaction.user_id,
+                        channel_id,
+                        timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(),
+                        "FAQ: Willkommen-Zustellung hat Zeitlimit ueberschritten"
+                    );
+                    drop(tx);
+                    return BridgeReply::ephemeral_text(
+                        if self.faq.discard_created_channel(channel_id).await {
+                            FAQ_SESSION_ERROR_TEXT
+                        } else {
+                            FAQ_SESSION_UNCERTAIN_TEXT
+                        },
+                    );
+                }
+            }
+            if let Err(err) = tx.commit().await {
+                tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session-Transaktion konnte nicht abgeschlossen werden");
+                let resolution = match reconcile_faq_session_commit(
+                    &self.faq.store.pool,
+                    &session_id,
+                    db_user_id,
+                    db_channel_id,
+                    db_guild_id,
+                )
+                .await
+                {
+                    Ok(resolution) => resolution,
+                    Err(reconcile_err) => {
+                        tracing::error!(%reconcile_err, user_id = interaction.user_id, channel_id, "FAQ: Session nach Commit-Fehler nicht sicher verifizierbar");
+                        FaqSessionCommitResolution::Uncertain
+                    }
+                };
+                return match resolution {
+                    FaqSessionCommitResolution::Committed => BridgeReply::ephemeral_text(format!(
+                        "✅ Dein Concierge-Chat wurde erstellt: <#{channel_id}>\n\nStell deine Frage(n) dort."
+                    )),
+                    FaqSessionCommitResolution::RolledBack => BridgeReply::ephemeral_text(
+                        if self.faq.discard_created_channel(channel_id).await {
+                            FAQ_SESSION_ERROR_TEXT
+                        } else {
+                            FAQ_SESSION_UNCERTAIN_TEXT
+                        },
+                    ),
+                    FaqSessionCommitResolution::Uncertain => {
+                        BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT)
+                    }
+                };
+            }
             return BridgeReply::ephemeral_text(format!(
                 "✅ Dein Concierge-Chat wurde erstellt: <#{channel_id}>\n\nStell deine Frage(n) dort."
             ));
@@ -706,23 +1430,30 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
 
         // faq_chat:close:{session_id} (Original-View nutzt faq_chat:close —
         // beide Formen werden über das Präfix gematcht)
+        let chat_action = self.faq.chat_action_lock(interaction.channel_id);
+        let _chat_guard = chat_action.lock().await;
         let session_id = interaction
             .custom_id
             .strip_prefix("faq_chat:close")
             .map(|rest| rest.trim_start_matches(':').to_string())
             .unwrap_or_default();
         // Session bestimmen: über die ID im Button, sonst über den Kanal
-        let session = if session_id.is_empty() {
-            self.faq
-                .store
-                .active_session_in_channel(interaction.channel_id)
-                .await
-        } else {
-            self.faq
-                .store
-                .active_session_in_channel(interaction.channel_id)
-                .await
-                .filter(|(sid, _)| *sid == session_id)
+        let session = match self
+            .faq
+            .store
+            .active_session_in_channel_checked(interaction.channel_id)
+            .await
+        {
+            Ok(Some((sid, owner_id, status)))
+                if status == "active" && (session_id.is_empty() || sid == session_id) =>
+            {
+                Some((sid, owner_id))
+            }
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session fuer Close konnte nicht geprueft werden");
+                return BridgeReply::ephemeral_text(FAQ_CLOSE_ERROR_TEXT);
+            }
         };
         let Some((session_id, owner_id)) = session else {
             return BridgeReply::ephemeral_text("❌ Session nicht gefunden.");
@@ -730,8 +1461,16 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
         if interaction.user_id != owner_id {
             return BridgeReply::ephemeral_text("❌ Das ist nicht dein Chat.");
         }
-        self.faq.store.close_session(&session_id).await;
-        self.faq
+        match self.faq.store.close_session(&session_id).await {
+            Ok(true) => {}
+            Ok(false) => return BridgeReply::ephemeral_text("❌ Session nicht gefunden."),
+            Err(err) => {
+                tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session konnte nicht geschlossen werden");
+                return BridgeReply::ephemeral_text(FAQ_CLOSE_ERROR_TEXT);
+            }
+        }
+        let _ = self
+            .faq
             .port
             .send_message(interaction.channel_id, "🛑 Chat beendet.", None)
             .await;
@@ -790,6 +1529,7 @@ pub fn spawn(
                         // Bot-Nachrichten filtert bereits das Gateway
                         let handled = faq
                             .handle_chat_message(
+                                event.guild_id.unwrap_or_default(),
                                 event.channel_id,
                                 event.author_id,
                                 &event.author_display_name,
@@ -826,6 +1566,65 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[cfg(feature = "testing")]
+    async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
+        let query_pattern = format!("%{query_fragment}%");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND pid <> pg_backend_pid()
+                           AND state = 'active'
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE $1
+                           AND ($2::TEXT IS NULL OR wait_event = $2)
+                    )",
+                )
+                .bind(&query_pattern)
+                .bind(wait_event)
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DB-Lock-Wait fuer {query_fragment} nicht sichtbar"));
+    }
+
+    #[cfg(feature = "testing")]
+    async fn wait_for_db_lock_count(pool: &PgPool, count: i64) {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*)
+                       FROM pg_stat_activity
+                      WHERE datname = current_database()
+                        AND pid <> pg_backend_pid()
+                        AND state = 'active'
+                        AND wait_event_type = 'Lock'
+                        AND wait_event = 'advisory'
+                        AND query LIKE '%pg_advisory_xact_lock%'",
+                )
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting >= count {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{count} wartende Privacy-Locks nicht sichtbar"));
+    }
     use crate::knowledge_client::test_logging::LogCapture;
     use std::sync::atomic::{AtomicBool, Ordering};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -834,6 +1633,11 @@ mod tests {
         sqlx::postgres::PgPoolOptions::new()
             .connect_lazy("postgres://faq-ticket-test.invalid/deadlock")
             .expect("lazy pg pool")
+    }
+
+    #[test]
+    fn knowledge_timeout_ist_acht_sekunden() {
+        assert_eq!(KNOWLEDGE_TIMEOUT, Duration::from_secs(8));
     }
 
     async fn knowledge_server(
@@ -869,6 +1673,85 @@ mod tests {
             let _ = stream.write_all(response.as_bytes()).await;
         });
         (format!("http://{addr}"), handle, called)
+    }
+
+    #[cfg(feature = "testing")]
+    async fn gated_two_response_knowledge_server(
+        first_body: &'static str,
+        second_body: &'static str,
+    ) -> (
+        String,
+        Arc<tokio::sync::Notify>,
+        Arc<tokio::sync::Notify>,
+        Arc<std::sync::Mutex<Vec<String>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let addr = listener.local_addr().expect("local addr");
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let request_bodies = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let server_started = started.clone();
+        let server_release = release.clone();
+        let server_request_bodies = request_bodies.clone();
+        let handle = tokio::spawn(async move {
+            for (index, body) in [first_body, second_body].into_iter().enumerate() {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    return;
+                };
+                let request_body = read_http_request_body(&mut stream).await;
+                server_request_bodies.lock().unwrap().push(request_body);
+                if index == 0 {
+                    server_started.notify_one();
+                    server_release.notified().await;
+                }
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = stream.write_all(response.as_bytes()).await;
+            }
+        });
+        (
+            format!("http://{addr}"),
+            started,
+            release,
+            request_bodies,
+            handle,
+        )
+    }
+
+    #[cfg(feature = "testing")]
+    async fn read_http_request_body(stream: &mut tokio::net::TcpStream) -> String {
+        let mut request = Vec::new();
+        let header_end = loop {
+            if let Some(index) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                break index + 4;
+            }
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).await.expect("read request headers");
+            assert!(read > 0, "request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+        };
+        let headers = std::str::from_utf8(&request[..header_end]).expect("utf8 request headers");
+        let content_length = headers
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find_map(|(name, value)| {
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("content length"))
+            })
+            .expect("content-length header");
+        while request.len() < header_end + content_length {
+            let mut chunk = [0_u8; 1024];
+            let read = stream.read(&mut chunk).await.expect("read request body");
+            assert!(read > 0, "request ended before body");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        String::from_utf8(request[header_end..header_end + content_length].to_vec())
+            .expect("utf8 request body")
     }
 
     #[test]
@@ -923,6 +1806,26 @@ mod tests {
         assert!(message.contains("Antwort"));
     }
 
+    #[tokio::test]
+    async fn produktionskonfiguration_nutzt_fest_den_log_kanal() {
+        let faq = FaqChat::new(lazy_pool(), ticket_port());
+
+        assert_eq!(faq.shadow_channel_id, Some(LOG_CHANNEL_ID));
+    }
+
+    #[test]
+    fn produktionskonfiguration_ignoriert_knowledge_url_override() {
+        let previous = std::env::var_os("DL_KNOWLEDGE_URL");
+        std::env::set_var("DL_KNOWLEDGE_URL", "http://192.0.2.1:8896");
+        let configured = knowledge_url_from_env();
+        match previous {
+            Some(value) => std::env::set_var("DL_KNOWLEDGE_URL", value),
+            None => std::env::remove_var("DL_KNOWLEDGE_URL"),
+        }
+
+        assert_eq!(configured, DEFAULT_KNOWLEDGE_URL);
+    }
+
     #[cfg(feature = "testing")]
     #[tokio::test]
     async fn session_lifecycle() {
@@ -933,9 +1836,10 @@ mod tests {
             pool: db.pool().clone(),
         };
         store.ensure_schema().await.expect("schema");
-        store
+        assert!(store
             .create_session("s1".into(), 42, "Nani".into(), 100, 1)
-            .await;
+            .await
+            .expect("create session"));
         assert_eq!(
             store.active_session_of_user(42).await,
             Some(("s1".to_string(), 100))
@@ -946,15 +1850,227 @@ mod tests {
         );
         // Verlauf: nur die letzten 10, chronologisch
         for i in 0..12 {
-            store.add_message("s1", "user", &format!("m{i}")).await;
+            assert_eq!(
+                store
+                    .add_message("s1", "user", &format!("m{i}"))
+                    .await
+                    .expect("add message"),
+                FaqMessageWrite::Stored
+            );
         }
         let recent = store.recent_messages("s1").await;
         assert_eq!(recent.len(), 10);
         assert_eq!(recent[0].1, "m2");
         assert_eq!(recent[9].1, "m11");
-        store.close_session("s1").await;
+        assert!(store.close_session("s1").await.expect("close session"));
         assert!(store.active_session_of_user(42).await.is_none());
         assert!(store.expired_sessions().await.is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_timeout_mit_tombstone_loescht_ohne_proaktive_nachricht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = panel_port();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "UPDATE bot.faq_chat_sessions
+                SET expires_at = now() - interval '1 minute'
+              WHERE session_id = 's1'",
+        )
+        .execute(db.pool())
+        .await
+        .expect("expire session");
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("privacy tombstone");
+
+        faq.cleanup_expired().await;
+
+        assert!(port.sent.lock().unwrap().is_empty());
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sessions");
+        assert_eq!(sessions, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_timeout_nachricht_wird_erst_nach_bestaetigtem_commit_gesendet() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = panel_port();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "UPDATE bot.faq_chat_sessions
+                SET expires_at = now() - interval '1 minute'
+              WHERE session_id = 's1'",
+        )
+        .execute(db.pool())
+        .await
+        .expect("expire session");
+        sqlx::query(
+            "CREATE FUNCTION bot.faq_timeout_test_fail_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'faq timeout deferred failure'; END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER faq_timeout_test_fail_commit_trigger
+             AFTER UPDATE ON bot.faq_chat_sessions
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.faq_timeout_test_fail_commit()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+
+        faq.cleanup_expired().await;
+
+        assert!(port.sent.lock().unwrap().is_empty());
+        assert!(port.deleted_messages.lock().unwrap().is_empty());
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.faq_chat_sessions WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("status");
+        assert_eq!(status, "active");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_session_write_wartet_hinter_privacy_delete_und_bleibt_geloescht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = FaqStore { pool: pool.clone() };
+        assert!(store
+            .create_session("vorher".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("seed session"));
+        let mut blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query_scalar::<_, String>(
+            "SELECT session_id FROM bot.faq_chat_sessions WHERE session_id = 'vorher' FOR UPDATE",
+        )
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("session row lock");
+
+        let erase_pool = pool.clone();
+        let erase_task = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(
+            &pool,
+            "DELETE FROM bot.faq_chat_sessions",
+            Some("transactionid"),
+        )
+        .await;
+
+        let write_store = FaqStore { pool: pool.clone() };
+        let write_task = tokio::spawn(async move {
+            write_store
+                .create_session("nachher".into(), 42, "Nani".into(), 101, 1)
+                .await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        blocker.commit().await.expect("release session row");
+
+        erase_task
+            .await
+            .expect("erase task")
+            .expect("privacy delete");
+        assert!(!write_task.await.expect("write task").expect("write result"));
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("sessions");
+        assert_eq!(sessions, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn privacy_delete_wartet_hinter_faq_message_und_loescht_es() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let store = FaqStore { pool: pool.clone() };
+        assert!(store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("seed session"));
+        let mut blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query_scalar::<_, String>(
+            "SELECT session_id FROM bot.faq_chat_sessions WHERE session_id = 's1' FOR UPDATE",
+        )
+        .fetch_one(&mut *blocker)
+        .await
+        .expect("session row lock");
+
+        let write_store = FaqStore { pool: pool.clone() };
+        let write_task =
+            tokio::spawn(async move { write_store.add_message("s1", "user", "laufend").await });
+        wait_for_db_lock(
+            &pool,
+            "INSERT INTO bot.faq_chat_messages",
+            Some("transactionid"),
+        )
+        .await;
+
+        let erase_pool = pool.clone();
+        let erase_task = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        blocker.commit().await.expect("release session row");
+
+        assert_eq!(
+            write_task.await.expect("write task").expect("write result"),
+            FaqMessageWrite::Stored
+        );
+        erase_task
+            .await
+            .expect("erase task")
+            .expect("privacy delete");
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("sessions");
+        let messages = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_messages WHERE session_id = 's1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("messages");
+        assert_eq!((sessions, messages), (0, 0));
     }
 
     // Port-Mock, der Panel-Post/-Edit/-Delete zählt.
@@ -962,13 +2078,27 @@ mod tests {
         posts: std::sync::Mutex<u32>,
         edits: std::sync::Mutex<u32>,
         deleted: std::sync::Mutex<Vec<u64>>,
+        deleted_channels: std::sync::Mutex<Vec<u64>>,
+        deleted_messages: std::sync::Mutex<Vec<(u64, u64)>>,
+        delete_message_fails: std::sync::Mutex<bool>,
+        faq_channels: std::sync::Mutex<Vec<u64>>,
+        channel_started: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
+        channel_release: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         sent: std::sync::Mutex<Vec<(u64, String)>>,
         category: Option<u64>,
     }
 
     #[async_trait::async_trait]
     impl FaqPort for MockPanelPort {
-        async fn create_faq_channel(&self, _g: u64, _u: u64, _n: &str) -> Result<u64, String> {
+        async fn create_faq_channel(&self, _g: u64, user_id: u64, _n: &str) -> Result<u64, String> {
+            if let Some(started) = self.channel_started.lock().unwrap().clone() {
+                started.notify_one();
+            }
+            let release = self.channel_release.lock().unwrap().take();
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            self.faq_channels.lock().unwrap().push(user_id);
             Ok(1)
         }
         async fn send_message(
@@ -976,17 +2106,30 @@ mod tests {
             channel_id: u64,
             text: &str,
             _comp: Option<serde_json::Value>,
-        ) {
-            self.sent
-                .lock()
-                .unwrap()
-                .push((channel_id, text.to_string()));
+        ) -> Result<u64, String> {
+            let mut sent = self.sent.lock().unwrap();
+            sent.push((channel_id, text.to_string()));
+            Ok(sent.len() as u64)
         }
         async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
             self.category
         }
         async fn user_name(&self, _u: u64) -> String {
             "U".to_string()
+        }
+        async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+            self.deleted_channels.lock().unwrap().push(channel_id);
+            Ok(())
+        }
+        async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
+            self.deleted_messages
+                .lock()
+                .unwrap()
+                .push((channel_id, message_id));
+            if *self.delete_message_fails.lock().unwrap() {
+                return Err("delete failed".to_string());
+            }
+            Ok(())
         }
         async fn post_rich(
             &self,
@@ -1016,6 +2159,12 @@ mod tests {
             posts: std::sync::Mutex::new(0),
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
+            deleted_channels: std::sync::Mutex::new(Vec::new()),
+            deleted_messages: std::sync::Mutex::new(Vec::new()),
+            delete_message_fails: std::sync::Mutex::new(false),
+            faq_channels: std::sync::Mutex::new(Vec::new()),
+            channel_started: std::sync::Mutex::new(None),
+            channel_release: std::sync::Mutex::new(None),
             sent: std::sync::Mutex::new(Vec::new()),
             category: None,
         })
@@ -1026,9 +2175,43 @@ mod tests {
             posts: std::sync::Mutex::new(0),
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
+            deleted_channels: std::sync::Mutex::new(Vec::new()),
+            deleted_messages: std::sync::Mutex::new(Vec::new()),
+            delete_message_fails: std::sync::Mutex::new(false),
+            faq_channels: std::sync::Mutex::new(Vec::new()),
+            channel_started: std::sync::Mutex::new(None),
+            channel_release: std::sync::Mutex::new(None),
             sent: std::sync::Mutex::new(Vec::new()),
             category: Some(TICKET_AUTO_HELP_CATEGORY_ID),
         })
+    }
+
+    #[cfg(feature = "testing")]
+    fn faq_category_port() -> Arc<MockPanelPort> {
+        Arc::new(MockPanelPort {
+            posts: std::sync::Mutex::new(0),
+            edits: std::sync::Mutex::new(0),
+            deleted: std::sync::Mutex::new(Vec::new()),
+            deleted_channels: std::sync::Mutex::new(Vec::new()),
+            deleted_messages: std::sync::Mutex::new(Vec::new()),
+            delete_message_fails: std::sync::Mutex::new(false),
+            faq_channels: std::sync::Mutex::new(Vec::new()),
+            channel_started: std::sync::Mutex::new(None),
+            channel_release: std::sync::Mutex::new(None),
+            sent: std::sync::Mutex::new(Vec::new()),
+            category: Some(FAQ_CATEGORY_ID),
+        })
+    }
+
+    #[cfg(feature = "testing")]
+    fn block_faq_channel_creation(
+        port: &MockPanelPort,
+    ) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
+        let started = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *port.channel_started.lock().unwrap() = Some(started.clone());
+        *port.channel_release.lock().unwrap() = Some(release.clone());
+        (started, release)
     }
 
     #[cfg(feature = "testing")]
@@ -1036,6 +2219,793 @@ mod tests {
         dl_central_db::testing::test_pool()
             .await
             .expect("test_pool")
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_mit_privacy_tombstone_erstellt_keinen_discord_kanal() {
+        let db = db_with_kv().await;
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("privacy tombstone");
+        let port = panel_port();
+        let handler = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "faq".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.content.unwrap().contains("Datenschutz-Opt-out"));
+        assert!(port.faq_channels.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn faq_start_bei_privacy_db_fehler_erstellt_keinen_discord_kanal() {
+        let port = ticket_port();
+        let handler = FaqHandler {
+            faq: FaqChat::new(lazy_pool(), port.clone()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "faq".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.content.unwrap().contains("technischen Fehler"));
+        assert!(port.faq_channels.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_haelt_privacy_lock_bis_nach_kanal_und_welcome() {
+        let db = db_with_kv().await;
+        let pool = db.pool().clone();
+        let port = panel_port();
+        let (started, release) = block_faq_channel_creation(&port);
+        let handler = FaqHandler {
+            faq: FaqChat::new(pool.clone(), port.clone()),
+        };
+        let action = tokio::spawn(async move {
+            handler
+                .handle(BridgeInteraction {
+                    command: "faq".to_string(),
+                    guild_id: 1,
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("FAQ channel start");
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        release.notify_one();
+
+        action.await.expect("FAQ task");
+        erase.await.expect("erase task").expect("privacy delete");
+        assert_eq!(*port.faq_channels.lock().unwrap(), vec![42]);
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("FAQ sessions");
+        assert_eq!(sessions, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_discord_hang_ist_begrenzt_und_gibt_privacy_lock_frei() {
+        let db = db_with_kv().await;
+        let pool = db.pool().clone();
+        let port = panel_port();
+        let (started, _never_release) = block_faq_channel_creation(&port);
+        let handler = FaqHandler {
+            faq: FaqChat::new(pool.clone(), port),
+        };
+        let mut action = tokio::spawn(async move {
+            handler
+                .handle(BridgeInteraction {
+                    command: "faq".to_string(),
+                    guild_id: 1,
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                })
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("FAQ channel start");
+
+        let completed = tokio::time::timeout(Duration::from_secs(4), &mut action).await;
+        if completed.is_err() {
+            action.abort();
+        }
+        let reply = completed
+            .expect("FAQ-Discord-I/O muss begrenzt sein")
+            .expect("FAQ task");
+        assert_eq!(reply.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+
+        let mut lock_probe = pool.begin().await.expect("lock probe");
+        let privacy_lock = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+            .bind(42_i64 ^ i64::MIN)
+            .fetch_one(&mut *lock_probe)
+            .await
+            .expect("privacy lock");
+        assert!(privacy_lock);
+        lock_probe.rollback().await.expect("release lock probe");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_raeumt_kanal_nach_deferred_commit_fehler_auf() {
+        let db = db_with_kv().await;
+        sqlx::query(
+            "CREATE FUNCTION bot.faq_test_fail_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'faq deferred failure'; END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER faq_test_fail_commit_trigger
+             AFTER INSERT ON bot.faq_chat_sessions
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.faq_test_fail_commit()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        let port = panel_port();
+        let handler = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "faq".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.content.unwrap().contains("technischen Fehler"));
+        assert_eq!(*port.deleted_channels.lock().unwrap(), vec![1]);
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sessions");
+        assert_eq!(sessions, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn normaler_faq_chat_spiegelt_keine_rohfrage_in_den_log_kanal() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let (url, handle, _) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq =
+            FaqChat::new_with_config(db.pool().clone(), port.clone(), url, Some(LOG_CHANNEL_ID));
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+
+        assert!(
+            faq.handle_chat_message(1, 100, 42, "Nani", "Wo ist der Router?")
+                .await
+        );
+        handle.await.expect("knowledge server");
+
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "Antwort".to_string())]
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn bestehender_faq_chat_antwortet_nach_optout_stateless_ohne_writes() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let (url, handle, _) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("privacy tombstone");
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("knowledge request")
+            .expect("knowledge server");
+
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "Stateless Antwort".to_string())]
+        );
+        let messages = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_messages WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("messages");
+        assert_eq!(messages, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn stateful_faq_begrenzt_kontext_und_behandelt_stopp_als_frage() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
+            r#"{"answerable":true,"answer":"Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"answerable":true,"answer":"ungenutzt","sources":[]}"#,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        for question in 1..=6 {
+            assert_eq!(
+                faq.store
+                    .add_message("s1", "user", &format!("Vorher {question}"))
+                    .await
+                    .expect("history"),
+                FaqMessageWrite::Stored
+            );
+        }
+        assert_eq!(
+            faq.store
+                .add_message("s1", "assistant", "ASSISTANT_DARF_NICHT_IN_KNOWLEDGE")
+                .await
+                .expect("assistant history"),
+            FaqMessageWrite::Stored
+        );
+
+        let chat = faq.clone();
+        let answer =
+            tokio::spawn(
+                async move { chat.handle_chat_message(1, 100, 42, "Nani", "stopp").await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("knowledge start");
+        release.notify_one();
+
+        assert!(answer.await.expect("answer task"));
+        server.abort();
+        assert_eq!(
+            *request_bodies.lock().unwrap(),
+            vec![r#"{"question":"Vorher 3\nVorher 4\nVorher 5\nVorher 6\nstopp"}"#]
+        );
+        assert_eq!(*port.sent.lock().unwrap(), vec![(100, "Antwort".into())]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn optout_waehrend_faq_retrieval_wartet_und_startet_keine_zweite_anfrage() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
+            r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        assert_eq!(
+            faq.store
+                .add_message("s1", "user", "Alte private Frage")
+                .await
+                .expect("history"),
+            FaqMessageWrite::Stored
+        );
+        let chat = faq.clone();
+        let answer = tokio::spawn(async move {
+            chat.handle_chat_message(1, 100, 42, "Nani", "Aktuelle Frage")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("stateful knowledge start");
+        let optout_pool = db.pool().clone();
+        let lock_acquired = Arc::new(tokio::sync::Notify::new());
+        let task_acquired = lock_acquired.clone();
+        let optout = tokio::spawn(async move {
+            let mut tx = optout_pool.begin().await.expect("optout tx");
+            crate::privacy::lock_user_privacy(&mut tx, 42)
+                .await
+                .expect("optout privacy lock");
+            task_acquired.notify_one();
+            sqlx::query(
+                "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+                 VALUES(42, TRUE, now())
+                 ON CONFLICT(user_id) DO UPDATE
+                    SET opted_out = TRUE, updated_at = excluded.updated_at",
+            )
+            .execute(&mut *tx)
+            .await
+            .expect("privacy tombstone");
+            tx.commit().await.expect("optout commit");
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), lock_acquired.notified())
+                .await
+                .is_err(),
+            "Opt-out darf den laufenden stateful FAQ-Turn nicht ueberholen"
+        );
+        release.notify_one();
+
+        assert!(answer.await.expect("answer task"));
+        optout.await.expect("optout task");
+        let request_bodies = request_bodies.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(
+            request_bodies,
+            vec![r#"{"question":"Alte private Frage\nAktuelle Frage"}"#]
+        );
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "Verlaufsantwort".to_string())]
+        );
+        let message_counts = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT COUNT(*) FILTER (WHERE role = 'user'),
+                    COUNT(*) FILTER (WHERE role = 'assistant')
+               FROM bot.faq_chat_messages
+              WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("message counts");
+        assert_eq!(message_counts, (2, 1));
+        assert!(crate::privacy::is_opted_out(db.pool(), 42).await);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn erasure_waehrend_faq_retrieval_wartet_und_loescht_den_fertigen_turn() {
+        let db = db_with_kv().await;
+        let port = faq_category_port();
+        let (url, started, release, request_bodies, server) = gated_two_response_knowledge_server(
+            r#"{"answerable":true,"answer":"Verlaufsantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"answerable":true,"answer":"Stateless nach Erasure","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        assert_eq!(
+            faq.store
+                .add_message("s1", "user", "Alte private Frage")
+                .await
+                .expect("history"),
+            FaqMessageWrite::Stored
+        );
+        let chat = faq.clone();
+        let answer = tokio::spawn(async move {
+            chat.handle_chat_message(1, 100, 42, "Nani", "Aktuelle Frage")
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("stateful knowledge start");
+        let erase_pool = db.pool().clone();
+        let erase = tokio::spawn(async move {
+            crate::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000).await
+        });
+        wait_for_db_lock(db.pool(), "pg_advisory_xact_lock", Some("advisory")).await;
+        release.notify_one();
+
+        assert!(answer.await.expect("answer task"));
+        erase.await.expect("erase task").expect("privacy delete");
+        let request_bodies = request_bodies.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(
+            request_bodies,
+            vec![r#"{"question":"Alte private Frage\nAktuelle Frage"}"#]
+        );
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "Verlaufsantwort".to_string())]
+        );
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sessions");
+        let messages = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_messages WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("messages");
+        assert_eq!((sessions, messages), (0, 0));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn bestehender_faq_chat_meldet_speicherfehler_sichtbar_und_fail_closed() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "ALTER TABLE bot.faq_chat_messages
+             ADD CONSTRAINT faq_chat_messages_test_reject CHECK (FALSE) NOT VALID",
+        )
+        .execute(db.pool())
+        .await
+        .expect("reject writes");
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert_eq!(port.sent.lock().unwrap().len(), 1);
+        let text = &port.sent.lock().unwrap()[0].1;
+        assert!(text.contains("technisch fehlgeschlagen"));
+        assert!(text.contains("nicht zuverlässig sagen"));
+        assert!(text.contains("<#1459628609705738539>"));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_antwort_bleibt_bei_commit_unsicherheit_sichtbar_und_warnt() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let (url, server, _) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Sachantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "CREATE FUNCTION bot.faq_answer_test_fail_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'faq answer deferred failure'; END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER faq_answer_test_fail_commit_trigger
+             AFTER INSERT ON bot.faq_chat_messages
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW WHEN (NEW.role = 'assistant')
+             EXECUTE FUNCTION bot.faq_answer_test_fail_commit()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+        server.await.expect("knowledge server");
+
+        assert!(port.deleted_messages.lock().unwrap().is_empty());
+        let sent = port.sent.lock().unwrap();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0].1, "Sachantwort");
+        assert_eq!(sent[1].1, FAQ_MESSAGE_UNCERTAIN_TEXT);
+        assert!(!sent[1]
+            .1
+            .contains("sende deshalb keine automatische Sachantwort"));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn geloeschter_faq_chat_kanal_antwortet_stateless_und_bleibt_db_leer() {
+        let db = db_with_kv().await;
+        let port = faq_category_port();
+        let (url, handle, _) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Antwort nach Löschung","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        crate::privacy::delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+        tokio::time::timeout(Duration::from_secs(2), handle)
+            .await
+            .expect("knowledge request")
+            .expect("knowledge server");
+
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "Antwort nach Löschung".to_string())]
+        );
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sessions");
+        let messages = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_messages WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("messages");
+        assert_eq!((sessions, messages), (0, 0));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_kategorie_meldet_db_ausfall_sichtbar_statt_zu_schweigen() {
+        let port = faq_category_port();
+        let faq = FaqChat::new(lazy_pool(), port.clone());
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert_eq!(port.sent.lock().unwrap().len(), 1);
+        assert!(port.sent.lock().unwrap()[0]
+            .1
+            .contains("technisch fehlgeschlagen"));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn geschlossener_faq_chat_startet_keine_stateless_antwort() {
+        let db = db_with_kv().await;
+        let port = faq_category_port();
+        let (url, handle, called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        assert!(faq.store.close_session("s1").await.expect("close"));
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(port.sent.lock().unwrap().is_empty());
+        handle.abort();
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn close_gewinnende_race_sendet_keine_spaete_faq_antwort() {
+        let db = db_with_kv().await;
+        let pool = db.pool().clone();
+        let port = faq_category_port();
+        let (url, knowledge_handle, called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"zu spaet","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(pool.clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        let mut blocker = pool.begin().await.expect("privacy blocker");
+        crate::privacy::lock_user_privacy(&mut blocker, 42)
+            .await
+            .expect("privacy lock");
+
+        let close_store = FaqStore { pool: pool.clone() };
+        let close = tokio::spawn(async move { close_store.close_session("s1").await });
+        wait_for_db_lock_count(&pool, 1).await;
+        let chat = faq.clone();
+        let answer =
+            tokio::spawn(
+                async move { chat.handle_chat_message(1, 100, 42, "Nani", "Frage").await },
+            );
+        wait_for_db_lock_count(&pool, 2).await;
+        blocker.commit().await.expect("release privacy lock");
+
+        assert!(close.await.expect("close task").expect("close result"));
+        assert!(answer.await.expect("answer task"));
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(port.sent.lock().unwrap().is_empty());
+        knowledge_handle.abort();
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn close_wartet_bei_tombstone_bis_laufende_stateless_antwort_gesendet_ist() {
+        let db = db_with_kv().await;
+        let port = faq_category_port();
+        let (url, started, release, _request_bodies, server) = gated_two_response_knowledge_server(
+            r#"{"answerable":true,"answer":"Stateless Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"answerable":true,"answer":"ungenutzt","sources":[]}"#,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("privacy tombstone");
+        let chat = faq.clone();
+        let answer =
+            tokio::spawn(
+                async move { chat.handle_chat_message(1, 100, 42, "Nani", "Frage").await },
+            );
+        tokio::time::timeout(Duration::from_secs(5), started.notified())
+            .await
+            .expect("stateless knowledge start");
+        let close_handler = Arc::new(FaqHandler { faq: faq.clone() });
+        let mut close = tokio::spawn(async move {
+            close_handler
+                .handle(BridgeInteraction {
+                    custom_id: "faq_chat:close:s1".to_string(),
+                    guild_id: 1,
+                    channel_id: 100,
+                    user_id: 42,
+                    ..BridgeInteraction::default()
+                })
+                .await
+        });
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(250), &mut close)
+                .await
+                .is_err(),
+            "Close darf die laufende direkte Antwort nicht ueberholen"
+        );
+        release.notify_one();
+        assert!(answer.await.expect("answer task"));
+        let close_reply = close.await.expect("close task");
+        assert_eq!(close_reply.content.as_deref(), Some("✅ Chat beendet."));
+        server.abort();
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![
+                (100, "Stateless Antwort".to_string()),
+                (100, "🛑 Chat beendet.".to_string())
+            ]
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn nutzer_close_mit_tombstone_loescht_und_bestaetigt_direkte_aktion() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("privacy tombstone");
+        let handler = FaqHandler { faq };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "faq_chat:close:s1".to_string(),
+                guild_id: 1,
+                channel_id: 100,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some("✅ Chat beendet."));
+        assert_eq!(
+            *port.sent.lock().unwrap(),
+            vec![(100, "🛑 Chat beendet.".to_string())]
+        );
+        let sessions = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sessions");
+        assert_eq!(sessions, 0);
+    }
+
+    #[tokio::test]
+    async fn faq_close_meldet_db_fehler_statt_falschem_nicht_gefunden() {
+        let port = ticket_port();
+        let handler = FaqHandler {
+            faq: FaqChat::new(lazy_pool(), port.clone()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "faq_chat:close:s1".to_string(),
+                guild_id: 1,
+                channel_id: 100,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(FAQ_CLOSE_ERROR_TEXT));
+        assert!(port.sent.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
@@ -1140,7 +3110,8 @@ mod tests {
             "http://127.0.0.1:1".to_string(),
             None,
         );
-        let question = format!("{}\nNICHT_LOGGEN", "ä".repeat(239));
+        let marker = "TICKET_NO_SHADOW_MARKER";
+        let question = format!("{marker}{}", '\u{7}');
         let capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(capture.clone())
@@ -1165,8 +3136,13 @@ mod tests {
         ] {
             assert!(logs.contains(field), "missing {field}: {logs}");
         }
-        assert!(logs.contains(&format!("question={} ", "ä".repeat(239))));
-        assert!(!logs.contains("NICHT_LOGGEN"));
+        assert!(!logs.contains(marker), "{logs}");
+        assert!(!logs.contains('\u{7}'), "{logs}");
+        assert!(!logs.contains("question="), "{logs}");
+        assert!(
+            logs.contains(&format!("question_chars={}", question.chars().count())),
+            "{logs}"
+        );
         assert!(port.sent.lock().unwrap().is_empty());
     }
 
@@ -1175,11 +3151,11 @@ mod tests {
         let port = ticket_port();
         let (url, handle, knowledge_called) = knowledge_server(
             200,
-            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(LOG_CHANNEL_ID));
 
         faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
             .await;
@@ -1188,7 +3164,7 @@ mod tests {
         assert!(knowledge_called.load(Ordering::SeqCst));
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, 999);
+        assert_eq!(sent[0].0, LOG_CHANNEL_ID);
         assert_ne!(sent[0].0, 222);
         assert_ne!(sent[0].0, 111111111111111111);
         assert!(sent[0].1.contains("Entscheidung: answered"));
@@ -1205,7 +3181,7 @@ mod tests {
             Duration::ZERO,
         )
         .await;
-        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(LOG_CHANNEL_ID));
 
         faq.handle_ticket_message(1, 222, 111111111111111111, "Unbekanntes Problem")
             .await;
@@ -1214,7 +3190,7 @@ mod tests {
         assert!(knowledge_called.load(Ordering::SeqCst));
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, 999);
+        assert_eq!(sent[0].0, LOG_CHANNEL_ID);
         assert_ne!(sent[0].0, 222);
         assert_ne!(sent[0].0, 111111111111111111);
         assert!(sent[0].1.contains(TICKET_SHADOW_PREFIX));
@@ -1228,7 +3204,7 @@ mod tests {
         let port = ticket_port();
         let (url, handle, knowledge_called) =
             knowledge_server(200, "kein json", Duration::ZERO).await;
-        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(LOG_CHANNEL_ID));
 
         faq.handle_ticket_message(1, 222, 111111111111111111, "Unbekanntes Problem")
             .await;
@@ -1237,7 +3213,7 @@ mod tests {
         assert!(knowledge_called.load(Ordering::SeqCst));
         let sent = port.sent.lock().unwrap();
         assert_eq!(sent.len(), 1);
-        assert_eq!(sent[0].0, 999);
+        assert_eq!(sent[0].0, LOG_CHANNEL_ID);
         assert!(sent[0].1.contains("Entscheidung: uncertain"));
         assert!(sent[0].1.contains(FAQ_NO_ANSWER));
         assert!(!sent[0].1.contains("InvalidResponse"));
@@ -1266,7 +3242,9 @@ mod tests {
             .with_target(false)
             .finish();
         let guard = tracing::subscriber::set_default(subscriber);
-        faq.handle_ticket_message(1, 222, 111111111111111111, "Steam geht nicht")
+        let marker = "TICKET_EQUAL_SHADOW_MARKER";
+        let question = format!("{marker}{}", '\u{1f}');
+        faq.handle_ticket_message(1, 222, 111111111111111111, &question)
             .await;
         drop(guard);
         handle.abort();
@@ -1282,6 +3260,59 @@ mod tests {
         let logs = capture.text();
         assert!(logs.contains("reason=shadow_equals_ticket"), "{logs}");
         assert!(logs.contains("error_class=shadow_equals_ticket"), "{logs}");
+        assert!(!logs.contains(marker), "{logs}");
+        assert!(!logs.contains('\u{1f}'), "{logs}");
+        assert!(!logs.contains("question="), "{logs}");
+        assert!(
+            logs.contains(&format!("question_chars={}", question.chars().count())),
+            "{logs}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ticket_auto_help_lehnt_nicht_freigegebenen_shadow_vor_knowledge_ab() {
+        let port = ticket_port();
+        let (url, handle, knowledge_called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"Ticket-Antwort","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(lazy_pool(), port.clone(), url, Some(999));
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        let marker = "TICKET_NOT_ALLOWLISTED_MARKER";
+        let question = format!("{marker}{}", '\0');
+        faq.handle_ticket_message(1, 222, 111111111111111111, &question)
+            .await;
+        drop(guard);
+        handle.abort();
+
+        assert!(
+            !knowledge_called.load(Ordering::SeqCst),
+            "nicht freigegebener Shadow darf keinen Knowledge-Request starten"
+        );
+        assert!(port.sent.lock().unwrap().is_empty());
+        let logs = capture.text();
+        assert!(logs.contains("reason=shadow_not_allowlisted"), "{logs}");
+        assert!(
+            logs.contains("error_class=shadow_not_allowlisted"),
+            "{logs}"
+        );
+        assert!(!logs.contains(marker), "{logs}");
+        assert!(!logs.contains('\0'), "{logs}");
+        assert!(!logs.contains("question="), "{logs}");
+        assert!(
+            logs.contains(&format!("question_chars={}", question.chars().count())),
+            "{logs}"
+        );
     }
 
     #[tokio::test]

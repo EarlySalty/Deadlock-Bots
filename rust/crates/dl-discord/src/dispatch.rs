@@ -27,6 +27,22 @@ const CB_MODAL: u8 = 9;
 const EPHEMERAL_FLAG: u64 = 64;
 
 const DEFER_THRESHOLD: Duration = Duration::from_secs(2);
+const DEFER_HTTP_TIMEOUT: Duration = Duration::from_secs(1);
+
+async fn await_handler_with_bounded_defer<Handler, Defer, Reply, Error>(
+    handler: Handler,
+    defer: Defer,
+    defer_timeout: Duration,
+) -> (
+    Reply,
+    Result<Result<(), Error>, tokio::time::error::Elapsed>,
+)
+where
+    Handler: std::future::Future<Output = Reply>,
+    Defer: std::future::Future<Output = Result<(), Error>>,
+{
+    tokio::join!(handler, tokio::time::timeout(defer_timeout, defer))
+}
 
 pub async fn dispatch(
     adapter: &Arc<DiscordAdapter>,
@@ -439,13 +455,21 @@ async fn respond(
         Err(_) => {
             // Defer (ephemeral) — Token bleibt 15 Minuten gültig
             let defer = json!({ "type": CB_DEFER, "data": { "flags": EPHEMERAL_FLAG } });
-            if let Err(err) = http
-                .create_interaction_response(interaction_id.into(), token, &defer, Vec::new())
-                .await
-            {
-                tracing::warn!(%err, "Defer fehlgeschlagen");
+            let (reply, defer_result) = await_handler_with_bounded_defer(
+                &mut handler_future,
+                http.create_interaction_response(interaction_id.into(), token, &defer, Vec::new()),
+                DEFER_HTTP_TIMEOUT,
+            )
+            .await;
+            match defer_result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => tracing::warn!(%err, "Defer fehlgeschlagen"),
+                Err(_) => tracing::warn!(
+                    timeout_ms = DEFER_HTTP_TIMEOUT.as_millis(),
+                    "Defer-HTTP hat Zeitlimit ueberschritten"
+                ),
             }
-            handler_future.await
+            reply
         }
     };
 
@@ -669,6 +693,7 @@ pub async fn sync_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn message_data_baut_flags_und_felder() {
@@ -744,5 +769,58 @@ mod tests {
             PanelEditFailure::Other
         );
         assert_eq!(classify_panel_edit_status(None), PanelEditFailure::Other);
+    }
+
+    #[tokio::test]
+    async fn defer_http_blockiert_den_laufenden_handler_nicht() {
+        let handler_done = Arc::new(tokio::sync::Notify::new());
+        let handler_done_signal = handler_done.clone();
+        let defer_release = Arc::new(tokio::sync::Notify::new());
+        let defer_release_waiter = defer_release.clone();
+        let task = tokio::spawn(async move {
+            await_handler_with_bounded_defer(
+                async move {
+                    handler_done_signal.notify_one();
+                    42_u64
+                },
+                async move {
+                    defer_release_waiter.notified().await;
+                    Ok::<(), &'static str>(())
+                },
+                Duration::from_secs(5),
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_millis(250), handler_done.notified())
+            .await
+            .expect("Handler muss waehrend des Defer-HTTP weitergepollt werden");
+        defer_release.notify_one();
+        let (reply, defer_result) = task.await.expect("orchestration task");
+        assert_eq!(reply, 42);
+        assert!(matches!(defer_result, Ok(Ok(()))));
+    }
+
+    #[tokio::test]
+    async fn haengendes_defer_http_ist_hart_begrenzt() {
+        let handler_finished = Arc::new(AtomicBool::new(false));
+        let handler_finished_signal = handler_finished.clone();
+        let completed = tokio::time::timeout(
+            Duration::from_millis(250),
+            await_handler_with_bounded_defer(
+                async move {
+                    handler_finished_signal.store(true, Ordering::SeqCst);
+                    7_u64
+                },
+                std::future::pending::<Result<(), &'static str>>(),
+                Duration::from_millis(20),
+            ),
+        )
+        .await
+        .expect("Defer-HTTP darf nicht unbegrenzt haengen");
+
+        assert_eq!(completed.0, 7);
+        assert!(completed.1.is_err(), "Defer muss als Timeout enden");
+        assert!(handler_finished.load(Ordering::SeqCst));
     }
 }

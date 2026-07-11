@@ -1,10 +1,10 @@
-## #243 — Concierge antwortet aus geprüftem Supportwissen
+## #245 — Concierge antwortet aus geprüftem Supportwissen
 
-**Ausgangslage:** Der Concierge konnte echte Fragen zu Discord und den Bots oft nicht belastbar beantworten.
+**Ausgangslage:** Fragen zu Discord und den Bots konnte der Concierge nicht belastbar beantworten, und es war unklar, was er dabei speichert oder an Menschen weitergibt.
 
-**Was wurde geändert:** Er nutzt jetzt ausschließlich die öffentliche dokumentierte Wissensbasis für DMs, private FAQ und Serverfragen; in Tickets wird eine mögliche Antwort nur im vorgesehenen Prüfbereich sichtbar und nie direkt vom Bot gepostet.
+**Was wurde geändert:** In DMs, im festen Fragenkanal und in privaten FAQ-Chats antwortet er nur noch aus dem veröffentlichten Supportwissen; unsichere oder undokumentierte Fälle gehen an Menschen, und aus Tickets entstehen höchstens interne Prüfkandidaten statt direkter Bot-Antworten oder Diagnosen.
 
-**Wie es jetzt läuft:** Interne Details, Debug-, Neustart- oder andere Aktionen führt er nicht aus; bei Unsicherheit übernimmt menschlicher Support. Ein Datenschutz-Opt-out bestätigt er erst nach erfolgreicher Speicherung und unterdrückt danach auch die einmalige Router-Hilfe per DM; lässt sich der Datenschutzstatus nicht sicher lesen, bleibt diese DM vorsichtshalber aus.
+**Wie es jetzt läuft:** „stopp“ beendet neue Concierge-Verlaufsspeicherung und ungefragte Concierge-Kontakte, direkte Fragen beantwortet er danach ohne Verlauf; „vergiss mich“ löscht nur seine Concierge-Daten, während der Datenschutz-Befehl der umfassendere Weg bleibt. Einen Patenwunsch bestätigt er erst nach der internen Übergabe und nicht doppelt; unklare Discord-Zustände kennzeichnet er sichtbar, statt möglicherweise vorhandene Antworten oder Kanäle blind zu löschen, und Debug, Neustarts oder andere Live-Aktionen führt er nicht aus.
 
 ## #242 — Router erklärt sich beim ersten Mal per DM
 

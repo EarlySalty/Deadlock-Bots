@@ -1402,100 +1402,112 @@ async fn compact_messages_tx(
     // fuer denselben Aggregat-Key geloescht. Beim Nachverdichten kann daher
     // kein echter Distinct ueber alle Batches mehr berechnet werden; `GREATEST`
     // ist eine dokumentierte Untergrenze statt eines exakten Gesamt-Distincts.
-    sqlx::query(
+    sqlx::query_scalar(
         r#"
-        INSERT INTO activity.message_daily_aggregates(
-            day, guild_id, channel_id, message_count, total_message_length,
-            attachment_message_count, reply_message_count, distinct_user_count
+        WITH deleted AS (
+            DELETE FROM activity.message_metadata_events
+             WHERE occurred_at < $1
+            RETURNING occurred_at, guild_id, channel_id, message_length,
+                      has_attachment, is_reply, user_id
+        ),
+        aggregated AS (
+            INSERT INTO activity.message_daily_aggregates(
+                day, guild_id, channel_id, message_count, total_message_length,
+                attachment_message_count, reply_message_count, distinct_user_count
+            )
+            SELECT occurred_at::date,
+                   guild_id,
+                   channel_id,
+                   COUNT(*),
+                   COALESCE(SUM(message_length), 0),
+                   COUNT(*) FILTER (WHERE has_attachment),
+                   COUNT(*) FILTER (WHERE is_reply),
+                   COUNT(DISTINCT user_id)
+              FROM deleted
+             GROUP BY occurred_at::date, guild_id, channel_id
+            ON CONFLICT(day, guild_id, channel_id) DO UPDATE SET
+                message_count = activity.message_daily_aggregates.message_count + EXCLUDED.message_count,
+                total_message_length = activity.message_daily_aggregates.total_message_length + EXCLUDED.total_message_length,
+                attachment_message_count = activity.message_daily_aggregates.attachment_message_count + EXCLUDED.attachment_message_count,
+                reply_message_count = activity.message_daily_aggregates.reply_message_count + EXCLUDED.reply_message_count,
+                distinct_user_count = GREATEST(activity.message_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+            RETURNING message_count
         )
-        SELECT occurred_at::date,
-               guild_id,
-               channel_id,
-               COUNT(*),
-               COALESCE(SUM(message_length), 0),
-               COUNT(*) FILTER (WHERE has_attachment),
-               COUNT(*) FILTER (WHERE is_reply),
-               COUNT(DISTINCT user_id)
-          FROM activity.message_metadata_events
-         WHERE occurred_at < $1
-         GROUP BY occurred_at::date, guild_id, channel_id
-        ON CONFLICT(day, guild_id, channel_id) DO UPDATE SET
-            message_count = activity.message_daily_aggregates.message_count + EXCLUDED.message_count,
-            total_message_length = activity.message_daily_aggregates.total_message_length + EXCLUDED.total_message_length,
-            attachment_message_count = activity.message_daily_aggregates.attachment_message_count + EXCLUDED.attachment_message_count,
-            reply_message_count = activity.message_daily_aggregates.reply_message_count + EXCLUDED.reply_message_count,
-            distinct_user_count = GREATEST(activity.message_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+        SELECT COUNT(*)::int8
+          FROM deleted
+          CROSS JOIN (SELECT COUNT(*) FROM aggregated) AS completed
         "#,
     )
     .bind(cutoff)
-    .execute(&mut **tx)
-    .await?;
-    let deleted =
-        sqlx::query("DELETE FROM activity.message_metadata_events WHERE occurred_at < $1")
-            .bind(cutoff)
-            .execute(&mut **tx)
-            .await?
-            .rows_affected();
-    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+    .fetch_one(&mut **tx)
+    .await
 }
 
 async fn compact_voice_tx(
     tx: &mut Transaction<'_, Postgres>,
     cutoff: DateTime<Utc>,
 ) -> Result<(i64, i64), sqlx::Error> {
-    sqlx::query(
+    let deleted = sqlx::query_scalar(
         r#"
-        INSERT INTO activity.voice_daily_aggregates(
-            day, guild_id, channel_id, join_count, leave_count, move_count,
-            update_count, total_duration_seconds, distinct_user_count
+        WITH deleted AS (
+            DELETE FROM activity.voice_metadata_events
+             WHERE occurred_at < $1
+            RETURNING occurred_at, guild_id, channel_id, event_type,
+                      duration_seconds, user_id
+        ),
+        aggregated AS (
+            INSERT INTO activity.voice_daily_aggregates(
+                day, guild_id, channel_id, join_count, leave_count, move_count,
+                update_count, total_duration_seconds, distinct_user_count
+            )
+            SELECT occurred_at::date,
+                   guild_id,
+                   channel_id,
+                   COUNT(*) FILTER (WHERE event_type = 'join'),
+                   COUNT(*) FILTER (WHERE event_type = 'leave'),
+                   COUNT(*) FILTER (WHERE event_type = 'move'),
+                   COUNT(*) FILTER (WHERE event_type = 'update'),
+                   COALESCE(SUM(duration_seconds), 0),
+                   COUNT(DISTINCT user_id)
+              FROM deleted
+             GROUP BY occurred_at::date, guild_id, channel_id
+            ON CONFLICT(day, guild_id, channel_id) DO UPDATE SET
+                join_count = activity.voice_daily_aggregates.join_count + EXCLUDED.join_count,
+                leave_count = activity.voice_daily_aggregates.leave_count + EXCLUDED.leave_count,
+                move_count = activity.voice_daily_aggregates.move_count + EXCLUDED.move_count,
+                update_count = activity.voice_daily_aggregates.update_count + EXCLUDED.update_count,
+                total_duration_seconds = activity.voice_daily_aggregates.total_duration_seconds + EXCLUDED.total_duration_seconds,
+                distinct_user_count = GREATEST(activity.voice_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+            RETURNING join_count
         )
-        SELECT occurred_at::date,
-               guild_id,
-               channel_id,
-               COUNT(*) FILTER (WHERE event_type = 'join'),
-               COUNT(*) FILTER (WHERE event_type = 'leave'),
-               COUNT(*) FILTER (WHERE event_type = 'move'),
-               COUNT(*) FILTER (WHERE event_type = 'update'),
-               COALESCE(SUM(duration_seconds), 0),
-               COUNT(DISTINCT user_id)
-          FROM activity.voice_metadata_events
-         WHERE occurred_at < $1
-         GROUP BY occurred_at::date, guild_id, channel_id
-        ON CONFLICT(day, guild_id, channel_id) DO UPDATE SET
-            join_count = activity.voice_daily_aggregates.join_count + EXCLUDED.join_count,
-            leave_count = activity.voice_daily_aggregates.leave_count + EXCLUDED.leave_count,
-            move_count = activity.voice_daily_aggregates.move_count + EXCLUDED.move_count,
-            update_count = activity.voice_daily_aggregates.update_count + EXCLUDED.update_count,
-            total_duration_seconds = activity.voice_daily_aggregates.total_duration_seconds + EXCLUDED.total_duration_seconds,
-            distinct_user_count = GREATEST(activity.voice_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+        SELECT COUNT(*)::int8
+          FROM deleted
+          CROSS JOIN (SELECT COUNT(*) FROM aggregated) AS completed
         "#,
     )
     .bind(cutoff)
-    .execute(&mut **tx)
+    .fetch_one(&mut **tx)
     .await?;
-    let deleted = sqlx::query("DELETE FROM activity.voice_metadata_events WHERE occurred_at < $1")
-        .bind(cutoff)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
     let stale_open = sqlx::query("DELETE FROM activity.voice_open_sessions WHERE joined_at < $1")
         .bind(cutoff)
         .execute(&mut **tx)
         .await?
         .rows_affected();
-    Ok((
-        i64::try_from(deleted).unwrap_or(i64::MAX),
-        i64::try_from(stale_open).unwrap_or(i64::MAX),
-    ))
+    Ok((deleted, i64::try_from(stale_open).unwrap_or(i64::MAX)))
 }
 
 async fn compact_interactions_tx(
     tx: &mut Transaction<'_, Postgres>,
     cutoff: DateTime<Utc>,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query(
+    sqlx::query_scalar(
         r#"
-        WITH sanitized AS (
+        WITH deleted AS (
+            DELETE FROM activity.interaction_events
+             WHERE occurred_at < $1
+            RETURNING occurred_at, guild_id, interaction_kind, user_id, route
+        ),
+        sanitized AS (
             SELECT occurred_at,
                    guild_id,
                    interaction_kind,
@@ -1516,102 +1528,109 @@ async fn compact_interactions_tx(
                        ), ''),
                        $2
                    ) AS route
-              FROM activity.interaction_events
-             WHERE occurred_at < $1
+              FROM deleted
+        ),
+        aggregated AS (
+            INSERT INTO activity.interaction_daily_aggregates(
+                day, guild_id, interaction_kind, route, interaction_count, distinct_user_count
+            )
+            SELECT occurred_at::date,
+                   guild_id,
+                   interaction_kind,
+                   route,
+                   COUNT(*),
+                   COUNT(DISTINCT user_id)
+              FROM sanitized
+             GROUP BY occurred_at::date, guild_id, interaction_kind, route
+            ON CONFLICT(day, guild_id, interaction_kind, route) DO UPDATE SET
+                interaction_count = activity.interaction_daily_aggregates.interaction_count + EXCLUDED.interaction_count,
+                distinct_user_count = GREATEST(activity.interaction_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+            RETURNING interaction_count
         )
-        INSERT INTO activity.interaction_daily_aggregates(
-            day, guild_id, interaction_kind, route, interaction_count, distinct_user_count
-        )
-        SELECT occurred_at::date,
-               guild_id,
-               interaction_kind,
-               route,
-               COUNT(*),
-               COUNT(DISTINCT user_id)
-          FROM sanitized
-         GROUP BY occurred_at::date, guild_id, interaction_kind, route
-        ON CONFLICT(day, guild_id, interaction_kind, route) DO UPDATE SET
-            interaction_count = activity.interaction_daily_aggregates.interaction_count + EXCLUDED.interaction_count,
-            distinct_user_count = GREATEST(activity.interaction_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+        SELECT COUNT(*)::int8
+          FROM deleted
+          CROSS JOIN (SELECT COUNT(*) FROM aggregated) AS completed
         "#,
     )
     .bind(cutoff)
     .bind(MAX_INTERACTION_ROUTE_SQL_LEN)
-    .execute(&mut **tx)
-    .await?;
-    let deleted = sqlx::query("DELETE FROM activity.interaction_events WHERE occurred_at < $1")
-        .bind(cutoff)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+    .fetch_one(&mut **tx)
+    .await
 }
 
 async fn compact_presence_tx(
     tx: &mut Transaction<'_, Postgres>,
     cutoff: DateTime<Utc>,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query(
+    sqlx::query_scalar(
         r#"
-        INSERT INTO activity.presence_daily_aggregates(
-            day, guild_id, distinct_user_count
-        )
-        SELECT day,
-               guild_id,
-               COUNT(DISTINCT user_id)
-          FROM activity.presence_daily_seen
-         WHERE day < $1::date
-         GROUP BY day, guild_id
-        ON CONFLICT(day, guild_id) DO UPDATE SET
-            distinct_user_count = GREATEST(
-                activity.presence_daily_aggregates.distinct_user_count,
-                EXCLUDED.distinct_user_count
+        WITH deleted AS (
+            DELETE FROM activity.presence_daily_seen
+             WHERE day < $1::date
+            RETURNING day, guild_id, user_id
+        ),
+        aggregated AS (
+            INSERT INTO activity.presence_daily_aggregates(
+                day, guild_id, distinct_user_count
             )
+            SELECT day,
+                   guild_id,
+                   COUNT(DISTINCT user_id)
+              FROM deleted
+             GROUP BY day, guild_id
+            ON CONFLICT(day, guild_id) DO UPDATE SET
+                distinct_user_count = GREATEST(
+                    activity.presence_daily_aggregates.distinct_user_count,
+                    EXCLUDED.distinct_user_count
+                )
+            RETURNING distinct_user_count
+        )
+        SELECT COUNT(*)::int8
+          FROM deleted
+          CROSS JOIN (SELECT COUNT(*) FROM aggregated) AS completed
         "#,
     )
     .bind(cutoff)
-    .execute(&mut **tx)
-    .await?;
-    let deleted = sqlx::query("DELETE FROM activity.presence_daily_seen WHERE day < $1::date")
-        .bind(cutoff)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+    .fetch_one(&mut **tx)
+    .await
 }
 
 async fn compact_journey_tx(
     tx: &mut Transaction<'_, Postgres>,
     cutoff: DateTime<Utc>,
 ) -> Result<i64, sqlx::Error> {
-    sqlx::query(
+    sqlx::query_scalar(
         r#"
-        INSERT INTO activity.journey_daily_aggregates(
-            day, guild_id, event_type, actor_kind, event_count, distinct_user_count
+        WITH deleted AS (
+            DELETE FROM activity.journey_events
+             WHERE occurred_at < $1
+            RETURNING occurred_at, guild_id, event_type, actor_kind, user_id
+        ),
+        aggregated AS (
+            INSERT INTO activity.journey_daily_aggregates(
+                day, guild_id, event_type, actor_kind, event_count, distinct_user_count
+            )
+            SELECT occurred_at::date,
+                   guild_id,
+                   event_type,
+                   COALESCE(actor_kind, ''),
+                   COUNT(*),
+                   COUNT(DISTINCT user_id)
+              FROM deleted
+             GROUP BY occurred_at::date, guild_id, event_type, COALESCE(actor_kind, '')
+            ON CONFLICT(day, guild_id, event_type, actor_kind) DO UPDATE SET
+                event_count = activity.journey_daily_aggregates.event_count + EXCLUDED.event_count,
+                distinct_user_count = GREATEST(activity.journey_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+            RETURNING event_count
         )
-        SELECT occurred_at::date,
-               guild_id,
-               event_type,
-               COALESCE(actor_kind, ''),
-               COUNT(*),
-               COUNT(DISTINCT user_id)
-          FROM activity.journey_events
-         WHERE occurred_at < $1
-         GROUP BY occurred_at::date, guild_id, event_type, COALESCE(actor_kind, '')
-        ON CONFLICT(day, guild_id, event_type, actor_kind) DO UPDATE SET
-            event_count = activity.journey_daily_aggregates.event_count + EXCLUDED.event_count,
-            distinct_user_count = GREATEST(activity.journey_daily_aggregates.distinct_user_count, EXCLUDED.distinct_user_count)
+        SELECT COUNT(*)::int8
+          FROM deleted
+          CROSS JOIN (SELECT COUNT(*) FROM aggregated) AS completed
         "#,
     )
     .bind(cutoff)
-    .execute(&mut **tx)
-    .await?;
-    let deleted = sqlx::query("DELETE FROM activity.journey_events WHERE occurred_at < $1")
-        .bind(cutoff)
-        .execute(&mut **tx)
-        .await?
-        .rows_affected();
-    Ok(i64::try_from(deleted).unwrap_or(i64::MAX))
+    .fetch_one(&mut **tx)
+    .await
 }
 
 pub async fn compact_raw_events(
@@ -1620,12 +1639,13 @@ pub async fn compact_raw_events(
 ) -> ActivityDbResult<RawRetentionRun> {
     let cutoff = now - Duration::days(RAW_EVENT_RETENTION_DAYS);
     let mut tx = pool.begin().await?;
+    dl_central_db::lock_raw_event_retention_erasure(&mut tx).await?;
+    let journey_rows_deleted = compact_journey_tx(&mut tx, cutoff).await?;
     let message_rows_deleted = compact_messages_tx(&mut tx, cutoff).await?;
     let (voice_rows_deleted, stale_open_voice_sessions_deleted) =
         compact_voice_tx(&mut tx, cutoff).await?;
     let interaction_rows_deleted = compact_interactions_tx(&mut tx, cutoff).await?;
     let presence_rows_deleted = compact_presence_tx(&mut tx, cutoff).await?;
-    let journey_rows_deleted = compact_journey_tx(&mut tx, cutoff).await?;
     tx.commit().await?;
     Ok(RawRetentionRun {
         message_rows_deleted,
@@ -1963,7 +1983,7 @@ mod tests {
     }
 
     #[cfg(feature = "testing")]
-    async fn erase_journey_and_set_tombstone(
+    async fn erase_journey_then_message_and_set_tombstone(
         tx: &mut Transaction<'_, Postgres>,
         user_id: i64,
     ) -> Result<(), sqlx::Error> {
@@ -1976,6 +1996,10 @@ mod tests {
             .execute(&mut **tx)
             .await?;
         sqlx::query("DELETE FROM activity.journey_user_state WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("DELETE FROM activity.message_metadata_events WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut **tx)
             .await?;
@@ -2052,7 +2076,7 @@ mod tests {
         let db = setup().await?;
         let pool = db.pool().clone();
         let mut erase_tx = pool.begin().await?;
-        erase_journey_and_set_tombstone(&mut erase_tx, 42).await?;
+        erase_journey_then_message_and_set_tombstone(&mut erase_tx, 42).await?;
 
         let write_pool = pool.clone();
         let write_task =
@@ -2094,7 +2118,7 @@ mod tests {
         let erase_pool = pool.clone();
         let erase_task = tokio::spawn(async move {
             let mut tx = erase_pool.begin().await?;
-            erase_journey_and_set_tombstone(&mut tx, 42).await?;
+            erase_journey_then_message_and_set_tombstone(&mut tx, 42).await?;
             tx.commit().await
         });
         wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
@@ -2110,6 +2134,543 @@ mod tests {
         .fetch_one(&pool)
         .await?;
         assert_eq!(rows, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn retention_und_privacy_loeschung_halten_gleiche_lock_reihenfolge(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let now = old + Duration::days(RAW_EVENT_RETENTION_DAYS + 1);
+
+        assert!(
+            record_journey_event(
+                &pool,
+                JourneyEventInput {
+                    event_source: "retention_privacy_lock_order",
+                    ..JourneyEventInput::new(42, 1, JourneyEventType::Join, old)
+                },
+            )
+            .await?
+        );
+        sqlx::query(
+            "INSERT INTO activity.message_metadata_events(
+                 user_id, guild_id, channel_id, message_id, occurred_at,
+                 message_length, has_attachment, attachment_count, is_reply
+             ) VALUES(42, 1, 20, 100, $1, 5, FALSE, 0, FALSE)",
+        )
+        .bind(old)
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO activity.message_daily_aggregates(
+                 day, guild_id, channel_id, message_count, total_message_length,
+                 attachment_message_count, reply_message_count, distinct_user_count
+             ) VALUES($1, 1, 20, 5, 0, 0, 0, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM activity.message_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND channel_id = 20
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let retention_pool = pool.clone();
+        let retention = tokio::spawn(async move { compact_raw_events(&retention_pool, now).await });
+        wait_for_db_lock(&pool, "INSERT INTO activity.message_daily_aggregates", None).await;
+
+        let erase_pool = pool.clone();
+        let erase = tokio::spawn(async move {
+            let mut tx = erase_pool.begin().await?;
+            erase_journey_then_message_and_set_tombstone(&mut tx, 42).await?;
+            tx.commit().await
+        });
+        wait_for_db_lock(&pool, "WHERE user_id =", Some("transactionid")).await;
+        aggregate_blocker.commit().await?;
+
+        let (retention, erase) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            tokio::join!(retention, erase)
+        })
+        .await?;
+        let summary = retention??;
+        erase??;
+
+        assert_eq!(summary.message_rows_deleted, 1);
+        assert_eq!(summary.journey_rows_deleted, 1);
+        let raw_rows = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM activity.message_metadata_events WHERE user_id = 42) +
+                (SELECT COUNT(*) FROM activity.journey_events WHERE user_id = 42) +
+                (SELECT COUNT(*) FROM activity.journey_user_state WHERE user_id = 42)",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(raw_rows, 0);
+        let aggregates = sqlx::query_as::<_, (i64, i64)>(
+            "SELECT
+                (SELECT message_count FROM activity.message_daily_aggregates
+                  WHERE day = $1 AND guild_id = 1 AND channel_id = 20),
+                (SELECT event_count FROM activity.journey_daily_aggregates
+                  WHERE day = $1 AND guild_id = 1 AND event_type = 'join' AND actor_kind = '')",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(aggregates, (6, 1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn journey_retention_aggregiert_genau_die_geloeschten_race_zeilen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let cutoff = old + Duration::days(1);
+
+        for user_id in [10, 12] {
+            assert!(
+                record_journey_event(
+                    &pool,
+                    JourneyEventInput {
+                        event_source: "retention_race",
+                        ..JourneyEventInput::new(user_id, 1, JourneyEventType::Join, old)
+                    },
+                )
+                .await?
+            );
+        }
+        sqlx::query(
+            "INSERT INTO activity.journey_daily_aggregates(
+                 day, guild_id, event_type, actor_kind, event_count, distinct_user_count
+             )
+             VALUES($1, 1, 'join', '', 5, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1
+               FROM activity.journey_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND event_type = 'join' AND actor_kind = ''
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let compact_pool = pool.clone();
+        let compact_task = tokio::spawn(async move {
+            let mut tx = compact_pool.begin().await?;
+            let deleted = compact_journey_tx(&mut tx, cutoff).await?;
+            tx.commit().await?;
+            Ok::<i64, sqlx::Error>(deleted)
+        });
+        wait_for_db_lock(&pool, "INSERT INTO activity.journey_daily_aggregates", None).await;
+
+        assert!(
+            record_journey_event(
+                &pool,
+                JourneyEventInput {
+                    event_source: "retention_race",
+                    ..JourneyEventInput::new(
+                        11,
+                        1,
+                        JourneyEventType::Join,
+                        old + Duration::hours(1),
+                    )
+                },
+            )
+            .await?
+        );
+        aggregate_blocker.commit().await?;
+
+        let first_deleted = compact_task.await??;
+        let first_aggregate: (i64, i64) = sqlx::query_as(
+            "SELECT event_count, distinct_user_count
+               FROM activity.journey_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND event_type = 'join' AND actor_kind = ''",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        let remaining_users: Vec<i64> =
+            sqlx::query_scalar("SELECT user_id FROM activity.journey_events ORDER BY user_id")
+                .fetch_all(&pool)
+                .await?;
+
+        assert_eq!(first_deleted, first_aggregate.0 - 5);
+        assert_eq!(first_deleted, 2);
+        assert_eq!(first_aggregate, (7, 2));
+        assert_eq!(remaining_users, vec![11]);
+
+        let mut second_tx = pool.begin().await?;
+        let second_deleted = compact_journey_tx(&mut second_tx, cutoff).await?;
+        second_tx.commit().await?;
+        let mut third_tx = pool.begin().await?;
+        let third_deleted = compact_journey_tx(&mut third_tx, cutoff).await?;
+        third_tx.commit().await?;
+        let final_event_count: i64 = sqlx::query_scalar(
+            "SELECT event_count
+               FROM activity.journey_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND event_type = 'join' AND actor_kind = ''",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+
+        assert_eq!(second_deleted, 1);
+        assert_eq!(third_deleted, 0);
+        assert_eq!(final_event_count, 8);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn message_retention_aggregiert_genau_die_geloeschten_race_zeilen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let cutoff = old + Duration::days(1);
+
+        for (user_id, message_id) in [(10_i64, 100_i64), (12, 102)] {
+            sqlx::query(
+                "INSERT INTO activity.message_metadata_events(
+                     user_id, guild_id, channel_id, message_id, occurred_at,
+                     message_length, has_attachment, attachment_count, is_reply
+                 ) VALUES($1, 1, 20, $2, $3, 5, FALSE, 0, FALSE)",
+            )
+            .bind(user_id)
+            .bind(message_id)
+            .bind(old)
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO activity.message_daily_aggregates(
+                 day, guild_id, channel_id, message_count, total_message_length,
+                 attachment_message_count, reply_message_count, distinct_user_count
+             ) VALUES($1, 1, 20, 5, 0, 0, 0, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM activity.message_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND channel_id = 20
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let compact_pool = pool.clone();
+        let compact_task = tokio::spawn(async move {
+            let mut tx = compact_pool.begin().await?;
+            let deleted = compact_messages_tx(&mut tx, cutoff).await?;
+            tx.commit().await?;
+            Ok::<i64, sqlx::Error>(deleted)
+        });
+        wait_for_db_lock(&pool, "INSERT INTO activity.message_daily_aggregates", None).await;
+
+        sqlx::query(
+            "INSERT INTO activity.message_metadata_events(
+                 user_id, guild_id, channel_id, message_id, occurred_at,
+                 message_length, has_attachment, attachment_count, is_reply
+             ) VALUES(11, 1, 20, 101, $1, 5, FALSE, 0, FALSE)",
+        )
+        .bind(old + Duration::hours(1))
+        .execute(&pool)
+        .await?;
+        aggregate_blocker.commit().await?;
+
+        let deleted = compact_task.await??;
+        let aggregate_count: i64 = sqlx::query_scalar(
+            "SELECT message_count FROM activity.message_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND channel_id = 20",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        let remaining_users: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM activity.message_metadata_events ORDER BY user_id",
+        )
+        .fetch_all(&pool)
+        .await?;
+
+        assert_eq!(deleted, aggregate_count - 5);
+        assert_eq!(deleted, 2);
+        assert_eq!(aggregate_count, 7);
+        assert_eq!(remaining_users, vec![11]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn voice_retention_aggregiert_genau_die_geloeschten_race_zeilen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let cutoff = old + Duration::days(1);
+
+        for user_id in [10_i64, 12] {
+            sqlx::query(
+                "INSERT INTO activity.voice_metadata_events(
+                     user_id, guild_id, channel_id, event_type, occurred_at, duration_seconds
+                 ) VALUES($1, 1, 20, 'leave', $2, 10)",
+            )
+            .bind(user_id)
+            .bind(old)
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO activity.voice_daily_aggregates(
+                 day, guild_id, channel_id, join_count, leave_count, move_count,
+                 update_count, total_duration_seconds, distinct_user_count
+             ) VALUES($1, 1, 20, 0, 5, 0, 0, 0, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+        sqlx::query(
+            "INSERT INTO activity.voice_open_sessions(
+                 user_id, guild_id, channel_id, joined_at
+             ) VALUES(50, 1, 20, $1)",
+        )
+        .bind(old)
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM activity.voice_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND channel_id = 20
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let compact_pool = pool.clone();
+        let compact_task = tokio::spawn(async move {
+            let mut tx = compact_pool.begin().await?;
+            let deleted = compact_voice_tx(&mut tx, cutoff).await?;
+            tx.commit().await?;
+            Ok::<(i64, i64), sqlx::Error>(deleted)
+        });
+        wait_for_db_lock(&pool, "INSERT INTO activity.voice_daily_aggregates", None).await;
+
+        sqlx::query(
+            "INSERT INTO activity.voice_metadata_events(
+                 user_id, guild_id, channel_id, event_type, occurred_at, duration_seconds
+             ) VALUES(11, 1, 20, 'leave', $1, 10)",
+        )
+        .bind(old + Duration::hours(1))
+        .execute(&pool)
+        .await?;
+        aggregate_blocker.commit().await?;
+
+        let (deleted, stale_open_deleted) = compact_task.await??;
+        let aggregate_count: i64 = sqlx::query_scalar(
+            "SELECT leave_count FROM activity.voice_daily_aggregates
+              WHERE day = $1 AND guild_id = 1 AND channel_id = 20",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        let remaining_users: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM activity.voice_metadata_events ORDER BY user_id",
+        )
+        .fetch_all(&pool)
+        .await?;
+        let open_sessions: i64 =
+            sqlx::query_scalar("SELECT COUNT(*)::int8 FROM activity.voice_open_sessions")
+                .fetch_one(&pool)
+                .await?;
+
+        assert_eq!(deleted, aggregate_count - 5);
+        assert_eq!((deleted, stale_open_deleted), (2, 1));
+        assert_eq!(aggregate_count, 7);
+        assert_eq!(remaining_users, vec![11]);
+        assert_eq!(open_sessions, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn interaction_retention_aggregiert_genau_die_geloeschten_race_zeilen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let cutoff = old + Duration::days(1);
+
+        for (user_id, interaction_id) in [(10_i64, 100_i64), (12, 102)] {
+            sqlx::query(
+                "INSERT INTO activity.interaction_events(
+                     user_id, guild_id, interaction_id, interaction_kind, route, occurred_at
+                 ) VALUES($1, 1, $2, 'component', 'route', $3)",
+            )
+            .bind(user_id)
+            .bind(interaction_id)
+            .bind(old)
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO activity.interaction_daily_aggregates(
+                 day, guild_id, interaction_kind, route, interaction_count, distinct_user_count
+             ) VALUES($1, 1, 'component', 'route', 5, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM activity.interaction_daily_aggregates
+              WHERE day = $1 AND guild_id = 1
+                AND interaction_kind = 'component' AND route = 'route'
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let compact_pool = pool.clone();
+        let compact_task = tokio::spawn(async move {
+            let mut tx = compact_pool.begin().await?;
+            let deleted = compact_interactions_tx(&mut tx, cutoff).await?;
+            tx.commit().await?;
+            Ok::<i64, sqlx::Error>(deleted)
+        });
+        wait_for_db_lock(&pool, "activity.interaction_events", None).await;
+
+        sqlx::query(
+            "INSERT INTO activity.interaction_events(
+                 user_id, guild_id, interaction_id, interaction_kind, route, occurred_at
+             ) VALUES(11, 1, 101, 'component', 'route', $1)",
+        )
+        .bind(old + Duration::hours(1))
+        .execute(&pool)
+        .await?;
+        aggregate_blocker.commit().await?;
+
+        let deleted = compact_task.await??;
+        let aggregate_count: i64 = sqlx::query_scalar(
+            "SELECT interaction_count FROM activity.interaction_daily_aggregates
+              WHERE day = $1 AND guild_id = 1
+                AND interaction_kind = 'component' AND route = 'route'",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        let remaining_users: Vec<i64> =
+            sqlx::query_scalar("SELECT user_id FROM activity.interaction_events ORDER BY user_id")
+                .fetch_all(&pool)
+                .await?;
+
+        assert_eq!(deleted, aggregate_count - 5);
+        assert_eq!(deleted, 2);
+        assert_eq!(aggregate_count, 7);
+        assert_eq!(remaining_users, vec![11]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn presence_retention_aggregiert_genau_die_geloeschten_race_zeilen(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let old = DateTime::parse_from_rfc3339("2026-01-01T00:00:00Z")?.with_timezone(&Utc);
+        let cutoff = old + Duration::days(1);
+
+        for user_id in [10_i64, 12] {
+            sqlx::query(
+                "INSERT INTO activity.presence_daily_seen(guild_id, user_id, day)
+                 VALUES(1, $1, $2)",
+            )
+            .bind(user_id)
+            .bind(old.date_naive())
+            .execute(&pool)
+            .await?;
+        }
+        sqlx::query(
+            "INSERT INTO activity.presence_daily_aggregates(day, guild_id, distinct_user_count)
+             VALUES($1, 1, 0)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+
+        let mut aggregate_blocker = pool.begin().await?;
+        sqlx::query(
+            "SELECT 1 FROM activity.presence_daily_aggregates
+              WHERE day = $1 AND guild_id = 1
+              FOR UPDATE",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&mut *aggregate_blocker)
+        .await?;
+
+        let compact_pool = pool.clone();
+        let compact_task = tokio::spawn(async move {
+            let mut tx = compact_pool.begin().await?;
+            let deleted = compact_presence_tx(&mut tx, cutoff).await?;
+            tx.commit().await?;
+            Ok::<i64, sqlx::Error>(deleted)
+        });
+        wait_for_db_lock(
+            &pool,
+            "INSERT INTO activity.presence_daily_aggregates",
+            None,
+        )
+        .await;
+
+        sqlx::query(
+            "INSERT INTO activity.presence_daily_seen(guild_id, user_id, day)
+             VALUES(1, 11, $1)",
+        )
+        .bind(old.date_naive())
+        .execute(&pool)
+        .await?;
+        aggregate_blocker.commit().await?;
+
+        let deleted = compact_task.await??;
+        let aggregate_count: i64 = sqlx::query_scalar(
+            "SELECT distinct_user_count FROM activity.presence_daily_aggregates
+              WHERE day = $1 AND guild_id = 1",
+        )
+        .bind(old.date_naive())
+        .fetch_one(&pool)
+        .await?;
+        let remaining_users: Vec<i64> =
+            sqlx::query_scalar("SELECT user_id FROM activity.presence_daily_seen ORDER BY user_id")
+                .fetch_all(&pool)
+                .await?;
+
+        assert_eq!(deleted, aggregate_count);
+        assert_eq!(deleted, 2);
+        assert_eq!(remaining_users, vec![11]);
         Ok(())
     }
 
