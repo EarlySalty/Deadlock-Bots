@@ -6,6 +6,24 @@ import json
 import os
 from urllib import error, parse, request
 
+INFISICAL_BASE_URL = "http://127.0.0.1:8080"
+KNOWLEDGE_ENV_ALLOWLIST = frozenset(
+    {
+        "DL_LLM_MODEL_BOT_PATE",
+        "FIREWORK_API_KEY",
+        "FIREWORK_BASE_URL",
+        "FIREWORK_MODEL",
+        "FIREWORKS_API_KEY",
+        "FIREWORKS_BASE_URL",
+        "FIREWORKS_MODEL",
+    }
+)
+
+
+class _NoRedirect(request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
 
 def _required(name: str) -> str:
     value = (os.getenv(name) or "").strip()
@@ -14,12 +32,28 @@ def _required(name: str) -> str:
     return value
 
 
-def _fetch_secrets() -> list[dict[str, object]]:
+def _validated_infisical_base_url() -> str:
     base_url = _required("INFISICAL_API_URL")
-    parsed_url = parse.urlsplit(base_url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-        raise SystemExit("INFISICAL_API_URL must use http/https")
-    base_url = base_url.rstrip("/")
+    parsed = parse.urlsplit(base_url)
+    if (
+        parsed.scheme != "http"
+        or parsed.netloc != "127.0.0.1:8080"
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise SystemExit(f"INFISICAL_API_URL must be exactly {INFISICAL_BASE_URL}")
+    return INFISICAL_BASE_URL
+
+
+def _local_opener():
+    return request.build_opener(request.ProxyHandler({}), _NoRedirect())
+
+
+def _fetch_secrets() -> list[dict[str, object]]:
+    base_url = _validated_infisical_base_url()
     project_id = _required("INFISICAL_PROJECT_ID")
     environment = _required("INFISICAL_ENV")
     service_token = _required("INFISICAL_SERVICE_TOKEN")
@@ -47,7 +81,7 @@ def _fetch_secrets() -> list[dict[str, object]]:
     )
 
     try:
-        with request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
+        with _local_opener().open(req, timeout=timeout) as resp:  # noqa: S310
             payload = json.loads(resp.read().decode("utf-8"))
     except error.HTTPError as exc:
         raise SystemExit(f"Infisical request failed with HTTP {exc.code}") from exc
@@ -69,9 +103,6 @@ def _as_env_map(items: list[dict[str, object]]) -> dict[str, str]:
         value = item.get("secretValue")
         env_map[key] = "" if value is None else str(value)
 
-    if env_map.get("MINIMAX_TOKEN_PLAN_KEY") and not env_map.get("MINIMAX_API_KEY"):
-        env_map["MINIMAX_API_KEY"] = env_map["MINIMAX_TOKEN_PLAN_KEY"]
-
     return env_map
 
 
@@ -80,10 +111,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--exec", dest="command", nargs=argparse.REMAINDER, required=True)
     args = parser.parse_args(argv)
 
-    env_map = _as_env_map(_fetch_secrets())
+    fetched_env = _as_env_map(_fetch_secrets())
+    env_map = {key: value for key, value in fetched_env.items() if key in KNOWLEDGE_ENV_ALLOWLIST}
     if not args.command:
         parser.error("--exec requires a command")
     environment = os.environ.copy()
+    for key in fetched_env:
+        environment.pop(key, None)
     environment.update(env_map)
     environment.pop("INFISICAL_SERVICE_TOKEN", None)
     os.execvpe(args.command[0], args.command, environment)  # noqa: S606

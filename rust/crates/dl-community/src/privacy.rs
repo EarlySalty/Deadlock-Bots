@@ -481,6 +481,17 @@ const USER_TABLES: &[TableSpec] = &[
         "user_id",
         ColumnType::I64,
     ),
+    // Offener `/invite`-Request, adressiert über die Discord-ID des
+    // Eingeladenen. MUSS hier stehen und nicht nur in STEAM_SIDE_TABLES:
+    // eingeladen wird jemand, der noch KEINEN core.steam_links-Eintrag hat,
+    // über den steam_ids_for_user ihn finden könnte.
+    TableSpec::new(
+        "invite_requests_target",
+        "target_discord_id",
+        "steam.invite_requests",
+        "target_discord_id",
+        ColumnType::I64,
+    ),
     TableSpec::new(
         "tempvoice_presets",
         "user_id",
@@ -884,6 +895,16 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "steam_id64",
         ColumnType::I64,
     ),
+    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthält neben der
+    // Steam-ID auch die Discord-ID des Eingeladenen — gehoert damit in die
+    // Erasure-Kette, nicht nur in den Poller.
+    TableSpec::new(
+        "invite_requests",
+        "steam_id64",
+        "steam.invite_requests",
+        "steam_id64",
+        ColumnType::I64,
+    ),
 ];
 
 const USER_CO_PLAYERS_REL: &str = "activity.user_co_players";
@@ -892,6 +913,7 @@ const KV_NATIVE_ONBOARDING_COMPLETED_NS: &str = "native_onboarding:completed";
 const KV_CONCIERGE_T0_NS: &str = "concierge:t0";
 const KV_CONCIERGE_FALLBACK_NS: &str = "concierge:fallback_channel";
 const KV_CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
+const KV_CONCIERGE_STECKBRIEF_REVOKED_NS: &str = "concierge:steckbrief_revoked";
 const USER_PRIVACY_REL: &str = "core.user_privacy";
 const SERVER_SYNC_ROLLBACK_EXPORTS_REL: &str = "server_config.rollback_exports";
 const PRIVACY_RETENTION_JOB_INTERVAL: StdDuration = StdDuration::from_secs(24 * 3600);
@@ -961,7 +983,9 @@ fn key_mentions_user(key: &str, user_id: i64) -> bool {
 
 fn concierge_claim_belongs_to_user(ns: &str, key: &str, raw: &str, user_id: i64) -> bool {
     match ns {
-        KV_CONCIERGE_T0_NS | KV_CONCIERGE_FALLBACK_NS => key_mentions_user(key, user_id),
+        KV_CONCIERGE_T0_NS | KV_CONCIERGE_FALLBACK_NS | KV_CONCIERGE_STECKBRIEF_REVOKED_NS => {
+            key_mentions_user(key, user_id)
+        }
         KV_CONCIERGE_PATE_CLAIM_NS => {
             key_mentions_user(key, user_id) || raw_value_mentions_user(raw, user_id)
         }
@@ -994,11 +1018,12 @@ pub(crate) async fn delete_concierge_claims(
     let claims = sqlx::query(
         "SELECT ns, k, v
            FROM bot.kv_store
-          WHERE ns IN ($1, $2, $3)",
+          WHERE ns IN ($1, $2, $3, $4)",
     )
     .bind(KV_CONCIERGE_T0_NS)
     .bind(KV_CONCIERGE_FALLBACK_NS)
     .bind(KV_CONCIERGE_PATE_CLAIM_NS)
+    .bind(KV_CONCIERGE_STECKBRIEF_REVOKED_NS)
     .fetch_all(&mut **tx)
     .await?
     .into_iter()
@@ -1395,6 +1420,21 @@ pub async fn lock_user_privacy(
 ) -> CommunityDbResult<()> {
     crate::db::advisory_lock(tx, user_id ^ i64::MIN).await?;
     Ok(())
+}
+
+pub(crate) async fn erasure_completed_under_lock(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM core.user_privacy
+              WHERE user_id = $1 AND deleted_at IS NOT NULL
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 pub(crate) async fn scrub_pate_journey_metadata(
@@ -1808,12 +1848,13 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         let claims = sqlx::query(
             "SELECT ns, k, v
                FROM bot.kv_store
-              WHERE ns IN ($1, $2, $3)
+              WHERE ns IN ($1, $2, $3, $4)
               ORDER BY ns, k",
         )
         .bind(KV_CONCIERGE_T0_NS)
         .bind(KV_CONCIERGE_FALLBACK_NS)
         .bind(KV_CONCIERGE_PATE_CLAIM_NS)
+        .bind(KV_CONCIERGE_STECKBRIEF_REVOKED_NS)
         .fetch_all(pool)
         .await?
         .into_iter()
@@ -1905,8 +1946,8 @@ mod privacy_contract_tests {
         // `server_config.*`: Audit-Referenzen auf Mod-/Admin-AKTIONEN am
         // Server-Soll-Modell (wer hat Diff erstellt / Apply angefordert /
         // Drift adoptiert). Kein Community-Verhaltensdatum; Aufbewahrung zur
-        // Nachvollziehbarkeit administrativer Server-Aenderungen
-        // (berechtigtes Interesse). Ein Opt-out darf die Aenderungs-
+        // Nachvollziehbarkeit administrativer Server-Änderungen
+        // (berechtigtes Interesse). Ein Opt-out darf die Änderungs-
         // Historie des Servers nicht zerstoeren.
         out.insert((
             "server_config.diff_previews".to_string(),
@@ -1920,14 +1961,26 @@ mod privacy_contract_tests {
             "server_config.adoption_events".to_string(),
             "adopted_by_user_id".to_string(),
         ));
-        // Rollback-Artefakte koennen verschachtelte Member-IDs im JSON
-        // enthalten; sie sind deshalb ueber `expires_at` auf 180 Tage
-        // begrenzt und werden durch den Privacy-Retention-Purge geloescht.
+        // Rollback-Artefakte können verschachtelte Member-IDs im JSON
+        // enthalten; sie sind deshalb über `expires_at` auf 180 Tage
+        // begrenzt und werden durch den Privacy-Retention-Purge gelöscht.
         // Die Admin-ID bleibt nur als Ersteller-Auditreferenz allowlisted.
         out.insert((
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
         ));
+        // `core.discord_audit_log.user_id` ist der AUSFÜHRENDE einer Moderations-
+        // aktion (Discord-Semantik: user_id handelt, target_id ist betroffen).
+        // Gleiche Kategorie wie server_config.*: Audit einer Admin-Aktion,
+        // Aufbewahrung im berechtigten Interesse. Ein Opt-out des Moderators darf
+        // die Moderationshistorie des Servers nicht löschen.
+        out.insert(("core.discord_audit_log".to_string(), "user_id".to_string()));
+        // `steam.invite_requests.admin_id` ist der Admin, der `/invite` ausgeloest
+        // hat — Audit-Referenz auf eine Admin-AKTION, gleiche Kategorie wie
+        // server_config.*. Sein Opt-out darf den offenen Invite eines Dritten
+        // nicht mitreissen; der Eingeladene selbst wird über `target_discord_id`
+        // in USER_TABLES gelöscht, und die Zeile lebt ohnehin nur 24 h.
+        out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
         out
     }
 
@@ -2250,6 +2303,70 @@ mod tests {
         assert!(is_opted_out(db.pool(), 5).await);
         set_opt_in(db.pool(), 5, 2000).await.expect("opt in");
         assert!(!is_opted_out(db.pool(), 5).await);
+    }
+
+    /// Legt einen offenen `/invite`-Request an: eingeladen wurde `target`,
+    /// ausgeloest hat ihn `admin`. Bewusst OHNE `core.steam_links`-Eintrag —
+    /// genau so sieht der Normalfall aus, denn eingeladen wird jemand, der
+    /// noch nicht verknuepft ist.
+    async fn seed_invite_request(pool: &PgPool, admin: i64, target: i64) {
+        sqlx::query(
+            r#"
+            INSERT INTO steam.invite_requests
+                (steam_id64, account_id, admin_id, target_discord_id, created_at)
+            VALUES (76561199813018551, 1852752823, $1, $2, 1000)
+            "#,
+        )
+        .bind(admin)
+        .bind(target)
+        .execute(pool)
+        .await
+        .expect("seed invite request");
+    }
+
+    async fn invite_requests_count(pool: &PgPool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*)::int8 FROM steam.invite_requests")
+            .fetch_one(pool)
+            .await
+            .expect("count invite requests")
+    }
+
+    #[tokio::test]
+    async fn erasure_loescht_offenen_invite_auch_ohne_steam_link() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 4242, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // Über STEAM_SIDE_TABLES allein wäre die Zeile unerreichbar:
+        // steam_ids_for_user liest nur core.steam_links, und der Eingeladene
+        // hat dort (noch) nichts stehen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            0,
+            "offener Invite überlebt die Löschanfrage des Eingeladenen"
+        );
+    }
+
+    #[tokio::test]
+    async fn erasure_des_admins_loescht_fremde_invites_nicht() {
+        let db = mk_db().await;
+        seed_invite_request(db.pool(), 999, 4242).await;
+
+        delete_user_data(db.pool(), 999, "test".into(), 2000)
+            .await
+            .expect("delete");
+
+        // `admin_id` ist eine Audit-Referenz auf eine Admin-AKTION (allowlisted).
+        // Ein Opt-out des Admins darf den offenen Invite eines Dritten nicht
+        // mitreissen.
+        assert_eq!(
+            invite_requests_count(db.pool()).await,
+            1,
+            "Löschanfrage des Admins hat den Invite eines Dritten gelöscht"
+        );
     }
 
     #[tokio::test]
@@ -2916,6 +3033,7 @@ mod tests {
             "INSERT INTO bot.kv_store(ns, k, v) VALUES
              ('concierge:t0', '1:42', 'claimed'),
              ('concierge:fallback_channel', '1:42', 'claimed'),
+             ('concierge:steckbrief_revoked', '42', 'revoked'),
              ('concierge:pate_claim', '42', '77'),
              ('concierge:pate_claim', '99', '42'),
              ('concierge:pate_claim', '100', '77')",
@@ -2930,7 +3048,7 @@ mod tests {
         let claims = export["kv"]["concierge_claims"]
             .as_array()
             .expect("concierge claims array");
-        assert_eq!(claims.len(), 4);
+        assert_eq!(claims.len(), 5);
         let claims_json = serde_json::to_string(claims).expect("claims json");
         assert!(!claims_json.contains("77"));
         assert!(!claims_json.contains("99"));
@@ -2938,7 +3056,7 @@ mod tests {
         let summary = delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
             .await
             .expect("privacy delete");
-        assert_eq!(summary.counts.get("kv_concierge_claims"), Some(&4));
+        assert_eq!(summary.counts.get("kv_concierge_claims"), Some(&5));
         let remaining = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM bot.kv_store WHERE ns LIKE 'concierge:%'",
         )

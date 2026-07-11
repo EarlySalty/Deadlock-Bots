@@ -863,13 +863,20 @@ impl TempVoiceEngine {
             .as_ref()
             .filter(|preset| preset.mode == mode)
             .cloned();
-        let create_name = self.tempvoice_mode_name(guild_id, user_id, mode).await;
-        let base = create_name.clone();
+        let preset_base = matching_default
+            .as_ref()
+            .map(|preset| logic::strip_suffixes(&preset.base_name))
+            .map(|base| base.trim().to_string())
+            .filter(|base| !base.is_empty());
+        let base = match preset_base {
+            Some(base) => base,
+            None => self.tempvoice_mode_name(guild_id, user_id, mode).await,
+        };
         let cap = router_lane_limit(mode, matching_default.as_ref());
         let source_staging_id = crate::router::router_mode(mode).map(|mode| mode.staging_id);
         let lane_id = self
             .port
-            .create_voice_channel(guild_id, Some(category_id), &create_name, cap)
+            .create_voice_channel(guild_id, Some(category_id), &base, cap)
             .await?;
         {
             let mut state = self.state.lock().await;
@@ -1265,10 +1272,21 @@ impl TempVoiceEngine {
         }
         self.set_base_name(channel_id, &base).await;
         let effective = self.set_limit(channel_id, limit).await?;
+        let current = self.port.channel_name(guild_id, channel_id).await;
+        if current.as_deref().is_some_and(logic::has_live_suffix) {
+            return Ok(effective);
+        }
+        let lane = {
+            let state = self.state.lock().await;
+            state.lanes.get(&channel_id).cloned()
+        };
+        let desired = match lane {
+            Some(lane) => self.desired_lane_name(guild_id, &lane).await,
+            None => base,
+        };
         self.port
-            .rename_channel(channel_id, &base, "TempVoice: Template")
+            .rename_channel(channel_id, &desired, "TempVoice: Template")
             .await?;
-        self.refresh_name(guild_id, channel_id).await;
         Ok(effective)
     }
 
@@ -1864,6 +1882,35 @@ impl TempVoiceEngine {
         }
     }
 
+    async fn desired_lane_name(&self, guild_id: u64, lane: &LaneState) -> String {
+        let base = if lane.prefix_from_rank {
+            // Dynamischer Rang-Prefix aus Owner-Pref/Rollen + Lane-Nummer
+            let (pref_rank, _) = self
+                .store
+                .rank_pref(lane.owner_id)
+                .await
+                .unwrap_or(("unknown".to_string(), 0));
+            let prefix = if pref_rank != "unknown" && logic::rank_index(&pref_rank) > 0 {
+                logic::capitalize(&pref_rank)
+            } else {
+                let roles = self.port.member_role_names(guild_id, lane.owner_id).await;
+                logic::rank_prefix_for(&roles).unwrap_or_else(|| "Lane".to_string())
+            };
+            match logic::extract_lane_number(&lane.base_name) {
+                Some(number) => format!("{prefix} {number}"),
+                None => prefix,
+            }
+        } else {
+            lane.base_name.clone()
+        };
+
+        let in_minrank = lane
+            .category_id
+            .map(|c| self.config.minrank_categories.contains(&c))
+            .unwrap_or(false);
+        logic::compose_name(&base, &lane.min_rank, in_minrank)
+    }
+
     /// Name aktualisieren — nur im Create-Fenster (45s) außer prefix_from_rank;
     /// nie bei LiveMatch-Suffix.
     async fn refresh_name(self: &Arc<Self>, guild_id: u64, channel_id: u64) {
@@ -1891,32 +1938,7 @@ impl TempVoiceEngine {
             }
         }
 
-        let base = if lane.prefix_from_rank {
-            // Dynamischer Rang-Prefix aus Owner-Pref/Rollen + Lane-Nummer
-            let (pref_rank, _) = self
-                .store
-                .rank_pref(lane.owner_id)
-                .await
-                .unwrap_or(("unknown".to_string(), 0));
-            let prefix = if pref_rank != "unknown" && logic::rank_index(&pref_rank) > 0 {
-                logic::capitalize(&pref_rank)
-            } else {
-                let roles = self.port.member_role_names(guild_id, lane.owner_id).await;
-                logic::rank_prefix_for(&roles).unwrap_or_else(|| "Lane".to_string())
-            };
-            match logic::extract_lane_number(&lane.base_name) {
-                Some(number) => format!("{prefix} {number}"),
-                None => prefix,
-            }
-        } else {
-            lane.base_name.clone()
-        };
-
-        let in_minrank = lane
-            .category_id
-            .map(|c| self.config.minrank_categories.contains(&c))
-            .unwrap_or(false);
-        let desired = logic::compose_name(&base, &lane.min_rank, in_minrank);
+        let desired = self.desired_lane_name(guild_id, &lane).await;
         if desired != current {
             let _ = self
                 .port
@@ -3026,6 +3048,191 @@ mod tests {
                 denied: HashSet::from([666]),
                 cleared: HashSet::new(),
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn router_lane_nutzt_passendes_default_preset_beim_create() {
+        let (_db, engine, port, _staging) = setup().await;
+        let router_vc = 777;
+        engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 100,
+                mode: "casual".to_string(),
+                base_name: "Meine Lane".to_string(),
+                limit: 3,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default preset");
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+
+        let lane_id = engine
+            .create_router_lane(1, 100, "casual", router_vc)
+            .await
+            .expect("casual lane");
+
+        assert_eq!(
+            port.created.lock().expect("lock").as_slice(),
+            &[("Meine Lane".to_string(), 3)]
+        );
+        assert!(port.renamed.lock().expect("lock").is_empty());
+        assert_eq!(
+            engine
+                .lane_preset_snapshot(lane_id)
+                .await
+                .map(|snapshot| snapshot.0),
+            Some("Meine Lane".to_string())
+        );
+        let lane = engine
+            .store
+            .all_lanes()
+            .await
+            .expect("lanes")
+            .into_iter()
+            .find(|lane| lane.channel_id == lane_id)
+            .expect("created lane");
+        assert_eq!(lane.base_name, "Meine Lane");
+    }
+
+    #[tokio::test]
+    async fn router_lane_nutzt_fallback_bei_leerem_preset_namen() {
+        let (_db, engine, port, _staging) = setup().await;
+        let router_vc = 777;
+        engine
+            .store
+            .save_default_preset(DefaultPresetRecord {
+                user_id: 100,
+                mode: "casual".to_string(),
+                base_name: " \t • ab Emissary".to_string(),
+                limit: 3,
+                min_rank: "unknown".to_string(),
+            })
+            .await
+            .expect("default preset");
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+
+        engine
+            .create_router_lane(1, 100, "casual", router_vc)
+            .await
+            .expect("casual lane");
+
+        assert_eq!(
+            port.created.lock().expect("lock").as_slice(),
+            &[("Chill Lane 1 · Phantom".to_string(), 3)]
+        );
+        assert!(port.renamed.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn router_lane_ohne_preset_nutzt_bisherigen_fallback() {
+        let (_db, engine, port, _staging) = setup().await;
+        let router_vc = 777;
+        port.voice.lock().expect("lock").insert((1, 100), router_vc);
+
+        engine
+            .create_router_lane(1, 100, "casual", router_vc)
+            .await
+            .expect("casual lane");
+
+        assert_eq!(
+            port.created.lock().expect("lock").as_slice(),
+            &[("Chill Lane 1 · Phantom".to_string(), 6)]
+        );
+        assert!(port.renamed.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lane_template_sendet_genau_einen_finalen_namen() {
+        let (_db, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Alte Lane".to_string());
+        engine.state.lock().await.lanes.insert(
+            lane_id,
+            LaneState {
+                owner_id: 100,
+                initial_owner_id: 100,
+                base_name: "Alte Lane".to_string(),
+                min_rank: "emissary".to_string(),
+                category_id: Some(RANKED_CATEGORY),
+                prefix_from_rank: false,
+                source_staging_id: None,
+            },
+        );
+
+        engine
+            .set_lane_template(1, lane_id, "Meine Lane", 3)
+            .await
+            .expect("template");
+
+        assert_eq!(
+            port.renamed.lock().expect("lock").as_slice(),
+            &[(lane_id, "Meine Lane • ab Emissary".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn lane_template_erhaelt_live_suffix_ohne_rename() {
+        let (_db, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Alte Lane • 2/6 Im Match".to_string());
+        engine.state.lock().await.lanes.insert(
+            lane_id,
+            LaneState {
+                owner_id: 100,
+                initial_owner_id: 100,
+                base_name: "Alte Lane".to_string(),
+                min_rank: "unknown".to_string(),
+                category_id: Some(CASUAL_CATEGORY),
+                prefix_from_rank: false,
+                source_staging_id: Some(CASUAL_STAGING),
+            },
+        );
+
+        engine
+            .set_lane_template(1, lane_id, "Meine Lane", 3)
+            .await
+            .expect("template");
+
+        assert!(port.renamed.lock().expect("lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn lane_template_nutzt_dynamischen_rang_prefix_fuer_finalen_namen() {
+        let (_db, engine, port, _staging) = setup().await;
+        let lane_id = 4242;
+        port.names
+            .lock()
+            .expect("lock")
+            .insert(lane_id, "Lane 7".to_string());
+        engine.state.lock().await.lanes.insert(
+            lane_id,
+            LaneState {
+                owner_id: 100,
+                initial_owner_id: 100,
+                base_name: "Lane 7".to_string(),
+                min_rank: "unknown".to_string(),
+                category_id: Some(CASUAL_CATEGORY),
+                prefix_from_rank: true,
+                source_staging_id: Some(CASUAL_STAGING),
+            },
+        );
+
+        engine
+            .set_lane_template(1, lane_id, "Meine Lane", 3)
+            .await
+            .expect("template");
+
+        assert_eq!(
+            port.renamed.lock().expect("lock").as_slice(),
+            &[(lane_id, "Phantom".to_string())]
         );
     }
 

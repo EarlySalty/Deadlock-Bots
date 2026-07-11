@@ -89,34 +89,6 @@ _PANEL_CUSTOM_IDS: frozenset[str] = frozenset(
     ]
 )
 
-# ---------------------------------------------------------------------------
-# Playtest-Funnel: alle custom_ids aus dem Beta-Invite-Flow.
-# Reihenfolge entspricht den Schritten im Funnel-Spec (nachschlag-funnel.md).
-# ---------------------------------------------------------------------------
-
-# Panel-Einstieg (Schritt 0 — persistentes Panel in öffentlichem Kanal)
-_BETAINVITE_PANEL_CUSTOM_ID = "betainvite:panel:start"
-
-# Alle betainvite:*-custom_ids, die per Button-Klick an Rust weitergeleitet werden.
-# Schritt 0: Intent-Wahl (Community vs. Nur-Einladung)
-# Schritt 1: Steam-Link-Prüfung (+ disabled-Placeholder)
-# Schritt 2: Freundschaft prüfen
-# Schritt 3: Zahlung fortführen / überspringen
-# Fehler: erneut versuchen
-_BETAINVITE_CUSTOM_IDS: frozenset[str] = frozenset(
-    [
-        _BETAINVITE_PANEL_CUSTOM_ID,
-        "betainvite:intent:community",
-        "betainvite:intent:invite_only",
-        "betainvite:link:continue",
-        "betainvite:link:disabled",
-        "betainvite:friendhint:continue",
-        "betainvite:payment:continue",
-        "betainvite:support:skip",
-        "betainvite:error:retry",
-    ]
-)
-
 # Befund 3+4: custom_ids, die lokal ein Modal öffnen statt an Rust forwardiert zu werden.
 _FRIEND_CODE_MODAL_IDS: frozenset[str] = frozenset(
     [
@@ -256,66 +228,6 @@ class SteamBridgePanelView(discord.ui.View):
                 self.add_item(_PanelButton(custom_id=cid, label=label, style=style))
             else:
                 self.add_item(_PanelButton(custom_id=cid))
-
-
-# ---------------------------------------------------------------------------
-# Playtest-Funnel: persistente Views für alle betainvite:* custom_ids
-# ---------------------------------------------------------------------------
-
-
-class _BetaInviteButton(discord.ui.Button):
-    """Proxy-Button für einen betainvite:*-custom_id.
-
-    Leitet jeden Klick als kind="interaction" an den Rust-steam-bot weiter.
-    Label und Stil können optional übergeben werden; Default bleibt Zero-Width-Space/
-    secondary damit alt gepostete persistente Views weiterhin funktionieren.
-    """
-
-    def __init__(
-        self,
-        custom_id: str,
-        label: str = "​",  # Zero-Width-Space als Default für persistente Views
-        style: discord.ButtonStyle = discord.ButtonStyle.secondary,
-    ) -> None:
-        super().__init__(
-            label=label,
-            custom_id=custom_id,
-            style=style,
-        )
-
-    async def callback(self, interaction: discord.Interaction) -> None:
-        await _forward_interaction(interaction, self.custom_id)
-
-
-class BetaInvitePanelView(discord.ui.View):
-    """Persistente View für das Playtest-Invite-Panel (Einstiegs-Button).
-
-    Registriert beim Bot-Start nur den Panel-Einstieg-custom_id
-    ("betainvite:panel:start"), damit bereits gepostete Panels nach einem
-    Neustart weiterhin auf Klicks reagieren.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-        self.add_item(_BetaInviteButton(
-            custom_id=_BETAINVITE_PANEL_CUSTOM_ID,
-            label="🎟️ Einladung starten",
-            style=discord.ButtonStyle.primary,
-        ))
-
-
-class BetaInviteFlowView(discord.ui.View):
-    """Persistente View, die alle 8 Funnel-Schritt-Buttons abfängt.
-
-    Wird beim Bot-Start registriert, damit laufende Funnel-Sessions nach
-    einem Neustart weiterhin funktionieren.  Alle Klicks werden als
-    kind="interaction" an den Rust-steam-bot weitergeleitet.
-    """
-
-    def __init__(self) -> None:
-        super().__init__(timeout=None)
-        for cid in _BETAINVITE_CUSTOM_IDS:
-            self.add_item(_BetaInviteButton(custom_id=cid))
 
 
 # ---------------------------------------------------------------------------
@@ -463,7 +375,7 @@ async def _render_response(
             btn_style_name = str(btn_spec.get("style") or "secondary").lower()
             btn_style = _style_map.get(btn_style_name, discord.ButtonStyle.secondary)
             if btn_custom_id:
-                view.add_item(_BetaInviteButton(
+                view.add_item(_PanelButton(
                     custom_id=btn_custom_id,
                     label=btn_label,
                     style=btn_style,
@@ -541,9 +453,6 @@ async def _forward_interaction(
     values = data.get("values") if isinstance(data, dict) else None
     if isinstance(values, (list, tuple)) and values:
         inner["values"] = list(values)
-    # Anzeigename mitsenden, damit der Rust-Funnel ihn z.B. für den Supporter-
-    # Namen nutzen kann statt der numerischen ID (liest payload.data.discord_name).
-    inner["data"] = {"discord_name": interaction.user.display_name}
     event_data: dict[str, Any] = {"interaction": inner}
 
     # Wir starten den API-Call und warten maximal _DEFER_THRESHOLD_SECONDS.
@@ -588,12 +497,9 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
     async def cog_load(self) -> None:
         # Persistente Views registrieren — überleben Bot-Restarts
         self.bot.add_view(SteamBridgePanelView())
-        self.bot.add_view(BetaInvitePanelView())
-        self.bot.add_view(BetaInviteFlowView())
         log.info(
-            "steam-bridge: Persistente Views registriert (link=%d, betainvite=%d custom_ids)",
+            "steam-bridge: Persistente Views registriert (link=%d custom_ids)",
             len(_PANEL_CUSTOM_IDS),
-            len(_BETAINVITE_CUSTOM_IDS),
         )
         # Panel-Restore läuft nach Ready: gespeicherte Panel-Message mit dem
         # aktuellen Embed aus dem Rust-Bot auffrischen (wie account_link_panel).
@@ -660,124 +566,6 @@ class SteamBridge(commands.Cog, name="SteamBridge"):
             log.info("steam-bridge: Panel-Message %s aufgefrischt.", message_id)
         except Exception:
             log.warning("steam-bridge: Panel-Message %s nicht aktualisierbar.", message_id, exc_info=True)
-
-    # ------------------------------------------------------------------
-    # Slash-Commands: Playtest-Invite-Funnel
-    # ------------------------------------------------------------------
-
-    @app_commands.command(
-        name="betainvite",
-        description="Starte den Deadlock-Playtest-Invite-Flow.",
-    )
-    async def betainvite(self, interaction: discord.Interaction) -> None:
-        """Einstiegspunkt für alle User — startet den Funnel im Rust-steam-bot."""
-        result = await _post_event(
-            "slash_command",
-            {
-                "interaction": {
-                    "custom_id": "",
-                    "user_id": interaction.user.id,
-                    "guild_id": getattr(interaction.guild, "id", None) or 0,
-                    "data": {"name": "betainvite"},
-                }
-            },
-        )
-        await _render_response(interaction, result)
-
-    @app_commands.command(
-        name="publish_betainvite_panel",
-        description="Veröffentlicht das Invite-Panel mit dem Einstiegs-Button (nur Admins).",
-    )
-    @app_commands.checks.has_permissions(manage_guild=True)
-    @app_commands.describe(channel="Zielkanal fürs Panel (Standard: aktueller Kanal)")
-    async def publish_betainvite_panel(
-        self,
-        interaction: discord.Interaction,
-        channel: discord.TextChannel | discord.Thread | None = None,
-    ) -> None:
-        """Postet das persistente BetaInvite-Panel (Zielkanal wählbar).
-
-        Der Rust-steam-bot liefert den vollständigen Embed-Inhalt.
-        Python hängt die persistente BetaInvitePanelView an die Nachricht.
-        """
-        result = await _post_event(
-            "slash_command",
-            {
-                "interaction": {
-                    "custom_id": "",
-                    "user_id": interaction.user.id,
-                    "guild_id": getattr(interaction.guild, "id", None) or 0,
-                    "data": {"name": "publish_betainvite_panel"},
-                }
-            },
-        )
-        if result is None:
-            await interaction.response.send_message(
-                "⚠️ Steam-Bot ist gerade nicht erreichbar. Bitte erneut versuchen.",
-                ephemeral=True,
-            )
-            return
-
-        # Rust liefert den Embed; Python fügt die persistente View hinzu
-        ephemeral: bool = bool(result.get("ephemeral", False))
-        reply_text: str | None = result.get("reply_text") or None
-        embed: discord.Embed | None = None
-        embed_dict = result.get("reply_embed")
-        if embed_dict and isinstance(embed_dict, dict):
-            try:
-                embed = discord.Embed.from_dict(embed_dict)
-            except Exception as exc:
-                log.warning("steam-bridge: Konnte reply_embed (publish_panel) nicht parsen: %s", exc)
-
-        # URL-Button-Support wie in _render_response
-        view: discord.ui.View = BetaInvitePanelView()
-        link_button_data = result.get("link_button")
-        if link_button_data and isinstance(link_button_data, dict):
-            label = str(link_button_data.get("label") or "Öffnen")
-            url = str(link_button_data.get("url") or "")
-            if url:
-                view.add_item(
-                    discord.ui.Button(
-                        style=discord.ButtonStyle.link,
-                        label=label,
-                        url=url,
-                    )
-                )
-
-        if channel is not None:
-            # Panel in den gewählten Kanal posten, Bestätigung ephemer.
-            await channel.send(content=reply_text, embed=embed, view=view)
-            await interaction.response.send_message(
-                f"✅ Invite-Panel in {channel.mention} gepostet.", ephemeral=True
-            )
-            return
-
-        await interaction.response.send_message(
-            content=reply_text,
-            embed=embed,
-            view=view,
-            ephemeral=ephemeral,
-        )
-
-    @app_commands.command(
-        name="betainvite_stats",
-        description="Zeigt Funnel-Metriken des Playtest-Invite-Systems (nur Admins).",
-    )
-    @app_commands.checks.has_permissions(manage_guild=True)
-    async def betainvite_stats(self, interaction: discord.Interaction) -> None:
-        """Fragt den Rust-steam-bot nach aktuellen Funnel-Statistiken."""
-        result = await _post_event(
-            "slash_command",
-            {
-                "interaction": {
-                    "custom_id": "",
-                    "user_id": interaction.user.id,
-                    "guild_id": getattr(interaction.guild, "id", None) or 0,
-                    "data": {"name": "betainvite_stats"},
-                }
-            },
-        )
-        await _render_response(interaction, result)
 
     # ------------------------------------------------------------------
     # Slash-Commands: Account-Verknüpfung

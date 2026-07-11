@@ -31,21 +31,46 @@ class KnowledgeLauncherTest(TestCase):
             )
             self.assertEqual(result.returncode, 1, path)
 
-    def test_loader_lehnt_nicht_http_infisical_url_ab(self) -> None:
-        environment = {
-            "INFISICAL_API_URL": "file:///tmp/not-infisical",
-            "INFISICAL_PROJECT_ID": "project",
-            "INFISICAL_ENV": "prod",
-            "INFISICAL_SERVICE_TOKEN": "bootstrap-token",
-        }
-        with (
-            mock.patch.dict(loader.os.environ, environment, clear=True),
-            mock.patch.object(loader.request, "urlopen") as urlopen,
-            self.assertRaisesRegex(SystemExit, "http/https"),
-        ):
-            loader._fetch_secrets()
+    def test_loader_akzeptiert_nur_exakten_lokalen_infisical_endpunkt(self) -> None:
+        invalid = (
+            "file:///tmp/not-infisical",
+            "https://127.0.0.1:8080",
+            "http://localhost:8080",
+            "http://127.0.0.1:8081",
+            "http://user@127.0.0.1:8080",
+            "http://127.0.0.1:8080/anderer/pfad",
+            "http://127.0.0.1:8080?redirect=evil",
+        )
+        for value in invalid:
+            with (
+                self.subTest(value=value),
+                mock.patch.dict(loader.os.environ, {"INFISICAL_API_URL": value}, clear=True),
+                self.assertRaisesRegex(SystemExit, "127.0.0.1:8080"),
+            ):
+                loader._validated_infisical_base_url()
 
-        urlopen.assert_not_called()
+        with mock.patch.dict(
+            loader.os.environ,
+            {"INFISICAL_API_URL": "http://127.0.0.1:8080/"},
+            clear=True,
+        ):
+            self.assertEqual(loader._validated_infisical_base_url(), "http://127.0.0.1:8080")
+
+    def test_loader_deaktiviert_proxy_und_redirects(self) -> None:
+        with mock.patch.object(loader.request, "build_opener") as build_opener:
+            loader._local_opener()
+
+        handlers = build_opener.call_args.args
+        proxy = next(
+            handler for handler in handlers if isinstance(handler, loader.request.ProxyHandler)
+        )
+        redirect = next(handler for handler in handlers if isinstance(handler, loader._NoRedirect))
+        self.assertEqual(proxy.proxies, {})
+        self.assertIsNone(
+            redirect.redirect_request(
+                None, None, 302, "Found", {}, "http://127.0.0.1:8080/elsewhere"
+            )
+        )
 
     def test_loader_exec_injiziert_secrets_ohne_ausgabe(self) -> None:
         stdout = StringIO()
@@ -53,12 +78,19 @@ class KnowledgeLauncherTest(TestCase):
             mock.patch.object(
                 loader,
                 "_fetch_secrets",
-                return_value=[{"secretKey": "TEST_SECRET", "secretValue": "top-secret"}],
+                return_value=[
+                    {"secretKey": "FIREWORK_API_KEY", "secretValue": "allowed-secret"},
+                    {"secretKey": "TEST_SECRET", "secretValue": "must-not-reach-child"},
+                ],
             ),
             mock.patch.object(loader.os, "execvpe", side_effect=ExecCalled) as execvpe,
             mock.patch.dict(
                 loader.os.environ,
-                {"UNCHANGED": "yes", "INFISICAL_SERVICE_TOKEN": "bootstrap-token"},
+                {
+                    "UNCHANGED": "yes",
+                    "TEST_SECRET": "old-value",
+                    "INFISICAL_SERVICE_TOKEN": "bootstrap-token",
+                },
                 clear=True,
             ),
             redirect_stdout(stdout),
@@ -69,7 +101,8 @@ class KnowledgeLauncherTest(TestCase):
         command, arguments, environment = execvpe.call_args.args
         self.assertEqual(command, "/bin/dl-knowledge")
         self.assertEqual(arguments, ["/bin/dl-knowledge", "--probe"])
-        self.assertEqual(environment["TEST_SECRET"], "top-secret")
+        self.assertEqual(environment["FIREWORK_API_KEY"], "allowed-secret")
+        self.assertNotIn("TEST_SECRET", environment)
         self.assertEqual(environment["UNCHANGED"], "yes")
         self.assertNotIn("INFISICAL_SERVICE_TOKEN", environment)
         self.assertEqual(stdout.getvalue(), "")

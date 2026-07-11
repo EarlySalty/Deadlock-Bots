@@ -26,6 +26,7 @@ pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
 pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
 pub const CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
+pub const CONCIERGE_STECKBRIEF_REVOKED_NS: &str = "concierge:steckbrief_revoked";
 pub const DEFAULT_KNOWLEDGE_URL: &str = "http://127.0.0.1:8896";
 pub const DEFAULT_PATE_CATEGORY_ID: u64 = 1465839366634209361;
 pub const RETENTION_DAYS: i64 = 90;
@@ -755,24 +756,57 @@ fn forget_reply_text(deleted: bool) -> &'static str {
 }
 
 pub fn forget_intent(text: &str) -> bool {
-    let normalized = text
-        .trim()
-        .trim_matches(['.', '!', '?'])
-        .to_ascii_lowercase();
-    let imperative = normalized.strip_prefix("bitte ").unwrap_or(&normalized);
-    matches!(
-        imperative,
-        "vergiss mich"
-            | "vergiss das"
-            | "vergiss alles"
-            | "vergiss meine daten"
-            | "lösch meine daten"
-            | "loesch meine daten"
-            | "lösch alles"
-            | "loesch alles"
-            | "daten löschen"
-            | "daten loeschen"
-    )
+    let unquoted = strip_blockquotes(text);
+    let cleaned = strip_leading_user_mentions(unquoted.trim());
+    if cleaned.is_empty() || suffix_after_leading_quote(cleaned).is_some() {
+        return false;
+    }
+
+    let lower = cleaned.to_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect();
+    let start = tokens
+        .iter()
+        .position(|token| !OPTOUT_POLITE_PREFIX.contains(token))
+        .unwrap_or(tokens.len());
+    let rest = &tokens[start..];
+    const PHRASES: [&[&str]; 16] = [
+        &["vergiss", "mich"],
+        &["vergiss", "das"],
+        &["vergiss", "alles"],
+        &["vergiss", "meine", "daten"],
+        &["lösch", "meine", "daten"],
+        &["loesch", "meine", "daten"],
+        &["lösche", "meine", "daten"],
+        &["loesche", "meine", "daten"],
+        &["lösch", "alles"],
+        &["loesch", "alles"],
+        &["lösche", "alles"],
+        &["loesche", "alles"],
+        &["daten", "löschen"],
+        &["daten", "loeschen"],
+        &["meine", "daten", "löschen"],
+        &["meine", "daten", "loeschen"],
+    ];
+    PHRASES.iter().any(|phrase| {
+        match_forget_phrase(rest, phrase).is_some_and(|consumed| consumed == rest.len())
+    })
+}
+
+fn match_forget_phrase(rest: &[&str], phrase: &[&str]) -> Option<usize> {
+    let mut ri = 0;
+    for &word in phrase {
+        while rest.get(ri) == Some(&"bitte") {
+            ri += 1;
+        }
+        if rest.get(ri) != Some(&word) {
+            return None;
+        }
+        ri += 1;
+    }
+    Some(ri)
 }
 
 fn knowledge_question_from_user_history(history: &[String], current: &str) -> String {
@@ -1249,7 +1283,34 @@ async fn set_pate_requested_tx(
     upsert_profile(tx, user_id, guild_id, now).await?;
     let updated = sqlx::query(
         "UPDATE bot.concierge_profiles
-            SET pate_requested = TRUE, pate_offered = TRUE, updated_at = $2
+            SET pate_requested = TRUE,
+                pate_offered = TRUE,
+                pate_request_uncertain = FALSE,
+                updated_at = $2
+          WHERE user_id = $1",
+    )
+    .bind(user_id)
+    .bind(now)
+    .execute(&mut **tx)
+    .await?
+    .rows_affected();
+    if updated != 1 {
+        return Err(sqlx::Error::RowNotFound.into());
+    }
+    Ok(())
+}
+
+async fn mark_pate_request_uncertain_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+    now: DateTime<Utc>,
+) -> CommunityDbResult<()> {
+    let updated = sqlx::query(
+        "UPDATE bot.concierge_profiles
+            SET pate_requested = TRUE,
+                pate_offered = TRUE,
+                pate_request_uncertain = TRUE,
+                updated_at = $2
           WHERE user_id = $1",
     )
     .bind(user_id)
@@ -1599,10 +1660,23 @@ impl ConciergeStore {
         &self,
         user_id: u64,
     ) -> CommunityDbResult<Option<(i64, Transaction<'static, Postgres>)>> {
+        let Some((user_id, mut tx)) = self.begin_privacy_safety_action(user_id).await? else {
+            return Ok(None);
+        };
+        if !privacy_write_allowed(&mut tx, user_id).await? {
+            return Ok(None);
+        }
+        Ok(Some((user_id, tx)))
+    }
+
+    async fn begin_privacy_safety_action(
+        &self,
+        user_id: u64,
+    ) -> CommunityDbResult<Option<(i64, Transaction<'static, Postgres>)>> {
         let user_id = u64_to_i64(user_id, "core.user_privacy.user_id")?;
         let mut tx = self.pool.begin().await?;
         crate::privacy::lock_user_privacy(&mut tx, user_id).await?;
-        if !privacy_write_allowed(&mut tx, user_id).await? {
+        if crate::privacy::erasure_completed_under_lock(&mut tx, user_id).await? {
             return Ok(None);
         }
         Ok(Some((user_id, tx)))
@@ -1617,6 +1691,23 @@ impl ConciergeStore {
         let pate_id = u64_to_i64(pate_id, "concierge_patenschaften.pate_id")?;
         let mut tx = self.pool.begin().await?;
         if !lock_patenschaft_privacy(&mut tx, user_id, pate_id).await? {
+            return Ok(None);
+        }
+        Ok(Some((user_id, pate_id, tx)))
+    }
+
+    async fn begin_patenschaft_safety_action(
+        &self,
+        user_id: u64,
+        pate_id: u64,
+    ) -> CommunityDbResult<Option<(i64, i64, Transaction<'static, Postgres>)>> {
+        let user_id = u64_to_i64(user_id, "concierge_patenschaften.user_id")?;
+        let pate_id = u64_to_i64(pate_id, "concierge_patenschaften.pate_id")?;
+        let mut tx = self.pool.begin().await?;
+        lock_patenschaft_users(&mut tx, user_id, pate_id).await?;
+        if crate::privacy::erasure_completed_under_lock(&mut tx, user_id).await?
+            || crate::privacy::erasure_completed_under_lock(&mut tx, pate_id).await?
+        {
             return Ok(None);
         }
         Ok(Some((user_id, pate_id, tx)))
@@ -2246,6 +2337,7 @@ pub struct Concierge {
     config: ConciergeConfig,
     cooldowns: Mutex<HashMap<u64, Vec<f64>>>,
     user_actions: Mutex<HashMap<u64, Weak<tokio::sync::Mutex<()>>>>,
+    steckbrief_revocations: Mutex<HashSet<u64>>,
     start: Instant,
 }
 
@@ -2263,6 +2355,7 @@ impl Concierge {
             config,
             cooldowns: Mutex::new(HashMap::new()),
             user_actions: Mutex::new(HashMap::new()),
+            steckbrief_revocations: Mutex::new(HashSet::new()),
             start: Instant::now(),
         })
     }
@@ -2277,6 +2370,10 @@ impl Concierge {
             .lock()
             .expect("user actions")
             .retain(|id, lock| *id != user_id || lock.strong_count() > 0);
+        self.steckbrief_revocations
+            .lock()
+            .expect("steckbrief revocations")
+            .remove(&user_id);
     }
 
     fn user_action_lock(&self, user_id: u64) -> Arc<tokio::sync::Mutex<()>> {
@@ -2290,6 +2387,128 @@ impl Concierge {
         lock
     }
 
+    fn user_cooldown_hit(&self, user_id: u64) -> bool {
+        let mut map = self.cooldowns.lock().expect("cooldowns");
+        check_cooldown(
+            map.entry(user_id).or_default(),
+            self.start.elapsed().as_secs_f64(),
+        )
+        .is_some()
+    }
+
+    fn remember_steckbrief_revocation(&self, user_id: u64) {
+        self.steckbrief_revocations
+            .lock()
+            .expect("steckbrief revocations")
+            .insert(user_id);
+    }
+
+    fn steckbrief_revoked_in_process(&self, user_id: u64) -> bool {
+        self.steckbrief_revocations
+            .lock()
+            .expect("steckbrief revocations")
+            .contains(&user_id)
+    }
+
+    async fn steckbrief_revocation_persisted(&self, user_id: u64) -> bool {
+        let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+            Ok(Some(action)) => action,
+            Ok(None) => return true,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Steckbrief-Widerruf konnte nicht verifiziert werden");
+                return false;
+            }
+        };
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM bot.kv_store
+                  WHERE ns = $1 AND k = $2
+             )",
+        )
+        .bind(CONCIERGE_STECKBRIEF_REVOKED_NS)
+        .bind(db_user_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(persisted) => persisted,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Steckbrief-Widerruf-Readback fehlgeschlagen");
+                false
+            }
+        }
+    }
+
+    async fn persist_steckbrief_revocation(&self, user_id: u64) -> bool {
+        self.remember_steckbrief_revocation(user_id);
+        for attempt in 0..2 {
+            let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+                Ok(Some(action)) => action,
+                Ok(None) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer Steckbrief-Widerruf fehlgeschlagen");
+                    return false;
+                }
+            };
+            if let Err(err) = sqlx::query(
+                "INSERT INTO bot.kv_store(ns, k, v)
+                 VALUES($1, $2, 'revoked')
+                 ON CONFLICT(ns, k) DO UPDATE SET v = EXCLUDED.v",
+            )
+            .bind(CONCIERGE_STECKBRIEF_REVOKED_NS)
+            .bind(db_user_id.to_string())
+            .execute(&mut *tx)
+            .await
+            {
+                tracing::error!(%err, user_id, "Concierge: Steckbrief-Widerruf nicht markierbar");
+                return false;
+            }
+            match tx.commit().await {
+                Ok(()) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, attempt, "Concierge: Steckbrief-Widerruf-Commit unsicher; Zustand wird verifiziert");
+                    if self.steckbrief_revocation_persisted(user_id).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn clear_steckbrief_revocation(&self, user_id: u64) -> bool {
+        let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
+            Ok(Some(action)) => action,
+            Ok(None) => return false,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer neue Steckbrief-Freigabe fehlgeschlagen");
+                return false;
+            }
+        };
+        if let Err(err) = sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+            .bind(CONCIERGE_STECKBRIEF_REVOKED_NS)
+            .bind(db_user_id.to_string())
+            .execute(&mut *tx)
+            .await
+        {
+            tracing::error!(%err, user_id, "Concierge: Alter Steckbrief-Widerruf nicht loeschbar");
+            return false;
+        }
+        let cleared = match tx.commit().await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Neue Steckbrief-Freigabe konnte nicht sicher bestaetigt werden");
+                !self.steckbrief_revocation_persisted(user_id).await
+            }
+        };
+        if cleared {
+            self.steckbrief_revocations
+                .lock()
+                .expect("steckbrief revocations")
+                .remove(&user_id);
+        }
+        cleared
+    }
+
     async fn persist_t0_uncertain(&self, user_id: u64, guild_id: u64, now: DateTime<Utc>) -> bool {
         let db_guild_id = match u64_to_i64(guild_id, "concierge_profiles.guild_id") {
             Ok(value) => value,
@@ -2298,34 +2517,282 @@ impl Concierge {
                 return false;
             }
         };
-        let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
+        let claim_key = format!("{guild_id}:{user_id}");
+        for attempt in 0..2 {
+            let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+                Ok(Some(action)) => action,
+                Ok(None) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer unsichere T0-Zustellung fehlgeschlagen");
+                    return false;
+                }
+            };
+            if let Err(err) = upsert_profile(&mut tx, db_user_id, db_guild_id, now).await {
+                tracing::error!(%err, user_id, "Concierge: Profil fuer unsichere T0-Zustellung nicht markierbar");
+                return false;
+            }
+            if let Err(err) =
+                claim_once_tx(&mut tx, CONCIERGE_T0_CLAIM_NS, &claim_key, "claimed").await
+            {
+                tracing::error!(%err, user_id, "Concierge: Claim fuer unsichere T0-Zustellung nicht markierbar");
+                return false;
+            }
+            if let Err(err) =
+                mark_unsolicited_sent_tx(&mut tx, db_user_id, ContactKind::T0, now).await
+            {
+                tracing::error!(%err, user_id, "Concierge: Unsichere T0-Zustellung nicht speicherbar");
+                return false;
+            }
+            match tx.commit().await {
+                Ok(()) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, attempt, "Concierge: Unsicherer T0-Marker nicht commitbar; Zustand wird verifiziert");
+                    if self.t0_uncertain_persisted(user_id, &claim_key).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn t0_uncertain_persisted(&self, user_id: u64, claim_key: &str) -> bool {
+        let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
             Ok(Some(action)) => action,
-            Ok(None) => return false,
+            Ok(None) => return true,
             Err(err) => {
-                tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer unsichere T0-Zustellung fehlgeschlagen");
+                tracing::error!(%err, user_id, "Concierge: T0-Marker konnte nicht verifiziert werden");
                 return false;
             }
         };
-        if let Err(err) = upsert_profile(&mut tx, db_user_id, db_guild_id, now).await {
-            tracing::error!(%err, user_id, "Concierge: Profil fuer unsichere T0-Zustellung nicht markierbar");
-            return false;
-        }
-        let claim_key = format!("{guild_id}:{user_id}");
-        if let Err(err) = claim_once_tx(&mut tx, CONCIERGE_T0_CLAIM_NS, &claim_key, "claimed").await
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT
+                COALESCE((
+                    SELECT t0_sent_at IS NOT NULL
+                      FROM bot.concierge_profiles
+                     WHERE user_id = $1
+                ), FALSE)
+                AND EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $2 AND k = $3
+                )",
+        )
+        .bind(db_user_id)
+        .bind(CONCIERGE_T0_CLAIM_NS)
+        .bind(claim_key)
+        .fetch_one(&mut *tx)
+        .await
         {
-            tracing::error!(%err, user_id, "Concierge: Claim fuer unsichere T0-Zustellung nicht markierbar");
-            return false;
+            Ok(persisted) => persisted,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: T0-Marker-Readback fehlgeschlagen");
+                false
+            }
         }
-        if let Err(err) = mark_unsolicited_sent_tx(&mut tx, db_user_id, ContactKind::T0, now).await
+    }
+
+    async fn persist_pate_request_uncertain(
+        &self,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        let db_guild_id = match u64_to_i64(guild_id, "concierge_profiles.guild_id") {
+            Ok(value) => value,
+            Err(err) => {
+                tracing::error!(%err, user_id, guild_id, "Concierge: Unsicherer Patenwunsch hat ungueltige Guild-ID");
+                return false;
+            }
+        };
+        for attempt in 0..2 {
+            let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+                Ok(Some(action)) => action,
+                Ok(None) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer unsicheren Patenwunsch fehlgeschlagen");
+                    return false;
+                }
+            };
+            if let Err(err) = upsert_profile(&mut tx, db_user_id, db_guild_id, now).await {
+                tracing::error!(%err, user_id, "Concierge: Profil fuer unsicheren Patenwunsch nicht anlegbar");
+                return false;
+            }
+            if let Err(err) = mark_pate_request_uncertain_tx(&mut tx, db_user_id, now).await {
+                tracing::error!(%err, user_id, "Concierge: Unsicherer Patenwunsch nicht markierbar");
+                return false;
+            }
+            match tx.commit().await {
+                Ok(()) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, attempt, "Concierge: Unsicherer Patenwunsch-Marker nicht commitbar; Zustand wird verifiziert");
+                    if self.pate_request_uncertain_persisted(user_id).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn pate_request_uncertain_persisted(&self, user_id: u64) -> bool {
+        let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+            Ok(Some(action)) => action,
+            Ok(None) => return true,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Patenwunsch-Marker konnte nicht verifiziert werden");
+                return false;
+            }
+        };
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT COALESCE((
+                 SELECT pate_requested AND pate_request_uncertain
+                   FROM bot.concierge_profiles
+                  WHERE user_id = $1
+             ), FALSE)",
+        )
+        .bind(db_user_id)
+        .fetch_one(&mut *tx)
+        .await
         {
-            tracing::error!(%err, user_id, "Concierge: Unsichere T0-Zustellung nicht speicherbar");
-            return false;
+            Ok(persisted) => persisted,
+            Err(err) => {
+                tracing::error!(%err, user_id, "Concierge: Patenwunsch-Marker-Readback fehlgeschlagen");
+                false
+            }
+        }
+    }
+
+    async fn finish_pate_request_uncertain(
+        &self,
+        mut tx: Transaction<'static, Postgres>,
+        db_user_id: i64,
+        user_id: u64,
+        guild_id: u64,
+        now: DateTime<Utc>,
+    ) -> bool {
+        if let Err(err) = mark_pate_request_uncertain_tx(&mut tx, db_user_id, now).await {
+            tracing::error!(%err, user_id, "Concierge: Unsicherer Patenwunsch nicht in laufender Transaktion markierbar");
+            drop(tx);
+            return self
+                .persist_pate_request_uncertain(user_id, guild_id, now)
+                .await;
         }
         match tx.commit().await {
             Ok(()) => true,
             Err(err) => {
-                tracing::error!(%err, user_id, "Concierge: Unsicherer T0-Marker nicht commitbar");
+                tracing::error!(%err, user_id, "Concierge: Unsicherer Patenwunsch-Commit fehlgeschlagen; Marker wird nachgezogen");
+                self.persist_pate_request_uncertain(user_id, guild_id, now)
+                    .await
+            }
+        }
+    }
+
+    async fn persist_pate_claim_uncertain(&self, user_id: u64, pate_id: u64) -> bool {
+        for attempt in 0..2 {
+            let (db_user_id, db_pate_id, mut tx) = match self
+                .store
+                .begin_patenschaft_safety_action(user_id, pate_id)
+                .await
+            {
+                Ok(Some(action)) => action,
+                Ok(None) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, pate_id, "Concierge: Privacy-Locks fuer unsicheren Paten-Claim fehlgeschlagen");
+                    return false;
+                }
+            };
+            if let Err(err) = mark_pate_request_uncertain_tx(&mut tx, db_user_id, Utc::now()).await
+            {
+                tracing::error!(%err, user_id, pate_id, "Concierge: Patenwunsch konnte fuer unsicheren Claim nicht markiert werden");
+                return false;
+            }
+            if let Err(err) = claim_once_tx(
+                &mut tx,
+                CONCIERGE_PATE_CLAIM_NS,
+                &db_user_id.to_string(),
+                &db_pate_id.to_string(),
+            )
+            .await
+            {
+                tracing::error!(%err, user_id, pate_id, "Concierge: Unsicherer Paten-Claim nicht markierbar");
+                return false;
+            }
+            match tx.commit().await {
+                Ok(()) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, pate_id, attempt, "Concierge: Unsicherer Paten-Claim-Marker nicht commitbar; Zustand wird verifiziert");
+                    if self.pate_claim_uncertain_persisted(user_id, pate_id).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn pate_claim_uncertain_persisted(&self, user_id: u64, pate_id: u64) -> bool {
+        let (db_user_id, _db_pate_id, mut tx) = match self
+            .store
+            .begin_patenschaft_safety_action(user_id, pate_id)
+            .await
+        {
+            Ok(Some(action)) => action,
+            Ok(None) => return true,
+            Err(err) => {
+                tracing::error!(%err, user_id, pate_id, "Concierge: Unsicherer Paten-Claim konnte nicht verifiziert werden");
+                return false;
+            }
+        };
+        match sqlx::query_scalar::<_, bool>(
+            "SELECT
+                COALESCE((
+                    SELECT pate_request_uncertain
+                      FROM bot.concierge_profiles
+                     WHERE user_id = $1
+                ), FALSE)
+                AND EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $2 AND k = $3
+                )",
+        )
+        .bind(db_user_id)
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .bind(db_user_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(persisted) => persisted,
+            Err(err) => {
+                tracing::error!(%err, user_id, pate_id, "Concierge: Paten-Claim-Marker-Readback fehlgeschlagen");
                 false
+            }
+        }
+    }
+
+    async fn finish_pate_claim_uncertain(
+        &self,
+        mut tx: Transaction<'static, Postgres>,
+        user_id: u64,
+        pate_id: u64,
+    ) -> bool {
+        let db_user_id = match u64_to_i64(user_id, "concierge_profiles.user_id") {
+            Ok(user_id) => user_id,
+            Err(err) => {
+                tracing::error!(%err, user_id, pate_id, "Concierge: User-ID fuer unsicheren Paten-Claim ungueltig");
+                drop(tx);
+                return self.persist_pate_claim_uncertain(user_id, pate_id).await;
+            }
+        };
+        if let Err(err) = mark_pate_request_uncertain_tx(&mut tx, db_user_id, Utc::now()).await {
+            tracing::error!(%err, user_id, pate_id, "Concierge: Patenwunsch konnte im unsicheren Claim nicht markiert werden");
+            drop(tx);
+            return self.persist_pate_claim_uncertain(user_id, pate_id).await;
+        }
+        match tx.commit().await {
+            Ok(()) => true,
+            Err(err) => {
+                tracing::error!(%err, user_id, pate_id, "Concierge: Unsicherer Paten-Claim-Commit fehlgeschlagen; Marker wird nachgezogen");
+                self.persist_pate_claim_uncertain(user_id, pate_id).await
             }
         }
     }
@@ -2336,38 +2803,77 @@ impl Concierge {
         action: CadenceAction,
         now: DateTime<Utc>,
     ) -> bool {
-        let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
+        for attempt in 0..2 {
+            let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
+                Ok(Some(action)) => action,
+                Ok(None) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer unsichere Kadenz-Zustellung fehlgeschlagen");
+                    return false;
+                }
+            };
+            let profile_exists = match sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM bot.concierge_profiles WHERE user_id = $1)",
+            )
+            .bind(db_user_id)
+            .fetch_one(&mut *tx)
+            .await
+            {
+                Ok(exists) => exists,
+                Err(err) => {
+                    tracing::error!(%err, user_id, "Concierge: Profil fuer unsichere Kadenz-Zustellung nicht pruefbar");
+                    return false;
+                }
+            };
+            if !profile_exists {
+                return false;
+            }
+            if let Err(err) = mark_cadence_action_tx(&mut tx, db_user_id, action, now).await {
+                tracing::error!(%err, user_id, "Concierge: Unsichere Kadenz-Zustellung nicht speicherbar");
+                return false;
+            }
+            match tx.commit().await {
+                Ok(()) => return true,
+                Err(err) => {
+                    tracing::error!(%err, user_id, attempt, "Concierge: Unsicherer Kadenz-Marker nicht commitbar; Zustand wird verifiziert");
+                    if self.cadence_uncertain_persisted(user_id, action).await {
+                        return true;
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    async fn cadence_uncertain_persisted(&self, user_id: u64, action: CadenceAction) -> bool {
+        let column = match action {
+            CadenceAction::T2 => "t2_sent_at",
+            CadenceAction::T7 => "t7_sent_at",
+            CadenceAction::CongratsMessage | CadenceAction::CongratsVoice => "congrats_sent_at",
+        };
+        let (db_user_id, mut tx) = match self.store.begin_privacy_safety_action(user_id).await {
             Ok(Some(action)) => action,
-            Ok(None) => return false,
+            Ok(None) => return true,
             Err(err) => {
-                tracing::error!(%err, user_id, "Concierge: Privacy-Lock fuer unsichere Kadenz-Zustellung fehlgeschlagen");
+                tracing::error!(%err, user_id, "Concierge: Kadenz-Marker konnte nicht verifiziert werden");
                 return false;
             }
         };
-        let profile_exists = match sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM bot.concierge_profiles WHERE user_id = $1)",
-        )
-        .bind(db_user_id)
-        .fetch_one(&mut *tx)
-        .await
+        let sql = format!(
+            "SELECT COALESCE((
+                 SELECT {column} IS NOT NULL
+                   FROM bot.concierge_profiles
+                  WHERE user_id = $1
+             ), FALSE)"
+        );
+        match sqlx::query_scalar::<_, bool>(&sql)
+            .bind(db_user_id)
+            .fetch_one(&mut *tx)
+            .await
         {
-            Ok(exists) => exists,
+            Ok(persisted) => persisted,
             Err(err) => {
-                tracing::error!(%err, user_id, "Concierge: Profil fuer unsichere Kadenz-Zustellung nicht pruefbar");
-                return false;
-            }
-        };
-        if !profile_exists {
-            return false;
-        }
-        if let Err(err) = mark_cadence_action_tx(&mut tx, db_user_id, action, now).await {
-            tracing::error!(%err, user_id, "Concierge: Unsichere Kadenz-Zustellung nicht speicherbar");
-            return false;
-        }
-        match tx.commit().await {
-            Ok(()) => true,
-            Err(err) => {
-                tracing::error!(%err, user_id, "Concierge: Unsicherer Kadenz-Marker nicht commitbar");
+                tracing::error!(%err, user_id, "Concierge: Kadenz-Marker-Readback fehlgeschlagen");
                 false
             }
         }
@@ -2643,6 +3149,9 @@ impl Concierge {
         if !self.config.user_allowed(user_id) {
             return false;
         }
+        let is_direct_dm = guild_id.is_none();
+        let is_public_support = guild_id == Some(self.config.main_guild_id)
+            && channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID;
         let Some(effective_guild_id) = self.effective_guild_id(channel_id, guild_id, user_id).await
         else {
             return false;
@@ -2654,8 +3163,24 @@ impl Concierge {
         if trimmed.is_empty() {
             return true;
         }
+        if is_public_support {
+            if self.user_cooldown_hit(user_id) {
+                let _ = tokio::time::timeout(
+                    CONCIERGE_DISCORD_IO_TIMEOUT,
+                    self.port
+                        .send_channel_v2(channel_id, v2_body(COOLDOWN_TEXT, Vec::new())),
+                )
+                .await;
+                return true;
+            }
+            let _support_turn = knowledge_client::acquire_stateful_support_turn().await;
+            self.send_stateless_reply(channel_id, effective_guild_id, trimmed, false)
+                .await;
+            return true;
+        }
+        let allow_personal_actions = is_direct_dm;
         let now = Utc::now();
-        if forget_intent(trimmed) {
+        if is_direct_dm && forget_intent(trimmed) {
             let deleted = match self.store.forget_user(user_id).await {
                 Ok(()) => {
                     self.clear_user_runtime(user_id);
@@ -2672,7 +3197,7 @@ impl Concierge {
                 .await;
             return true;
         }
-        if optout_intent(trimmed) {
+        if is_direct_dm && optout_intent(trimmed) {
             if let Err(err) = self
                 .store
                 .record_conversation(user_id, effective_guild_id, "user", trimmed, now)
@@ -2688,8 +3213,13 @@ impl Concierge {
             Ok(guild_id) => guild_id,
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Guild-ID fuer Antwort ungueltig");
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         };
@@ -2699,15 +3229,25 @@ impl Concierge {
             Ok(None) => {
                 self.clear_user_runtime(user_id);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Privacy-Status vor Antwort nicht pruefbar");
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         };
@@ -2725,16 +3265,26 @@ impl Concierge {
             Ok(false) => {
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: User-Nachricht konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         }
@@ -2753,18 +3303,16 @@ impl Concierge {
             tracing::warn!(%err, user_id, "Concierge: Intent konnte nicht gespeichert werden");
             drop(delivery_tx);
             drop(stateful_turn);
-            self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                .await;
+            self.send_stateless_reply(
+                channel_id,
+                effective_guild_id,
+                trimmed,
+                allow_personal_actions,
+            )
+            .await;
             return true;
         }
-        let cooldown_hit = {
-            let mut map = self.cooldowns.lock().expect("cooldowns");
-            check_cooldown(
-                map.entry(user_id).or_default(),
-                self.start.elapsed().as_secs_f64(),
-            )
-            .is_some()
-        };
+        let cooldown_hit = self.user_cooldown_hit(user_id);
         if cooldown_hit {
             let delivery_uncertain = match tokio::time::timeout(
                 CONCIERGE_DISCORD_IO_TIMEOUT,
@@ -2817,8 +3365,13 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: Verlauf konnte nicht geladen werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         };
@@ -2838,8 +3391,13 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: LLM-Intent konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         }
@@ -2867,20 +3425,30 @@ impl Concierge {
             Ok(false) => {
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Assistant-Nachricht konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(channel_id, effective_guild_id, trimmed)
-                    .await;
+                self.send_stateless_reply(
+                    channel_id,
+                    effective_guild_id,
+                    trimmed,
+                    allow_personal_actions,
+                )
+                .await;
                 return true;
             }
         }
-        let body = if pate_request {
+        let body = if pate_request && allow_personal_actions {
             pate_offer_body(&reply)
         } else {
             v2_body(&reply, Vec::new())
@@ -2941,26 +3509,53 @@ impl Concierge {
             if guild_id == self.config.main_guild_id && channel_id == SERVER_BOT_FRAGEN_CHANNEL_ID {
                 return Some(guild_id);
             }
-            let owner = self.store.fallback_owner(channel_id).await.ok().flatten();
-            if owner == Some(user_id) {
-                return Some(guild_id);
-            }
-            if owner.is_none()
-                && self
-                    .port
-                    .private_channel_owned_by_user(
-                        guild_id,
-                        channel_id,
-                        user_id,
-                        self.config.fallback_category_id,
-                    )
-                    .await
+            if self
+                .verified_private_fallback(guild_id, channel_id, user_id)
+                .await
             {
                 return Some(guild_id);
             }
             return None;
         }
         Some(self.config.main_guild_id)
+    }
+
+    async fn personal_control_allowed(&self, interaction: &BridgeInteraction) -> bool {
+        if interaction.guild_id == 0 {
+            return true;
+        }
+        self.verified_private_fallback(
+            interaction.guild_id,
+            interaction.channel_id,
+            interaction.user_id,
+        )
+        .await
+    }
+
+    async fn verified_private_fallback(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> bool {
+        let stored_owner = match self.store.fallback_owner(channel_id).await {
+            Ok(owner) => owner,
+            Err(err) => {
+                tracing::warn!(%err, guild_id, channel_id, user_id, "Concierge: Fallback-Ownership konnte nicht geprueft werden");
+                return false;
+            }
+        };
+        if stored_owner.is_some() && stored_owner != Some(user_id) {
+            return false;
+        }
+        self.port
+            .private_channel_owned_by_user(
+                guild_id,
+                channel_id,
+                user_id,
+                self.config.fallback_category_id,
+            )
+            .await
     }
 
     async fn opt_out(&self, user_id: u64, guild_id: u64, channel_id: u64, now: DateTime<Utc>) {
@@ -3039,12 +3634,18 @@ impl Concierge {
         }
     }
 
-    async fn send_stateless_reply(&self, channel_id: u64, _guild_id: u64, question: &str) {
+    async fn send_stateless_reply(
+        &self,
+        channel_id: u64,
+        _guild_id: u64,
+        question: &str,
+        allow_personal_actions: bool,
+    ) {
         let answer = self.answer_with_knowledge_and_llm(question, None).await;
         let reply = answer
             .reply
             .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string());
-        let body = if answer.pate_request {
+        let body = if answer.pate_request && allow_personal_actions {
             pate_offer_body(&reply)
         } else {
             v2_body(&reply, Vec::new())
@@ -3268,37 +3869,50 @@ impl Concierge {
             }),
             Ok(ConciergeDmDelivery::CannotSend50007) => {
                 if let Some(channel_id) = profile.fallback_channel_id {
-                    match tokio::time::timeout(
-                        CONCIERGE_DISCORD_IO_TIMEOUT,
-                        self.port.send_channel_v2(channel_id, body),
-                    )
-                    .await
+                    if !self
+                        .verified_private_fallback(profile.guild_id, channel_id, profile.user_id)
+                        .await
                     {
-                        Ok(Ok(message_id)) => {
-                            DiscordEffectOutcome::Confirmed(PendingDiscordEffect::Message {
-                                channel_id,
-                                message_id,
-                            })
-                        }
-                        Ok(Err(err)) => {
-                            tracing::warn!(
-                                %err,
-                                user_id = profile.user_id,
-                                channel_id,
-                                label,
-                                "Concierge: Kadenz-Fallback-Zustellung unsicher"
-                            );
-                            DiscordEffectOutcome::Uncertain
-                        }
-                        Err(_) => {
-                            tracing::warn!(
-                                user_id = profile.user_id,
-                                channel_id,
-                                label,
-                                timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
-                                "Concierge: Kadenz-Fallback-Timeout; Zustellung unsicher"
-                            );
-                            DiscordEffectOutcome::Uncertain
+                        tracing::warn!(
+                            user_id = profile.user_id,
+                            channel_id,
+                            label,
+                            "Concierge: Kadenz-Fallback ist nicht mehr sicher privat"
+                        );
+                        DiscordEffectOutcome::NotDelivered
+                    } else {
+                        match tokio::time::timeout(
+                            CONCIERGE_DISCORD_IO_TIMEOUT,
+                            self.port.send_channel_v2(channel_id, body),
+                        )
+                        .await
+                        {
+                            Ok(Ok(message_id)) => {
+                                DiscordEffectOutcome::Confirmed(PendingDiscordEffect::Message {
+                                    channel_id,
+                                    message_id,
+                                })
+                            }
+                            Ok(Err(err)) => {
+                                tracing::warn!(
+                                    %err,
+                                    user_id = profile.user_id,
+                                    channel_id,
+                                    label,
+                                    "Concierge: Kadenz-Fallback-Zustellung unsicher"
+                                );
+                                DiscordEffectOutcome::Uncertain
+                            }
+                            Err(_) => {
+                                tracing::warn!(
+                                    user_id = profile.user_id,
+                                    channel_id,
+                                    label,
+                                    timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
+                                    "Concierge: Kadenz-Fallback-Timeout; Zustellung unsicher"
+                                );
+                                DiscordEffectOutcome::Uncertain
+                            }
                         }
                     }
                 } else {
@@ -3415,6 +4029,9 @@ impl Concierge {
         text: &str,
         now: DateTime<Utc>,
     ) -> SteckbriefPostOutcome {
+        if self.steckbrief_revoked_in_process(user_id) {
+            return SteckbriefPostOutcome::NotPosted;
+        }
         let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
         let (db_user_id, mut tx) = match self.store.begin_privacy_action(user_id).await {
             Ok(Some(action)) => action,
@@ -3424,6 +4041,26 @@ impl Concierge {
                 return SteckbriefPostOutcome::NotPosted;
             }
         };
+        let revoked = match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM bot.kv_store
+                  WHERE ns = $1 AND k = $2
+             )",
+        )
+        .bind(CONCIERGE_STECKBRIEF_REVOKED_NS)
+        .bind(db_user_id.to_string())
+        .fetch_one(&mut *tx)
+        .await
+        {
+            Ok(revoked) => revoked,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Steckbrief-Widerruf konnte nicht geprueft werden");
+                return SteckbriefPostOutcome::NotPosted;
+            }
+        };
+        if revoked {
+            return SteckbriefPostOutcome::NotPosted;
+        }
         let db_channel_id = match u64_to_i64(
             channel_id,
             "concierge_profiles.pending_steckbrief_channel_id",
@@ -3440,6 +4077,7 @@ impl Concierge {
                   WHERE user_id = $1
                     AND pending_steckbrief_text = $2
                     AND pending_steckbrief_channel_id = $3
+                    AND pending_steckbrief_approved = TRUE
              )",
         )
         .bind(db_user_id)
@@ -3467,6 +4105,9 @@ impl Concierge {
             Ok(Err(err)) => {
                 tracing::warn!(%err, user_id, channel_id, "Concierge: Steckbrief-Post-Zustellung unsicher; Retry wird gesperrt");
                 drop(tx);
+                if !self.persist_steckbrief_revocation(user_id).await {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Steckbrief konnte nicht gespeichert werden");
+                }
                 if let Err(clear_err) = self
                     .store
                     .clear_pending_steckbrief(user_id, false, now)
@@ -3484,6 +4125,9 @@ impl Concierge {
                     "Concierge: Steckbrief-Post hat Zeitlimit ueberschritten; Retry wird gesperrt"
                 );
                 drop(tx);
+                if !self.persist_steckbrief_revocation(user_id).await {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer Steckbrief-Timeout konnte nicht gespeichert werden");
+                }
                 if let Err(clear_err) = self
                     .store
                     .clear_pending_steckbrief(user_id, false, now)
@@ -3539,6 +4183,9 @@ impl Concierge {
                 .discard_steckbrief_messages(channel_id, message_id, reply_message_id, user_id)
                 .await;
             if !cleaned || reply_uncertain {
+                if !self.persist_steckbrief_revocation(user_id).await {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz nach unsicherem Steckbrief-Cleanup konnte nicht gespeichert werden");
+                }
                 if let Err(clear_err) = self
                     .store
                     .clear_pending_steckbrief(user_id, false, now)
@@ -3553,6 +4200,9 @@ impl Concierge {
         if let Err(err) = tx.commit().await {
             tracing::warn!(%err, user_id, "Concierge: Steckbrief-Transaktion konnte nicht abgeschlossen werden");
             tracing::error!(user_id, channel_id, message_id, reply_uncertain, "Concierge: Steckbrief-Commit unsicher; Discord-Nachrichten werden nicht destruktiv entfernt");
+            if !self.persist_steckbrief_revocation(user_id).await {
+                tracing::error!(user_id, "Concierge: Wiederholungsschutz nach unsicherem Steckbrief-Commit konnte nicht gespeichert werden");
+            }
             if let Err(clear_err) = self
                 .store
                 .clear_pending_steckbrief(user_id, false, now)
@@ -3689,26 +4339,30 @@ impl Concierge {
                 return text_reply(PATE_REQUEST_ERROR_TEXT);
             }
         };
-        let already_requested = match sqlx::query_scalar::<_, bool>(
-            "SELECT pate_requested FROM bot.concierge_profiles WHERE user_id = $1",
+        let existing_request = match sqlx::query_as::<_, (bool, bool)>(
+            "SELECT pate_requested, pate_request_uncertain
+               FROM bot.concierge_profiles WHERE user_id = $1",
         )
         .bind(db_user_id)
         .fetch_optional(&mut *tx)
         .await
         {
-            Ok(Some(requested)) => requested,
-            Ok(None) => false,
+            Ok(state) => state,
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Bestehender Patenwunsch konnte nicht geprueft werden");
                 return text_reply(PATE_REQUEST_ERROR_TEXT);
             }
         };
-        if already_requested {
+        if let Some((true, uncertain)) = existing_request {
             if let Err(err) = tx.commit().await {
                 tracing::warn!(%err, user_id, "Concierge: Bestehender Patenwunsch konnte nicht sicher bestaetigt werden");
                 return text_reply(PATE_REQUEST_ERROR_TEXT);
             }
-            return text_reply(PATE_YES_TEXT);
+            return text_reply(if uncertain {
+                PATE_REQUEST_UNCERTAIN_TEXT
+            } else {
+                PATE_YES_TEXT
+            });
         }
         if let Err(err) = set_pate_requested_tx(&mut tx, db_user_id, db_guild_id, now).await {
             tracing::warn!(%err, user_id, "Concierge: Patenwunsch konnte nicht gespeichert werden");
@@ -3723,10 +4377,22 @@ impl Concierge {
             Ok(Ok(message_id)) => message_id,
             Ok(Err(err)) => {
                 tracing::warn!(%err, user_id, target, "Concierge: Interne Patenpost-Zustellung unsicher");
+                if !self
+                    .finish_pate_request_uncertain(tx, db_user_id, user_id, guild_id, now)
+                    .await
+                {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Patenwunsch konnte nicht gespeichert werden");
+                }
                 return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
             }
             Err(_) => {
                 tracing::warn!(user_id, target, timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(), "Concierge: Interner Patenpost hat Zeitlimit ueberschritten; Zustellung unsicher");
+                if !self
+                    .finish_pate_request_uncertain(tx, db_user_id, user_id, guild_id, now)
+                    .await
+                {
+                    tracing::error!(user_id, "Concierge: Wiederholungsschutz fuer unsicheren Patenwunsch konnte nicht gespeichert werden");
+                }
                 return text_reply(PATE_REQUEST_UNCERTAIN_TEXT);
             }
         };
@@ -3765,11 +4431,15 @@ impl Concierge {
                     {
                         text_reply(PATE_REQUEST_ERROR_TEXT)
                     } else {
+                        self.persist_pate_request_uncertain(user_id, guild_id, now)
+                            .await;
                         text_reply(PATE_REQUEST_UNCERTAIN_TEXT)
                     }
                 }
                 PateCommitResolution::Uncertain => {
                     tracing::error!(user_id, target, post_message_id, "Concierge: Patenwunsch-Commit unsicher; interner Post wird nicht destruktiv kompensiert");
+                    self.persist_pate_request_uncertain(user_id, guild_id, now)
+                        .await;
                     text_reply(PATE_REQUEST_UNCERTAIN_TEXT)
                 }
             };
@@ -3798,6 +4468,21 @@ impl Concierge {
                 false
             }
         }
+    }
+
+    async fn discard_pate_channel_or_mark_uncertain(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        pate_id: u64,
+    ) -> bool {
+        if self.discard_private_channel(channel_id).await {
+            return true;
+        }
+        if !self.persist_pate_claim_uncertain(user_id, pate_id).await {
+            tracing::error!(user_id, pate_id, channel_id, "Concierge: Paten-Claim konnte nach fehlgeschlagenem Kanal-Cleanup nicht gesperrt werden");
+        }
+        false
     }
 
     async fn discard_discord_effect(
@@ -3976,11 +4661,31 @@ impl Concierge {
         {
             Ok(true) => {}
             Ok(false) => {
+                let has_active_match = match sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                         SELECT 1 FROM bot.concierge_patenschaften
+                          WHERE user_id = $1 AND released_at IS NULL
+                     )",
+                )
+                .bind(db_user_id)
+                .fetch_one(&mut *tx)
+                .await
+                {
+                    Ok(exists) => exists,
+                    Err(err) => {
+                        tracing::warn!(%err, user_id, pate_id, "Concierge: Bestehender Paten-Claim konnte nicht verifiziert werden");
+                        return BridgeReply::ephemeral_text(PATE_CLAIM_ERROR_TEXT);
+                    }
+                };
                 if let Err(err) = tx.commit().await {
                     tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Claim-Transaktion konnte nicht abgeschlossen werden");
                     return BridgeReply::ephemeral_text(PATE_CLAIM_ERROR_TEXT);
                 }
-                return BridgeReply::ephemeral_text(PATE_ALREADY_CLAIMED_TEXT);
+                return BridgeReply::ephemeral_text(if has_active_match {
+                    PATE_ALREADY_CLAIMED_TEXT
+                } else {
+                    PATE_CLAIM_UNCERTAIN_TEXT
+                });
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, pate_id, "Concierge: Paten-Claim fehlgeschlagen");
@@ -4003,10 +4708,16 @@ impl Concierge {
             Ok(Ok(channel_id)) => channel_id,
             Ok(Err(err)) => {
                 tracing::warn!(%err, user_id, pate_id, "Concierge: Anlage des Paten-Kanals unsicher; kein Fallback-Versuch");
+                if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                    tracing::error!(user_id, pate_id, "Concierge: Wiederholungsschutz fuer unsichere Paten-Kanalanlage konnte nicht gespeichert werden");
+                }
                 return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
             Err(_) => {
                 tracing::warn!(user_id, pate_id, timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(), "Concierge: Anlage des Paten-Kanals hat Zeitlimit ueberschritten; Zustand unsicher");
+                if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                    tracing::error!(user_id, pate_id, "Concierge: Wiederholungsschutz fuer unsichere Paten-Kanalanlage konnte nicht gespeichert werden");
+                }
                 return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
         };
@@ -4017,7 +4728,10 @@ impl Concierge {
                 tracing::warn!(%err, user_id, pate_id, channel_id, "Concierge: Paten-Kanal-ID ungueltig");
                 drop(tx);
                 return BridgeReply::ephemeral_text(
-                    if self.discard_private_channel(channel_id).await {
+                    if self
+                        .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
+                        .await
+                    {
                         PATE_CLAIM_ERROR_TEXT
                     } else {
                         PATE_CLAIM_UNCERTAIN_TEXT
@@ -4040,7 +4754,10 @@ impl Concierge {
                 tracing::warn!(%err, user_id, pate_id, "Concierge: Patenschaft konnte nicht gespeichert werden");
                 drop(tx);
                 return BridgeReply::ephemeral_text(
-                    if self.discard_private_channel(channel_id).await {
+                    if self
+                        .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
+                        .await
+                    {
                         PATE_CLAIM_ERROR_TEXT
                     } else {
                         PATE_CLAIM_UNCERTAIN_TEXT
@@ -4051,8 +4768,33 @@ impl Concierge {
         if !inserted {
             drop(tx);
             return BridgeReply::ephemeral_text(
-                if self.discard_private_channel(channel_id).await {
+                if self
+                    .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
+                    .await
+                {
                     PATE_ALREADY_CLAIMED_TEXT
+                } else {
+                    PATE_CLAIM_UNCERTAIN_TEXT
+                },
+            );
+        }
+        if let Err(err) = sqlx::query(
+            "UPDATE bot.concierge_profiles
+                SET pate_request_uncertain = FALSE, updated_at = now()
+              WHERE user_id = $1",
+        )
+        .bind(db_user_id)
+        .execute(&mut *tx)
+        .await
+        {
+            tracing::warn!(%err, user_id, pate_id, "Concierge: Patenwunsch-Unsicherheitsmarker konnte nicht bestaetigt werden");
+            drop(tx);
+            return BridgeReply::ephemeral_text(
+                if self
+                    .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
+                    .await
+                {
+                    PATE_CLAIM_ERROR_TEXT
                 } else {
                     PATE_CLAIM_UNCERTAIN_TEXT
                 },
@@ -4068,14 +4810,10 @@ impl Concierge {
             Ok(Ok(_)) => {}
             Ok(Err(err)) => {
                 tracing::warn!(%err, user_id, pate_id, channel_id, "Concierge: Paten-Intro-Zustellung unsicher");
-                drop(tx);
-                return BridgeReply::ephemeral_text(
-                    if self.discard_private_channel(channel_id).await {
-                        PATE_CLAIM_ERROR_TEXT
-                    } else {
-                        PATE_CLAIM_UNCERTAIN_TEXT
-                    },
-                );
+                if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                    tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach unsicherem Paten-Intro konnte nicht gespeichert werden");
+                }
+                return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
             Err(_) => {
                 tracing::warn!(
@@ -4085,14 +4823,10 @@ impl Concierge {
                     timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
                     "Concierge: Paten-Intro hat Zeitlimit ueberschritten; Zustellung unsicher"
                 );
-                drop(tx);
-                return BridgeReply::ephemeral_text(
-                    if self.discard_private_channel(channel_id).await {
-                        PATE_CLAIM_ERROR_TEXT
-                    } else {
-                        PATE_CLAIM_UNCERTAIN_TEXT
-                    },
-                );
+                if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                    tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach unsicherem Paten-Intro konnte nicht gespeichert werden");
+                }
+                return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
         }
         let pate_name = if interaction.author_display_name.trim().is_empty() {
@@ -4118,15 +4852,19 @@ impl Concierge {
                     timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
                     "Concierge: Paten-DM hat Zeitlimit ueberschritten; Zustellung unsicher"
                 );
-                drop(tx);
-                let _ = self.discard_private_channel(channel_id).await;
+                if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                    tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach unsicherer Paten-DM konnte nicht gespeichert werden");
+                }
                 return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
             }
         };
         if matches!(dm_delivery, ConciergeDmDelivery::CannotSend50007) {
             drop(tx);
             return BridgeReply::ephemeral_text(
-                if self.discard_private_channel(channel_id).await {
+                if self
+                    .discard_pate_channel_or_mark_uncertain(channel_id, user_id, pate_id)
+                    .await
+                {
                     PATE_CLAIM_ERROR_TEXT
                 } else {
                     PATE_CLAIM_UNCERTAIN_TEXT
@@ -4135,10 +4873,12 @@ impl Concierge {
         }
         if let ConciergeDmDelivery::Failed(err) = &dm_delivery {
             tracing::warn!(%err, user_id, pate_id, channel_id, "Concierge: Paten-DM-Zustellung unsicher");
-            drop(tx);
-            let _ = self.discard_private_channel(channel_id).await;
+            if !self.finish_pate_claim_uncertain(tx, user_id, pate_id).await {
+                tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach unsicherer Paten-DM konnte nicht gespeichert werden");
+            }
             return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
         }
+        let mut claim_reply_uncertain = false;
         let claim_reply = if let Some(message_id) = interaction.message_id {
             match tokio::time::timeout(
                 CONCIERGE_DISCORD_IO_TIMEOUT,
@@ -4154,10 +4894,12 @@ impl Concierge {
                 Ok(Ok(reply_id)) => Some((interaction.channel_id, reply_id)),
                 Ok(Err(err)) => {
                     tracing::warn!(%err, user_id, pate_id, "Concierge: Claim-Antwort fehlgeschlagen");
+                    claim_reply_uncertain = true;
                     None
                 }
                 Err(_) => {
                     tracing::warn!(user_id, pate_id, timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(), "Concierge: Claim-Antwort hat Zeitlimit ueberschritten; Zustellung unsicher");
+                    claim_reply_uncertain = true;
                     None
                 }
             }
@@ -4206,11 +4948,15 @@ impl Concierge {
                         channel_id,
                         "Concierge: Commit-Zustand unsicher; Discord-Effekte werden nicht destruktiv kompensiert"
                     );
+                    if !self.persist_pate_claim_uncertain(user_id, pate_id).await {
+                        tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach unklarem Paten-Commit konnte nicht gespeichert werden");
+                    }
                     return BridgeReply::ephemeral_text(PATE_CLAIM_UNCERTAIN_TEXT);
                 }
                 PateCommitResolution::RolledBack => {}
             }
-            let mut cleaned = self.discard_private_channel(channel_id).await;
+            let channel_cleaned = self.discard_private_channel(channel_id).await;
+            let mut cleaned = channel_cleaned && !claim_reply_uncertain;
             if let ConciergeDmDelivery::Sent {
                 channel_id: dm_channel_id,
                 message_id,
@@ -4244,6 +4990,9 @@ impl Concierge {
                 {
                     cleaned = false;
                 }
+            }
+            if !cleaned && !self.persist_pate_claim_uncertain(user_id, pate_id).await {
+                tracing::error!(user_id, pate_id, channel_id, "Concierge: Wiederholungsschutz nach fehlgeschlagenem Paten-Cleanup konnte nicht gespeichert werden");
             }
             return BridgeReply::ephemeral_text(if cleaned {
                 PATE_CLAIM_ERROR_TEXT
@@ -4523,6 +5272,11 @@ impl InteractionHandler for ConciergeHandler {
         if !self.concierge.config.user_allowed(interaction.user_id) {
             return BridgeReply::default();
         }
+        if !interaction.custom_id.starts_with("concierge:pate:claim:")
+            && !self.concierge.personal_control_allowed(&interaction).await
+        {
+            return BridgeReply::default();
+        }
         let action = self.concierge.user_action_lock(interaction.user_id);
         let _guard = action.lock().await;
         let now = Utc::now();
@@ -4565,15 +5319,56 @@ impl InteractionHandler for ConciergeHandler {
                     }
                 }
             }
-            "concierge:steckbrief:skip" | "concierge:steckbrief:no" => text_reply(TOUR_SKIP_TEXT),
+            "concierge:steckbrief:skip" | "concierge:steckbrief:no" => {
+                if !self
+                    .concierge
+                    .persist_steckbrief_revocation(interaction.user_id)
+                    .await
+                {
+                    tracing::error!(
+                        user_id = interaction.user_id,
+                        "Concierge: Dauerhafter Steckbrief-Widerruf konnte nicht bestaetigt werden"
+                    );
+                }
+                if let Err(err) = self
+                    .concierge
+                    .store
+                    .clear_pending_steckbrief(interaction.user_id, false, now)
+                    .await
+                {
+                    tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Freigabe konnte nicht verworfen werden");
+                    return text_reply(STECKBRIEF_ERROR_TEXT);
+                }
+                text_reply(TOUR_SKIP_TEXT)
+            }
             "concierge:steckbrief:edit" => {
+                if !self
+                    .concierge
+                    .persist_steckbrief_revocation(interaction.user_id)
+                    .await
+                {
+                    tracing::error!(user_id = interaction.user_id, "Concierge: Dauerhafter Steckbrief-Widerruf vor Bearbeitung konnte nicht bestaetigt werden");
+                }
                 match self
                     .concierge
                     .store
                     .begin_privacy_action(interaction.user_id)
                     .await
                 {
-                    Ok(Some((_, tx))) => {
+                    Ok(Some((db_user_id, mut tx))) => {
+                        if let Err(err) = sqlx::query(
+                            "UPDATE bot.concierge_profiles
+                                SET pending_steckbrief_approved = FALSE, updated_at = $2
+                              WHERE user_id = $1",
+                        )
+                        .bind(db_user_id)
+                        .bind(now)
+                        .execute(&mut *tx)
+                        .await
+                        {
+                            tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Freigabe konnte nicht entzogen werden");
+                            return text_reply(STECKBRIEF_ERROR_TEXT);
+                        }
                         if let Err(err) = tx.commit().await {
                             tracing::warn!(%err, user_id = interaction.user_id, "Concierge: Steckbrief-Privacy-Pruefung konnte nicht abgeschlossen werden");
                             return text_reply(STECKBRIEF_ERROR_TEXT);
@@ -4651,6 +5446,27 @@ impl InteractionHandler for ConciergeHandler {
                 ) else {
                     return text_reply(STECKBRIEF_LOST_TEXT);
                 };
+                let text = text.to_string();
+                match self
+                    .concierge
+                    .store
+                    .save_pending_steckbrief(profile.user_id, &text, channel_id, true, now)
+                    .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => return text_reply(STECKBRIEF_PRIVACY_TEXT),
+                    Err(err) => {
+                        tracing::warn!(%err, user_id = profile.user_id, "Concierge: Steckbrief-Freigabe konnte nicht gespeichert werden");
+                        return text_reply(STECKBRIEF_ERROR_TEXT);
+                    }
+                }
+                if !self
+                    .concierge
+                    .clear_steckbrief_revocation(profile.user_id)
+                    .await
+                {
+                    return text_reply(STECKBRIEF_ERROR_TEXT);
+                }
                 let last_activity = self
                     .concierge
                     .store
@@ -4665,7 +5481,7 @@ impl InteractionHandler for ConciergeHandler {
                 ) {
                     match self
                         .concierge
-                        .post_steckbrief(profile.user_id, profile.guild_id, channel_id, text, now)
+                        .post_steckbrief(profile.user_id, profile.guild_id, channel_id, &text, now)
                         .await
                     {
                         SteckbriefPostOutcome::Posted => text_reply(
@@ -4678,7 +5494,7 @@ impl InteractionHandler for ConciergeHandler {
                         SteckbriefPostOutcome::NotPosted => match self
                             .concierge
                             .store
-                            .save_pending_steckbrief(profile.user_id, text, channel_id, true, now)
+                            .save_pending_steckbrief(profile.user_id, &text, channel_id, true, now)
                             .await
                         {
                             Ok(true) => text_reply(STECKBRIEF_HOLD_TEXT),
@@ -4693,7 +5509,7 @@ impl InteractionHandler for ConciergeHandler {
                     match self
                         .concierge
                         .store
-                        .save_pending_steckbrief(profile.user_id, text, channel_id, true, now)
+                        .save_pending_steckbrief(profile.user_id, &text, channel_id, true, now)
                         .await
                     {
                         Ok(true) => text_reply(STECKBRIEF_HOLD_TEXT),
@@ -4945,7 +5761,9 @@ mod tests {
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
         sent_channel_text: std::sync::Mutex<Vec<(u64, String)>>,
         replied_messages: std::sync::Mutex<Vec<(u64, u64)>>,
+        reply_hangs: std::sync::Mutex<bool>,
         deleted_channels: std::sync::Mutex<Vec<u64>>,
+        delete_channel_fails: std::sync::Mutex<bool>,
         deleted_messages: std::sync::Mutex<Vec<(u64, u64)>>,
         delete_message_fails: std::sync::Mutex<bool>,
         private_channel_owners: std::sync::Mutex<HashSet<(u64, u64, u64, u64)>>,
@@ -5038,6 +5856,9 @@ mod tests {
 
         async fn send_channel_text(&self, channel_id: u64, content: &str) -> Result<u64, String> {
             self.wait_at_port_gate().await;
+            if *self.channel_send_fails.lock().unwrap() {
+                return Err("channel text send failed".to_string());
+            }
             self.sent_channel_text
                 .lock()
                 .unwrap()
@@ -5046,6 +5867,9 @@ mod tests {
         }
 
         async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
+            if *self.delete_channel_fails.lock().unwrap() {
+                return Err("delete channel failed".to_string());
+            }
             self.deleted_channels.lock().unwrap().push(channel_id);
             Ok(())
         }
@@ -5070,6 +5894,9 @@ mod tests {
             _content: &str,
             _allowed_role_id: Option<u64>,
         ) -> Result<u64, String> {
+            if *self.reply_hangs.lock().unwrap() {
+                std::future::pending::<()>().await;
+            }
             self.replied_messages
                 .lock()
                 .unwrap()
@@ -5206,7 +6033,9 @@ mod tests {
             sent_channel_v2: std::sync::Mutex::new(Vec::new()),
             sent_channel_text: std::sync::Mutex::new(Vec::new()),
             replied_messages: std::sync::Mutex::new(Vec::new()),
+            reply_hangs: std::sync::Mutex::new(false),
             deleted_channels: std::sync::Mutex::new(Vec::new()),
+            delete_channel_fails: std::sync::Mutex::new(false),
             deleted_messages: std::sync::Mutex::new(Vec::new()),
             delete_message_fails: std::sync::Mutex::new(false),
             private_channel_owners: std::sync::Mutex::new(HashSet::new()),
@@ -5565,6 +6394,38 @@ mod tests {
     }
 
     #[test]
+    fn vergessen_erkennt_explizite_natuerliche_loeschdirektiven() {
+        for text in [
+            "Bitte lösche meine Daten",
+            "Lösche bitte meine Daten",
+            "Meine Daten löschen",
+            "LÖSCHE MEINE DATEN",
+            "<@123456789> bitte lösche meine Daten",
+            "<@!123456789> loesche bitte meine Daten!",
+        ] {
+            assert!(forget_intent(text), "muss Löschdirektive erkennen: {text}");
+        }
+    }
+
+    #[test]
+    fn vergessen_ignoriert_zitate_meta_fragen_und_fremde_mentions() {
+        for text in [
+            "> Bitte lösche meine Daten",
+            ">>> Bitte lösche meine Daten\nLösche meine Daten",
+            "\"Lösche meine Daten\" bedeutet was?",
+            "Wie kann ich meine Daten löschen?",
+            "Kannst du bitte meine Daten vergessen?",
+            "<@&123456789> bitte lösche meine Daten",
+            "<#123456789> bitte lösche meine Daten",
+        ] {
+            assert!(
+                !forget_intent(text),
+                "darf keine Löschdirektive erkennen: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn v2_fallback_enthaelt_klartext_des_bodys() {
         let reply = text_reply(PLAY_TEXT);
         assert_eq!(
@@ -5880,6 +6741,274 @@ mod tests {
                 .await
         );
         assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn oeffentliche_serverfrage_stopp_setzt_keinen_optout_und_speichert_nichts() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        let guild_id = config.main_guild_id;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        assert!(
+            concierge
+                .handle_user_message(SERVER_BOT_FRAGEN_CHANNEL_ID, Some(guild_id), 42, "stopp",)
+                .await
+        );
+
+        let opted_out = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM core.user_privacy
+                  WHERE user_id = 42 AND opted_out = TRUE
+             )",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("privacy state");
+        let conversations = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert!(!opted_out);
+        assert_eq!(conversations, 0);
+        server.await.expect("knowledge server");
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            "Öffentliche Wissensantwort"
+        );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn oeffentliche_serverfrage_vergiss_mich_loescht_keine_privaten_daten() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        let guild_id = config.main_guild_id;
+        assert!(store
+            .record_conversation(42, guild_id, "user", "Privater Verlauf", Utc::now())
+            .await
+            .expect("private history"));
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+
+        assert!(
+            concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(guild_id),
+                    42,
+                    "vergiss mich",
+                )
+                .await
+        );
+
+        let profiles = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_profiles WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("profile count");
+        let conversations = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert_eq!((profiles, conversations), (1, 1));
+        server.await.expect("knowledge server");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn oeffentliche_serverfrage_nutzt_keinen_privaten_dm_verlauf() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        let (knowledge_url, requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Öffentliche Wissensantwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        let guild_id = config.main_guild_id;
+        assert!(store
+            .record_conversation(42, guild_id, "user", "Privates Geheimthema", Utc::now(),)
+            .await
+            .expect("private history"));
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), None, config);
+
+        assert!(
+            concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(guild_id),
+                    42,
+                    "Und dort?",
+                )
+                .await
+        );
+        server.await.expect("knowledge server");
+
+        let body: Value = {
+            let requests = requests.lock().unwrap();
+            serde_json::from_str(&requests[0]).expect("knowledge request json")
+        };
+        assert_eq!(body["question"], "Und dort?");
+        let conversations = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert_eq!(conversations, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn oeffentlicher_patenwunsch_hat_keine_persoenlichen_aktionsbuttons() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let config = test_config(true, &[]);
+        let guild_id = config.main_guild_id;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        assert!(
+            concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(guild_id),
+                    42,
+                    "Ich wünsche mir einen festen Ansprechpartner.",
+                )
+                .await
+        );
+
+        let body = port.sent_channel_v2.lock().unwrap()[0].clone();
+        assert_eq!(sent_v2_content(&body), PATE_REQUEST_FALLBACK_TEXT);
+        assert!(!serde_json::to_string(&body)
+            .expect("response json")
+            .contains("concierge:pate:yes"));
+        let conversations = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert_eq!(conversations, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn oeffentliche_serverfragen_haben_fluechtigen_cooldown_ohne_zweiten_knowledge_call() {
+        let (
+            knowledge_url,
+            started,
+            release,
+            calls,
+            _requests,
+            server,
+        ) = gated_two_response_knowledge_server(
+            r#"{"answerable":true,"answer":"Erste Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+            r#"{"answerable":true,"answer":"Zweite Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        let guild_id = config.main_guild_id;
+        let port = mock_port();
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+        let first_concierge = concierge.clone();
+        let first = tokio::spawn(async move {
+            first_concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(guild_id),
+                    42,
+                    "Erste öffentliche Frage",
+                )
+                .await
+        });
+        tokio::time::timeout(StdDuration::from_secs(5), started.notified())
+            .await
+            .expect("first knowledge call");
+        release.notify_one();
+        assert!(first.await.expect("first public task"));
+
+        assert!(
+            concierge
+                .handle_user_message(
+                    SERVER_BOT_FRAGEN_CHANNEL_ID,
+                    Some(guild_id),
+                    42,
+                    "Zweite öffentliche Frage",
+                )
+                .await
+        );
+        tokio::time::sleep(StdDuration::from_millis(100)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        {
+            let sent = port.sent_channel_v2.lock().unwrap();
+            assert_eq!(sent.len(), 2);
+            assert_eq!(sent_v2_content(&sent[0]), "Erste Antwort");
+            assert_eq!(sent_v2_content(&sent[1]), COOLDOWN_TEXT);
+        }
+        server.abort();
+        let _ = server.await;
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn alter_oeffentlicher_pate_button_startet_keinen_patenwunsch() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let mut config = test_config(true, &[]);
+        config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
+        let guild_id = config.main_guild_id;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let handler = ConciergeHandler { concierge };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:pate:yes".to_string(),
+                guild_id,
+                channel_id: SERVER_BOT_FRAGEN_CHANNEL_ID,
+                user_id: 77,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(bridge_reply_text(&reply).is_none());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+        let requests = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_profiles WHERE user_id = 77 AND pate_requested = TRUE",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("pate requests");
+        assert_eq!(requests, 0);
     }
 
     #[tokio::test]
@@ -8381,12 +9510,14 @@ mod tests {
         fail_concierge_profile_commit(db.pool(), "concierge_cadence_fallback_test").await;
         let port = Arc::new(MockConciergePort::default());
         *port.dm_cannot_send.lock().unwrap() = true;
-        let concierge = Concierge::new(
-            db.pool().clone(),
-            port.clone(),
-            None,
-            test_config(true, &[]),
-        );
+        let config = test_config(true, &[]);
+        port.private_channel_owners.lock().unwrap().insert((
+            1,
+            100,
+            42,
+            config.fallback_category_id,
+        ));
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
         let mut profile = profile_at(Utc::now() - Duration::days(3));
         profile.fallback_channel_id = Some(100);
 
@@ -8417,7 +9548,14 @@ mod tests {
         let port = Arc::new(MockConciergePort::default());
         *port.dm_cannot_send.lock().unwrap() = true;
         *port.channel_send_fails.lock().unwrap() = true;
-        let concierge = Concierge::new(db.pool().clone(), port, None, test_config(true, &[]));
+        let config = test_config(true, &[]);
+        port.private_channel_owners.lock().unwrap().insert((
+            1,
+            100,
+            42,
+            config.fallback_category_id,
+        ));
+        let concierge = Concierge::new(db.pool().clone(), port, None, config);
         let mut profile = profile_at(Utc::now() - Duration::days(3));
         profile.fallback_channel_id = Some(100);
 
@@ -8440,6 +9578,52 @@ mod tests {
             .unwrap()
             .t7_sent_at
             .is_some());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn kadenz_sendet_nicht_in_nicht_mehr_privaten_fallbackkanal() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        store
+            .save_fallback_channel(42, 100, Utc::now())
+            .await
+            .expect("fallback channel");
+        let port = Arc::new(MockConciergePort::default());
+        *port.dm_cannot_send.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+        let mut profile = profile_at(Utc::now() - Duration::days(3));
+        profile.fallback_channel_id = Some(100);
+
+        assert!(
+            !concierge
+                .send_cadence_message(
+                    &profile,
+                    v2_body(T7_TEXT, Vec::new()),
+                    "T7",
+                    CadenceAction::T7,
+                    Utc::now(),
+                )
+                .await
+        );
+
+        assert_eq!(*port.dm_attempts.lock().unwrap(), vec![42]);
+        assert!(port.sent_channel_ids.lock().unwrap().is_empty());
+        assert!(store
+            .profile(42)
+            .await
+            .unwrap()
+            .unwrap()
+            .t7_sent_at
+            .is_none());
     }
 
     #[cfg(feature = "testing")]
@@ -8509,6 +9693,221 @@ mod tests {
             SteckbriefPostOutcome::NotPosted
         );
         assert!(port.sent_channel_text.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_post_prueft_freigabe_frisch_unter_privacy_lock() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, false, Utc::now())
+            .await
+            .unwrap());
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+
+        assert_eq!(
+            concierge
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::NotPosted
+        );
+        assert!(port.sent_channel_text.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_no_loescht_ausstehende_freigabe() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        let handler = ConciergeHandler {
+            concierge: Concierge::new(
+                db.pool().clone(),
+                Arc::new(MockConciergePort::default()),
+                None,
+                test_config(true, &[]),
+            ),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:steckbrief:no".to_string(),
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(bridge_reply_text(&reply), Some(TOUR_SKIP_TEXT));
+        let profile = store.profile(42).await.unwrap().unwrap();
+        assert!(profile.pending_steckbrief_text.is_none());
+        assert!(!profile.pending_steckbrief_approved);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_edit_entzieht_freigabe_bevor_modal_oeffnet() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        let handler = ConciergeHandler {
+            concierge: Concierge::new(
+                db.pool().clone(),
+                Arc::new(MockConciergePort::default()),
+                None,
+                test_config(true, &[]),
+            ),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:steckbrief:edit".to_string(),
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.modal.is_some());
+        let profile = store.profile(42).await.unwrap().unwrap();
+        assert_eq!(
+            profile.pending_steckbrief_text.as_deref(),
+            Some("Mein Steckbrief")
+        );
+        assert!(!profile.pending_steckbrief_approved);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_no_commitfehler_bleibt_auch_nach_neustart_widerrufen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        fail_concierge_profile_commit(db.pool(), "concierge_steckbrief_no_test").await;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            test_config(true, &[]),
+        );
+        let handler = ConciergeHandler { concierge };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:steckbrief:no".to_string(),
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(bridge_reply_text(&reply), Some(STECKBRIEF_ERROR_TEXT));
+        assert!(
+            store
+                .profile(42)
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_steckbrief_approved
+        );
+
+        let fresh_port = Arc::new(MockConciergePort::default());
+        let fresh = Concierge::new(
+            db.pool().clone(),
+            fresh_port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+        assert_eq!(
+            fresh
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::NotPosted
+        );
+        assert!(fresh_port.sent_channel_text.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_edit_commitfehler_bleibt_auch_nach_neustart_widerrufen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        fail_concierge_profile_commit(db.pool(), "concierge_steckbrief_edit_test").await;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            test_config(true, &[]),
+        );
+        let handler = ConciergeHandler { concierge };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "concierge:steckbrief:edit".to_string(),
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+        assert_eq!(bridge_reply_text(&reply), Some(STECKBRIEF_ERROR_TEXT));
+        assert!(reply.modal.is_none());
+        assert!(
+            store
+                .profile(42)
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_steckbrief_approved
+        );
+
+        let fresh_port = Arc::new(MockConciergePort::default());
+        let fresh = Concierge::new(
+            db.pool().clone(),
+            fresh_port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+        assert_eq!(
+            fresh
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::NotPosted
+        );
+        assert!(fresh_port.sent_channel_text.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
@@ -8590,6 +9989,74 @@ mod tests {
             Some("Mein Steckbrief")
         );
         assert!(pending.pending_steckbrief_approved);
+
+        let fresh_port = Arc::new(MockConciergePort::default());
+        let fresh = Concierge::new(
+            db.pool().clone(),
+            fresh_port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+        assert_eq!(
+            fresh
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::NotPosted
+        );
+        assert!(fresh_port.sent_channel_text.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn steckbrief_sendefehler_mit_clear_commitfehler_sperrt_neustart_retry() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store.ensure_profile(42, 1, Utc::now()).await.unwrap());
+        assert!(store
+            .save_pending_steckbrief(42, "Mein Steckbrief", 100, true, Utc::now())
+            .await
+            .unwrap());
+        fail_concierge_profile_commit(db.pool(), "concierge_steckbrief_send_test").await;
+        let failing_port = Arc::new(MockConciergePort::default());
+        *failing_port.channel_send_fails.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            failing_port,
+            None,
+            test_config(true, &[]),
+        );
+
+        assert_eq!(
+            concierge
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::CleanupUncertain
+        );
+        assert!(
+            store
+                .profile(42)
+                .await
+                .unwrap()
+                .unwrap()
+                .pending_steckbrief_approved
+        );
+
+        let fresh_port = Arc::new(MockConciergePort::default());
+        let fresh = Concierge::new(
+            db.pool().clone(),
+            fresh_port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+        assert_eq!(
+            fresh
+                .post_steckbrief(42, 1, 100, "Mein Steckbrief", Utc::now())
+                .await,
+            SteckbriefPostOutcome::NotPosted
+        );
+        assert!(fresh_port.sent_channel_text.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
@@ -8664,6 +10131,47 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
+    async fn stale_fallback_db_owner_ohne_live_privatsphaere_erlaubt_weder_chat_noch_controls() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = Arc::new(MockConciergePort::default());
+        let config = test_config(true, &[]);
+        let guild_id = config.main_guild_id;
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        assert!(concierge
+            .store
+            .ensure_profile(42, guild_id, Utc::now())
+            .await
+            .unwrap());
+        concierge
+            .store
+            .save_fallback_channel(42, 100, Utc::now())
+            .await
+            .unwrap();
+
+        assert!(
+            !concierge
+                .handle_user_message(100, Some(guild_id), 42, "Hallo")
+                .await
+        );
+        let reply = ConciergeHandler {
+            concierge: concierge.clone(),
+        }
+        .handle(BridgeInteraction {
+            custom_id: "concierge:play".to_string(),
+            guild_id,
+            channel_id: 100,
+            user_id: 42,
+            ..BridgeInteraction::default()
+        })
+        .await;
+        assert!(bridge_reply_text(&reply).is_none());
+        assert!(port.sent_channel_v2.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
     async fn pate_request_raeumt_internen_post_nach_deferred_commit_fehler_auf() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -8715,8 +10223,10 @@ mod tests {
         let (started, _never_release) = block_next_port_call(&port);
         let mut config = test_config(true, &[]);
         config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
-        let concierge = Concierge::new(db.pool().clone(), port, None, config);
-        let mut action = tokio::spawn(async move { concierge.request_pate(42, 1, "Nani").await });
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+        let action_concierge = concierge.clone();
+        let mut action =
+            tokio::spawn(async move { action_concierge.request_pate(42, 1, "Nani").await });
         tokio::time::timeout(StdDuration::from_secs(5), started.notified())
             .await
             .expect("Patenpost start");
@@ -8729,11 +10239,23 @@ mod tests {
             .expect("Patenpost-Discord-I/O muss begrenzt sein")
             .expect("Patenwunsch task");
         assert_eq!(bridge_reply_text(&reply), Some(PATE_REQUEST_UNCERTAIN_TEXT));
+        let state = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT pate_requested, pate_request_uncertain
+               FROM bot.concierge_profiles WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("persistenter unsicherer Patenwunsch");
+        assert_eq!(state, (true, true));
+
+        let retry = concierge.request_pate(42, 1, "Nani").await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_REQUEST_UNCERTAIN_TEXT));
+        assert!(port.sent_channel_ids.lock().unwrap().is_empty());
         assert!(ConciergeStore::new(db.pool().clone())
             .profile(42)
             .await
             .expect("profile")
-            .is_none());
+            .is_some());
     }
 
     #[cfg(feature = "testing")]
@@ -8829,9 +10351,12 @@ mod tests {
         seed_current_pate_request(&pool, 42).await;
         let port = Arc::new(MockConciergePort::default());
         let (started, _never_release) = block_next_port_call(&port);
-        let concierge = Concierge::new(pool.clone(), port, None, test_config(true, &[]));
+        let mut config = test_config(true, &[]);
+        config.pater_channel_id = Some(PATE_REQUEST_CHANNEL_ID);
+        let concierge = Concierge::new(pool.clone(), port.clone(), None, config);
+        let action_concierge = concierge.clone();
         let mut action = tokio::spawn(async move {
-            concierge
+            action_concierge
                 .claim_pate(valid_pate_claim_interaction(42, 77))
                 .await
         });
@@ -8848,6 +10373,14 @@ mod tests {
             .expect("Paten-Claim task");
         assert_eq!(bridge_reply_text(&reply), Some(PATE_CLAIM_UNCERTAIN_TEXT));
 
+        let request_retry = concierge
+            .request_pate(42, concierge.config.main_guild_id, "User")
+            .await;
+        assert_eq!(
+            bridge_reply_text(&request_retry),
+            Some(PATE_REQUEST_UNCERTAIN_TEXT)
+        );
+
         let mut lock_probe = pool.begin().await.expect("lock probe");
         let user_lock = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
             .bind(42_i64 ^ i64::MIN)
@@ -8861,11 +10394,25 @@ mod tests {
             .expect("pate privacy lock");
         assert!(user_lock && pate_lock);
         lock_probe.rollback().await.expect("release lock probe");
+
+        let retry = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+        let claims = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.kv_store WHERE ns = $1 AND k = '42'",
+        )
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(&pool)
+        .await
+        .expect("persistenter unsicherer Paten-Claim");
+        assert_eq!(claims, 1);
+        assert!(port.created_private_channels.lock().unwrap().is_empty());
     }
 
     #[cfg(feature = "testing")]
     #[tokio::test]
-    async fn pate_claim_dm_transportfehler_bleibt_unsicher_trotz_kanal_cleanup() {
+    async fn pate_claim_dm_transportfehler_bleibt_unsicher_ohne_kanal_cleanup_oder_retry() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
@@ -8884,7 +10431,7 @@ mod tests {
             .await;
 
         assert_eq!(bridge_reply_text(&reply), Some(PATE_CLAIM_UNCERTAIN_TEXT));
-        assert_eq!(*port.deleted_channels.lock().unwrap(), vec![1]);
+        assert!(port.deleted_channels.lock().unwrap().is_empty());
         let db_effects = sqlx::query_scalar::<_, i64>(
             "SELECT
                 (SELECT COUNT(*) FROM bot.kv_store WHERE ns = $1 AND k = '42')
@@ -8893,8 +10440,91 @@ mod tests {
         .bind(CONCIERGE_PATE_CLAIM_NS)
         .fetch_one(db.pool())
         .await
-        .expect("rolled back Pate state");
-        assert_eq!(db_effects, 0);
+        .expect("persistenter unsicherer Pate state");
+        assert_eq!(db_effects, 2);
+
+        let retry = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_ALREADY_CLAIMED_TEXT));
+        assert_eq!(port.created_private_channels.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_claim_intro_transportfehler_bleibt_unsicher_ohne_kanal_cleanup_oder_retry() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        seed_current_pate_request(db.pool(), 42).await;
+        let port = Arc::new(MockConciergePort::default());
+        *port.channel_send_fails.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+
+        let reply = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+
+        assert_eq!(bridge_reply_text(&reply), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+        assert!(port.deleted_channels.lock().unwrap().is_empty());
+        let db_effects = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM bot.kv_store WHERE ns = $1 AND k = '42')
+              + (SELECT COUNT(*) FROM bot.concierge_patenschaften WHERE user_id = 42)",
+        )
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("persistenter unsicherer Pate state");
+        assert_eq!(db_effects, 2);
+
+        let retry = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_ALREADY_CLAIMED_TEXT));
+        assert_eq!(port.created_private_channels.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_claim_dm_50007_mit_cleanupfehler_persistiert_no_retry() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        seed_current_pate_request(db.pool(), 42).await;
+        let port = Arc::new(MockConciergePort::default());
+        *port.dm_cannot_send.lock().unwrap() = true;
+        *port.delete_channel_fails.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+
+        let reply = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&reply), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+
+        let retry = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+        let claims = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.kv_store WHERE ns = $1 AND k = '42'",
+        )
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("persistenter Claim nach Cleanupfehler");
+        assert_eq!(claims, 1);
+        assert_eq!(port.created_private_channels.lock().unwrap().len(), 1);
     }
 
     #[cfg(feature = "testing")]
@@ -8957,6 +10587,428 @@ mod tests {
         .await
         .expect("patenschaften");
         assert_eq!((claims, patenschaften), (0, 0));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_claim_commit_rollback_mit_cleanupfehler_sperrt_retry() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        sqlx::query(
+            "CREATE FUNCTION bot.concierge_claim_test_fail_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'claim deferred failure'; END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER concierge_claim_test_fail_commit_trigger
+             AFTER INSERT ON bot.concierge_patenschaften
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.concierge_claim_test_fail_commit()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        seed_current_pate_request(db.pool(), 42).await;
+        let port = Arc::new(MockConciergePort::default());
+        *port.delete_channel_fails.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+
+        let first = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&first), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+
+        let retry = concierge
+            .claim_pate(valid_pate_claim_interaction(42, 77))
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+        assert_eq!(port.created_private_channels.lock().unwrap().len(), 1);
+        let claims = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.kv_store WHERE ns = $1 AND k = '42'",
+        )
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("persistenter Claim nach Cleanupfehler");
+        assert_eq!(claims, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_claim_reply_timeout_mit_commit_rollback_sperrt_retry() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        sqlx::query(
+            "CREATE FUNCTION bot.concierge_claim_test_fail_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'claim deferred failure'; END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER concierge_claim_test_fail_commit_trigger
+             AFTER INSERT ON bot.concierge_patenschaften
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.concierge_claim_test_fail_commit()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        seed_current_pate_request(db.pool(), 42).await;
+        let port = Arc::new(MockConciergePort::default());
+        *port.reply_hangs.lock().unwrap() = true;
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            test_config(true, &[]),
+        );
+
+        let first = concierge
+            .claim_pate(BridgeInteraction {
+                message_id: Some(55),
+                ..valid_pate_claim_interaction(42, 77)
+            })
+            .await;
+        assert_eq!(bridge_reply_text(&first), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+
+        let retry = concierge
+            .claim_pate(BridgeInteraction {
+                message_id: Some(55),
+                ..valid_pate_claim_interaction(42, 77)
+            })
+            .await;
+        assert_eq!(bridge_reply_text(&retry), Some(PATE_CLAIM_UNCERTAIN_TEXT));
+        assert_eq!(port.created_private_channels.lock().unwrap().len(), 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_request_uncertain_marker_wird_nach_commit_rollback_nachgezogen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let config = test_config(true, &[]);
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .set_pate_requested(42, config.main_guild_id, Utc::now())
+            .await
+            .unwrap());
+        sqlx::query("CREATE SEQUENCE bot.pate_request_uncertain_commit_seq")
+            .execute(db.pool())
+            .await
+            .expect("failure sequence");
+        sqlx::query(
+            "CREATE FUNCTION bot.pate_request_uncertain_fail_once() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF nextval('bot.pate_request_uncertain_commit_seq') = 1 THEN
+                 RAISE EXCEPTION 'deferred marker failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER pate_request_uncertain_fail_once_trigger
+             AFTER UPDATE ON bot.concierge_profiles
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.pate_request_uncertain_fail_once()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            config,
+        );
+
+        assert!(
+            concierge
+                .persist_pate_request_uncertain(42, concierge.config.main_guild_id, Utc::now())
+                .await
+        );
+        let uncertain = sqlx::query_scalar::<_, bool>(
+            "SELECT pate_request_uncertain FROM bot.concierge_profiles WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request marker");
+        assert!(uncertain);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn pate_claim_uncertain_marker_wird_nach_commit_rollback_nachgezogen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        seed_current_pate_request(db.pool(), 42).await;
+        sqlx::query("CREATE SEQUENCE bot.pate_claim_uncertain_commit_seq")
+            .execute(db.pool())
+            .await
+            .expect("failure sequence");
+        sqlx::query(
+            "CREATE FUNCTION bot.pate_claim_uncertain_fail_once() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF nextval('bot.pate_claim_uncertain_commit_seq') = 1 THEN
+                 RAISE EXCEPTION 'deferred marker failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER pate_claim_uncertain_fail_once_trigger
+             AFTER UPDATE ON bot.concierge_profiles
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.pate_claim_uncertain_fail_once()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            test_config(true, &[]),
+        );
+
+        assert!(concierge.persist_pate_claim_uncertain(42, 77).await);
+        let state = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT
+                pate_request_uncertain,
+                EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $1 AND k = '42'
+                )
+               FROM bot.concierge_profiles
+              WHERE user_id = 42",
+        )
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("claim marker");
+        assert_eq!(state, (true, true));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn t0_uncertain_marker_wird_nach_commit_rollback_nachgezogen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let config = test_config(true, &[]);
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .ensure_profile(42, config.main_guild_id, Utc::now())
+            .await
+            .unwrap());
+        sqlx::query("CREATE SEQUENCE bot.t0_uncertain_commit_seq")
+            .execute(db.pool())
+            .await
+            .expect("failure sequence");
+        sqlx::query(
+            "CREATE FUNCTION bot.t0_uncertain_fail_once() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF nextval('bot.t0_uncertain_commit_seq') = 1 THEN
+                 RAISE EXCEPTION 'deferred marker failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER t0_uncertain_fail_once_trigger
+             AFTER UPDATE ON bot.concierge_profiles
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.t0_uncertain_fail_once()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            config,
+        );
+
+        assert!(
+            concierge
+                .persist_t0_uncertain(42, concierge.config.main_guild_id, Utc::now())
+                .await
+        );
+        let state = sqlx::query_as::<_, (bool, bool)>(
+            "SELECT
+                t0_sent_at IS NOT NULL,
+                EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $1 AND k = $2
+                )
+               FROM bot.concierge_profiles
+              WHERE user_id = 42",
+        )
+        .bind(CONCIERGE_T0_CLAIM_NS)
+        .bind(format!("{}:42", concierge.config.main_guild_id))
+        .fetch_one(db.pool())
+        .await
+        .expect("T0 marker");
+        assert_eq!(state, (true, true));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn cadence_uncertain_marker_wird_nach_commit_rollback_nachgezogen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let config = test_config(true, &[]);
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .ensure_profile(42, config.main_guild_id, Utc::now())
+            .await
+            .unwrap());
+        sqlx::query("CREATE SEQUENCE bot.cadence_uncertain_commit_seq")
+            .execute(db.pool())
+            .await
+            .expect("failure sequence");
+        sqlx::query(
+            "CREATE FUNCTION bot.cadence_uncertain_fail_once() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF nextval('bot.cadence_uncertain_commit_seq') = 1 THEN
+                 RAISE EXCEPTION 'deferred marker failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER cadence_uncertain_fail_once_trigger
+             AFTER UPDATE ON bot.concierge_profiles
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.cadence_uncertain_fail_once()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            config,
+        );
+
+        assert!(
+            concierge
+                .persist_cadence_uncertain(42, CadenceAction::T2, Utc::now())
+                .await
+        );
+        let marked = sqlx::query_scalar::<_, bool>(
+            "SELECT t2_sent_at IS NOT NULL FROM bot.concierge_profiles WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("cadence marker");
+        assert!(marked);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn reversible_optout_verhindert_technische_no_retry_marker_nicht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let config = test_config(true, &[]);
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .ensure_profile(42, config.main_guild_id, Utc::now())
+            .await
+            .unwrap());
+        assert!(store
+            .set_opted_out(42, config.main_guild_id, Utc::now())
+            .await
+            .expect("optout"));
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            Arc::new(MockConciergePort::default()),
+            None,
+            config,
+        );
+
+        assert!(concierge.persist_steckbrief_revocation(42).await);
+        assert!(
+            concierge
+                .persist_t0_uncertain(42, concierge.config.main_guild_id, Utc::now())
+                .await
+        );
+        assert!(
+            concierge
+                .persist_pate_request_uncertain(42, concierge.config.main_guild_id, Utc::now())
+                .await
+        );
+        assert!(concierge.persist_pate_claim_uncertain(42, 77).await);
+        assert!(
+            concierge
+                .persist_cadence_uncertain(42, CadenceAction::T2, Utc::now())
+                .await
+        );
+        crate::privacy::set_opt_in(db.pool(), 42, Utc::now().timestamp())
+            .await
+            .expect("optin");
+
+        let state = sqlx::query_as::<_, (bool, bool, bool, bool, bool)>(
+            "SELECT
+                profile.pate_request_uncertain,
+                profile.t0_sent_at IS NOT NULL,
+                profile.t2_sent_at IS NOT NULL,
+                EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $1 AND k = $2
+                ),
+                EXISTS(
+                    SELECT 1 FROM bot.kv_store
+                     WHERE ns = $3 AND k = '42'
+                )
+               FROM bot.concierge_profiles profile
+              WHERE profile.user_id = 42",
+        )
+        .bind(CONCIERGE_T0_CLAIM_NS)
+        .bind(format!("{}:42", concierge.config.main_guild_id))
+        .bind(CONCIERGE_PATE_CLAIM_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("technical no-retry state");
+        let steckbrief_revoked = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(
+                 SELECT 1 FROM bot.kv_store
+                  WHERE ns = $1 AND k = '42'
+             )",
+        )
+        .bind(CONCIERGE_STECKBRIEF_REVOKED_NS)
+        .fetch_one(db.pool())
+        .await
+        .expect("steckbrief marker");
+        assert_eq!(state, (true, true, true, true, true));
+        assert!(steckbrief_revoked);
     }
 
     #[cfg(feature = "testing")]

@@ -57,6 +57,59 @@ const BRAIN_EMBED_DESCRIPTION_TRUNCATE_AT: usize = 4080;
 const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
 const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
 const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
+
+fn private_channel_overwrites_are_owner_only(
+    guild_id: u64,
+    owner_id: u64,
+    bot_id: u64,
+    overwrites: &[serenity::all::PermissionOverwrite],
+) -> bool {
+    let mut everyone_denied = false;
+    let mut owner_allowed = false;
+    let mut bot_allowed = false;
+
+    for overwrite in overwrites {
+        match overwrite.kind {
+            PermissionOverwriteType::Role(role_id) if role_id == RoleId::new(guild_id) => {
+                if overwrite.allow.contains(Permissions::VIEW_CHANNEL) {
+                    return false;
+                }
+                everyone_denied |= overwrite.deny.contains(Permissions::VIEW_CHANNEL);
+            }
+            PermissionOverwriteType::Role(_) => {
+                if overwrite.allow.contains(Permissions::VIEW_CHANNEL) {
+                    return false;
+                }
+            }
+            PermissionOverwriteType::Member(member_id) => {
+                let member_id = member_id.get();
+                if member_id != owner_id
+                    && member_id != bot_id
+                    && overwrite.allow.contains(Permissions::VIEW_CHANNEL)
+                {
+                    return false;
+                }
+                let required = Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES;
+                if member_id == owner_id {
+                    if overwrite.deny.intersects(required) {
+                        return false;
+                    }
+                    owner_allowed |= overwrite.allow.contains(required);
+                }
+                if member_id == bot_id {
+                    if overwrite.deny.intersects(required) {
+                        return false;
+                    }
+                    bot_allowed |= overwrite.allow.contains(required);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    everyone_denied && owner_allowed && bot_allowed
+}
+
 pub struct ModGlue {
     pub adapter: Arc<DiscordAdapter>,
     pub tags: Arc<dl_community::tags::TagService>,
@@ -1911,6 +1964,28 @@ impl dl_community::faq::FaqPort for FaqGlue {
             .and_then(|c| c.parent_id.map(|p| p.get()))
     }
 
+    async fn private_faq_channel_owned_by_user(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> bool {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return false;
+        };
+        let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+            return false;
+        };
+        let bot_id = self.adapter.cache().current_user().id.get();
+        channel.parent_id == Some(ChannelId::new(dl_community::faq::FAQ_CATEGORY_ID))
+            && private_channel_overwrites_are_owner_only(
+                guild_id,
+                user_id,
+                bot_id,
+                &channel.permission_overwrites,
+            )
+    }
+
     async fn user_name(&self, user_id: u64) -> String {
         self.adapter
             .cache()
@@ -2247,16 +2322,16 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
         let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
             return false;
         };
+        let bot_id = self.adapter.cache().current_user().id.get();
         let expected_topic = format!("dl-concierge-owner:{user_id}");
         channel.parent_id == Some(ChannelId::new(category_id))
             && channel.topic.as_deref() == Some(expected_topic.as_str())
-            && channel.permission_overwrites.iter().any(|overwrite| {
-                matches!(
-                    overwrite.kind,
-                    PermissionOverwriteType::Member(member_id) if member_id == UserId::new(user_id)
-                ) && overwrite.allow.contains(Permissions::VIEW_CHANNEL)
-                    && overwrite.allow.contains(Permissions::SEND_MESSAGES)
-            })
+            && private_channel_overwrites_are_owner_only(
+                guild_id,
+                user_id,
+                bot_id,
+                &channel.permission_overwrites,
+            )
     }
 
     async fn send_channel_v2(
@@ -3727,6 +3802,83 @@ mod tests {
             with_components.get("components"),
             Some(&json!([{ "type": 1 }]))
         );
+    }
+
+    fn private_overwrite_fixture() -> Vec<serenity::all::PermissionOverwrite> {
+        vec![
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::empty(),
+                deny: Permissions::VIEW_CHANNEL,
+                kind: PermissionOverwriteType::Role(RoleId::new(1)),
+            },
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(UserId::new(42)),
+            },
+            serenity::all::PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(UserId::new(99)),
+            },
+        ]
+    }
+
+    #[test]
+    fn private_overwrites_erlauben_nur_owner_und_bot() {
+        assert!(private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &private_overwrite_fixture(),
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_brauchen_everyone_view_deny() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.remove(0);
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_verbieten_breite_rollensicht() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.push(serenity::all::PermissionOverwrite {
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+            kind: PermissionOverwriteType::Role(RoleId::new(7)),
+        });
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
+    }
+
+    #[test]
+    fn private_overwrites_verbieten_fremde_membersicht() {
+        let mut overwrites = private_overwrite_fixture();
+        overwrites.push(serenity::all::PermissionOverwrite {
+            allow: Permissions::VIEW_CHANNEL,
+            deny: Permissions::empty(),
+            kind: PermissionOverwriteType::Member(UserId::new(7)),
+        });
+
+        assert!(!private_channel_overwrites_are_owner_only(
+            1,
+            42,
+            99,
+            &overwrites,
+        ));
     }
 
     #[test]

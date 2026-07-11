@@ -28,7 +28,7 @@ pub const SYSTEM_PROMPT: &str = "Du bist der freundliche Bot der Deutschen Deadl
 Deine Aufgabe: Beantworte DMs von Nutzern auf Deutsch, kurz und freundlich.\n\n\
 === Server-Features ===\n\
 - Streamer-Partnerschaft: Auto-Raid, Chat Guard, Analytics Dashboard (/twitch/), Discord Auto-Post (#🎥twitch), Chat-Promos alle ~30 Min. → Start mit /streamer oder DM-Flow.\n\
-- Beta-Invite: Deadlock Beta-Zugang via Ko-fi oder Invite → /betainvite im Server.\n\
+- Playtest-Invite: Zugang zum Deadlock-Playtest. Es gibt keinen Selbstbedienungs-Befehl. Der Nutzer postet seinen Steam-Freundescode im Server, ein Admin lädt ihn persönlich ein. Der Bot schickt dann die Steam-Freundschaftsanfrage; sobald sie angenommen ist, geht die Einladung raus. Ko-fi spielt keine Rolle mehr.\n\
 - Steam-Verifizierung: Steam-Account verknüpfen → Rolle \"Steam Verifiziert\" → /steamlink.\n\
 - Twitch Analytics: /twitch/ – Retention, Unique Chatters, Leaderboard.\n\
 - LFG: Mitspieler finden → #spieler-suche Channel.\n\
@@ -234,12 +234,17 @@ fn streamer_embed() -> Value {
 }
 
 fn beta_embed() -> Value {
+    // Kanal-ID aus invite_lounge ziehen, nicht abschreiben: die aeltere ID aus
+    // den Python-Cogs war veraltet und wanderte so in die Nutzerfuehrung.
+    let lounge = crate::invite_lounge::INVITE_LOUNGE_CHANNEL_ID;
     json!({
-        "title": "🎟️ Deadlock Beta-Invite",
-        "description": "So bekommst du einen Beta-Invite:\n\n\
-                        **1.** Betritt unseren Discord-Server\n\
-                        **2.** Nutze `/betainvite` im richtigen Channel\n\n\
-                        Du kannst auch direkt im <#1428745737323155679> Channel nachschauen.",
+        "title": "🎟️ Deadlock Playtest-Invite",
+        "description": format!(
+            "So kommst du in den Playtest:\n\n\
+             **1.** Betritt unseren Discord-Server\n\
+             **2.** Poste deinen Steam-Freundescode in <#{lounge}>\n\n\
+             Ein Admin lädt dich dann persönlich ein. Du bekommst eine Steam-Freundschaftsanfrage, und sobald du die annimmst, ist die Einladung raus."
+        ),
         "color": 0x3498DB
     })
 }
@@ -311,6 +316,55 @@ mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    /// Commands, die es nicht mehr gibt. Der DM-Assistent ist die Stelle, an der
+    /// der Bot Nutzern sagt, was sie tippen sollen — ein abgeschaffter Command
+    /// hier ist eine Sackgasse, die niemandem auffällt, weil nichts kaputtgeht.
+    /// Genau so hat der Bot nach dem /invite-Umbau weiter `/betainvite` empfohlen.
+    const ABGESCHAFFTE_COMMANDS: &[&str] = &[
+        "/betainvite",
+        "/publish_betainvite_panel",
+        "/betainvite_stats",
+        "/kofi",
+    ];
+
+    /// Die alte Invite-Kanal-ID aus den Python-Cogs. Sie zeigt nicht mehr auf die
+    /// Invite-Lounge, sah aber jahrelang plausibel aus und wanderte so von Text
+    /// zu Text weiter.
+    const VERALTETE_INVITE_KANAL_ID: &str = "1428745737323155679";
+
+    fn nutzerfuehrungs_texte() -> Vec<String> {
+        let mut texte = vec![SYSTEM_PROMPT.to_string()];
+        for embed in [streamer_embed(), beta_embed(), steam_embed()] {
+            texte.push(embed.to_string());
+        }
+        texte
+    }
+
+    #[test]
+    fn nutzerfuehrung_nennt_keine_abgeschafften_commands() {
+        for text in nutzerfuehrungs_texte() {
+            for tot in ABGESCHAFFTE_COMMANDS {
+                assert!(
+                    !text.contains(tot),
+                    "Nutzerfuehrung verweist auf den abgeschafften Command {tot}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn invite_hilfe_zeigt_auf_die_echte_lounge() {
+        let beta = beta_embed().to_string();
+        assert!(
+            !beta.contains(VERALTETE_INVITE_KANAL_ID),
+            "Invite-Hilfe schickt Nutzer in den veralteten Kanal"
+        );
+        assert!(
+            beta.contains(&crate::invite_lounge::INVITE_LOUNGE_CHANNEL_ID.to_string()),
+            "Invite-Hilfe nennt die Invite-Lounge nicht"
+        );
+    }
 
     #[test]
     fn cooldown_min_intervall_und_max_calls() {

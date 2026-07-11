@@ -228,6 +228,131 @@ async fn active_session_of_user_tx(
     }))
 }
 
+async fn uncertain_session_of_user_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<bool> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(
+             SELECT 1 FROM bot.faq_chat_sessions
+              WHERE user_id = $1 AND status = 'uncertain'
+         )",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await?)
+}
+
+async fn mark_faq_session_uncertain_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+    guild_id: i64,
+) -> CommunityDbResult<()> {
+    sqlx::query(
+        "INSERT INTO bot.faq_chat_sessions(
+             session_id, user_id, channel_id, guild_id, expires_at, status
+         ) VALUES ($1, $2, 0, $3, now(), 'uncertain')
+         ON CONFLICT(session_id) DO UPDATE SET
+             user_id = excluded.user_id,
+             guild_id = excluded.guild_id,
+             status = 'uncertain',
+             last_activity_at = now()",
+    )
+    .bind(format!("faq-uncertain-{user_id}"))
+    .bind(user_id)
+    .bind(guild_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+async fn persist_faq_session_uncertain(pool: &PgPool, user_id: i64, guild_id: i64) -> bool {
+    for attempt in 0..2 {
+        let mut tx = match pool.begin().await {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::error!(%err, user_id, "FAQ: Transaktion fuer Unsicherheitsmarker fehlgeschlagen");
+                return false;
+            }
+        };
+        if let Err(err) = crate::privacy::lock_user_privacy(&mut tx, user_id).await {
+            tracing::error!(%err, user_id, "FAQ: Privacy-Lock fuer Unsicherheitsmarker fehlgeschlagen");
+            return false;
+        }
+        match crate::privacy::erasure_completed_under_lock(&mut tx, user_id).await {
+            Ok(false) => {}
+            Ok(true) => return true,
+            Err(err) => {
+                tracing::error!(%err, user_id, "FAQ: Erasure-Status fuer Unsicherheitsmarker fehlgeschlagen");
+                return false;
+            }
+        }
+        if let Err(err) = mark_faq_session_uncertain_tx(&mut tx, user_id, guild_id).await {
+            tracing::error!(%err, user_id, "FAQ: Unsicherheitsmarker konnte nicht gespeichert werden");
+            return false;
+        }
+        match tx.commit().await {
+            Ok(()) => return true,
+            Err(err) => {
+                tracing::error!(%err, user_id, attempt, "FAQ: Unsicherheitsmarker-Commit fehlgeschlagen; Zustand wird verifiziert");
+                if faq_session_uncertain_persisted(pool, user_id).await {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+async fn faq_session_uncertain_persisted(pool: &PgPool, user_id: i64) -> bool {
+    let mut tx = match pool.begin().await {
+        Ok(tx) => tx,
+        Err(err) => {
+            tracing::error!(%err, user_id, "FAQ: Readback-Transaktion fuer Unsicherheitsmarker fehlgeschlagen");
+            return false;
+        }
+    };
+    if let Err(err) = crate::privacy::lock_user_privacy(&mut tx, user_id).await {
+        tracing::error!(%err, user_id, "FAQ: Privacy-Lock fuer Unsicherheitsmarker-Readback fehlgeschlagen");
+        return false;
+    }
+    match crate::privacy::erasure_completed_under_lock(&mut tx, user_id).await {
+        Ok(false) => {}
+        Ok(true) => return true,
+        Err(err) => {
+            tracing::error!(%err, user_id, "FAQ: Erasure-Status fuer Unsicherheitsmarker-Readback fehlgeschlagen");
+            return false;
+        }
+    }
+    match uncertain_session_of_user_tx(&mut tx, user_id).await {
+        Ok(persisted) => persisted,
+        Err(err) => {
+            tracing::error!(%err, user_id, "FAQ: Unsicherheitsmarker-Readback fehlgeschlagen");
+            false
+        }
+    }
+}
+
+async fn finish_faq_session_uncertain(
+    pool: &PgPool,
+    mut tx: Transaction<'static, Postgres>,
+    user_id: i64,
+    guild_id: i64,
+) -> bool {
+    if let Err(err) = mark_faq_session_uncertain_tx(&mut tx, user_id, guild_id).await {
+        tracing::error!(%err, user_id, "FAQ: Unsicherheitsmarker in laufender Transaktion fehlgeschlagen");
+        drop(tx);
+        return persist_faq_session_uncertain(pool, user_id, guild_id).await;
+    }
+    match tx.commit().await {
+        Ok(()) => true,
+        Err(err) => {
+            tracing::error!(%err, user_id, "FAQ: Unsicherheitsmarker-Commit fehlgeschlagen; Marker wird nachgezogen");
+            persist_faq_session_uncertain(pool, user_id, guild_id).await
+        }
+    }
+}
+
 async fn create_session_tx(
     tx: &mut Transaction<'_, Postgres>,
     session_id: &str,
@@ -526,11 +651,11 @@ impl FaqStore {
         Ok(true)
     }
 
-    /// (session_id, channel_id, user_id) aller abgelaufenen aktiven Sessions.
-    pub async fn expired_sessions(&self) -> Vec<(String, u64, u64)> {
+    /// (session_id, channel_id, user_id, guild_id) aller abgelaufenen aktiven Sessions.
+    pub async fn expired_sessions(&self) -> Vec<(String, u64, u64, u64)> {
         let rows = sqlx::query(
             r#"
-            SELECT session_id, channel_id, user_id
+            SELECT session_id, channel_id, user_id, guild_id
               FROM bot.faq_chat_sessions
              WHERE status = 'active' AND expires_at <= $1
             "#,
@@ -545,10 +670,12 @@ impl FaqStore {
                 let session_id: String = row.try_get("session_id").ok()?;
                 let channel_id: i64 = row.try_get("channel_id").ok()?;
                 let user_id: i64 = row.try_get("user_id").ok()?;
+                let guild_id: i64 = row.try_get("guild_id").ok()?;
                 Some((
                     session_id,
                     i64_to_u64(channel_id, "channel_id")?,
                     i64_to_u64(user_id, "user_id")?,
+                    i64_to_u64(guild_id, "guild_id")?,
                 ))
             })
             .collect()
@@ -573,6 +700,12 @@ pub trait FaqPort: Send + Sync {
         components: Option<serde_json::Value>,
     ) -> Result<u64, String>;
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64>;
+    async fn private_faq_channel_owned_by_user(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> bool;
     async fn user_name(&self, user_id: u64) -> String;
     async fn delete_channel(&self, channel_id: u64) -> Result<(), String>;
     async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String>;
@@ -856,6 +989,26 @@ impl FaqChat {
         }
     }
 
+    async fn discard_created_channel_or_mark_uncertain(
+        &self,
+        channel_id: u64,
+        tx: Option<Transaction<'static, Postgres>>,
+        user_id: i64,
+        guild_id: i64,
+    ) -> bool {
+        if self.discard_created_channel(channel_id).await {
+            return true;
+        }
+        let marked = match tx {
+            Some(tx) => finish_faq_session_uncertain(&self.store.pool, tx, user_id, guild_id).await,
+            None => persist_faq_session_uncertain(&self.store.pool, user_id, guild_id).await,
+        };
+        if !marked {
+            tracing::error!(user_id, channel_id, "FAQ: Wiederholungsschutz nach fehlgeschlagenem Kanal-Cleanup konnte nicht gespeichert werden");
+        }
+        false
+    }
+
     async fn ticket_auto_answer(&self, problem: &str, _author_id: u64) -> TicketAutoOutcome {
         ticket_auto_outcome_from_knowledge(ask_knowledge_at(&self.knowledge_url, problem).await)
     }
@@ -893,7 +1046,11 @@ impl FaqChat {
             }
             Ok(Some(_)) => return true,
             Ok(None) => {
-                if self.port.channel_category(guild_id, channel_id).await != Some(FAQ_CATEGORY_ID) {
+                if !self
+                    .port
+                    .private_faq_channel_owned_by_user(guild_id, channel_id, author_id)
+                    .await
+                {
                     return false;
                 }
                 let question = content.trim();
@@ -905,7 +1062,11 @@ impl FaqChat {
             }
             Err(err) => {
                 tracing::warn!(%err, channel_id, "FAQ: Session konnte nicht sicher geprueft werden");
-                if self.port.channel_category(guild_id, channel_id).await != Some(FAQ_CATEGORY_ID) {
+                if !self
+                    .port
+                    .private_faq_channel_owned_by_user(guild_id, channel_id, author_id)
+                    .await
+                {
                     return false;
                 }
                 let _ = self
@@ -915,6 +1076,19 @@ impl FaqChat {
                 return true;
             }
         };
+        if !self
+            .port
+            .private_faq_channel_owned_by_user(guild_id, channel_id, owner_id)
+            .await
+        {
+            tracing::warn!(
+                guild_id,
+                channel_id,
+                owner_id,
+                "FAQ: Stateful-Antwort wegen unsicherer Kanal-Privatheit verworfen"
+            );
+            return true;
+        }
         if author_id != owner_id {
             return true; // Kanal gehört dem FAQ-System, aber fremde Nachricht
         }
@@ -1053,7 +1227,7 @@ impl FaqChat {
 
     /// Abgelaufene Sessions schließen (1-h-Loop).
     pub async fn cleanup_expired(&self) {
-        for (session_id, channel_id, user_id) in self.store.expired_sessions().await {
+        for (session_id, channel_id, user_id, guild_id) in self.store.expired_sessions().await {
             let chat_action = self.chat_action_lock(channel_id);
             let _chat_guard = chat_action.lock().await;
             let _stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
@@ -1174,6 +1348,18 @@ impl FaqChat {
             if !may_notify {
                 continue;
             }
+            if !self
+                .port
+                .private_faq_channel_owned_by_user(guild_id, channel_id, user_id)
+                .await
+            {
+                tracing::warn!(
+                    channel_id,
+                    user_id,
+                    "FAQ: Timeout-Nachricht wegen unsicherer Kanal-Privatheit verworfen"
+                );
+                continue;
+            }
             match tokio::time::timeout(
                 FAQ_DISCORD_IO_TIMEOUT,
                 self.port
@@ -1232,6 +1418,20 @@ impl InteractionHandler for FaqHandler {
                     return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
                 }
             };
+            let uncertain = match uncertain_session_of_user_tx(&mut tx, db_user_id).await {
+                Ok(uncertain) => uncertain,
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Unsicherheitsmarker konnte nicht geprueft werden");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+            };
+            if uncertain {
+                if let Err(err) = tx.commit().await {
+                    tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Unsicherheitspruefung konnte nicht abgeschlossen werden");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+                return BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT);
+            }
             let active = match active_session_of_user_tx(&mut tx, db_user_id).await {
                 Ok(active) => active,
                 Err(err) => {
@@ -1244,10 +1444,35 @@ impl InteractionHandler for FaqHandler {
                     tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session-Prüfung konnte nicht abgeschlossen werden");
                     return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
                 }
+                if !self
+                    .faq
+                    .port
+                    .private_faq_channel_owned_by_user(
+                        interaction.guild_id,
+                        channel_id,
+                        interaction.user_id,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        guild_id = interaction.guild_id,
+                        channel_id,
+                        user_id = interaction.user_id,
+                        "FAQ: Aktive Session wegen unsicherer Kanal-Privatheit nicht verlinkt"
+                    );
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
                 return BridgeReply::ephemeral_text(format!(
                     "❌ Du hast bereits einen aktiven Chat: <#{channel_id}>"
                 ));
             }
+            let db_guild_id = match u64_to_i64(interaction.guild_id, "guild_id") {
+                Ok(value) => value,
+                Err(err) => {
+                    tracing::warn!(%err, user_id = interaction.user_id, guild_id = interaction.guild_id, "FAQ: Guild-ID ist ungueltig");
+                    return BridgeReply::ephemeral_text(FAQ_SESSION_ERROR_TEXT);
+                }
+            };
             let user_name = match tokio::time::timeout(
                 FAQ_DISCORD_IO_TIMEOUT,
                 self.faq.port.user_name(interaction.user_id),
@@ -1278,6 +1503,16 @@ impl InteractionHandler for FaqHandler {
                 Ok(Ok(id)) => id,
                 Ok(Err(err)) => {
                     tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Kanalanlage fehlgeschlagen oder unsicher");
+                    if !finish_faq_session_uncertain(
+                        &self.faq.store.pool,
+                        tx,
+                        db_user_id,
+                        db_guild_id,
+                    )
+                    .await
+                    {
+                        tracing::error!(user_id = interaction.user_id, "FAQ: Wiederholungsschutz nach unsicherer Kanalanlage konnte nicht gespeichert werden");
+                    }
                     return BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT);
                 }
                 Err(_) => {
@@ -1286,6 +1521,16 @@ impl InteractionHandler for FaqHandler {
                         timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(),
                         "FAQ: Kanalanlage hat Zeitlimit ueberschritten; Zustand unsicher"
                     );
+                    if !finish_faq_session_uncertain(
+                        &self.faq.store.pool,
+                        tx,
+                        db_user_id,
+                        db_guild_id,
+                    )
+                    .await
+                    {
+                        tracing::error!(user_id = interaction.user_id, "FAQ: Wiederholungsschutz nach Kanalanlage-Timeout konnte nicht gespeichert werden");
+                    }
                     return BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT);
                 }
             };
@@ -1298,23 +1543,17 @@ impl InteractionHandler for FaqHandler {
                 Ok(value) => value,
                 Err(err) => {
                     tracing::warn!(%err, user_id = interaction.user_id, channel_id, "FAQ: Kanal-ID ist ungueltig");
-                    drop(tx);
                     return BridgeReply::ephemeral_text(
-                        if self.faq.discard_created_channel(channel_id).await {
-                            FAQ_SESSION_ERROR_TEXT
-                        } else {
-                            FAQ_SESSION_UNCERTAIN_TEXT
-                        },
-                    );
-                }
-            };
-            let db_guild_id = match u64_to_i64(interaction.guild_id, "guild_id") {
-                Ok(value) => value,
-                Err(err) => {
-                    tracing::warn!(%err, user_id = interaction.user_id, guild_id = interaction.guild_id, "FAQ: Guild-ID ist ungueltig");
-                    drop(tx);
-                    return BridgeReply::ephemeral_text(
-                        if self.faq.discard_created_channel(channel_id).await {
+                        if self
+                            .faq
+                            .discard_created_channel_or_mark_uncertain(
+                                channel_id,
+                                Some(tx),
+                                db_user_id,
+                                db_guild_id,
+                            )
+                            .await
+                        {
                             FAQ_SESSION_ERROR_TEXT
                         } else {
                             FAQ_SESSION_UNCERTAIN_TEXT
@@ -1333,9 +1572,17 @@ impl InteractionHandler for FaqHandler {
             .await
             {
                 tracing::warn!(%err, user_id = interaction.user_id, "FAQ: Session konnte nicht gespeichert werden");
-                drop(tx);
                 return BridgeReply::ephemeral_text(
-                    if self.faq.discard_created_channel(channel_id).await {
+                    if self
+                        .faq
+                        .discard_created_channel_or_mark_uncertain(
+                            channel_id,
+                            Some(tx),
+                            db_user_id,
+                            db_guild_id,
+                        )
+                        .await
+                    {
                         FAQ_SESSION_ERROR_TEXT
                     } else {
                         FAQ_SESSION_UNCERTAIN_TEXT
@@ -1364,9 +1611,17 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
                 Ok(Ok(_)) => {}
                 Ok(Err(err)) => {
                     tracing::warn!(%err, user_id = interaction.user_id, channel_id, "FAQ: Willkommen-Zustellung fehlgeschlagen oder unsicher");
-                    drop(tx);
                     return BridgeReply::ephemeral_text(
-                        if self.faq.discard_created_channel(channel_id).await {
+                        if self
+                            .faq
+                            .discard_created_channel_or_mark_uncertain(
+                                channel_id,
+                                Some(tx),
+                                db_user_id,
+                                db_guild_id,
+                            )
+                            .await
+                        {
                             FAQ_SESSION_ERROR_TEXT
                         } else {
                             FAQ_SESSION_UNCERTAIN_TEXT
@@ -1380,9 +1635,17 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
                         timeout_secs = FAQ_DISCORD_IO_TIMEOUT.as_secs(),
                         "FAQ: Willkommen-Zustellung hat Zeitlimit ueberschritten"
                     );
-                    drop(tx);
                     return BridgeReply::ephemeral_text(
-                        if self.faq.discard_created_channel(channel_id).await {
+                        if self
+                            .faq
+                            .discard_created_channel_or_mark_uncertain(
+                                channel_id,
+                                Some(tx),
+                                db_user_id,
+                                db_guild_id,
+                            )
+                            .await
+                        {
                             FAQ_SESSION_ERROR_TEXT
                         } else {
                             FAQ_SESSION_UNCERTAIN_TEXT
@@ -1412,13 +1675,31 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
                         "✅ Dein Concierge-Chat wurde erstellt: <#{channel_id}>\n\nStell deine Frage(n) dort."
                     )),
                     FaqSessionCommitResolution::RolledBack => BridgeReply::ephemeral_text(
-                        if self.faq.discard_created_channel(channel_id).await {
+                        if self
+                            .faq
+                            .discard_created_channel_or_mark_uncertain(
+                                channel_id,
+                                None,
+                                db_user_id,
+                                db_guild_id,
+                            )
+                            .await
+                        {
                             FAQ_SESSION_ERROR_TEXT
                         } else {
                             FAQ_SESSION_UNCERTAIN_TEXT
                         },
                     ),
                     FaqSessionCommitResolution::Uncertain => {
+                        if !persist_faq_session_uncertain(
+                            &self.faq.store.pool,
+                            db_user_id,
+                            db_guild_id,
+                        )
+                        .await
+                        {
+                            tracing::error!(user_id = interaction.user_id, channel_id, "FAQ: Wiederholungsschutz nach unsicherem Session-Commit konnte nicht gespeichert werden");
+                        }
                         BridgeReply::ephemeral_text(FAQ_SESSION_UNCERTAIN_TEXT)
                     }
                 };
@@ -1460,6 +1741,24 @@ Ich kann mich an unsere Unterhaltung erinnern - du kannst auch Rückfragen stell
         };
         if interaction.user_id != owner_id {
             return BridgeReply::ephemeral_text("❌ Das ist nicht dein Chat.");
+        }
+        if !self
+            .faq
+            .port
+            .private_faq_channel_owned_by_user(
+                interaction.guild_id,
+                interaction.channel_id,
+                owner_id,
+            )
+            .await
+        {
+            tracing::warn!(
+                guild_id = interaction.guild_id,
+                channel_id = interaction.channel_id,
+                owner_id,
+                "FAQ: Close wegen unsicherer Kanal-Privatheit verworfen"
+            );
+            return BridgeReply::ephemeral_text(FAQ_CLOSE_ERROR_TEXT);
         }
         match self.faq.store.close_session(&session_id).await {
             Ok(true) => {}
@@ -1961,6 +2260,41 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
+    async fn faq_timeout_sendet_nach_permission_drift_keine_nachricht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let port = panel_port();
+        port.faq_private_channels.lock().unwrap().clear();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        sqlx::query(
+            "UPDATE bot.faq_chat_sessions
+                SET expires_at = now() - interval '1 minute'
+              WHERE session_id = 's1'",
+        )
+        .execute(db.pool())
+        .await
+        .expect("expire session");
+
+        faq.cleanup_expired().await;
+
+        assert!(port.sent.lock().unwrap().is_empty());
+        let status = sqlx::query_scalar::<_, String>(
+            "SELECT status FROM bot.faq_chat_sessions WHERE session_id = 's1'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("status");
+        assert_eq!(status, "closed");
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
     async fn faq_session_write_wartet_hinter_privacy_delete_und_bleibt_geloescht() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -2079,18 +2413,29 @@ mod tests {
         edits: std::sync::Mutex<u32>,
         deleted: std::sync::Mutex<Vec<u64>>,
         deleted_channels: std::sync::Mutex<Vec<u64>>,
+        delete_channel_fails: std::sync::Mutex<bool>,
         deleted_messages: std::sync::Mutex<Vec<(u64, u64)>>,
         delete_message_fails: std::sync::Mutex<bool>,
         faq_channels: std::sync::Mutex<Vec<u64>>,
+        faq_channel_attempts: std::sync::Mutex<u32>,
+        faq_channel_error: std::sync::Mutex<bool>,
+        faq_channel_id: std::sync::Mutex<u64>,
         channel_started: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         channel_release: std::sync::Mutex<Option<Arc<tokio::sync::Notify>>>,
         sent: std::sync::Mutex<Vec<(u64, String)>>,
+        faq_private_channels: std::sync::Mutex<HashSet<(u64, u64, u64)>>,
         category: Option<u64>,
     }
 
     #[async_trait::async_trait]
     impl FaqPort for MockPanelPort {
-        async fn create_faq_channel(&self, _g: u64, user_id: u64, _n: &str) -> Result<u64, String> {
+        async fn create_faq_channel(
+            &self,
+            guild_id: u64,
+            user_id: u64,
+            _n: &str,
+        ) -> Result<u64, String> {
+            *self.faq_channel_attempts.lock().unwrap() += 1;
             if let Some(started) = self.channel_started.lock().unwrap().clone() {
                 started.notify_one();
             }
@@ -2098,8 +2443,16 @@ mod tests {
             if let Some(release) = release {
                 release.notified().await;
             }
+            if *self.faq_channel_error.lock().unwrap() {
+                return Err("create failed".to_string());
+            }
             self.faq_channels.lock().unwrap().push(user_id);
-            Ok(1)
+            let channel_id = *self.faq_channel_id.lock().unwrap();
+            self.faq_private_channels
+                .lock()
+                .unwrap()
+                .insert((guild_id, channel_id, user_id));
+            Ok(channel_id)
         }
         async fn send_message(
             &self,
@@ -2114,11 +2467,25 @@ mod tests {
         async fn channel_category(&self, _g: u64, _c: u64) -> Option<u64> {
             self.category
         }
+        async fn private_faq_channel_owned_by_user(
+            &self,
+            guild_id: u64,
+            channel_id: u64,
+            user_id: u64,
+        ) -> bool {
+            self.faq_private_channels
+                .lock()
+                .unwrap()
+                .contains(&(guild_id, channel_id, user_id))
+        }
         async fn user_name(&self, _u: u64) -> String {
             "U".to_string()
         }
         async fn delete_channel(&self, channel_id: u64) -> Result<(), String> {
             self.deleted_channels.lock().unwrap().push(channel_id);
+            if *self.delete_channel_fails.lock().unwrap() {
+                return Err("delete failed".to_string());
+            }
             Ok(())
         }
         async fn delete_message(&self, channel_id: u64, message_id: u64) -> Result<(), String> {
@@ -2160,12 +2527,17 @@ mod tests {
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
             deleted_channels: std::sync::Mutex::new(Vec::new()),
+            delete_channel_fails: std::sync::Mutex::new(false),
             deleted_messages: std::sync::Mutex::new(Vec::new()),
             delete_message_fails: std::sync::Mutex::new(false),
             faq_channels: std::sync::Mutex::new(Vec::new()),
+            faq_channel_attempts: std::sync::Mutex::new(0),
+            faq_channel_error: std::sync::Mutex::new(false),
+            faq_channel_id: std::sync::Mutex::new(1),
             channel_started: std::sync::Mutex::new(None),
             channel_release: std::sync::Mutex::new(None),
             sent: std::sync::Mutex::new(Vec::new()),
+            faq_private_channels: std::sync::Mutex::new(HashSet::from([(1, 100, 42)])),
             category: None,
         })
     }
@@ -2176,12 +2548,17 @@ mod tests {
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
             deleted_channels: std::sync::Mutex::new(Vec::new()),
+            delete_channel_fails: std::sync::Mutex::new(false),
             deleted_messages: std::sync::Mutex::new(Vec::new()),
             delete_message_fails: std::sync::Mutex::new(false),
             faq_channels: std::sync::Mutex::new(Vec::new()),
+            faq_channel_attempts: std::sync::Mutex::new(0),
+            faq_channel_error: std::sync::Mutex::new(false),
+            faq_channel_id: std::sync::Mutex::new(1),
             channel_started: std::sync::Mutex::new(None),
             channel_release: std::sync::Mutex::new(None),
             sent: std::sync::Mutex::new(Vec::new()),
+            faq_private_channels: std::sync::Mutex::new(HashSet::from([(1, 100, 42)])),
             category: Some(TICKET_AUTO_HELP_CATEGORY_ID),
         })
     }
@@ -2193,12 +2570,17 @@ mod tests {
             edits: std::sync::Mutex::new(0),
             deleted: std::sync::Mutex::new(Vec::new()),
             deleted_channels: std::sync::Mutex::new(Vec::new()),
+            delete_channel_fails: std::sync::Mutex::new(false),
             deleted_messages: std::sync::Mutex::new(Vec::new()),
             delete_message_fails: std::sync::Mutex::new(false),
             faq_channels: std::sync::Mutex::new(Vec::new()),
+            faq_channel_attempts: std::sync::Mutex::new(0),
+            faq_channel_error: std::sync::Mutex::new(false),
+            faq_channel_id: std::sync::Mutex::new(1),
             channel_started: std::sync::Mutex::new(None),
             channel_release: std::sync::Mutex::new(None),
             sent: std::sync::Mutex::new(Vec::new()),
+            faq_private_channels: std::sync::Mutex::new(HashSet::from([(1, 100, 42)])),
             category: Some(FAQ_CATEGORY_ID),
         })
     }
@@ -2248,6 +2630,40 @@ mod tests {
 
         assert!(reply.content.unwrap().contains("Datenschutz-Opt-out"));
         assert!(port.faq_channels.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_verweist_nach_permission_drift_nicht_auf_aktive_session() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        assert!(FaqStore {
+            pool: db.pool().clone(),
+        }
+        .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+        .await
+        .expect("session"));
+        port.faq_private_channels.lock().unwrap().clear();
+        let handler = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                command: "faq".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(FAQ_SESSION_ERROR_TEXT));
+        assert!(!reply
+            .content
+            .as_deref()
+            .unwrap_or_default()
+            .contains("<#100>"));
+        assert_eq!(*port.faq_channel_attempts.lock().unwrap(), 0);
     }
 
     #[tokio::test]
@@ -2320,7 +2736,7 @@ mod tests {
         let port = panel_port();
         let (started, _never_release) = block_faq_channel_creation(&port);
         let handler = FaqHandler {
-            faq: FaqChat::new(pool.clone(), port),
+            faq: FaqChat::new(pool.clone(), port.clone()),
         };
         let mut action = tokio::spawn(async move {
             handler
@@ -2353,6 +2769,269 @@ mod tests {
             .expect("privacy lock");
         assert!(privacy_lock);
         lock_probe.rollback().await.expect("release lock probe");
+
+        let retry = FaqHandler {
+            faq: FaqChat::new(pool.clone(), port.clone()),
+        }
+        .handle(BridgeInteraction {
+            command: "faq".to_string(),
+            guild_id: 1,
+            user_id: 42,
+            ..BridgeInteraction::default()
+        })
+        .await;
+        assert_eq!(retry.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(*port.faq_channel_attempts.lock().unwrap(), 1);
+        let uncertain = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions
+              WHERE user_id = 42 AND status = 'uncertain'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("uncertain FAQ session");
+        assert_eq!(uncertain, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_discord_fehler_sperrt_retry_und_marker_ist_privacy_verankert() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        *port.faq_channel_error.lock().unwrap() = true;
+        let interaction = BridgeInteraction {
+            command: "faq".to_string(),
+            guild_id: 1,
+            user_id: 42,
+            ..BridgeInteraction::default()
+        };
+
+        let first = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        }
+        .handle(interaction.clone())
+        .await;
+        *port.faq_channel_error.lock().unwrap() = false;
+        let retry = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        }
+        .handle(interaction)
+        .await;
+
+        assert_eq!(first.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(retry.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(*port.faq_channel_attempts.lock().unwrap(), 1);
+        let export = crate::privacy::export_user_data(db.pool(), 42, 1_000)
+            .await
+            .expect("privacy export");
+        assert!(export["tables"]["faq_chat_sessions.user_id"]
+            .as_array()
+            .expect("FAQ sessions in export")
+            .iter()
+            .any(|row| row["status"] == "uncertain"));
+
+        crate::privacy::delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+        let remaining = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions WHERE user_id = 42",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("remaining FAQ sessions");
+        assert_eq!(remaining, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_cleanupfehler_sperrt_retry_dauerhaft() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        *port.faq_channel_id.lock().unwrap() = u64::MAX;
+        *port.delete_channel_fails.lock().unwrap() = true;
+        let interaction = BridgeInteraction {
+            command: "faq".to_string(),
+            guild_id: 1,
+            user_id: 42,
+            ..BridgeInteraction::default()
+        };
+
+        let first = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        }
+        .handle(interaction.clone())
+        .await;
+        *port.faq_channel_id.lock().unwrap() = 1;
+        *port.delete_channel_fails.lock().unwrap() = false;
+        let retry = FaqHandler {
+            faq: FaqChat::new(db.pool().clone(), port.clone()),
+        }
+        .handle(interaction)
+        .await;
+
+        assert_eq!(first.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(retry.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(*port.faq_channel_attempts.lock().unwrap(), 1);
+        assert_eq!(*port.deleted_channels.lock().unwrap(), vec![u64::MAX]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_unsicherer_commit_reconcile_sperrt_retry_dauerhaft() {
+        const COMMIT_BLOCKER: i64 = 8_675_309;
+        let db = db_with_kv().await;
+        let pool = db.pool().clone();
+        sqlx::query(
+            "CREATE FUNCTION bot.faq_test_uncertain_commit() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF NEW.channel_id = 1 THEN
+                 PERFORM pg_advisory_xact_lock(8675309);
+                 RAISE EXCEPTION 'faq deferred failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(&pool)
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER faq_test_uncertain_commit_trigger
+             AFTER INSERT ON bot.faq_chat_sessions
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.faq_test_uncertain_commit()",
+        )
+        .execute(&pool)
+        .await
+        .expect("failure trigger");
+        let mut blocker = pool.acquire().await.expect("commit blocker connection");
+        sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(COMMIT_BLOCKER)
+            .execute(&mut *blocker)
+            .await
+            .expect("commit blocker");
+        let port = panel_port();
+        let action_port = port.clone();
+        let action_pool = pool.clone();
+        let action = tokio::spawn(async move {
+            FaqHandler {
+                faq: FaqChat::new(action_pool, action_port),
+            }
+            .handle(BridgeInteraction {
+                command: "faq".to_string(),
+                guild_id: 1,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await
+        });
+        wait_for_db_lock(&pool, "COMMIT", Some("advisory")).await;
+        sqlx::query(
+            "INSERT INTO bot.faq_chat_sessions(
+                 session_id, user_id, user_name, channel_id, guild_id, expires_at
+             ) VALUES ('other-active', 42, 'U', 999, 1, now() + interval '1 hour')",
+        )
+        .execute(&pool)
+        .await
+        .expect("mismatching active session");
+        sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(COMMIT_BLOCKER)
+            .execute(&mut *blocker)
+            .await
+            .expect("release commit blocker");
+        let first = action.await.expect("FAQ start task");
+
+        let retry = FaqHandler {
+            faq: FaqChat::new(pool.clone(), port.clone()),
+        }
+        .handle(BridgeInteraction {
+            command: "faq".to_string(),
+            guild_id: 1,
+            user_id: 42,
+            ..BridgeInteraction::default()
+        })
+        .await;
+        assert_eq!(first.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(retry.content.as_deref(), Some(FAQ_SESSION_UNCERTAIN_TEXT));
+        assert_eq!(*port.faq_channel_attempts.lock().unwrap(), 1);
+        let uncertain = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions
+              WHERE user_id = 42 AND status = 'uncertain'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("uncertain FAQ session");
+        assert_eq!(uncertain, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_start_uncertain_marker_wird_nach_commit_rollback_nachgezogen() {
+        let db = db_with_kv().await;
+        sqlx::query("CREATE SEQUENCE bot.faq_uncertain_marker_commit_seq")
+            .execute(db.pool())
+            .await
+            .expect("failure sequence");
+        sqlx::query(
+            "CREATE FUNCTION bot.faq_uncertain_marker_fail_once() RETURNS trigger
+             LANGUAGE plpgsql AS $$ BEGIN
+               IF NEW.status = 'uncertain'
+                  AND nextval('bot.faq_uncertain_marker_commit_seq') = 1 THEN
+                 RAISE EXCEPTION 'deferred marker failure';
+               END IF;
+               RETURN NEW;
+             END $$",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure function");
+        sqlx::query(
+            "CREATE CONSTRAINT TRIGGER faq_uncertain_marker_fail_once_trigger
+             AFTER INSERT OR UPDATE ON bot.faq_chat_sessions
+             DEFERRABLE INITIALLY DEFERRED
+             FOR EACH ROW EXECUTE FUNCTION bot.faq_uncertain_marker_fail_once()",
+        )
+        .execute(db.pool())
+        .await
+        .expect("failure trigger");
+
+        assert!(persist_faq_session_uncertain(db.pool(), 42, 1).await);
+        let uncertain = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions
+              WHERE session_id = 'faq-uncertain-42'
+                AND user_id = 42
+                AND status = 'uncertain'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("uncertain marker");
+        assert_eq!(uncertain, 1);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_uncertain_marker_ueberlebt_reversiblen_optout_und_optin() {
+        let db = db_with_kv().await;
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await
+        .expect("optout");
+
+        assert!(persist_faq_session_uncertain(db.pool(), 42, 1).await);
+        crate::privacy::set_opt_in(db.pool(), 42, chrono::Utc::now().timestamp())
+            .await
+            .expect("optin");
+
+        let uncertain = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.faq_chat_sessions
+              WHERE session_id = 'faq-uncertain-42'
+                AND status = 'uncertain'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("uncertain marker");
+        assert_eq!(uncertain, 1);
     }
 
     #[cfg(feature = "testing")]
@@ -2429,6 +3108,32 @@ mod tests {
             *port.sent.lock().unwrap(),
             vec![(100, "Antwort".to_string())]
         );
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_session_antwortet_nach_permission_drift_nicht() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        port.faq_private_channels.lock().unwrap().clear();
+        let (url, server, called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+
+        assert!(faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(port.sent.lock().unwrap().is_empty());
+        server.abort();
     }
 
     #[cfg(feature = "testing")]
@@ -2800,6 +3505,39 @@ mod tests {
 
     #[cfg(feature = "testing")]
     #[tokio::test]
+    async fn geloeschter_faq_chat_antwortet_nach_permission_drift_nicht() {
+        let db = db_with_kv().await;
+        let port = faq_category_port();
+        port.faq_private_channels.lock().unwrap().clear();
+        let (url, server, called) = knowledge_server(
+            200,
+            r#"{"answerable":true,"answer":"darf nicht kommen","sources":[]}"#,
+            Duration::ZERO,
+        )
+        .await;
+        let faq = FaqChat::new_with_config(db.pool().clone(), port.clone(), url, None);
+
+        assert!(!faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert!(!called.load(Ordering::SeqCst));
+        assert!(port.sent.lock().unwrap().is_empty());
+        server.abort();
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_db_fehler_antwortet_nach_permission_drift_nicht() {
+        let port = faq_category_port();
+        port.faq_private_channels.lock().unwrap().clear();
+        let faq = FaqChat::new(lazy_pool(), port.clone());
+
+        assert!(!faq.handle_chat_message(1, 100, 42, "Nani", "Frage").await);
+
+        assert!(port.sent.lock().unwrap().is_empty());
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
     async fn faq_kategorie_meldet_db_ausfall_sichtbar_statt_zu_schweigen() {
         let port = faq_category_port();
         let faq = FaqChat::new(lazy_pool(), port.clone());
@@ -2985,6 +3723,41 @@ mod tests {
         .await
         .expect("sessions");
         assert_eq!(sessions, 0);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn faq_close_aendert_nach_permission_drift_keinen_zustand() {
+        let db = db_with_kv().await;
+        let port = panel_port();
+        port.faq_private_channels.lock().unwrap().clear();
+        let faq = FaqChat::new(db.pool().clone(), port.clone());
+        assert!(faq
+            .store
+            .create_session("s1".into(), 42, "Nani".into(), 100, 1)
+            .await
+            .expect("session"));
+        let handler = FaqHandler { faq: faq.clone() };
+
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "faq_chat:close:s1".to_string(),
+                guild_id: 1,
+                channel_id: 100,
+                user_id: 42,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(reply.content.as_deref(), Some(FAQ_CLOSE_ERROR_TEXT));
+        assert_eq!(
+            faq.store
+                .active_session_in_channel(100)
+                .await
+                .expect("session"),
+            ("s1".to_string(), 42)
+        );
+        assert!(port.sent.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
