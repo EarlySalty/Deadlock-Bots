@@ -283,6 +283,29 @@ fn sanitized_join_metadata(metadata: Value) -> Value {
     Value::Object(out)
 }
 
+pub async fn lock_user_privacy_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: u64,
+) -> ActivityDbResult<()> {
+    let user_id = discord_id_to_i64(user_id, "core.user_privacy.user_id")?;
+    // Gleicher per-User-Lock wie der Privacy-Erasure-Pfad. Er bleibt bis zum
+    // Transaktionsende aktiv und serialisiert Check + alle folgenden Writes.
+    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+        .bind(user_id ^ i64::MIN)
+        .fetch_one(&mut **tx)
+        .await?;
+    Ok(())
+}
+
+pub async fn lock_user_privacy_and_is_opted_out_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: u64,
+) -> ActivityDbResult<bool> {
+    lock_user_privacy_tx(tx, user_id).await?;
+    let user_id = discord_id_to_i64(user_id, "core.user_privacy.user_id")?;
+    Ok(is_opted_out_tx(tx, user_id).await?)
+}
+
 async fn is_opted_out_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
@@ -624,7 +647,7 @@ pub async fn record_journey_event_tx(
     let metadata_json = metadata_text(&input.metadata)?;
     let weiche_choice = metadata_string(&input.metadata, &["weiche_choice", "choice"]);
 
-    if is_opted_out_tx(tx, user_id).await? {
+    if lock_user_privacy_and_is_opted_out_tx(tx, input.user_id).await? {
         return Ok(false);
     }
     insert_journey_event_tx(
@@ -902,7 +925,7 @@ pub async fn record_message_metadata(
     let metadata_json = "{}";
 
     let mut tx = pool.begin().await?;
-    if is_opted_out_tx(&mut tx, user_id).await? {
+    if lock_user_privacy_and_is_opted_out_tx(&mut tx, event.author_id).await? {
         tx.commit().await?;
         return Ok(false);
     }
@@ -964,7 +987,7 @@ pub async fn record_interaction_metadata(
     let route = event.route.as_deref().map(sanitize_interaction_route);
 
     let mut tx = pool.begin().await?;
-    if is_opted_out_tx(&mut tx, user_id).await? {
+    if lock_user_privacy_and_is_opted_out_tx(&mut tx, event.user_id).await? {
         tx.commit().await?;
         return Ok(false);
     }
@@ -1003,11 +1026,12 @@ pub async fn record_presence_seen(
     user_id: u64,
     day: NaiveDate,
 ) -> ActivityDbResult<bool> {
+    let raw_user_id = user_id;
     let guild_id = discord_id_to_i64(guild_id, "presence_daily_seen.guild_id")?;
     let user_id = discord_id_to_i64(user_id, "presence_daily_seen.user_id")?;
 
     let mut tx = pool.begin().await?;
-    if is_opted_out_tx(&mut tx, user_id).await? {
+    if lock_user_privacy_and_is_opted_out_tx(&mut tx, raw_user_id).await? {
         tx.commit().await?;
         return Ok(false);
     }
@@ -1119,7 +1143,7 @@ pub async fn record_voice_metadata(
     event: &dl_discord::VoiceEvent,
 ) -> ActivityDbResult<bool> {
     let now = Utc::now();
-    let (guild_id, user_id) = match *event {
+    let (guild_id, user_id, raw_user_id) = match *event {
         dl_discord::VoiceEvent::Join {
             guild_id, user_id, ..
         }
@@ -1134,11 +1158,12 @@ pub async fn record_voice_metadata(
         } => (
             discord_id_to_i64(guild_id, "voice_metadata_events.guild_id")?,
             discord_id_to_i64(user_id, "voice_metadata_events.user_id")?,
+            user_id,
         ),
     };
 
     let mut tx = pool.begin().await?;
-    if is_opted_out_tx(&mut tx, user_id).await? {
+    if lock_user_privacy_and_is_opted_out_tx(&mut tx, raw_user_id).await? {
         tx.commit().await?;
         return Ok(false);
     }
@@ -1903,6 +1928,189 @@ mod tests {
     #[cfg(feature = "testing")]
     async fn setup() -> Result<dl_central_db::TestDb, Box<dyn std::error::Error>> {
         Ok(dl_central_db::testing::test_pool().await?)
+    }
+
+    #[cfg(feature = "testing")]
+    async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
+        let query_pattern = format!("%{query_fragment}%");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND pid <> pg_backend_pid()
+                           AND state = 'active'
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE $1
+                           AND ($2::TEXT IS NULL OR wait_event = $2)
+                    )",
+                )
+                .bind(&query_pattern)
+                .bind(wait_event)
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DB-Lock-Wait fuer {query_fragment} nicht sichtbar"));
+    }
+
+    #[cfg(feature = "testing")]
+    async fn erase_journey_and_set_tombstone(
+        tx: &mut Transaction<'_, Postgres>,
+        user_id: i64,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(user_id ^ i64::MIN)
+            .fetch_one(&mut **tx)
+            .await?;
+        sqlx::query("DELETE FROM activity.journey_events WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query("DELETE FROM activity.journey_user_state WHERE user_id = $1")
+            .bind(user_id)
+            .execute(&mut **tx)
+            .await?;
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES($1, TRUE, now())
+             ON CONFLICT(user_id) DO UPDATE SET opted_out = TRUE, updated_at = now()",
+        )
+        .bind(user_id)
+        .execute(&mut **tx)
+        .await?;
+        Ok(())
+    }
+
+    #[cfg(feature = "testing")]
+    fn privacy_race_input() -> JourneyEventInput {
+        JourneyEventInput {
+            event_source: "privacy_race",
+            ..JourneyEventInput::new(42, 1, JourneyEventType::ConciergeReply, Utc::now())
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn public_privacy_lock_ist_mit_journey_write_reentrant(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let mut tx = db.pool().begin().await?;
+
+        lock_user_privacy_tx(&mut tx, 42).await?;
+        let recorded = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            record_journey_event_tx(&mut tx, privacy_race_input()),
+        )
+        .await??;
+
+        assert!(recorded);
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn kombinierter_privacy_lock_prueft_tombstone_und_bleibt_reentrant(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(db.pool())
+        .await?;
+        let mut tx = db.pool().begin().await?;
+
+        assert!(
+            lock_user_privacy_and_is_opted_out_tx(&mut tx, 42).await?,
+            "kombinierter Helper muss den Tombstone unter gehaltenem Lock erkennen"
+        );
+        let recorded = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            record_journey_event_tx(&mut tx, privacy_race_input()),
+        )
+        .await??;
+
+        assert!(!recorded);
+        tx.rollback().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn privacy_race_delete_first_blockiert_journey_write(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let mut erase_tx = pool.begin().await?;
+        erase_journey_and_set_tombstone(&mut erase_tx, 42).await?;
+
+        let write_pool = pool.clone();
+        let write_task =
+            tokio::spawn(
+                async move { record_journey_event(&write_pool, privacy_race_input()).await },
+            );
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+
+        erase_tx.commit().await?;
+        assert!(!write_task.await??);
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM activity.journey_events WHERE user_id = 42) +
+                (SELECT COUNT(*) FROM activity.journey_user_state WHERE user_id = 42)",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(rows, 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    async fn privacy_race_write_first_blockiert_delete() -> Result<(), Box<dyn std::error::Error>> {
+        let db = setup().await?;
+        let pool = db.pool().clone();
+        let mut blocker = pool.begin().await?;
+        sqlx::query("LOCK TABLE activity.journey_events IN ACCESS EXCLUSIVE MODE")
+            .execute(&mut *blocker)
+            .await?;
+
+        let write_pool = pool.clone();
+        let write_task =
+            tokio::spawn(
+                async move { record_journey_event(&write_pool, privacy_race_input()).await },
+            );
+        wait_for_db_lock(&pool, "INSERT INTO activity.journey_events", None).await;
+
+        let erase_pool = pool.clone();
+        let erase_task = tokio::spawn(async move {
+            let mut tx = erase_pool.begin().await?;
+            erase_journey_and_set_tombstone(&mut tx, 42).await?;
+            tx.commit().await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+
+        blocker.commit().await?;
+        assert!(write_task.await??);
+        erase_task.await??;
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM activity.journey_events WHERE user_id = 42) +
+                (SELECT COUNT(*) FROM activity.journey_user_state WHERE user_id = 42)",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert_eq!(rows, 0);
+        Ok(())
     }
 
     #[tokio::test]
