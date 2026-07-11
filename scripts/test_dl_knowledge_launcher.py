@@ -7,7 +7,9 @@ from subprocess import run
 from unittest import TestCase, main, mock
 
 SCRIPTS_DIR = Path(__file__).resolve().parent
-spec = spec_from_file_location("export_infisical_env", SCRIPTS_DIR / "export_infisical_env.py")
+spec = spec_from_file_location(
+    "export_knowledge_infisical_env", SCRIPTS_DIR / "export_knowledge_infisical_env.py"
+)
 assert spec is not None and spec.loader is not None
 loader = module_from_spec(spec)
 spec.loader.exec_module(loader)
@@ -20,7 +22,7 @@ class ExecCalled(Exception):
 class KnowledgeLauncherTest(TestCase):
     def test_launcher_artefakte_sind_nicht_gitignoriert(self) -> None:
         for path in (
-            "scripts/export_infisical_env.py",
+            "scripts/export_knowledge_infisical_env.py",
             "scripts/test_dl_knowledge_launcher.py",
             "scripts/wait_for_infisical.sh",
         ):
@@ -114,6 +116,8 @@ class KnowledgeLauncherTest(TestCase):
     def test_launcher_uebergibt_secrets_ohne_shell_ausgabe(self) -> None:
         wrapper = (SCRIPTS_DIR / "run_dl_knowledge_service.sh").read_text()
 
+        self.assertIn("export_knowledge_infisical_env.py", wrapper)
+        self.assertNotIn('scripts/export_infisical_env.py"', wrapper)
         self.assertIn("--exec", wrapper)
         self.assertNotIn("eval ", wrapper)
         self.assertNotIn("--format shell", wrapper)

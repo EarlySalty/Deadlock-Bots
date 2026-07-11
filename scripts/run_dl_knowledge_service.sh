@@ -33,5 +33,5 @@ fi
 export RUST_LOG="${RUST_LOG:-info}"
 
 cd "$ROOT_DIR"
-exec "$PYTHON_BIN" "$ROOT_DIR/scripts/export_infisical_env.py" \
+exec "$PYTHON_BIN" "$ROOT_DIR/scripts/export_knowledge_infisical_env.py" \
   --exec "$ROOT_DIR/rust/target/release/dl-knowledge"
