@@ -128,31 +128,37 @@ fn trim_text(value: Option<&Value>, limit: usize) -> String {
 }
 
 /// Parst die `spam_learning`-Payload v2. Payloads ohne `v: 2` (altes Format
-/// oder fremde Absender) werden ignoriert → keine Buttons.
+/// oder fremde Absender) werden ignoriert → keine Buttons. Enthält das
+/// `learned`-Array auch nur einen unbrauchbaren Eintrag (fremde Tabelle,
+/// String-ID), wird die GESAMTE Payload verworfen — sonst entstünde aus einem
+/// halb kaputten Spam-Urteil fälschlich ein „Als Spam korrigieren"-Button.
 pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
     let obj = raw?.as_object()?;
     if obj.get("v").and_then(Value::as_i64) != Some(2) {
         return None;
     }
-    let learned = obj
+    let raw_entries = obj
         .get("learned")
         .and_then(Value::as_array)
-        .map(|entries| {
-            entries
-                .iter()
-                .filter_map(|entry| {
-                    let entry = entry.as_object()?;
-                    if trim_text(entry.get("table"), 10) != "spam" {
-                        return None;
-                    }
-                    Some(LearnedSpamRef {
-                        id: entry.get("id").and_then(Value::as_i64)?,
-                        pattern: trim_text(entry.get("pattern"), 200),
-                    })
-                })
-                .collect::<Vec<_>>()
-        })
+        .cloned()
         .unwrap_or_default();
+    let learned = raw_entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_object()?;
+            if trim_text(entry.get("table"), 10) != "spam" {
+                return None;
+            }
+            let id = entry.get("id").and_then(Value::as_i64)?;
+            (id > 0).then(|| LearnedSpamRef {
+                id,
+                pattern: trim_text(entry.get("pattern"), 200),
+            })
+        })
+        .collect::<Vec<_>>();
+    if learned.len() != raw_entries.len() {
+        return None;
+    }
     let learn_pattern =
         Some(trim_text(obj.get("learn_pattern"), 78)).filter(|p| p.chars().count() >= 4);
     Some(SpamLearningV2 {
@@ -167,13 +173,20 @@ fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
     let payload = parse_spam_learning(data.get("spam_learning"))?;
     let mut buttons: Vec<Value> = Vec::new();
     // Pro gelerntem Muster ein Rückgängig-Button (Row-ID in der custom_id).
-    for learned in &payload.learned {
+    // Discord: max. 5 Buttons pro Action-Row, max. 5 Rows → hart bei 25 kappen.
+    for learned in payload.learned.iter().take(25) {
         buttons.push(json!({
             "type": 2,
             "style": 3,
             "label": "Als harmlos korrigieren",
             "custom_id": format!("spam-learning:correct:spam:{}", learned.id),
         }));
+    }
+    if payload.learned.len() > 25 {
+        tracing::warn!(
+            anzahl = payload.learned.len(),
+            "spam_learning: mehr als 25 gelernte Muster — Buttons gekappt"
+        );
     }
     // Nichts gelernt (Harmlos-/Fehler-/Cooldown-Urteil oder Gate-Ablehnung):
     // ein Button, der das Muster aus der custom_id als Spam nachlernt.
@@ -190,7 +203,11 @@ fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
     if buttons.is_empty() {
         return None;
     }
-    Some(json!([{ "type": 1, "components": buttons }]))
+    let rows: Vec<Value> = buttons
+        .chunks(5)
+        .map(|chunk| json!({ "type": 1, "components": chunk }))
+        .collect();
+    Some(Value::Array(rows))
 }
 
 pub fn router(state: SharedChangelog) -> Router {
@@ -886,6 +903,11 @@ mod tests {
         for spam_learning in [
             json!({"pattern": "abcdef", "pattern_type": "phrase"}),
             json!({"v": 2, "verdict": "skipped", "learned": [], "learn_pattern": null}),
+            // Unbrauchbarer learned-Eintrag (String-ID) → GANZE Payload weg,
+            // auch wenn ein learn_pattern da wäre (kein Fallback-Button).
+            json!({"v": 2, "verdict": "spam",
+                   "learned": [{"table": "spam", "id": "123", "pattern": "x"}],
+                   "learn_pattern": "eballo.com kaufen"}),
         ] {
             let (app, mock) = test_app();
             let (status, _) = post_json(

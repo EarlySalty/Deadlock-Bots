@@ -347,7 +347,13 @@ impl TwitchApiClient {
                 None,
             )
             .await?;
-        Ok(body.get("learned").and_then(Value::as_bool).unwrap_or(false))
+        // Fehlendes/falsch typisiertes learned = API-/Rollout-Fehler, keine
+        // Gate-Ablehnung — sonst bekäme der Mod eine sachlich falsche Antwort.
+        body.get("learned")
+            .and_then(Value::as_bool)
+            .ok_or_else(|| {
+                TwitchBridgeError::Api("Antwort ohne learned-Feld (API-Version?)".to_string())
+            })
     }
 
     /// „Als harmlos korrigieren": löscht ein vom Judge gelerntes Spam-Muster.
@@ -607,10 +613,11 @@ fn parse_spam_learning_custom_id(custom_id: &str) -> Option<SpamLearningAction<'
     let rest = custom_id.strip_prefix(SPAM_LEARNING_PREFIX)?;
     if let Some(rest) = rest.strip_prefix("correct:") {
         let (table, id) = rest.split_once(':')?;
-        return Some(SpamLearningAction::Correct {
-            table,
-            id: id.parse().ok()?,
-        });
+        if table != "spam" {
+            return None;
+        }
+        let id: i64 = id.parse().ok()?;
+        return (id > 0).then_some(SpamLearningAction::Correct { table, id });
     }
     if let Some(pattern) = rest.strip_prefix("learn:") {
         return (pattern.trim().chars().count() >= 4)
@@ -873,8 +880,11 @@ mod tests {
                 pattern: "https://eballo.com"
             })
         );
-        // Kaputte IDs / zu kurze Muster → None
+        // Kaputte IDs / fremde Tabellen / zu kurze Muster → None
         assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:abc").is_none());
+        assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:0").is_none());
+        assert!(parse_spam_learning_custom_id("spam-learning:correct:spam:-5").is_none());
+        assert!(parse_spam_learning_custom_id("spam-learning:correct:safe:12").is_none());
         assert!(parse_spam_learning_custom_id("spam-learning:learn:ab").is_none());
         // Alte v1-Buttons → Legacy (freundliche Antwort statt Crash)
         assert_eq!(
