@@ -360,6 +360,11 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     if let Err(err) = adapter.init_application_id().await {
         tracing::error!(%err, "Application-ID nicht setzbar — Interaction-Followups schlagen fehl");
     }
+    let _audit_log_poller = dl_discord::audit_log::spawn(
+        central_pool.clone(),
+        adapter.clone(),
+        dl_server_as_code::DEFAULT_GUILD_ID,
+    );
     let spam_learning_store = dl_changelog::SpamLearningStore::new();
     let changelog = dl_changelog::ChangelogState::new_with_spam_learning(
         adapter.clone(),

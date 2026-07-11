@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 dl-broker.workspace = true
 dl-changelog.workspace = true
 dl-central-db.workspace = true

@@ -1,10 +1,26 @@
-## #241 — Einladungs-Panel entfernt, Admins laden per Befehl ein
+## #243 — Einladungs-Panel entfernt, Admins laden per Befehl ein
 
 **Ausgangslage:** Das Panel für Playtest-Einladungen war der einzige Weg ins Spiel und lief komplett ohne menschlichen Kontakt. Wer im Trichter feststeckte, bekam davon nichts mit.
 
 **Änderung:** Das Panel und die zugehörigen Knöpfe sind entfernt. Stattdessen gibt es einen Einladungs-Befehl, den nur Admins sehen und benutzen können. Die Antwort darauf sieht ebenfalls nur der Admin.
 
 **Aktuelles Verhalten:** Wer eine Einladung möchte, postet seinen Steam-Freundescode und wird von einem Admin persönlich eingeladen. Alte Panel-Nachrichten reagieren nicht mehr, sie werden entfernt.
+
+## #242 — Router erklärt sich beim ersten Mal per DM
+
+**Ausgangslage:** Wer zum ersten Mal in den Deadlock Router ging, wurde nicht automatisch in eine Lane sortiert und wusste oft nicht warum. Der Router braucht erst einen gewählten Modus, und das war vielen nicht klar.
+
+**Was wurde geändert:** Beim ersten Router-Besuch ohne gespeicherten Modus schickt der Bot einmalig eine DM, die erklärt wie der Router funktioniert. Den Modus setzt man direkt in der DM und lässt sich mit einem Klick auf Fertig sofort seine eigene Lane bauen.
+
+**Wie es jetzt läuft:** Modus einmal wählen, Fertig drücken, ab dann sortiert der Router bei jedem Join automatisch ein. Name, Limit und Rang passt man direkt in der DM oder jederzeit im Panel an.
+
+## #241 — Freundescode-Tipp nur noch für neue Mitglieder
+
+**Ausgangslage:** In der Invite-Lounge entschied allein der Text darüber, ob der Bot den Freundescode-Hinweis schickt. Wer jemandem beim Invite helfen wollte und dabei "einladen" schrieb, bekam den Tipp ebenfalls, obwohl er seit Monaten auf dem Server ist.
+
+**Was wurde geändert:** Der Hinweis geht nur noch an Leute, die seit weniger als sieben Tagen auf dem Server sind. Lässt sich das Beitrittsdatum nicht bestimmen, bleibt der Bot still.
+
+**Wie es jetzt läuft:** Neue Mitglieder werden weiterhin an den Steam-Freundescode erinnert, alle anderen können in der Invite-Lounge ungestört antworten und helfen.
 
 ## #240 — Coaching-Rolle kommt wieder direkt nach Website-Anfrage
 
