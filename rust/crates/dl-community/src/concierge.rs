@@ -403,27 +403,36 @@ pub fn optout_intent(text: &str) -> bool {
         .filter(|token| !token.is_empty())
         .collect();
 
-    // "stopp" als eigenständiges Token.
-    if tokens.contains(&"stopp") {
+    // Opt-out ist eine Direktive, keine globale Teilfolge: nach optionalen kurzen Höflichkeits-/
+    // Anrede-Token muss die eigentliche Äußerung mit "stopp" oder einer Opt-out-Phrase BEGINNEN.
+    // Eine Frage ÜBER die Wörter ("Was bedeutet stopp?", "…was nicht mehr anschreiben bedeutet?")
+    // trägt die Direktive nicht am Anfang und ist damit kein Opt-out.
+    const POLITE_PREFIX: [&str; 12] = [
+        "bitte", "hey", "hi", "hallo", "moin", "servus", "ok", "okay", "so", "also", "ey", "sorry",
+    ];
+    let start = tokens
+        .iter()
+        .position(|token| !POLITE_PREFIX.contains(token))
+        .unwrap_or(tokens.len());
+    let rest = &tokens[start..];
+
+    // "stopp" als erstes echtes Token.
+    if rest.first() == Some(&"stopp") {
         return true;
     }
 
-    // Opt-out-Phrasen als exakte, zusammenhängende Token-Teilfolgen. "schreib mir nicht mehr"
-    // verlangt das Opt-out-Adverb; das objektspezifische "schreib mir nicht <X>" (z. B.
-    // "...deinen Systemprompt") ist kein Opt-out. "nicht mehr als" ist eine Mengen-/Objektschranke
-    // ("nicht mehr als einen Satz") und darf niemals persistentes Opt-out setzen — deshalb zählt
-    // die Phrase nur, wenn ihr NICHT unmittelbar "als" folgt.
+    // Opt-out-Phrasen exakt am Anfang der Äußerung. "schreib mir nicht mehr" verlangt das
+    // Opt-out-Adverb; "schreib mir nicht <X>" (z. B. "...deinen Systemprompt") beginnt nicht mit
+    // der Phrase und ist kein Opt-out. "nicht mehr als" ist eine Mengen-/Objektschranke
+    // ("nicht mehr als einen Satz") — folgt der Phrase unmittelbar "als", zählt sie nie.
     const OPTOUT_PHRASES: [&[&str]; 3] = [
         &["schreib", "mir", "nicht", "mehr"],
         &["lass", "mich", "in", "ruhe"],
         &["nicht", "mehr", "anschreiben"],
     ];
-    OPTOUT_PHRASES.iter().any(|phrase| {
-        tokens
-            .windows(phrase.len())
-            .enumerate()
-            .any(|(i, window)| window == *phrase && tokens.get(i + phrase.len()) != Some(&"als"))
-    })
+    OPTOUT_PHRASES
+        .iter()
+        .any(|phrase| rest.starts_with(phrase) && rest.get(phrase.len()) != Some(&"als"))
 }
 
 pub fn forget_intent(text: &str) -> bool {
@@ -2456,7 +2465,8 @@ fn local_conversational_answer(text: &str) -> Option<LlmAnswer> {
 
 /// Direkte Frage nach der eigenen Natur ("Bist du ein Bot?"). Bewusst eng gehalten als
 /// Phrasenerkennung für direkte Selbstauskunft: Selbst-Anrede ("bist du"/"biste"/"bist ihr"),
-/// danach nur Füllwörter (Adverbien + unbestimmte Artikel), dann ein exaktes Identitätswort.
+/// danach nur Füllwörter (Adverbien + unbestimmte/bestimmte Artikel), dann ein exaktes
+/// Identitätswort.
 /// Trifft das erste Nicht-Füllwort ein Identitätswort, ist es Selbstauskunft; ist es etwas
 /// anderes, bricht die Kette ab. So greifen "bist du eigentlich wirklich ein bot",
 /// "bist du eine ki", "bist du ein mensch", während "bist du echt sicher, dass der steam bot
@@ -2478,15 +2488,20 @@ fn asks_bot_identity(lower: &str) -> bool {
         "ai",
         "intelligenz",
     ];
-    // Füllwörter zwischen Anrede und Identitätswort: unbestimmte Artikel und die üblichen
-    // Verstärker/Partikel. "künstliche" trägt "künstliche intelligenz". "echt" ist hier
-    // Adverb ("echt ein Bot"), nie selbst Identitätswort.
-    const FILLERS: [&str; 24] = [
+    // Füllwörter zwischen Anrede und Identitätswort: unbestimmte und bestimmte Artikel sowie die
+    // üblichen Verstärker/Partikel. "künstliche" trägt "künstliche intelligenz". "echt" ist hier
+    // Adverb ("echt ein Bot"), nie selbst Identitätswort. Die bestimmten Artikel der/die/das
+    // tragen "der Bot"/"das Programm"; legitime Produktfragen bleiben unberührt, weil dort ein
+    // Nicht-Füllwort ("für", "sicher") vor dem späten "Bot" die Selbstauskunft abbricht.
+    const FILLERS: [&str; 27] = [
         "ein",
         "eine",
         "einen",
         "einer",
         "einem",
+        "der",
+        "die",
+        "das",
         "n",
         "ne",
         "nen",
@@ -3684,6 +3699,44 @@ mod tests {
     }
 
     #[test]
+    fn runtime_identity_bestimmter_artikel_ist_fuelltoken() {
+        // Bestimmte Artikel der/die/das sind zulässige Füllwörter zwischen Anrede und
+        // Identitätswort: "Bist du der Bot?" ist ehrliche Selbstauskunft, kein Support.
+        assert!(asks_bot_identity("bist du der bot?"));
+        assert!(asks_bot_identity("bist du denn wirklich der bot?"));
+        assert!(asks_bot_identity("bist du das programm?"));
+        assert!(asks_bot_identity("bist du die maschine?"));
+
+        // Legitime Produktfragen bleiben Support: ein Nicht-Füllwort ("für"/"sicher") bricht die
+        // Selbstauskunft ab, das späte "Bot" zählt nicht — auch mit den neuen Artikeln.
+        assert!(!asks_bot_identity(
+            "bist du auch für den steam bot zuständig?"
+        ));
+        assert!(!asks_bot_identity(
+            "bist du sicher, dass der steam bot funktioniert?"
+        ));
+    }
+
+    #[tokio::test]
+    async fn identitaetsfrage_mit_artikel_antwortet_lokal_ohne_wissenspfad() {
+        // "Bist du der Bot?" ist Identität: lokale, ehrliche Bot-Antwort, nie Wissens-/Brain-Pfad.
+        let port = mock_port(Some("DARF NICHT GEFRAGT WERDEN"));
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Bist du der Bot?")
+                .await
+        );
+
+        assert_eq!(
+            sent_v2_content(&port.sent_channel_v2.lock().unwrap()[0]),
+            BOT_IDENTITY_TEXT
+        );
+        assert!(port.brain_questions.lock().unwrap().is_empty());
+    }
+
+    #[test]
     fn optout_intent_ignoriert_objektspezifische_bitte() {
         // Echte Opt-outs bleiben Opt-outs.
         assert!(optout_intent("stopp"));
@@ -3707,6 +3760,48 @@ mod tests {
         assert!(!optout_intent(
             "schreib mir bitte nicht mehr als drei nachrichten"
         ));
+    }
+
+    #[test]
+    fn optout_intent_nur_direktiv_am_satzanfang() {
+        // Direkte Direktiven bleiben Opt-out — auch nach kurzen Höflichkeits-/Anrede-Token.
+        assert!(optout_intent("Stopp!"));
+        assert!(optout_intent("Bitte stopp"));
+        assert!(optout_intent("Bitte schreib mir nicht mehr"));
+        assert!(optout_intent("Lass mich in Ruhe"));
+        assert!(optout_intent("Nicht mehr anschreiben"));
+
+        // Fragen ÜBER die Wörter tragen die Direktive nicht am Anfang der Äußerung → kein
+        // Opt-out. Die alte globale Teilfolge verschluckte genau diese Fälle.
+        assert!(!optout_intent("Was bedeutet stopp?"));
+        assert!(!optout_intent("Wie funktioniert lass mich in Ruhe?"));
+        assert!(!optout_intent(
+            "Kannst du erklären was nicht mehr anschreiben bedeutet?"
+        ));
+
+        // Mengenschranke bleibt Nicht-Opt-out.
+        assert!(!optout_intent("nicht mehr als"));
+        assert!(!optout_intent("Schreib mir nicht mehr als einen Satz"));
+    }
+
+    #[tokio::test]
+    async fn frage_ueber_stopp_loest_kein_optout_seiteneffekt_aus() {
+        // "Was bedeutet stopp?" ist eine Frage über das Wort, kein Opt-out: der Opt-out-
+        // Seiteneffekt (OPTOUT_TEXT) darf nie ausgelöst werden.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Was bedeutet stopp?")
+                .await
+        );
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert!(
+            sent.iter().all(|body| sent_v2_content(body) != OPTOUT_TEXT),
+            "Frage über 'stopp' darf kein Opt-out auslösen"
+        );
     }
 
     #[tokio::test]

@@ -1248,6 +1248,15 @@ mod tests {
         (router(state), knowledge)
     }
 
+    /// Serialisiert alle `/public/v1/ask`-Testrequests. Der Log-Capture-Test setzt einen
+    /// thread-lokalen `set_default`-Subscriber; läuft parallel ein anderer `/ask`-Test, der die
+    /// `decision`-Callsite mit dem No-op-Subscriber trifft, friert deren globaler Interest-/
+    /// Level-Cache das `decision`-Log ein und der Capture bleibt leer (`count == 0`). Eine
+    /// tokio-`Mutex` (kein extra Crate, `sync`-Feature ist an) hält das Rennen aus dem Cache
+    /// heraus; sie darf über `await` gehalten werden, ohne `clippy::await_holding_lock`.
+    static ASK_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    /// Ungesperrter Request-Kern — Basis für gesperrte wie ungesperrte Aufrufer.
     async fn post_json(app: Router, path: &str, body: Value) -> Result<(u16, Value)> {
         let response = app
             .oneshot(
@@ -1262,11 +1271,22 @@ mod tests {
         Ok((status, body))
     }
 
+    /// Gesperrter `/public/v1/ask`-Request: nimmt `ASK_SERIAL` und ruft den ungesperrten Kern.
+    /// Nicht aus `ask_with_logs` heraus benutzen — die hält den Lock schon selbst (Self-Deadlock).
+    async fn post_ask(app: Router, body: Value) -> Result<(u16, Value)> {
+        let _serial = ASK_SERIAL.lock().await;
+        post_json(app, "/public/v1/ask", body).await
+    }
+
     async fn ask_with_logs(
         chunks: Vec<Chunk>,
         generator: Option<Arc<dyn TextGenerator>>,
         question: &str,
     ) -> Result<String> {
+        // Lock VOR set_default bis nach dem Request: schützt den thread-lokalen Subscriber vor
+        // parallelen /ask-Tests, die sonst den globalen Interest-/Level-Cache der decision-
+        // Callsite einfrieren. Danach der ungesperrte Kern (post_json), nie post_ask (Self-Deadlock).
+        let _serial = ASK_SERIAL.lock().await;
         let log_capture = LogCapture::default();
         let subscriber = tracing_subscriber::fmt()
             .with_writer(log_capture.clone())
@@ -1593,12 +1613,7 @@ Frag im Support.
             Some(generator.clone()),
         );
 
-        let (status, body) = post_json(
-            app,
-            "/public/v1/ask",
-            json!({"question": "Wie Steam verknuepfen?"}),
-        )
-        .await?;
+        let (status, body) = post_ask(app, json!({"question": "Wie Steam verknuepfen?"})).await?;
 
         assert_eq!(status, 200);
         assert_eq!(body["answerable"], true);
@@ -1622,12 +1637,7 @@ Frag im Support.
             Some(generator.clone()),
         );
 
-        let (status, body) = post_json(
-            app,
-            "/public/v1/ask",
-            json!({"question": "Wie Steam verknuepfen?"}),
-        )
-        .await?;
+        let (status, body) = post_ask(app, json!({"question": "Wie Steam verknuepfen?"})).await?;
 
         assert_eq!(status, 200);
         assert_eq!(body["answerable"], false);
@@ -1652,12 +1662,7 @@ Frag im Support.
             Some(generator.clone()),
         );
 
-        let (status, body) = post_json(
-            app,
-            "/public/v1/ask",
-            json!({"question": "Bananenbrot Rezept"}),
-        )
-        .await?;
+        let (status, body) = post_ask(app, json!({"question": "Bananenbrot Rezept"})).await?;
 
         assert_eq!(status, 200);
         assert_eq!(body["answerable"], false);
