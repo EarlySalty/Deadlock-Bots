@@ -408,11 +408,11 @@ const OPTOUT_POLITE_PREFIX: [&str; 12] = [
 /// Kurze Höflichkeitstoken, die INNERHALB einer Opt-out-Phrase stehen dürfen ("schreib mir bitte
 /// nicht mehr", "lass mich bitte in Ruhe"), ohne sie zu entwerten. Bewusst schmal, damit keine
 /// Themenwörter verschluckt werden.
-const OPTOUT_INTERIOR_POLITE: [&str; 4] = ["bitte", "doch", "mal", "halt"];
+const OPTOUT_INTERIOR_POLITE: [&str; 5] = ["bitte", "doch", "mal", "halt", "jetzt"];
 
 /// Themenmarker, die eine "schreib mir nicht mehr"-Bitte scoped/quantitativ machen ("... über
 /// Steam", "... nicht mehr als einen Satz") und damit KEINEN globalen Opt-out bedeuten.
-const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
+const OPTOUT_TOPIC_MARKERS: [&str; 15] = [
     "über",
     "ueber",
     "zu",
@@ -427,6 +427,7 @@ const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
     "davon",
     "wegen",
     "als",
+    "nur",
 ];
 
 /// Die einleitende Opt-out-Direktive einer Nachricht. Nur "schreib mir nicht mehr" ist für
@@ -481,27 +482,31 @@ pub fn optout_intent(text: &str) -> bool {
     //     ("... über Steam", "... nicht mehr als einen Satz") → kein globaler Opt-out.
     if directive == OptoutDirective::WriteNoMore
         && tail
-            .first()
-            .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(token))
+            .iter()
+            .copied()
+            .find(|token| !OPTOUT_INTERIOR_POLITE.contains(token))
+            .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(&token))
     {
         return false;
     }
 
-    // (4a) Explizite Ernsthaftigkeitsmarker gewinnen als direkte Klarstellung, auch gegen ein sonst
+    // (4a) Ein vollständig zitierter Ausdruck bleibt Erwähnung, auch wenn sein Inhalt einen
+    //      Ernsthaftigkeitsmarker enthält.
+    if starts_with_quote(cleaned) {
+        return false;
+    }
+    // (4b) Explizite Ernsthaftigkeitsmarker gewinnen als direkte Klarstellung gegen ein sonst
     //      greifendes Meta-Muster ("Stopp ist ein Befehl, den du befolgen sollst").
     if has_seriousness_marker(tail) {
         return true;
     }
-    // (4b) Zitat/Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt.
+    // (4c) Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt.
     //      - Hinter der Direktive folgt ein Definitions-/Frageform-Muster, das aus ihr eine Frage
     //        ÜBER die Wörter macht ("Stopp bedeutet eigentlich was?", "Stopp ist eigentlich ein
     //        Wort?", "Stopp, kannst du das erklären?"). Der Tail wird dafür begrenzt gescannt.
     //      - Die verbleibende unzitierte Äußerung steht in Anführungszeichen/Backticks (""Stopp"",
     //        "`Stopp`"), auch mit höflichem Präfix. Blockquotes sind bereits zeilenweise raus.
     if is_meta_mention(tail) {
-        return false;
-    }
-    if starts_with_quote(cleaned) {
         return false;
     }
     true
@@ -554,7 +559,7 @@ fn match_optout_directive(rest: &[&str]) -> Option<(OptoutDirective, usize)> {
     if rest.first() == Some(&"stopp") {
         return Some((OptoutDirective::Stopp, 1));
     }
-    const PHRASES: [(OptoutDirective, &[&str]); 3] = [
+    const PHRASES: [(OptoutDirective, &[&str]); 4] = [
         (
             OptoutDirective::WriteNoMore,
             &["schreib", "mir", "nicht", "mehr"],
@@ -563,6 +568,10 @@ fn match_optout_directive(rest: &[&str]) -> Option<(OptoutDirective, usize)> {
         (
             OptoutDirective::NoMoreContact,
             &["nicht", "mehr", "anschreiben"],
+        ),
+        (
+            OptoutDirective::NoMoreContact,
+            &["schreib", "mich", "nicht", "mehr", "an"],
         ),
     ];
     PHRASES.iter().find_map(|(directive, phrase)| {
@@ -636,7 +645,7 @@ fn is_meta_mention(tail: &[&str]) -> bool {
     const CATEGORY: [&str; 5] = ["wort", "satz", "befehl", "ausdruck", "phrase"];
     const COPULA: [&str; 4] = ["ist", "sind", "war", "waren"];
     // Artikel und kurze Füllwörter, die zwischen Kopula und Kategoriewort stehen dürfen.
-    const ARTICLE_OR_FILLER: [&str; 13] = [
+    const ARTICLE_OR_FILLER: [&str; 15] = [
         "ein",
         "eine",
         "einen",
@@ -650,6 +659,8 @@ fn is_meta_mention(tail: &[&str]) -> bool {
         "wohl",
         "halt",
         "einfach",
+        "doch",
+        "nur",
     ];
 
     let has = |set: &[&str]| tail.iter().any(|token| set.contains(token));
@@ -4259,6 +4270,34 @@ mod tests {
         assert!(!optout_intent(">>> alte Nachricht\nStopp ist jetzt genug"));
         // Einfaches ">" zitiert nur eine Zeile, die spätere unzitierte Direktive zählt.
         assert!(optout_intent("> alte Nachricht\nStopp ist jetzt genug"));
+    }
+
+    #[test]
+    fn optout_intent_vollstaendiges_zitat_schlaegt_ernsthaftigkeit() {
+        assert!(!optout_intent(
+            "\"Stopp ist ein Wort, aber ich meine es ernst\""
+        ));
+        assert!(optout_intent("Stopp ist ein Wort, aber ich meine es ernst"));
+    }
+
+    #[test]
+    fn optout_intent_scoping_nach_hoeflichkeit_bleibt_lokal() {
+        assert!(!optout_intent("Schreib mir nicht mehr bitte über Steam"));
+        assert!(!optout_intent("Schreib mir nicht mehr nur über Steam"));
+        assert!(optout_intent("Schreib mir nicht mehr bitte"));
+    }
+
+    #[test]
+    fn optout_intent_metafrage_mit_mehreren_fuellwoertern() {
+        assert!(!optout_intent(
+            "Stopp ist doch eigentlich nur ein Wort, oder?"
+        ));
+    }
+
+    #[test]
+    fn optout_intent_natuerliche_direktphrasen() {
+        assert!(optout_intent("Lass mich jetzt in Ruhe"));
+        assert!(optout_intent("Schreib mich bitte nicht mehr an"));
     }
 
     #[test]
