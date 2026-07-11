@@ -510,6 +510,16 @@ fn button(label: &str, style: u8, custom_id: &str) -> Value {
     })
 }
 
+fn emoji_button(label: &str, style: u8, custom_id: &str, emoji_name: &str, emoji_id: &str) -> Value {
+    json!({
+        "type": 2,
+        "style": style,
+        "label": label,
+        "custom_id": custom_id,
+        "emoji": { "name": emoji_name, "id": emoji_id },
+    })
+}
+
 fn tv_container(id: u64, components: Vec<Value>) -> Value {
     json!({
         "type": 17,
@@ -826,16 +836,28 @@ impl PanelHandler {
         interaction.values.first().and_then(|v| v.parse().ok())
     }
 
-    fn prefs_reply(content: String, components: Value) -> BridgeReply {
+    fn prefs_reply(content: String, components: Value, is_dm: bool) -> BridgeReply {
         let mut container_components = vec![tv_text_display(30, &content), json!({ "type": 14 })];
         container_components.extend(components.as_array().cloned().unwrap_or_default());
-        BridgeReply {
-            components: Some(json!([tv_container(29, container_components)])),
-            ephemeral: true,
-            message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
-            allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
-            fallback: Some(Box::new(BridgeReply::ephemeral_text(content))),
-            ..BridgeReply::default()
+        let body = json!([tv_container(29, container_components)]);
+        if is_dm {
+            // In einer DM gibt es kein Ephemeral — das Panel wird in-place editiert.
+            BridgeReply {
+                components: Some(body),
+                update_message: true,
+                message_flags: Some(TV_COMPONENTS_V2_FLAG),
+                allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                ..BridgeReply::default()
+            }
+        } else {
+            BridgeReply {
+                components: Some(body),
+                ephemeral: true,
+                message_flags: Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG),
+                allowed_mentions: Some(json!({ "parse": Vec::<String>::new() })),
+                fallback: Some(Box::new(BridgeReply::ephemeral_text(content))),
+                ..BridgeReply::default()
+            }
         }
     }
 
@@ -859,19 +881,44 @@ impl PanelHandler {
         }
     }
 
-    fn prefs_components(has_default: bool, can_apply_lane: bool) -> Value {
-        let mut rows = vec![
-            action_row(vec![
-                button("Casual", 1, "tv_prefs_mode_casual"),
-                button("Ranked", 3, "tv_prefs_mode_ranked"),
-                button("Street Brawl", 2, "tv_prefs_mode_street_brawl"),
-            ]),
-            action_row(vec![
-                button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
-                button("Rang ändern", 2, "tv_prefs_rank"),
-                button("Default löschen", 4, "tv_prefs_delete"),
-            ]),
-        ];
+    fn prefs_components(has_default: bool, can_apply_lane: bool, is_dm: bool) -> Value {
+        // In der DM ersetzt „Fertig" (router_dm_done) das „Default löschen", damit
+        // der User nach der Moduswahl direkt seine Lane bauen kann und der Button
+        // bei jedem In-place-Update des Panels erhalten bleibt.
+        let (mode_row, second_row) = if is_dm {
+            (
+                action_row(vec![
+                    emoji_button("Casual", 2, "tv_prefs_mode_casual", "dl_casual", "1522518264088100995"),
+                    emoji_button("Ranked", 2, "tv_prefs_mode_ranked", "dl_ranked", "1522518271306366996"),
+                    emoji_button(
+                        "Street Brawl",
+                        2,
+                        "tv_prefs_mode_street_brawl",
+                        "dl_brawl",
+                        "1522518262708174928",
+                    ),
+                ]),
+                action_row(vec![
+                    button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
+                    button("Rang ändern", 2, "tv_prefs_rank"),
+                    emoji_button("Fertig", 3, "router_dm_done", "dl_crown", "1522518265421631538"),
+                ]),
+            )
+        } else {
+            (
+                action_row(vec![
+                    button("Casual", 1, "tv_prefs_mode_casual"),
+                    button("Ranked", 3, "tv_prefs_mode_ranked"),
+                    button("Street Brawl", 2, "tv_prefs_mode_street_brawl"),
+                ]),
+                action_row(vec![
+                    button("Name+Limit ändern", 2, "tv_prefs_name_limit"),
+                    button("Rang ändern", 2, "tv_prefs_rank"),
+                    button("Default löschen", 4, "tv_prefs_delete"),
+                ]),
+            )
+        };
+        let mut rows = vec![mode_row, second_row];
         if has_default && can_apply_lane {
             rows.push(action_row(vec![button(
                 "Auf aktuelle Lane anwenden",
@@ -893,7 +940,8 @@ impl PanelHandler {
         let can_apply_lane = self.owned_lane_of(interaction).await.is_ok();
         Self::prefs_reply(
             Self::prefs_text(default.as_ref()),
-            Self::prefs_components(default.is_some(), can_apply_lane),
+            Self::prefs_components(default.is_some(), can_apply_lane, interaction.guild_id == 0),
+            interaction.guild_id == 0,
         )
     }
 
@@ -1161,6 +1209,7 @@ impl InteractionHandler for PanelHandler {
                         "options": options,
                         "min_values": 1, "max_values": 1,
                     }]}]),
+                    interaction.guild_id == 0,
                 )
             }
             "tv_prefs_rank_main" => {
@@ -1188,6 +1237,7 @@ impl InteractionHandler for PanelHandler {
                             .chain((1..=6).map(|n| json!({"label": format!("Sub-Rang {n}"), "value": n.to_string()})))
                             .collect::<Vec<_>>(),
                     }]}]),
+                    interaction.guild_id == 0,
                 )
             }
             "tv_prefs_rank_sub" => {
@@ -1245,7 +1295,8 @@ impl InteractionHandler for PanelHandler {
                 else {
                     return Self::prefs_reply(
                         Self::prefs_text(None),
-                        Self::prefs_components(false, false),
+                        Self::prefs_components(false, false, interaction.guild_id == 0),
+                        interaction.guild_id == 0,
                     );
                 };
                 if let Some(err) = self
@@ -2194,6 +2245,38 @@ mod tests {
     use crate::tempvoice::{TempVoiceConfig, TempVoiceEngine, TempVoiceStore};
     use std::collections::{HashMap, HashSet};
     use std::sync::Arc;
+
+    #[test]
+    fn prefs_reply_dm_updatet_in_place_ohne_ephemeral() {
+        // DM (guild_id 0): in-place Update, kein Ephemeral (in DMs unmöglich).
+        let dm = PanelHandler::prefs_reply("x".to_string(), json!([]), true);
+        assert!(dm.update_message);
+        assert!(!dm.ephemeral);
+        assert_eq!(dm.message_flags, Some(TV_COMPONENTS_V2_FLAG));
+
+        // Guild-Kontext bleibt unverändert ephemeral.
+        let guild = PanelHandler::prefs_reply("x".to_string(), json!([]), false);
+        assert!(!guild.update_message);
+        assert!(guild.ephemeral);
+        assert_eq!(
+            guild.message_flags,
+            Some(TV_EPHEMERAL_FLAG | TV_COMPONENTS_V2_FLAG)
+        );
+    }
+
+    #[test]
+    fn prefs_components_dm_behaelt_fertig_statt_loeschen() {
+        // Re-Render nach Modus-Klick in der DM MUSS Fertig behalten (Regression).
+        let dm =
+            serde_json::to_string(&PanelHandler::prefs_components(true, false, true)).expect("json");
+        assert!(dm.contains("router_dm_done"), "DM-Panel muss Fertig behalten");
+        assert!(!dm.contains("tv_prefs_delete"), "DM-Panel zeigt kein Default löschen");
+        // Guild-Panel unverändert: Default löschen, kein Fertig.
+        let guild = serde_json::to_string(&PanelHandler::prefs_components(true, false, false))
+            .expect("json");
+        assert!(guild.contains("tv_prefs_delete"));
+        assert!(!guild.contains("router_dm_done"));
+    }
 
     #[test]
     fn global_panel_body_enthaelt_python_embed_und_buttons() {

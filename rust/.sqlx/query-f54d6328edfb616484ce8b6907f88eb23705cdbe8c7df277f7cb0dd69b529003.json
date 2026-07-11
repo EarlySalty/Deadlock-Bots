@@ -1,0 +1,49 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH visible_users AS (\n            SELECT visibility.user_id\n            FROM steam.rank_history_visibility visibility\n            WHERE visibility.visibility = ANY($1)\n        ),\n        ranked AS (\n            SELECT visible.user_id,\n                   current_rank.badge_level,\n                   current_rank.rank_name,\n                   current_rank.captured_at,\n                   current_rank.badge_level\n                       - COALESCE(baseline_before.badge_level, baseline_oldest.badge_level) AS delta\n            FROM visible_users visible\n            JOIN LATERAL (\n                SELECT history.badge_level,\n                       history.rank_name,\n                       history.captured_at\n                FROM steam.steam_rank_history history\n                WHERE history.user_id = visible.user_id\n                  AND history.badge_level IS NOT NULL\n                  AND history.rank_name IS NOT NULL\n                ORDER BY history.captured_at DESC, history.badge_level DESC\n                LIMIT 1\n            ) current_rank ON TRUE\n            JOIN LATERAL (\n                SELECT history.badge_level\n                FROM steam.steam_rank_history history\n                WHERE history.user_id = visible.user_id\n                  AND history.badge_level IS NOT NULL\n                  AND history.rank_name IS NOT NULL\n                ORDER BY history.captured_at ASC, history.badge_level DESC\n                LIMIT 1\n            ) baseline_oldest ON TRUE\n            LEFT JOIN LATERAL (\n                SELECT history.badge_level\n                FROM steam.steam_rank_history history\n                WHERE $2::timestamptz IS NOT NULL\n                  AND history.user_id = visible.user_id\n                  AND history.captured_at <= $2\n                  AND history.badge_level IS NOT NULL\n                  AND history.rank_name IS NOT NULL\n                ORDER BY history.captured_at DESC, history.badge_level DESC\n                LIMIT 1\n            ) baseline_before ON TRUE\n        )\n        SELECT ranked.user_id AS \"user_id!\",\n               ranked.badge_level AS \"badge_level!\",\n               ranked.rank_name AS \"rank_name!\",\n               ranked.captured_at AS \"captured_at!\",\n               ranked.delta AS \"delta!\"\n        FROM ranked\n        ORDER BY\n            CASE WHEN $3::text = 'climb' THEN ranked.delta END DESC NULLS LAST,\n            CASE WHEN $3::text = 'climb' THEN ranked.badge_level END DESC NULLS LAST,\n            CASE WHEN $3::text = 'top' THEN ranked.badge_level END DESC NULLS LAST,\n            CASE WHEN $3::text = 'top' THEN ranked.delta END DESC NULLS LAST,\n            ranked.user_id ASC\n        LIMIT $4\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "user_id!",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "badge_level!",
+        "type_info": "Int4"
+      },
+      {
+        "ordinal": 2,
+        "name": "rank_name!",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 3,
+        "name": "captured_at!",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 4,
+        "name": "delta!",
+        "type_info": "Int4"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "TextArray",
+        "Timestamptz",
+        "Text",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      null
+    ]
+  },
+  "hash": "f54d6328edfb616484ce8b6907f88eb23705cdbe8c7df277f7cb0dd69b529003"
+}

@@ -1,0 +1,23 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT event_type AS \"event_type!\"\n        FROM activity.member_events\n        WHERE user_id = $1\n          AND guild_id = $2\n        ORDER BY occurred_at DESC NULLS LAST, id DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "event_type!",
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f95349e95c8d13765510bc7b9ecf1c78cd566dc93e9714156b5409042e61a367"
+}
