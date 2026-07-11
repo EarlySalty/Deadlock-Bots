@@ -7,7 +7,9 @@ pub mod testing;
 
 pub use core_users::{get_user, upsert_user, CoreUser};
 pub use kv::{delete as delete_kv, get as get_kv, set as set_kv};
-pub use locks::lock_raw_event_retention_erasure;
+pub use locks::{
+    lock_raw_event_retention_erasure, lock_user_privacy, lock_user_privacy_and_is_opted_out,
+};
 pub use pool::{connect_pool, dsn_from_env};
 #[cfg(feature = "testing")]
 pub use testing::{test_pool, TestDb};

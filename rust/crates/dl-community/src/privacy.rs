@@ -1432,7 +1432,7 @@ pub async fn lock_user_privacy(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
 ) -> CommunityDbResult<()> {
-    crate::db::advisory_lock(tx, user_id ^ i64::MIN).await?;
+    dl_central_db::lock_user_privacy(tx, user_id).await?;
     Ok(())
 }
 
