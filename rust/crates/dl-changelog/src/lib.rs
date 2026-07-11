@@ -8,11 +8,8 @@
 // Frühe HTTP-Fehlerantworten als Err(Response) — axum-idiomatisch.
 #![allow(clippy::result_large_err)]
 
-use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
 
 use axum::extract::State;
 use axum::http::StatusCode;
@@ -71,7 +68,6 @@ pub trait ChangelogDiscord: Send + Sync {
 pub struct ChangelogState {
     pub discord: Arc<dyn ChangelogDiscord>,
     pub token: String,
-    pub spam_learning: Option<SpamLearningStore>,
 }
 
 pub type SharedChangelog = Arc<ChangelogState>;
@@ -79,87 +75,35 @@ pub type SharedChangelog = Arc<ChangelogState>;
 impl ChangelogState {
     /// Token wie das Original: CHANGELOG_API_TOKEN, Default "changeme-local".
     pub fn new(discord: Arc<dyn ChangelogDiscord>, token: Option<String>) -> SharedChangelog {
-        Self::new_with_spam_learning(discord, token, None)
-    }
-
-    pub fn new_with_spam_learning(
-        discord: Arc<dyn ChangelogDiscord>,
-        token: Option<String>,
-        spam_learning: Option<SpamLearningStore>,
-    ) -> SharedChangelog {
         Arc::new(Self {
             discord,
             token: token
                 .map(|t| t.trim().to_string())
                 .filter(|t| !t.is_empty())
                 .unwrap_or_else(|| "changeme-local".to_string()),
-            spam_learning,
         })
     }
 }
 
+/// Referenz auf ein vom Twitch-Judge gelerntes Spam-Muster (Payload v2).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SpamLearningPayload {
+pub struct LearnedSpamRef {
+    pub id: i64,
     pub pattern: String,
-    pub pattern_type: String,
-    pub source_message: String,
-    pub source_channel: String,
-    pub reason: String,
 }
 
-#[derive(Clone, Default)]
-pub struct SpamLearningStore {
-    inner: Arc<SpamLearningStoreInner>,
-}
-
-#[derive(Default)]
-struct SpamLearningStoreInner {
-    seq: AtomicU64,
-    items: Mutex<HashMap<String, StoredSpamLearning>>,
-}
-
-#[derive(Clone)]
-struct StoredSpamLearning {
-    created_at_ms: u128,
-    payload: SpamLearningPayload,
-}
-
-impl SpamLearningStore {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn insert(&self, payload: SpamLearningPayload) -> String {
-        let now = now_ms();
-        let seq = self.inner.seq.fetch_add(1, Ordering::Relaxed);
-        let token = format!("{now:x}{seq:x}");
-        let mut items = self.inner.items.lock().expect("spam learning store lock");
-        items.retain(|_, item| now.saturating_sub(item.created_at_ms) < 24 * 60 * 60 * 1000);
-        items.insert(
-            token.clone(),
-            StoredSpamLearning {
-                created_at_ms: now,
-                payload,
-            },
-        );
-        token
-    }
-
-    pub fn take(&self, token: &str) -> Option<SpamLearningPayload> {
-        self.inner
-            .items
-            .lock()
-            .expect("spam learning store lock")
-            .remove(token)
-            .map(|item| item.payload)
-    }
-}
-
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or_default()
+/// `spam_learning`-Payload v2 des Twitch-Bots. Der Judge lernt selbst; die
+/// Buttons korrigieren ihn nur. Alle Button-Daten (Row-ID bzw. Lern-Muster)
+/// reisen in der custom_id — kein serverseitiger Zustand, Restarts egal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpamLearningV2 {
+    /// "spam" | "safe" | "error" | "skipped"
+    pub verdict: String,
+    pub ai_reason: String,
+    pub learned: Vec<LearnedSpamRef>,
+    /// Muster-Vorschlag für „Als Spam korrigieren" (≤ 78 Zeichen, vom
+    /// Twitch-Bot mention-bereinigt) — None, wenn zu kurz.
+    pub learn_pattern: Option<String>,
 }
 
 fn trim_text(value: Option<&Value>, limit: usize) -> String {
@@ -183,46 +127,81 @@ fn trim_text(value: Option<&Value>, limit: usize) -> String {
         .collect()
 }
 
-pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningPayload> {
+/// Parst die `spam_learning`-Payload v2. Payloads ohne `v: 2` (altes Format
+/// oder fremde Absender) werden ignoriert → keine Buttons. Enthält das
+/// `learned`-Array auch nur einen unbrauchbaren Eintrag (fremde Tabelle,
+/// String-ID), wird die GESAMTE Payload verworfen — sonst entstünde aus einem
+/// halb kaputten Spam-Urteil fälschlich ein „Als Spam korrigieren"-Button.
+pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
     let obj = raw?.as_object()?;
-    let pattern = trim_text(obj.get("pattern"), 200);
-    if pattern.chars().count() < 4 {
+    if obj.get("v").and_then(Value::as_i64) != Some(2) {
         return None;
     }
-    let pattern_type = match trim_text(obj.get("pattern_type"), 20).as_str() {
-        "phrase" => "phrase".to_string(),
-        _ => "fragment".to_string(),
-    };
-    Some(SpamLearningPayload {
-        pattern,
-        pattern_type,
-        source_message: trim_text(obj.get("source_message"), 500),
-        source_channel: trim_text(obj.get("source_channel"), 100),
-        reason: trim_text(obj.get("reason"), 200),
+    let raw_entries = obj
+        .get("learned")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let learned = raw_entries
+        .iter()
+        .filter_map(|entry| {
+            let entry = entry.as_object()?;
+            if trim_text(entry.get("table"), 10) != "spam" {
+                return None;
+            }
+            let id = entry.get("id").and_then(Value::as_i64)?;
+            (id > 0).then(|| LearnedSpamRef {
+                id,
+                pattern: trim_text(entry.get("pattern"), 200),
+            })
+        })
+        .collect::<Vec<_>>();
+    if learned.len() != raw_entries.len() {
+        return None;
+    }
+    let learn_pattern =
+        Some(trim_text(obj.get("learn_pattern"), 78)).filter(|p| p.chars().count() >= 4);
+    Some(SpamLearningV2 {
+        verdict: trim_text(obj.get("verdict"), 20),
+        ai_reason: trim_text(obj.get("ai_reason"), 200),
+        learned,
+        learn_pattern,
     })
 }
 
-fn spam_learning_components(state: &ChangelogState, data: &Map<String, Value>) -> Option<Value> {
-    let store = state.spam_learning.as_ref()?;
+fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
     let payload = parse_spam_learning(data.get("spam_learning"))?;
-    let token = store.insert(payload);
-    Some(json!([{
-        "type": 1,
-        "components": [
-            {
-                "type": 2,
-                "style": 4,
-                "label": "Spam lernen",
-                "custom_id": format!("spam-learning:spam:{token}"),
-            },
-            {
-                "type": 2,
-                "style": 3,
-                "label": "Harmlos lernen",
-                "custom_id": format!("spam-learning:safe:{token}"),
-            },
-        ],
-    }]))
+    // Genau EIN Button pro Meldung: Der Twitch-Judge lernt höchstens ein
+    // Muster pro Fall, und der Klick-Handler ersetzt beim Korrigieren die
+    // komplette Button-Zeile durch einen disabled-Button — mehrere Buttons
+    // wären nach dem ersten Klick verloren.
+    if payload.learned.len() > 1 {
+        tracing::warn!(
+            anzahl = payload.learned.len(),
+            "spam_learning: mehrere gelernte Muster gemeldet — nur das erste bekommt einen Button"
+        );
+    }
+    let button = if let Some(learned) = payload.learned.first() {
+        // Rückgängig-Button (Row-ID in der custom_id).
+        json!({
+            "type": 2,
+            "style": 3,
+            "label": "Als harmlos korrigieren",
+            "custom_id": format!("spam-learning:correct:spam:{}", learned.id),
+        })
+    } else if let Some(pattern) = &payload.learn_pattern {
+        // Nichts gelernt (Harmlos-/Fehler-/Cooldown-Urteil oder
+        // Gate-Ablehnung): Muster aus der custom_id als Spam nachlernen.
+        json!({
+            "type": 2,
+            "style": 4,
+            "label": "Als Spam korrigieren",
+            "custom_id": format!("spam-learning:learn:{pattern}"),
+        })
+    } else {
+        return None;
+    };
+    Some(json!([{ "type": 1, "components": [button] }]))
 }
 
 pub fn router(state: SharedChangelog) -> Router {
@@ -435,7 +414,7 @@ async fn handle_changelog(
     };
 
     let embed = build_embed(title, content, target);
-    let components = spam_learning_components(&state, &data);
+    let components = spam_learning_components(&data);
     match state
         .discord
         .send(channel_id, None, &[embed], false, components.as_ref())
@@ -847,32 +826,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direkter_changelog_mit_spam_learning_baut_buttons() {
-        let mock = Arc::new(MockDiscord {
-            sent: Mutex::new(Vec::new()),
-        });
-        let store = SpamLearningStore::new();
-        let state = ChangelogState::new_with_spam_learning(
-            mock.clone(),
-            Some("test-token".to_string()),
-            Some(store.clone()),
-        );
-        let app = router(state);
-
+    async fn spam_learning_v2_mit_gelerntem_muster_baut_korrektur_button() {
+        let (app, mock) = test_app();
         let (status, body) = post_json(
             app,
             "/changelog",
             json!({
                 "token": "test-token",
                 "channel_id": "42",
-                "title": "Verdächtige Nachricht",
+                "title": "Spam bestätigt",
                 "content": "x",
                 "spam_learning": {
-                    "pattern": "aha, so sammelt man also viewer Kappa",
-                    "pattern_type": "phrase",
-                    "source_message": "@MiracleGhost9 aha, so sammelt man also viewer Kappa",
-                    "source_channel": "miracleghost9",
-                    "reason": "Score 1",
+                    "v": 2,
+                    "verdict": "spam",
+                    "ai_reason": "Viewer-Bot-Werbung",
+                    "learned": [{"table": "spam", "id": 123, "pattern": "eballo.com"}],
+                    "learn_pattern": null,
                 },
             }),
         )
@@ -882,15 +851,75 @@ mod tests {
         assert_eq!(body["ok"], true);
         let sent = mock.sent.lock().expect("lock");
         let components = sent[0].3.as_ref().expect("components");
-        assert_eq!(components[0]["components"][0]["label"], "Spam lernen");
-        assert_eq!(components[0]["components"][1]["label"], "Harmlos lernen");
-        let custom_id = components[0]["components"][0]["custom_id"]
-            .as_str()
-            .expect("custom id");
-        let token = custom_id.trim_start_matches("spam-learning:spam:");
-        let learned = store.take(token).expect("stored payload");
-        assert_eq!(learned.pattern, "aha, so sammelt man also viewer Kappa");
-        assert_eq!(learned.pattern_type, "phrase");
+        let button = &components[0]["components"][0];
+        assert_eq!(button["label"], "Als harmlos korrigieren");
+        assert_eq!(button["custom_id"], "spam-learning:correct:spam:123");
+        assert!(components[0]["components"].as_array().unwrap().len() == 1);
+    }
+
+    #[tokio::test]
+    async fn spam_learning_v2_harmlos_baut_lern_button_aus_custom_id() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Verdächtige Nachricht",
+                "content": "x",
+                "spam_learning": {
+                    "v": 2,
+                    "verdict": "safe",
+                    "ai_reason": "normales Gespräch",
+                    "learned": [],
+                    "learn_pattern": "aha, so sammelt man also viewer Kappa",
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        let components = sent[0].3.as_ref().expect("components");
+        let button = &components[0]["components"][0];
+        assert_eq!(button["label"], "Als Spam korrigieren");
+        assert_eq!(
+            button["custom_id"],
+            "spam-learning:learn:aha, so sammelt man also viewer Kappa"
+        );
+    }
+
+    #[tokio::test]
+    async fn spam_learning_v1_und_ohne_muster_baut_keine_buttons() {
+        // Altes v1-Format (kein v-Feld) → ignorieren; v2 ohne learned und ohne
+        // learn_pattern → ebenfalls keine Buttons.
+        for spam_learning in [
+            json!({"pattern": "abcdef", "pattern_type": "phrase"}),
+            json!({"v": 2, "verdict": "skipped", "learned": [], "learn_pattern": null}),
+            // Unbrauchbarer learned-Eintrag (String-ID) → GANZE Payload weg,
+            // auch wenn ein learn_pattern da wäre (kein Fallback-Button).
+            json!({"v": 2, "verdict": "spam",
+                   "learned": [{"table": "spam", "id": "123", "pattern": "x"}],
+                   "learn_pattern": "eballo.com kaufen"}),
+        ] {
+            let (app, mock) = test_app();
+            let (status, _) = post_json(
+                app,
+                "/changelog",
+                json!({
+                    "token": "test-token",
+                    "channel_id": "42",
+                    "title": "T",
+                    "content": "x",
+                    "spam_learning": spam_learning,
+                }),
+            )
+            .await;
+            assert_eq!(status, 200);
+            let sent = mock.sent.lock().expect("lock");
+            assert!(sent[0].3.is_none(), "keine Buttons erwartet");
+        }
     }
 
     #[tokio::test]

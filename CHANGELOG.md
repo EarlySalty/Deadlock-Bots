@@ -1,3 +1,13 @@
+## #245 — Spam-Korrektur-Buttons überleben jetzt jeden Neustart
+
+**Problem:** Die Lern-Buttons unter Twitch-Spam-Meldungen wurden nach einem Bot-Neustart tot und meldeten nur noch „Dieser Lernfall ist nicht mehr aktiv".
+
+**Änderung:** Der Twitch-Bot lernt jetzt selbst und meldet, was er gelernt hat. Die Buttons korrigieren nur noch: „Als harmlos korrigieren" macht ein gelerntes Muster rückgängig, „Als Spam korrigieren" lernt eines nach. Alles Nötige steckt im Button selbst, es gibt keinen internen Zwischenspeicher mehr.
+
+**Aktuelles Verhalten:** Korrekturen funktionieren auch Tage später noch, egal wie oft der Bot neu gestartet wurde. Alte Buttons aus früheren Meldungen antworten mit einem freundlichen Hinweis statt mit einem Fehler.
+
+---
+
 ## #244 — Neue Sprachkanäle heißen sofort so, wie ihr sie haben wollt
 
 **Ausgangslage:** Der Bot hat jeden neuen Kanal erst mit einem Standardnamen angelegt und euren gespeicherten Wunschnamen ignoriert. Den musstet ihr danach selbst über das Panel anwenden. Discord erlaubt aber nur zwei Umbenennungen pro zehn Minuten, also war eine davon schon weg, bevor ihr überhaupt etwas gemacht habt.
