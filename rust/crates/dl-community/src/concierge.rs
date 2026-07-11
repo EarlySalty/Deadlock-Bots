@@ -480,15 +480,20 @@ pub fn optout_intent(text: &str) -> bool {
     let tail = &rest[directive_len..];
 
     // (5) Themenmarker nach einer Schreib- oder Ruhe-Direktive machen die Bitte scoped. Kurze
-    //     Höflichkeit und "nur" dürfen vor dem eigentlichen Marker stehen.
+    //     Höflichkeit und "nur" dürfen vor dem eigentlichen Marker stehen. Klare Emphase-Phrasen
+    //     mit denselben Präpositionen bleiben dagegen global.
+    let global_emphasis = tail.starts_with(&["auf", "keinen", "fall"])
+        || tail.starts_with(&["auf", "gar", "keinen", "fall"])
+        || tail.starts_with(&["mit", "sofortiger", "wirkung"]);
     if matches!(
         directive,
         OptoutDirective::WriteNoMore | OptoutDirective::LeaveAlone | OptoutDirective::NoMoreContact
-    ) && tail
-        .iter()
-        .copied()
-        .find(|token| !OPTOUT_INTERIOR_POLITE.contains(token) && *token != "nur")
-        .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(&token))
+    ) && !global_emphasis
+        && tail
+            .iter()
+            .copied()
+            .find(|token| !OPTOUT_INTERIOR_POLITE.contains(token) && *token != "nur")
+            .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(&token))
     {
         return false;
     }
@@ -4388,6 +4393,21 @@ mod tests {
         assert!(!optout_intent(
             "Schreib mir nicht mehr ÜBER Steam, aber über Discord schon."
         ));
+    }
+
+    #[test]
+    fn optout_intent_auf_keinen_fall_ist_globale_emphase() {
+        assert!(optout_intent(
+            "Lass mich in Ruhe, auf keinen Fall will ich weitere Nachrichten"
+        ));
+        assert!(optout_intent(
+            "Lass mich in Ruhe, auf gar keinen Fall will ich weitere Nachrichten"
+        ));
+    }
+
+    #[test]
+    fn optout_intent_mit_sofortiger_wirkung_ist_globale_emphase() {
+        assert!(optout_intent("Lass mich in Ruhe, mit sofortiger Wirkung"));
     }
 
     #[test]
