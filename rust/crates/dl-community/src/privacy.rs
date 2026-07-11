@@ -1246,7 +1246,7 @@ pub fn spawn_moderation_content_retention(pool: PgPool) -> tokio::task::JoinHand
 }
 
 pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
-    sqlx::query!(
+    match sqlx::query!(
         r#"
         SELECT opted_out
           FROM core.user_privacy
@@ -1256,10 +1256,17 @@ pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
     )
     .fetch_optional(pool)
     .await
-    .ok()
-    .flatten()
-    .map(|row| row.opted_out)
-    .unwrap_or(false)
+    {
+        Ok(row) => {
+            let opted_out = row.is_some_and(|row| row.opted_out);
+            tracing::debug!(user_id, opted_out, "Datenschutz-Opt-out-Entscheidung");
+            opted_out
+        }
+        Err(err) => {
+            tracing::error!(user_id, %err, opted_out = true, "Datenschutz-Opt-out-Status nicht lesbar; fail-closed");
+            true
+        }
+    }
 }
 
 /// Serialisiert Privacy-Erasure und neue nutzerbezogene Writes fuer denselben User.
@@ -1474,6 +1481,23 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
         );
     }
 
+    if relations.contains("bot.faq_chat_sessions")
+        && relation_exists(pool, "bot.faq_chat_messages").await?
+    {
+        let rows: Value = sqlx::query_scalar(
+            r#"
+            SELECT COALESCE(jsonb_agg(to_jsonb(message) ORDER BY message.id), '[]'::jsonb)
+              FROM bot.faq_chat_messages message
+              JOIN bot.faq_chat_sessions session USING (session_id)
+             WHERE session.user_id = $1
+            "#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
+        tbl.insert("faq_chat_messages.session_id".into(), rows);
+    }
+
     if relations.contains(USER_CO_PLAYERS_REL) {
         let rows = select_rows_i64(
             pool,
@@ -1538,6 +1562,12 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
     }
     if let Some(Value::Array(rows)) = tbl.get_mut("tempvoice_bans.banned_id") {
         redact_other_id(rows, user_id, "owner_id");
+    }
+    if let Some(Value::Array(rows)) = tbl.get_mut("concierge_patenschaften_user.user_id") {
+        redact_other_id(rows, user_id, "pate_id");
+    }
+    if let Some(Value::Array(rows)) = tbl.get_mut("concierge_patenschaften_pate.pate_id") {
+        redact_other_id(rows, user_id, "user_id");
     }
 
     let mut kv_out = serde_json::Map::new();
@@ -1898,6 +1928,16 @@ mod privacy_contract_tests {
             "User-ID-Spalten fehlen in privacy.rs USER_TABLES oder Allowlist: {missing:?}"
         );
     }
+
+    #[tokio::test]
+    async fn is_opted_out_sperrt_bei_nicht_erreichbarem_privacy_status() {
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://postgres@localhost/privacy_test")
+            .expect("lazy pool");
+        pool.close().await;
+
+        assert!(is_opted_out(&pool, 7).await);
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -1925,7 +1965,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn is_opted_out_fail_open_und_wertbasiert() {
+    async fn is_opted_out_ist_wertbasiert() {
         let db = mk_db().await;
         assert!(!is_opted_out(db.pool(), 7).await);
 
@@ -2329,6 +2369,78 @@ mod tests {
             .await
             .expect("delete");
         assert_eq!(second.counts.get("voice_stats.user_id").copied(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn export_enthaelt_nur_faq_nachrichten_eigener_sessions() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.faq_chat_sessions(
+                session_id, user_id, user_name, channel_id, guild_id, expires_at
+            )
+            VALUES
+              ('privacy-faq-own-a', 42, 'me', 1, 1, now() + interval '1 hour'),
+              ('privacy-faq-own-b', 42, 'me', 2, 1, now() + interval '1 hour'),
+              ('privacy-faq-foreign', 99, 'DO_NOT_EXPORT', 3, 1, now() + interval '1 hour')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("faq sessions");
+        sqlx::query(
+            r#"
+            INSERT INTO bot.faq_chat_messages(session_id, role, content)
+            VALUES
+              ('privacy-faq-own-a', 'user', 'own question'),
+              ('privacy-faq-own-b', 'assistant', 'own answer'),
+              ('privacy-faq-foreign', 'user', 'DO_NOT_EXPORT')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("faq messages");
+
+        let snap = export_user_data(db.pool(), 42, 5000).await.expect("export");
+        let messages = snap["tables"]["faq_chat_messages.session_id"]
+            .as_array()
+            .expect("faq messages in export");
+
+        assert_eq!(
+            messages
+                .iter()
+                .map(|row| row["session_id"].as_str().expect("session id"))
+                .collect::<Vec<_>>(),
+            ["privacy-faq-own-a", "privacy-faq-own-b"]
+        );
+        assert!(!snap.to_string().contains("DO_NOT_EXPORT"));
+    }
+
+    #[tokio::test]
+    async fn export_redigiert_gegenparteien_in_patenschaften() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.concierge_patenschaften(
+                user_id, pate_id, guild_id, channel_id, created_at
+            )
+            VALUES (42, 99, 1, 420, now()), (77, 42, 1, 421, now())
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("patenschaften");
+
+        let snap = export_user_data(db.pool(), 42, 5000).await.expect("export");
+        let als_user = &snap["tables"]["concierge_patenschaften_user.user_id"][0];
+        let als_pate = &snap["tables"]["concierge_patenschaften_pate.pate_id"][0];
+
+        assert_eq!(als_user["user_id"], serde_json::json!(42));
+        assert_eq!(als_user["pate_id"], serde_json::json!("redacted"));
+        assert_eq!(als_user["channel_id"], serde_json::json!(420));
+        assert_eq!(als_pate["pate_id"], serde_json::json!(42));
+        assert_eq!(als_pate["user_id"], serde_json::json!("redacted"));
+        assert_eq!(als_pate["channel_id"], serde_json::json!(421));
     }
 
     #[tokio::test]
