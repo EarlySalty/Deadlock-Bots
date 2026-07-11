@@ -402,8 +402,21 @@ const OPTOUT_POLITE_PREFIX: [&str; 12] = [
 ];
 
 pub fn optout_intent(text: &str) -> bool {
+    // Discord-Blockquotes gelten ZEILENWEISE, nicht als Marker für die ganze Nachricht: Zeilen,
+    // deren getrimmter Anfang mit ">" beginnt, werden ZITIERT, nicht als Direktive benutzt. Die
+    // verbleibenden unzitierten Zeilen analysieren wir gemeinsam — eine spätere unzitierte
+    // Direktive ("> altes Zitat\nStopp ist jetzt genug") zählt, ein reines Zitat nie.
+    let unquoted: String = text
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('>'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    if unquoted.trim().is_empty() {
+        return false;
+    }
+
     // Satzzeichen-robust tokenisieren, damit "Stopp!"/"stopp." nicht am Ausrufezeichen scheitern.
-    let lower = text.to_ascii_lowercase();
+    let lower = unquoted.to_ascii_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -443,60 +456,88 @@ pub fn optout_intent(text: &str) -> bool {
     // Zitat/Meta-Kontext: Die Phrase wird ERWÄHNT, nicht als Direktive benutzt, dann kein Opt-out.
     // (a) Hinter der Direktive folgt ein Definitions-/Frageform-Muster, das aus ihr eine Frage
     //     ÜBER die Wörter macht ("Stopp bedeutet was?", "Stopp – was bedeutet das?", "Bitte Stopp
-    //     erklären", "… ist welcher Satz/Befehl"). Eine bloße Kopula ("Stopp ist jetzt genug",
-    //     "Stopp war ernst gemeint") oder ein nacktes "was" entwertet eine echte Direktive NICHT.
-    // (b) Die Direktive steht in Anführungszeichen/Backticks (""Stopp"", "`Stopp`") oder hinter
-    //     einem Discord-Blockquote-Marker (">", ">>>"), auch mit höflichem Präfix.
+    //     erklären", "Stopp ist ein Wort …", "… ist welcher Satz/Befehl"). Eine bloße Kopula
+    //     ("Stopp ist jetzt genug") oder ein Bedeutungs-Verb mit direktem Folgesatz ("Stopp heißt
+    //     jetzt Schluss") entwertet eine echte Direktive NICHT.
+    // (b) Die verbleibende unzitierte Äußerung steht in Anführungszeichen/Backticks (""Stopp"",
+    //     "`Stopp`"), auch mit höflichem Präfix. Discord-Blockquotes sind bereits zeilenweise raus.
     if is_meta_mention(&rest[directive_len..]) {
         return false;
     }
-    if starts_with_quote(text) || starts_with_blockquote(text) {
+    if starts_with_quote(&unquoted) {
         return false;
     }
     true
 }
 
 /// True, wenn hinter der Direktive ein Definitions-/Frageform-Muster folgt, das die Phrase zum
-/// Gesprächsgegenstand macht, statt sie als Anweisung zu meinen. Rein tokenbasiert, ohne NLP:
-/// - ein Definitionsverb direkt ("stopp bedeutet …", "… erklären");
-/// - Zwischenwort "was" + Definitionsverb ("stopp – was bedeutet das");
-/// - Zwischenwort "als" + Kategoriewort ("stopp als wort …");
-/// - Kopula ("ist"/"war"/…) + echte Frage-/Definitionsform ("… ist welcher satz/befehl").
+/// Gesprächsgegenstand macht, statt sie als Anweisung zu meinen. Rein tokenbasiert, ohne NLP.
 ///
-/// Eine bloße Kopula ("stopp ist jetzt genug") oder ein nacktes "was" ohne Definitionsmuster
-/// reicht NICHT — sonst würden ernst gemeinte Klarstellungen fälschlich entwertet.
+/// Erklär-Aufforderungen und Bedeutungs-Verben werden getrennt behandelt:
+/// - "erklären"/"erklaeren" (nach optionalem höflichem Token) ist IMMER Meta ("Stopp bitte erklären");
+/// - "bedeutet"/"heißt"/"heisst"/"meint"/"meinst" sind NICHT pauschal Meta, sondern nur mit echter
+///   Frage-/Definitionsform: Bedeutungs-Verb + Interrogativ ("stopp bedeutet was"), "was" +
+///   Bedeutungs-Verb ("stopp – was bedeutet das"), "als" + Kategoriewort ("stopp als wort …") oder
+///   Kopula + optionaler Artikel + Kategoriewort ("stopp ist ein wort …") bzw. Kopula + Interrogativ
+///   ("… ist welcher satz").
+///
+/// Ein direkter Folgesatz mit "dass"/"jetzt"/"Schluss"/"Ernst" oder eine bloße Kopula ("stopp ist
+/// jetzt genug", "stopp heißt jetzt schluss") bleibt Direktive — sonst würden ernst gemeinte
+/// Klarstellungen fälschlich entwertet.
 fn is_meta_mention(tail: &[&str]) -> bool {
-    const DEFINITION_VERB: [&str; 7] = [
-        "bedeutet",
-        "heißt",
-        "heisst",
-        "meint",
-        "meinst",
-        "erklären",
-        "erklaeren",
-    ];
+    const MEANING_VERB: [&str; 5] = ["bedeutet", "heißt", "heisst", "meint", "meinst"];
+    const EXPLAIN_VERB: [&str; 2] = ["erklären", "erklaeren"];
     const INTERROGATIVE: [&str; 5] = ["welcher", "welche", "welchen", "welches", "was"];
     const CATEGORY: [&str; 5] = ["wort", "satz", "befehl", "ausdruck", "phrase"];
     const COPULA: [&str; 4] = ["ist", "sind", "war", "waren"];
+    const ARTICLE: [&str; 8] = [
+        "ein", "eine", "einen", "einem", "einer", "der", "die", "das",
+    ];
+
+    // Ein optionales höfliches Token im Tail darf die Meta-Form nicht verstecken ("Stopp bitte
+    // erklären"). "Stopp, bitte." bleibt danach mit leerem Tail eine echte Direktive.
+    let tail = match tail.split_first() {
+        Some((first, rest)) if OPTOUT_POLITE_PREFIX.contains(first) => rest,
+        _ => tail,
+    };
 
     let first = tail.first().copied();
     let second = tail.get(1).copied();
     let is_in = |slot: Option<&str>, set: &[&str]| slot.is_some_and(|w| set.contains(&w));
 
-    // Definitionsverb direkt hinter der Direktive.
-    is_in(first, &DEFINITION_VERB)
-        // Zwischenwort "was" + Definitionsverb.
-        || (first == Some("was") && is_in(second, &DEFINITION_VERB))
-        // Zwischenwort "als" + Kategoriewort.
-        || (first == Some("als") && is_in(second, &CATEGORY))
-        // Kopula NUR mit echter Frage-/Definitionsform, nie allein.
-        || (is_in(first, &COPULA) && (is_in(second, &INTERROGATIVE) || is_in(second, &DEFINITION_VERB)))
-}
-
-/// True, wenn die Äußerung nach optionalem führenden Whitespace mit einem Discord-Blockquote-
-/// Marker (">", ">>>") beginnt. Der zitierte Text wird ERWÄHNT, nicht als Direktive benutzt.
-fn starts_with_blockquote(text: &str) -> bool {
-    text.trim_start().starts_with('>')
+    // Erklär-Aufforderung ist immer Meta.
+    if is_in(first, &EXPLAIN_VERB) {
+        return true;
+    }
+    // Bedeutungs-Verb NUR mit echter Frage-/Definitionsform ("bedeutet was").
+    if is_in(first, &MEANING_VERB) && is_in(second, &INTERROGATIVE) {
+        return true;
+    }
+    // Zwischenwort "was" + Bedeutungs-Verb ("was bedeutet das").
+    if first == Some("was") && is_in(second, &MEANING_VERB) {
+        return true;
+    }
+    // Zwischenwort "als" + Kategoriewort ("als wort …").
+    if first == Some("als") && is_in(second, &CATEGORY) {
+        return true;
+    }
+    // Kopula NUR mit echter Frage-/Definitionsform, nie allein.
+    if is_in(first, &COPULA) {
+        // Kopula + optionaler Artikel + Kategoriewort ("ist ein wort", "ist wort").
+        let after_copula = &tail[1..];
+        let after_article = match after_copula.split_first() {
+            Some((word, rest)) if ARTICLE.contains(word) => rest,
+            _ => after_copula,
+        };
+        if is_in(after_article.first().copied(), &CATEGORY) {
+            return true;
+        }
+        // Kopula + Interrogativ/Bedeutungs-Verb ("ist welcher satz").
+        if is_in(second, &INTERROGATIVE) || is_in(second, &MEANING_VERB) {
+            return true;
+        }
+    }
+    false
 }
 
 /// True, wenn die Äußerung nach optionalem Höflichkeits-Präfix mit einem Anführungszeichen oder
@@ -3933,6 +3974,47 @@ mod tests {
         assert!(optout_intent("Nicht mehr anschreiben"));
     }
 
+    #[test]
+    fn optout_intent_bedeutungsverb_nur_mit_frageform_ist_meta() {
+        // Ein Bedeutungs-/Klärungs-Verb entwertet das Opt-out NUR mit echter Frage-/Definitionsform.
+        // Ein direkter Folgesatz (dass/jetzt/Schluss/Ernst) bleibt Direktive.
+        assert!(optout_intent(
+            "Stopp bedeutet, dass du mich nicht mehr anschreiben sollst"
+        ));
+        assert!(optout_intent("Stopp heißt jetzt Schluss"));
+
+        // Echte Meta-/Definitionsfragen bleiben kein Opt-out.
+        assert!(!optout_intent("Stopp bedeutet was?"));
+        assert!(!optout_intent("Stopp – was bedeutet das?"));
+
+        // Erklär-Aufforderung ist Meta, auch mit höflichem Token vor oder im Tail.
+        assert!(!optout_intent("Bitte Stopp erklären"));
+        assert!(!optout_intent("Stopp bitte erklären"));
+    }
+
+    #[test]
+    fn optout_intent_kopula_kategorie_ist_meta() {
+        // Kopula + optionaler Artikel + Kategoriewort ist eine Aussage ÜBER das Wort, kein Opt-out.
+        assert!(!optout_intent("Stopp ist ein Wort – was bedeutet es?"));
+        assert!(!optout_intent("Stopp ist ein Wort"));
+
+        // Bloße Kopula + jetzt/ernst bleibt echte Direktive.
+        assert!(optout_intent("Stopp ist jetzt genug"));
+        assert!(optout_intent("Stopp war ernst gemeint"));
+    }
+
+    #[test]
+    fn optout_intent_zitierte_zeile_vor_direktive() {
+        // Discord-Blockquotes gelten zeilenweise: die zitierte erste Zeile zählt nicht, eine
+        // spätere unzitierte Direktive schon.
+        assert!(optout_intent("> alte Nachricht\nStopp ist jetzt genug"));
+
+        // Reine Zitate ohne unzitierte Direktive bleiben kein Opt-out.
+        assert!(!optout_intent("> Stopp"));
+        assert!(!optout_intent(">>> Stopp"));
+        assert!(!optout_intent("> Stopp ist jetzt genug"));
+    }
+
     #[tokio::test]
     async fn stopp_klarstellung_loest_optout_seiteneffekt_aus() {
         // "Stopp ist jetzt genug" betont eine echte Direktive: der Seiteneffekt sendet OPTOUT_TEXT
@@ -3949,6 +4031,44 @@ mod tests {
         let sent = port.sent_channel_v2.lock().unwrap();
         assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
         assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn zitierte_zeile_vor_stopp_direktive_loest_optout_seiteneffekt_aus() {
+        // Erste Zeile ist ein Discord-Zitat, die zweite unzitierte Zeile "Stopp ist jetzt genug"
+        // ist eine echte Direktive: der Seiteneffekt sendet OPTOUT_TEXT und nichts sonst.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, test_config(true, &[]));
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "> alte Nachricht\nStopp ist jetzt genug")
+                .await
+        );
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent.len(), 1, "genau eine sichtbare Antwort");
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+    }
+
+    #[tokio::test]
+    async fn kategorie_meta_frage_loest_kein_optout_seiteneffekt_aus() {
+        // "Stopp ist ein Wort – was bedeutet es?" fragt ÜBER das Wort, ist kein Opt-out: der
+        // Opt-out-Seiteneffekt (OPTOUT_TEXT) darf im Handler nie ausgelöst werden.
+        let port = Arc::new(MockConciergePort::default());
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        assert!(
+            concierge
+                .handle_user_message(10, None, 42, "Stopp ist ein Wort – was bedeutet es?")
+                .await
+        );
+
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert!(
+            sent.iter().all(|body| sent_v2_content(body) != OPTOUT_TEXT),
+            "Kategorie-Meta-Frage darf kein Opt-out auslösen"
+        );
     }
 
     #[tokio::test]
