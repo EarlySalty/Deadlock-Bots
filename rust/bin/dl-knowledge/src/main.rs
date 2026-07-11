@@ -1130,6 +1130,7 @@ mod tests {
         "public-steam-website.json",
         "public-twitch.json",
     ];
+    const GOLDEN_CASE_COUNT: usize = 224;
 
     fn required_env_path(name: &str) -> Result<PathBuf> {
         let path = std::env::var_os(name)
@@ -1244,8 +1245,8 @@ mod tests {
             }
         }
         ensure!(
-            cases.len() >= 176,
-            "Golden-Suite hat nur {} statt mindestens 176 Faellen",
+            cases.len() == GOLDEN_CASE_COUNT,
+            "Golden-Suite hat {} statt exakt {GOLDEN_CASE_COUNT} Faellen",
             cases.len()
         );
         Ok(cases)
@@ -1253,6 +1254,32 @@ mod tests {
 
     fn contains_case_insensitive(text: &str, term: &str) -> bool {
         text.to_lowercase().contains(&term.to_lowercase())
+    }
+
+    #[test]
+    fn golden_suite_verlangt_exakt_224_faelle() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let golden_dir = tmp.path().join("evals");
+        let docs_path = tmp.path().join("public");
+        std::fs::create_dir_all(&golden_dir)?;
+        std::fs::create_dir_all(&docs_path)?;
+        std::fs::write(docs_path.join("hilfe.html"), "<html></html>")?;
+        for (index, file) in GOLDEN_FILES.iter().enumerate() {
+            let cases = json!([{
+                "question": format!("Frage {index}"),
+                "answerable": true,
+                "expected_sources": ["hilfe.html"],
+                "context_terms": ["Kontext"],
+                "answer_terms": ["Antwort"],
+                "forbidden_terms": []
+            }]);
+            std::fs::write(golden_dir.join(file), serde_json::to_vec(&cases)?)?;
+        }
+
+        let error = load_golden_cases(&golden_dir, &docs_path).expect_err("nur 6 statt 224");
+
+        assert!(error.to_string().contains("statt exakt 224"));
+        Ok(())
     }
 
     #[test]
