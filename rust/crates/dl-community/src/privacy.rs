@@ -475,6 +475,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "router_intro_dm",
+        "user_id",
+        "voice.router_intro_dm",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "tempvoice_presets",
         "user_id",
         "voice.tempvoice_presets",
@@ -874,6 +881,16 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "beta_invite_audit",
         "steam_id64",
         "steam.beta_invite_audit",
+        "steam_id64",
+        ColumnType::I64,
+    ),
+    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthaelt neben der
+    // Steam-ID auch die Discord-ID des Eingeladenen — gehoert damit in die
+    // Erasure-Kette, nicht nur in den Poller.
+    TableSpec::new(
+        "invite_requests",
+        "steam_id64",
+        "steam.invite_requests",
         "steam_id64",
         ColumnType::I64,
     ),
@@ -1658,6 +1675,12 @@ mod privacy_contract_tests {
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
         ));
+        // `core.discord_audit_log.user_id` ist der AUSFUEHRENDE einer Moderations-
+        // aktion (Discord-Semantik: user_id handelt, target_id ist betroffen).
+        // Gleiche Kategorie wie server_config.*: Audit einer Admin-Aktion,
+        // Aufbewahrung im berechtigten Interesse. Ein Opt-out des Moderators darf
+        // die Moderationshistorie des Servers nicht loeschen.
+        out.insert(("core.discord_audit_log".to_string(), "user_id".to_string()));
         out
     }
 
