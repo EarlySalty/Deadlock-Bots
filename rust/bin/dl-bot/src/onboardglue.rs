@@ -142,7 +142,7 @@ impl InteractionHandler for OnboardingHandler {
                 "Nutze **/streamer** im Server, um den Streamer-Partner-Prozess zu starten!\nAls Partner bekommst du: Auto-Raid, Chat Guard, Analytics und mehr.",
             ),
             "dma:fallback:beta" => BridgeReply::ephemeral_text(
-                "Für einen Deadlock Beta-Invite nutze **/betainvite** im Server.\nAlternativ schau im <#1428745737323155679> Channel vorbei.",
+                "Für einen Deadlock-Playtest-Invite postest du deinen Steam-Freundescode in <#1428745737323155679>.\nEin Admin lädt dich dann persönlich ein.",
             ),
 
             // Schritt-Navigation: Flow-Steuerung folgt mit dem Onboarding-Rest
