@@ -134,12 +134,11 @@ struct LlmAnswer {
 async fn main() -> Result<()> {
     dl_core::observability::init_tracing("info");
 
-    let docs_path = std::env::args_os()
-        .nth(1)
-        .map(PathBuf::from)
-        .or_else(|| std::env::var_os("DL_DOCS_PATH").map(PathBuf::from))
-        .unwrap_or_else(|| PathBuf::from(DEFAULT_DOCS_PATH));
-    let knowledge = load_corpus(&docs_path)
+    let docs_path = resolve_production_docs_path(
+        std::env::args_os().nth(1).map(PathBuf::from),
+        std::env::var_os("DL_DOCS_PATH").map(PathBuf::from),
+    )?;
+    let knowledge = load_production_corpus(&docs_path)
         .with_context(|| format!("Korpus laden: {}", docs_path.display()))?;
     tracing::info!(
         chunks = knowledge.chunks.len(),
@@ -168,6 +167,18 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+fn resolve_production_docs_path(
+    cli_override: Option<PathBuf>,
+    env_override: Option<PathBuf>,
+) -> Result<PathBuf> {
+    ensure!(cli_override.is_none(), "CLI-Korpuspfad ist nicht erlaubt");
+    ensure!(
+        env_override.is_none(),
+        "DL_DOCS_PATH ist im Produktionsbetrieb nicht erlaubt"
+    );
+    Ok(PathBuf::from(DEFAULT_DOCS_PATH))
+}
+
 fn router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(health))
@@ -188,7 +199,7 @@ async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
 }
 
 async fn reload(State(state): State<AppState>) -> Response {
-    match load_corpus(&state.docs_path) {
+    match load_production_corpus(&state.docs_path) {
         Ok(knowledge) => {
             let chunks = knowledge.chunks.len();
             *state.knowledge.write().await = knowledge;
@@ -563,6 +574,44 @@ fn load_corpus(root: &Path) -> Result<KnowledgeBase> {
         }
     }
     Ok(KnowledgeBase::from_chunks(chunks))
+}
+
+fn load_production_corpus(root: &Path) -> Result<KnowledgeBase> {
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("Korpus-Root kanonisieren: {}", root.display()))?;
+    let knowledge = load_corpus(&canonical_root)?;
+    validate_production_corpus(&canonical_root, &knowledge)?;
+    Ok(knowledge)
+}
+
+fn validate_production_corpus(root: &Path, knowledge: &KnowledgeBase) -> Result<()> {
+    ensure!(
+        root.file_name().and_then(|name| name.to_str()) == Some("public"),
+        "Kanonischer Korpus-Root endet nicht auf public"
+    );
+    ensure!(
+        !root.components().any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|segment| segment.eq_ignore_ascii_case("internal"))
+        }),
+        "Kanonischer Korpus-Root enthält internal"
+    );
+    ensure!(!knowledge.chunks.is_empty(), "Korpus ist leer");
+    let stats = knowledge.source_stats();
+    ensure!(
+        stats.non_html_sources == 0,
+        "Produktionskorpus enthält {} Nicht-HTML-Quellen",
+        stats.non_html_sources
+    );
+    ensure!(
+        stats.internal_sources == 0,
+        "Produktionskorpus enthält {} interne Quellen",
+        stats.internal_sources
+    );
+    Ok(())
 }
 
 fn collect_corpus_files(dir: &Path, extension: &str, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -1515,6 +1564,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn produktionskorpus_lehnt_cli_und_env_overrides_ab() -> Result<()> {
+        let internal = tempfile::tempdir()?.path().join("internal");
+
+        assert!(resolve_production_docs_path(Some(internal.clone()), None).is_err());
+        assert!(resolve_production_docs_path(None, Some(internal)).is_err());
+        assert_eq!(
+            resolve_production_docs_path(None, None)?,
+            PathBuf::from(DEFAULT_DOCS_PATH)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn service_wrapper_setzt_keinen_korpus_override() {
+        let wrapper = include_str!("../../../../scripts/run_dl_knowledge_service.sh");
+
+        assert!(!wrapper.contains("DL_DOCS_PATH"));
+    }
+
     const HTML_FIXTURE: &str = r#"<!doctype html>
 <html lang="de"><head>
 <meta charset="utf-8"><title>Steam-Bot</title>
@@ -1605,6 +1674,72 @@ mod tests {
             tags: Vec::new(),
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn produktionslader_akzeptiert_public_html() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public)?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+
+        let knowledge = load_production_corpus(&public)?;
+
+        assert_eq!(knowledge.source_stats().html_sources, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn produktionslader_lehnt_public_symlink_auf_internal_ab() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let internal_public = temp.path().join("internal/public");
+        let current = temp.path().join("current");
+        std::fs::create_dir_all(&internal_public)?;
+        std::fs::create_dir(&current)?;
+        std::fs::write(internal_public.join("secret.html"), HTML_FIXTURE)?;
+        std::os::unix::fs::symlink(&internal_public, current.join("public"))?;
+
+        assert!(load_production_corpus(&current.join("public")).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn produktionsvalidierung_lehnt_unsichere_quellen_ab() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public)?;
+        let cases = [
+            (
+                "leer",
+                KnowledgeBase::from_chunks(Vec::new()),
+                "Korpus ist leer",
+            ),
+            (
+                "Markdown",
+                KnowledgeBase::from_chunks(vec![test_chunk("Alt", "Alt", "legacy.md", "Alt")]),
+                "Nicht-HTML",
+            ),
+            (
+                "internal",
+                KnowledgeBase::from_chunks(vec![test_chunk(
+                    "Geheim",
+                    "Geheim",
+                    "internal/secret.html",
+                    "Geheim",
+                )]),
+                "interne Quellen",
+            ),
+        ];
+
+        for (label, knowledge, expected_error) in cases {
+            let error = validate_production_corpus(&public, &knowledge)
+                .expect_err("unsicherer Korpus muss abgelehnt werden");
+            assert!(
+                error.to_string().contains(expected_error),
+                "{label}: {error}"
+            );
+        }
+        Ok(())
     }
 
     fn test_app(
@@ -1837,13 +1972,14 @@ mod tests {
     #[tokio::test]
     async fn reload_fehler_behaelt_letzten_gueltigen_index_und_health() -> Result<()> {
         let temp = tempfile::tempdir()?;
-        let public = temp.path();
+        let public = temp.path().join("public");
+        std::fs::create_dir(&public)?;
         let page = public.join("visible.html");
         std::fs::write(&page, HTML_FIXTURE)?;
-        let initial = load_corpus(public)?;
+        let initial = load_corpus(&public)?;
         let knowledge = Arc::new(RwLock::new(initial));
         let state = AppState {
-            docs_path: public.to_path_buf(),
+            docs_path: public,
             knowledge: knowledge.clone(),
             generator: None,
         };
@@ -1851,6 +1987,35 @@ mod tests {
 
         let (_, health_before) = get_json(app.clone(), "/healthz").await?;
         std::fs::write(&page, "<html><body>kaputt</body></html>")?;
+        let (status, body) = post_json(app.clone(), "/internal/reload", json!({})).await?;
+        let (_, health_after) = get_json(app, "/healthz").await?;
+
+        assert_eq!(status, 500);
+        assert_eq!(body["error"], "reload_failed");
+        assert_eq!(health_after, health_before);
+        assert_eq!(knowledge.read().await.chunks.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reload_lehnt_internal_root_mit_gueltigem_html_ab() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        let internal = temp.path().join("internal");
+        std::fs::create_dir_all(&public)?;
+        std::fs::create_dir_all(&internal)?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        std::fs::write(internal.join("secret.html"), HTML_FIXTURE)?;
+        let initial = load_corpus(&public)?;
+        let knowledge = Arc::new(RwLock::new(initial));
+        let state = AppState {
+            docs_path: internal,
+            knowledge: knowledge.clone(),
+            generator: None,
+        };
+        let app = router(state);
+
+        let (_, health_before) = get_json(app.clone(), "/healthz").await?;
         let (status, body) = post_json(app.clone(), "/internal/reload", json!({})).await?;
         let (_, health_after) = get_json(app, "/healthz").await?;
 
