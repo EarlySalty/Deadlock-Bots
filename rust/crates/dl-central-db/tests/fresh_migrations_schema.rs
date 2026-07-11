@@ -1736,6 +1736,7 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "last_render_hash",
             "last_post_edit_at",
             "id",
+            "play_window",
         ]
     );
     assert_column_in_schema(
