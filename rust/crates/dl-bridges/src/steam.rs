@@ -704,11 +704,11 @@ fn register_inner(
         "invite",
         spec(json!({
             "name": "invite",
-            "description": "Platzhalter",
+            "description": "Lädt jemanden per Steam-Freundescode zum Playtest ein.",
             "default_member_permissions": "8",
             "options": [
-                {"type": 3, "name": "freundescode", "description": "Platzhalter", "required": true},
-                {"type": 6, "name": "user", "description": "Platzhalter", "required": false}
+                {"type": 3, "name": "freundescode", "description": "Steam-Freundescode, nur Ziffern, zum Beispiel 1852752823", "required": true},
+                {"type": 6, "name": "user", "description": "Das Discord-Mitglied dazu, damit die Einladung in der Historie steht", "required": false}
             ],
         })),
         forward_slash("invite", &["freundescode", "user"], 30),
@@ -1172,13 +1172,31 @@ mod tests {
             .expect("invite command definition");
 
         assert_eq!(invite["default_member_permissions"], json!("8"));
+
+        let options = invite["options"].as_array().expect("invite options");
+        let shape: Vec<_> = options
+            .iter()
+            .map(|option| (&option["type"], &option["name"], &option["required"]))
+            .collect();
         assert_eq!(
-            invite["options"],
-            json!([
-                {"type": 3, "name": "freundescode", "description": "Platzhalter", "required": true},
-                {"type": 6, "name": "user", "description": "Platzhalter", "required": false}
-            ])
+            shape,
+            vec![
+                (&json!(3), &json!("freundescode"), &json!(true)),
+                (&json!(6), &json!("user"), &json!(false)),
+            ]
         );
+
+        // Discord zeigt jede description im Command-Picker. Ein durchgerutschter
+        // Platzhalter waere damit user-sichtbar, der Test haelt das auf.
+        for text in std::iter::once(&invite["description"])
+            .chain(options.iter().map(|option| &option["description"]))
+        {
+            let text = text.as_str().expect("description ist ein String");
+            assert_ne!(text, "Platzhalter");
+            assert!(!text.is_empty());
+            // Discord zaehlt Zeichen, nicht Bytes: len() waere bei Umlauten zu streng.
+            assert!(text.chars().count() <= 100, "Discord-Limit: {text}");
+        }
     }
 
     #[test]
