@@ -365,12 +365,8 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         adapter.clone(),
         dl_server_as_code::DEFAULT_GUILD_ID,
     );
-    let spam_learning_store = dl_changelog::SpamLearningStore::new();
-    let changelog = dl_changelog::ChangelogState::new_with_spam_learning(
-        adapter.clone(),
-        env("CHANGELOG_API_TOKEN"),
-        Some(spam_learning_store.clone()),
-    );
+    let changelog =
+        dl_changelog::ChangelogState::new(adapter.clone(), env("CHANGELOG_API_TOKEN"));
     let owner_id = master::owner_id_from_lookup(env);
     if owner_id.is_none() {
         tracing::warn!("OWNER_ID fehlt — Owner-Commands bleiben gesperrt");
@@ -415,11 +411,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 twitch_client.clone(),
                 twitch_registry.clone(),
             );
-            dl_bridges::twitch::register_spam_learning(
-                &mut router,
-                twitch_client.clone(),
-                spam_learning_store.clone(),
-            );
+            dl_bridges::twitch::register_spam_learning(&mut router, twitch_client.clone());
             // Streamer-Link-Matcher (Review-Buttons immer registrieren —
             // offene Vorschläge überleben Neustarts über den State-File)
             let matcher_config =
