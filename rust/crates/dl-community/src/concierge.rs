@@ -482,9 +482,14 @@ pub fn optout_intent(text: &str) -> bool {
     // (5) Themenmarker nach einer Schreib- oder Ruhe-Direktive machen die Bitte scoped. Kurze
     //     Höflichkeit und "nur" dürfen vor dem eigentlichen Marker stehen. Klare Emphase-Phrasen
     //     mit denselben Präpositionen bleiben dagegen global.
-    let global_emphasis = tail.starts_with(&["auf", "keinen", "fall"])
-        || tail.starts_with(&["auf", "gar", "keinen", "fall"])
-        || tail.starts_with(&["mit", "sofortiger", "wirkung"]);
+    let emphasis_start = tail
+        .iter()
+        .position(|token| !OPTOUT_INTERIOR_POLITE.contains(token))
+        .unwrap_or(tail.len());
+    let emphasis_tail = &tail[emphasis_start..];
+    let global_emphasis = emphasis_tail.starts_with(&["auf", "keinen", "fall"])
+        || emphasis_tail.starts_with(&["auf", "gar", "keinen", "fall"])
+        || emphasis_tail.starts_with(&["mit", "sofortiger", "wirkung"]);
     if matches!(
         directive,
         OptoutDirective::WriteNoMore | OptoutDirective::LeaveAlone | OptoutDirective::NoMoreContact
@@ -4408,6 +4413,29 @@ mod tests {
     #[test]
     fn optout_intent_mit_sofortiger_wirkung_ist_globale_emphase() {
         assert!(optout_intent("Lass mich in Ruhe, mit sofortiger Wirkung"));
+    }
+
+    #[test]
+    fn optout_intent_hoeflich_auf_keinen_fall_bleibt_global() {
+        assert!(optout_intent(
+            "Lass mich in Ruhe, bitte auf keinen Fall will ich weitere Nachrichten"
+        ));
+        assert!(!optout_intent("Lass mich in Ruhe, bitte auf Steam"));
+    }
+
+    #[test]
+    fn optout_intent_hoeflich_auf_gar_keinen_fall_bleibt_global() {
+        assert!(optout_intent(
+            "Lass mich in Ruhe, bitte auf gar keinen Fall will ich weitere Nachrichten"
+        ));
+    }
+
+    #[test]
+    fn optout_intent_hoeflich_mit_sofortiger_wirkung_bleibt_global() {
+        assert!(optout_intent(
+            "Lass mich in Ruhe, bitte mit sofortiger Wirkung"
+        ));
+        assert!(!optout_intent("Lass mich in Ruhe, bitte mit Steam"));
     }
 
     #[test]
