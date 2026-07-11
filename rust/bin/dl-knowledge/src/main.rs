@@ -679,25 +679,88 @@ fn required_meta(document: &Html, selector: &Selector, name: &str) -> Result<Str
 }
 
 fn html_text(element: &ElementRef<'_>) -> String {
-    let mut visible = String::new();
-    for fragment in element.text() {
-        let normalized = fragment.split_whitespace().collect::<Vec<_>>().join(" ");
-        if normalized.is_empty() {
-            continue;
-        }
-        let first = normalized.chars().next().unwrap_or_default();
-        let last = visible.chars().last().unwrap_or_default();
-        let attaches_to_previous = matches!(
-            first,
-            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '%' | '-' | '–' | '—' | '/'
-        );
-        let follows_opening = matches!(last, '(' | '[' | '{' | '/' | '„' | '“');
-        if !visible.is_empty() && !attaches_to_previous && !follows_opening {
+    fn separates_text(name: &str) -> bool {
+        matches!(
+            name,
+            "address"
+                | "article"
+                | "aside"
+                | "blockquote"
+                | "body"
+                | "br"
+                | "caption"
+                | "center"
+                | "col"
+                | "colgroup"
+                | "dd"
+                | "details"
+                | "dialog"
+                | "dir"
+                | "div"
+                | "dl"
+                | "dt"
+                | "fieldset"
+                | "figcaption"
+                | "figure"
+                | "footer"
+                | "form"
+                | "h1"
+                | "h2"
+                | "h3"
+                | "h4"
+                | "h5"
+                | "h6"
+                | "header"
+                | "hgroup"
+                | "hr"
+                | "html"
+                | "legend"
+                | "li"
+                | "listing"
+                | "main"
+                | "menu"
+                | "nav"
+                | "ol"
+                | "optgroup"
+                | "option"
+                | "p"
+                | "plaintext"
+                | "pre"
+                | "search"
+                | "section"
+                | "summary"
+                | "table"
+                | "tbody"
+                | "td"
+                | "tfoot"
+                | "th"
+                | "thead"
+                | "tr"
+                | "ul"
+                | "xmp"
+        )
+    }
+
+    fn collect(element: &ElementRef<'_>, visible: &mut String) {
+        let boundary = separates_text(element.value().name());
+        if boundary {
             visible.push(' ');
         }
-        visible.push_str(&normalized);
+        for child in element.children() {
+            if let scraper::Node::Text(text) = child.value() {
+                visible.push_str(text);
+            } else if let Some(child) = ElementRef::wrap(child) {
+                collect(&child, visible);
+            }
+        }
+        if boundary {
+            visible.push(' ');
+        }
     }
-    visible
+
+    let mut visible = String::new();
+    collect(element, &mut visible);
+    visible.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn parse_markdown_file(root: &Path, path: &Path, raw: &str) -> Vec<Chunk> {
@@ -1890,6 +1953,81 @@ mod tests {
             .contains("Nutze das öffentliche Panel. Schreib <@123>."));
         assert!(!chunks[1].text.contains("Panel ."));
         assert!(!chunks[1].text.contains("<@123> ."));
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_bewahrt_leerraum_vor_slash_command() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "<p>Öffne <strong>jetzt</strong> <code>/faq</code>.</p>",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert!(
+            chunks[1].text.contains("Öffne jetzt /faq."),
+            "{}",
+            chunks[1].text
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_bewahrt_freistehenden_gedankenstrich() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "<p>Das gilt <strong>hier</strong> <em>—</em> weiterhin.</p>",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert!(
+            chunks[1].text.contains("Das gilt hier — weiterhin."),
+            "{}",
+            chunks[1].text
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_bewahrt_deutsches_schliessendes_anfuehrungszeichen() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "<p>Wähle „<strong>Fertig</strong>“ und weiter.</p>",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert!(
+            chunks[1].text.contains("Wähle „Fertig“ und weiter."),
+            "{}",
+            chunks[1].text
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_trennt_text_an_br() -> Result<()> {
+        let raw =
+            HTML_FIXTURE.replace("<p>Nutze das öffentliche Panel.</p>", "<p>Eins<br>Zwei</p>");
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert_eq!(chunks[1].text, "Steam verknüpfen Eins Zwei");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_trennt_standard_blockgrenze_ohne_quellleerraum() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "Eins<h3>Drei</h3>Zwei",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert_eq!(chunks[1].text, "Steam verknüpfen Eins Drei Zwei");
         Ok(())
     }
 
