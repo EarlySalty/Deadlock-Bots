@@ -762,14 +762,21 @@ fn html_text(element: &ElementRef<'_>) -> String {
 
     fn collect(element: &ElementRef<'_>, visible: &mut String) {
         let boundary = separates_text(element.value().name());
+        let separates_children = element.value().name() == "nav";
         if boundary {
             visible.push(' ');
         }
+        let mut previous_direct_child_was_element = false;
         for child in element.children() {
             if let scraper::Node::Text(text) = child.value() {
                 visible.push_str(text);
+                previous_direct_child_was_element = false;
             } else if let Some(child) = ElementRef::wrap(child) {
+                if separates_children && previous_direct_child_was_element {
+                    visible.push(' ');
+                }
                 collect(&child, visible);
+                previous_direct_child_was_element = true;
             }
         }
         if boundary {
@@ -2121,6 +2128,66 @@ mod tests {
         let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
 
         assert_eq!(chunks[1].text, "Steam verknüpfen Eins Drei Zwei");
+        Ok(())
+    }
+
+    #[test]
+    fn html_text_trennt_benachbarte_nav_links() -> Result<()> {
+        let document =
+            Html::parse_fragment("<section><h2>H</h2><nav><a>A</a><a>B</a></nav></section>");
+        let selector = html_selector("section")?;
+        let section = document.select(&selector).next().context("section fehlt")?;
+
+        assert_eq!(html_text(&section), "H A B");
+        Ok(())
+    }
+
+    #[test]
+    fn parse_html_trennt_reale_nav_nachbarn() -> Result<()> {
+        let raw = HTML_FIXTURE.replace(
+            "<p>Nutze das öffentliche Panel.</p>",
+            "<nav><a href=\"einrichtung.html\">Einrichtung</a><a href=\"chat-befehle.html\">Befehle</a><a href=\"faq-plaene.html\">Pläne</a></nav>",
+        );
+
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/steam.html"), &raw)?;
+
+        assert!(
+            chunks[1].text.contains("Einrichtung Befehle Pläne"),
+            "{}",
+            chunks[1].text
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn html_text_verklebt_inline_inhalt_innerhalb_eines_elements() -> Result<()> {
+        let document = Html::parse_fragment(
+            "<p><a><strong>Dead</strong><em>lock</em></a> <strong><span>Auto</span><span>-Raid</span></strong></p>",
+        );
+        let selector = html_selector("p")?;
+        let paragraph = document.select(&selector).next().context("p fehlt")?;
+
+        assert_eq!(html_text(&paragraph), "Deadlock Auto-Raid");
+        Ok(())
+    }
+
+    #[test]
+    fn html_text_haengt_nav_satzzeichen_an_vorheriges_element() -> Result<()> {
+        let document = Html::parse_fragment("<nav><code>/faq</code>.</nav>");
+        let selector = html_selector("nav")?;
+        let navigation = document.select(&selector).next().context("nav fehlt")?;
+
+        assert_eq!(html_text(&navigation), "/faq.");
+        Ok(())
+    }
+
+    #[test]
+    fn html_text_ignoriert_kommentar_zwischen_nav_elementen() -> Result<()> {
+        let document = Html::parse_fragment("<nav><a>A</a><!--x--><a>B</a></nav>");
+        let selector = html_selector("nav")?;
+        let navigation = document.select(&selector).next().context("nav fehlt")?;
+
+        assert_eq!(html_text(&navigation), "A B");
         Ok(())
     }
 
