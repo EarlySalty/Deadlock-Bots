@@ -288,12 +288,7 @@ pub async fn lock_user_privacy_tx(
     user_id: u64,
 ) -> ActivityDbResult<()> {
     let user_id = discord_id_to_i64(user_id, "core.user_privacy.user_id")?;
-    // Gleicher per-User-Lock wie der Privacy-Erasure-Pfad. Er bleibt bis zum
-    // Transaktionsende aktiv und serialisiert Check + alle folgenden Writes.
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(user_id ^ i64::MIN)
-        .fetch_one(&mut **tx)
-        .await?;
+    dl_central_db::lock_user_privacy(tx, user_id).await?;
     Ok(())
 }
 
@@ -301,22 +296,8 @@ pub async fn lock_user_privacy_and_is_opted_out_tx(
     tx: &mut Transaction<'_, Postgres>,
     user_id: u64,
 ) -> ActivityDbResult<bool> {
-    lock_user_privacy_tx(tx, user_id).await?;
     let user_id = discord_id_to_i64(user_id, "core.user_privacy.user_id")?;
-    Ok(is_opted_out_tx(tx, user_id).await?)
-}
-
-async fn is_opted_out_tx(
-    tx: &mut Transaction<'_, Postgres>,
-    user_id: i64,
-) -> Result<bool, sqlx::Error> {
-    let row = sqlx::query(
-        "SELECT 1 FROM core.user_privacy WHERE user_id = $1 AND opted_out = TRUE LIMIT 1",
-    )
-    .bind(user_id)
-    .fetch_optional(&mut **tx)
-    .await?;
-    Ok(row.is_some())
+    Ok(dl_central_db::lock_user_privacy_and_is_opted_out(tx, user_id).await?)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1987,10 +1968,7 @@ mod tests {
         tx: &mut Transaction<'_, Postgres>,
         user_id: i64,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("SELECT pg_advisory_xact_lock($1)")
-            .bind(user_id ^ i64::MIN)
-            .fetch_one(&mut **tx)
-            .await?;
+        dl_central_db::lock_user_privacy(tx, user_id).await?;
         sqlx::query("DELETE FROM activity.journey_events WHERE user_id = $1")
             .bind(user_id)
             .execute(&mut **tx)
