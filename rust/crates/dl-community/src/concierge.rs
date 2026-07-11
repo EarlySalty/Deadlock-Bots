@@ -412,7 +412,7 @@ const OPTOUT_INTERIOR_POLITE: [&str; 5] = ["bitte", "doch", "mal", "halt", "jetz
 
 /// Themenmarker, die eine "schreib mir nicht mehr"-Bitte scoped/quantitativ machen ("... über
 /// Steam", "... nicht mehr als einen Satz") und damit KEINEN globalen Opt-out bedeuten.
-const OPTOUT_TOPIC_MARKERS: [&str; 15] = [
+const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
     "über",
     "ueber",
     "zu",
@@ -427,11 +427,10 @@ const OPTOUT_TOPIC_MARKERS: [&str; 15] = [
     "davon",
     "wegen",
     "als",
-    "nur",
 ];
 
-/// Die einleitende Opt-out-Direktive einer Nachricht. Nur "schreib mir nicht mehr" ist für
-/// Themenmarker anfällig, deshalb wird die Variante mitgeführt.
+/// Die einleitende Opt-out-Direktive einer Nachricht. Schreib-Direktiven sind für Themenmarker
+/// anfällig, deshalb wird die Variante mitgeführt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptoutDirective {
     Stopp,
@@ -478,22 +477,34 @@ pub fn optout_intent(text: &str) -> bool {
     };
     let tail = &rest[directive_len..];
 
-    // (5) Themenmarker direkt nach "schreib mir nicht mehr" machen die Bitte scoped/quantitativ
-    //     ("... über Steam", "... nicht mehr als einen Satz") → kein globaler Opt-out.
-    if directive == OptoutDirective::WriteNoMore
-        && tail
-            .iter()
-            .copied()
-            .find(|token| !OPTOUT_INTERIOR_POLITE.contains(token))
-            .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(&token))
+    // (5) Themenmarker nach einer Schreib-Direktive machen die Bitte scoped/quantitativ. Kurze
+    //     Höflichkeit und "nur" dürfen vor dem eigentlichen Marker stehen.
+    if matches!(
+        directive,
+        OptoutDirective::WriteNoMore | OptoutDirective::NoMoreContact
+    ) && tail
+        .iter()
+        .copied()
+        .find(|token| !OPTOUT_INTERIOR_POLITE.contains(token) && *token != "nur")
+        .is_some_and(|token| OPTOUT_TOPIC_MARKERS.contains(&token))
     {
         return false;
     }
 
-    // (4a) Ein vollständig zitierter Ausdruck bleibt Erwähnung, auch wenn sein Inhalt einen
-    //      Ernsthaftigkeitsmarker enthält.
-    if starts_with_quote(cleaned) {
+    // (6) Eine ausdrücklich spätere Wiederaufnahme ist zeitlich begrenzt, kein globaler Opt-out.
+    if tail.contains(&"später") && tail.contains(&"wieder") && tail.contains(&"schreiben") {
         return false;
+    }
+
+    // (4a) Bei einem führenden geschlossenen Zitat zählt nur eine Ernsthaftigkeitsklarstellung
+    //      außerhalb des Zitats. Marker innerhalb eines vollständigen Zitats bleiben Erwähnung.
+    if let Some(suffix) = suffix_after_leading_quote(cleaned) {
+        let lower = suffix.to_ascii_lowercase();
+        let suffix_tokens: Vec<&str> = lower
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .collect();
+        return has_seriousness_marker(&suffix_tokens);
     }
     // (4b) Explizite Ernsthaftigkeitsmarker gewinnen als direkte Klarstellung gegen ein sonst
     //      greifendes Meta-Muster ("Stopp ist ein Befehl, den du befolgen sollst").
@@ -703,26 +714,46 @@ fn is_meta_mention(tail: &[&str]) -> bool {
     false
 }
 
-/// True, wenn die Äußerung nach optionalem Höflichkeits-Präfix mit einem Anführungszeichen oder
-/// Backtick beginnt. Ein zitierter Ausdruck wird ERWÄHNT, nicht als Direktive benutzt.
-fn starts_with_quote(text: &str) -> bool {
+/// Liefert den Suffix nach einem führenden, optional höflich eingeleiteten Zitat. Bei fehlender
+/// Schlussquote ist der Suffix leer; der unvollständige Zitat-Kontext bleibt damit sicher Meta.
+fn suffix_after_leading_quote(text: &str) -> Option<&str> {
     const QUOTES: [char; 11] = ['"', '\'', '`', '„', '“', '”', '‚', '‘', '’', '«', '»'];
-    let lower = text.to_ascii_lowercase();
-    let mut cursor = lower.as_str();
+    let mut cursor = text;
     loop {
         // Führende Trenner (Space, Komma) überspringen, ohne ein Anführungszeichen zu verschlucken.
         cursor = cursor.trim_start_matches(|c: char| !c.is_alphanumeric() && !QUOTES.contains(&c));
         match cursor.chars().next() {
-            Some(c) if QUOTES.contains(&c) => return true,
+            Some(opening) if QUOTES.contains(&opening) => {
+                let closing = match opening {
+                    '„' => '“',
+                    '“' => '”',
+                    '‚' => '‘',
+                    '‘' => '’',
+                    '«' => '»',
+                    '»' => '«',
+                    quote => quote,
+                };
+                let after_opening = &cursor[opening.len_utf8()..];
+                return Some(match after_opening.find(closing) {
+                    Some(pos) => &after_opening[pos + closing.len_utf8()..],
+                    None => "",
+                });
+            }
             Some(c) if c.is_alphanumeric() => {
                 // Ein führendes Wort nur überspringen, wenn es reines Höflichkeits-/Anrede-Token ist.
-                let word: String = cursor.chars().take_while(|c| c.is_alphanumeric()).collect();
-                if !OPTOUT_POLITE_PREFIX.contains(&word.as_str()) {
-                    return false;
+                let word_end = cursor
+                    .find(|c: char| !c.is_alphanumeric())
+                    .unwrap_or(cursor.len());
+                let word = &cursor[..word_end];
+                if !OPTOUT_POLITE_PREFIX
+                    .iter()
+                    .any(|prefix| word.eq_ignore_ascii_case(prefix))
+                {
+                    return None;
                 }
-                cursor = &cursor[word.len()..];
+                cursor = &cursor[word_end..];
             }
-            _ => return false,
+            _ => return None,
         }
     }
 }
@@ -4298,6 +4329,32 @@ mod tests {
     fn optout_intent_natuerliche_direktphrasen() {
         assert!(optout_intent("Lass mich jetzt in Ruhe"));
         assert!(optout_intent("Schreib mich bitte nicht mehr an"));
+    }
+
+    #[test]
+    fn optout_intent_nur_ohne_thema_bleibt_global() {
+        assert!(optout_intent(
+            "Schreib mir nicht mehr, nur damit das klar ist."
+        ));
+    }
+
+    #[test]
+    fn optout_intent_ernsthaftigkeit_nach_geschlossenem_zitat() {
+        assert!(optout_intent("„Stopp“ – ich meine es ernst."));
+    }
+
+    #[test]
+    fn optout_intent_neue_direktphrase_mit_thema_bleibt_lokal() {
+        assert!(!optout_intent(
+            "Schreib mich bitte nicht mehr an über Steam, aber zu Discord schon."
+        ));
+    }
+
+    #[test]
+    fn optout_intent_zeitlich_begrenzte_ruhe_bleibt_lokal() {
+        assert!(!optout_intent(
+            "Lass mich jetzt in Ruhe, später kannst du wieder schreiben."
+        ));
     }
 
     #[test]
