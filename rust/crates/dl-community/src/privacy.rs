@@ -475,6 +475,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "router_intro_dm",
+        "user_id",
+        "voice.router_intro_dm",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "tempvoice_presets",
         "user_id",
         "voice.tempvoice_presets",
@@ -1255,6 +1262,15 @@ pub async fn is_opted_out(pool: &PgPool, user_id: i64) -> bool {
     .unwrap_or(false)
 }
 
+/// Serialisiert Privacy-Erasure und neue nutzerbezogene Writes fuer denselben User.
+pub async fn lock_user_privacy(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: i64,
+) -> CommunityDbResult<()> {
+    crate::db::advisory_lock(tx, user_id ^ i64::MIN).await?;
+    Ok(())
+}
+
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
     let now = utc_from_unix(now)?;
     sqlx::query!(
@@ -1293,6 +1309,7 @@ pub async fn delete_user_data(
     );
 
     let mut tx = pool.begin().await?;
+    lock_user_privacy(&mut tx, user_id).await?;
 
     for &spec in USER_TABLES {
         if !relations.contains(spec.relation) {
@@ -1612,6 +1629,7 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
 #[cfg(test)]
 mod privacy_contract_tests {
     use super::*;
+    use regex::Regex;
     use std::collections::BTreeSet;
     use std::fs;
     use std::path::Path;
@@ -1632,6 +1650,27 @@ mod privacy_contract_tests {
         // diese eine User-ID bleibt bewusst erhalten, damit zukuenftige Writes
         // geblockt werden und der Delete-Zeitpunkt auditierbar bleibt.
         out.insert((USER_PRIVACY_REL.to_string(), "user_id".to_string()));
+        // Das Discord-Guild-Audit-Log bleibt als unveraenderliche Sicherheits-
+        // und Aenderungshistorie vollstaendig erhalten. `user_id` bezeichnet
+        // den Actor, `target_id` kann je nach Aktion einen User bezeichnen und
+        // `changes`, `options` sowie `reason` koennen weitere personenbezogene
+        // Werte enthalten. Die restlichen Felder sichern Ereignis, Guild,
+        // Aktion und Zeitbezug; normale Community-Aktivitaet wird hier nicht
+        // protokolliert. Die vollstaendige Liste macht Schema-Drift testbar.
+        for column in [
+            "entry_id",
+            "guild_id",
+            "action_type",
+            "user_id",
+            "target_id",
+            "changes",
+            "options",
+            "reason",
+            "occurred_at",
+            "ingested_at",
+        ] {
+            out.insert(("core.discord_audit_log".to_string(), column.to_string()));
+        }
         // `server_config.*`: Audit-Referenzen auf Mod-/Admin-AKTIONEN am
         // Server-Soll-Modell (wer hat Diff erstellt / Apply angefordert /
         // Drift adoptiert). Kein Community-Verhaltensdatum; Aufbewahrung zur
@@ -1673,6 +1712,79 @@ mod privacy_contract_tests {
 
     fn normalize_sql_ident(identifier: &str) -> String {
         identifier.trim().trim_matches('"').replace('"', "")
+    }
+
+    fn table_columns_from_sql(raw: &str, relation: &str) -> BTreeSet<String> {
+        let create = format!("CREATE TABLE IF NOT EXISTS {relation} (\n");
+        let mut columns = raw
+            .split_once(&create)
+            .and_then(|(_, rest)| rest.split_once("\n);").map(|(body, _)| body))
+            .into_iter()
+            .flat_map(str::lines)
+            .filter_map(|line| line.split_whitespace().next())
+            .map(|column| normalize_sql_ident(column.trim_end_matches(',')))
+            .collect::<BTreeSet<_>>();
+
+        let without_line_comments = raw
+            .lines()
+            .map(|line| line.split_once("--").map_or(line, |(sql, _)| sql))
+            .collect::<Vec<_>>()
+            .join("\n");
+        // ponytail: Repo-Migrationen bleiben direktes DDL; bei dynamischem SQL auf Schematest wechseln.
+        let alter = Regex::new(
+            r#"(?is)\bALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?(?:ONLY\s+)?((?:"[^"]+"|[a-z_][a-z0-9_$]*)\s*\.\s*(?:"[^"]+"|[a-z_][a-z0-9_$]*))\s+([^;]+)"#,
+        )
+        .expect("ALTER TABLE regex");
+        let add_column = Regex::new(
+            r#"(?im)(?:^|,)\s*ADD\s+(?:COLUMN\s+)?(?:IF\s+NOT\s+EXISTS\s+)?("[^"]+"|[a-z_][a-z0-9_$]*)"#,
+        )
+        .expect("ADD COLUMN regex");
+        for captures in alter.captures_iter(&without_line_comments) {
+            let table = normalize_sql_ident(&captures[1])
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            if table.eq_ignore_ascii_case(relation) {
+                columns.extend(add_column.captures_iter(&captures[2]).filter_map(|added| {
+                    let column = normalize_sql_ident(&added[1]);
+                    (![
+                        "CHECK",
+                        "CONSTRAINT",
+                        "EXCLUDE",
+                        "FOREIGN",
+                        "PRIMARY",
+                        "UNIQUE",
+                    ]
+                    .iter()
+                    .any(|keyword| column.eq_ignore_ascii_case(keyword)))
+                    .then_some(column)
+                }));
+            }
+        }
+
+        columns
+    }
+
+    fn migration_columns_for_relation(relation: &str) -> BTreeSet<String> {
+        let migration_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("dl-community under crates")
+            .join("dl-central-db/migrations");
+        let entries = fs::read_dir(&migration_dir)
+            .unwrap_or_else(|err| panic!("read {}: {err}", migration_dir.display()));
+        let mut columns = BTreeSet::new();
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|err| panic!("read_dir entry {}: {err}", migration_dir.display()))
+                .path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+                continue;
+            }
+            let raw = fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            columns.extend(table_columns_from_sql(&raw, relation));
+        }
+        columns
     }
 
     fn migration_user_id_columns() -> BTreeSet<(String, String)> {
@@ -1726,6 +1838,49 @@ mod privacy_contract_tests {
         assert!(raw.contains("expires_at TIMESTAMPTZ NOT NULL DEFAULT"));
         assert!(raw.contains("INTERVAL '180 days'"));
         assert!(raw.contains("rollback_exports_expires_at_idx"));
+    }
+
+    #[test]
+    fn discord_audit_log_ist_vollstaendig_im_permanenten_privacy_vertrag() {
+        let schema_columns = migration_columns_for_relation("core.discord_audit_log");
+        let retained_columns = privacy_contract_allowlist()
+            .into_iter()
+            .filter_map(|(relation, column)| {
+                (relation == "core.discord_audit_log").then_some(column)
+            })
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            retained_columns, schema_columns,
+            "jede Spalte der unveraenderlichen Guild-Audit-Historie muss explizit eingeordnet sein"
+        );
+    }
+
+    #[test]
+    fn migrationsscanner_erkennt_spaetere_audit_add_columns() {
+        let sql = r#"
+            -- spaetere Migration, absichtlich in mehreren ueblichen Schreibweisen
+            ALTER TABLE core.discord_audit_log
+                ADD COLUMN target_display_name TEXT,
+                ADD COLUMN IF NOT EXISTS moderator_note TEXT;
+            alter table if exists "core"."discord_audit_log"
+                add column "target_profile" jsonb;
+            ALTER TABLE ONLY core.discord_audit_log ADD member_note TEXT;
+            ALTER TABLE CORE.DISCORD_AUDIT_LOG ADD COLUMN uppercase_note TEXT;
+            ALTER TABLE core.discord_audit_log ADD CHECK (action_type >= 0);
+            ALTER TABLE core.other_table ADD COLUMN ignored TEXT;
+        "#;
+
+        assert_eq!(
+            table_columns_from_sql(sql, "core.discord_audit_log"),
+            BTreeSet::from([
+                "member_note".to_string(),
+                "moderator_note".to_string(),
+                "target_display_name".to_string(),
+                "target_profile".to_string(),
+                "uppercase_note".to_string(),
+            ])
+        );
     }
 
     #[test]

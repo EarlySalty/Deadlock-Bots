@@ -1,3 +1,11 @@
+## #243 — Concierge antwortet aus geprüftem Supportwissen
+
+**Ausgangslage:** Der Concierge konnte echte Fragen zu Discord und den Bots oft nicht belastbar beantworten.
+
+**Was wurde geändert:** Er nutzt jetzt ausschließlich die öffentliche dokumentierte Wissensbasis für DMs, private FAQ und Serverfragen; in Tickets wird eine mögliche Antwort nur im vorgesehenen Prüfbereich sichtbar und nie direkt vom Bot gepostet.
+
+**Wie es jetzt läuft:** Interne Details, Debug-, Neustart- oder andere Aktionen führt er nicht aus; bei Unsicherheit übernimmt menschlicher Support. Ein Datenschutz-Opt-out bestätigt er erst nach erfolgreicher Speicherung und unterdrückt danach auch die einmalige Router-Hilfe per DM; lässt sich der Datenschutzstatus nicht sicher lesen, bleibt diese DM vorsichtshalber aus.
+
 ## #242 — Router erklärt sich beim ersten Mal per DM
 
 **Ausgangslage:** Wer zum ersten Mal in den Deadlock Router ging, wurde nicht automatisch in eine Lane sortiert und wusste oft nicht warum. Der Router braucht erst einen gewählten Modus, und das war vielen nicht klar.

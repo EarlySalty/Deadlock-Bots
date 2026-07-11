@@ -58,6 +58,7 @@ pub const ROUTER_MANAGE_BANNER_FILENAME: &str = "divider-lane-verwalten.png";
 pub const ROUTER_GUIDE_BANNER_FILENAME: &str = "divider-anleitung.png";
 pub const ROUTER_FLOOD_WINDOW_SECS: u64 = 60;
 pub const ROUTER_FLOOD_MAX_CREATES: usize = 4;
+const ROUTER_INTRO_DM_TIMEOUT: Duration = Duration::from_secs(3);
 pub const ROUTER_SELECT_MODE_BEFORE_AUTOJOIN: &str = "Wähle zuerst einen Spielmodus.";
 pub const ROUTER_PANEL_INTRO: &str =
     "Wähle deinen Modus — der Bot erstellt dir eine eigene Voice-Lane in der passenden Kategorie und zieht dich direkt rüber. Dafür musst du in einem Sprachkanal sitzen, zum Beispiel im Deadlock Router.";
@@ -450,7 +451,8 @@ pub trait RouterPort: Send + Sync {
         -> Result<(), String>;
     async fn send_dm(&self, user_id: u64, text: String);
     /// Volle Components-V2-DM (flags + components) roh an den User senden.
-    async fn send_dm_components(&self, user_id: u64, body: serde_json::Value);
+    async fn send_dm_components(&self, user_id: u64, body: serde_json::Value)
+        -> Result<(), String>;
 }
 
 #[async_trait::async_trait]
@@ -875,9 +877,50 @@ impl LaneRouter {
     }
 
     /// Einmalige Router-Onboarding-DM beim Erst-Join ohne gespeicherten Standard.
-    /// Jede Entscheidung wird geloggt (gesendet / schon gesendet / Marker-Fehler).
+    /// Jede Entscheidung wird geloggt (Privacy / gesendet / schon gesendet / Marker-Fehler).
     async fn maybe_send_intro_dm(&self, user_id: u64) {
-        let already_sent = match self.engine.store.router_intro_dm_sent(user_id).await {
+        let db_user_id = match u64_to_i64("core.user_privacy.user_id", user_id) {
+            Ok(user_id) => user_id,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Router: User-ID nicht speicherbar — überspringe Intro-DM");
+                return;
+            }
+        };
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Router: Privacy-Transaktion nicht startbar — überspringe Intro-DM");
+                return;
+            }
+        };
+        if let Err(err) = dl_community::privacy::lock_user_privacy(&mut tx, db_user_id).await {
+            tracing::warn!(%err, user_id, "Router: Privacy-Lock nicht setzbar — überspringe Intro-DM");
+            return;
+        }
+        let opted_out = match sqlx::query_scalar::<_, bool>(
+            "SELECT opted_out FROM core.user_privacy WHERE user_id = $1",
+        )
+        .bind(db_user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        {
+            Ok(opted_out) => opted_out.unwrap_or(false),
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Router: Privacy-Status nicht lesbar — überspringe Intro-DM");
+                return;
+            }
+        };
+        if opted_out {
+            tracing::debug!(user_id, "Router: Intro-DM übersprungen (Privacy-Opt-out)");
+            return;
+        }
+        let already_sent = match sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM voice.router_intro_dm WHERE user_id = $1)",
+        )
+        .bind(db_user_id)
+        .fetch_one(&mut *tx)
+        .await
+        {
             Ok(sent) => sent,
             Err(err) => {
                 tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht lesbar — überspringe");
@@ -889,14 +932,46 @@ impl LaneRouter {
                 tracing::debug!(user_id, "Router: Intro-DM übersprungen (schon gesendet)");
             }
             IntroDmDecision::Send => {
-                self.port
-                    .send_dm_components(user_id, router_intro_dm_body())
-                    .await;
-                // Mark nach dem Versuch: strikt einmalig, auch wenn DMs zu sind.
-                if let Err(err) = self.engine.store.mark_router_intro_dm_sent(user_id).await {
-                    tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht setzbar");
+                match tokio::time::timeout(
+                    ROUTER_INTRO_DM_TIMEOUT,
+                    self.port
+                        .send_dm_components(user_id, router_intro_dm_body()),
+                )
+                .await
+                {
+                    Ok(Ok(())) => {}
+                    Ok(Err(err)) => {
+                        tracing::warn!(%err, user_id, "Router: Intro-DM fehlgeschlagen — kein Marker");
+                        return;
+                    }
+                    Err(_) => {
+                        tracing::warn!(
+                            user_id,
+                            timeout_secs = ROUTER_INTRO_DM_TIMEOUT.as_secs(),
+                            "Router: Intro-DM-Timeout — kein Marker"
+                        );
+                        return;
+                    }
                 }
-                tracing::info!(user_id, "Router: Intro-DM gesendet (Erst-Join ohne Standard)");
+                // Marker nur nach bestaetigtem Versand, in derselben Privacy-Transaktion.
+                if let Err(err) = sqlx::query(
+                    "INSERT INTO voice.router_intro_dm (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING",
+                )
+                .bind(db_user_id)
+                .execute(&mut *tx)
+                .await
+                {
+                    tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht setzbar");
+                    return;
+                }
+                if let Err(err) = tx.commit().await {
+                    tracing::warn!(%err, user_id, "Router: Intro-DM-Marker nicht commitbar");
+                    return;
+                }
+                tracing::info!(
+                    user_id,
+                    "Router: Intro-DM gesendet (Erst-Join ohne Standard)"
+                );
             }
         }
     }
@@ -1338,7 +1413,10 @@ mod tests {
     #[test]
     fn router_dm_done_reply_updatet_die_dm_in_place() {
         let created = router_dm_done_reply(&RouterSpawnOutcome::Created { lane_id: 42 });
-        assert!(created.update_message, "Fertig muss die DM in-place updaten");
+        assert!(
+            created.update_message,
+            "Fertig muss die DM in-place updaten"
+        );
         assert!(!created.ephemeral, "DM-Antwort darf nicht ephemeral sein");
         assert_eq!(created.message_flags, Some(ROUTER_COMPONENTS_V2_FLAG));
         let text = serde_json::to_string(&created.components).expect("json");
@@ -1608,7 +1686,13 @@ mod tests {
             Ok(())
         }
         async fn send_dm(&self, _user_id: u64, _text: String) {}
-        async fn send_dm_components(&self, _user_id: u64, _body: serde_json::Value) {}
+        async fn send_dm_components(
+            &self,
+            _user_id: u64,
+            _body: serde_json::Value,
+        ) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[derive(Default)]
@@ -1616,6 +1700,9 @@ mod tests {
         voice_channel: StdMutex<Option<u64>>,
         role_ids: StdMutex<Vec<u64>>,
         dm_components: StdMutex<Vec<serde_json::Value>>,
+        dm_started: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+        dm_release: StdMutex<Option<Arc<tokio::sync::Notify>>>,
+        dm_error: StdMutex<bool>,
     }
 
     #[async_trait::async_trait]
@@ -1642,8 +1729,24 @@ mod tests {
         }
 
         async fn send_dm(&self, _user_id: u64, _text: String) {}
-        async fn send_dm_components(&self, _user_id: u64, body: serde_json::Value) {
+        async fn send_dm_components(
+            &self,
+            _user_id: u64,
+            body: serde_json::Value,
+        ) -> Result<(), String> {
+            let started = self.dm_started.lock().expect("started").clone();
+            let release = self.dm_release.lock().expect("release").clone();
+            if let Some(started) = started {
+                started.notify_one();
+            }
+            if let Some(release) = release {
+                release.notified().await;
+            }
+            if *self.dm_error.lock().expect("dm error") {
+                return Err("dm failed".to_string());
+            }
             self.dm_components.lock().expect("dm").push(body);
+            Ok(())
         }
     }
 
@@ -1837,6 +1940,37 @@ mod tests {
             crate::tempvoice::TempVoiceStore::new(pool),
             Arc::new(NoopLanePort),
         )
+    }
+
+    async fn wait_for_db_lock(pool: &PgPool, query_fragment: &str, wait_event: Option<&str>) {
+        let query_pattern = format!("%{query_fragment}%");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let waiting = sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(
+                        SELECT 1
+                          FROM pg_stat_activity
+                         WHERE datname = current_database()
+                           AND pid <> pg_backend_pid()
+                           AND state = 'active'
+                           AND wait_event_type = 'Lock'
+                           AND query LIKE $1
+                           AND ($2::TEXT IS NULL OR wait_event = $2)
+                    )",
+                )
+                .bind(&query_pattern)
+                .bind(wait_event)
+                .fetch_one(pool)
+                .await
+                .expect("pg_stat_activity");
+                if waiting {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("DB-Lock-Wait fuer {query_fragment} nicht sichtbar"));
     }
 
     #[tokio::test]
@@ -2311,18 +2445,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn router_join_ohne_default_erstellt_keine_lane() {
+    async fn router_join_ohne_default_sendet_intro_dm_genau_einmal() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("test_pool");
         let pool = db.pool().clone();
         let engine = test_engine(pool.clone());
-        let router = LaneRouter::new(
-            pool,
-            Arc::new(StaticRouterPort::default()),
-            engine.clone(),
-            None,
-        );
+        let port = Arc::new(StaticRouterPort::default());
+        let router = LaneRouter::new(pool, port.clone(), engine.clone(), None);
+
+        for _ in 0..2 {
+            router
+                .handle_event(VoiceEvent::Join {
+                    guild_id: 1,
+                    user_id: 42,
+                    channel_id: ROUTER_VC_ID,
+                })
+                .await;
+        }
+
+        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+        assert_eq!(port.dm_components.lock().expect("dm").len(), 1);
+        assert!(engine.store.router_intro_dm_sent(42).await.expect("marker"));
+    }
+
+    #[tokio::test]
+    async fn router_intro_dm_fehler_setzt_keinen_marker() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        let port = Arc::new(StaticRouterPort::default());
+        *port.dm_error.lock().expect("dm error") = true;
+        let router = LaneRouter::new(pool, port.clone(), engine.clone(), None);
 
         router
             .handle_event(VoiceEvent::Join {
@@ -2332,7 +2488,218 @@ mod tests {
             })
             .await;
 
-        assert!(engine.store.all_lanes().await.expect("lanes").is_empty());
+        assert!(port.dm_components.lock().expect("dm").is_empty());
+        assert!(!engine.store.router_intro_dm_sent(42).await.expect("marker"));
+    }
+
+    #[tokio::test]
+    async fn router_intro_dm_timeout_setzt_keinen_marker() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        let port = Arc::new(StaticRouterPort::default());
+        *port.dm_release.lock().expect("release") = Some(Arc::new(tokio::sync::Notify::new()));
+        let router = LaneRouter::new(pool, port, engine.clone(), None);
+
+        let completed = tokio::time::timeout(
+            ROUTER_INTRO_DM_TIMEOUT + Duration::from_secs(5),
+            router.handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            }),
+        )
+        .await;
+
+        assert!(completed.is_ok(), "Router muss die blockierte DM begrenzen");
+        assert!(!engine.store.router_intro_dm_sent(42).await.expect("marker"));
+    }
+
+    #[tokio::test]
+    async fn router_intro_dm_bleibt_nach_privacy_erase_geloescht() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        engine
+            .store
+            .mark_router_intro_dm_sent(42)
+            .await
+            .expect("intro marker");
+        dl_community::privacy::delete_user_data(&pool, 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy erase");
+        assert!(!engine
+            .store
+            .router_intro_dm_sent(42)
+            .await
+            .expect("marker deleted"));
+        let port = Arc::new(StaticRouterPort::default());
+        let router = LaneRouter::new(pool, port.clone(), engine.clone(), None);
+
+        router
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            })
+            .await;
+
+        assert!(port.dm_components.lock().expect("dm").is_empty());
+        assert!(!engine
+            .store
+            .router_intro_dm_sent(42)
+            .await
+            .expect("marker stays deleted"));
+    }
+
+    #[tokio::test]
+    async fn router_intro_dm_blockiert_bei_privacy_db_fehler() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        sqlx::query("ALTER TABLE core.user_privacy RENAME TO user_privacy_unavailable")
+            .execute(&pool)
+            .await
+            .expect("privacy table unavailable");
+        let engine = test_engine(pool.clone());
+        let port = Arc::new(StaticRouterPort::default());
+        let router = LaneRouter::new(pool, port.clone(), engine.clone(), None);
+
+        router
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 42,
+                channel_id: ROUTER_VC_ID,
+            })
+            .await;
+
+        assert!(port.dm_components.lock().expect("dm").is_empty());
+        assert!(!engine
+            .store
+            .router_intro_dm_sent(42)
+            .await
+            .expect("marker stays absent"));
+    }
+
+    #[tokio::test]
+    async fn privacy_erase_wartet_db_seitig_auf_laufende_router_intro_dm() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        let port = Arc::new(StaticRouterPort::default());
+        let dm_started = Arc::new(tokio::sync::Notify::new());
+        let dm_release = Arc::new(tokio::sync::Notify::new());
+        *port.dm_started.lock().expect("started") = Some(dm_started.clone());
+        *port.dm_release.lock().expect("release") = Some(dm_release.clone());
+        let router = LaneRouter::new(pool.clone(), port.clone(), engine.clone(), None);
+        let router_task = tokio::spawn(async move {
+            router
+                .handle_event(VoiceEvent::Join {
+                    guild_id: 1,
+                    user_id: 42,
+                    channel_id: ROUTER_VC_ID,
+                })
+                .await;
+        });
+        tokio::time::timeout(Duration::from_secs(5), dm_started.notified())
+            .await
+            .expect("Intro-DM wurde nicht gestartet");
+
+        let erase_pool = pool.clone();
+        let erase_task = tokio::spawn(async move {
+            dl_community::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000)
+                .await
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        dm_release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), router_task)
+            .await
+            .expect("router task deadline")
+            .expect("router task");
+        tokio::time::timeout(Duration::from_secs(10), erase_task)
+            .await
+            .expect("erase task deadline")
+            .expect("erase task")
+            .expect("privacy erase");
+
+        assert_eq!(port.dm_components.lock().expect("dm").len(), 1);
+        assert!(!engine
+            .store
+            .router_intro_dm_sent(42)
+            .await
+            .expect("marker stays deleted"));
+    }
+
+    #[tokio::test]
+    async fn router_intro_dm_wartet_hinter_bereits_laufendem_privacy_erase() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let pool = db.pool().clone();
+        let engine = test_engine(pool.clone());
+        engine
+            .store
+            .mark_router_intro_dm_sent(42)
+            .await
+            .expect("intro marker");
+        let mut marker_blocker = pool.begin().await.expect("blocker tx");
+        sqlx::query_scalar::<_, i64>(
+            "SELECT user_id FROM voice.router_intro_dm WHERE user_id = $1 FOR UPDATE",
+        )
+        .bind(42_i64)
+        .fetch_one(&mut *marker_blocker)
+        .await
+        .expect("lock marker row");
+
+        let erase_pool = pool.clone();
+        let erase_task = tokio::spawn(async move {
+            dl_community::privacy::delete_user_data(&erase_pool, 42, "test".to_string(), 1_000)
+                .await
+        });
+        wait_for_db_lock(
+            &pool,
+            "DELETE FROM voice.router_intro_dm",
+            Some("transactionid"),
+        )
+        .await;
+
+        let port = Arc::new(StaticRouterPort::default());
+        let router = LaneRouter::new(pool.clone(), port.clone(), engine.clone(), None);
+        let router_task = tokio::spawn(async move {
+            router
+                .handle_event(VoiceEvent::Join {
+                    guild_id: 1,
+                    user_id: 42,
+                    channel_id: ROUTER_VC_ID,
+                })
+                .await;
+        });
+        wait_for_db_lock(&pool, "pg_advisory_xact_lock", Some("advisory")).await;
+        marker_blocker.commit().await.expect("release marker row");
+
+        tokio::time::timeout(Duration::from_secs(10), erase_task)
+            .await
+            .expect("erase task deadline")
+            .expect("erase task")
+            .expect("privacy erase");
+        tokio::time::timeout(Duration::from_secs(5), router_task)
+            .await
+            .expect("router task deadline")
+            .expect("router task");
+
+        assert!(port.dm_components.lock().expect("dm").is_empty());
+        assert!(!engine
+            .store
+            .router_intro_dm_sent(42)
+            .await
+            .expect("marker stays deleted"));
     }
 
     #[tokio::test]
