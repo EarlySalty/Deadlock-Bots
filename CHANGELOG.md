@@ -1,3 +1,11 @@
+## #244 — Neue Sprachkanäle heißen sofort so, wie ihr sie haben wollt
+
+**Ausgangslage:** Der Bot hat jeden neuen Kanal erst mit einem Standardnamen angelegt und euren gespeicherten Wunschnamen ignoriert. Den musstet ihr danach selbst über das Panel anwenden. Discord erlaubt aber nur zwei Umbenennungen pro zehn Minuten, also war eine davon schon weg, bevor ihr überhaupt etwas gemacht habt.
+
+**Änderung:** Habt ihr eine Voreinstellung gespeichert, wird euer Name direkt bei der Erstellung gesetzt. Außerdem hat das Anwenden einer Voreinstellung bisher zwei Umbenennungen statt einer verbraucht, das ist jetzt behoben.
+
+**Aktuelles Verhalten:** Der Kanal trägt von der ersten Sekunde an euren Namen. Eure beiden Umbenennungen gehören wieder euch, nicht dem Bot.
+
 ## #243 — Einladungs-Panel entfernt, Admins laden per Befehl ein
 
 **Ausgangslage:** Das Panel für Playtest-Einladungen war der einzige Weg ins Spiel und lief komplett ohne menschlichen Kontakt. Wer im Trichter feststeckte, bekam davon nichts mit.
