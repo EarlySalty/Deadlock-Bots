@@ -319,7 +319,7 @@ mod tests {
 
     /// Commands, die es nicht mehr gibt. Der DM-Assistent ist die Stelle, an der
     /// der Bot Nutzern sagt, was sie tippen sollen — ein abgeschaffter Command
-    /// hier ist eine Sackgasse, die niemandem auffaellt, weil nichts kaputtgeht.
+    /// hier ist eine Sackgasse, die niemandem auffällt, weil nichts kaputtgeht.
     /// Genau so hat der Bot nach dem /invite-Umbau weiter `/betainvite` empfohlen.
     const ABGESCHAFFTE_COMMANDS: &[&str] = &[
         "/betainvite",

@@ -481,10 +481,10 @@ const USER_TABLES: &[TableSpec] = &[
         "user_id",
         ColumnType::I64,
     ),
-    // Offener `/invite`-Request, adressiert ueber die Discord-ID des
+    // Offener `/invite`-Request, adressiert über die Discord-ID des
     // Eingeladenen. MUSS hier stehen und nicht nur in STEAM_SIDE_TABLES:
     // eingeladen wird jemand, der noch KEINEN core.steam_links-Eintrag hat,
-    // ueber den steam_ids_for_user ihn finden koennte.
+    // über den steam_ids_for_user ihn finden könnte.
     TableSpec::new(
         "invite_requests_target",
         "target_discord_id",
@@ -895,7 +895,7 @@ const STEAM_SIDE_TABLES: &[TableSpec] = &[
         "steam_id64",
         ColumnType::I64,
     ),
-    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthaelt neben der
+    // Offene Admin-Invites (`/invite`). Kurzlebig (24-h-TTL), enthält neben der
     // Steam-ID auch die Discord-ID des Eingeladenen — gehoert damit in die
     // Erasure-Kette, nicht nur in den Poller.
     TableSpec::new(
@@ -1663,8 +1663,8 @@ mod privacy_contract_tests {
         // `server_config.*`: Audit-Referenzen auf Mod-/Admin-AKTIONEN am
         // Server-Soll-Modell (wer hat Diff erstellt / Apply angefordert /
         // Drift adoptiert). Kein Community-Verhaltensdatum; Aufbewahrung zur
-        // Nachvollziehbarkeit administrativer Server-Aenderungen
-        // (berechtigtes Interesse). Ein Opt-out darf die Aenderungs-
+        // Nachvollziehbarkeit administrativer Server-Änderungen
+        // (berechtigtes Interesse). Ein Opt-out darf die Änderungs-
         // Historie des Servers nicht zerstoeren.
         out.insert((
             "server_config.diff_previews".to_string(),
@@ -1678,25 +1678,25 @@ mod privacy_contract_tests {
             "server_config.adoption_events".to_string(),
             "adopted_by_user_id".to_string(),
         ));
-        // Rollback-Artefakte koennen verschachtelte Member-IDs im JSON
-        // enthalten; sie sind deshalb ueber `expires_at` auf 180 Tage
-        // begrenzt und werden durch den Privacy-Retention-Purge geloescht.
+        // Rollback-Artefakte können verschachtelte Member-IDs im JSON
+        // enthalten; sie sind deshalb über `expires_at` auf 180 Tage
+        // begrenzt und werden durch den Privacy-Retention-Purge gelöscht.
         // Die Admin-ID bleibt nur als Ersteller-Auditreferenz allowlisted.
         out.insert((
             "server_config.rollback_exports".to_string(),
             "created_by_user_id".to_string(),
         ));
-        // `core.discord_audit_log.user_id` ist der AUSFUEHRENDE einer Moderations-
+        // `core.discord_audit_log.user_id` ist der AUSFÜHRENDE einer Moderations-
         // aktion (Discord-Semantik: user_id handelt, target_id ist betroffen).
         // Gleiche Kategorie wie server_config.*: Audit einer Admin-Aktion,
         // Aufbewahrung im berechtigten Interesse. Ein Opt-out des Moderators darf
-        // die Moderationshistorie des Servers nicht loeschen.
+        // die Moderationshistorie des Servers nicht löschen.
         out.insert(("core.discord_audit_log".to_string(), "user_id".to_string()));
         // `steam.invite_requests.admin_id` ist der Admin, der `/invite` ausgeloest
         // hat — Audit-Referenz auf eine Admin-AKTION, gleiche Kategorie wie
         // server_config.*. Sein Opt-out darf den offenen Invite eines Dritten
-        // nicht mitreissen; der Eingeladene selbst wird ueber `target_discord_id`
-        // in USER_TABLES geloescht, und die Zeile lebt ohnehin nur 24 h.
+        // nicht mitreissen; der Eingeladene selbst wird über `target_discord_id`
+        // in USER_TABLES gelöscht, und die Zeile lebt ohnehin nur 24 h.
         out.insert(("steam.invite_requests".to_string(), "admin_id".to_string()));
         out
     }
@@ -1875,13 +1875,13 @@ mod tests {
             .await
             .expect("delete");
 
-        // Ueber STEAM_SIDE_TABLES allein waere die Zeile unerreichbar:
+        // Über STEAM_SIDE_TABLES allein wäre die Zeile unerreichbar:
         // steam_ids_for_user liest nur core.steam_links, und der Eingeladene
         // hat dort (noch) nichts stehen.
         assert_eq!(
             invite_requests_count(db.pool()).await,
             0,
-            "offener Invite ueberlebt die Loeschanfrage des Eingeladenen"
+            "offener Invite überlebt die Löschanfrage des Eingeladenen"
         );
     }
 
@@ -1900,7 +1900,7 @@ mod tests {
         assert_eq!(
             invite_requests_count(db.pool()).await,
             1,
-            "Loeschanfrage des Admins hat den Invite eines Dritten geloescht"
+            "Löschanfrage des Admins hat den Invite eines Dritten gelöscht"
         );
     }
 

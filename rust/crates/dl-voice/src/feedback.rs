@@ -357,7 +357,7 @@ impl VoiceFeedback {
         }
         let result = self.delete_feedback_requests_for_user(user_id).await;
         if let Err(err) = result {
-            tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht geloescht werden");
+            tracing::debug!(%err, user_id, "VoiceFeedback: alte Requests konnten nicht gelöscht werden");
         }
     }
 
