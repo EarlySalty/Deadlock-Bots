@@ -317,9 +317,7 @@ fn grounded_response(question: &str, evidence: &[String], chunks: &[Chunk]) -> O
     if evidence.is_empty() {
         return None;
     }
-    let question_terms = tokenize(&expand_query(question))
-        .into_iter()
-        .collect::<HashSet<_>>();
+    let question_terms = grounding_terms(question);
     let mut passages = Vec::with_capacity(evidence.len());
     let mut source_chunks = Vec::with_capacity(evidence.len());
     for raw in evidence {
@@ -327,12 +325,12 @@ fn grounded_response(question: &str, evidence: &[String], chunks: &[Chunk]) -> O
         if passage.is_empty() {
             return None;
         }
-        let passage_terms = tokenize(&passage).into_iter().collect::<HashSet<_>>();
+        let passage_terms = grounding_terms(&passage);
         let chunk = chunks.iter().find(|chunk| {
             if !contains_complete_passage(&chunk.text, &passage) {
                 return false;
             }
-            let chunk_terms = tokenize(&chunk.text).into_iter().collect::<HashSet<_>>();
+            let chunk_terms = grounding_terms(&chunk.text);
             let mut anchors = question_terms.intersection(&chunk_terms);
             let Some(first) = anchors.next() else {
                 return false;
@@ -365,6 +363,27 @@ fn contains_complete_passage(chunk: &str, passage: &str) -> bool {
         (start == 0 || ends_sentence(chunk[..start].trim_end()))
             && (end == chunk.len() || chunk[end..].starts_with(' '))
     })
+}
+
+fn grounding_terms(text: &str) -> HashSet<String> {
+    let mut terms = HashSet::new();
+    for term in tokenize(text) {
+        match term.as_str() {
+            // Nur orthografische Kompaktformen; semantische Aliase bleiben Retrieval-only.
+            "steambot" => {
+                terms.insert("steam".to_string());
+                terms.insert("bot".to_string());
+            }
+            "twitchbot" => {
+                terms.insert("twitch".to_string());
+                terms.insert("bot".to_string());
+            }
+            _ => {
+                terms.insert(term);
+            }
+        }
+    }
+    terms
 }
 
 fn ends_sentence(text: &str) -> bool {
@@ -973,7 +992,28 @@ impl KnowledgeBase {
 
 fn expand_query(query: &str) -> String {
     let lower = query.to_ascii_lowercase();
-    let mut expanded = query.to_string();
+    let phrase_terms = lower
+        .split(|character: char| !character.is_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let is_deadlock_rank = phrase_terms
+        .windows(2)
+        .any(|pair| pair[0] == "deadlock" && matches!(pair[1], "rang" | "rank"));
+    let has_rank_command = lower.match_indices("!rank").any(|(start, command)| {
+        let end = start + command.len();
+        !lower[..start]
+            .chars()
+            .next_back()
+            .is_some_and(|character| character.is_alphanumeric() || character == '_')
+            && !lower[end..]
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_alphanumeric() || character == '_')
+    });
+    // Explizite Wiederholungen der Rohfrage bleiben; nur injizierte Aliase dürfen
+    // keine versteckte BM25-Zusatzgewichtung erzeugen.
+    let mut expanded = tokenize(query);
+    let mut seen = expanded.iter().cloned().collect::<HashSet<_>>();
     for (needle, alias) in [
         ("steambot", " steam bot steam-bot steam dienst"),
         ("twitchbot", " twitch bot twitch-bot"),
@@ -981,18 +1021,25 @@ fn expand_query(query: &str) -> String {
         ("champs", " helden hero heroes tierlist builds winrate"),
         ("charaktere", " helden hero heroes"),
         ("items", " item build builds"),
-        (
-            "deadlock-rang",
-            " steam steam-bot steam_rank checkrank verknuepfung",
-        ),
         ("melde", " anmeldung anmelden registrierung"),
         ("woher", " quelle quellen ursprung"),
     ] {
         if lower.contains(needle) {
-            expanded.push_str(alias);
+            for term in tokenize(alias) {
+                if seen.insert(term.clone()) {
+                    expanded.push(term);
+                }
+            }
         }
     }
-    expanded
+    if is_deadlock_rank && !lower.contains("twitch") && !has_rank_command {
+        for term in tokenize("steam checkrank verknuepfung") {
+            if seen.insert(term.clone()) {
+                expanded.push(term);
+            }
+        }
+    }
+    expanded.join(" ")
 }
 
 impl Bm25Index {
@@ -1286,29 +1333,40 @@ mod tests {
         text.to_lowercase().contains(&term.to_lowercase())
     }
 
-    #[test]
-    fn golden_suite_verlangt_exakt_224_faelle() -> Result<()> {
-        let tmp = tempfile::tempdir()?;
-        let golden_dir = tmp.path().join("evals");
-        let docs_path = tmp.path().join("public");
+    fn write_golden_suite(root: &Path, case_count: usize) -> Result<(PathBuf, PathBuf)> {
+        let golden_dir = root.join("evals");
+        let docs_path = root.join("public");
         std::fs::create_dir_all(&golden_dir)?;
         std::fs::create_dir_all(&docs_path)?;
         std::fs::write(docs_path.join("hilfe.html"), "<html></html>")?;
-        for (index, file) in GOLDEN_FILES.iter().enumerate() {
-            let cases = json!([{
-                "question": format!("Frage {index}"),
-                "answerable": true,
-                "expected_sources": ["hilfe.html"],
-                "context_terms": ["Kontext"],
-                "answer_terms": ["Antwort"],
-                "forbidden_terms": []
-            }]);
+        for (file_index, file) in GOLDEN_FILES.iter().enumerate() {
+            let cases = (file_index..case_count)
+                .step_by(GOLDEN_FILES.len())
+                .map(|case_index| {
+                    json!({
+                        "question": format!("Frage {case_index}"),
+                        "answerable": true,
+                        "expected_sources": ["hilfe.html"],
+                        "context_terms": ["Kontext"],
+                        "answer_terms": ["Antwort"],
+                        "forbidden_terms": []
+                    })
+                })
+                .collect::<Vec<_>>();
             std::fs::write(golden_dir.join(file), serde_json::to_vec(&cases)?)?;
         }
+        Ok((golden_dir, docs_path))
+    }
 
-        let error = load_golden_cases(&golden_dir, &docs_path).expect_err("nur 6 statt 224");
+    #[test]
+    fn golden_suite_verlangt_exakt_224_faelle() -> Result<()> {
+        let tmp = tempfile::tempdir()?;
+        let (golden_dir, docs_path) = write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT)?;
+        let cases = load_golden_cases(&golden_dir, &docs_path)?;
+        assert_eq!(cases.len(), GOLDEN_CASE_COUNT);
 
-        assert!(error.to_string().contains("statt exakt 224"));
+        write_golden_suite(tmp.path(), GOLDEN_CASE_COUNT + 1)?;
+        assert!(load_golden_cases(&golden_dir, &docs_path).is_err());
         Ok(())
     }
 
@@ -1695,6 +1753,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(unix)]
     #[test]
     fn produktionslader_lehnt_public_symlink_auf_internal_ab() -> Result<()> {
         let temp = tempfile::tempdir()?;
@@ -1705,7 +1764,41 @@ mod tests {
         std::fs::write(internal_public.join("secret.html"), HTML_FIXTURE)?;
         std::os::unix::fs::symlink(&internal_public, current.join("public"))?;
 
-        assert!(load_production_corpus(&current.join("public")).is_err());
+        let error = load_production_corpus(&current.join("public"))
+            .expect_err("internal-Root-Symlink muss abgelehnt werden");
+
+        assert!(error
+            .to_string()
+            .contains("Kanonischer Korpus-Root enthält internal"));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn korpus_collector_und_lader_folgen_keinen_symlinks() -> Result<()> {
+        let temp = tempfile::tempdir()?;
+        let public = temp.path().join("public");
+        let internal = temp.path().join("internal");
+        std::fs::create_dir(&public)?;
+        std::fs::create_dir(&internal)?;
+        std::fs::write(public.join("visible.html"), HTML_FIXTURE)?;
+        std::fs::write(internal.join("secret.html"), HTML_FIXTURE)?;
+        std::os::unix::fs::symlink("../internal/secret.html", public.join("link.html"))?;
+        std::os::unix::fs::symlink("../internal", public.join("link_dir"))?;
+
+        let mut files = Vec::new();
+        collect_corpus_files(&public, "html", &mut files)?;
+        let knowledge = load_production_corpus(&public)?;
+        let stats = knowledge.source_stats();
+
+        assert_eq!(files, [public.join("visible.html")]);
+        assert!(knowledge
+            .chunks
+            .iter()
+            .all(|chunk| chunk.path == "visible.html"));
+        assert_eq!(stats.html_sources, 1);
+        assert_eq!(stats.non_html_sources, 0);
+        assert_eq!(stats.internal_sources, 0);
         Ok(())
     }
 
@@ -2249,7 +2342,7 @@ Frag im Support.
     }
 
     #[test]
-    fn bm25_findet_steamquelle_bei_deadlock_rangfrage_zwischen_bot_distraktoren() {
+    fn bm25_rankt_steamquelle_fuer_eindeutige_deadlock_rangformen_zuerst() {
         let mut chunks = (0..6)
             .map(|index| {
                 test_chunk(
@@ -2268,11 +2361,93 @@ Frag im Support.
         ));
         let knowledge = KnowledgeBase::from_chunks(chunks);
 
-        let results = knowledge.search("Wie prüfe ich meinen Deadlock-Rang über den Bot?", 6);
+        for question in [
+            "Wie prüfe ich meinen Deadlock-Rang über den Bot?",
+            "Wie prüfe ich meinen Deadlock Rang über den Bot?",
+            "Wie prüfe ich meinen Deadlock Rank über den Bot?",
+        ] {
+            let results = knowledge.search(question, 6);
 
-        assert!(results
-            .iter()
-            .any(|(chunk, _)| chunk.path == "steam-bot.html"));
+            assert_eq!(results[0].0.path, "steam-bot.html", "{question}");
+        }
+    }
+
+    #[test]
+    fn bm25_erkennt_nur_exakten_rank_command_als_twitch_kontext() {
+        let knowledge = KnowledgeBase::from_chunks(vec![
+            test_chunk(
+                "Twitch-Bot",
+                "Chat-Befehl !rank",
+                "twitch-chat.html",
+                "Mit !rank zeigst du deinen Deadlock-Rang im Twitch-Chat.",
+            ),
+            test_chunk(
+                "Steam-Bot",
+                "Deadlock-Rang prüfen",
+                "steam-bot.html",
+                "Die Steam-Verknüpfung prüfst du mit /steam_rank oder /checkrank.",
+            ),
+        ]);
+
+        let exact = knowledge.search("Wie nutze ich !rank für meinen Deadlock-Rang?", 2);
+        let longer = knowledge.search("Wie nutze ich !ranked für meinen Deadlock-Rang?", 2);
+
+        assert_eq!(exact[0].0.path, "twitch-chat.html");
+        assert_eq!(longer[0].0.path, "steam-bot.html");
+    }
+
+    #[test]
+    fn bm25_zwingt_ambivalente_rangfrage_nicht_zum_steam_bot() {
+        let knowledge = KnowledgeBase::from_chunks(vec![
+            test_chunk(
+                "Twitch-Bot",
+                "Rang prüfen",
+                "twitch-chat.html",
+                "Rang prüfen.",
+            ),
+            test_chunk("Steam-Bot", "Rang prüfen", "steam-bot.html", "Rang prüfen."),
+        ]);
+
+        let results = knowledge.search("Rang prüfen?", 2);
+
+        assert_eq!(results[0].0.path, "twitch-chat.html");
+    }
+
+    #[test]
+    fn bm25_behandelt_deadlock_oder_rang_nicht_als_eindeutige_rangphrase() {
+        let knowledge = KnowledgeBase::from_chunks(vec![
+            test_chunk(
+                "Twitch-Bot",
+                "Rang prüfen",
+                "twitch-chat.html",
+                "Rang prüfen.",
+            ),
+            test_chunk("Steam-Bot", "Rang prüfen", "steam-bot.html", "Rang prüfen."),
+        ]);
+
+        let results = knowledge.search("Deadlock oder Rang?", 2);
+
+        assert_eq!(results[0].0.path, "twitch-chat.html");
+    }
+
+    #[test]
+    fn deadlock_rang_expansion_dedupliziert_termstrom_stabil() {
+        let terms = tokenize(&expand_query("Deadlock-Rang über Steam"));
+
+        assert_eq!(
+            terms,
+            ["deadlock", "rang", "steam", "checkrank", "verknuepfung"]
+        );
+    }
+
+    #[test]
+    fn query_expansion_bewahrt_steambot_aliase_ohne_duplikate() {
+        let terms = tokenize(&expand_query("wie funktioniert der steambot?"));
+
+        assert_eq!(
+            terms,
+            ["funktioniert", "steambot", "steam", "bot", "dienst"]
+        );
     }
 
     #[test]
@@ -2361,6 +2536,65 @@ Frag im Support.
             assert_eq!(body["answerable"], true, "{question}");
             assert_eq!(body["answer"], evidence, "{question}");
             assert_eq!(generator.calls(), 1, "{question}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_handler_groundet_deadlock_rang_evidence_nur_gegen_rohfrage() -> Result<()> {
+        let evidence = "Deadlock-Rang prüfen: Nutze /checkrank.";
+        let generator = Arc::new(MockGenerator::new(vec![Some(
+            json!({"answerable": true, "evidence": [evidence]}).to_string(),
+        )]));
+        let (app, _) = test_app(
+            vec![test_chunk(
+                "Steam-Bot",
+                "Deadlock-Rang prüfen",
+                "steam-bot.html",
+                &format!("{evidence} Der Steam-Bot nutzt dafür die Steam-Verknüpfung."),
+            )],
+            Some(generator),
+        );
+
+        let (status, body) = post_ask(app, json!({"question": "Deadlock-Rang prüfen?"})).await?;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["answerable"], true);
+        assert_eq!(body["answer"], evidence);
+        assert_eq!(body["sources"][0]["path"], "steam-bot.html");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_handler_groundet_kompakte_bot_aliase_kanonisch() -> Result<()> {
+        for (question, title, path, evidence) in [
+            (
+                "wie funktioniert der steambot?",
+                "Steam Bot",
+                "steam-bot.html",
+                "Der Steam Bot erklärt die öffentliche Verknüpfung.",
+            ),
+            (
+                "wie funktioniert der twitchbot?",
+                "Twitch Bot",
+                "twitch-bot.html",
+                "Der Twitch Bot erklärt den öffentlichen Chat-Befehl.",
+            ),
+        ] {
+            let generator = Arc::new(MockGenerator::new(vec![Some(
+                json!({"answerable": true, "evidence": [evidence]}).to_string(),
+            )]));
+            let (app, _) = test_app(
+                vec![test_chunk(title, "Support", path, evidence)],
+                Some(generator),
+            );
+
+            let (status, body) = post_ask(app, json!({"question": question})).await?;
+
+            assert_eq!(status, 200);
+            assert_eq!(body["answerable"], true, "{question}");
+            assert_eq!(body["answer"], evidence, "{question}");
+            assert_eq!(body["sources"][0]["path"], path, "{question}");
         }
         Ok(())
     }
