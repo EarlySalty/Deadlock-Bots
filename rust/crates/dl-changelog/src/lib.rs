@@ -171,43 +171,37 @@ pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
 
 fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
     let payload = parse_spam_learning(data.get("spam_learning"))?;
-    let mut buttons: Vec<Value> = Vec::new();
-    // Pro gelerntem Muster ein Rückgängig-Button (Row-ID in der custom_id).
-    // Discord: max. 5 Buttons pro Action-Row, max. 5 Rows → hart bei 25 kappen.
-    for learned in payload.learned.iter().take(25) {
-        buttons.push(json!({
+    // Genau EIN Button pro Meldung: Der Twitch-Judge lernt höchstens ein
+    // Muster pro Fall, und der Klick-Handler ersetzt beim Korrigieren die
+    // komplette Button-Zeile durch einen disabled-Button — mehrere Buttons
+    // wären nach dem ersten Klick verloren.
+    if payload.learned.len() > 1 {
+        tracing::warn!(
+            anzahl = payload.learned.len(),
+            "spam_learning: mehrere gelernte Muster gemeldet — nur das erste bekommt einen Button"
+        );
+    }
+    let button = if let Some(learned) = payload.learned.first() {
+        // Rückgängig-Button (Row-ID in der custom_id).
+        json!({
             "type": 2,
             "style": 3,
             "label": "Als harmlos korrigieren",
             "custom_id": format!("spam-learning:correct:spam:{}", learned.id),
-        }));
-    }
-    if payload.learned.len() > 25 {
-        tracing::warn!(
-            anzahl = payload.learned.len(),
-            "spam_learning: mehr als 25 gelernte Muster — Buttons gekappt"
-        );
-    }
-    // Nichts gelernt (Harmlos-/Fehler-/Cooldown-Urteil oder Gate-Ablehnung):
-    // ein Button, der das Muster aus der custom_id als Spam nachlernt.
-    if buttons.is_empty() {
-        if let Some(pattern) = &payload.learn_pattern {
-            buttons.push(json!({
-                "type": 2,
-                "style": 4,
-                "label": "Als Spam korrigieren",
-                "custom_id": format!("spam-learning:learn:{pattern}"),
-            }));
-        }
-    }
-    if buttons.is_empty() {
+        })
+    } else if let Some(pattern) = &payload.learn_pattern {
+        // Nichts gelernt (Harmlos-/Fehler-/Cooldown-Urteil oder
+        // Gate-Ablehnung): Muster aus der custom_id als Spam nachlernen.
+        json!({
+            "type": 2,
+            "style": 4,
+            "label": "Als Spam korrigieren",
+            "custom_id": format!("spam-learning:learn:{pattern}"),
+        })
+    } else {
         return None;
-    }
-    let rows: Vec<Value> = buttons
-        .chunks(5)
-        .map(|chunk| json!({ "type": 1, "components": chunk }))
-        .collect();
-    Some(Value::Array(rows))
+    };
+    Some(json!([{ "type": 1, "components": [button] }]))
 }
 
 pub fn router(state: SharedChangelog) -> Router {
