@@ -951,6 +951,10 @@ fn expand_query(query: &str) -> String {
         ("champs", " helden hero heroes tierlist builds winrate"),
         ("charaktere", " helden hero heroes"),
         ("items", " item build builds"),
+        (
+            "deadlock-rang",
+            " steam steam-bot steam_rank checkrank verknuepfung",
+        ),
         ("melde", " anmeldung anmelden registrierung"),
         ("woher", " quelle quellen ursprung"),
     ] {
@@ -1915,6 +1919,33 @@ Frag im Support.
 
         assert_eq!(steambot[0].0.path, "steam.md");
         assert_eq!(ascii[0].0.path, "steam.md");
+    }
+
+    #[test]
+    fn bm25_findet_steamquelle_bei_deadlock_rangfrage_zwischen_bot_distraktoren() {
+        let mut chunks = (0..6)
+            .map(|index| {
+                test_chunk(
+                    "Twitch-Bot",
+                    "Rang und Analytics",
+                    &format!("twitch-{index}.html"),
+                    "Der Bot zeigt Deadlock-Rang und Statistiken im Twitch-Dashboard.",
+                )
+            })
+            .collect::<Vec<_>>();
+        chunks.push(test_chunk(
+            "Steam-Bot",
+            "Deadlock-Rang prüfen",
+            "steam-bot.html",
+            "Die eigene Steam-Verknüpfung prüfst du mit /steam_rank oder /checkrank.",
+        ));
+        let knowledge = KnowledgeBase::from_chunks(chunks);
+
+        let results = knowledge.search("Wie prüfe ich meinen Deadlock-Rang über den Bot?", 6);
+
+        assert!(results
+            .iter()
+            .any(|(chunk, _)| chunk.path == "steam-bot.html"));
     }
 
     #[test]
