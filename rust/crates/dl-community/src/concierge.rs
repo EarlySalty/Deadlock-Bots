@@ -408,11 +408,11 @@ const OPTOUT_POLITE_PREFIX: [&str; 12] = [
 /// Kurze Höflichkeitstoken, die INNERHALB einer Opt-out-Phrase stehen dürfen ("schreib mir bitte
 /// nicht mehr", "lass mich bitte in Ruhe"), ohne sie zu entwerten. Bewusst schmal, damit keine
 /// Themenwörter verschluckt werden.
-const OPTOUT_INTERIOR_POLITE: [&str; 5] = ["bitte", "doch", "mal", "halt", "jetzt"];
+const OPTOUT_INTERIOR_POLITE: [&str; 6] = ["bitte", "doch", "mal", "halt", "jetzt", "einfach"];
 
 /// Themenmarker, die eine "schreib mir nicht mehr"-Bitte scoped/quantitativ machen ("... über
 /// Steam", "... nicht mehr als einen Satz") und damit KEINEN globalen Opt-out bedeuten.
-const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
+const OPTOUT_TOPIC_MARKERS: [&str; 16] = [
     "über",
     "ueber",
     "zu",
@@ -427,10 +427,12 @@ const OPTOUT_TOPIC_MARKERS: [&str; 14] = [
     "davon",
     "wegen",
     "als",
+    "auf",
+    "mit",
 ];
 
-/// Die einleitende Opt-out-Direktive einer Nachricht. Schreib-Direktiven sind für Themenmarker
-/// anfällig, deshalb wird die Variante mitgeführt.
+/// Die einleitende Opt-out-Direktive einer Nachricht. Direktiven mit möglichem Themenbezug werden
+/// unterschieden, damit ein lokaler Wunsch kein globaler Opt-out wird.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum OptoutDirective {
     Stopp,
@@ -452,7 +454,7 @@ pub fn optout_intent(text: &str) -> bool {
     }
 
     // Satzzeichen-robust tokenisieren, damit "Stopp!"/"stopp." nicht am Ausrufezeichen scheitern.
-    let lower = cleaned.to_ascii_lowercase();
+    let lower = cleaned.to_lowercase();
     let tokens: Vec<&str> = lower
         .split(|c: char| !c.is_alphanumeric())
         .filter(|token| !token.is_empty())
@@ -477,11 +479,11 @@ pub fn optout_intent(text: &str) -> bool {
     };
     let tail = &rest[directive_len..];
 
-    // (5) Themenmarker nach einer Schreib-Direktive machen die Bitte scoped/quantitativ. Kurze
+    // (5) Themenmarker nach einer Schreib- oder Ruhe-Direktive machen die Bitte scoped. Kurze
     //     Höflichkeit und "nur" dürfen vor dem eigentlichen Marker stehen.
     if matches!(
         directive,
-        OptoutDirective::WriteNoMore | OptoutDirective::NoMoreContact
+        OptoutDirective::WriteNoMore | OptoutDirective::LeaveAlone | OptoutDirective::NoMoreContact
     ) && tail
         .iter()
         .copied()
@@ -499,7 +501,7 @@ pub fn optout_intent(text: &str) -> bool {
     // (4a) Bei einem führenden geschlossenen Zitat zählt nur eine Ernsthaftigkeitsklarstellung
     //      außerhalb des Zitats. Marker innerhalb eines vollständigen Zitats bleiben Erwähnung.
     if let Some(suffix) = suffix_after_leading_quote(cleaned) {
-        let lower = suffix.to_ascii_lowercase();
+        let lower = suffix.to_lowercase();
         let suffix_tokens: Vec<&str> = lower
             .split(|c: char| !c.is_alphanumeric())
             .filter(|token| !token.is_empty())
@@ -4354,6 +4356,37 @@ mod tests {
     fn optout_intent_zeitlich_begrenzte_ruhe_bleibt_lokal() {
         assert!(!optout_intent(
             "Lass mich jetzt in Ruhe, später kannst du wieder schreiben."
+        ));
+    }
+
+    #[test]
+    fn optout_intent_einfach_in_leave_alone_phrase() {
+        assert!(optout_intent("Lass mich einfach in Ruhe."));
+    }
+
+    #[test]
+    fn optout_intent_einfach_in_write_no_more_phrase() {
+        assert!(optout_intent("Schreib mir bitte einfach nicht mehr."));
+    }
+
+    #[test]
+    fn optout_intent_auf_markiert_schreibwunsch_als_scoped() {
+        assert!(!optout_intent(
+            "Schreib mir nicht mehr auf Steam, aber auf Discord schon."
+        ));
+    }
+
+    #[test]
+    fn optout_intent_mit_markiert_ruhe_wunsch_als_scoped() {
+        assert!(!optout_intent(
+            "Lass mich in Ruhe mit Steam, zu Discord kannst du schreiben."
+        ));
+    }
+
+    #[test]
+    fn optout_intent_unicode_grossschreibung_des_topic_markers() {
+        assert!(!optout_intent(
+            "Schreib mir nicht mehr ÜBER Steam, aber über Discord schon."
         ));
     }
 
