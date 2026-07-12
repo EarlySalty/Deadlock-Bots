@@ -12,6 +12,7 @@ use dl_discord::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use serenity::all::{ChannelId, MessageId};
 
 const PROPOSAL_CHANNEL_ID: u64 = 1_474_543_558_793_887_937;
 const MOD_ROLE_ID: u64 = 1_337_518_124_647_579_661;
@@ -81,6 +82,11 @@ struct RenderedRequest {
     config_json: String,
     channel_id: String,
     message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PlannedRequest {
+    config_json: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +174,22 @@ impl TurnierClient {
         .await
     }
 
+    async fn planned(
+        &self,
+        proposal_id: i64,
+        request: &PlannedRequest,
+    ) -> Result<ProposalEnvelope, String> {
+        self.request(
+            self.http
+                .post(format!(
+                    "{}/internal/turnier/v1/proposals/{proposal_id}/planned",
+                    self.base_url
+                ))
+                .json(request),
+        )
+        .await
+    }
+
     async fn announcement_rendered(
         &self,
         proposal_id: i64,
@@ -248,10 +270,32 @@ impl TurnierProposalService {
             return Ok(message_id);
         }
 
-        let config = self.plan_config(&proposal, None).await?;
-        let body = proposal_body(&proposal, &config)?;
+        let current: Value = serde_json::from_str(&proposal.proposal.config_json)
+            .map_err(|error| format!("Gespeicherter Turnierplan ungültig: {error}"))?;
+        let (proposal, config) = if current
+            .get("_ai_planned")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            (proposal, current)
+        } else {
+            let mut config = self.plan_config(&proposal, None).await?;
+            config["_ai_planned"] = json!(true);
+            let stored = self
+                .client
+                .planned(
+                    proposal_id,
+                    &PlannedRequest {
+                        config_json: config.to_string(),
+                    },
+                )
+                .await?;
+            (stored, config)
+        };
+        let body = proposal_send_body(&proposal, &config)?;
         let message_id = self.adapter.send_raw_public(channel_id, &body).await?;
-        self.client
+        if let Err(error) = self
+            .client
             .rendered(
                 proposal_id,
                 &RenderedRequest {
@@ -260,7 +304,34 @@ impl TurnierProposalService {
                     message_id: message_id.to_string(),
                 },
             )
-            .await?;
+            .await
+        {
+            let cleanup = self
+                .adapter
+                .http
+                .delete_message(
+                    ChannelId::new(channel_id),
+                    MessageId::new(message_id),
+                    Some("Turniervorschlag konnte nicht persistiert werden"),
+                )
+                .await;
+            if let Err(cleanup_error) = cleanup {
+                tracing::error!(
+                    proposal_id,
+                    channel_id,
+                    message_id,
+                    %error,
+                    cleanup_error = %cleanup_error,
+                    "Nicht persistierte Vorschlagskarte konnte nicht entfernt werden"
+                );
+                return Err(format!(
+                    "Vorschlagsplan gespeichert, Karten-Verknüpfung fehlgeschlagen ({error}); Cleanup fehlgeschlagen ({cleanup_error})"
+                ));
+            }
+            return Err(format!(
+                "Vorschlagsplan gespeichert, Karten-Verknüpfung fehlgeschlagen: {error}"
+            ));
+        }
         Ok(message_id)
     }
 
@@ -748,6 +819,19 @@ fn proposal_body(
     Ok(body)
 }
 
+fn proposal_send_body(
+    envelope: &ProposalEnvelope,
+    config: &Value,
+) -> Result<Map<String, Value>, String> {
+    let mut body = proposal_body(envelope, config)?;
+    body.insert(
+        "nonce".to_string(),
+        json!(format!("tp-{}", envelope.proposal.id)),
+    );
+    body.insert("enforce_nonce".to_string(), json!(true));
+    Ok(body)
+}
+
 fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Vec<Value>, String> {
     validate_plan(config)?;
     let name = config
@@ -931,8 +1015,9 @@ mod tests {
 
     #[test]
     fn proposal_card_is_gold_components_v2_with_three_actions() {
-        let body = proposal_body(&envelope(), &config()).expect("valid card");
+        let body = proposal_send_body(&envelope(), &config()).expect("valid card");
         assert_eq!(body.get("flags"), Some(&json!(COMPONENTS_V2)));
+        assert_eq!(body.get("enforce_nonce"), Some(&json!(true)));
         let container = &body["components"][0];
         assert_eq!(container["accent_color"], json!(GOLD));
         assert_eq!(
