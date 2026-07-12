@@ -199,11 +199,13 @@ impl VoiceNudge {
         else {
             return;
         };
-        self.trigger_voice_return(user_id).await;
-
         if self.is_opted_out(user_id).await {
             return;
         }
+        // Nach dem Opt-out-Gate (Datenschutz gilt auch für Steam-Re-Friend),
+        // aber vor den Nudge-Frühausstiegen: Rückkehrer HABEN einen Steam-Link.
+        self.trigger_voice_return(user_id).await;
+
         let roles = self.port.member_role_ids(guild_id, user_id).await;
         if roles.iter().any(|r| EXEMPT_ROLE_IDS.contains(r)) {
             return;
@@ -829,6 +831,50 @@ mod tests {
         }
 
         assert_eq!(port.voice_returns.lock().expect("lock").as_slice(), &[200]);
+    }
+
+    #[tokio::test]
+    async fn opt_out_verhindert_voice_return_trigger() {
+        let (_db, nudge, port) = setup(None).await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.users (discord_id)
+            VALUES (300)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("users");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.steam_links (
+                discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at
+            )
+            VALUES (300, 'returner-opt-out', FALSE, 'inactive_purge', NULL)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("links");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.user_privacy (user_id, opted_out, updated_at)
+            VALUES (300, TRUE, NOW())
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("opt-out");
+
+        nudge
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 300,
+                channel_id: 5,
+            })
+            .await;
+
+        assert!(port.voice_returns.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]
