@@ -454,6 +454,9 @@ impl InteractionHandler for ProposalHandler {
                             went_live = envelope.went_live,
                             "Turniervorschlag-Aktion"
                         );
+                        if let Err(error) = self.service.edit_proposal_message(&envelope).await {
+                            return BridgeReply::ephemeral_text(error);
+                        }
                         if envelope.went_live {
                             let draft = self.service.announcement_draft(&envelope).await;
                             if let Err(error) = self
@@ -465,7 +468,11 @@ impl InteractionHandler for ProposalHandler {
                                 tracing::error!(%error, proposal_id, "Ankündigungsentwurf nicht postbar");
                             }
                         }
-                        update_reply(&envelope)
+                        BridgeReply::ephemeral_text(if envelope.went_live {
+                            "Zweite Freigabe gespeichert; Turnier angelegt und interne Vorlage erstellt."
+                        } else {
+                            "Freigabe gespeichert."
+                        })
                     }
                     Err(error) => BridgeReply::ephemeral_text(error),
                 }
@@ -662,20 +669,6 @@ fn modal(custom_id: String, title: &str, field_id: &str, label: &str) -> BridgeR
             }],
         }),
         ..BridgeReply::default()
-    }
-}
-
-fn update_reply(envelope: &ProposalEnvelope) -> BridgeReply {
-    let config = serde_json::from_str(&envelope.proposal.config_json).unwrap_or(Value::Null);
-    match proposal_components(envelope, &config) {
-        Ok(components) => BridgeReply {
-            components: Some(Value::Array(components)),
-            message_flags: Some(COMPONENTS_V2),
-            allowed_mentions: Some(json!({"parse": []})),
-            update_message: true,
-            ..BridgeReply::default()
-        },
-        Err(error) => BridgeReply::ephemeral_text(error),
     }
 }
 
