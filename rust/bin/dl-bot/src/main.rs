@@ -1170,6 +1170,40 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             tracing::info!("Player-Finder deaktiviert (PLAYER_FINDER_ENABLED nicht gesetzt)");
         }
 
+        match dl_activity::lfg_freetext::config_from_lookup(env) {
+            Ok(None) => {
+                tracing::info!("LFG-Freitext deaktiviert (DL_LFG_FREITEXT_ENABLED nicht gesetzt)")
+            }
+            Err(error) => {
+                tracing::warn!(%error, "LFG-Freitext deaktiviert: ungueltige Konfiguration")
+            }
+            Ok(Some(config)) => match dl_ai::LlmProviderConfig::from_env(env) {
+                Err(error) => {
+                    tracing::warn!(%error, "LFG-Freitext deaktiviert: LLM-Konfiguration ungueltig")
+                }
+                Ok(provider_config) => match provider_config
+                    .build_provider_for_env(dl_ai::LlmUseCase::LfgFreitext, env)
+                {
+                    Err(error) => {
+                        tracing::warn!(%error, "LFG-Freitext deaktiviert: LLM-Provider nicht verfuegbar")
+                    }
+                    Ok(provider) => {
+                        let channel_id = config.channel_id;
+                        let handler = dl_activity::lfg_freetext::FreetextLfg::new(
+                            config,
+                            central_pool.clone(),
+                            provider,
+                            Arc::new(modglue::LfgFreetextGlue {
+                                adapter: adapter.clone(),
+                            }),
+                        );
+                        let _lfg_freetext = dl_activity::lfg_freetext::spawn(handler, &dispatcher);
+                        tracing::info!(channel_id, "LFG-Freitext aktiviert");
+                    }
+                },
+            },
+        }
+
         // Website-Invites (5): permanente Codes je Unterseite sicherstellen
         let website_invites = dl_community::invites::WebsiteInvites {
             store: dl_community::invites::InviteStore {

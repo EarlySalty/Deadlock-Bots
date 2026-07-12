@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LFG-Freitext — technischer Betrieb</title>
+  <style>
+    body { max-width: 52rem; margin: 2rem auto; padding: 0 1rem; font: 16px/1.55 system-ui, sans-serif; color: #222; }
+    code, pre { background: #f3f3f3; }
+    code { padding: .1rem .3rem; }
+    pre { padding: 1rem; overflow: auto; }
+    h1, h2 { line-height: 1.2; }
+  </style>
+</head>
+<body>
+  <h1>LFG-Freitext — technischer Betrieb</h1>
+  <p>Stand: 2026-07-12. Der neue Flow läuft parallel zu bestehenden LFG-Panels und Watches.</p>
+
+  <h2>Aktivierung</h2>
+  <p>Standardmäßig ist der Listener aus. Zum Aktivieren müssen
+    <code>DL_LFG_FREITEXT_ENABLED=true</code> und eine positive
+    <code>DL_LFG_FREITEXT_CHANNEL_ID</code> gesetzt sein. Der LLM-Provider wird über
+    <code>DL_LLM_PROVIDER_LFG_FREITEXT</code> im vorhandenen Provider-Router gewählt.</p>
+
+  <h2>Parser-Vertrag</h2>
+  <pre>{
+  "elo_band": {"min": 1, "max": 11},
+  "start_window": {"start": "RFC3339", "end": "RFC3339"},
+  "needed_players": 1,
+  "mode": "ranked|casual|street_brawl|unknown",
+  "uncertainty": 0.0
+}</pre>
+  <p>Discord-Inhalt wird JSON-kodiert als untrusted Datenfeld übergeben. Relative Zeiten beziehen
+    sich auf <code>Europe/Berlin</code>. Unbekannte Felder, ungültige Werte, mehr als 35 Prozent
+    Unsicherheit oder Providerfehler stoppen den Flow. Fehlt nur das Zeitfenster, entsteht genau
+    eine öffentliche Rückfrage.</p>
+
+  <h2>Deterministisches Matching</h2>
+  <p>Kandidaten stammen aus <code>activity.user_activity_patterns</code> und derselben Guild.
+    Geprüft werden das Proactive-DM-Gate, Aktivität in den letzten 14 Tagen, passender Wochentag
+    und Stundenbereich sowie Rank-Nähe von ±3 um die Mitte des Elo-Bands. Eine Modus-Historie
+    schränkt nur ein, wenn sie in einer künftigen Datenquelle vorhanden ist.</p>
+
+  <h2>Ausgabe und Beobachtbarkeit</h2>
+  <p>Zugelassene Kandidaten erzeugen ausschließlich einen idempotenten
+    <code>bot.action_outbox</code>-Eintrag vom Typ <code>lfg_invite</code>; dieser Flow versendet
+    keine DM. Logs enthalten Parser-Ergebnis, jede Kandidatenentscheidung samt Grund und jeden
+    erfolgreichen oder unterdrückten Outbox-Schreibversuch.</p>
+</body>
+</html>
