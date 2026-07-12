@@ -212,7 +212,13 @@ impl DiscordAdapter {
         }
 
         body.insert("content".into(), json!(message.content));
-        body.insert("embeds".into(), json!([message.embed]));
+        if message
+            .embed
+            .as_object()
+            .is_some_and(|embed| !embed.is_empty())
+        {
+            body.insert("embeds".into(), json!([message.embed]));
+        }
         body.insert(
             "allowed_mentions".into(),
             Self::allowed_mentions(&message.allowed_user_ids, &message.allowed_role_ids),
@@ -1166,6 +1172,28 @@ mod tests {
                 }],
             })
         );
+    }
+
+    #[test]
+    fn rich_body_haengt_nur_nicht_leere_embeds_an() {
+        let mut message = RichMessage {
+            channel_id: 123,
+            content: Some("content only".to_string()),
+            embed: json!({}),
+            allowed_user_ids: vec![],
+            allowed_role_ids: vec![],
+            view_spec: None,
+            components: None,
+        };
+
+        let body = DiscordAdapter::rich_body(&message);
+
+        assert!(!body.contains_key("embeds"));
+
+        message.embed = json!({"description": "x"});
+        let body = DiscordAdapter::rich_body(&message);
+
+        assert_eq!(body.get("embeds"), Some(&json!([{"description": "x"}])));
     }
 
     #[test]
