@@ -851,7 +851,8 @@ fn option_text(interaction: &BridgeInteraction, key: &str) -> String {
 }
 
 fn needs_announcement(envelope: &ProposalEnvelope) -> bool {
-    envelope.proposal.tournament_id.is_some() && !envelope.announcement_posted
+    (envelope.proposal.tournament_id.is_some() || envelope.tournament_id.is_some())
+        && !envelope.announcement_posted
 }
 
 fn modal(custom_id: String, title: &str, field_id: &str, label: &str) -> BridgeReply {
@@ -1151,6 +1152,10 @@ mod tests {
             completed[0]["components"][4]["components"][0]["disabled"],
             true
         );
+
+        let mut top_level_only = envelope();
+        top_level_only.tournament_id = Some(8);
+        assert!(needs_announcement(&top_level_only));
     }
 
     #[tokio::test]
