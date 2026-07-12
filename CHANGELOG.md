@@ -1,3 +1,13 @@
+## #250 — „Kann“ blockiert keine passende FAQ-Antwort
+
+Problem: Richtige FAQ-Passagen wurden bei Fragen mit „kann“ abgelehnt, wenn das Wort erst später im gefundenen Dokument stand.
+
+Änderung: „kann“ zählt nicht mehr als thematischer Beleg; die übrigen Inhaltsanker und die vollständige Belegprüfung bleiben unverändert.
+
+Aktuelles Verhalten: Fragen zum Stellen einer Server- oder Bot-Frage werden aus der passenden öffentlichen Passage beantwortet, themenfremde Texte weiterhin abgelehnt.
+
+---
+
 ## #249 — FAQ-Chat wird eindeutig erkannt
 
 Problem: Eine Frage zum privaten FAQ-Chat wurde trotz exakter öffentlicher Passage abgelehnt, weil „Fragechat“ und „FAQ-Chat“ unterschiedlich verglichen wurden.
