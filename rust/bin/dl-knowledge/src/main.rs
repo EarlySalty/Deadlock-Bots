@@ -385,6 +385,10 @@ fn grounding_terms(text: &str) -> HashSet<String> {
                 terms.insert("twitch".to_string());
                 terms.insert("bot".to_string());
             }
+            "fragechat" => {
+                terms.insert("frage".to_string());
+                terms.insert("chat".to_string());
+            }
             _ => {
                 terms.insert(term);
             }
@@ -2429,6 +2433,51 @@ mod tests {
     }
 
     #[test]
+    fn grounding_expandiert_faq_chat_und_fragechat_stabil() {
+        assert_eq!(
+            grounding_terms("FAQ-Chat"),
+            HashSet::from(["faq".to_string(), "chat".to_string()])
+        );
+        assert_eq!(
+            grounding_terms("Fragechat"),
+            HashSet::from(["frage".to_string(), "chat".to_string()])
+        );
+    }
+
+    #[test]
+    fn grounding_expandiert_nur_das_exakte_fragechat_token() {
+        assert_eq!(
+            grounding_terms("Umfragechat"),
+            HashSet::from(["umfragechat".to_string()])
+        );
+        assert_eq!(
+            grounding_terms("Fragechatbot"),
+            HashSet::from(["fragechatbot".to_string()])
+        );
+    }
+
+    #[test]
+    fn fragechat_evidence_erdet_keinen_fremden_chatkontext() {
+        let evidence = "Privaten Fragechat öffnen Über die Schaltfläche Frage stellen im Bereich für Server- und Bot-Fragen. Oder mit dem Befehl /faq auf dem Server.";
+        let chunks = vec![test_chunk(
+            "FAQ",
+            "Privaten Fragechat öffnen",
+            "faq.html",
+            &format!("{evidence} Twitch-Chat und Voice-Chat sind andere Themen."),
+        )];
+
+        for question in [
+            "Wie öffne ich einen Twitch-Chat?",
+            "Wie öffne ich einen Voice-Chat?",
+        ] {
+            assert!(
+                grounded_response(question, &[evidence.to_string()], &chunks).is_none(),
+                "{question}"
+            );
+        }
+    }
+
+    #[test]
     fn chunking_strippt_frontmatter_und_baut_abschnitte() {
         let root = Path::new("/docs/public");
         let path = root.join("guide/steam.md");
@@ -2759,6 +2808,39 @@ Frag im Support.
             assert_eq!(body["answer"], evidence, "{question}");
             assert_eq!(body["sources"][0]["path"], path, "{question}");
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_handler_groundet_fragechat_gegen_faq_chat_frage() -> Result<()> {
+        let evidence = "Privaten Fragechat öffnen Über die Schaltfläche Frage stellen im Bereich für Server- und Bot-Fragen. Oder mit dem Befehl /faq auf dem Server.";
+        let raw = r#"{"answerable":true,"evidence":["Privaten Fragechat öffnen Über die Schaltfläche Frage stellen im Bereich für Server- und Bot-Fragen. Oder mit dem Befehl /faq auf dem Server."]}"#;
+        let generator = Arc::new(MockGenerator::new(vec![Some(raw.to_string())]));
+        let (app, _) = test_app(
+            vec![test_chunk(
+                "Fragen an den Concierge und FAQ-Chat",
+                "Privaten Fragechat öffnen",
+                "discord-server/faq-bot-selbst.html",
+                &format!(
+                    "{evidence} Es entsteht ein privater Chat, den andere gewöhnliche Mitglieder nicht sehen. Dort stellst du deine Frage zum Server in eigenen Worten."
+                ),
+            )],
+            Some(generator),
+        );
+
+        let (status, body) = post_ask(
+            app,
+            json!({"question": "Wie öffne ich einen privaten FAQ-Chat?"}),
+        )
+        .await?;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["answerable"], true);
+        assert_eq!(body["answer"], evidence);
+        assert_eq!(
+            body["sources"][0]["path"],
+            "discord-server/faq-bot-selbst.html"
+        );
         Ok(())
     }
 

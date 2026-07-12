@@ -1,3 +1,13 @@
+## #249 — FAQ-Chat wird eindeutig erkannt
+
+Problem: Eine Frage zum privaten FAQ-Chat wurde trotz exakter öffentlicher Passage abgelehnt, weil „Fragechat“ und „FAQ-Chat“ unterschiedlich verglichen wurden.
+
+Änderung: Die enge Kompaktform wird wie andere Bot-Namen in ihre Bestandteile zerlegt; beliebige Wörter sowie Twitch- und Voice-Kontext bleiben getrennt.
+
+Aktuelles Verhalten: Fragen zum Öffnen über „Frage stellen“ oder /faq werden aus der öffentlichen Doku beantwortet.
+
+---
+
 ## #248 — „Kurz:“ als Strukturgrenze erkannt
 
 Problem: Der Support-Agent fand die richtige Hilfeseite, lehnte aber einen vollständigen Antwortsatz direkt nach dem sichtbaren Label „Kurz:“ ab.
