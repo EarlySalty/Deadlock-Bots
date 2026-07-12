@@ -1,3 +1,13 @@
+## #256 — Der Concierge redet wieder wie ein Mensch
+
+Problem: Auf Fragen hat der Concierge zuletzt wörtliche Doku-Abschnitte gepostet. Inhaltlich korrekt, aber es klang nach Handbuch statt nach Gespräch, und bei Smalltalk kam immer derselbe Standardsatz.
+
+Änderung: Der Concierge formuliert seine Antworten jetzt wieder selbst, in seinem eigenen Ton. Die Fakten kommen weiterhin ausschließlich aus unserer geprüften Server-Doku, er erfindet also nichts dazu. Weiß die Doku etwas nicht, sagt er das ehrlich und schickt dich zu einem echten Menschen.
+
+Aktuelles Verhalten: Fragen zum Server beantwortet er frei formuliert auf Basis der Doku, Smalltalk beantwortet er natürlich statt mit Textbaustein. Falls die freie Stimme mal klemmt, fällt er automatisch auf den wörtlichen Doku-Text zurück.
+
+---
+
 ## #255 — Mitspielersuche einfach in den Channel schreiben
 
 Problem: Die Mitspielersuche über Forum-Posts hat kaum jemand genutzt. Wer Leute suchte, fand keine, und die Suche verlief im Sand.
