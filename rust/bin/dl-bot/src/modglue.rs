@@ -59,6 +59,40 @@ const BRAIN_MAX_OUTPUT_TOKENS: u32 = 700;
 const BRAIN_DIRECT_ANSWER_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für normale Fragen:\nBeantworte zuerst die konkrete Frage in 1-2 kurzen Sätzen. Wenn die Frage eine Rechnung enthält, nutze auch Zahlen aus der Nutzerfrage als Annahme und zeige höchstens eine kurze Formel plus Ergebnis. Keine Meta-Abschnitte wie \"Hinweis zur Verifikation\", \"Break-Even-Rechnung\" oder \"laut ground_truth\". Erwähne keine internen Datenquellen, Vertrauensstufen, JSON-Felder oder Faktensammlung. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende, außer der Nutzer fragt ausdrücklich danach. Gib keine Build-Tipps, wenn nicht nach Build oder Items gefragt wurde. Wenn etwas unsicher ist, sag es in einem Nebensatz statt als eigenen Abschnitt. Maximal 650 Zeichen, höchstens 4 Stichpunkte.\n---";
 const BRAIN_BUILD_OVERRIDE: &str = "---\nWICHTIG — Discord-Antwortstil für Build-Fragen:\nLiefere einen konkreten, spielbaren Build aus den gelieferten Daten. Beginne mit einem kurzen Satz zum Plan, danach early/mid/late mit knappen Stichpunkten. Nenne keine internen Datenquellen, JSON-Felder oder Vertrauensstufen. Keine ✅/ℹ️-Labels und keine Quellen-/Vertrauenslegende. Wenn Daten dünn sind, schreibe vorsichtig, aber ohne Verweigerungsabschnitt. Maximal 900 Zeichen und höchstens 8 Stichpunkte.\n---";
 
+pub struct LfgFreetextGlue {
+    pub adapter: Arc<DiscordAdapter>,
+}
+
+fn lfg_freetext_question_body(message_id: u64, text: &str) -> Map<String, Value> {
+    let mut body = Map::new();
+    body.insert("content".into(), json!(text));
+    body.insert(
+        "message_reference".into(),
+        json!({ "message_id": message_id.to_string() }),
+    );
+    body.insert(
+        "allowed_mentions".into(),
+        json!({ "parse": [], "replied_user": false }),
+    );
+    body
+}
+
+#[async_trait::async_trait]
+impl dl_activity::lfg_freetext::FreetextLfgPort for LfgFreetextGlue {
+    async fn ask_start_window(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        text: &'static str,
+    ) -> Result<(), String> {
+        self.adapter
+            .send_raw_public(channel_id, &lfg_freetext_question_body(message_id, text))
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+}
+
 fn private_channel_overwrites_are_owner_only(
     guild_id: u64,
     owner_id: u64,
@@ -3302,6 +3336,16 @@ mod tests {
     use std::time::Instant;
 
     use dl_brain::BrainRetriever as _;
+
+    #[test]
+    fn lfg_freitext_rueckfrage_antwortet_ohne_mentions_auf_die_quellnachricht() {
+        let body = lfg_freetext_question_body(555, "PLATZHALTER");
+
+        assert_eq!(body["content"], "PLATZHALTER");
+        assert_eq!(body["message_reference"]["message_id"], "555");
+        assert_eq!(body["allowed_mentions"]["parse"], json!([]));
+        assert_eq!(body["allowed_mentions"]["replied_user"], false);
+    }
 
     fn shell_quote(path: &Path) -> String {
         format!("'{}'", path.display().to_string().replace('\'', "'\\''"))

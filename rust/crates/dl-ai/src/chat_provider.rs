@@ -148,11 +148,17 @@ pub enum LlmUseCase {
     BotPate,
     CockpitVorschlag,
     Faq,
+    LfgFreitext,
 }
 
 impl LlmUseCase {
     pub fn all() -> &'static [Self] {
-        &[Self::BotPate, Self::CockpitVorschlag, Self::Faq]
+        &[
+            Self::BotPate,
+            Self::CockpitVorschlag,
+            Self::Faq,
+            Self::LfgFreitext,
+        ]
     }
 
     pub fn env_suffix(self) -> &'static str {
@@ -160,6 +166,7 @@ impl LlmUseCase {
             Self::BotPate => "BOT_PATE",
             Self::CockpitVorschlag => "COCKPIT_VORSCHLAG",
             Self::Faq => "FAQ",
+            Self::LfgFreitext => "LFG_FREITEXT",
         }
     }
 
@@ -168,6 +175,7 @@ impl LlmUseCase {
             Self::BotPate => "bot_pate",
             Self::CockpitVorschlag => "cockpit_vorschlag",
             Self::Faq => "faq",
+            Self::LfgFreitext => "lfg_freitext",
         }
     }
 }
@@ -377,7 +385,9 @@ impl LlmProviderConfig {
 fn default_provider_for(use_case: LlmUseCase) -> LlmProviderKind {
     match use_case {
         LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
+        LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
+            LlmProviderKind::Mistral
+        }
     }
 }
 
@@ -1208,7 +1218,9 @@ mod tests {
         for use_case in LlmUseCase::all() {
             let expected = match use_case {
                 LlmUseCase::BotPate => LlmProviderKind::Fireworks,
-                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq => LlmProviderKind::Mistral,
+                LlmUseCase::CockpitVorschlag | LlmUseCase::Faq | LlmUseCase::LfgFreitext => {
+                    LlmProviderKind::Mistral
+                }
             };
             assert_eq!(
                 defaults
@@ -1221,6 +1233,24 @@ mod tests {
                 LlmDataClass::UserContent
             );
         }
+    }
+
+    #[test]
+    fn lfg_freitext_hat_eigenen_user_content_provider_pfad() {
+        let cfg = LlmProviderConfig::from_env(|key| {
+            (key == "DL_LLM_PROVIDER_LFG_FREITEXT").then(|| "openai".to_string())
+        })
+        .expect("config");
+
+        assert_eq!(
+            cfg.provider_for(LlmUseCase::LfgFreitext, |_| None)
+                .expect("provider"),
+            LlmProviderKind::OpenAi
+        );
+        assert_eq!(
+            cfg.data_class_for(LlmUseCase::LfgFreitext),
+            LlmDataClass::UserContent
+        );
     }
 
     #[test]

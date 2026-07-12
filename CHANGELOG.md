@@ -1,3 +1,13 @@
+## #255 — PLATZHALTER: LFG-Freitext
+
+Problem: PLATZHALTER: bisheriger LFG-Ablauf.
+
+Änderung: PLATZHALTER: Freitext-Auswertung und proaktive Kandidatensuche.
+
+Aktuelles Verhalten: PLATZHALTER: Feature-Flag, Rückfrage und vorbereitete Einladungen.
+
+---
+
 ## #254 — Schnellere Auswahl passender Doku-Passagen
 
 Problem: Die reine Auswahl fester Doku-Passagen lief unnötig in lange Reasoning-Timeouts und bekam Kandidaten, die der Wissensdienst anschließend sicher ablehnen musste.
