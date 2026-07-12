@@ -1,0 +1,50 @@
+[
+  {
+    "id": 100,
+    "class_name": "upgrade_mystic_shot",
+    "name": "Mystic Shot",
+    "type": "upgrade",
+    "item_slot_type": "spirit",
+    "item_tier": 2,
+    "cost": 1600,
+    "shopable": true,
+    "disabled": false,
+    "is_active_item": false,
+    "description": "Adds spirit damage.",
+    "properties": {
+      "SpiritPower": {
+        "value": "12",
+        "provided_property_type": "ETechPower"
+      }
+    },
+    "commit_sha": "metadata-only",
+    "version": "123456"
+  },
+  {
+    "id": 101,
+    "name": "Retired Item",
+    "type": "upgrade",
+    "item_slot_type": "weapon",
+    "item_tier": 1,
+    "cost": 800,
+    "shopable": false,
+    "disabled": true,
+    "properties": {}
+  },
+  {
+    "id": 102,
+    "name": "Hero Ability",
+    "type": "ability",
+    "properties": {}
+  },
+  {
+    "id": 103,
+    "type": "upgrade",
+    "item_slot_type": "vitality",
+    "item_tier": 1,
+    "cost": 800,
+    "shopable": true,
+    "disabled": false,
+    "properties": {}
+  }
+]

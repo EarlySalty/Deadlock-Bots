@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <title>Deadlock-API-Ingest für dl-brain</title>
+</head>
+<body>
+  <main>
+    <h1>Deadlock-API-Ingest für dl-brain</h1>
+    <p>Der Job läuft ausschließlich manuell und ist im Bot-Startpfad standardmäßig aus.</p>
+
+    <h2>Aufruf</h2>
+    <pre><code>DEADLOCK_CENTRAL_DSN=… cargo run -p dl-brain --bin deadlock-brain-api-ingest</code></pre>
+
+    <h2>Quellen und Speicherung</h2>
+    <ul>
+      <li><code>GET https://api.deadlock-api.com/v1/assets/items/by-type/upgrade?language=english</code></li>
+      <li><code>GET https://api.deadlock-api.com/v1/assets/heroes?language=english</code></li>
+    </ul>
+    <p>Aktive Shop-Items landen in <code>brain.item_catalog</code>, aktive Helden samt Basiswerten in <code>brain.hero_catalog</code>. Normalisierte Snapshots und ihr aktueller Hash liegen in <code>brain.entity_snapshots</code> und <code>brain.current_entity_state</code>; Laufzähler stehen in <code>brain.source_runs</code>.</p>
+
+    <h2>Idempotenz</h2>
+    <p>Der SHA-256-Hash umfasst nur normalisierte Spielfelder. Versions- und Commit-Metadaten werden nicht übernommen. Ein identischer zweiter Lauf meldet daher null Updates und zählt die Datensätze als unverändert.</p>
+
+    <h2>Nicht enthalten</h2>
+    <p>Analytics-Daten wie Win-Rates, Item-Synergien und Pick-Rates bleiben ein separater Folgeschritt. Sie benötigen eigene Aktualitäts- und Stichprobenverträge und sind nicht Teil dieses Assets-Ingests.</p>
+  </main>
+</body>
+</html>
