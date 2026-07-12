@@ -1202,7 +1202,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn stale_batch_nach_owner_unban_aendert_restore_wunsch_nicht() {
+    async fn legitimer_batch_ban_aktualisiert_restore_wunsch() {
         let (guard, _, store) = setup_guard().await;
         guard
             .handle_event(VoiceEvent::Join {
@@ -1212,20 +1212,17 @@ mod tests {
             })
             .await;
 
-        resolve_member_connect(store.as_ref(), GUILD_ID, 42, USER_B, None)
+        resolve_member_connect(store.as_ref(), GUILD_ID, 42, USER_B, Some(false))
             .await
-            .expect("owner unban");
-        compose_member_connect(store.as_ref(), GUILD_ID, 42, USER_B, Some(false))
-            .await
-            .expect("stale batch");
+            .expect("batch ban");
 
         let lock = store
             .lock(GUILD_ID, 42, USER_B)
             .await
             .expect("store")
             .expect("lock");
-        assert!(!lock.had_overwrite);
-        assert_eq!((lock.previous_allow, lock.previous_deny), (0, 0));
+        assert!(lock.had_overwrite);
+        assert_eq!((lock.previous_allow, lock.previous_deny), (0, CONNECT_BIT));
     }
 
     #[tokio::test]

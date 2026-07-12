@@ -499,17 +499,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
         adapter: adapter.clone(),
         voice_pair_store: voice_pair_store.clone(),
-        voice_pair_operations: voice_pair_operations.clone(),
     });
     let voice_pair_guard = dl_voice::voice_pair_guard::VoicePairGuard::new(
         voice_pair_store,
         cache_snapshot.clone(),
-        voice_pair_operations,
+        voice_pair_operations.clone(),
     );
-    let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
+    let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new_with_voice_pair_operations(
         dl_voice::tempvoice::TempVoiceConfig::production(),
         dl_voice::tempvoice::TempVoiceStore::new(central_pool.clone()),
         cache_snapshot.clone(),
+        voice_pair_operations,
     );
     let lfg_forum_cutover_enabled = env_bool_default("DL_LFG_FORUM_CUTOVER", false);
     let (lfg_panel_channel_id, lfg_panel_channel_reason) = lfg_panel_channel_id_from_env();
