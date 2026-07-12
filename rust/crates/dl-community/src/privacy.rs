@@ -1495,6 +1495,33 @@ pub(crate) async fn scrub_pate_journey_metadata(
     ))
 }
 
+async fn scrub_action_outbox_requester(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: &str,
+) -> CommunityDbResult<(i64, i64)> {
+    let deleted = sqlx::query(
+        "DELETE FROM bot.action_outbox
+          WHERE status <> 'sent'
+            AND payload ->> 'requester_id' = $1",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    let redacted = sqlx::query(
+        "UPDATE bot.action_outbox
+            SET payload = '{}'::jsonb
+          WHERE status = 'sent'
+            AND payload ->> 'requester_id' = $1",
+    )
+    .bind(user_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok((
+        rows_to_i64(deleted.rows_affected()),
+        rows_to_i64(redacted.rows_affected()),
+    ))
+}
+
 pub async fn set_opt_in(pool: &PgPool, user_id: i64, now: i64) -> CommunityDbResult<()> {
     let now = utc_from_unix(now)?;
     let mut tx = pool.begin().await?;
@@ -1561,6 +1588,18 @@ pub async fn delete_user_data(
         }
         let n = delete_rows_user(&mut tx, spec, user_id, &user_key).await?;
         counts.insert(spec.count_key(), n);
+    }
+
+    if relations.contains("bot.action_outbox") {
+        let (deleted, redacted) = scrub_action_outbox_requester(&mut tx, &user_key).await?;
+        counts.insert(
+            "action_outbox.payload.requester_id.deleted".to_string(),
+            deleted,
+        );
+        counts.insert(
+            "action_outbox.payload.requester_id.redacted".to_string(),
+            redacted,
+        );
     }
 
     for &spec in NULLABLE_USER_COLUMNS {
@@ -1719,6 +1758,20 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             spec.count_key(),
             Value::Array(select_rows_user(pool, spec, user_id, &user_key).await?),
         );
+    }
+
+    if relations.contains("bot.action_outbox") {
+        let rows: Value = sqlx::query_scalar(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(outbox) ORDER BY outbox.id), '[]'::jsonb)
+               FROM bot.action_outbox AS outbox
+              WHERE outbox.user_id <> $1
+                AND outbox.payload ->> 'requester_id' = $2",
+        )
+        .bind(user_id)
+        .bind(&user_key)
+        .fetch_one(pool)
+        .await?;
+        tbl.insert("action_outbox.payload.requester_id".into(), rows);
     }
 
     if relations.contains("bot.faq_chat_sessions")
@@ -3019,6 +3072,95 @@ mod tests {
             .await
             .expect("delete");
         assert_eq!(second.counts.get("voice_stats.user_id").copied(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn delete_entfernt_requester_spuren_aus_fremden_outbox_zeilen() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.action_outbox(
+                action_type, user_id, guild_id, payload, anchor, idempotency_key, status
+            ) VALUES
+                ('future_action', 99, 1,
+                 '{"requester_id":42,"source_message_id":100,"details":{"note":"privat"}}',
+                 'pending', 'privacy-requester-pending', 'pending'),
+                ('future_action', 99, 1,
+                 '{"requester_id":"42","source_message_id":101,"details":{"note":"privat"}}',
+                 'suppressed', 'privacy-requester-suppressed', 'suppressed'),
+                ('future_action', 99, 1,
+                 '{"requester_id":42,"source_message_id":102,"details":{"note":"privat"}}',
+                 'sent', 'privacy-requester-sent', 'sent'),
+                ('future_action', 99, 1,
+                 '{"requester_id":7,"details":{"keep":"yes"}}',
+                 'other', 'privacy-requester-other', 'sent')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("outbox rows");
+
+        delete_user_data(db.pool(), 42, "test".to_string(), 1_000)
+            .await
+            .expect("privacy delete");
+
+        let pending_or_suppressed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM bot.action_outbox
+              WHERE idempotency_key IN ('privacy-requester-pending', 'privacy-requester-suppressed')",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("deleted requester rows");
+        assert_eq!(pending_or_suppressed, 0);
+
+        let sent_payload: Value = sqlx::query_scalar(
+            "SELECT payload FROM bot.action_outbox
+              WHERE idempotency_key = 'privacy-requester-sent'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("sent requester row");
+        assert_eq!(sent_payload, serde_json::json!({}));
+
+        let unrelated_payload: Value = sqlx::query_scalar(
+            "SELECT payload FROM bot.action_outbox
+              WHERE idempotency_key = 'privacy-requester-other'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("unrelated outbox row");
+        assert_eq!(
+            unrelated_payload,
+            serde_json::json!({"requester_id": 7, "details": {"keep": "yes"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn export_enthaelt_fremde_outbox_zeilen_des_requesters() {
+        let db = mk_db().await;
+        sqlx::query(
+            r#"
+            INSERT INTO bot.action_outbox(
+                action_type, user_id, guild_id, payload, anchor, idempotency_key, status
+            ) VALUES
+                ('future_action', 99, 1, '{"requester_id":42,"details":{"note":"privat"}}',
+                 'requester', 'privacy-export-requester', 'pending'),
+                ('future_action', 99, 1, '{"requester_id":7,"details":{"keep":"yes"}}',
+                 'other', 'privacy-export-other', 'pending')
+            "#,
+        )
+        .execute(db.pool())
+        .await
+        .expect("outbox rows");
+
+        let export = export_user_data(db.pool(), 42, 1_000)
+            .await
+            .expect("privacy export");
+        let rows = export["tables"]["action_outbox.payload.requester_id"]
+            .as_array()
+            .expect("requester outbox rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0]["idempotency_key"], "privacy-export-requester");
     }
 
     #[tokio::test]
