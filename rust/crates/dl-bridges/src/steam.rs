@@ -148,6 +148,12 @@ impl SteamBotClient {
         }
     }
 
+    pub async fn post_voice_return(&self, user_id: u64) {
+        let mut data = Map::new();
+        data.insert("voice_return".into(), json!({ "user_id": user_id }));
+        let _ = self.post_event("voice_return", data, DEFAULT_TIMEOUT).await;
+    }
+
     fn interaction_payload(interaction: &BridgeInteraction, custom_id: &str) -> Map<String, Value> {
         let mut inner = Map::new();
         inner.insert("custom_id".into(), json!(custom_id));
@@ -980,6 +986,24 @@ mod tests {
             channel_id: 9,
             ..BridgeInteraction::default()
         }
+    }
+
+    #[tokio::test]
+    async fn voice_return_wire_format() {
+        let (url, received, server) = mock_steam_bot(json!({})).await;
+        let client = SteamBotClient::new(url, None);
+
+        client.post_voice_return(42).await;
+
+        let sent = received.lock().expect("lock");
+        assert_eq!(
+            sent[0],
+            json!({
+                "kind": "voice_return",
+                "voice_return": { "user_id": 42 }
+            })
+        );
+        server.abort();
     }
 
     #[tokio::test]
