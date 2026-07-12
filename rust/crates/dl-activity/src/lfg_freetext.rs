@@ -359,12 +359,14 @@ impl FreetextLfgStore {
                    patterns.last_active_at,
                    patterns.last_pinged_at,
                    COALESCE(patterns.ping_count_30d, 0) AS ping_count_30d,
-                   retention.opted_out,
+                   (retention.opted_out OR COALESCE(privacy.opted_out, FALSE)) AS opted_out,
                    rank.deadlock_rank
               FROM activity.user_activity_patterns AS patterns
               JOIN activity.user_retention_tracking AS retention
                 ON retention.user_id = patterns.user_id
                AND retention.guild_id = $1
+              LEFT JOIN core.user_privacy AS privacy
+                ON privacy.user_id = retention.user_id
               LEFT JOIN LATERAL (
                     SELECT steam.deadlock_rank
                       FROM core.steam_links AS steam
@@ -1067,6 +1069,45 @@ mod tests {
                 questions: AtomicUsize::new(0),
             }),
         )
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn globales_privacy_opt_out_verhindert_lfg_einladung() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("disposable postgres");
+        let pool = db.pool();
+        seed_matched_candidates(pool, 1).await;
+        sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES (1, TRUE)")
+            .execute(pool)
+            .await
+            .expect("global opt-out");
+
+        let candidates = FreetextLfgStore::new(pool.clone())
+            .load_candidates(99, 42)
+            .await
+            .expect("candidates");
+        assert_eq!(
+            match_candidates(&request(), candidates, now()),
+            vec![CandidateDecision {
+                user_id: 1,
+                outcome: MatchOutcome::Skipped(SkipReason::OptedOut),
+            }]
+        );
+
+        handler(pool.clone())
+            .match_and_enqueue(&message_event(), 99, request())
+            .await;
+
+        let invite_exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM bot.action_outbox WHERE idempotency_key = 'lfg:555:1')",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("invite lookup");
+        assert!(!invite_exists);
     }
 
     #[tokio::test]
