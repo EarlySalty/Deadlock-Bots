@@ -17,7 +17,7 @@ mod scrimglue;
 mod serversync;
 mod vanity;
 
-use std::{num::NonZeroU64, sync::Arc};
+use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
 
 use anyhow::Context;
 use dl_webcore::WebConfig;
@@ -162,6 +162,10 @@ fn openai_client_with_model_from_env(
 
 fn default_brain_bin() -> String {
     "/home/naniadm/Documents/Deadlock-Brain/rust/target/release/deadlock-brain".to_string()
+}
+
+fn brain_channel_allowlist_from_value(raw: Option<&str>) -> Option<HashSet<u64>> {
+    raw.and_then(modglue::parse_brain_channel_allowlist)
 }
 
 async fn wait_for_gateway_cache_ready(
@@ -681,40 +685,48 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             );
             None
         } else {
-            let client = dl_ai::MiniMaxClient::from_env(env);
-            if client.is_none() {
+            let raw_allowlist = std::env::var("BRAIN_CHANNEL_ALLOWLIST").ok();
+            let channel_allowlist = brain_channel_allowlist_from_value(raw_allowlist.as_deref());
+            if channel_allowlist.is_none() {
                 tracing::warn!(
-                    "Brain-Command registriert ohne MiniMax-Client; Antworten liefern Backend-Fehler"
+                    "Brain-Command deaktiviert: BRAIN_CHANNEL_ALLOWLIST fehlt, ist leer oder enthaelt eine ungueltige/0-Channel-ID (deny-all)"
                 );
             }
-            let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
-            let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
-            let channel_allowlist = env("BRAIN_CHANNEL_ALLOWLIST")
-                .and_then(|raw| modglue::parse_brain_channel_allowlist(&raw));
-            tracing::info!(
-                bin = %brain_bin_path.display(),
-                cooldown_secs,
-                max_question_len,
-                channel_allowlist = channel_allowlist.as_ref().map(|ids| ids.len()).unwrap_or(0),
-                "Brain-Command registriert"
-            );
-            let config = Arc::new(dl_brain::BrainConfig {
-                max_question_len,
-                cooldown_secs,
-            });
-            let retriever: Arc<dyn dl_brain::BrainRetriever> =
-                Arc::new(modglue::BrainRetrieverGlue {
-                    bin: brain_bin_path,
+            channel_allowlist.map(|channel_allowlist| {
+                let client = dl_ai::MiniMaxClient::from_env(env);
+                if client.is_none() {
+                    tracing::warn!(
+                        "Brain-Command registriert ohne MiniMax-Client; Antworten liefern Backend-Fehler"
+                    );
+                }
+                let cooldown_secs = env_u64_default("BRAIN_COOLDOWN_SECS", 20);
+                let max_question_len = env_usize_default("BRAIN_MAX_QUESTION_LEN", 300);
+                tracing::info!(
+                    bin = %brain_bin_path.display(),
+                    cooldown_secs,
+                    max_question_len,
+                    channel_allowlist = channel_allowlist.len(),
+                    "Brain-Command registriert"
+                );
+                let config = Arc::new(dl_brain::BrainConfig {
+                    max_question_len,
+                    cooldown_secs,
                 });
-            let answerer: Arc<dyn dl_brain::AiAnswerer> = Arc::new(modglue::BrainAiGlue { client });
-            Some(Arc::new(modglue::BrainHandler {
-                adapter: adapter.clone(),
-                config,
-                cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-                retriever,
-                answerer,
-                channel_allowlist,
-            }))
+                let retriever: Arc<dyn dl_brain::BrainRetriever> =
+                    Arc::new(modglue::BrainRetrieverGlue {
+                        bin: brain_bin_path,
+                    });
+                let answerer: Arc<dyn dl_brain::AiAnswerer> =
+                    Arc::new(modglue::BrainAiGlue { client });
+                Arc::new(modglue::BrainHandler {
+                    adapter: adapter.clone(),
+                    config,
+                    cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+                    retriever,
+                    answerer,
+                    channel_allowlist: Some(channel_allowlist),
+                })
+            })
         }
     };
 
@@ -1458,8 +1470,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::{
-        legacy_lfg_responder_enabled, lfg_cutover_active, lfg_forum_channel_id_from_value,
-        lfg_panel_channel_id_from_value, moderation_enforce_from_lookup,
+        brain_channel_allowlist_from_value, legacy_lfg_responder_enabled, lfg_cutover_active,
+        lfg_forum_channel_id_from_value, lfg_panel_channel_id_from_value,
+        moderation_enforce_from_lookup,
     };
     use std::collections::HashMap;
 
@@ -1491,6 +1504,20 @@ mod tests {
 
         let vars = HashMap::from([("MODERATION_ENFORCE", "yes")]);
         assert!(!moderation_enforce_from_lookup(lookup(&vars)));
+    }
+
+    #[test]
+    fn brain_startup_aktiviert_nur_nichtleere_gueltige_allowlist() {
+        for raw in [None, Some(""), Some(" \n\t"), Some("nope"), Some("0")] {
+            assert_eq!(brain_channel_allowlist_from_value(raw), None, "{raw:?}");
+        }
+        for raw in [Some("123, nope, 456"), Some("123, 0, 456")] {
+            assert_eq!(brain_channel_allowlist_from_value(raw), None, "{raw:?}");
+        }
+        assert_eq!(
+            brain_channel_allowlist_from_value(Some("123, 456")),
+            Some(std::collections::HashSet::from([123, 456]))
+        );
     }
 
     #[test]

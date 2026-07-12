@@ -19,12 +19,18 @@ und wird über die CLI `deadlock-brain ask-context` angezapft.
 - **Anbindung:** Subprozess auf die Brain-CLI. Kein neuer Dienst, keine
   Cross-Repo-Crate-Dependency.
 - **Ziel:** Rust, gebaut **und deployed** (nicht dormant).
+- **Exklusive Ownership:** Öffentlicher Support, private FAQ-Kanäle,
+  Concierge-Fallbacks und allowlistete Gameplay-Kanäle haben jeweils genau
+  einen Owner. Eine Predicate-/Cache-Matrix prüft diese Trennung; der echte
+  Message-Subscriber und sein Allowlist-Guard sind separat getestet.
 
 ### Fluss
 
 ```
 !brain <frage>
-  → Gateway matcht Prefix "brain" → BrainHandler::handle(BridgeInteraction)
+  → Gateway veröffentlicht MessageEvent
+  → separater spawn_brain_command-Subscriber → BrainHandler::handle_message_event
+  → Guild- und Channel-Allowlist-Guard (fail-closed)
   → Frage extrahieren (alles nach dem Befehlswort), trimmen
   → Guards: leer→Usage · zu lang→Hinweis · Per-User-Cooldown→Hinweis
   → Subprozess: deadlock-brain ask-context "<frage>"  (JSON auf stdout)
@@ -76,14 +82,20 @@ Cooldowns im Bot. Antwort-Chunking: an Wortgrenzen, ≤2000 Zeichen (Discord-Lim
 - `BrainAiGlue`: hält `Arc<dl_ai::MiniMaxClient>`, ruft
   `generate_text(GenerateRequest { prompt, system_prompt: None, model: None,
   max_output_tokens: Some(700), temperature: 0.25 })`, danach `strip_think`.
-- `BrainHandler`: implementiert `dl_discord::InteractionHandler`; extrahiert die
-  Frage aus der `BridgeInteraction`, ruft die `dl-brain`-Logik, sendet Reply(s).
-  Bei langer Laufzeit Typing-Indicator/Arbeits-Hinweis senden, dann Antwort.
+- `BrainHandler::handle_message_event`: verarbeitet den `MessageEvent` aus dem
+  eigenen Subscriber, prüft Guild und Allowlist, extrahiert `!brain`, ruft die
+  `dl-brain`-Logik und sendet beziehungsweise editiert die öffentliche Antwort
+  über den `DiscordAdapter`.
 
 ### 3. Registrierung in `rust/bin/dl-bot/src/main.rs`
-Hinter Env-Gate `BRAIN_CMD_ENABLED` (default an, wenn `BRAIN_BIN` gesetzt):
+Hinter Env-Gate `BRAIN_CMD_ENABLED` (default an, wenn `BRAIN_BIN` gesetzt) und
+einer vollständig gültigen, nichtleeren Channel-Allowlist. Fehlt die Liste,
+ist sie leer oder enthält sie auch nur einen ungültigen beziehungsweise
+nullwertigen Eintrag, wird weder ein `BrainHandler` gebaut noch der Subscriber
+registriert:
 ```rust
-router.on_prefix("brain", Arc::new(modglue::BrainHandler { /* glue, config */ }));
+let handler = Arc::new(modglue::BrainHandler { /* glue, config + allowlist */ });
+modglue::spawn_brain_command(handler, &dispatcher);
 ```
 MiniMax-Client via vorhandenem `MiniMaxClient::from_env(env)` — kein Client da
 → Befehl meldet `BackendError` (kein Panik).
@@ -96,13 +108,16 @@ MiniMax-Client via vorhandenem `MiniMaxClient::from_env(env)` — kein Client da
 | `BRAIN_CMD_ENABLED` | `1` falls `BRAIN_BIN` existiert | Feature-Gate |
 | `BRAIN_COOLDOWN_SECS` | `20` | Per-User-Cooldown |
 | `BRAIN_MAX_QUESTION_LEN` | `300` | Max Fragelänge |
-| `BRAIN_CHANNEL_ALLOWLIST` | leer = überall | optionale Channel-IDs (CSV) |
+| `BRAIN_CHANNEL_ALLOWLIST` | fehlend/leer/ungültig = deaktiviert (deny-all) | Nur eine nichtleere Liste gültiger, positiver Channel-IDs (CSV) aktiviert den Befehl; ein einziger ungültiger oder `0`-Eintrag verwirft die gesamte Liste. |
+
+Produktiv ist ausschließlich `1428745737323155679` (`🤖bot-spam`) erlaubt.
+Die ID bleibt Laufzeitkonfiguration und wird nicht im Code hardcodiert.
 
 > **Codex verifiziert am Code:** (a) wie `ask-context` die DB wählt (globales
 > `--db`-Flag vs. Env vs. Default-Pfad) und reicht `BRAIN_DB` korrekt durch;
 > (b) ob `ask-context` die Frage positional erwartet (ja, laut `AskContextArgs`);
-> (c) exakte `BridgeInteraction`/`BridgeReply`-Felder (Frage-Text, channel_id,
-> user_id, Reply-Mechanik); (d) ob `--pretty` für menschenlesbar nötig ist
+> (c) exakte `MessageEvent`-Felder (Frage-Text, channel_id, user_id) und die
+> `DiscordAdapter`-Send/Edit-Mechanik; (d) ob `--pretty` für menschenlesbar nötig ist
 > (NEIN — Default-JSON ist maschinenlesbar, das nutzen wir).
 
 ## Deutsche Texte (Claude liefert — Codex nutzt als Konstanten, schreibt KEINE eigenen DE-Texte)
@@ -131,13 +146,17 @@ BRAIN_OUT_OF_DOMAIN= "🧠 Klingt nicht nach Deadlock — dazu hab ich keine ges
 - normaler Pfad → `Answer`, MiniMax mit `prompt` aufgerufen, `strip_think` angewandt
 - MiniMax `None` → `BackendError`/`NoAnswer`
 - Chunking: >2000 Zeichen → mehrere Chunks, jeder ≤2000, an Wortgrenzen
+- Allowlist fehlt/leer/enthält ungültige oder `0`-Einträge → kein Handler und
+  kein Subscriber; eine vollständig gültige Liste aktiviert nur ihre Kanäle
+- Predicate-/Cache-Matrix: Support, FAQ, Concierge-Fallback und allowlisteter
+  Gameplay-Kanal haben jeweils exakt einen Owner; Brain-I/O bleibt `0/0/0/1`
 
 ## Deploy + Verifikation (nach Code-Freigabe, durch Claude)
 1. Brain-CLI release bauen, falls `deadlock-brain`-Binary fehlt (`cargo build --release -p deadlock-brain` im Brain-Repo).
 2. `dl-bot` release bauen (`cargo build --release --bin dl-bot`).
-3. ENV (`BRAIN_BIN`, ggf. `BRAIN_DB`) für den dl-bot-Dienst setzen (Infisical/EnvironmentFile, nie Secret in Klartext loggen).
+3. ENV (`BRAIN_BIN`, ggf. `BRAIN_DB`, `BRAIN_CHANNEL_ALLOWLIST=1428745737323155679`) für den dl-bot-Dienst setzen (Infisical/EnvironmentFile, nie Secret in Klartext loggen).
 4. Dienst neu starten.
-5. **Beweisen:** (a) neues Binary enthält das Feature (`strings`/grep nach `on_prefix`-Symbol bzw. Brain-Konstante), (b) Live-Test im Discord: `!brain <frage>` liefert echte Antwort; sonst Journal prüfen. Nicht dem Erfolgs-Log trauen.
+5. **Beweisen:** (a) `/proc/<pid>/exe` zeigt auf das frisch gebaute Binary und das Startup-Journal registriert den Brain-Subscriber mit genau einem Allowlist-Kanal, (b) `!brain <frage>` antwortet in `🤖bot-spam` genau einmal und bleibt im Supportkanal sowie in DMs ohne Brain-Antwort. Nicht dem Erfolgs-Log trauen.
 
 ## Out of Scope (YAGNI)
 - Konversations-Verlauf / Multi-Turn.

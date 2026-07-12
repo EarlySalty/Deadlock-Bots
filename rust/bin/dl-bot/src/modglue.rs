@@ -10,6 +10,7 @@ use std::sync::{
 use std::time::Duration;
 
 use dl_ai::TextGenerator;
+use dl_community::concierge::CONCIERGE_OWNER_TOPIC_PREFIX;
 use dl_discord::{BridgeInteraction, BridgeReply, DiscordAdapter, InteractionHandler};
 use serde_json::{json, Map, Value};
 use serenity::all::{
@@ -329,7 +330,7 @@ impl BrainHandler {
         self.channel_allowlist
             .as_ref()
             .map(|allowlist| allowlist.contains(&channel_id))
-            .unwrap_or(true)
+            .unwrap_or(false)
     }
 
     async fn outcome_for_question(&self, question: &str, user_id: u64) -> dl_brain::BrainOutcome {
@@ -625,18 +626,12 @@ pub fn parse_brain_channel_allowlist(raw: &str) -> Option<HashSet<u64>> {
     if raw.trim().is_empty() {
         return None;
     }
-    let ids = raw
-        .split([',', ';', '\n', '\r', '\t', ' '])
-        .filter_map(|part| part.trim().parse::<u64>().ok())
-        .collect::<HashSet<_>>();
-    if ids.is_empty() {
-        tracing::warn!(
-            "BRAIN_CHANNEL_ALLOWLIST ist gesetzt, enthaelt aber keine gueltige Channel-ID; Brain-Command deny-all"
-        );
-    } else {
-        tracing::debug!(count = ids.len(), "Brain-Channel-Allowlist geladen");
-    }
-    Some(ids)
+    raw.split([',', ';', '\n', '\r', '\t', ' '])
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u64>().ok().filter(|id| *id > 0))
+        .collect::<Option<HashSet<_>>>()
+        .filter(|ids| !ids.is_empty())
 }
 
 pub fn spawn_brain_command(
@@ -1978,6 +1973,10 @@ impl dl_community::faq::FaqPort for FaqGlue {
         };
         let bot_id = self.adapter.cache().current_user().id.get();
         channel.parent_id == Some(ChannelId::new(dl_community::faq::FAQ_CATEGORY_ID))
+            && !channel
+                .topic
+                .as_deref()
+                .is_some_and(|topic| topic.starts_with(CONCIERGE_OWNER_TOPIC_PREFIX))
             && private_channel_overwrites_are_owner_only(
                 guild_id,
                 user_id,
@@ -2255,7 +2254,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             "type": 0,
             "parent_id": category_id.to_string(),
             "topic": if extra_user_id.is_none() {
-                Some(format!("dl-concierge-owner:{user_id}"))
+                Some(format!("{CONCIERGE_OWNER_TOPIC_PREFIX}{user_id}"))
             } else {
                 None
             },
@@ -2323,7 +2322,7 @@ impl dl_community::concierge::ConciergePort for ConciergeGlue {
             return false;
         };
         let bot_id = self.adapter.cache().current_user().id.get();
-        let expected_topic = format!("dl-concierge-owner:{user_id}");
+        let expected_topic = format!("{CONCIERGE_OWNER_TOPIC_PREFIX}{user_id}");
         channel.parent_id == Some(ChannelId::new(category_id))
             && channel.topic.as_deref() == Some(expected_topic.as_str())
             && private_channel_overwrites_are_owner_only(
@@ -3362,12 +3361,38 @@ mod tests {
         }
     }
 
-    struct StaticBrainAnswerer(Option<&'static str>);
+    struct CountingBrainAnswerer {
+        calls: Arc<AtomicUsize>,
+    }
 
     #[async_trait::async_trait]
-    impl dl_brain::AiAnswerer for StaticBrainAnswerer {
+    impl dl_brain::AiAnswerer for CountingBrainAnswerer {
         async fn answer(&self, _prompt: &str) -> Result<Option<String>, dl_brain::BrainError> {
-            Ok(self.0.map(str::to_string))
+            self.calls
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(Some("Antwort".to_string()))
+        }
+    }
+
+    fn test_brain_handler(
+        channel_allowlist: Option<HashSet<u64>>,
+        retriever_calls: Arc<AtomicUsize>,
+        answerer_calls: Arc<AtomicUsize>,
+    ) -> BrainHandler {
+        BrainHandler {
+            adapter: dl_discord::DiscordAdapter::new("test-token"),
+            config: Arc::new(dl_brain::BrainConfig {
+                max_question_len: 300,
+                cooldown_secs: 20,
+            }),
+            cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
+            retriever: Arc::new(CountingBrainRetriever {
+                calls: retriever_calls,
+            }),
+            answerer: Arc::new(CountingBrainAnswerer {
+                calls: answerer_calls,
+            }),
+            channel_allowlist,
         }
     }
 
@@ -3454,26 +3479,70 @@ mod tests {
 
     #[tokio::test]
     async fn brain_handler_ignoriert_dms() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let handler = BrainHandler {
-            adapter: dl_discord::DiscordAdapter::new("test-token"),
-            config: Arc::new(dl_brain::BrainConfig {
-                max_question_len: 300,
-                cooldown_secs: 20,
-            }),
-            cooldowns: Arc::new(dl_brain::BrainCooldowns::default()),
-            retriever: Arc::new(CountingBrainRetriever {
-                calls: calls.clone(),
-            }),
-            answerer: Arc::new(StaticBrainAnswerer(Some("Antwort"))),
-            channel_allowlist: None,
-        };
+        let retriever_calls = Arc::new(AtomicUsize::new(0));
+        let handler =
+            test_brain_handler(None, retriever_calls.clone(), Arc::new(AtomicUsize::new(0)));
 
         handler
             .handle_message_event(&test_message_event(None, "!brain Abrams"))
             .await;
 
-        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(
+            retriever_calls.load(std::sync::atomic::Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn brain_deny_vermeidet_message_und_interaction_io() {
+        for (label, allowlist) in [
+            ("fehlend", None),
+            ("leer", parse_brain_channel_allowlist(" \n\t")),
+            ("ungueltig", parse_brain_channel_allowlist("#brain, nope")),
+            ("anderer Kanal", parse_brain_channel_allowlist("999")),
+        ] {
+            let retriever_calls = Arc::new(AtomicUsize::new(0));
+            let answerer_calls = Arc::new(AtomicUsize::new(0));
+            let handler =
+                test_brain_handler(allowlist, retriever_calls.clone(), answerer_calls.clone());
+            assert!(!handler.channel_allowed(1), "{label}");
+
+            let message = tokio::time::timeout(
+                Duration::from_millis(100),
+                handler.handle_message_event(&test_message_event(Some(1), "!brain Abrams")),
+            )
+            .await;
+            assert!(
+                message.is_ok(),
+                "Message-Deny muss ohne Discord-I/O enden: {label}"
+            );
+
+            let interaction = tokio::time::timeout(
+                Duration::from_millis(100),
+                handler.handle(BridgeInteraction {
+                    guild_id: 1,
+                    channel_id: 1,
+                    user_id: 3,
+                    content: "!brain Abrams".to_string(),
+                    ..BridgeInteraction::default()
+                }),
+            )
+            .await;
+            assert!(
+                interaction.is_ok(),
+                "Interaction-Deny muss ohne Discord-I/O enden: {label}"
+            );
+            assert_eq!(
+                retriever_calls.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "Retriever: {label}"
+            );
+            assert_eq!(
+                answerer_calls.load(std::sync::atomic::Ordering::Relaxed),
+                0,
+                "Answerer: {label}"
+            );
+        }
     }
 
     #[test]
@@ -3696,12 +3765,12 @@ mod tests {
     #[test]
     fn brain_allowlist_invalid_config_wird_deny_all() {
         assert!(parse_brain_channel_allowlist(" \n\t").is_none());
+        assert!(parse_brain_channel_allowlist("#brain, nope").is_none());
+        assert!(parse_brain_channel_allowlist("0").is_none());
+        assert!(parse_brain_channel_allowlist("123, nope, 456").is_none());
+        assert!(parse_brain_channel_allowlist("123, 0, 456").is_none());
 
-        let parsed = parse_brain_channel_allowlist("#brain, nope")
-            .unwrap_or_else(|| panic!("invalid configured allowlist must not fail open"));
-        assert!(parsed.is_empty());
-
-        let parsed = parse_brain_channel_allowlist("123, nope, 456")
+        let parsed = parse_brain_channel_allowlist("123, 456")
             .unwrap_or_else(|| panic!("valid IDs should be kept"));
         assert_eq!(parsed, HashSet::from([123, 456]));
     }
@@ -3805,23 +3874,144 @@ mod tests {
     }
 
     fn private_overwrite_fixture() -> Vec<serenity::all::PermissionOverwrite> {
+        private_overwrites_for(1, 42, 99)
+    }
+
+    fn private_overwrites_for(
+        guild_id: u64,
+        owner_id: u64,
+        bot_id: u64,
+    ) -> Vec<serenity::all::PermissionOverwrite> {
         vec![
             serenity::all::PermissionOverwrite {
                 allow: Permissions::empty(),
                 deny: Permissions::VIEW_CHANNEL,
-                kind: PermissionOverwriteType::Role(RoleId::new(1)),
+                kind: PermissionOverwriteType::Role(RoleId::new(guild_id)),
             },
             serenity::all::PermissionOverwrite {
                 allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
                 deny: Permissions::empty(),
-                kind: PermissionOverwriteType::Member(UserId::new(42)),
+                kind: PermissionOverwriteType::Member(UserId::new(owner_id)),
             },
             serenity::all::PermissionOverwrite {
                 allow: Permissions::VIEW_CHANNEL | Permissions::SEND_MESSAGES,
                 deny: Permissions::empty(),
-                kind: PermissionOverwriteType::Member(UserId::new(99)),
+                kind: PermissionOverwriteType::Member(UserId::new(bot_id)),
             },
         ]
+    }
+
+    fn test_adapter_with_channels(
+        guild_id: u64,
+        channels: Vec<serenity::all::GuildChannel>,
+    ) -> Arc<DiscordAdapter> {
+        let adapter = DiscordAdapter::new("test-token");
+        let cache = Arc::new(serenity::all::Cache::new());
+        let mut guild = serenity::all::Guild::default();
+        guild.id = GuildId::new(guild_id);
+        guild.channels = channels
+            .into_iter()
+            .map(|channel| (channel.id, channel))
+            .collect();
+        let mut event: serenity::all::GuildCreateEvent = serde_json::from_value(
+            serde_json::to_value(guild).unwrap_or_else(|err| panic!("Guild JSON: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("GuildCreateEvent JSON: {err}"));
+        cache.update(&mut event);
+        adapter.link_cache(cache);
+        adapter
+    }
+
+    fn private_text_channel(
+        guild_id: u64,
+        channel_id: u64,
+        owner_id: u64,
+        topic: Option<&str>,
+    ) -> serenity::all::GuildChannel {
+        let mut channel = serenity::all::GuildChannel::default();
+        channel.id = ChannelId::new(channel_id);
+        channel.guild_id = GuildId::new(guild_id);
+        channel.parent_id = Some(ChannelId::new(dl_community::faq::FAQ_CATEGORY_ID));
+        channel.topic = topic.map(str::to_string);
+        channel.permission_overwrites = private_overwrites_for(guild_id, owner_id, 1);
+        channel
+    }
+
+    #[tokio::test]
+    async fn support_ownership_predicate_cache_matrix_hat_exakt_einen_owner() {
+        use dl_community::{concierge::ConciergePort as _, faq::FaqPort as _};
+
+        // Kein Dispatcher-Harness: Diese Matrix kombiniert die echten Cache-Prädikate.
+        // Die Brain-Entry-Points deckt der Test `brain_deny_vermeidet_message_und_interaction_io` separat.
+        let guild_id = crate::onboardglue::MAIN_GUILD_ID;
+        let support_id = dl_community::concierge::SERVER_BOT_FRAGEN_CHANNEL_ID;
+        let faq_id = 100;
+        let concierge_id = 101;
+        let gameplay_id = 102;
+        let mut support_channel = serenity::all::GuildChannel::default();
+        support_channel.id = ChannelId::new(support_id);
+        support_channel.guild_id = GuildId::new(guild_id);
+        let mut gameplay_channel = serenity::all::GuildChannel::default();
+        gameplay_channel.id = ChannelId::new(gameplay_id);
+        gameplay_channel.guild_id = GuildId::new(guild_id);
+        let adapter = test_adapter_with_channels(
+            guild_id,
+            vec![
+                support_channel,
+                private_text_channel(guild_id, faq_id, 42, None),
+                private_text_channel(guild_id, concierge_id, 42, Some("dl-concierge-owner:42")),
+                gameplay_channel,
+            ],
+        );
+        let faq = FaqGlue {
+            adapter: adapter.clone(),
+        };
+        let concierge = ConciergeGlue { adapter };
+        let retriever_calls = Arc::new(AtomicUsize::new(0));
+        let answerer_calls = Arc::new(AtomicUsize::new(0));
+        let brain = test_brain_handler(
+            Some(HashSet::from([gameplay_id])),
+            retriever_calls.clone(),
+            answerer_calls.clone(),
+        );
+        let mut brain_calls = Vec::new();
+
+        for (label, channel_id) in [
+            ("Support", support_id),
+            ("FAQ", faq_id),
+            ("Concierge-Fallback", concierge_id),
+            ("Gameplay", gameplay_id),
+        ] {
+            let brain_owner = brain.channel_allowed(channel_id);
+            let owners = [
+                channel_id == support_id,
+                faq.private_faq_channel_owned_by_user(guild_id, channel_id, 42)
+                    .await,
+                concierge
+                    .private_channel_owned_by_user(
+                        guild_id,
+                        channel_id,
+                        42,
+                        dl_community::faq::FAQ_CATEGORY_ID,
+                    )
+                    .await,
+                brain_owner,
+            ];
+            assert_eq!(
+                owners.into_iter().filter(|owned| *owned).count(),
+                1,
+                "{label}: {owners:?}"
+            );
+            if brain_owner {
+                let _ = brain.outcome_for_question("Abrams?", 42).await;
+            }
+            brain_calls.push((
+                retriever_calls.load(std::sync::atomic::Ordering::Relaxed),
+                answerer_calls.load(std::sync::atomic::Ordering::Relaxed),
+            ));
+        }
+
+        assert_eq!(brain_calls, vec![(0, 0), (0, 0), (0, 0), (1, 1)]);
     }
 
     #[test]
