@@ -1,10 +1,10 @@
-## #255 — PLATZHALTER: LFG-Freitext
+## #255 — Mitspielersuche einfach in den Channel schreiben
 
-Problem: PLATZHALTER: bisheriger LFG-Ablauf.
+Problem: Die Mitspielersuche über Forum-Posts hat kaum jemand genutzt. Wer Leute suchte, fand keine, und die Suche verlief im Sand.
 
-Änderung: PLATZHALTER: Freitext-Auswertung und proaktive Kandidatensuche.
+Änderung: Künftig reicht eine normale Nachricht im Suche-Channel („suche 2 für Ranked heute Abend"). Der Bot liest Rang, Uhrzeit, Anzahl und Modus selbst heraus und sucht passende Leute, die zuletzt aktiv waren und zu der Zeit üblicherweise online sind. Fehlt die Uhrzeit, fragt er einmal kurz nach.
 
-Aktuelles Verhalten: PLATZHALTER: Feature-Flag, Rückfrage und vorbereitete Einladungen.
+Aktuelles Verhalten: Die Funktion ist eingebaut, aber noch nicht angeschaltet. Die Einladungen an passende Mitspieler starten, sobald der Zustellweg über den Concierge steht, mit hartem Limit, damit niemand zugespamt wird.
 
 ---
 
