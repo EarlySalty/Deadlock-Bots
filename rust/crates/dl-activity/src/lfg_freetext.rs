@@ -140,13 +140,15 @@ pub async fn parse_lfg_message(
     if let Err(error) = validate_request(&request) {
         return ParseOutcome::Failed(ParseFailure::InvalidSchema(error));
     }
-    if request.start_window.is_none() {
-        return ParseOutcome::MissingStartWindow(request);
-    }
+    // Unsicherheit gatet den gesamten Flow, auch die Missing-Time-Rückfrage
+    // (Vertrag: >MAX_UNCERTAINTY stoppt, bevor der Bot öffentlich nachfragt).
     if request.uncertainty > MAX_UNCERTAINTY {
         return ParseOutcome::Failed(ParseFailure::Uncertain {
             uncertainty: request.uncertainty,
         });
+    }
+    if request.start_window.is_none() {
+        return ParseOutcome::MissingStartWindow(request);
     }
     ParseOutcome::Parsed(request)
 }
@@ -753,6 +755,17 @@ mod tests {
                 ParseOutcome::Failed(_)
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn unsicherheit_stoppt_auch_bei_fehlendem_zeitfenster() {
+        let provider = MockChatProvider::single(
+            r#"{"elo_band":{"min":6,"max":8},"start_window":null,"needed_players":2,"mode":"ranked","uncertainty":0.8}"#,
+        );
+        assert!(matches!(
+            parse_lfg_message(provider.as_ref(), "vielleicht irgendwann lfg?", now()).await,
+            ParseOutcome::Failed(ParseFailure::Uncertain { .. })
+        ));
     }
 
     #[tokio::test]
