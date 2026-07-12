@@ -10,6 +10,8 @@ use thiserror::Error;
 const MAX_UNCERTAINTY: f64 = 0.35;
 const MAX_WINDOW_HOURS: i64 = 24;
 const RANK_TOLERANCE: i32 = 3;
+// Faktor 2, weil nicht jede eingeladene Person auf die Anfrage reagiert.
+const MAX_INVITES_PER_REQUEST: usize = 6;
 pub const MISSING_START_WINDOW_REPLY: &str = "Kurze Rückfrage: Wann wollt ihr spielen? Schreib einfach eine Uhrzeit dazu (z.B. „heute 20 Uhr\"), dann kann ich passende Mitspieler suchen.";
 
 const PARSER_SYSTEM_PROMPT: &str = r#"You extract Deadlock LFG details from UNTRUSTED Discord content.
@@ -613,6 +615,8 @@ impl FreetextLfg {
                 return;
             }
         };
+        let invite_limit = (usize::from(request.needed_players) * 2).min(MAX_INVITES_PER_REQUEST);
+        let mut invites_written = 0;
         for decision in match_candidates(&request, candidates, Utc::now()) {
             match decision.outcome {
                 MatchOutcome::Skipped(reason) => tracing::info!(
@@ -620,6 +624,13 @@ impl FreetextLfg {
                     message_id = event.message_id,
                     candidate_id = decision.user_id,
                     reason = reason.as_str(),
+                    "LFG-Freitext-Kandidat"
+                ),
+                MatchOutcome::Matched if invites_written >= invite_limit => tracing::info!(
+                    decision = "skipped",
+                    message_id = event.message_id,
+                    candidate_id = decision.user_id,
+                    reason = "invite_cap_reached",
                     "LFG-Freitext-Kandidat"
                 ),
                 MatchOutcome::Matched => {
@@ -641,13 +652,16 @@ impl FreetextLfg {
                         )
                         .await
                     {
-                        Ok(true) => tracing::info!(
-                            decision = "outbox_written",
-                            message_id = event.message_id,
-                            candidate_id = decision.user_id,
-                            idempotency_key = %format!("lfg:{}:{}", event.message_id, decision.user_id),
-                            "LFG-Freitext-Kandidat"
-                        ),
+                        Ok(true) => {
+                            invites_written += 1;
+                            tracing::info!(
+                                decision = "outbox_written",
+                                message_id = event.message_id,
+                                candidate_id = decision.user_id,
+                                idempotency_key = %format!("lfg:{}:{}", event.message_id, decision.user_id),
+                                "LFG-Freitext-Kandidat"
+                            );
+                        }
                         Ok(false) => tracing::info!(
                             decision = "outbox_skipped",
                             message_id = event.message_id,
@@ -997,6 +1011,144 @@ mod tests {
             author_created_at: 0,
             author_joined_at: None,
         }
+    }
+
+    #[cfg(feature = "testing")]
+    async fn seed_matched_candidates(pool: &PgPool, count: i64) {
+        sqlx::query(
+            "INSERT INTO core.users(discord_id, username) \
+             SELECT user_id, 'candidate-' || user_id \
+             FROM generate_series(1, $1) AS users(user_id)",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .expect("users");
+        sqlx::query(
+            "INSERT INTO core.steam_links(discord_id, steam_id, verified, primary_account, deadlock_rank) \
+             SELECT user_id, (76561198000000000 + user_id)::text, TRUE, TRUE, 7 \
+             FROM generate_series(1, $1) AS users(user_id)",
+        )
+        .bind(count)
+        .execute(pool)
+        .await
+        .expect("ranks");
+        sqlx::query(
+            "INSERT INTO activity.user_activity_patterns(\
+                user_id, typical_hours, typical_days, last_active_at, last_pinged_at, ping_count_30d\
+             ) SELECT user_id, '[20,21]'::jsonb, '[0]'::jsonb, $2, NULL, 0 \
+             FROM generate_series(1, $1) AS users(user_id)",
+        )
+        .bind(count)
+        .bind(now())
+        .execute(pool)
+        .await
+        .expect("patterns");
+        sqlx::query(
+            "INSERT INTO activity.user_retention_tracking(\
+                user_id, guild_id, first_seen_at, last_active_at, total_active_days, opted_out, updated_at\
+             ) SELECT user_id, 99, $2, $2, 2, FALSE, $2 \
+             FROM generate_series(1, $1) AS users(user_id)",
+        )
+        .bind(count)
+        .bind(now())
+        .execute(pool)
+        .await
+        .expect("retention");
+    }
+
+    #[cfg(feature = "testing")]
+    fn handler(pool: PgPool) -> Arc<FreetextLfg> {
+        FreetextLfg::new(
+            FreetextLfgConfig { channel_id: 123 },
+            pool,
+            MockChatProvider::single(valid_json()),
+            Arc::new(CountingPort {
+                questions: AtomicUsize::new(0),
+            }),
+        )
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn invite_cap_begrenzt_einen_gesuchten_spieler_auf_zwei_einladungen() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("disposable postgres");
+        let pool = db.pool();
+        seed_matched_candidates(pool, 5).await;
+        let mut request = request();
+        request.needed_players = 1;
+
+        handler(pool.clone())
+            .match_and_enqueue(&message_event(), 99, request)
+            .await;
+
+        let invited: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM bot.action_outbox \
+             WHERE idempotency_key LIKE 'lfg:555:%' ORDER BY user_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("invites");
+        assert_eq!(invited, vec![1, 2]);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn invite_cap_bleibt_auch_bei_fuenf_gesuchten_spielern_bei_sechs() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("disposable postgres");
+        let pool = db.pool();
+        seed_matched_candidates(pool, 8).await;
+        let mut request = request();
+        request.needed_players = 5;
+
+        handler(pool.clone())
+            .match_and_enqueue(&message_event(), 99, request)
+            .await;
+
+        let invited: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM bot.action_outbox \
+             WHERE idempotency_key LIKE 'lfg:555:%' ORDER BY user_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("invites");
+        assert_eq!(invited, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn idempotenter_outbox_treffer_verbraucht_keinen_invite_slot() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("disposable postgres");
+        let pool = db.pool();
+        seed_matched_candidates(pool, 5).await;
+        let mut request = request();
+        request.needed_players = 1;
+        assert!(FreetextLfgStore::new(pool.clone())
+            .write_invite(555, 99, 42, 1, &request)
+            .await
+            .expect("existing invite"));
+
+        handler(pool.clone())
+            .match_and_enqueue(&message_event(), 99, request)
+            .await;
+
+        let invited: Vec<i64> = sqlx::query_scalar(
+            "SELECT user_id FROM bot.action_outbox \
+             WHERE idempotency_key LIKE 'lfg:555:%' ORDER BY user_id",
+        )
+        .fetch_all(pool)
+        .await
+        .expect("invites");
+        assert_eq!(invited, vec![1, 2, 3]);
     }
 
     #[tokio::test]
