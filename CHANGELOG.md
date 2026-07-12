@@ -1,3 +1,13 @@
+## #247 — Absätze nach Überschriften werden erkannt
+
+Der Support-Agent fand zwar die richtige Hilfeseite, verwarf aber den ersten vollständigen Absatz nach einer Überschrift ohne Satzzeichen.
+
+Der Validator erkennt diese strukturelle Grenze jetzt korrekt.
+
+Der folgende Absatz kann als Antwort dienen; die Überschrift allein weiterhin nicht.
+
+---
+
 ## #246 — Concierge antwortet aus geprüftem Supportwissen
 
 **Ausgangslage:** Fragen zu Discord und den Bots konnte der Concierge nicht belastbar beantworten, und es war unklar, was er dabei speichert oder an Menschen weitergibt.
