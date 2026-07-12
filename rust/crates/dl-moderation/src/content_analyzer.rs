@@ -5,6 +5,50 @@ use crate::moderation_verdict::{
     parse_content_analysis, ContentAnalysis, ModerationCategory, ModerationVerdict,
 };
 
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub(crate) struct LogCapture {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl LogCapture {
+        pub(crate) fn text(&self) -> String {
+            String::from_utf8_lossy(&self.bytes.lock().expect("log capture")).to_string()
+        }
+    }
+
+    pub(crate) struct LogCaptureWriter {
+        bytes: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl std::io::Write for LogCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.bytes
+                .lock()
+                .expect("log capture")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogCapture {
+        type Writer = LogCaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            LogCaptureWriter {
+                bytes: self.bytes.clone(),
+            }
+        }
+    }
+}
+
 pub const ANALYZER_SYSTEM_PROMPT: &str = r#"Du bist ein Discord-Moderations-Analyzer fuer einen Gaming-Server.
 Analysiere Text und Bilder knapp und konservativ.
 Gib eine Kategorie, Confidence und eine kurze Begruendung auf Deutsch zurueck.
@@ -126,6 +170,9 @@ impl ContentAnalyzer {
                     temperature: 0.0,
                 })
                 .await;
+            if raw.is_none() {
+                log_provider_failure(input, "text", &self.config.text_model);
+            }
             analyses.push(ModalAnalysis {
                 analysis: parse_content_analysis(raw.as_deref()),
                 modality: AnalysisModality::Text,
@@ -148,6 +195,9 @@ impl ContentAnalyzer {
             } else {
                 None
             };
+            if raw.is_none() {
+                log_provider_failure(input, "image", &self.config.image_model);
+            }
             analyses.push(ModalAnalysis {
                 analysis: parse_content_analysis(raw.as_deref()),
                 modality: AnalysisModality::Image,
@@ -178,6 +228,26 @@ enum AnalysisModality {
 struct ModalAnalysis {
     analysis: ContentAnalysis,
     modality: AnalysisModality,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ContentModerationEvaluation {
+    pub analysis: ContentAnalysis,
+    pub verdict: Option<ModerationVerdict>,
+}
+
+fn log_provider_failure(input: &ModerationInput, modality: &str, model: &str) {
+    let input = input.trigger_preview();
+    let verdict = "error";
+    let reason = "provider_timeout_or_error";
+    tracing::error!(
+        input = %input,
+        verdict = %verdict,
+        reason = %reason,
+        modality,
+        model,
+        "Moderation: Analyzer ohne Provider-Antwort"
+    );
 }
 
 fn analyzer_prompt(modality: &str, message: &str, image_count: usize) -> String {
@@ -245,10 +315,20 @@ impl ContentModerationPipeline {
     }
 
     pub async fn evaluate(&self, input: &ModerationInput) -> Option<ModerationVerdict> {
+        self.evaluate_with_analysis(input).await.verdict
+    }
+
+    pub(crate) async fn evaluate_with_analysis(
+        &self,
+        input: &ModerationInput,
+    ) -> ContentModerationEvaluation {
         let modal_analysis = self.analyzer.analyze_modal(input).await;
         let analysis = modal_analysis.analysis;
         if analysis.confidence < self.analyze_flag_threshold || analysis.category.is_harmless() {
-            return None;
+            return ContentModerationEvaluation {
+                analysis,
+                verdict: None,
+            };
         }
         let verification =
             if input.is_image_only() && self.analyzer.image_model() == self.verifier.model() {
@@ -258,17 +338,21 @@ impl ContentModerationPipeline {
             } else {
                 self.verifier.verify(input, &analysis).await
             };
-        Some(ModerationVerdict {
-            analysis,
-            verification,
-            trigger: input.trigger_preview(),
-        })
+        ContentModerationEvaluation {
+            analysis: analysis.clone(),
+            verdict: Some(ModerationVerdict {
+                analysis,
+                verification,
+                trigger: input.trigger_preview(),
+            }),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::content_analyzer::test_support::LogCapture;
     use crate::content_verifier::ContentVerifier;
     use std::sync::Arc;
     use tokio::sync::Mutex;
@@ -329,6 +413,35 @@ mod tests {
             &[Some(dl_ai::DEFAULT_FIREWORKS_MODEL.to_string())]
         );
         assert!(vision.models.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn analyzer_logs_missing_provider_response_as_error() {
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let analyzer = ContentAnalyzer::new(
+            Arc::new(RecordingText::default()),
+            None,
+            ContentAnalyzerConfig::default(),
+        );
+
+        let result = analyzer
+            .analyze(&ModerationInput::text("free crypto"))
+            .await;
+        drop(guard);
+
+        assert_eq!(result.category, ModerationCategory::Other);
+        assert_eq!(result.reason, "parse_error");
+        let logs = capture.text();
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("input=free crypto"), "{logs}");
+        assert!(logs.contains("verdict=error"), "{logs}");
+        assert!(logs.contains("reason=provider_timeout_or_error"), "{logs}");
     }
 
     #[tokio::test]
