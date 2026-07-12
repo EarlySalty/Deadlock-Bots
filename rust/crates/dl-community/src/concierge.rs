@@ -23,6 +23,7 @@ use crate::knowledge_client::{self, KnowledgeLookup};
 
 pub const CONCIERGE_COMPONENTS_V2_FLAG: u64 = 1 << 15;
 pub const CONCIERGE_ACCENT_GOLD: u64 = 0xC8A86B;
+pub const CONCIERGE_OWNER_TOPIC_PREFIX: &str = "dl-concierge-owner:";
 pub const CONCIERGE_T0_CLAIM_NS: &str = "concierge:t0";
 pub const CONCIERGE_FALLBACK_CLAIM_NS: &str = "concierge:fallback_channel";
 pub const CONCIERGE_PATE_CLAIM_NS: &str = "concierge:pate_claim";
@@ -6028,6 +6029,11 @@ mod tests {
     #[test]
     fn knowledge_timeout_ist_acht_sekunden() {
         assert_eq!(KNOWLEDGE_TIMEOUT, StdDuration::from_secs(8));
+    }
+
+    #[test]
+    fn concierge_owner_topic_prefix_bleibt_stabil() {
+        assert_eq!(CONCIERGE_OWNER_TOPIC_PREFIX, "dl-concierge-owner:");
     }
 
     fn valid_pate_claim_interaction(user_id: u64, pate_id: u64) -> BridgeInteraction {

@@ -1,3 +1,13 @@
+## #253 — Eindeutige Antwortwege für Support-Fragen
+
+Problem: Im Support konnten sich mehrere Antwortwege überschneiden, sodass !brain doppelt oder ohne öffentliche Doku-Grundlage antwortete.
+
+Änderung: Brain reagiert nur noch in einem ausdrücklich freigegebenen Bot-Spam-Kanal; FAQ und Concierge haben in privaten Bereichen jeweils eine exklusive Zuständigkeit.
+
+Aktuelles Verhalten: Pro Ort ist genau ein Antwortweg zuständig, sodass Support-Fragen nicht mehr parallel von mehreren Bots beantwortet werden.
+
+---
+
 ## #252 — Antworten kommen nur aus festen Doku-Passagen
 
 Problem: Kopierte Textausschnitte des Sprachmodells konnten trotz Prüfung an Satz- und Überschriftsgrenzen unnötig abgelehnt werden.
