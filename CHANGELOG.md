@@ -1,3 +1,13 @@
+## #259 — Voice-Trennungen bleiben dauerhaft aktiv
+
+Problem: Andere Rechte-Updates des Bots konnten eine laufende feste Voice-Trennung aus einem Kanal wieder entfernen.
+
+Änderung: Aktive Trennungen werden jetzt bei jedem vollständigen Rechte-Update erneut eingemischt und mit Besitzer-Bans gemeinsam verarbeitet.
+
+Aktuelles Verhalten: Die beiden betroffenen Personen können in keinem Sprachkanal zusammenkommen; Besitzerrechte, Rang-Updates und Bot-Neustarts umgehen die Sperre nicht.
+
+---
+
 ## #258 — Gelöschte Daten bleiben gelöscht
 
 Problem: Wer seine Daten über den Datenschutz-Befehl gelöscht hat, bekam einen Teil davon still zurück. Mehrere Hintergrundprozesse haben weitergeschrieben, sobald die Person wieder im Sprachkanal saß: Aktivitätsmuster, Mitspieler-Verbindungen, Mitspielersuche, Sprachstatistik und Umfrage-Einladungen.
