@@ -1,3 +1,13 @@
+## #251 — Frageformen blockieren keine passende Steam-Antwort
+
+Problem: Richtige Steam-Passagen wurden bei „Welche“-Fragen abgelehnt, wenn die Frageform erst später im gefundenen Dokument stand.
+
+Änderung: Die rein grammatischen Formen von „welche“ zählen nicht mehr als thematischer Beleg; Steam, Verwaltung und der Bezug zu den eigenen Konten bleiben verbindlich.
+
+Aktuelles Verhalten: Fragen zur eigenen Steam-Verwaltung werden aus der passenden öffentlichen Passage beantwortet, themenfremde Texte weiterhin abgelehnt.
+
+---
+
 ## #250 — „Kann“ blockiert keine passende FAQ-Antwort
 
 Problem: Richtige FAQ-Passagen wurden bei Fragen mit „kann“ abgelehnt, wenn das Wort erst später im gefundenen Dokument stand.
