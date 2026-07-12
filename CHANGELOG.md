@@ -1,3 +1,9 @@
+## #259 — Turniervorschläge bleiben in Mod-Hand
+
+Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen vorher gespeicherten KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; parallele Änderungen laufen nacheinander und alte Buttons finden automatisch die aktive Version. Aktuelles Verhalten: Erst zwei unterschiedliche Mods legen das Turnier an, danach entsteht zuverlässig nur eine interne Ankündigungsvorlage zur manuellen Veröffentlichung. Scheitert dieser interne Post, bleibt er offen und wird bei einem erneuten J nochmals versucht.
+
+---
+
 ## #258 — Gelöschte Daten bleiben gelöscht
 
 Problem: Wer seine Daten über den Datenschutz-Befehl gelöscht hat, bekam einen Teil davon still zurück. Mehrere Hintergrundprozesse haben weitergeschrieben, sobald die Person wieder im Sprachkanal saß: Aktivitätsmuster, Mitspieler-Verbindungen, Mitspielersuche, Sprachstatistik und Umfrage-Einladungen.
