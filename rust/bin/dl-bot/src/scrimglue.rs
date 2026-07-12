@@ -369,11 +369,7 @@ async fn provision_scrim_voice_channels(
         }
 
         let channel_id = match tempvoice
-            .create_restricted_voice_channel(
-                category_id,
-                &channel_name,
-                &team.connect_user_ids,
-            )
+            .create_restricted_voice_channel(category_id, &channel_name, &team.connect_user_ids)
             .await
         {
             Ok(channel_id) => channel_id,
