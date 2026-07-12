@@ -188,6 +188,15 @@ pub async fn run_wave(
             continue;
         }
 
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            summary.skipped_opt_out += 1;
+            tracing::info!(
+                writer = "bot.action_outbox.survey_pulse",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            continue;
+        }
         let inserted = sqlx::query(
             "INSERT INTO bot.action_outbox(
                 action_type, user_id, guild_id, payload, anchor, idempotency_key
@@ -864,6 +873,66 @@ mod tests {
         .await
         .expect("outbox users");
         assert_eq!(invited, vec![1]);
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn privacy_lock_blockiert_survey_einladung_nach_loeschung() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("disposable postgres");
+        let pool = db.pool().clone();
+        let guild_id = 99;
+        seed_user(
+            &pool,
+            42,
+            guild_id,
+            now() - Duration::days(1),
+            false,
+            None,
+            0,
+        )
+        .await;
+
+        let mut erase_tx = pool.begin().await.expect("erase tx");
+        dl_central_db::lock_user_privacy(&mut erase_tx, 42)
+            .await
+            .expect("privacy lock");
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(42, TRUE, now())",
+        )
+        .execute(&mut *erase_tx)
+        .await
+        .expect("privacy tombstone");
+
+        let write_pool = pool.clone();
+        let write = tokio::spawn(async move {
+            run_wave(
+                &write_pool,
+                guild_id,
+                SurveyPulseConfig {
+                    enabled: true,
+                    interval_days: 75,
+                },
+                now(),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        erase_tx.commit().await.expect("erase commit");
+        let summary = write.await.expect("writer task").expect("writer result");
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.action_outbox
+              WHERE action_type = 'survey_pulse' AND user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("survey refill count");
+        assert_eq!(summary.invited, 0);
+        assert_eq!(count, 0, "Löschung darf Survey-Einladung nicht neu anlegen");
     }
 
     #[tokio::test]

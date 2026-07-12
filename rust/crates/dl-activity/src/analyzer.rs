@@ -182,6 +182,16 @@ impl ActivityAnalyzer {
         let sessions_count = i64_to_i32(pattern.sessions_count, "sessions_count_2w")?;
         let total_minutes = i64_to_i32(pattern.total_minutes, "total_minutes_2w")?;
 
+        let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tracing::info!(
+                writer = "activity.user_activity_patterns",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            tx.commit().await?;
+            return Ok(());
+        }
         sqlx::query!(
             r#"
             INSERT INTO activity.user_activity_patterns(
@@ -206,8 +216,9 @@ impl ActivityAnalyzer {
             total_minutes,
             last_active,
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
         Ok(())
     }
 
@@ -250,6 +261,29 @@ impl ActivityAnalyzer {
         for (uid, co_uid, uid_name, co_name) in pairs {
             let uid = discord_id_to_i64(*uid, "user_id")?;
             let co_uid = discord_id_to_i64(*co_uid, "co_player_id")?;
+            let mut tx = self.pool.begin().await?;
+            let (first, second) = if uid <= co_uid {
+                (uid, co_uid)
+            } else {
+                (co_uid, uid)
+            };
+            let first_opted_out =
+                dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, first).await?;
+            let second_opted_out = if first == second {
+                first_opted_out
+            } else {
+                dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, second).await?
+            };
+            if first_opted_out || second_opted_out {
+                tracing::info!(
+                    writer = "activity.user_co_players",
+                    user_id = uid,
+                    co_player_id = co_uid,
+                    "übersprungen wegen Opt-out"
+                );
+                tx.commit().await?;
+                continue;
+            }
             sqlx::query!(
                 r#"
                 INSERT INTO activity.user_co_players(
@@ -274,8 +308,9 @@ impl ActivityAnalyzer {
                 uid_name,
                 co_name,
             )
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+            tx.commit().await?;
         }
         Ok(())
     }
@@ -1010,6 +1045,38 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "testing")]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn opted_out_user_bekommt_keinen_activity_pattern_refill(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, analyzer, _voice) = setup().await?;
+        sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(101, TRUE)")
+            .execute(db.pool())
+            .await?;
+
+        analyzer
+            .persist_pattern_inner(
+                101,
+                &ActivityPattern {
+                    typical_hours: vec![20],
+                    typical_days: vec![1],
+                    sessions_count: 1,
+                    total_minutes: 30,
+                    last_active: dt("2026-07-12 20:00:00"),
+                },
+            )
+            .await?;
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.user_activity_patterns WHERE user_id = 101",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(count, 0, "Opt-out darf Activity-Pattern nicht neu anlegen");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn co_player_tracking_bidirektional() -> Result<(), Box<dyn std::error::Error>> {
         let (_db, analyzer, voice) = setup().await?;
         *voice.groups.lock().expect("lock") =
@@ -1032,6 +1099,30 @@ mod tests {
         assert_eq!((row.sessions, row.minutes), (2, 20));
         assert_eq!(row.name, "Ben");
         assert_eq!(analyzer.top_co_players(200, 5).await, vec![(100, 2)]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn opted_out_user_bekommt_keinen_co_player_refill(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, analyzer, _voice) = setup().await?;
+        sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(100, TRUE)")
+            .execute(db.pool())
+            .await?;
+
+        analyzer
+            .record_pair(100, "Opt-out", 200, "Mitspieler")
+            .await;
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.user_co_players
+              WHERE user_id = 100 OR co_player_id = 100",
+        )
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(count, 0, "Opt-out darf Co-Player-Profil nicht neu anlegen");
         Ok(())
     }
 
