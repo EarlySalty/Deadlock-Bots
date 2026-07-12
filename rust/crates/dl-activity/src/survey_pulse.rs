@@ -719,20 +719,26 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "testing")]
     use std::sync::{Arc, Mutex};
 
+    #[cfg(feature = "testing")]
     use chrono::{Duration, TimeZone, Utc};
+    #[cfg(feature = "testing")]
     use dl_discord::{BridgeInteraction, InteractionHandler, InteractionRouter};
+    #[cfg(feature = "testing")]
     use serde_json::json;
 
     use super::*;
 
+    #[cfg(feature = "testing")]
     fn now() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2026, 7, 12, 12, 0, 0)
             .single()
             .expect("valid timestamp")
     }
 
+    #[cfg(feature = "testing")]
     async fn seed_user(
         pool: &sqlx::PgPool,
         user_id: i64,
@@ -789,6 +795,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn wave_selects_recent_voice_users_and_exposes_every_skip_reason() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -859,6 +867,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn response_upsert_overwrites_instead_of_duplicating() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -908,6 +918,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn summary_view_aggregates_rate_satisfaction_and_event_counts() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -962,6 +974,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn interaction_handler_persists_buttons_select_and_modal_upserts() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -1044,11 +1058,13 @@ mod tests {
             .is_some());
     }
 
+    #[cfg(feature = "testing")]
     #[derive(Default)]
     struct MockPort {
         sent: Mutex<Vec<(u64, Value)>>,
     }
 
+    #[cfg(feature = "testing")]
     #[async_trait::async_trait]
     impl SurveyPulsePort for MockPort {
         async fn send_dm(&self, user_id: u64, body: Value) -> Result<(), String> {
@@ -1058,6 +1074,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn outbox_dispatch_rechecks_gate_and_accounts_only_successful_dm() {
         let db = dl_central_db::testing::test_pool()
             .await
@@ -1127,6 +1145,8 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "testing")]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
     async fn due_check_creates_at_most_one_wave_per_interval() {
         let db = dl_central_db::testing::test_pool()
             .await
