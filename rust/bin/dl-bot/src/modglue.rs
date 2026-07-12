@@ -299,6 +299,7 @@ impl dl_brain::AiAnswerer for BrainAiGlue {
                 system_prompt: None,
                 model: None,
                 max_output_tokens: Some(BRAIN_MAX_OUTPUT_TOKENS),
+                reasoning_effort: None,
                 temperature: 0.25,
             })
             .await

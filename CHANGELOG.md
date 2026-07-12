@@ -1,3 +1,13 @@
+## #254 — Schnellere Auswahl passender Doku-Passagen
+
+Problem: Die reine Auswahl fester Doku-Passagen lief unnötig in lange Reasoning-Timeouts und bekam Kandidaten, die der Wissensdienst anschließend sicher ablehnen musste.
+
+Änderung: Für diesen Auswahlpfad ist Reasoning abgeschaltet, und sicher ungültige Kandidaten werden bereits vor der Modellanfrage entfernt.
+
+Aktuelles Verhalten: Antworten bleiben bei einer Modellanfrage, die auf sieben Sekunden begrenzt ist, und bestehen weiterhin nur aus festen öffentlichen Passagen.
+
+---
+
 ## #253 — Eindeutige Antwortwege für Support-Fragen
 
 Problem: Im Support konnten sich mehrere Antwortwege überschneiden, sodass !brain doppelt oder ohne öffentliche Doku-Grundlage antwortete.

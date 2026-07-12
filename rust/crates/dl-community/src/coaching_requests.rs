@@ -828,6 +828,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
                 system_prompt: Some(COACHING_ANALYSIS_SYSTEM.to_string()),
                 model: Some("MiniMax-M3".to_string()),
                 max_output_tokens: Some(500),
+                reasoning_effort: None,
                 temperature: 0.7,
             })
             .await

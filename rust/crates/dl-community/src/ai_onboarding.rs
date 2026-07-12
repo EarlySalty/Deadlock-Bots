@@ -391,6 +391,7 @@ impl AiOnboarding {
                 system_prompt: Some(AI_ONBOARDING_SYSTEM_PROMPT.to_string()),
                 model: None,
                 max_output_tokens: Some(self.config.max_output_tokens),
+                reasoning_effort: None,
                 temperature: TEMPERATURE,
             };
             if let Some(text) = ai.generate_text(request).await {

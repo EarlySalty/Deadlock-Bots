@@ -815,6 +815,7 @@ impl AiModerator {
                     system_prompt: Some(MODERATION_SYSTEM_PROMPT.to_string()),
                     model: None,
                     max_output_tokens: Some(300),
+                    reasoning_effort: None,
                     temperature: 0.0,
                 })
                 .await;
