@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
+pub mod api_ingest;
+
 pub const DISCORD_MESSAGE_LIMIT: usize = 2000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,0 +1,34 @@
+[
+  {
+    "id": 1,
+    "class_name": "hero_inferno",
+    "name": "Infernus",
+    "description": "Ignites enemies.",
+    "hero_type": "marksman",
+    "disabled": false,
+    "in_development": false,
+    "player_selectable": true,
+    "starting_stats": {
+      "max_health": {"value": 830, "display_stat_name": "EMaxHealth"},
+      "stamina": {"value": 3, "display_stat_name": "EStamina"},
+      "base_health_regen": {"value": 2, "display_stat_name": "EBaseHealthRegen"}
+    },
+    "commit_sha": "metadata-only",
+    "version": "123456"
+  },
+  {
+    "id": 2,
+    "name": "Disabled Hero",
+    "disabled": true,
+    "in_development": false,
+    "player_selectable": true,
+    "starting_stats": {"max_health": {"value": 900}}
+  },
+  {
+    "id": 3,
+    "disabled": false,
+    "in_development": false,
+    "player_selectable": true,
+    "starting_stats": {"max_health": {"value": 700}}
+  }
+]
