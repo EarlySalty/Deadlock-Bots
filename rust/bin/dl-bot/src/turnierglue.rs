@@ -256,6 +256,7 @@ pub struct TurnierProposalService {
     adapter: Arc<DiscordAdapter>,
     generator: Option<Arc<dyn TextGenerator>>,
     model: String,
+    revision_lock: tokio::sync::Mutex<()>,
 }
 
 impl TurnierProposalService {
@@ -277,6 +278,7 @@ impl TurnierProposalService {
             adapter,
             generator,
             model,
+            revision_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -683,16 +685,20 @@ impl InteractionHandler for ProposalHandler {
                 if feedback.is_empty() {
                     return BridgeReply::ephemeral_text("Die gewünschte Änderung fehlt.");
                 }
+                // Der Bot läuft per PID-Lock als Einzelinstanz. Damit kann nur
+                // eine Revision zugleich dieselbe persistente Karte ersetzen.
+                let _revision_guard = self.service.revision_lock.lock().await;
                 let current = match self.service.client.get(proposal_id).await {
                     Ok(value) => value,
                     Err(error) => return BridgeReply::ephemeral_text(error),
                 };
                 let channel_id = current.proposal.channel_id.clone();
                 let message_id = current.proposal.proposal_message_id.clone();
-                let config = match self.service.plan_config(&current, Some(&feedback)).await {
+                let mut config = match self.service.plan_config(&current, Some(&feedback)).await {
                     Ok(value) => value,
                     Err(error) => return BridgeReply::ephemeral_text(error),
                 };
+                config["_parent_proposal_id"] = json!(proposal_id);
                 let request = RevisionRequest {
                     role_ids: interaction
                         .role_ids
