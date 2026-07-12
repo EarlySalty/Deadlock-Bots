@@ -8,7 +8,7 @@ Die Discord-Nutzer `887664726421671976` und `279971744964542464` dürfen sich in
 
 - Sobald einer der beiden Nutzer einem Voice-Channel beitritt, erhält der andere in genau diesem Kanal ein explizites `CONNECT: deny`.
 - Beim Verlassen wird die Sondersperre im alten Kanal entfernt.
-- Bei einem Kanalwechsel wird zuerst der alte Kanal bereinigt und anschließend der neue Kanal geschützt.
+- Bei einem Kanalwechsel wird zuerst der neue Kanal geschützt und anschließend der alte Kanal bereinigt, damit keine Join-Lücke entsteht.
 - Die Regel gilt bidirektional und für alle Voice-Channels, nicht nur für TempVoice-Kanäle.
 - Andere Voice-Channels bleiben für den jeweils gesperrten Nutzer unverändert nutzbar.
 - Der Bot trennt oder verschiebt keinen Nutzer für diese Regel.
