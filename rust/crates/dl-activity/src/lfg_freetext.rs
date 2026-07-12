@@ -276,8 +276,9 @@ fn matches_window(candidate: &CandidateSnapshot, window: &StartWindow) -> bool {
     if candidate.typical_hours.is_empty() || candidate.typical_days.is_empty() {
         return false;
     }
-    let mut slot = window.start;
-    while slot < window.end {
+    let mut slot = window.start.with_timezone(&Utc);
+    let end = window.end.with_timezone(&Utc);
+    while slot < end {
         let day = slot.weekday().num_days_from_monday();
         if candidate.typical_days.contains(&day) && candidate.typical_hours.contains(&slot.hour()) {
             return true;
@@ -806,7 +807,7 @@ mod tests {
     fn candidate(user_id: i64) -> CandidateSnapshot {
         CandidateSnapshot {
             user_id,
-            typical_hours: vec![20, 21],
+            typical_hours: vec![18, 19],
             typical_days: vec![0],
             last_active_at: now() - chrono::Duration::days(2),
             rank: Some(7),
@@ -822,6 +823,60 @@ mod tests {
 
     fn request() -> LfgRequest {
         serde_json::from_str(valid_json()).expect("valid request")
+    }
+
+    #[test]
+    fn matcher_vergleicht_berliner_sommerzeit_mit_utc_stunden() {
+        let mut utc_hour = candidate(1);
+        utc_hour.typical_hours = vec![18];
+        let mut local_hour = candidate(2);
+        local_hour.typical_hours = vec![20];
+
+        let outcomes = match_candidates(&request(), vec![utc_hour, local_hour], now())
+            .into_iter()
+            .map(|decision| decision.outcome)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                MatchOutcome::Matched,
+                MatchOutcome::Skipped(SkipReason::TimeWindow),
+            ]
+        );
+    }
+
+    #[test]
+    fn matcher_vergleicht_wochentag_nach_mitternachtsueberlauf_in_utc() {
+        let request = serde_json::from_str(
+            r#"{
+                "elo_band":{"min":6,"max":8},
+                "start_window":{"start":"2026-07-13T00:30:00+02:00","end":"2026-07-13T01:30:00+02:00"},
+                "needed_players":2,
+                "mode":"ranked",
+                "uncertainty":0.1
+            }"#,
+        )
+        .expect("valid request");
+        let mut sunday = candidate(1);
+        sunday.typical_hours = vec![0, 22];
+        sunday.typical_days = vec![6];
+        let mut monday = candidate(2);
+        monday.typical_hours = vec![0, 22];
+        monday.typical_days = vec![0];
+
+        let outcomes = match_candidates(&request, vec![sunday, monday], now())
+            .into_iter()
+            .map(|decision| decision.outcome)
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            outcomes,
+            vec![
+                MatchOutcome::Matched,
+                MatchOutcome::Skipped(SkipReason::TimeWindow),
+            ]
+        );
     }
 
     #[test]
