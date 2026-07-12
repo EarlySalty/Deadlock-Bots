@@ -12,6 +12,7 @@ pub mod journey;
 pub mod lfg;
 pub mod player_finder;
 pub mod stats_cmd;
+pub mod survey_pulse;
 pub mod text_stats;
 
 pub use db::{ActivityDbError, ActivityDbResult};

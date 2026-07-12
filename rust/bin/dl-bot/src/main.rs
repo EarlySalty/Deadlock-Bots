@@ -593,6 +593,30 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     );
     dl_voice::feedback::register(&mut router, voice_feedback.clone());
 
+    // Community-Puls: Interactions bleiben für bereits versandte DMs aktiv;
+    // Scheduler und Outbox-Zustellung laufen nur hinter dem Opt-in-Flag.
+    let survey_pulse_config = dl_activity::survey_pulse::SurveyPulseConfig::from_lookup(env);
+    let survey_pulse_handler =
+        dl_activity::survey_pulse::SurveyPulseHandler::new(central_pool.clone());
+    dl_activity::survey_pulse::register(&mut router, survey_pulse_handler);
+    let _survey_pulse = if survey_pulse_config.enabled {
+        let guild_id = i64::try_from(concierge_config.main_guild_id)
+            .context("SURVEY_PULSE: Guild-ID außerhalb des BIGINT-Bereichs")?;
+        tracing::info!(
+            interval_days = survey_pulse_config.interval_days,
+            "Umfragen-Puls aktiviert"
+        );
+        Some(dl_activity::survey_pulse::spawn(
+            central_pool.clone(),
+            guild_id,
+            survey_pulse_config,
+            adapter.clone(),
+        ))
+    } else {
+        tracing::info!("Umfragen-Puls deaktiviert");
+        None
+    };
+
     // Tag-System (6/7): Single Source of Truth, von TempVoice-Filtern genutzt
     let tag_service = dl_community::tags::TagService::new(central_pool.clone());
     // /meine-tags-Selbstverwaltung (Slash + Select/Reset-Komponenten).

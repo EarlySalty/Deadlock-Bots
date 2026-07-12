@@ -19,6 +19,9 @@ thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+dl-central-db = { workspace = true, features = ["testing"] }
+
 [features]
 testing = ["dl-central-db/testing"]
 

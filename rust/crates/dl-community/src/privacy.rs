@@ -605,6 +605,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "survey_responses",
+        "user_id",
+        "bot.survey_responses",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "dm_response_tracking",
         "user_id",
         "bot.dm_response_tracking",
@@ -3019,6 +3026,44 @@ mod tests {
             .await
             .expect("delete");
         assert_eq!(second.counts.get("voice_stats.user_id").copied(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn delete_entfernt_umfragen_puls_antworten() {
+        let db = mk_db().await;
+        let wave_id: i64 = sqlx::query_scalar(
+            "INSERT INTO bot.survey_waves(config_snapshot) VALUES ('{}') RETURNING id",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("survey wave");
+        sqlx::query(
+            "INSERT INTO bot.survey_responses(
+                wave_id, user_id, satisfaction, events, freitext
+             ) VALUES ($1, 42, 5, ARRAY['turnier'], 'privat')",
+        )
+        .bind(wave_id)
+        .execute(db.pool())
+        .await
+        .expect("survey response");
+
+        let summary = delete_user_data(db.pool(), 42, "test".into(), 1_000)
+            .await
+            .expect("delete");
+
+        assert_eq!(
+            summary.counts.get("survey_responses.user_id").copied(),
+            Some(1)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM bot.survey_responses WHERE user_id = 42",
+            )
+            .fetch_one(db.pool())
+            .await
+            .expect("survey response count"),
+            0
+        );
     }
 
     #[tokio::test]
