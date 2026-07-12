@@ -1102,6 +1102,10 @@ impl crate::nudge::NudgePort for NudgeGlue {
         self.steam.fetch_steam_link_url(user_id).await
     }
 
+    async fn send_voice_return(&self, user_id: u64) {
+        self.steam.post_voice_return(user_id).await;
+    }
+
     async fn delete_message(&self, channel_id: u64, message_id: u64) {
         let _ = self
             .adapter
