@@ -23,3 +23,4 @@ pub mod stats;
 pub mod status;
 pub mod tempvoice;
 pub mod tracker;
+pub mod voice_pair_guard;
