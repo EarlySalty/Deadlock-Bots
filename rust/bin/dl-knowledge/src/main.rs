@@ -37,8 +37,8 @@ const STOPWORDS: &[&str] = &[
     "dein", "dem", "den", "der", "des", "die", "dir", "doch", "du", "ein", "eine", "einem",
     "einen", "einer", "eines", "er", "es", "fuer", "für", "ich", "im", "in", "ist", "kein",
     "keine", "kann", "man", "mal", "mehr", "mein", "mit", "nach", "nicht", "nur", "oder", "sein",
-    "sie", "sind", "so", "und", "uns", "von", "vor", "war", "was", "wenn", "wer", "wie", "wir",
-    "wo", "zu", "zum", "zur", "ueber", "über",
+    "sie", "sind", "so", "und", "uns", "von", "vor", "war", "was", "welche", "welcher", "welches",
+    "welchen", "welchem", "wenn", "wer", "wie", "wir", "wo", "zu", "zum", "zur", "ueber", "über",
 ];
 
 #[derive(Clone)]
@@ -2501,6 +2501,59 @@ mod tests {
 
         assert!(grounded_response(
             "Wo kann ich dem Bot eine Frage zum Server stellen?",
+            &[evidence.to_string()],
+            &chunks,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn grounding_behandelt_welche_flexionen_nicht_als_inhaltsanker() {
+        let terms =
+            grounding_terms("welche welcher welches welchen welchem Steam-Verwaltung selbst");
+
+        assert_eq!(
+            terms,
+            HashSet::from([
+                "steam".to_string(),
+                "verwaltung".to_string(),
+                "selbst".to_string(),
+            ])
+        );
+    }
+
+    #[test]
+    fn steam_verwaltung_scheitert_nicht_an_spaeterem_welche_im_chunk() {
+        let evidence = "Du kannst mehrere eigene Steam-Konten verknüpfen und selbst verwalten. Die Verwaltung betrifft immer nur deine eigenen Verknüpfungen: deine verknüpften Konten ansehen (primäres zuerst, mit Verifiziert-Haken): /steam links. ein bereits verknüpftes Konto als primär festlegen: /steam setprimary. eine eigene Verknüpfung entfernen: /steam unlink.";
+        let chunks = vec![test_chunk(
+            "Steam-Bot",
+            "Eigene Verknüpfungen verwalten",
+            "steam-bot/steam-bot.html",
+            &format!(
+                "Eigene Verknüpfungen verwalten {evidence} /steam whoami ist dagegen ein reiner Nachschlage-Befehl: Du gibst eine Steam-Referenz an — SteamID, Vanity-Name oder Profil-Link — und der Bot löst sie zu Persona-Name und SteamID64 auf. Das zeigt weder deine eigene Verknüpfung noch belegt es einen Besitz; welche Konten mit dir verknüpft sind, siehst du über /steam links."
+            ),
+        )];
+
+        assert!(grounded_response(
+            "Welche Steam-Verwaltung kann ich selbst im Server erledigen?",
+            &[evidence.to_string()],
+            &chunks,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn welche_allein_erdet_keine_themenfremde_evidence() {
+        let evidence = "Welche Antwort ist verfügbar?";
+        let chunks = vec![test_chunk(
+            "Assistent",
+            "Automatische Antworten",
+            "assistent.html",
+            evidence,
+        )];
+
+        assert!(grounded_response(
+            "Welche Steam-Verwaltung kann ich selbst im Server erledigen?",
             &[evidence.to_string()],
             &chunks,
         )
