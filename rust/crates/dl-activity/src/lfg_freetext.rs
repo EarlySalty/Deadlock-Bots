@@ -820,6 +820,7 @@ mod tests {
         let mut opted_out = candidate(5);
         opted_out.eligibility.opted_out = true;
         let mut budget = candidate(6);
+        budget.eligibility.last_pinged_at = Some(now() - chrono::Duration::days(20));
         budget.eligibility.ping_count_30d = 2;
         matched.mode_history.clear(); // keine Modus-Historie = keine Einschränkung
 

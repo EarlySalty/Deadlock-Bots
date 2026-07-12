@@ -65,6 +65,7 @@ fn allows_user_exactly_fourteen_days_after_last_ping() {
 #[test]
 fn denies_user_at_monthly_budget_limit() {
     let input = ProactiveDmEligibility {
+        last_pinged_at: Some(now() - Duration::days(20)),
         ping_count_30d: 2,
         ..eligible()
     };
