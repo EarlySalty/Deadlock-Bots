@@ -692,13 +692,13 @@ impl InteractionHandler for ProposalHandler {
                     Ok(value) => value,
                     Err(error) => return BridgeReply::ephemeral_text(error),
                 };
+                let active_proposal_id = current.proposal.id;
                 let channel_id = current.proposal.channel_id.clone();
                 let message_id = current.proposal.proposal_message_id.clone();
-                let mut config = match self.service.plan_config(&current, Some(&feedback)).await {
+                let config = match self.service.plan_config(&current, Some(&feedback)).await {
                     Ok(value) => value,
                     Err(error) => return BridgeReply::ephemeral_text(error),
                 };
-                config["_parent_proposal_id"] = json!(proposal_id);
                 let request = RevisionRequest {
                     role_ids: interaction
                         .role_ids
@@ -707,7 +707,12 @@ impl InteractionHandler for ProposalHandler {
                         .collect(),
                     config_json: config.to_string(),
                 };
-                match self.service.client.revise(proposal_id, &request).await {
+                match self
+                    .service
+                    .client
+                    .revise(active_proposal_id, &request)
+                    .await
+                {
                     Ok(envelope) => {
                         tracing::info!(
                             actor_id = interaction.user_id,
@@ -722,18 +727,11 @@ impl InteractionHandler for ProposalHandler {
                                 "Die ursprüngliche Vorschlagskarte ist nicht gespeichert.",
                             );
                         };
-                        if let Err(error) = self
-                            .service
-                            .edit_message_at(&channel_id, &message_id, &envelope)
-                            .await
-                        {
-                            return BridgeReply::ephemeral_text(error);
-                        }
                         let activated = self
                             .service
                             .client
                             .activate_revision(
-                                proposal_id,
+                                active_proposal_id,
                                 envelope.proposal.id,
                                 &ActivateRevisionRequest {
                                     actor_id: interaction.user_id.to_string(),
@@ -748,29 +746,31 @@ impl InteractionHandler for ProposalHandler {
                                 },
                             )
                             .await;
-                        match activated {
-                            Ok(_) => BridgeReply::ephemeral_text(
-                                "Neue KI-Version erstellt; die Freigaben starten wieder bei 0.",
-                            ),
-                            Err(error) => {
-                                if let Err(rollback_error) = self
-                                    .service
-                                    .edit_message_at(&channel_id, &message_id, &current)
-                                    .await
-                                {
-                                    tracing::error!(
-                                        proposal_id,
-                                        revised_proposal_id = envelope.proposal.id,
-                                        %error,
-                                        %rollback_error,
-                                        "Revision-Aktivierung und Discord-Rollback fehlgeschlagen"
-                                    );
+                        let activated = match activated {
+                            Ok(value) => value,
+                            Err(error) => match self.service.client.get(active_proposal_id).await {
+                                Ok(value) if value.proposal.id == envelope.proposal.id => value,
+                                _ => {
+                                    return BridgeReply::ephemeral_text(format!(
+                                        "Neue Version konnte nicht aktiviert werden: {error}"
+                                    ));
                                 }
-                                BridgeReply::ephemeral_text(format!(
-                                    "Neue Version konnte nicht aktiviert werden: {error}"
-                                ))
-                            }
+                            },
+                        };
+                        if let Err(error) = self.service.edit_proposal_message(&activated).await {
+                            tracing::error!(
+                                proposal_id,
+                                revised_proposal_id = activated.proposal.id,
+                                %error,
+                                "Aktive Revision wird beim nächsten Mod-Klick über die alte Button-ID geheilt"
+                            );
+                            return BridgeReply::ephemeral_text(format!(
+                                "Neue Version ist aktiv; die Karte aktualisiert sich beim nächsten Klick: {error}"
+                            ));
                         }
+                        BridgeReply::ephemeral_text(
+                            "Neue KI-Version erstellt; die Freigaben starten wieder bei 0.",
+                        )
                     }
                     Err(error) => BridgeReply::ephemeral_text(error),
                 }
