@@ -15,6 +15,7 @@ mod onboardglue;
 mod onboardingbridgeglue;
 mod scrimglue;
 mod serversync;
+mod turnierglue;
 mod vanity;
 
 use std::{collections::HashSet, num::NonZeroU64, sync::Arc};
@@ -392,6 +393,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // Interaction-Routing: Steam-Bridge + Twitch-Live-Bridge
     let mut router = dl_discord::InteractionRouter::new();
+    let (turnier_generator, turnier_model) =
+        openai_client_with_model_from_env("TURNIER_AI_MODEL", dl_ai::DEFAULT_OPENAI_MODEL)
+            .map(|(client, model)| (Some(client as Arc<dyn dl_ai::TextGenerator>), model))
+            .unwrap_or_else(|| (None, dl_ai::DEFAULT_OPENAI_MODEL.to_string()));
+    let turnier_proposals = Arc::new(turnierglue::TurnierProposalService::from_env(
+        adapter.clone(),
+        turnier_generator,
+        turnier_model,
+        env,
+    ));
+    turnierglue::register(&mut router, turnier_proposals.clone());
     let steam_client = dl_bridges::steam::SteamBotClient::from_env(|k| std::env::var(k).ok());
     dl_bridges::steam::register_with_db(&mut router, steam_client.clone(), central_pool.clone());
     router.on_command(
@@ -974,7 +986,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         Arc::new(BrokerChannelInfoGlue {
             adapter: adapter.clone(),
         }),
-        broker_token,
+        broker_token.clone(),
         |key| std::env::var(key).ok(),
     )
     .map_err(|e| anyhow::anyhow!(e))?;
@@ -986,7 +998,12 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     tracing::info!(addr = %broker_addr, "Master-Broker gebunden");
     let broker_server = axum::serve(
         broker_listener,
-        dl_broker::router(broker).into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        dl_broker::router(broker)
+            .merge(turnierglue::publisher_router(
+                turnier_proposals,
+                broker_token,
+            ))
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
     );
 
     // Changelog-Empfänger :8899

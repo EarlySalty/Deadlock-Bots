@@ -1,3 +1,9 @@
+## #257 — Turniervorschläge bleiben in Mod-Hand
+
+Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; jede neue Version verwirft alte Stimmen. Aktuelles Verhalten: Erst zwei unterschiedliche Mods legen das Turnier an, danach entsteht nur eine interne Ankündigungsvorlage zur manuellen Veröffentlichung.
+
+---
+
 ## #256 — Der Concierge redet wieder wie ein Mensch
 
 Problem: Auf Fragen hat der Concierge zuletzt wörtliche Doku-Abschnitte gepostet. Inhaltlich korrekt, aber es klang nach Handbuch statt nach Gespräch, und bei Smalltalk kam immer derselbe Standardsatz.
