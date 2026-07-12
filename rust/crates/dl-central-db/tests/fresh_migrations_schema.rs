@@ -1486,13 +1486,25 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "deadlock_badge_level",
             "deadlock_rank_name",
             "deadlock_rank_updated_at",
-            "is_steam_friend"
+            "is_steam_friend",
+            "friend_bot_account_id"
         ]
     );
     assert_eq!(
         primary_key_columns(&pool, "steam_links").await,
         vec!["discord_id", "steam_id"]
     );
+    // Multi-Bot: welcher Bot-Account ist mit diesem Nutzer befreundet (NULL = keiner).
+    assert_column(
+        &pool,
+        "steam_links",
+        "friend_bot_account_id",
+        "smallint",
+        "int2",
+        "YES",
+        None,
+    )
+    .await;
     assert_column(
         &pool,
         "steam_links",
