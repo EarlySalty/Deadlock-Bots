@@ -1620,15 +1620,28 @@ impl crate::router::RouterPort for RouterGlue {
                 c.kind == serenity::all::ChannelType::Voice
                     && c.parent_id == Some(ChannelId::new(category_id))
             })
-            .map(|c| {
+            .filter_map(|c| {
                 let members: Vec<u64> = guild
                     .voice_states
                     .iter()
                     .filter(|(_, vs)| vs.channel_id == Some(c.id))
                     .map(|(user_id, _)| user_id.get())
                     .collect();
-                (c.id.get(), members)
+                crate::router::has_voice_capacity(members.len(), c.user_limit.map(u64::from))
+                    .then_some((c.id.get(), members))
             })
+            .collect()
+    }
+
+    async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Vec::new();
+        };
+        guild
+            .voice_states
+            .iter()
+            .filter(|(_, state)| state.channel_id == Some(ChannelId::new(channel_id)))
+            .map(|(user_id, _)| user_id.get())
             .collect()
     }
 
