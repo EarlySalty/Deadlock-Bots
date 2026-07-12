@@ -253,6 +253,10 @@ const STAGING_IDS: [u64; 3] = [
     1357422958544420944,
 ];
 
+pub fn has_voice_capacity(member_count: usize, user_limit: Option<u64>) -> bool {
+    user_limit.is_none_or(|limit| limit == 0 || member_count < limit as usize)
+}
+
 /// Lane-Wahl wie `_find_suitable_lane`: 1–5 Mitglieder, keine Stagings;
 /// Co-Spieler-Lane gewinnt, sonst die erste.
 pub fn pick_lane(
@@ -276,6 +280,71 @@ pub fn pick_lane(
         }
     }
     suitable.first().map(|(channel_id, _)| *channel_id)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutoMoveDecision {
+    SkipDisabled,
+    SkipNotInRouter,
+    SkipNotAlone,
+    MoveExisting { lane_id: u64 },
+    CreateCasual,
+}
+
+pub fn decide_auto_move(
+    enabled: bool,
+    user_id: u64,
+    current_channel_id: Option<u64>,
+    router_members: &[u64],
+    casual_lanes: &[(u64, Vec<u64>)],
+) -> AutoMoveDecision {
+    if !enabled {
+        return AutoMoveDecision::SkipDisabled;
+    }
+    if current_channel_id != Some(ROUTER_VC_ID) {
+        return AutoMoveDecision::SkipNotInRouter;
+    }
+    if router_members != [user_id] {
+        return AutoMoveDecision::SkipNotAlone;
+    }
+    pick_lane(casual_lanes, &Default::default())
+        .map(|lane_id| AutoMoveDecision::MoveExisting { lane_id })
+        .unwrap_or(AutoMoveDecision::CreateCasual)
+}
+
+fn log_auto_move_decision(
+    guild_id: u64,
+    user_id: u64,
+    lane_id: Option<u64>,
+    decision: &'static str,
+    reason: &'static str,
+) {
+    tracing::info!(
+        guild_id,
+        user_id,
+        ?lane_id,
+        decision,
+        reason,
+        "Router-Auto-Move: Entscheidung"
+    );
+}
+
+fn log_auto_move_error(
+    guild_id: u64,
+    user_id: u64,
+    lane_id: Option<u64>,
+    reason: &'static str,
+    err: &str,
+) {
+    tracing::warn!(
+        guild_id,
+        user_id,
+        ?lane_id,
+        decision = "error",
+        reason,
+        error = err,
+        "Router-Auto-Move: Entscheidung"
+    );
 }
 
 pub fn router_panel_body() -> Map<String, Value> {
@@ -446,6 +515,7 @@ pub fn voice_guide_detail_reply() -> BridgeReply {
 pub trait RouterPort: Send + Sync {
     /// Voice-Kanäle einer Kategorie mit ihren Mitglieder-IDs.
     async fn category_lanes(&self, guild_id: u64, category_id: u64) -> Vec<(u64, Vec<u64>)>;
+    async fn channel_members(&self, guild_id: u64, channel_id: u64) -> Vec<u64>;
     async fn member_role_ids(&self, guild_id: u64, user_id: u64) -> Vec<u64>;
     async fn member_voice_channel(&self, guild_id: u64, user_id: u64) -> Option<u64>;
     async fn move_member(&self, guild_id: u64, user_id: u64, channel_id: u64)
@@ -757,12 +827,29 @@ fn find_existing_router_v2_panel(messages: &[RouterPanelMessage]) -> Option<u64>
         .map(|message| message.message_id)
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct RouterAutoMoveConfig {
+    pub enabled: bool,
+    pub delay: Duration,
+}
+
+impl RouterAutoMoveConfig {
+    pub const fn disabled() -> Self {
+        Self {
+            enabled: false,
+            delay: Duration::from_secs(60),
+        }
+    }
+}
+
 pub struct LaneRouter {
     pub pool: PgPool,
     pub port: Arc<dyn RouterPort>,
     pub engine: Arc<TempVoiceEngine>,
     pub analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
     spawn_history: tokio::sync::Mutex<HashMap<u64, Vec<Instant>>>,
+    auto_move: RouterAutoMoveConfig,
+    auto_move_entries: tokio::sync::Mutex<HashMap<(u64, u64), Instant>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,12 +869,30 @@ impl LaneRouter {
         engine: Arc<TempVoiceEngine>,
         analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
     ) -> Arc<Self> {
+        Self::new_with_auto_move(
+            pool,
+            port,
+            engine,
+            analyzer,
+            RouterAutoMoveConfig::disabled(),
+        )
+    }
+
+    pub fn new_with_auto_move(
+        pool: PgPool,
+        port: Arc<dyn RouterPort>,
+        engine: Arc<TempVoiceEngine>,
+        analyzer: Option<Arc<dl_activity::analyzer::ActivityAnalyzer>>,
+        auto_move: RouterAutoMoveConfig,
+    ) -> Arc<Self> {
         Arc::new(Self {
             pool,
             port,
             engine,
             analyzer,
             spawn_history: tokio::sync::Mutex::new(HashMap::new()),
+            auto_move,
+            auto_move_entries: tokio::sync::Mutex::new(HashMap::new()),
         })
     }
 
@@ -842,6 +947,7 @@ impl LaneRouter {
     }
 
     pub async fn handle_event(self: &Arc<Self>, event: VoiceEvent) {
+        self.update_auto_move_timer(&event).await;
         let (guild_id, user_id, channel_id) = match event {
             VoiceEvent::Join {
                 guild_id,
@@ -878,6 +984,164 @@ impl LaneRouter {
             .is_some()
         {
             self.mark_spawn_created(user_id).await;
+        }
+    }
+
+    async fn update_auto_move_timer(self: &Arc<Self>, event: &VoiceEvent) {
+        let entered = match event {
+            VoiceEvent::Join {
+                guild_id,
+                user_id,
+                channel_id: ROUTER_VC_ID,
+            }
+            | VoiceEvent::Move {
+                guild_id,
+                user_id,
+                to_channel_id: ROUTER_VC_ID,
+                ..
+            } => Some((*guild_id, *user_id)),
+            _ => None,
+        };
+        if let Some((guild_id, user_id)) = entered {
+            if !self.auto_move.enabled {
+                log_auto_move_decision(guild_id, user_id, None, "skipped", "disabled");
+                return;
+            }
+            let entered_at = Instant::now();
+            self.auto_move_entries
+                .lock()
+                .await
+                .insert((guild_id, user_id), entered_at);
+            let router = self.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(router.auto_move.delay).await;
+                let is_current = router
+                    .auto_move_entries
+                    .lock()
+                    .await
+                    .get(&(guild_id, user_id))
+                    .is_some_and(|current| *current == entered_at);
+                if !is_current {
+                    log_auto_move_decision(guild_id, user_id, None, "skipped", "left_or_rejoined");
+                    return;
+                }
+                router.run_auto_move(guild_id, user_id).await;
+                let mut entries = router.auto_move_entries.lock().await;
+                if entries
+                    .get(&(guild_id, user_id))
+                    .is_some_and(|current| *current == entered_at)
+                {
+                    entries.remove(&(guild_id, user_id));
+                }
+            });
+            return;
+        }
+
+        let left = match event {
+            VoiceEvent::Leave {
+                guild_id,
+                user_id,
+                channel_id: ROUTER_VC_ID,
+            }
+            | VoiceEvent::Move {
+                guild_id,
+                user_id,
+                from_channel_id: ROUTER_VC_ID,
+                ..
+            } => Some((*guild_id, *user_id)),
+            _ => None,
+        };
+        if let Some(key) = left {
+            self.auto_move_entries.lock().await.remove(&key);
+        }
+    }
+
+    async fn run_auto_move(&self, guild_id: u64, user_id: u64) {
+        let current_channel = self.port.member_voice_channel(guild_id, user_id).await;
+        let router_members = if current_channel == Some(ROUTER_VC_ID) {
+            self.port.channel_members(guild_id, ROUTER_VC_ID).await
+        } else {
+            Vec::new()
+        };
+        let casual_lanes = if router_members == [user_id] {
+            self.port
+                .category_lanes(guild_id, ROUTER_CATEGORY_CHILL)
+                .await
+        } else {
+            Vec::new()
+        };
+
+        match decide_auto_move(
+            self.auto_move.enabled,
+            user_id,
+            current_channel,
+            &router_members,
+            &casual_lanes,
+        ) {
+            AutoMoveDecision::SkipDisabled => {
+                log_auto_move_decision(guild_id, user_id, None, "skipped", "disabled")
+            }
+            AutoMoveDecision::SkipNotInRouter => {
+                log_auto_move_decision(guild_id, user_id, None, "skipped", "left_router")
+            }
+            AutoMoveDecision::SkipNotAlone => {
+                log_auto_move_decision(guild_id, user_id, None, "skipped", "not_alone")
+            }
+            AutoMoveDecision::MoveExisting { lane_id } => {
+                if self.port.member_voice_channel(guild_id, user_id).await != Some(ROUTER_VC_ID)
+                    || self.port.channel_members(guild_id, ROUTER_VC_ID).await != [user_id]
+                {
+                    log_auto_move_decision(
+                        guild_id,
+                        user_id,
+                        None,
+                        "skipped",
+                        "state_changed_before_move",
+                    );
+                    return;
+                }
+                match self.port.move_member(guild_id, user_id, lane_id).await {
+                    Ok(()) => log_auto_move_decision(
+                        guild_id,
+                        user_id,
+                        Some(lane_id),
+                        "moved",
+                        "existing_casual_lane",
+                    ),
+                    Err(err) => log_auto_move_error(
+                        guild_id,
+                        user_id,
+                        Some(lane_id),
+                        "move_existing_failed",
+                        &err,
+                    ),
+                }
+            }
+            AutoMoveDecision::CreateCasual => {
+                match self
+                    .engine
+                    .create_router_lane_if_alone(guild_id, user_id, "casual", ROUTER_VC_ID)
+                    .await
+                {
+                    Ok(Some(lane_id)) => log_auto_move_decision(
+                        guild_id,
+                        user_id,
+                        Some(lane_id),
+                        "moved",
+                        "new_casual_lane",
+                    ),
+                    Ok(None) => log_auto_move_decision(
+                        guild_id,
+                        user_id,
+                        None,
+                        "skipped",
+                        "state_changed_or_create_busy",
+                    ),
+                    Err(err) => {
+                        log_auto_move_error(guild_id, user_id, None, "create_casual_failed", &err)
+                    }
+                }
+            }
         }
     }
 
@@ -1596,6 +1860,59 @@ mod tests {
     }
 
     #[test]
+    fn voice_capacity_respektiert_individuelles_discord_limit() {
+        assert!(has_voice_capacity(2, None));
+        assert!(has_voice_capacity(2, Some(0)));
+        assert!(has_voice_capacity(1, Some(2)));
+        assert!(!has_voice_capacity(2, Some(2)));
+    }
+
+    #[test]
+    fn auto_move_ist_per_flag_abschaltbar() {
+        assert_eq!(
+            decide_auto_move(false, 7, Some(ROUTER_VC_ID), &[7], &[]),
+            AutoMoveDecision::SkipDisabled
+        );
+    }
+
+    #[test]
+    fn auto_move_skippt_wenn_user_den_router_verlassen_hat() {
+        assert_eq!(
+            decide_auto_move(true, 7, None, &[], &[]),
+            AutoMoveDecision::SkipNotInRouter
+        );
+        assert_eq!(
+            decide_auto_move(true, 7, Some(99), &[7], &[]),
+            AutoMoveDecision::SkipNotInRouter
+        );
+    }
+
+    #[test]
+    fn auto_move_skippt_wenn_user_nicht_mehr_allein_ist() {
+        assert_eq!(
+            decide_auto_move(true, 7, Some(ROUTER_VC_ID), &[7, 8], &[]),
+            AutoMoveDecision::SkipNotAlone
+        );
+        assert_eq!(
+            decide_auto_move(true, 7, Some(ROUTER_VC_ID), &[8], &[]),
+            AutoMoveDecision::SkipNotAlone
+        );
+    }
+
+    #[test]
+    fn auto_move_nutzt_belegte_lane_sonst_neue_casual_lane() {
+        let lanes = vec![(10, vec![]), (11, vec![1, 2, 3, 4, 5, 6]), (12, vec![1, 2])];
+        assert_eq!(
+            decide_auto_move(true, 7, Some(ROUTER_VC_ID), &[7], &lanes),
+            AutoMoveDecision::MoveExisting { lane_id: 12 }
+        );
+        assert_eq!(
+            decide_auto_move(true, 7, Some(ROUTER_VC_ID), &[7], &[]),
+            AutoMoveDecision::CreateCasual
+        );
+    }
+
+    #[test]
     fn modus_zuordnung() {
         assert_eq!(mode_to_category("ranked"), ROUTER_CATEGORY_CHILL);
         assert_eq!(mode_to_category("street_brawl"), ROUTER_CATEGORY_CHILL);
@@ -1814,6 +2131,9 @@ mod tests {
         async fn category_lanes(&self, _guild_id: u64, _category_id: u64) -> Vec<(u64, Vec<u64>)> {
             Vec::new()
         }
+        async fn channel_members(&self, _guild_id: u64, _channel_id: u64) -> Vec<u64> {
+            Vec::new()
+        }
         async fn member_role_ids(&self, _guild_id: u64, _user_id: u64) -> Vec<u64> {
             Vec::new()
         }
@@ -1863,6 +2183,10 @@ mod tests {
     #[async_trait::async_trait]
     impl RouterPort for StaticRouterPort {
         async fn category_lanes(&self, _guild_id: u64, _category_id: u64) -> Vec<(u64, Vec<u64>)> {
+            Vec::new()
+        }
+
+        async fn channel_members(&self, _guild_id: u64, _channel_id: u64) -> Vec<u64> {
             Vec::new()
         }
 

@@ -832,7 +832,7 @@ impl TempVoiceEngine {
             }
         }
         let result = self
-            .create_router_lane_inner(guild_id, user_id, mode, expected_channel_id)
+            .create_router_lane_inner(guild_id, user_id, mode, expected_channel_id, false)
             .await;
         self.state.lock().await.creating.remove(&user_id);
         match result {
@@ -844,13 +844,45 @@ impl TempVoiceEngine {
         }
     }
 
-    async fn create_router_lane_inner(
+    pub async fn create_router_lane_if_alone(
         self: &Arc<Self>,
         guild_id: u64,
         user_id: u64,
         mode: &str,
         expected_channel_id: u64,
     ) -> Result<Option<u64>, String> {
+        {
+            let mut state = self.state.lock().await;
+            if !state.creating.insert(user_id) {
+                return Ok(None);
+            }
+        }
+        let result = self
+            .create_router_lane_inner(guild_id, user_id, mode, expected_channel_id, true)
+            .await;
+        self.state.lock().await.creating.remove(&user_id);
+        result
+    }
+
+    async fn create_router_lane_inner(
+        self: &Arc<Self>,
+        guild_id: u64,
+        user_id: u64,
+        mode: &str,
+        expected_channel_id: u64,
+        require_sole_member: bool,
+    ) -> Result<Option<u64>, String> {
+        if require_sole_member
+            && (self.port.member_voice_channel(guild_id, user_id).await
+                != Some(expected_channel_id)
+                || self
+                    .port
+                    .channel_members(guild_id, expected_channel_id)
+                    .await
+                    != [user_id])
+        {
+            return Ok(None);
+        }
         if matches!(
             self.port.member_voice_channel(guild_id, user_id).await,
             Some(c) if c != expected_channel_id
@@ -909,10 +941,16 @@ impl TempVoiceEngine {
         {
             tracing::warn!(%err, lane_id, "TempVoice: Router-Lane-Persist fehlgeschlagen");
         }
-        if matches!(
-            self.port.member_voice_channel(guild_id, user_id).await,
-            Some(c) if c != expected_channel_id
-        ) {
+        let current_channel = self.port.member_voice_channel(guild_id, user_id).await;
+        if matches!(current_channel, Some(c) if c != expected_channel_id)
+            || (require_sole_member
+                && (current_channel != Some(expected_channel_id)
+                    || self
+                        .port
+                        .channel_members(guild_id, expected_channel_id)
+                        .await
+                        != [user_id]))
+        {
             self.cleanup_lane(lane_id, "TempVoice: Router-Owner nicht mehr im VC")
                 .await;
             return Ok(None);
@@ -2503,6 +2541,31 @@ mod tests {
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].owner_id, 100);
         assert_eq!(lanes[0].source_staging_id, Some(staging));
+    }
+
+    #[tokio::test]
+    async fn guarded_router_create_skippt_wenn_user_nicht_allein_ist() {
+        let (_db, engine, port, _staging) = setup().await;
+        let guild_id = 1;
+        let user_id = 100;
+        let router_id = crate::router::ROUTER_VC_ID;
+        port.voice
+            .lock()
+            .expect("lock")
+            .insert((guild_id, user_id), router_id);
+        port.members
+            .lock()
+            .expect("lock")
+            .insert(router_id, vec![user_id, 101]);
+
+        let outcome = engine
+            .create_router_lane_if_alone(guild_id, user_id, "casual", router_id)
+            .await
+            .expect("guarded create");
+
+        assert_eq!(outcome, None);
+        assert!(port.created.lock().expect("lock").is_empty());
+        assert!(port.moved.lock().expect("lock").is_empty());
     }
 
     #[tokio::test]

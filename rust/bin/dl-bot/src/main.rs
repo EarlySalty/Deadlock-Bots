@@ -521,11 +521,18 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let router_glue = Arc::new(dl_voice::glue::RouterGlue {
         adapter: adapter.clone(),
     });
-    let lane_router = dl_voice::router::LaneRouter::new(
+    let lane_router = dl_voice::router::LaneRouter::new_with_auto_move(
         central_pool.clone(),
         router_glue.clone(),
         tempvoice.clone(),
         Some(activity.clone()),
+        dl_voice::router::RouterAutoMoveConfig {
+            enabled: env_bool_default("DL_ROUTER_AUTO_MOVE_ENABLED", true),
+            delay: std::time::Duration::from_secs(env_u64_default(
+                "DL_ROUTER_AUTO_MOVE_DELAY_SECONDS",
+                60,
+            )),
+        },
     );
     dl_voice::router::register(&mut router, lane_router.clone());
     let router_interface =
