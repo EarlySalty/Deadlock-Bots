@@ -362,7 +362,12 @@ fn contains_complete_passage(chunk: &str, section: &str, passage: &str) -> bool 
     chunk.match_indices(passage).any(|(start, _)| {
         let end = start + passage.len();
         let prefix = chunk[..start].trim_end();
-        (start == 0 || ends_sentence(prefix) || prefix == section)
+        (start == 0
+            || ends_sentence(prefix)
+            || prefix == section
+            || prefix
+                .strip_prefix(&section)
+                .is_some_and(|suffix| suffix == " Kurz:"))
             && (end == chunk.len() || chunk[end..].starts_with(' '))
     })
 }
@@ -2107,6 +2112,20 @@ mod tests {
     }
 
     #[test]
+    fn grounding_oeffnet_keine_allgemeine_doppelpunkt_ausnahme() {
+        let evidence = "Die zuständigen Personen stehen im Abschnitt Community-Team.";
+
+        for label in ["Hinweis:", "Warnung:", "Beliebig:"] {
+            let chunk = format!("Team und Ansprechpartner {label} {evidence}");
+            assert!(!contains_complete_passage(
+                &chunk,
+                "Team und Ansprechpartner",
+                evidence
+            ));
+        }
+    }
+
+    #[test]
     fn parse_html_nutzt_section_id_ohne_h2() -> Result<()> {
         let raw = HTML_FIXTURE.replace("<h2>Steam verknüpfen</h2>", "");
 
@@ -2808,6 +2827,54 @@ Frag im Support.
         );
         assert_eq!(body["sources"].as_array().map(Vec::len), Some(1));
         assert_eq!(body["sources"][0]["path"], "steam.html");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_handler_akzeptiert_intro_evidence_nach_kurz_label() -> Result<()> {
+        let raw = r#"<!doctype html>
+<html lang="de"><head>
+<meta charset="utf-8"><title>Team und Ansprechpartner</title>
+<meta name="tags" content="discord-server, team, support">
+<meta name="stand" content="2026-07-12">
+<meta name="quelle" content="Produktdokumentation und geprüftes sichtbares Verhalten">
+</head><body><main>
+<h1>Team und Ansprechpartner</h1>
+<p><strong>Kurz:</strong> Die aktuell zuständigen Personen findest du in <em>Willkommen</em> im Abschnitt <em>Community-Team</em>. Für ein persönliches Anliegen nutzt du den dortigen Support-Schnellzugriff; für reine Wissensfragen zuerst <code>/faq</code>.</p>
+<section id="wen-erreichen"><h2>Wen du erreichst</h2>
+<p>Der Abschnitt <em>Community-Team</em> in <em>Willkommen</em> zeigt die aktuell zugeordneten Gruppen.</p>
+<p>Hast du ein Serverproblem und weißt nicht, wer dir hilft? Nutze beim Abschnitt <em>Community-Team</em> in <em>Willkommen</em> den Support-Schnellzugriff — von dort kümmert sich der Support um dein Serveranliegen.</p>
+</section>
+</main></body></html>"#;
+        let chunks = parse_html_file(
+            Path::new("/docs"),
+            Path::new("/docs/team-und-ansprechpartner.html"),
+            raw,
+        )?;
+        let relevant_evidence = "Die aktuell zuständigen Personen findest du in Willkommen im Abschnitt Community-Team. Für ein persönliches Anliegen nutzt du den dortigen Support-Schnellzugriff; für reine Wissensfragen zuerst /faq.";
+        let second_evidence = "Hast du ein Serverproblem und weißt nicht, wer dir hilft? Nutze beim Abschnitt Community-Team in Willkommen den Support-Schnellzugriff — von dort kümmert sich der Support um dein Serveranliegen.";
+        let generator = Arc::new(MockGenerator::new(vec![Some(
+            json!({
+                "answerable": true,
+                "evidence": [relevant_evidence, second_evidence]
+            })
+            .to_string(),
+        )]));
+        let (app, _) = test_app(chunks, Some(generator));
+
+        let (status, body) = post_ask(
+            app,
+            json!({"question": "Wie erreiche ich das Community-Team?"}),
+        )
+        .await?;
+
+        assert_eq!(status, 200);
+        assert_eq!(body["answerable"], true);
+        assert_eq!(
+            body["answer"],
+            format!("{relevant_evidence} {second_evidence}")
+        );
+        assert_eq!(body["sources"][0]["path"], "team-und-ansprechpartner.html");
         Ok(())
     }
 

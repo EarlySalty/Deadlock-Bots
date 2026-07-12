@@ -1,3 +1,13 @@
+## #248 — „Kurz:“ als Strukturgrenze erkannt
+
+Problem: Der Support-Agent fand die richtige Hilfeseite, lehnte aber einen vollständigen Antwortsatz direkt nach dem sichtbaren Label „Kurz:“ ab.
+
+Änderung: Das feste Einleitungslabel wird jetzt als Strukturgrenze erkannt; beliebige Doppelpunkt-Texte bleiben unberührt.
+
+Aktuelles Verhalten: Zusammen mit der selbsttragenden öffentlichen Doku beantwortet der Support-Agent die Frage zum Community-Team zuverlässig.
+
+---
+
 ## #247 — Absätze nach Überschriften werden erkannt
 
 Der Support-Agent fand zwar die richtige Hilfeseite, verwarf aber den ersten vollständigen Absatz nach einer Überschrift ohne Satzzeichen.
