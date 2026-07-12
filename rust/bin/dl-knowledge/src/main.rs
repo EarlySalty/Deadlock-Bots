@@ -327,7 +327,7 @@ fn grounded_response(question: &str, evidence: &[String], chunks: &[Chunk]) -> O
         }
         let passage_terms = grounding_terms(&passage);
         let chunk = chunks.iter().find(|chunk| {
-            if !contains_complete_passage(&chunk.text, &passage) {
+            if !contains_complete_passage(&chunk.text, &chunk.section, &passage) {
                 return false;
             }
             let chunk_terms = grounding_terms(&chunk.text);
@@ -353,14 +353,16 @@ fn normalize_evidence(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn contains_complete_passage(chunk: &str, passage: &str) -> bool {
+fn contains_complete_passage(chunk: &str, section: &str, passage: &str) -> bool {
     if !ends_sentence(passage) {
         return false;
     }
     let chunk = normalize_evidence(chunk);
+    let section = normalize_evidence(section);
     chunk.match_indices(passage).any(|(start, _)| {
         let end = start + passage.len();
-        (start == 0 || ends_sentence(chunk[..start].trim_end()))
+        let prefix = chunk[..start].trim_end();
+        (start == 0 || ends_sentence(prefix) || prefix == section)
             && (end == chunk.len() || chunk[end..].starts_with(' '))
     })
 }
@@ -2026,6 +2028,81 @@ mod tests {
         assert!(chunks
             .iter()
             .all(|chunk| !chunk.text.contains("Steam-Bot-Code")));
+        Ok(())
+    }
+
+    #[test]
+    fn grounding_akzeptiert_folgesatz_nur_nach_voller_section() -> Result<()> {
+        let raw = r#"<!doctype html>
+<html lang="de"><head>
+<meta charset="utf-8"><title>Team und Ansprechpartner</title>
+<meta name="tags" content="discord, team">
+<meta name="stand" content="2026-07-12">
+<meta name="quelle" content="Öffentliche Server-Dokumentation">
+</head><body><main>
+<h1>Team und Ansprechpartner</h1>
+<p>Die aktuell zuständigen Personen findest du in Willkommen im Abschnitt Community-Team.</p>
+<section><h2>Wen du erreichst</h2>
+<p>Die aktuell zuständigen Personen findest du in Willkommen im Abschnitt Community-Team.</p>
+</section>
+</main></body></html>"#;
+        let chunks = parse_html_file(Path::new("/docs"), Path::new("/docs/team.html"), raw)?;
+        let evidence =
+            "Die aktuell zuständigen Personen findest du in Willkommen im Abschnitt Community-Team.";
+
+        assert_eq!(
+            chunks
+                .iter()
+                .map(|chunk| chunk.section.as_str())
+                .collect::<Vec<_>>(),
+            ["Team und Ansprechpartner", "Wen du erreichst"]
+        );
+
+        for chunk in &chunks {
+            assert_eq!(chunk.text, format!("{} {evidence}", chunk.section));
+            assert!(contains_complete_passage(
+                &chunk.text,
+                &chunk.section,
+                evidence
+            ));
+
+            let normalized_section = chunk
+                .section
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join("   \n");
+            assert!(contains_complete_passage(
+                &chunk.text,
+                &normalized_section,
+                evidence
+            ));
+
+            let partial_section = chunk
+                .section
+                .split_whitespace()
+                .next_back()
+                .context("Section ist leer")?;
+            assert!(!contains_complete_passage(
+                &chunk.text,
+                partial_section,
+                evidence
+            ));
+            assert!(!contains_complete_passage(
+                &chunk.text,
+                "Nicht die Überschrift",
+                evidence
+            ));
+            assert!(!contains_complete_passage(
+                &chunk.text,
+                &chunk.section,
+                &chunk.section
+            ));
+            assert!(!contains_complete_passage(
+                &chunk.text,
+                &chunk.section,
+                "aktuell zuständigen Personen findest du in Willkommen im Abschnitt Community-Team."
+            ));
+        }
         Ok(())
     }
 
