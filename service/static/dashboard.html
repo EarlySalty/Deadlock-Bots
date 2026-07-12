@@ -2402,6 +2402,8 @@ Wir melden uns bei dir, sobald die Gruppen stehen. Bis gleich! 🎮`;
         return response.json();
     }
 
+    function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
     // ─── Deadlock Heroes (Admin) ─────────────────────────────
     function setHeroMessage(text, type='success') {
         if (!heroMsg) return;
@@ -5310,7 +5312,7 @@ function renderCoNetworkList(links, nameLookup) {
         const title = document.createElement('div');
         const sourceName = nameLookup.get(link.source) || `User ${link.source}`;
         const targetName = nameLookup.get(link.target) || `User ${link.target}`;
-        title.innerHTML = `<strong>${sourceName}</strong> ↔ <strong>${targetName}</strong>`;
+        title.innerHTML = `<strong>${esc(sourceName)}</strong> ↔ <strong>${esc(targetName)}</strong>`;
         const meta = document.createElement('div');
         meta.className = 'network-row-meta';
         const sessionsLabel = `${safeNumber(link.sessions)} Sessions`;
@@ -5467,7 +5469,7 @@ function renderRankMetrics(container, metrics) {
             .map(([name, active]) => `${active ? '✅' : '⚠️'} ${name.replace(/_/g, ' ')}`)
             .join(' • ');
         const loopDiv = document.createElement('div');
-        loopDiv.innerHTML = `<strong>Loops:</strong> ${loopLine || 'Keine Daten'}`;
+        loopDiv.innerHTML = `<strong>Loops:</strong> ${esc(loopLine || 'Keine Daten')}`;
         container.appendChild(loopDiv);
     }
 }
@@ -5494,12 +5496,12 @@ function renderSteamMetrics(container, metrics) {
         statusParts.push(`Guard: ${guardLabel}`);
     }
     const statusDiv = document.createElement('div');
-    statusDiv.innerHTML = `<strong>Status:</strong> ${statusParts.join(' • ')}`;
+    statusDiv.innerHTML = `<strong>Status:</strong> ${esc(statusParts.join(' • '))}`;
     container.appendChild(statusDiv);
 
     if (runtime.account_name || runtime.steam_id64) {
         const accountDiv = document.createElement('div');
-        accountDiv.innerHTML = `<strong>Konto:</strong> ${runtime.account_name || '–'} (${runtime.steam_id64 || '–'})`;
+        accountDiv.innerHTML = `<strong>Konto:</strong> ${esc(runtime.account_name || '–')} (${esc(runtime.steam_id64 || '–')})`;
         container.appendChild(accountDiv);
     }
 
@@ -5521,7 +5523,7 @@ function renderSteamMetrics(container, metrics) {
             .map(([label, count]) => `${label}: ${safeNumber(count)}`)
             .join(' • ');
         const countsDiv = document.createElement('div');
-        countsDiv.innerHTML = `<strong>Invite-Status:</strong> ${countsLine}`;
+        countsDiv.innerHTML = `<strong>Invite-Status:</strong> ${esc(countsLine)}`;
         container.appendChild(countsDiv);
     }
 
@@ -5731,7 +5733,7 @@ function renderStandalone(bots) {
             list.className = 'standalone-list';
             pendingCommands.slice(0, 5).forEach((cmd) => {
                 const li = document.createElement('li');
-                li.innerHTML = `<span>${cmd.command}</span><span>${formatTimestamp(cmd.created_at)}</span>`;
+                li.innerHTML = `<span>${esc(cmd.command)}</span><span>${formatTimestamp(cmd.created_at)}</span>`;
                 list.appendChild(li);
             });
             commandSection.appendChild(list);
@@ -6492,20 +6494,20 @@ async function fetchStandaloneLogs(key, limit = 200) {
             }).sort((x, y) => y.c - x.c);
             tbody.innerHTML = rows.map(({ repo, i, c, a, r, f }) => `
                 <tr>
-                    <td><span class="dev-repo-dot" style="background:${REPO_COLORS[i % REPO_COLORS.length]}"></span>${repo.name}</td>
+                    <td><span class="dev-repo-dot" style="background:${REPO_COLORS[i % REPO_COLORS.length]}"></span>${esc(repo.name)}</td>
                     <td class="num">${fmtInt(c)}</td>
                     <td class="num dev-add">${fmtInt(a)}</td>
                     <td class="num dev-del">${fmtInt(r)}</td>
                     <td class="num">${fmtInt(f)}</td>
                     <td>${sparkline(repo, cutoff)}</td>
-                    <td class="voice-meta">${repo.first_commit || '–'} … ${repo.last_commit || '–'} · ${fmtInt(repo.total_commits)} ges.</td>
+                    <td class="voice-meta">${esc(repo.first_commit || '–')} … ${esc(repo.last_commit || '–')} · ${fmtInt(repo.total_commits)} ges.</td>
                 </tr>`).join('');
         }
 
         function renderAll() {
             const grid = $('repo-kpi-grid');
             if (!data || data.available === false) {
-                if (grid) grid.innerHTML = `<div class="voice-meta">${(data && data.error) || 'Keine Daten verfügbar.'}</div>`;
+                if (grid) grid.innerHTML = `<div class="voice-meta">${esc((data && data.error) || 'Keine Daten verfügbar.')}</div>`;
                 return;
             }
             const upd = $('repo-activity-updated');
@@ -6523,7 +6525,7 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 renderAll();
             } catch (e) {
                 const grid = $('repo-kpi-grid');
-                if (grid) grid.innerHTML = `<div class="voice-meta">Fehler: ${e.message}</div>`;
+                if (grid) grid.innerHTML = `<div class="voice-meta">Fehler: ${esc(e.message)}</div>`;
             }
         }
 

@@ -399,6 +399,8 @@ async function fetchJson(url) {
   return res.json();
 }
 
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;'); }
+
 function qs() {
   const interval = document.getElementById("interval").value;
   const from = document.getElementById("from").value;
@@ -816,8 +818,8 @@ function renderInvites(top) {
   }
   body.innerHTML = rows.map(r => `
     <tr>
-      <td><code>discord.gg/${r.invite_code ?? "?"}</code></td>
-      <td>${r.inviter_label ?? (r.inviter_id ? `ID ${r.inviter_id}` : "–")}</td>
+      <td><code>discord.gg/${esc(r.invite_code ?? "?")}</code></td>
+      <td>${esc(r.inviter_label ?? (r.inviter_id ? `ID ${r.inviter_id}` : "–"))}</td>
       <td class="num">${nf.format(r.joins)}</td>
     </tr>`).join("");
 }
@@ -856,15 +858,15 @@ async function uploadCsvs(files) {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      const headers = data.details?.headers ? `<br>Gefundene Spalten: <code>${data.details.headers.join(", ")}</code>` : "";
-      log.innerHTML = `<div class="err">Import fehlgeschlagen (HTTP ${res.status}): ${data.error ?? "unbekannter Fehler"}${headers}</div>`;
+      const headers = data.details?.headers ? `<br>Gefundene Spalten: <code>${esc(data.details.headers.join(", "))}</code>` : "";
+      log.innerHTML = `<div class="err">Import fehlgeschlagen (HTTP ${res.status}): ${esc(data.error ?? "unbekannter Fehler")}${headers}</div>`;
       return;
     }
-    log.innerHTML = `<div class="ok">✓ ${data.files} Datei(en), ${nf.format(data.rows)} Zeilen importiert.</div>` +
-      (data.results ?? []).map(r => `<div>· ${r.file} → <code>${r.import_kind}</code> (${nf.format(r.rows)} Zeilen)</div>`).join("");
+    log.innerHTML = `<div class="ok">✓ ${esc(data.files)} Datei(en), ${nf.format(data.rows)} Zeilen importiert.</div>` +
+      (data.results ?? []).map(r => `<div>· ${esc(r.file)} → <code>${esc(r.import_kind)}</code> (${nf.format(r.rows)} Zeilen)</div>`).join("");
     loadAll();
   } catch (err) {
-    log.innerHTML = `<div class="err">Import fehlgeschlagen: ${err.message}</div>`;
+    log.innerHTML = `<div class="err">Import fehlgeschlagen: ${esc(err.message)}</div>`;
   }
 }
 
@@ -913,7 +915,7 @@ async function loadAll() {
   } catch (err) {
     console.error(err);
     document.getElementById("kpiGrid").innerHTML =
-      `<div class="empty">Daten konnten nicht geladen werden: ${err.message}</div>`;
+      `<div class="empty">Daten konnten nicht geladen werden: ${esc(err.message)}</div>`;
   } finally {
     document.body.classList.remove("loading");
   }
