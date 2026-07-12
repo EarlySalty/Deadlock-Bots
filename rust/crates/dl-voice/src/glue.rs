@@ -10,15 +10,19 @@ use serde_json::{json, Map, Value};
 use serenity::all::{
     AutoArchiveDuration, ButtonStyle, ChannelId, CreateAllowedMentions, CreateForumPost,
     CreateMessage, ForumTagId, GuildId, MessageId, PermissionOverwrite, PermissionOverwriteType,
-    PremiumTier, RoleId, UserId,
+    Permissions, PremiumTier, RoleId, UserId,
 };
 use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread};
 
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
+use crate::voice_pair_guard::{
+    compose_member_connect, resolve_member_connect, GuardResult, VoicePairGuardError,
+    VoicePairGuardStore, VoicePairOperationLock, VoicePairPort,
+};
 
 /// Discord-Permission-Bit CONNECT (Voice).
-const CONNECT_BIT: u64 = 1 << 20;
+pub(crate) const CONNECT_BIT: u64 = 1 << 20;
 const VIEW_CHANNEL_BIT: u64 = 1 << 10;
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
@@ -95,17 +99,16 @@ fn build_connect_batch_payload(
         overwrites: &mut Vec<Value>,
         kind: u8,
         changes: &HashMap<u64, Option<bool>>,
+        already_merged: &BTreeSet<u64>,
     ) {
         let mut changed: Vec<_> = changes.iter().collect();
         changed.sort_by_key(|(target_id, _)| **target_id);
         for (target_id, connect) in changed {
-            let Some(connect) = *connect else {
+            if already_merged.contains(target_id) {
                 continue;
-            };
-            let (allow_bits, deny_bits) = if connect {
-                (CONNECT_BIT, 0)
-            } else {
-                (0, CONNECT_BIT)
+            }
+            let Some((allow_bits, deny_bits)) = merge_connect_overwrite(0, 0, *connect) else {
+                continue;
             };
             overwrites.push(json!({
                 "id": target_id.to_string(),
@@ -122,15 +125,35 @@ fn build_connect_batch_payload(
         member_changes: &HashMap<u64, Option<bool>>,
     ) -> Vec<Value> {
         let mut overwrites = Vec::new();
+        let mut merged_roles = BTreeSet::new();
+        let mut merged_members = BTreeSet::new();
         for ow in existing {
             let (kind, target_id) = match ow.kind {
                 PermissionOverwriteType::Role(role_id) => (0u8, role_id.get()),
                 PermissionOverwriteType::Member(user_id) => (1u8, user_id.get()),
                 _ => continue,
             };
-            if (kind == 0 && role_changes.contains_key(&target_id))
-                || (kind == 1 && member_changes.contains_key(&target_id))
-            {
+            let connect = if kind == 0 {
+                role_changes.get(&target_id)
+            } else {
+                member_changes.get(&target_id)
+            };
+            if let Some(connect) = connect {
+                if kind == 0 {
+                    merged_roles.insert(target_id);
+                } else {
+                    merged_members.insert(target_id);
+                }
+                if let Some((allow, deny)) =
+                    merge_connect_overwrite(ow.allow.bits(), ow.deny.bits(), *connect)
+                {
+                    overwrites.push(json!({
+                        "id": target_id.to_string(),
+                        "type": kind,
+                        "allow": allow.to_string(),
+                        "deny": deny.to_string(),
+                    }));
+                }
                 continue;
             }
             overwrites.push(json!({
@@ -141,8 +164,8 @@ fn build_connect_batch_payload(
             }));
         }
 
-        push_changed_overwrites(&mut overwrites, 0, role_changes);
-        push_changed_overwrites(&mut overwrites, 1, member_changes);
+        push_changed_overwrites(&mut overwrites, 0, role_changes, &merged_roles);
+        push_changed_overwrites(&mut overwrites, 1, member_changes, &merged_members);
         overwrites
     }
 
@@ -436,6 +459,26 @@ fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
 
 pub struct CacheSnapshot {
     pub adapter: Arc<DiscordAdapter>,
+    pub voice_pair_store: Arc<VoicePairGuardStore>,
+    pub voice_pair_operations: Arc<VoicePairOperationLock>,
+}
+
+impl CacheSnapshot {
+    fn channel_guild_id(&self, channel_id: u64) -> Option<u64> {
+        let channel_id = ChannelId::new(channel_id);
+        self.adapter
+            .cache()
+            .guilds()
+            .into_iter()
+            .find_map(|guild_id| {
+                self.adapter.cache().guild(guild_id).and_then(|guild| {
+                    guild
+                        .channels
+                        .contains_key(&channel_id)
+                        .then_some(guild_id.get())
+                })
+            })
+    }
 }
 
 #[async_trait::async_trait]
@@ -611,11 +654,24 @@ impl LanePort for CacheSnapshot {
         user_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String> {
+        let _operation = self.voice_pair_operations.lock().await;
+        let guild_id = self
+            .channel_guild_id(channel_id)
+            .ok_or_else(|| "Channel nicht im Cache".to_string())?;
+        let connect = resolve_member_connect(
+            self.voice_pair_store.as_ref(),
+            guild_id,
+            channel_id,
+            user_id,
+            connect,
+        )
+        .await
+        .map_err(|err| err.to_string())?;
         let role_changes = HashMap::new();
         let member_changes = HashMap::from([(user_id, connect)]);
         let overwrites = build_connect_batch_payload(
             &self.adapter,
-            None,
+            Some(guild_id),
             channel_id,
             &role_changes,
             &member_changes,
@@ -641,17 +697,39 @@ impl LanePort for CacheSnapshot {
         if denied_user_ids.is_empty() && clear_user_ids.is_empty() {
             return Ok(());
         }
+        let _operation = self.voice_pair_operations.lock().await;
+        let guild_id = self
+            .channel_guild_id(channel_id)
+            .ok_or_else(|| "Channel nicht im Cache".to_string())?;
         let role_changes = HashMap::new();
         let mut member_changes = HashMap::new();
         for user_id in clear_user_ids {
-            member_changes.insert(*user_id, None);
+            let connect = compose_member_connect(
+                self.voice_pair_store.as_ref(),
+                guild_id,
+                channel_id,
+                *user_id,
+                None,
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            member_changes.insert(*user_id, connect);
         }
         for user_id in denied_user_ids {
-            member_changes.insert(*user_id, Some(false));
+            let connect = compose_member_connect(
+                self.voice_pair_store.as_ref(),
+                guild_id,
+                channel_id,
+                *user_id,
+                Some(false),
+            )
+            .await
+            .map_err(|err| err.to_string())?;
+            member_changes.insert(*user_id, connect);
         }
         let overwrites = build_connect_batch_payload(
             &self.adapter,
-            None,
+            Some(guild_id),
             channel_id,
             &role_changes,
             &member_changes,
@@ -1021,6 +1099,71 @@ impl LanePort for CacheSnapshot {
             .await
             .map(|_| ())
             .map_err(|e| e.to_string())
+    }
+}
+
+#[async_trait::async_trait]
+impl VoicePairPort for CacheSnapshot {
+    async fn member_overwrite_raw(
+        &self,
+        guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+    ) -> GuardResult<Option<(u64, u64)>> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Err(VoicePairGuardError::CacheUnavailable(format!(
+                "Guild {guild_id} fehlt"
+            )));
+        };
+        let Some(channel) = guild.channels.get(&ChannelId::new(channel_id)) else {
+            return Err(VoicePairGuardError::CacheUnavailable(format!(
+                "Channel {channel_id} fehlt"
+            )));
+        };
+        Ok(channel.permission_overwrites.iter().find_map(|overwrite| {
+            (overwrite.kind == PermissionOverwriteType::Member(UserId::new(user_id)))
+                .then_some((overwrite.allow.bits(), overwrite.deny.bits()))
+        }))
+    }
+
+    async fn set_member_overwrite_raw(
+        &self,
+        _guild_id: u64,
+        channel_id: u64,
+        user_id: u64,
+        overwrite: Option<(u64, u64)>,
+    ) -> GuardResult<()> {
+        let channel_id = ChannelId::new(channel_id);
+        let kind = PermissionOverwriteType::Member(UserId::new(user_id));
+        match overwrite {
+            Some((allow, deny)) => {
+                channel_id
+                    .create_permission(
+                        &self.adapter.http,
+                        PermissionOverwrite {
+                            allow: Permissions::from_bits_truncate(allow),
+                            deny: Permissions::from_bits_truncate(deny),
+                            kind,
+                        },
+                    )
+                    .await
+            }
+            None => channel_id.delete_permission(&self.adapter.http, kind).await,
+        }
+        .map_err(|err| VoicePairGuardError::Discord(err.to_string()))
+    }
+
+    async fn voice_channel(&self, guild_id: u64, user_id: u64) -> GuardResult<Option<u64>> {
+        let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
+            return Err(VoicePairGuardError::CacheUnavailable(format!(
+                "Guild {guild_id} fehlt"
+            )));
+        };
+        Ok(guild
+            .voice_states
+            .get(&UserId::new(user_id))
+            .and_then(|state| state.channel_id)
+            .map(|channel_id| channel_id.get()))
     }
 }
 
@@ -2342,7 +2485,28 @@ fn lfg_edit_error_from_serenity(err: serenity::Error) -> crate::lfg_panel::LfgEd
 
 #[cfg(test)]
 mod tests {
+    use serenity::all::{Cache, Guild, GuildChannel, GuildCreateEvent};
+
     use super::*;
+
+    fn test_adapter_with_overwrites(overwrites: Vec<PermissionOverwrite>) -> Arc<DiscordAdapter> {
+        let adapter = DiscordAdapter::new("test-token");
+        let cache = Arc::new(Cache::new());
+        let mut channel = GuildChannel::default();
+        channel.id = ChannelId::new(42);
+        channel.guild_id = GuildId::new(7);
+        channel.permission_overwrites = overwrites;
+        let mut guild = Guild::default();
+        guild.id = GuildId::new(7);
+        guild.channels.insert(channel.id, channel);
+        let mut event: GuildCreateEvent = serde_json::from_value(
+            serde_json::to_value(guild).unwrap_or_else(|err| panic!("Guild JSON: {err}")),
+        )
+        .unwrap_or_else(|err| panic!("GuildCreateEvent JSON: {err}"));
+        cache.update(&mut event);
+        adapter.link_cache(cache);
+        adapter
+    }
 
     #[test]
     fn scrim_overwrites_enthalten_endzustand_bereits_beim_create() {
@@ -2403,6 +2567,91 @@ mod tests {
             Some((view_channel, speak))
         );
         assert_eq!(merge_connect_overwrite(CONNECT_BIT, 0, None), None);
+    }
+
+    #[test]
+    fn payload_role_connect_merge_erhaelt_fremde_bits() {
+        let view = 1 << 10;
+        let speak = 1 << 21;
+        let adapter = test_adapter_with_overwrites(vec![PermissionOverwrite {
+            allow: Permissions::from_bits_truncate(view),
+            deny: Permissions::from_bits_truncate(speak),
+            kind: PermissionOverwriteType::Role(RoleId::new(8)),
+        }]);
+
+        let payload = build_connect_batch_payload(
+            &adapter,
+            Some(7),
+            42,
+            &HashMap::from([(8, Some(true))]),
+            &HashMap::new(),
+        )
+        .expect("payload");
+
+        assert_eq!(
+            payload,
+            vec![json!({
+                "id": "8",
+                "type": 0,
+                "allow": (view | CONNECT_BIT).to_string(),
+                "deny": speak.to_string(),
+            })]
+        );
+    }
+
+    #[test]
+    fn payload_member_none_entfernt_nur_connect() {
+        let view = 1 << 10;
+        let speak = 1 << 21;
+        let adapter = test_adapter_with_overwrites(vec![
+            PermissionOverwrite {
+                allow: Permissions::from_bits_truncate(view | CONNECT_BIT),
+                deny: Permissions::from_bits_truncate(speak),
+                kind: PermissionOverwriteType::Member(UserId::new(9)),
+            },
+            PermissionOverwrite {
+                allow: Permissions::from_bits_truncate(CONNECT_BIT),
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Member(UserId::new(10)),
+            },
+        ]);
+
+        let payload = build_connect_batch_payload(
+            &adapter,
+            Some(7),
+            42,
+            &HashMap::new(),
+            &HashMap::from([(9, None), (10, None)]),
+        )
+        .expect("payload");
+
+        assert_eq!(
+            payload,
+            vec![json!({
+                "id": "9",
+                "type": 1,
+                "allow": view.to_string(),
+                "deny": speak.to_string(),
+            })]
+        );
+    }
+
+    #[tokio::test]
+    async fn member_overwrite_raw_meldet_channel_cache_miss() {
+        let adapter = test_adapter_with_overwrites(Vec::new());
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("lazy pool");
+        let snapshot = CacheSnapshot {
+            adapter,
+            voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
+            voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
+        };
+
+        assert!(matches!(
+            snapshot.member_overwrite_raw(7, 99, 9).await,
+            Err(VoicePairGuardError::CacheUnavailable(_))
+        ));
     }
 
     #[test]

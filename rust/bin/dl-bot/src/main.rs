@@ -491,9 +491,21 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
 
     // TempVoice-Engine (4b/4c) — Panel-Buttons brauchen den Router,
     // der Event-Subscriber startet erst mit dem Gateway
+    let voice_pair_store = Arc::new(dl_voice::voice_pair_guard::VoicePairGuardStore::new(
+        central_pool.clone(),
+    ));
+    let voice_pair_operations =
+        Arc::new(dl_voice::voice_pair_guard::VoicePairOperationLock::new(()));
     let cache_snapshot = Arc::new(dl_voice::glue::CacheSnapshot {
         adapter: adapter.clone(),
+        voice_pair_store: voice_pair_store.clone(),
+        voice_pair_operations: voice_pair_operations.clone(),
     });
+    let voice_pair_guard = dl_voice::voice_pair_guard::VoicePairGuard::new(
+        voice_pair_store,
+        cache_snapshot.clone(),
+        voice_pair_operations,
+    );
     let tempvoice = dl_voice::tempvoice::TempVoiceEngine::new(
         dl_voice::tempvoice::TempVoiceConfig::production(),
         dl_voice::tempvoice::TempVoiceStore::new(central_pool.clone()),
@@ -1117,6 +1129,9 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         );
         dl_voice::stats::spawn_command(voice_stats, &dispatcher, adapter.clone());
         dl_voice::tracker::spawn(voice_tracker, &dispatcher);
+
+        // Serverweiter Voice-Pair-Guard vor den TempVoice-spezifischen Subscribern.
+        dl_voice::voice_pair_guard::spawn(voice_pair_guard.clone(), &dispatcher);
 
         // TempVoice-Engine (4b): Join-to-create + Owner-Lifecycle
         dl_voice::tempvoice::interface::spawn_command(

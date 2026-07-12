@@ -19,10 +19,11 @@ Diese Doku fasst die Voice-Funktionen zusammen, die du direkt im Server merkst: 
 kostenlos
 
 ## Was passiert technisch (kurz)?
-TempVoice speichert Owner, Presets, Bans, Lurker-Status und Tag-Filter serverseitig und räumt leere Lanes zyklisch wieder auf. Der Router erstellt Lanes bedarfsweise (Casual über den Router mit 6 Plätzen) und nutzt Co-Player-Daten fürs Smart-Routing. Die Rang- und Statuslogik liest Rollen, Steam-Verknüpfungen und Presence-Daten, bildet daraus die relevante Lobby-/Match-Gruppe und aktualisiert Kanalnamen oder Berechtigungen asynchron. Das Voice-Tracking schreibt Sessions, Gesamtzeit und Punkte in die zentrale Datenbank und verschickt Feedback- oder Link-DMs nur nach klaren Regeln.
+TempVoice speichert Owner, Presets, Bans, Lurker-Status und Tag-Filter serverseitig und räumt leere Lanes zyklisch wieder auf. Serverweite Voice-Trennungen werden als befristete Zutrittssperren gesetzt, haben Vorrang vor TempVoice-Owner-Rechten und stellen bestehende Kanalrechte anschließend wieder her. Der Router erstellt Lanes bedarfsweise (Casual über den Router mit 6 Plätzen) und nutzt Co-Player-Daten fürs Smart-Routing. Die Rang- und Statuslogik liest Rollen, Steam-Verknüpfungen und Presence-Daten, bildet daraus die relevante Lobby-/Match-Gruppe und aktualisiert Kanalnamen oder Berechtigungen asynchron. Das Voice-Tracking schreibt Sessions, Gesamtzeit und Punkte in die zentrale Datenbank und verschickt Feedback- oder Link-DMs nur nach klaren Regeln.
 
 ## Grenzen & häufige Fragen
 - TempVoice-Buttons wirken nur, wenn du gerade selbst in einer passenden Lane sitzt. Kick, Ban und Tag-Filter sind Owner-/Mod-Funktionen.
+- Eine serverweite Voice-Trennung verhindert neue Beitritte in den bereits belegten Kanal; sie trennt oder verschiebt niemanden nachträglich.
 - `Owner übernehmen` ist für den Fall gedacht, dass der ursprüngliche Owner weg ist — dann dürfen bevorzugt die aktivsten Mitglieder der Lane übernehmen, nach 20 Minuten jeder in der Lane. Die Rang-Basis einer Lane bleibt intern trotzdem stabil.
 - Das Rang-Gate gibt es nur in Ranked-Lanes und nur für den Owner. Aktiv wirkt es als echte Zutritts-Beschränkung über verifizierte Rang-Rollen; wer beim Aktivieren schon drin ist, bleibt drin. Ranked-Lanes erstellen und joinen geht ohne Verifizierung, solange kein Gate aktiv ist.
 - Beim Tag-Filter werden Mindestalter und `Ragebaiter-Free` durchgesetzt; die Ton-Präferenz (`Banter-OK`) ist eine Info und sperrt niemanden aus.
@@ -33,5 +34,5 @@ TempVoice speichert Owner, Presets, Bans, Lurker-Status und Tag-Filter serversei
 - Voice-Feedback- oder Steam-Link-DMs können ausbleiben, wenn deine DMs geschlossen sind, du ein Privacy-Opt-out gesetzt hast oder eine ausgenommene Rolle trägst.
 
 ## Für Devs (knapp)
-- Rust live: `dl-voice/src/tempvoice/` (engine + interface: Staging, Buttons, Presets, Tag-Filter, Owner-Claim-Regeln), `router.rs` (Router-VC, Smart-Routing), `adaptive.rs` (New-Player-/Off-Topic-/Sortier-Automatik), `rank.rs` (Anker, Subrang-Fenster ±9, Overwrites), `status.rs` (Kanalstatus), `stats.rs` (`!vstats`, Leaderboards, Admin-Debug), `feedback.rs` (Feedback-DM + Modal), `nudge.rs` (Steam-Link-DM), `tracker.rs` (Sessions, respektiert Privacy-Opt-out)
+- Rust live: `dl-voice/src/tempvoice/` (engine + interface: Staging, Buttons, Presets, Tag-Filter, Owner-Claim-Regeln), `voice_pair_guard.rs` (serverweite, bidirektionale Zutrittstrennung), `router.rs` (Router-VC, Smart-Routing), `adaptive.rs` (New-Player-/Off-Topic-/Sortier-Automatik), `rank.rs` (Anker, Subrang-Fenster ±9, Overwrites), `status.rs` (Kanalstatus), `stats.rs` (`!vstats`, Leaderboards, Admin-Debug), `feedback.rs` (Feedback-DM + Modal), `nudge.rs` (Steam-Link-DM), `tracker.rs` (Sessions, respektiert Privacy-Opt-out)
 - Admin: Panel-Post per `!tvpanel`/`!tempvoicepanel`/`!tvinterface`

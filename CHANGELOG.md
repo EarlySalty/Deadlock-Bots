@@ -1,3 +1,13 @@
+## #257 — Feste Voice-Trennungen gelten überall
+
+Problem: Eine feste Trennung konnte in anderen Sprachkanälen oder über die Rechte eines TempVoice-Owners umgangen werden.
+
+Änderung: Der Bot sperrt den jeweils belegten Sprachkanal jetzt serverweit für die andere betroffene Person und nimmt die Sperre beim Wechsel oder Verlassen wieder zurück.
+
+Aktuelles Verhalten: Beide Seiten haben dieselben Regeln, andere Sprachkanäle bleiben nutzbar und niemand wird nachträglich getrennt oder verschoben.
+
+---
+
 ## #256 — Der Concierge redet wieder wie ein Mensch
 
 Problem: Auf Fragen hat der Concierge zuletzt wörtliche Doku-Abschnitte gepostet. Inhaltlich korrekt, aber es klang nach Handbuch statt nach Gespräch, und bei Smalltalk kam immer derselbe Standardsatz.
