@@ -17,8 +17,7 @@ use serenity::builder::{CreateActionRow, CreateButton, EditMessage, EditThread};
 use crate::tempvoice::LanePort;
 use crate::tracker::{VoiceMemberState, VoiceSnapshot};
 use crate::voice_pair_guard::{
-    compose_member_connect, resolve_member_connect, GuardResult, VoicePairGuardError,
-    VoicePairGuardStore, VoicePairOperationLock, VoicePairPort,
+    resolve_member_connect, GuardResult, VoicePairGuardError, VoicePairGuardStore, VoicePairPort,
 };
 
 /// Discord-Permission-Bit CONNECT (Voice).
@@ -460,7 +459,6 @@ fn guild_voice_bitrate_limit(tier: PremiumTier) -> u32 {
 pub struct CacheSnapshot {
     pub adapter: Arc<DiscordAdapter>,
     pub voice_pair_store: Arc<VoicePairGuardStore>,
-    pub voice_pair_operations: Arc<VoicePairOperationLock>,
 }
 
 impl CacheSnapshot {
@@ -654,7 +652,6 @@ impl LanePort for CacheSnapshot {
         user_id: u64,
         connect: Option<bool>,
     ) -> Result<(), String> {
-        let _operation = self.voice_pair_operations.lock().await;
         let guild_id = self
             .channel_guild_id(channel_id)
             .ok_or_else(|| "Channel nicht im Cache".to_string())?;
@@ -697,14 +694,13 @@ impl LanePort for CacheSnapshot {
         if denied_user_ids.is_empty() && clear_user_ids.is_empty() {
             return Ok(());
         }
-        let _operation = self.voice_pair_operations.lock().await;
         let guild_id = self
             .channel_guild_id(channel_id)
             .ok_or_else(|| "Channel nicht im Cache".to_string())?;
         let role_changes = HashMap::new();
         let mut member_changes = HashMap::new();
         for user_id in clear_user_ids {
-            let connect = compose_member_connect(
+            let connect = resolve_member_connect(
                 self.voice_pair_store.as_ref(),
                 guild_id,
                 channel_id,
@@ -716,7 +712,7 @@ impl LanePort for CacheSnapshot {
             member_changes.insert(*user_id, connect);
         }
         for user_id in denied_user_ids {
-            let connect = compose_member_connect(
+            let connect = resolve_member_connect(
                 self.voice_pair_store.as_ref(),
                 guild_id,
                 channel_id,
@@ -2645,7 +2641,6 @@ mod tests {
         let snapshot = CacheSnapshot {
             adapter,
             voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
-            voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
         };
 
         assert!(matches!(
