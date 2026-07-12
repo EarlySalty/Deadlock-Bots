@@ -71,10 +71,17 @@ struct VoteRequest {
 
 #[derive(Debug, Serialize)]
 struct RevisionRequest {
+    role_ids: Vec<String>,
+    config_json: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ActivateRevisionRequest {
     actor_id: String,
     role_ids: Vec<String>,
     feedback: String,
-    config_json: String,
+    channel_id: String,
+    message_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -151,6 +158,23 @@ impl TurnierClient {
             self.http
                 .post(format!(
                     "{}/internal/turnier/v1/proposals/{proposal_id}/revision",
+                    self.base_url
+                ))
+                .json(request),
+        )
+        .await
+    }
+
+    async fn activate_revision(
+        &self,
+        proposal_id: i64,
+        revised_id: i64,
+        request: &ActivateRevisionRequest,
+    ) -> Result<ProposalEnvelope, String> {
+        self.request(
+            self.http
+                .post(format!(
+                    "{}/internal/turnier/v1/proposals/{proposal_id}/revision/{revised_id}/activate",
                     self.base_url
                 ))
                 .json(request),
@@ -478,14 +502,27 @@ impl TurnierProposalService {
             .proposal
             .channel_id
             .as_deref()
-            .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| "Vorschlagskanal fehlt".to_string())?;
         let message_id = envelope
             .proposal
             .proposal_message_id
             .as_deref()
-            .and_then(|value| value.parse::<u64>().ok())
             .ok_or_else(|| "Vorschlagsnachricht fehlt".to_string())?;
+        self.edit_message_at(channel_id, message_id, envelope).await
+    }
+
+    async fn edit_message_at(
+        &self,
+        channel_id: &str,
+        message_id: &str,
+        envelope: &ProposalEnvelope,
+    ) -> Result<(), String> {
+        let channel_id = channel_id
+            .parse::<u64>()
+            .map_err(|_| "Vorschlagskanal ist ungültig".to_string())?;
+        let message_id = message_id
+            .parse::<u64>()
+            .map_err(|_| "Vorschlagsnachricht ist ungültig".to_string())?;
         let config: Value = serde_json::from_str(&envelope.proposal.config_json)
             .map_err(|error| format!("Gespeicherter Turnierplan ungültig: {error}"))?;
         self.adapter
@@ -657,13 +694,11 @@ impl InteractionHandler for ProposalHandler {
                     Err(error) => return BridgeReply::ephemeral_text(error),
                 };
                 let request = RevisionRequest {
-                    actor_id: interaction.user_id.to_string(),
                     role_ids: interaction
                         .role_ids
                         .iter()
                         .map(ToString::to_string)
                         .collect(),
-                    feedback,
                     config_json: config.to_string(),
                 };
                 match self.service.client.revise(proposal_id, &request).await {
@@ -672,7 +707,7 @@ impl InteractionHandler for ProposalHandler {
                             actor_id = interaction.user_id,
                             proposal_id,
                             revised_proposal_id = envelope.proposal.id,
-                            change = %short(&request.feedback, 200),
+                            change = %short(&feedback, 200),
                             verdict = "revised",
                             "Turniervorschlag-Aktion"
                         );
@@ -681,27 +716,54 @@ impl InteractionHandler for ProposalHandler {
                                 "Die ursprüngliche Vorschlagskarte ist nicht gespeichert.",
                             );
                         };
-                        let envelope = match self
+                        if let Err(error) = self
                             .service
-                            .client
-                            .rendered(
-                                envelope.proposal.id,
-                                &RenderedRequest {
-                                    config_json: config.to_string(),
-                                    channel_id,
-                                    message_id,
-                                },
-                            )
+                            .edit_message_at(&channel_id, &message_id, &envelope)
                             .await
                         {
-                            Ok(value) => value,
-                            Err(error) => return BridgeReply::ephemeral_text(error),
-                        };
-                        match self.service.edit_proposal_message(&envelope).await {
-                            Ok(()) => BridgeReply::ephemeral_text(
+                            return BridgeReply::ephemeral_text(error);
+                        }
+                        let activated = self
+                            .service
+                            .client
+                            .activate_revision(
+                                proposal_id,
+                                envelope.proposal.id,
+                                &ActivateRevisionRequest {
+                                    actor_id: interaction.user_id.to_string(),
+                                    role_ids: interaction
+                                        .role_ids
+                                        .iter()
+                                        .map(ToString::to_string)
+                                        .collect(),
+                                    feedback,
+                                    channel_id: channel_id.clone(),
+                                    message_id: message_id.clone(),
+                                },
+                            )
+                            .await;
+                        match activated {
+                            Ok(_) => BridgeReply::ephemeral_text(
                                 "Neue KI-Version erstellt; die Freigaben starten wieder bei 0.",
                             ),
-                            Err(error) => BridgeReply::ephemeral_text(error),
+                            Err(error) => {
+                                if let Err(rollback_error) = self
+                                    .service
+                                    .edit_message_at(&channel_id, &message_id, &current)
+                                    .await
+                                {
+                                    tracing::error!(
+                                        proposal_id,
+                                        revised_proposal_id = envelope.proposal.id,
+                                        %error,
+                                        %rollback_error,
+                                        "Revision-Aktivierung und Discord-Rollback fehlgeschlagen"
+                                    );
+                                }
+                                BridgeReply::ephemeral_text(format!(
+                                    "Neue Version konnte nicht aktiviert werden: {error}"
+                                ))
+                            }
                         }
                     }
                     Err(error) => BridgeReply::ephemeral_text(error),
