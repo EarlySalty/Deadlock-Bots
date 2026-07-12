@@ -34,6 +34,8 @@ struct ProposalEnvelope {
     required_approvals: i64,
     #[serde(default)]
     went_live: bool,
+    #[serde(default)]
+    announcement_posted: bool,
     tournament_id: Option<i64>,
 }
 
@@ -78,6 +80,13 @@ struct RevisionRequest {
 struct RenderedRequest {
     config_json: String,
     channel_id: String,
+    message_id: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AnnouncementRenderedRequest {
+    actor_id: String,
+    role_ids: Vec<String>,
     message_id: String,
 }
 
@@ -152,6 +161,22 @@ impl TurnierClient {
             self.http
                 .post(format!(
                     "{}/internal/turnier/v1/proposals/{proposal_id}/rendered",
+                    self.base_url
+                ))
+                .json(request),
+        )
+        .await
+    }
+
+    async fn announcement_rendered(
+        &self,
+        proposal_id: i64,
+        request: &AnnouncementRenderedRequest,
+    ) -> Result<ProposalEnvelope, String> {
+        self.request(
+            self.http
+                .post(format!(
+                    "{}/internal/turnier/v1/proposals/{proposal_id}/announcement-rendered",
                     self.base_url
                 ))
                 .json(request),
@@ -457,15 +482,48 @@ impl InteractionHandler for ProposalHandler {
                         if let Err(error) = self.service.edit_proposal_message(&envelope).await {
                             return BridgeReply::ephemeral_text(error);
                         }
-                        if envelope.went_live {
+                        if needs_announcement(&envelope) {
                             let draft = self.service.announcement_draft(&envelope).await;
-                            if let Err(error) = self
+                            let message_id = match self
                                 .service
                                 .adapter
                                 .send_raw_public(PROPOSAL_CHANNEL_ID, &announcement_body(&draft))
                                 .await
                             {
-                                tracing::error!(%error, proposal_id, "Ankündigungsentwurf nicht postbar");
+                                Ok(message_id) => message_id,
+                                Err(error) => {
+                                    tracing::error!(%error, proposal_id, "Ankündigungsentwurf nicht postbar");
+                                    return BridgeReply::ephemeral_text(
+                                        "Turnier freigegeben, aber die interne Vorlage konnte nicht gepostet werden. J erneut klicken versucht es wieder.",
+                                    );
+                                }
+                            };
+                            let marked = match self
+                                .service
+                                .client
+                                .announcement_rendered(
+                                    proposal_id,
+                                    &AnnouncementRenderedRequest {
+                                        actor_id: interaction.user_id.to_string(),
+                                        role_ids: interaction
+                                            .role_ids
+                                            .iter()
+                                            .map(ToString::to_string)
+                                            .collect(),
+                                        message_id: message_id.to_string(),
+                                    },
+                                )
+                                .await
+                            {
+                                Ok(marked) => marked,
+                                Err(error) => {
+                                    return BridgeReply::ephemeral_text(format!(
+                                        "Vorlage gepostet, Status konnte nicht gespeichert werden: {error}"
+                                    ));
+                                }
+                            };
+                            if let Err(error) = self.service.edit_proposal_message(&marked).await {
+                                return BridgeReply::ephemeral_text(error);
                             }
                         }
                         BridgeReply::ephemeral_text(if envelope.went_live {
@@ -653,6 +711,10 @@ fn option_text(interaction: &BridgeInteraction, key: &str) -> String {
         .to_string()
 }
 
+fn needs_announcement(envelope: &ProposalEnvelope) -> bool {
+    envelope.proposal.tournament_id.is_some() && !envelope.announcement_posted
+}
+
 fn modal(custom_id: String, title: &str, field_id: &str, label: &str) -> BridgeReply {
     BridgeReply {
         modal: Some(ModalSpec {
@@ -722,6 +784,7 @@ fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Ve
         .collect::<Vec<_>>()
         .join("\n");
     let live = envelope.proposal.tournament_id.is_some() || envelope.tournament_id.is_some();
+    let announcement_pending = live && !envelope.announcement_posted;
     let state = if live {
         "✅ Freigegeben und angelegt"
     } else {
@@ -736,7 +799,7 @@ fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Ve
             {"type": 10, "content": format!("**Status:** {}\n**Turnierstart:** `{}`\n**Anmeldung bis:** `{}`\n**Freigaben:** {}/{}\n**J:** {}\n**N:** {}\n**Einwände / Änderungen:**\n{}", state, event, registration, envelope.approvals, envelope.required_approvals, if yes.is_empty() { "—" } else { &yes }, if no.is_empty() { "—" } else { &no }, if objections.is_empty() { "—" } else { &objections })},
             {"type": 14, "divider": true, "spacing": 1},
             {"type": 1, "components": [
-                {"type": 2, "style": 3, "label": "J – Zeit & Freigabe", "custom_id": format!("{PREFIX}y:{}", envelope.proposal.id), "disabled": live},
+                {"type": 2, "style": 3, "label": if announcement_pending { "Vorlage erneut versuchen" } else { "J – Zeit & Freigabe" }, "custom_id": format!("{PREFIX}y:{}", envelope.proposal.id), "disabled": live && !announcement_pending},
                 {"type": 2, "style": 4, "label": "N – Einwand / keine Zeit", "custom_id": format!("{PREFIX}n:{}", envelope.proposal.id), "disabled": live},
                 {"type": 2, "style": 2, "label": "Änderung vorschlagen", "custom_id": format!("{PREFIX}change:{}", envelope.proposal.id), "disabled": live}
             ]}
@@ -861,6 +924,7 @@ mod tests {
             approvals: 0,
             required_approvals: 2,
             went_live: false,
+            announcement_posted: false,
             tournament_id: None,
         }
     }
@@ -914,6 +978,25 @@ mod tests {
         assert_eq!(
             parse_custom_id("turnier-proposal:change-modal:99"),
             Some(("change-modal", 99))
+        );
+    }
+
+    #[test]
+    fn approved_proposal_retries_missing_announcement_until_marker_exists() {
+        let mut value = envelope();
+        value.proposal.tournament_id = Some(7);
+        value.went_live = false;
+        assert!(needs_announcement(&value));
+        let pending = proposal_components(&value, &config()).expect("retry card");
+        let retry_button = &pending[0]["components"][4]["components"][0];
+        assert_eq!(retry_button["disabled"], false);
+        assert_eq!(retry_button["label"], "Vorlage erneut versuchen");
+        value.announcement_posted = true;
+        assert!(!needs_announcement(&value));
+        let completed = proposal_components(&value, &config()).expect("completed card");
+        assert_eq!(
+            completed[0]["components"][4]["components"][0]["disabled"],
+            true
         );
     }
 

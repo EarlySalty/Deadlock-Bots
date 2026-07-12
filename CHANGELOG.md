@@ -1,6 +1,6 @@
 ## #257 — Turniervorschläge bleiben in Mod-Hand
 
-Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; jede neue Version verwirft alte Stimmen. Aktuelles Verhalten: Erst zwei unterschiedliche Mods legen das Turnier an, danach entsteht nur eine interne Ankündigungsvorlage zur manuellen Veröffentlichung.
+Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; jede neue Version verwirft alte Stimmen. Aktuelles Verhalten: Erst zwei unterschiedliche Mods legen das Turnier an, danach entsteht nur eine interne Ankündigungsvorlage zur manuellen Veröffentlichung. Scheitert dieser interne Post, bleibt er offen und wird bei einem erneuten J nochmals versucht.
 
 ---
 
