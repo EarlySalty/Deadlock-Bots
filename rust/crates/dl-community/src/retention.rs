@@ -107,7 +107,14 @@ impl RetentionTracker {
     ) -> CommunityDbResult<()> {
         let user_id = u64_to_i64(user_id, "user_id")?;
         let guild_id = u64_to_i64(guild_id, "guild_id")?;
-        if crate::privacy::is_opted_out(&self.pool, user_id).await {
+        let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tracing::info!(
+                writer = "activity.user_retention_tracking",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            tx.commit().await?;
             return Ok(());
         }
         let now_dt = utc_from_unix(now)?;
@@ -119,7 +126,7 @@ impl RetentionTracker {
             "#,
             user_id,
         )
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await?;
         match row {
             Some(row) => {
@@ -141,7 +148,7 @@ impl RetentionTracker {
                     new_total,
                     user_id,
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
             None => {
@@ -156,10 +163,11 @@ impl RetentionTracker {
                     guild_id,
                     now_dt,
                 )
-                .execute(&self.pool)
+                .execute(&mut *tx)
                 .await?;
             }
         }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -355,6 +363,11 @@ impl RetentionTracker {
             return;
         };
         if crate::privacy::is_opted_out(&self.pool, user_id_i64).await {
+            tracing::info!(
+                writer = "activity.user_retention_messages",
+                user_id = user_id_i64,
+                "übersprungen wegen Opt-out"
+            );
             return;
         }
         // Name + Excluded-Rollen aus dem Cache; ausgeschlossene Rollen → kein DM.
@@ -380,19 +393,7 @@ impl RetentionTracker {
         let now = chrono::Utc::now();
         match delivery {
             MissYouDelivery::Sent => {
-                let _ = sqlx::query!(
-                    r#"
-                    UPDATE activity.user_retention_tracking
-                       SET last_miss_you_sent_at = $1,
-                           miss_you_count = miss_you_count + 1,
-                           updated_at = $1
-                     WHERE user_id = $2
-                    "#,
-                    now,
-                    user_id_i64,
-                )
-                .execute(&self.pool)
-                .await;
+                let _ = self.update_miss_you_sent(user_id_i64, now).await;
                 let _ = self
                     .insert_retention_message(
                         user_id_i64,
@@ -431,6 +432,38 @@ impl RetentionTracker {
         }
     }
 
+    async fn update_miss_you_sent(
+        &self,
+        user_id: i64,
+        now: DateTime<Utc>,
+    ) -> CommunityDbResult<()> {
+        let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tracing::info!(
+                writer = "activity.user_retention_tracking.miss_you",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            tx.commit().await?;
+            return Ok(());
+        }
+        sqlx::query!(
+            r#"
+                    UPDATE activity.user_retention_tracking
+                       SET last_miss_you_sent_at = $1,
+                           miss_you_count = miss_you_count + 1,
+                           updated_at = $1
+                     WHERE user_id = $2
+                    "#,
+            now,
+            user_id,
+        )
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     async fn insert_retention_message(
         &self,
         user_id: i64,
@@ -441,6 +474,15 @@ impl RetentionTracker {
         error_message: Option<String>,
     ) -> CommunityDbResult<i64> {
         let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tracing::info!(
+                writer = "activity.user_retention_messages",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            tx.commit().await?;
+            return Ok(0);
+        }
         advisory_lock(&mut tx, RETENTION_MESSAGES_ID_LOCK).await?;
         let next_id = sqlx::query_scalar!(
             r#"
@@ -777,6 +819,47 @@ mod tests {
         .await
         .expect("count");
         assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn privacy_lock_blockiert_retention_refill_nach_loeschung() {
+        let (db, tracker) = mk().await;
+        let pool = db.pool().clone();
+        let mut erase_tx = pool.begin().await.expect("erase tx");
+        dl_central_db::lock_user_privacy(&mut erase_tx, 9)
+            .await
+            .expect("privacy lock");
+        sqlx::query(
+            "INSERT INTO core.user_privacy(user_id, opted_out, updated_at)
+             VALUES(9, TRUE, now())",
+        )
+        .execute(&mut *erase_tx)
+        .await
+        .expect("privacy tombstone");
+
+        let write_tracker = tracker.clone();
+        let write = tokio::spawn(async move {
+            write_tracker
+                .update_user_activity(9, 1, 1_780_000_000, day(1_780_000_000))
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        erase_tx.commit().await.expect("erase commit");
+        write.await.expect("writer task").expect("writer result");
+
+        tracker
+            .insert_retention_message(9, 1, "miss_you", Utc::now(), "sent", None)
+            .await
+            .expect("message writer");
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM activity.user_retention_tracking WHERE user_id = 9) +
+                (SELECT COUNT(*) FROM activity.user_retention_messages WHERE user_id = 9)",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("retention refill count");
+        assert_eq!(count, 0, "Löschung darf Retention-Profil nicht neu anlegen");
     }
 
     #[tokio::test]

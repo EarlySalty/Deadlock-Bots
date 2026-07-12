@@ -55,6 +55,17 @@ pub async fn insert_or_replace_watch(
     window: LfgWatchWindow,
     expires_at: DateTime<Utc>,
 ) -> Result<(), sqlx::Error> {
+    let user_id = user_id as i64;
+    let mut tx = pool.begin().await?;
+    if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+        tracing::info!(
+            writer = "activity.lfg_watches",
+            user_id,
+            "übersprungen wegen Opt-out"
+        );
+        tx.commit().await?;
+        return Ok(());
+    }
     sqlx::query(
         "INSERT INTO activity.lfg_watches (
              user_id, guild_id, mode, rank_min, rank_max, window_kind, expires_at
@@ -70,15 +81,16 @@ pub async fn insert_or_replace_watch(
              created_at = now(),
              matched_post_id = NULL",
     )
-    .bind(user_id as i64)
+    .bind(user_id)
     .bind(guild_id as i64)
     .bind(mode)
     .bind(range.min)
     .bind(range.max)
     .bind(window.as_str())
     .bind(expires_at)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 
@@ -518,6 +530,39 @@ mod tests {
             .await
             .expect("casual");
         assert!(casual.is_empty(), "alter casual-Watch muss ersetzt sein");
+    }
+
+    #[tokio::test]
+    async fn opted_out_user_bekommt_keinen_lfg_watch_refill() {
+        let db = dl_central_db::testing::test_pool().await.expect("pool");
+        let pool = db.pool().clone();
+        sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(42, TRUE)")
+            .execute(&pool)
+            .await
+            .expect("privacy tombstone");
+
+        insert_or_replace_watch(
+            &pool,
+            1,
+            42,
+            "casual",
+            LfgRankRange {
+                min: None,
+                max: None,
+            },
+            LfgWatchWindow::Now3h,
+            Utc::now() + chrono::Duration::hours(3),
+        )
+        .await
+        .expect("writer result");
+
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM activity.lfg_watches WHERE user_id = 42",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("watch count");
+        assert_eq!(count, 0, "Opt-out darf LFG-Watch nicht neu anlegen");
     }
 
     #[tokio::test]

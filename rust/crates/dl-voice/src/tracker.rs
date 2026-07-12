@@ -622,6 +622,15 @@ impl VoiceTracker {
         let co_player_ids_json = serde_json::to_string(&co_player_ids)?;
 
         let mut tx = self.pool.begin().await?;
+        if dl_central_db::lock_user_privacy_and_is_opted_out(&mut tx, user_id).await? {
+            tracing::info!(
+                writer = "voice.finalized_session",
+                user_id,
+                "übersprungen wegen Opt-out"
+            );
+            tx.commit().await?;
+            return Ok(());
+        }
         sqlx::query!(
             r#"
             INSERT INTO voice.voice_stats (user_id, total_seconds, total_points, last_update)
@@ -1021,6 +1030,57 @@ mod tests {
             .await;
         // Anna (Opt-out) bekommt keine Session; Ben allein reicht nicht für min_users=2
         assert_eq!(tracker.active_sessions().await, 0);
+    }
+
+    #[tokio::test]
+    async fn opt_out_waehrend_session_blockiert_voice_refill() {
+        let (_db, tracker, snapshot) = setup().await;
+        snapshot
+            .states
+            .lock()
+            .expect("lock")
+            .insert((1, 10), vec![member(100, "Anna"), member(200, "Ben")]);
+        tracker
+            .handle_event(VoiceEvent::Join {
+                guild_id: 1,
+                user_id: 100,
+                channel_id: 10,
+            })
+            .await;
+        assert_eq!(tracker.active_sessions().await, 2);
+        let session = {
+            let mut state = tracker.state.lock().await;
+            let session = state.sessions.remove(&(100, 1)).expect("active session");
+            Session {
+                start_time: session.start_time - chrono::Duration::seconds(600),
+                ..session
+            }
+        };
+
+        sqlx::query("INSERT INTO core.user_privacy(user_id, opted_out) VALUES(100, TRUE)")
+            .execute(&tracker.pool)
+            .await
+            .expect("privacy tombstone");
+        let end_time = Utc::now().naive_utc();
+        let seconds = (end_time - session.start_time).num_seconds();
+        let points = calculate_points(seconds, session.peak_users);
+        tracker
+            .persist_finalized_session(session, end_time, seconds, points)
+            .await
+            .expect("voice writer");
+
+        let rows = sqlx::query_scalar::<_, i64>(
+            "SELECT
+                (SELECT COUNT(*) FROM voice.voice_stats WHERE user_id = 100) +
+                (SELECT COUNT(*) FROM activity.voice_session_log WHERE user_id = 100)",
+        )
+        .fetch_one(&tracker.pool)
+        .await
+        .expect("voice refill count");
+        assert_eq!(
+            rows, 0,
+            "Opt-out während Session darf Voice-Profil nicht neu anlegen"
+        );
     }
 
     #[tokio::test]
