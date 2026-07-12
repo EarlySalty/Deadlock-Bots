@@ -1,0 +1,12 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO core.steam_links (\n                discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at\n            )\n            VALUES\n                (200, 'returner', FALSE, 'inactive_purge', NULL),\n                (201, 'friend', TRUE, NULL, NULL)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": []
+  },
+  "hash": "24dfe426673fcb6c5e23b9c7009cc42241b0627e2afd5ae99362b3fc9fd69c6b"
+}

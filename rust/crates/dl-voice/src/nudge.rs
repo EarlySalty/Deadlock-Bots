@@ -49,6 +49,7 @@ pub trait NudgePort: Send + Sync {
     async fn send_log(&self, text: String);
     /// Frische Steam-Login-URL (Einmal-Link) vom Rust-Steam-Bot.
     async fn fetch_steam_link_url(&self, user_id: u64) -> Option<String>;
+    async fn send_voice_return(&self, _user_id: u64) {}
     async fn delete_message(&self, channel_id: u64, message_id: u64);
     async fn refresh_dm(
         &self,
@@ -133,6 +134,44 @@ impl VoiceNudge {
         .unwrap_or(false)
     }
 
+    async fn is_refriend_returner(&self, user_id: u64) -> bool {
+        let Ok(user_id) = u64_to_i64("core.steam_links.discord_id", user_id) else {
+            return false;
+        };
+        sqlx::query_scalar!(
+            r#"
+            SELECT EXISTS(
+                SELECT 1
+                  FROM core.steam_links
+                 WHERE discord_id = $1
+                   AND is_steam_friend = FALSE
+                   AND unlink_reason = 'inactive_purge'
+                   -- Mit REFRIEND_COOLDOWN_DAYS=30 auf der Steam-Seite gekoppelt.
+                   AND (
+                       refriend_attempted_at IS NULL
+                       OR refriend_attempted_at < NOW() - INTERVAL '30 days'
+                   )
+                 LIMIT 1
+            ) AS "exists!"
+            "#,
+            user_id,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .unwrap_or(false)
+    }
+
+    async fn trigger_voice_return(&self, user_id: u64) {
+        if self.is_refriend_returner(user_id).await {
+            // Schnelle Mehrfach-Joins dürfen bis zum Steam-seitigen Zeitstempel mehrfach feuern;
+            // upsert_friend_request ist dort idempotent, daher braucht es hier kein Dedup.
+            self.port.send_voice_return(user_id).await;
+            tracing::info!(user_id, "Rückkehrer erkannt, voice_return gefeuert");
+        } else {
+            tracing::debug!(user_id, "kein Rückkehr-Kandidat");
+        }
+    }
+
     #[cfg(test)]
     async fn has_active_nudge(&self, user_id: u64) -> bool {
         self.load_nudge_state(user_id)
@@ -160,6 +199,8 @@ impl VoiceNudge {
         else {
             return;
         };
+        self.trigger_voice_return(user_id).await;
+
         if self.is_opted_out(user_id).await {
             return;
         }
@@ -617,6 +658,7 @@ mod tests {
         url: Option<String>,
         roles: StdMutex<Vec<u64>>,
         fail_dm: StdMutex<bool>,
+        voice_returns: StdMutex<Vec<u64>>,
     }
 
     #[async_trait::async_trait]
@@ -644,6 +686,9 @@ mod tests {
         }
         async fn fetch_steam_link_url(&self, _u: u64) -> Option<String> {
             self.url.clone()
+        }
+        async fn send_voice_return(&self, user_id: u64) {
+            self.voice_returns.lock().expect("lock").push(user_id);
         }
         async fn delete_message(&self, _c: u64, _m: u64) {}
         async fn refresh_dm(
@@ -683,6 +728,7 @@ mod tests {
             url: url.map(str::to_string),
             roles: StdMutex::new(Vec::new()),
             fail_dm: StdMutex::new(false),
+            voice_returns: StdMutex::new(Vec::new()),
         });
         (db, VoiceNudge::new(pool, port.clone()), port)
     }
@@ -706,7 +752,83 @@ mod tests {
             url: url.map(str::to_string),
             roles: StdMutex::new(Vec::new()),
             fail_dm: StdMutex::new(false),
+            voice_returns: StdMutex::new(Vec::new()),
         })
+    }
+
+    #[tokio::test]
+    async fn refriend_returner_gate_filtert_exakt() {
+        let (_db, nudge, _port) = setup(None).await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.users (discord_id)
+            VALUES (101), (102), (103), (104), (105)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("users");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.steam_links (
+                discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at
+            )
+            VALUES
+                (101, 'returner', FALSE, 'inactive_purge', NULL),
+                (102, 'friend', TRUE, 'inactive_purge', NULL),
+                (103, 'no-reason', FALSE, NULL, NULL),
+                (104, 'other-reason', FALSE, 'manual', NULL),
+                (105, 'cooldown', FALSE, 'inactive_purge', NOW())
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("links");
+
+        assert!(nudge.is_refriend_returner(101).await);
+        assert!(!nudge.is_refriend_returner(102).await);
+        assert!(!nudge.is_refriend_returner(103).await);
+        assert!(!nudge.is_refriend_returner(104).await);
+        assert!(!nudge.is_refriend_returner(105).await);
+    }
+
+    #[tokio::test]
+    async fn handle_event_feuert_voice_return_nur_fuer_berechtigte_rueckkehrer() {
+        let (_db, nudge, port) = setup(None).await;
+        sqlx::query!(
+            r#"
+            INSERT INTO core.users (discord_id)
+            VALUES (200), (201)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("users");
+        sqlx::query!(
+            r#"
+            INSERT INTO core.steam_links (
+                discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at
+            )
+            VALUES
+                (200, 'returner', FALSE, 'inactive_purge', NULL),
+                (201, 'friend', TRUE, NULL, NULL)
+            "#
+        )
+        .execute(&nudge.pool)
+        .await
+        .expect("links");
+
+        for user_id in [200, 201] {
+            nudge
+                .handle_event(VoiceEvent::Join {
+                    guild_id: 1,
+                    user_id,
+                    channel_id: 5,
+                })
+                .await;
+        }
+
+        assert_eq!(port.voice_returns.lock().expect("lock").as_slice(), &[200]);
     }
 
     #[tokio::test]
