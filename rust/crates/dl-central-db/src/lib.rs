@@ -2,6 +2,7 @@ pub mod core_users;
 pub mod kv;
 mod locks;
 pub mod pool;
+mod proactive_dm;
 #[cfg(feature = "testing")]
 pub mod testing;
 
@@ -11,6 +12,7 @@ pub use locks::{
     lock_raw_event_retention_erasure, lock_user_privacy, lock_user_privacy_and_is_opted_out,
 };
 pub use pool::{connect_pool, dsn_from_env};
+pub use proactive_dm::{is_proactive_dm_allowed, ProactiveDmDenialReason, ProactiveDmEligibility};
 #[cfg(feature = "testing")]
 pub use testing::{test_pool, TestDb};
 

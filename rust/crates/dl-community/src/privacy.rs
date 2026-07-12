@@ -598,6 +598,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "action_outbox",
+        "user_id",
+        "bot.action_outbox",
+        "user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "dm_response_tracking",
         "user_id",
         "bot.dm_response_tracking",
