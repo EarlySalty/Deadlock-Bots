@@ -280,13 +280,23 @@ pub async fn upsert_response(
     Ok(stored.unwrap_or(false))
 }
 
+fn event_label(value: &str) -> &'static str {
+    match value {
+        "community_abend" => "Community-Abende",
+        "turnier" => "Turniere",
+        "coaching" => "Coaching-Sessions",
+        "workshop" => "Workshops und Guides",
+        _ => "Casual-Runden",
+    }
+}
+
 pub fn survey_dm_body(wave_id: i64) -> Value {
     let scores: Vec<Value> = (1..=5)
         .map(|score| {
             json!({
                 "type": 2,
                 "style": 2,
-                "label": format!("PLATZHALTER: Zufriedenheit {score}"),
+                "label": format!("{score} ⭐"),
                 "custom_id": format!("survey_pulse:satisfaction:{wave_id}:{score}"),
             })
         })
@@ -295,19 +305,19 @@ pub fn survey_dm_body(wave_id: i64) -> Value {
         .iter()
         .map(|value| {
             json!({
-                "label": format!("PLATZHALTER: Event {value}"),
+                "label": event_label(value),
                 "value": value,
             })
         })
         .collect();
     json!({
-        "content": "PLATZHALTER: Einladung zur Community-Puls-Umfrage",
+        "content": "Hey! Kurzer Community-Puls von uns, drei schnelle Fragen, dauert keine 30 Sekunden.\n\n**1. Wie zufrieden bist du gerade mit dem Server?** Klick auf 1 bis 5 Sterne.\n**2. Welche Events wünschst du dir öfter?** Wähl unten aus.\n**3. Was fehlt dir?** Schreib es uns über den Button.\n\nWir werten die Antworten gesammelt aus, damit wir wissen, was als Nächstes dran ist. Antworten kannst du ändern, solange die Umfrage läuft.",
         "components": [
             { "type": 1, "components": scores },
             { "type": 1, "components": [{
                 "type": 3,
                 "custom_id": format!("survey_pulse:events:{wave_id}"),
-                "placeholder": "PLATZHALTER: gewünschte Events auswählen",
+                "placeholder": "Welche Events willst du öfter sehen?",
                 "options": options,
                 "min_values": 1,
                 "max_values": EVENT_VALUES.len(),
@@ -315,7 +325,7 @@ pub fn survey_dm_body(wave_id: i64) -> Value {
             { "type": 1, "components": [{
                 "type": 2,
                 "style": 2,
-                "label": "PLATZHALTER: Was fehlt?",
+                "label": "Was fehlt dir? Schreib es uns",
                 "custom_id": format!("survey_pulse:freetext:{wave_id}"),
             }]}
         ],
@@ -343,13 +353,17 @@ fn parse_wave_id(parts: &[&str], index: usize) -> Option<i64> {
 
 fn response_reply(result: Result<bool, SurveyPulseError>) -> BridgeReply {
     match result {
-        Ok(true) => BridgeReply::ephemeral_text("PLATZHALTER: Antwort gespeichert"),
-        Ok(false) | Err(SurveyPulseError::InvalidAnswer) => {
-            BridgeReply::ephemeral_text("PLATZHALTER: ungültige oder abgelaufene Umfrage")
-        }
+        Ok(true) => BridgeReply::ephemeral_text(
+            "Danke, ist notiert! Du kannst deine Antwort ändern, solange die Umfrage läuft.",
+        ),
+        Ok(false) | Err(SurveyPulseError::InvalidAnswer) => BridgeReply::ephemeral_text(
+            "Diese Umfrage läuft leider nicht mehr, die Antwort wurde nicht gespeichert.",
+        ),
         Err(error) => {
             tracing::warn!(%error, "Umfragen-Puls-Antwort konnte nicht gespeichert werden");
-            BridgeReply::ephemeral_text("PLATZHALTER: Antwort konnte nicht gespeichert werden")
+            BridgeReply::ephemeral_text(
+                "Das hat gerade nicht geklappt. Versuch es in ein paar Minuten nochmal.",
+            )
         }
     }
 }
@@ -359,18 +373,24 @@ impl InteractionHandler for SurveyPulseHandler {
     async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
         let parts: Vec<&str> = interaction.custom_id.split(':').collect();
         if parts.first() != Some(&"survey_pulse") {
-            return BridgeReply::ephemeral_text("PLATZHALTER: unbekannte Umfrage-Aktion");
+            return BridgeReply::ephemeral_text(
+                "Diese Aktion kennen wir nicht, die Umfrage-Nachricht ist vermutlich veraltet.",
+            );
         }
         let Ok(user_id) = i64::try_from(interaction.user_id) else {
-            return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Discord-ID");
+            return BridgeReply::ephemeral_text(
+                "Deine Discord-ID konnten wir nicht verarbeiten, bitte meld das dem Team.",
+            );
         };
         match parts.get(1).copied() {
             Some("satisfaction") => {
                 let Some(wave_id) = parse_wave_id(&parts, 2) else {
-                    return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Umfrage");
+                    return BridgeReply::ephemeral_text("Diese Umfrage gibt es nicht mehr.");
                 };
                 let Some(score) = parts.get(3).and_then(|value| value.parse::<i16>().ok()) else {
-                    return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Bewertung");
+                    return BridgeReply::ephemeral_text(
+                        "Diese Bewertung konnten wir nicht lesen, bitte nutz die Buttons 1 bis 5.",
+                    );
                 };
                 response_reply(
                     upsert_response(
@@ -385,7 +405,7 @@ impl InteractionHandler for SurveyPulseHandler {
             }
             Some("events") => {
                 let Some(wave_id) = parse_wave_id(&parts, 2) else {
-                    return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Umfrage");
+                    return BridgeReply::ephemeral_text("Diese Umfrage gibt es nicht mehr.");
                 };
                 response_reply(
                     upsert_response(
@@ -400,16 +420,16 @@ impl InteractionHandler for SurveyPulseHandler {
             }
             Some("freetext") => {
                 let Some(wave_id) = parse_wave_id(&parts, 2) else {
-                    return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Umfrage");
+                    return BridgeReply::ephemeral_text("Diese Umfrage gibt es nicht mehr.");
                 };
                 BridgeReply {
                     modal: Some(ModalSpec {
                         custom_id: format!("survey_pulse:freetext_submit:{wave_id}"),
-                        title: "PLATZHALTER: Was fehlt?".to_string(),
+                        title: "Was fehlt dir auf dem Server?".to_string(),
                         fields: vec![ModalField {
                             custom_id: "freetext".to_string(),
-                            label: "PLATZHALTER: Freitext-Antwort".to_string(),
-                            placeholder: "PLATZHALTER: Dein Feedback".to_string(),
+                            label: "Dein Feedback".to_string(),
+                            placeholder: "Was fehlt, was nervt, was wünschst du dir?".to_string(),
                             required: true,
                             min_length: 1,
                             max_length: 1_000,
@@ -421,7 +441,7 @@ impl InteractionHandler for SurveyPulseHandler {
             }
             Some("freetext_submit") => {
                 let Some(wave_id) = parse_wave_id(&parts, 2) else {
-                    return BridgeReply::ephemeral_text("PLATZHALTER: ungültige Umfrage");
+                    return BridgeReply::ephemeral_text("Diese Umfrage gibt es nicht mehr.");
                 };
                 let value = interaction
                     .options
@@ -440,7 +460,9 @@ impl InteractionHandler for SurveyPulseHandler {
                     .await,
                 )
             }
-            _ => BridgeReply::ephemeral_text("PLATZHALTER: unbekannte Umfrage-Aktion"),
+            _ => BridgeReply::ephemeral_text(
+                "Diese Aktion kennen wir nicht, die Umfrage-Nachricht ist vermutlich veraltet.",
+            ),
         }
     }
 }
