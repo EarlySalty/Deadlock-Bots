@@ -39,6 +39,8 @@ pub struct GenerateRequest {
     pub system_prompt: Option<String>,
     pub model: Option<String>,
     pub max_output_tokens: Option<u32>,
+    /// Optionaler OpenAI-kompatibler Reasoning-Modus; derzeit nur Fireworks.
+    pub reasoning_effort: Option<String>,
     pub temperature: f64,
 }
 
@@ -490,17 +492,22 @@ impl TextGenerator for FireworksClient {
         }
         messages.push(json!({ "role": "user", "content": request.prompt }));
 
+        let mut body = json!({
+            "model": model,
+            "messages": messages,
+            "max_tokens": max_tokens,
+            "temperature": request.temperature,
+            "response_format": { "type": "json_object" },
+        });
+        if let Some(reasoning_effort) = request.reasoning_effort {
+            body["reasoning_effort"] = Value::String(reasoning_effort);
+        }
+
         let response = self
             .http
             .post(format!("{}/chat/completions", self.base_url))
             .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&json!({
-                "model": model,
-                "messages": messages,
-                "max_tokens": max_tokens,
-                "temperature": request.temperature,
-                "response_format": { "type": "json_object" },
-            }))
+            .json(&body)
             .send()
             .await;
         let response = match response {
@@ -1146,6 +1153,7 @@ score ist die Wahrscheinlichkeit in Prozent. Kein weiterer Text.";
                 system_prompt: Some(system.to_string()),
                 model: None,
                 max_output_tokens: Some(160),
+                reasoning_effort: None,
                 temperature: 0.0,
             })
             .await;
@@ -1230,6 +1238,7 @@ mod tests {
                 system_prompt: Some("sys".into()),
                 model: None,
                 max_output_tokens: Some(50),
+                reasoning_effort: None,
                 temperature: 0.0,
             })
             .await;
@@ -1242,6 +1251,7 @@ mod tests {
                 system_prompt: Some("sys".into()),
                 model: None,
                 max_output_tokens: Some(50),
+                reasoning_effort: None,
                 temperature: 0.6,
             })
             .await;
@@ -1364,11 +1374,24 @@ mod tests {
                 system_prompt: Some("system".to_string()),
                 model: None,
                 max_output_tokens: Some(300),
+                reasoning_effort: Some("none".to_string()),
+                temperature: 0.0,
+            })
+            .await;
+
+        let normal_text = client
+            .generate_text(GenerateRequest {
+                prompt: "normal".to_string(),
+                system_prompt: None,
+                model: None,
+                max_output_tokens: Some(300),
+                reasoning_effort: None,
                 temperature: 0.0,
             })
             .await;
 
         assert_eq!(text.as_deref(), Some("{\"category\":\"game_related_ok\"}"));
+        assert_eq!(normal_text.as_deref(), text.as_deref());
         let captured = captured.lock().expect("lock");
         assert_eq!(captured[0]["model"], DEFAULT_FIREWORKS_MODEL);
         assert_eq!(captured[0]["messages"][0]["role"], "system");
@@ -1376,6 +1399,8 @@ mod tests {
         assert_eq!(captured[0]["max_tokens"], 300);
         assert_eq!(captured[0]["temperature"], 0.0);
         assert_eq!(captured[0]["response_format"]["type"], "json_object");
+        assert_eq!(captured[0]["reasoning_effort"], "none");
+        assert!(captured[1].get("reasoning_effort").is_none());
     }
 
     /// Filter (valide Präfixe) + Kappung auf 4 gegen einen Mock beweisen.

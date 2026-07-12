@@ -116,6 +116,7 @@ impl DmAssistant {
                 system_prompt: Some(SYSTEM_PROMPT.to_string()),
                 model: None,
                 max_output_tokens: Some(MAX_OUTPUT_TOKENS),
+                reasoning_effort: None,
                 temperature: 0.7,
             })
             .await

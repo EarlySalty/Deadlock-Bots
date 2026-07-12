@@ -122,6 +122,7 @@ impl ContentAnalyzer {
                     system_prompt: Some(ANALYZER_SYSTEM_PROMPT.to_string()),
                     model: Some(self.config.text_model.clone()),
                     max_output_tokens: Some(300),
+                    reasoning_effort: None,
                     temperature: 0.0,
                 })
                 .await;

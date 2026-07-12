@@ -770,13 +770,28 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
     let retrieval_score = ranked.first().map(|(_, score)| *score);
     let chunks: Vec<Chunk> = ranked.into_iter().map(|(chunk, _score)| chunk).collect();
     let candidates = candidates_for(&chunks);
-    let candidate_count = candidates.len();
     if candidates.is_empty() {
         log_decision(
             "no",
             "none",
             retrieval_score,
             "no_candidates",
+            (0, 0, 0),
+            None,
+        );
+        return Json(unanswerable());
+    }
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| candidate_is_relevant(&request.question, candidate))
+        .collect::<Vec<_>>();
+    let candidate_count = candidates.len();
+    if candidates.is_empty() {
+        log_decision(
+            "no",
+            "none",
+            retrieval_score,
+            "no_relevant_candidates",
             (0, 0, 0),
             None,
         );
@@ -801,6 +816,7 @@ async fn ask(State(state): State<AppState>, Json(request): Json<AskRequest>) -> 
             system_prompt: Some(SYSTEM_PROMPT.to_string()),
             model: None,
             max_output_tokens: Some(2000),
+            reasoning_effort: Some("none".to_string()),
             temperature: 0.0,
         }),
     )
@@ -2121,6 +2137,20 @@ mod tests {
         text.to_lowercase().contains(&term.to_lowercase())
     }
 
+    fn grounded_context_for_case(case: &GoldenCase, candidates: &[Candidate]) -> String {
+        candidates
+            .iter()
+            .filter(|candidate| {
+                case.expected_sources
+                    .iter()
+                    .any(|expected| expected == &candidate.path)
+                    && candidate_is_relevant(&case.question, candidate)
+            })
+            .map(|candidate| candidate.passage.rendered())
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    }
+
     fn write_golden_suite(root: &Path, case_count: usize) -> Result<(PathBuf, PathBuf)> {
         let golden_dir = root.join("evals");
         let docs_path = root.join("public");
@@ -2202,6 +2232,7 @@ mod tests {
             stats.internal_sources
         );
 
+        let mut grounded_failures = Vec::new();
         for case in cases {
             let chunks = knowledge
                 .search(&case.question, 6)
@@ -2211,6 +2242,10 @@ mod tests {
             let sources = sources_for(&chunks);
             let candidates = candidates_for(&chunks);
             let context = build_prompt("", &candidates);
+            let found_sections = chunks
+                .iter()
+                .map(|chunk| format!("{}#{}", chunk.path, chunk.section))
+                .collect::<Vec<_>>();
 
             for term in &case.forbidden_terms {
                 ensure!(
@@ -2220,16 +2255,13 @@ mod tests {
                 );
             }
             if case.answerable {
-                ensure!(
-                    candidates.iter().any(|candidate| {
-                        case.expected_sources
-                            .iter()
-                            .any(|expected| expected == &candidate.path)
-                            && candidate_is_relevant(&case.question, candidate)
-                    }),
-                    "Keine relevante Passage aus erwarteter Quelle fuer Frage {:?}",
-                    case.question
-                );
+                let grounded_context = grounded_context_for_case(&case, &candidates);
+                if grounded_context.is_empty() {
+                    grounded_failures.push(format!(
+                        "Keine relevante Passage aus erwarteter Quelle fuer Frage {:?}",
+                        case.question
+                    ));
+                }
                 ensure!(
                     sources.iter().any(|source| case
                         .expected_sources
@@ -2242,13 +2274,27 @@ mod tests {
                 for term in &case.context_terms {
                     ensure!(
                         contains_case_insensitive(&context, term),
-                        "Kontextterm {term:?} fehlt fuer Frage {:?}; gefunden: {:?}",
+                        "Kontextterm {term:?} fehlt fuer Frage {:?}; gefunden: {:?}; Abschnitte: {:?}",
                         case.question,
-                        sources
+                        sources,
+                        found_sections
                     );
+                }
+                for term in &case.answer_terms {
+                    if !contains_case_insensitive(&grounded_context, term) {
+                        grounded_failures.push(format!(
+                            "Belegterm {term:?} fehlt in relevanten Passagen fuer Frage {:?}; gefunden: {:?}",
+                            case.question, sources
+                        ));
+                    }
                 }
             }
         }
+        ensure!(
+            grounded_failures.is_empty(),
+            "Golden-Belegluecken:\n{}",
+            grounded_failures.join("\n")
+        );
         Ok(())
     }
 
@@ -2430,6 +2476,7 @@ mod tests {
 
     struct MockGenerator {
         responses: Mutex<Vec<Option<String>>>,
+        requests: Mutex<Vec<GenerateRequest>>,
         calls: AtomicUsize,
     }
 
@@ -2441,12 +2488,17 @@ mod tests {
         fn new(responses: Vec<Option<String>>) -> Self {
             Self {
                 responses: Mutex::new(responses),
+                requests: Mutex::new(Vec::new()),
                 calls: AtomicUsize::new(0),
             }
         }
 
         fn calls(&self) -> usize {
             self.calls.load(AtomicOrdering::SeqCst)
+        }
+
+        fn requests(&self) -> Vec<GenerateRequest> {
+            self.requests.lock().expect("requests").clone()
         }
     }
 
@@ -2492,8 +2544,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl TextGenerator for MockGenerator {
-        async fn generate_text(&self, _request: GenerateRequest) -> Option<String> {
+        async fn generate_text(&self, request: GenerateRequest) -> Option<String> {
             self.calls.fetch_add(1, AtomicOrdering::SeqCst);
+            self.requests.lock().ok()?.push(request);
             let mut responses = self.responses.lock().ok()?;
             if responses.is_empty() {
                 None
@@ -3538,6 +3591,31 @@ Frag im Support.
     }
 
     #[tokio::test]
+    async fn knowledge_selector_deaktiviert_reasoning_nur_im_request() -> Result<()> {
+        let generator = Arc::new(MockGenerator::new(vec![Some(
+            r#"{"candidate_ids":["P1"]}"#.to_string(),
+        )]));
+        let (app, _) = test_app(
+            vec![test_chunk(
+                "Steam-Bot",
+                "Support",
+                "steam-bot.html",
+                "Steam Support.",
+            )],
+            Some(generator.clone()),
+        );
+
+        let (status, _) = post_ask(app, json!({"question": "Steam Support?"})).await?;
+
+        assert_eq!(status, 200);
+        let requests = generator.requests();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].reasoning_effort.as_deref(), Some("none"));
+        assert_eq!(requests[0].max_output_tokens, Some(2000));
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn helden_anzahl_und_account_fragen_nutzen_den_evidence_pfad() -> Result<()> {
         for (question, evidence) in [
             (
@@ -3877,7 +3955,7 @@ Frag im Support.
                 "Steam kostet nichts. Steam verknüpfen geht über den Account-Link.",
                 "Steam kostet nichts.",
             )],
-            Some(generator),
+            Some(generator.clone()),
         );
 
         let (status, body) = post_ask(app, json!({"question": "Wie Steam verknüpfen?"})).await?;
@@ -3886,6 +3964,7 @@ Frag im Support.
         assert_eq!(body["answerable"], false);
         assert!(body["answer"].is_null());
         assert_eq!(body["sources"].as_array().map(Vec::len), Some(0));
+        assert_eq!(generator.calls(), 0);
         Ok(())
     }
 

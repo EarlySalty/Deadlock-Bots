@@ -110,6 +110,7 @@ impl VoiceHintClassifier for OpenAiVoiceHintClassifier {
                 system_prompt: None,
                 model: None,
                 max_output_tokens: Some(4),
+                reasoning_effort: None,
                 temperature: 0.0,
             })
             .await

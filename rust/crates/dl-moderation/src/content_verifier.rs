@@ -60,6 +60,7 @@ impl ContentVerifier {
                     system_prompt: Some(VERIFIER_SYSTEM_PROMPT.to_string()),
                     model: Some(self.config.model.clone()),
                     max_output_tokens: Some(300),
+                    reasoning_effort: None,
                     temperature: 0.0,
                 })
                 .await
