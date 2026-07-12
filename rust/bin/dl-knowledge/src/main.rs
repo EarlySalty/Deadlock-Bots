@@ -36,9 +36,9 @@ const STOPWORDS: &[&str] = &[
     "aber", "als", "am", "an", "auch", "auf", "aus", "bei", "bin", "bis", "da", "das", "dass",
     "dein", "dem", "den", "der", "des", "die", "dir", "doch", "du", "ein", "eine", "einem",
     "einen", "einer", "eines", "er", "es", "fuer", "für", "ich", "im", "in", "ist", "kein",
-    "keine", "man", "mal", "mehr", "mein", "mit", "nach", "nicht", "nur", "oder", "sein", "sie",
-    "sind", "so", "und", "uns", "von", "vor", "war", "was", "wenn", "wer", "wie", "wir", "wo",
-    "zu", "zum", "zur", "ueber", "über",
+    "keine", "kann", "man", "mal", "mehr", "mein", "mit", "nach", "nicht", "nur", "oder", "sein",
+    "sie", "sind", "so", "und", "uns", "von", "vor", "war", "was", "wenn", "wer", "wie", "wir",
+    "wo", "zu", "zum", "zur", "ueber", "über",
 ];
 
 #[derive(Clone)]
@@ -2454,6 +2454,57 @@ mod tests {
             grounding_terms("Fragechatbot"),
             HashSet::from(["fragechatbot".to_string()])
         );
+    }
+
+    #[test]
+    fn grounding_behandelt_kann_nicht_als_inhaltsanker() {
+        let terms = grounding_terms("Wo kann ich dem Bot eine Frage zum Server stellen?");
+
+        assert!(!terms.contains("kann"));
+        assert!(terms.is_superset(&HashSet::from([
+            "bot".to_string(),
+            "frage".to_string(),
+            "server".to_string(),
+            "stellen".to_string(),
+        ])));
+    }
+
+    #[test]
+    fn faq_evidence_scheitert_nicht_an_spaeterem_kann_im_chunk() {
+        let evidence = "Privaten Fragechat öffnen Über die Schaltfläche Frage stellen im Bereich für Server- und Bot-Fragen. Oder mit dem Befehl /faq auf dem Server.";
+        let chunks = vec![test_chunk(
+            "FAQ",
+            "Privaten Fragechat öffnen",
+            "faq.html",
+            &format!(
+                "{evidence} Kann der Assistent Fragen zu Discord und den Community-Bots beantworten?"
+            ),
+        )];
+
+        assert!(grounded_response(
+            "Wo kann ich dem Bot eine Frage zum Server stellen?",
+            &[evidence.to_string()],
+            &chunks,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn kann_allein_erdet_keine_themenfremde_evidence() {
+        let evidence = "Kann der Assistent automatisch antworten?";
+        let chunks = vec![test_chunk(
+            "Assistent",
+            "Automatische Antworten",
+            "assistent.html",
+            evidence,
+        )];
+
+        assert!(grounded_response(
+            "Wo kann ich dem Bot eine Frage zum Server stellen?",
+            &[evidence.to_string()],
+            &chunks,
+        )
+        .is_none());
     }
 
     #[test]
