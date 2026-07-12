@@ -2138,7 +2138,7 @@ mod tests {
     }
 
     fn grounded_context_for_case(case: &GoldenCase, candidates: &[Candidate]) -> String {
-        candidates
+        let relevant = candidates
             .iter()
             .filter(|candidate| {
                 case.expected_sources
@@ -2146,9 +2146,84 @@ mod tests {
                     .any(|expected| expected == &candidate.path)
                     && candidate_is_relevant(&case.question, candidate)
             })
-            .map(|candidate| candidate.passage.rendered())
-            .collect::<Vec<_>>()
-            .join("\n\n")
+            .collect::<Vec<_>>();
+
+        let mut subsets = vec![(0usize, Vec::new())];
+        while let Some((start, selected_ids)) = subsets.pop() {
+            for (index, candidate) in relevant.iter().enumerate().skip(start) {
+                let mut candidate_ids = selected_ids.clone();
+                candidate_ids.push(candidate.id.clone());
+                let selection = LlmSelection { candidate_ids };
+                if let Some(answer) = grounded_response(&case.question, &selection, candidates)
+                    .and_then(|response| response.answer)
+                    .filter(|answer| {
+                        case.answer_terms
+                            .iter()
+                            .all(|term| contains_case_insensitive(answer, term))
+                    })
+                {
+                    return answer;
+                }
+                if selection.candidate_ids.len() < MAX_SELECTED_CANDIDATES {
+                    subsets.push((index + 1, selection.candidate_ids));
+                }
+            }
+        }
+        String::new()
+    }
+
+    #[test]
+    fn golden_belegterme_brauchen_eine_live_zulaessige_auswahl() {
+        let candidate = |id: &str, body: String| Candidate {
+            id: id.to_string(),
+            title: "Hilfe".to_string(),
+            path: "hilfe.html".to_string(),
+            parent_text: body.clone(),
+            passage: Passage {
+                heading: None,
+                context: None,
+                body,
+                kind: PassageKind::Paragraph,
+            },
+        };
+        let case = |answer_terms: &[&str]| GoldenCase {
+            question: "Steam?".to_string(),
+            answerable: true,
+            expected_sources: vec!["hilfe.html".to_string()],
+            context_terms: vec![],
+            answer_terms: answer_terms
+                .iter()
+                .map(|term| (*term).to_string())
+                .collect(),
+            forbidden_terms: vec![],
+        };
+
+        let five_candidates = ["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]
+            .iter()
+            .enumerate()
+            .map(|(index, term)| candidate(&format!("P{}", index + 1), format!("Steam {term}.")))
+            .collect::<Vec<_>>();
+        let oversized_candidates = ["Alpha", "Beta"]
+            .iter()
+            .enumerate()
+            .map(|(index, term)| {
+                candidate(
+                    &format!("P{}", index + 1),
+                    format!("Steam {term} {}", "x".repeat(900)),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            [
+                grounded_context_for_case(
+                    &case(&["Alpha", "Beta", "Gamma", "Delta", "Epsilon"]),
+                    &five_candidates,
+                ),
+                grounded_context_for_case(&case(&["Alpha", "Beta"]), &oversized_candidates,),
+            ],
+            ["", ""]
+        );
     }
 
     fn write_golden_suite(root: &Path, case_count: usize) -> Result<(PathBuf, PathBuf)> {
