@@ -1,0 +1,22 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            SELECT EXISTS(\n                SELECT 1\n                  FROM core.steam_links\n                 WHERE discord_id = $1\n                   AND is_steam_friend = FALSE\n                   AND unlink_reason = 'inactive_purge'\n                   -- Mit REFRIEND_COOLDOWN_DAYS=30 auf der Steam-Seite gekoppelt.\n                   AND (\n                       refriend_attempted_at IS NULL\n                       OR refriend_attempted_at < NOW() - INTERVAL '30 days'\n                   )\n                 LIMIT 1\n            ) AS \"exists!\"\n            ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "exists!",
+        "type_info": "Bool"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8"
+      ]
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "9c69fcebc9a5ea5f84040a31dba2efeb86ecac51e4324e951bd128ac6b699ed2"
+}
