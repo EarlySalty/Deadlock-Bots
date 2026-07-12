@@ -1762,7 +1762,7 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
 
     if relations.contains("bot.action_outbox") {
         let rows: Value = sqlx::query_scalar(
-            "SELECT COALESCE(jsonb_agg(to_jsonb(outbox) ORDER BY outbox.id), '[]'::jsonb)
+            "SELECT COALESCE(jsonb_agg(to_jsonb(outbox) - 'user_id' ORDER BY outbox.id), '[]'::jsonb)
                FROM bot.action_outbox AS outbox
               WHERE outbox.user_id <> $1
                 AND outbox.payload ->> 'requester_id' = $2",
@@ -3161,6 +3161,7 @@ mod tests {
             .expect("requester outbox rows");
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["idempotency_key"], "privacy-export-requester");
+        assert!(rows[0].get("user_id").is_none());
     }
 
     #[tokio::test]
