@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -19,6 +19,47 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const STATE_RESULT_FETCHING: &str = "result_fetching";
 const STATE_RESULT_FAILED: &str = "result_failed";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
+const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
+
+#[derive(Debug, Clone, Copy)]
+pub struct ScrimVoiceConfig {
+    pub enabled: bool,
+    pub category_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScrimVoiceAction {
+    Create,
+    Keep,
+    Cleanup,
+    SkipDisabled,
+    SkipMissingCategory,
+    SkipNoChannel,
+}
+
+fn decide_scrim_voice_action(
+    enabled: bool,
+    category_id: Option<u64>,
+    has_channel: bool,
+    terminal: bool,
+) -> ScrimVoiceAction {
+    if terminal {
+        return if has_channel {
+            ScrimVoiceAction::Cleanup
+        } else {
+            ScrimVoiceAction::SkipNoChannel
+        };
+    }
+    if has_channel {
+        ScrimVoiceAction::Keep
+    } else if !enabled {
+        ScrimVoiceAction::SkipDisabled
+    } else if category_id.is_none() {
+        ScrimVoiceAction::SkipMissingCategory
+    } else {
+        ScrimVoiceAction::Create
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ScrimDriverAction {
@@ -47,14 +88,22 @@ pub fn spawn(
     pool: PgPool,
     adapter: Arc<dl_discord::DiscordAdapter>,
     announcement_channel_id: Option<u64>,
+    tempvoice: Arc<dl_voice::tempvoice::TempVoiceEngine>,
+    voice_config: ScrimVoiceConfig,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = time::interval(POLL_INTERVAL);
         interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            if let Err(err) =
-                process_one_pending(&pool, adapter.as_ref(), announcement_channel_id).await
+            if let Err(err) = process_one_pending(
+                &pool,
+                adapter.as_ref(),
+                announcement_channel_id,
+                tempvoice.as_ref(),
+                voice_config,
+            )
+            .await
             {
                 tracing::warn!(%err, "Scrim-Match-Treiber-Tick fehlgeschlagen");
             }
@@ -66,14 +115,19 @@ async fn process_one_pending(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
     announcement_channel_id: Option<u64>,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    voice_config: ScrimVoiceConfig,
 ) -> anyhow::Result<()> {
+    cleanup_terminal_scrim_voice_channels(pool, tempvoice).await?;
     let Some(claim) = claim_next_pending_match(pool, announcement_channel_id).await? else {
         return Ok(());
     };
 
     match claim.action {
-        ScrimDriverAction::Start => handle_start(pool, adapter, &claim).await,
-        ScrimDriverAction::FetchResult => handle_result(pool, adapter, &claim).await,
+        ScrimDriverAction::Start => {
+            handle_start(pool, adapter, tempvoice, voice_config, &claim).await
+        }
+        ScrimDriverAction::FetchResult => handle_result(pool, adapter, tempvoice, &claim).await,
     }
 }
 
@@ -139,10 +193,17 @@ async fn claim_next_pending_match(
 async fn handle_start(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    voice_config: ScrimVoiceConfig,
     claim: &ClaimedMatch,
 ) -> anyhow::Result<()> {
     match start_scrim_match(pool, claim.match_id).await {
         Ok(outcome) => {
+            if let Err(err) =
+                provision_scrim_voice_channels(pool, tempvoice, voice_config, claim.match_id).await
+            {
+                tracing::error!(%err, match_id = claim.match_id, action = "error", "Scrim-Voice-Erstellung fehlgeschlagen");
+            }
             post_to_targets_or_log(
                 adapter,
                 &claim.team_channels,
@@ -169,10 +230,21 @@ async fn handle_start(
 async fn handle_result(
     pool: &PgPool,
     adapter: &dl_discord::DiscordAdapter,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
     claim: &ClaimedMatch,
 ) -> anyhow::Result<()> {
     match fetch_scrim_match_result(pool, claim.match_id).await {
         Ok(outcome) => {
+            if let Err(err) = cleanup_scrim_voice_channels_for_match(
+                pool,
+                tempvoice,
+                claim.match_id,
+                "Scrim beendet",
+            )
+            .await
+            {
+                tracing::error!(%err, match_id = claim.match_id, action = "error", "Scrim-Voice-Cleanup fehlgeschlagen");
+            }
             post_to_targets_or_log(
                 adapter,
                 &claim.team_channels,
@@ -211,6 +283,355 @@ async fn set_lobby_state(pool: &PgPool, match_id: i64, lobby_state: &str) -> any
     .await
     .with_context(|| format!("Scrim-Match-State-Update fehlgeschlagen: {match_id}"))?;
     Ok(())
+}
+
+#[derive(Debug)]
+struct ScrimVoiceTeam {
+    team_id: i64,
+    connect_user_ids: Vec<u64>,
+}
+
+#[derive(Debug)]
+struct ScrimVoiceChannel {
+    match_id: i64,
+    team_id: i64,
+    channel_id: u64,
+}
+
+async fn provision_scrim_voice_channels(
+    pool: &PgPool,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    config: ScrimVoiceConfig,
+    match_id: i64,
+) -> anyhow::Result<()> {
+    match decide_scrim_voice_action(config.enabled, config.category_id, false, false) {
+        ScrimVoiceAction::SkipDisabled => {
+            tracing::info!(
+                match_id,
+                action = "skipped",
+                reason = "feature_disabled",
+                "Scrim-Voice-Entscheidung"
+            );
+            return Ok(());
+        }
+        ScrimVoiceAction::SkipMissingCategory => {
+            tracing::warn!(
+                match_id,
+                action = "skipped",
+                reason = "category_missing",
+                "Scrim-Voice-Entscheidung"
+            );
+            return Ok(());
+        }
+        _ => {}
+    }
+    let category_id = config
+        .category_id
+        .ok_or_else(|| anyhow!("Scrim-Voice-Kategorie fehlt"))?;
+    let teams = load_scrim_voice_teams(pool, match_id).await?;
+    if teams.is_empty() {
+        tracing::warn!(
+            match_id,
+            action = "skipped",
+            reason = "teams_missing",
+            "Scrim-Voice-Entscheidung"
+        );
+        return Ok(());
+    }
+
+    for (team_index, team) in teams.into_iter().enumerate() {
+        let channel_name = format!("{} {}", SCRIM_VOICE_CHANNEL_NAME, team_index + 1);
+        let existing = stored_scrim_voice_channel(pool, match_id, team.team_id).await?;
+        match decide_scrim_voice_action(true, Some(category_id), existing.is_some(), false) {
+            ScrimVoiceAction::Keep => {
+                tracing::info!(
+                    match_id,
+                    team_id = team.team_id,
+                    channel_id = existing,
+                    action = "skipped",
+                    reason = "already_created",
+                    "Scrim-Voice-Entscheidung"
+                );
+                continue;
+            }
+            ScrimVoiceAction::Create => {}
+            action => {
+                tracing::warn!(
+                    match_id,
+                    team_id = team.team_id,
+                    decision = ?action,
+                    action = "skipped",
+                    reason = "unexpected_decision",
+                    "Scrim-Voice-Entscheidung"
+                );
+                continue;
+            }
+        }
+
+        let channel_id = match tempvoice
+            .create_restricted_voice_channel(
+                category_id,
+                &channel_name,
+                &team.connect_user_ids,
+            )
+            .await
+        {
+            Ok(channel_id) => channel_id,
+            Err(err) => {
+                tracing::error!(%err, match_id, team_id = team.team_id, action = "error", reason = "discord_create_failed", "Scrim-Voice-Entscheidung");
+                continue;
+            }
+        };
+
+        match store_scrim_voice_channel(pool, match_id, team.team_id, channel_id).await {
+            Ok(true) => tracing::info!(
+                match_id,
+                team_id = team.team_id,
+                channel_id,
+                action = "created",
+                "Scrim-Voice-Entscheidung"
+            ),
+            Ok(false) => {
+                tracing::info!(
+                    match_id,
+                    team_id = team.team_id,
+                    channel_id,
+                    action = "skipped",
+                    reason = "concurrent_create",
+                    "Scrim-Voice-Entscheidung"
+                );
+                if let Err(err) = tempvoice
+                    .delete_managed_voice_channel(channel_id, "Scrim: doppelten Voice entfernen")
+                    .await
+                {
+                    tracing::error!(%err, match_id, team_id = team.team_id, channel_id, action = "error", reason = "duplicate_cleanup_failed", "Scrim-Voice-Entscheidung");
+                }
+            }
+            Err(err) => {
+                tracing::error!(%err, match_id, team_id = team.team_id, channel_id, action = "error", reason = "persist_failed", "Scrim-Voice-Entscheidung");
+                if let Err(cleanup_err) = tempvoice
+                    .delete_managed_voice_channel(channel_id, "Scrim: ungetrackten Voice entfernen")
+                    .await
+                {
+                    tracing::error!(%cleanup_err, match_id, team_id = team.team_id, channel_id, action = "error", reason = "rollback_cleanup_failed", "Scrim-Voice-Entscheidung");
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn load_scrim_voice_teams(
+    pool: &PgPool,
+    match_id: i64,
+) -> anyhow::Result<Vec<ScrimVoiceTeam>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT t.id::bigint AS team_id,
+               p.discord_id,
+               m.coach_spectator_discord_id
+          FROM scrim.matches m
+          JOIN scrim.teams t ON t.id IN (m.team_a_id, m.team_b_id)
+          LEFT JOIN scrim.team_members tm ON tm.team_id = t.id
+          LEFT JOIN scrim.participants p ON p.id = tm.participant_id
+         WHERE m.id = $1
+         ORDER BY t.id, p.id
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .fetch_all(pool)
+    .await
+    .context("Scrim-Voice-Teams laden")?;
+    let mut teams = BTreeMap::<i64, BTreeSet<u64>>::new();
+    for row in rows {
+        let team_id: i64 = row.get("team_id");
+        let users = teams.entry(team_id).or_default();
+        if let Some(user_id) = valid_channel_id(row.get("discord_id")) {
+            users.insert(user_id);
+        }
+        if let Some(coach_id) = valid_channel_id(row.get("coach_spectator_discord_id")) {
+            users.insert(coach_id);
+        }
+    }
+    Ok(teams
+        .into_iter()
+        .map(|(team_id, connect_user_ids)| ScrimVoiceTeam {
+            team_id,
+            connect_user_ids: connect_user_ids.into_iter().collect(),
+        })
+        .collect())
+}
+
+async fn stored_scrim_voice_channel(
+    pool: &PgPool,
+    match_id: i64,
+    team_id: i64,
+) -> anyhow::Result<Option<u64>> {
+    let channel_id = sqlx::query_scalar::<_, i64>(
+        "SELECT channel_id FROM scrim.voice_channels WHERE match_id = $1 AND team_id = $2",
+    )
+    .bind(i32::try_from(match_id)?)
+    .bind(i32::try_from(team_id)?)
+    .fetch_optional(pool)
+    .await?;
+    Ok(channel_id.and_then(|id| u64::try_from(id).ok()))
+}
+
+async fn store_scrim_voice_channel(
+    pool: &PgPool,
+    match_id: i64,
+    team_id: i64,
+    channel_id: u64,
+) -> anyhow::Result<bool> {
+    let result = sqlx::query(
+        r#"
+        INSERT INTO scrim.voice_channels(match_id, team_id, channel_id)
+        VALUES($1, $2, $3)
+        ON CONFLICT (match_id, team_id) DO NOTHING
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .bind(i32::try_from(team_id)?)
+    .bind(i64::try_from(channel_id)?)
+    .execute(pool)
+    .await?;
+    Ok(result.rows_affected() == 1)
+}
+
+async fn cleanup_terminal_scrim_voice_channels(
+    pool: &PgPool,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query(
+        r#"
+        SELECT vc.match_id::bigint AS match_id,
+               vc.team_id::bigint AS team_id,
+               vc.channel_id
+          FROM scrim.voice_channels vc
+          LEFT JOIN scrim.matches m ON m.id = vc.match_id
+         WHERE m.id IS NULL
+            OR lower(COALESCE(m.lobby_state, '')) IN ('finished', 'aborted', 'cancelled', 'canceled')
+            OR lower(COALESCE(m.status, '')) IN ('finished', 'completed', 'aborted', 'cancelled', 'canceled')
+         ORDER BY vc.match_id, vc.team_id
+        "#,
+    )
+    .fetch_all(pool)
+    .await
+    .context("terminale Scrim-Voice-Channels laden")?;
+    for row in rows {
+        let channel_id: i64 = row.get("channel_id");
+        let Ok(channel_id) = u64::try_from(channel_id) else {
+            tracing::error!(
+                match_id = row.get::<i64, _>("match_id"),
+                team_id = row.get::<i64, _>("team_id"),
+                channel_id,
+                action = "error",
+                reason = "invalid_channel_id",
+                "Scrim-Voice-Cleanup"
+            );
+            continue;
+        };
+        cleanup_scrim_voice_channel(
+            pool,
+            tempvoice,
+            ScrimVoiceChannel {
+                match_id: row.get("match_id"),
+                team_id: row.get("team_id"),
+                channel_id,
+            },
+            "Scrim beendet oder abgebrochen",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_scrim_voice_channels_for_match(
+    pool: &PgPool,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    match_id: i64,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let rows = sqlx::query(
+        r#"
+        SELECT team_id::bigint AS team_id, channel_id
+          FROM scrim.voice_channels
+         WHERE match_id = $1
+         ORDER BY team_id
+        "#,
+    )
+    .bind(i32::try_from(match_id)?)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let channel_id: i64 = row.get("channel_id");
+        let Ok(channel_id) = u64::try_from(channel_id) else {
+            tracing::error!(
+                match_id,
+                team_id = row.get::<i64, _>("team_id"),
+                channel_id,
+                action = "error",
+                reason = "invalid_channel_id",
+                "Scrim-Voice-Cleanup"
+            );
+            continue;
+        };
+        cleanup_scrim_voice_channel(
+            pool,
+            tempvoice,
+            ScrimVoiceChannel {
+                match_id,
+                team_id: row.get("team_id"),
+                channel_id,
+            },
+            reason,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_scrim_voice_channel(
+    pool: &PgPool,
+    tempvoice: &dl_voice::tempvoice::TempVoiceEngine,
+    channel: ScrimVoiceChannel,
+    reason: &str,
+) -> anyhow::Result<()> {
+    let delete_result = tempvoice
+        .delete_managed_voice_channel(channel.channel_id, reason)
+        .await;
+    let already_missing = delete_result
+        .as_ref()
+        .is_err_and(|err| channel_already_missing(err));
+    if let Err(err) = delete_result {
+        if !already_missing {
+            tracing::error!(%err, match_id = channel.match_id, team_id = channel.team_id, channel_id = channel.channel_id, action = "error", reason = "discord_delete_failed", "Scrim-Voice-Cleanup");
+            return Ok(());
+        }
+    }
+    if let Err(err) =
+        sqlx::query("DELETE FROM scrim.voice_channels WHERE match_id = $1 AND team_id = $2")
+            .bind(i32::try_from(channel.match_id)?)
+            .bind(i32::try_from(channel.team_id)?)
+            .execute(pool)
+            .await
+    {
+        tracing::error!(%err, match_id = channel.match_id, team_id = channel.team_id, channel_id = channel.channel_id, action = "error", reason = "record_delete_failed", "Scrim-Voice-Cleanup");
+        return Err(err.into());
+    }
+    tracing::info!(
+        match_id = channel.match_id,
+        team_id = channel.team_id,
+        channel_id = channel.channel_id,
+        action = "cleanup",
+        already_missing,
+        "Scrim-Voice-Cleanup"
+    );
+    Ok(())
+}
+
+fn channel_already_missing(err: &str) -> bool {
+    err.contains("Unknown Channel") || err.contains("10003") || err.contains("404")
 }
 
 fn target_channels(
@@ -342,6 +763,34 @@ mod tests {
     use super::*;
 
     type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+
+    #[test]
+    fn scrim_voice_entscheidung_deckt_create_skip_keep_und_cleanup_ab() {
+        assert_eq!(
+            decide_scrim_voice_action(false, Some(10), false, false),
+            ScrimVoiceAction::SkipDisabled
+        );
+        assert_eq!(
+            decide_scrim_voice_action(true, None, false, false),
+            ScrimVoiceAction::SkipMissingCategory
+        );
+        assert_eq!(
+            decide_scrim_voice_action(true, Some(10), false, false),
+            ScrimVoiceAction::Create
+        );
+        assert_eq!(
+            decide_scrim_voice_action(true, Some(10), true, false),
+            ScrimVoiceAction::Keep
+        );
+        assert_eq!(
+            decide_scrim_voice_action(false, None, true, true),
+            ScrimVoiceAction::Cleanup
+        );
+        assert_eq!(
+            decide_scrim_voice_action(true, Some(10), false, true),
+            ScrimVoiceAction::SkipNoChannel
+        );
+    }
 
     #[tokio::test]
     async fn claim_next_pending_match_markiert_start_und_verhindert_doppelstart() -> TestResult {

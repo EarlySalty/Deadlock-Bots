@@ -81,6 +81,13 @@ pub trait LanePort: Send + Sync {
         name: &str,
         user_limit: i64,
     ) -> Result<u64, String>;
+    async fn create_restricted_voice_channel(
+        &self,
+        guild_id: u64,
+        category_id: u64,
+        name: &str,
+        connect_user_ids: &[u64],
+    ) -> Result<u64, String>;
     async fn delete_channel(&self, channel_id: u64, reason: &str) -> Result<(), String>;
     async fn move_member(
         &self,
@@ -340,6 +347,30 @@ impl TempVoiceEngine {
 
     pub async fn set_lfg_panel(&self, lfg: Arc<crate::lfg_panel::LfgPanelInterface>) {
         *self.lfg.write().await = Some(Arc::downgrade(&lfg));
+    }
+
+    pub async fn create_restricted_voice_channel(
+        &self,
+        category_id: u64,
+        name: &str,
+        connect_user_ids: &[u64],
+    ) -> Result<u64, String> {
+        self.port
+            .create_restricted_voice_channel(
+                self.config.guild_id_hint,
+                category_id,
+                name,
+                connect_user_ids,
+            )
+            .await
+    }
+
+    pub async fn delete_managed_voice_channel(
+        &self,
+        channel_id: u64,
+        reason: &str,
+    ) -> Result<(), String> {
+        self.port.delete_channel(channel_id, reason).await
     }
 
     fn rules_for_category(&self, category_id: Option<u64>) -> (StagingRules, Option<u64>) {
@@ -2221,6 +2252,16 @@ mod tests {
                 self.categories.lock().expect("lock").insert(id, category);
             }
             Ok(id)
+        }
+        async fn create_restricted_voice_channel(
+            &self,
+            guild_id: u64,
+            category_id: u64,
+            name: &str,
+            _connect_user_ids: &[u64],
+        ) -> Result<u64, String> {
+            self.create_voice_channel(guild_id, Some(category_id), name, 0)
+                .await
         }
         async fn delete_channel(&self, channel_id: u64, _reason: &str) -> Result<(), String> {
             self.deleted.lock().expect("lock").push(channel_id);
