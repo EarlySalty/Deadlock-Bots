@@ -19,7 +19,7 @@ const STATE_RESULT_REQUESTED: &str = "result_requested";
 const STATE_RESULT_FETCHING: &str = "result_fetching";
 const STATE_RESULT_FAILED: &str = "result_failed";
 const LOG_CHANNEL_ID: u64 = dl_moderation::LOG_CHANNEL_ID;
-const SCRIM_VOICE_CHANNEL_NAME: &str = "PLATZHALTER: Scrim-Team-Voice";
+const SCRIM_VOICE_CHANNEL_NAME: &str = "⚔️ Scrim läuft · Team";
 
 #[derive(Debug, Clone, Copy)]
 pub struct ScrimVoiceConfig {
@@ -339,7 +339,8 @@ async fn provision_scrim_voice_channels(
         return Ok(());
     }
 
-    for team in teams {
+    for (team_index, team) in teams.into_iter().enumerate() {
+        let channel_name = format!("{} {}", SCRIM_VOICE_CHANNEL_NAME, team_index + 1);
         let existing = stored_scrim_voice_channel(pool, match_id, team.team_id).await?;
         match decide_scrim_voice_action(true, Some(category_id), existing.is_some(), false) {
             ScrimVoiceAction::Keep => {
@@ -370,7 +371,7 @@ async fn provision_scrim_voice_channels(
         let channel_id = match tempvoice
             .create_restricted_voice_channel(
                 category_id,
-                SCRIM_VOICE_CHANNEL_NAME,
+                &channel_name,
                 &team.connect_user_ids,
             )
             .await
