@@ -1,3 +1,13 @@
+## #252 — Antworten kommen nur aus festen Doku-Passagen
+
+Problem: Kopierte Textausschnitte des Sprachmodells konnten trotz Prüfung an Satz- und Überschriftsgrenzen unnötig abgelehnt werden.
+
+Änderung: Das Modell wählt jetzt nur noch nummerierte öffentliche Absätze, Listen oder Tabellenzeilen; den Antworttext und die Quellen setzt der Wissensdienst selbst aus diesen festen Passagen zusammen.
+
+Aktuelles Verhalten: Fragen zu Discord und den Bots erhalten ausschließlich belegte Doku-Passagen, während unbekannte, doppelte, zu lange oder themenfremde Auswahlen vollständig verworfen werden.
+
+---
+
 ## #251 — Frageformen blockieren keine passende Steam-Antwort
 
 Problem: Richtige Steam-Passagen wurden bei „Welche“-Fragen abgelehnt, wenn die Frageform erst später im gefundenen Dokument stand.
