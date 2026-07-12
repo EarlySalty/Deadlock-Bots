@@ -1487,7 +1487,9 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
             "deadlock_rank_name",
             "deadlock_rank_updated_at",
             "is_steam_friend",
-            "friend_bot_account_id"
+            "friend_bot_account_id",
+            "unlink_reason",
+            "refriend_attempted_at"
         ]
     );
     assert_eq!(
@@ -1501,6 +1503,26 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         "friend_bot_account_id",
         "smallint",
         "int2",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "unlink_reason",
+        "text",
+        "text",
+        "YES",
+        None,
+    )
+    .await;
+    assert_column(
+        &pool,
+        "steam_links",
+        "refriend_attempted_at",
+        "timestamp with time zone",
+        "timestamptz",
         "YES",
         None,
     )
