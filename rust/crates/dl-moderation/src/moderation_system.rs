@@ -7,7 +7,9 @@ use sqlx::PgPool;
 use crate::action_policy::{ActionPolicy, ModerationAction, PolicyDecision, PolicyDecisionSource};
 use crate::behavior_detector::{BehaviorDetector, BehaviorSignal, BehaviorTriggerType};
 use crate::case_embed::{build_case_components, build_compact_case_embed, CompactCaseEmbedInput};
-use crate::content_analyzer::{ContentModerationPipeline, ModerationInput};
+use crate::content_analyzer::{
+    ContentModerationEvaluation, ContentModerationPipeline, ModerationInput,
+};
 use crate::moderation_channel::{DEFAULT_MODERATION_CHANNEL_ID, DEFAULT_SCAN_CHANNEL_IDS};
 use crate::moderation_verdict::{
     ContentAnalysis, ModerationCategory, ModerationVerdict, VerificationDecision,
@@ -182,25 +184,52 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
         } else {
             None
         };
-        let content_verdict = if (self.config.scan_channel_ids.contains(&event.channel_id)
+        let content_input = if (self.config.scan_channel_ids.contains(&event.channel_id)
             || behavior_signal.is_some())
             && !(event.content.trim().is_empty() && event.image_attachment_urls.is_empty())
         {
-            let input =
-                ModerationInput::new(event.content.clone(), event.image_attachment_urls.clone());
-            self.pipeline.evaluate(&input).await
+            Some(ModerationInput::new(
+                event.content.clone(),
+                event.image_attachment_urls.clone(),
+            ))
         } else {
             None
         };
+        let content_evaluation = if let Some(input) = content_input.as_ref() {
+            Some(self.pipeline.evaluate_with_analysis(input).await)
+        } else {
+            None
+        };
+        let content_verdict = content_evaluation
+            .as_ref()
+            .and_then(|evaluation| evaluation.verdict.as_ref());
         let outcome = self
             .policy
-            .decide_combined_outcome(content_verdict.as_ref(), behavior_signal.as_ref());
+            .decide_combined_outcome(content_verdict, behavior_signal.as_ref());
+        let source = outcome.source;
         let decision = outcome.decision;
+        if content_evaluation.is_some() || behavior_signal.is_some() {
+            log_judge_decision(
+                event,
+                &decision,
+                source,
+                content_evaluation.as_ref(),
+                behavior_signal.as_ref(),
+            );
+        }
         if matches!(decision, PolicyDecision::Ignore) {
+            self.persist_non_action_decision(
+                guild_id,
+                event,
+                content_evaluation.as_ref(),
+                behavior_signal.as_ref(),
+                "ignored",
+            )
+            .await;
             return;
         };
 
-        let verdict = match outcome.source {
+        let verdict = match source {
             Some(PolicyDecisionSource::Behavior) => {
                 let is_takeover = behavior_signal
                     .as_ref()
@@ -209,17 +238,73 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
                 if is_takeover {
                     behavior_signal.as_ref().map(behavior_verdict)
                 } else {
-                    content_verdict
+                    content_verdict.cloned()
                 }
             }
-            Some(PolicyDecisionSource::Content) => content_verdict,
-            None => content_verdict.or_else(|| behavior_signal.as_ref().map(behavior_verdict)),
+            Some(PolicyDecisionSource::Content) => content_verdict.cloned(),
+            None => content_verdict
+                .cloned()
+                .or_else(|| behavior_signal.as_ref().map(behavior_verdict)),
         };
         let Some(verdict) = verdict else {
+            let input =
+                ModerationInput::new(event.content.clone(), event.image_attachment_urls.clone())
+                    .trigger_preview();
+            let verdict = policy_decision_label(&decision);
+            let reason = "decision_without_verdict";
+            tracing::error!(
+                guild_id,
+                channel_id = event.channel_id,
+                message_id = event.message_id,
+                user_id = event.author_id,
+                input = %input,
+                verdict = %verdict,
+                reason = %reason,
+                "Moderation: Policy-Entscheidung ohne Urteil"
+            );
+            self.persist_non_action_decision(
+                guild_id,
+                event,
+                content_evaluation.as_ref(),
+                behavior_signal.as_ref(),
+                "decision_unresolved",
+            )
+            .await;
             return;
         };
         self.persist_execute_and_post(guild_id, event, verdict, behavior_signal, decision)
             .await;
+    }
+
+    async fn persist_non_action_decision(
+        &self,
+        guild_id: u64,
+        event: &dl_discord::MessageEvent,
+        content_evaluation: Option<&ContentModerationEvaluation>,
+        behavior_signal: Option<&BehaviorSignal>,
+        action: &str,
+    ) {
+        let Some(verdict) = non_action_verdict(event, content_evaluation, behavior_signal) else {
+            return;
+        };
+        let draft = self.case_draft(
+            guild_id,
+            event,
+            &verdict,
+            behavior_signal,
+            action,
+            &PolicyDecision::Ignore,
+        );
+        if self.store.insert_case(draft).await.is_none() {
+            tracing::warn!(
+                guild_id,
+                channel_id = event.channel_id,
+                message_id = event.message_id,
+                user_id = event.author_id,
+                action,
+                "Moderation: Nicht-Aktions-Entscheidung konnte nicht persistiert werden"
+            );
+        }
     }
 
     async fn persist_execute_and_post(
@@ -535,6 +620,124 @@ impl<S: ModerationCaseStore> ModerationSystem<S> {
     }
 }
 
+fn log_judge_decision(
+    event: &dl_discord::MessageEvent,
+    decision: &PolicyDecision,
+    source: Option<PolicyDecisionSource>,
+    content_evaluation: Option<&ContentModerationEvaluation>,
+    behavior_signal: Option<&BehaviorSignal>,
+) {
+    let input = ModerationInput::new(event.content.clone(), event.image_attachment_urls.clone())
+        .trigger_preview();
+    let verdict = policy_decision_label(decision);
+    let source = policy_source_label(source);
+    let (category, confidence, reason) =
+        decision_details(source, content_evaluation, behavior_signal);
+    tracing::info!(
+        guild_id = event.guild_id,
+        channel_id = event.channel_id,
+        message_id = event.message_id,
+        user_id = event.author_id,
+        input = %input,
+        verdict = %verdict,
+        category = %category,
+        confidence,
+        reason = %reason,
+        source,
+        "Moderation: Judge-Entscheidung"
+    );
+}
+
+fn non_action_verdict(
+    event: &dl_discord::MessageEvent,
+    content_evaluation: Option<&ContentModerationEvaluation>,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> Option<ModerationVerdict> {
+    if let Some(evaluation) = content_evaluation {
+        if let Some(verdict) = evaluation.verdict.as_ref() {
+            return Some(verdict.clone());
+        }
+        let analysis = evaluation.analysis.clone();
+        return Some(ModerationVerdict {
+            verification: VerificationDecision {
+                confirmed: false,
+                category: analysis.category.clone(),
+                confidence: analysis.confidence,
+                reason: analysis.reason.clone(),
+                raw_json: analysis.raw_json.clone(),
+            },
+            analysis,
+            trigger: ModerationInput::new(
+                event.content.clone(),
+                event.image_attachment_urls.clone(),
+            )
+            .trigger_preview(),
+        });
+    }
+    behavior_signal.map(behavior_verdict)
+}
+
+fn decision_details(
+    source: &str,
+    content_evaluation: Option<&ContentModerationEvaluation>,
+    behavior_signal: Option<&BehaviorSignal>,
+) -> (String, f64, String) {
+    if source == "behavior" {
+        if let Some(signal) = behavior_signal {
+            return (
+                signal.trigger_label().to_string(),
+                1.0,
+                signal.reason_code.clone(),
+            );
+        }
+    }
+    if let Some(evaluation) = content_evaluation {
+        if let Some(verdict) = evaluation.verdict.as_ref() {
+            return (
+                verdict.verification.category.as_label().to_string(),
+                verdict.verification.confidence,
+                verdict.verification.reason.clone(),
+            );
+        }
+        return (
+            evaluation.analysis.category.as_label().to_string(),
+            evaluation.analysis.confidence,
+            evaluation.analysis.reason.clone(),
+        );
+    }
+    if let Some(signal) = behavior_signal {
+        return (
+            signal.trigger_label().to_string(),
+            1.0,
+            signal.reason_code.clone(),
+        );
+    }
+    ("none".to_string(), 0.0, "not_evaluated".to_string())
+}
+
+fn policy_decision_label(decision: &PolicyDecision) -> &'static str {
+    match decision {
+        PolicyDecision::Ignore => "ignore",
+        PolicyDecision::Proposal { .. } => "proposal",
+        PolicyDecision::AutoExecute {
+            action: ModerationAction::Timeout,
+            ..
+        } => "auto_timeout",
+        PolicyDecision::AutoExecute {
+            action: ModerationAction::Ban,
+            ..
+        } => "auto_ban",
+    }
+}
+
+fn policy_source_label(source: Option<PolicyDecisionSource>) -> &'static str {
+    match source {
+        Some(PolicyDecisionSource::Content) => "content",
+        Some(PolicyDecisionSource::Behavior) => "behavior",
+        None => "none",
+    }
+}
+
 fn auto_delete_targets(
     event: &dl_discord::MessageEvent,
     behavior_signal: Option<&BehaviorSignal>,
@@ -675,6 +878,7 @@ mod tests {
     use super::*;
     use crate::action_policy::ActionPolicyConfig;
     use crate::behavior_detector::BehaviorDetectorPort;
+    use crate::content_analyzer::test_support::LogCapture;
     use crate::content_analyzer::{ContentAnalyzer, ContentAnalyzerConfig};
     use crate::content_verifier::ContentVerifier;
     use sqlx::postgres::PgPoolOptions;
@@ -1139,14 +1343,83 @@ mod tests {
             ))
             .await;
 
-        assert_eq!(moderator.store.drafts.lock().await.len(), 0);
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].action, "ignored");
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
     }
 
     #[tokio::test]
-    async fn benign_burst_rate_does_not_create_case() {
+    async fn ignored_policy_decision_is_logged_and_persisted_without_discord_action() {
+        let (moderator, port) = memory_moderator(
+            &[r#"{"category":"scam","confidence":0.9,"reason":"Analyzer"}"#],
+            &[r#"{"confirmed":false,"category":"scam","confidence":0.95,"reason":"Nicht bestaetigt"}"#],
+            None,
+            vec![42],
+            true,
+        )
+        .await;
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        moderator
+            .handle_message(&scanned_text_event(104, "free crypto"))
+            .await;
+        drop(guard);
+
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].action, "ignored");
+        assert_eq!(drafts[0].reason, "Nicht bestaetigt");
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        let logs = capture.text();
+        assert!(logs.contains("input=free crypto"), "{logs}");
+        assert!(logs.contains("verdict=ignore"), "{logs}");
+        assert!(logs.contains("reason=Nicht bestaetigt"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn missing_content_verdict_is_logged_and_persisted_without_discord_action() {
+        let (moderator, port) = memory_moderator(&[], &[], None, vec![42], true).await;
+        let capture = LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+
+        moderator
+            .handle_message(&scanned_text_event(105, "free crypto"))
+            .await;
+        drop(guard);
+
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].action, "ignored");
+        assert_eq!(drafts[0].category, "other");
+        assert_eq!(drafts[0].reason, "parse_error");
+        assert_eq!(port.posts.load(Ordering::Relaxed), 0);
+        assert_eq!(port.deletes.load(Ordering::Relaxed), 0);
+        assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        let logs = capture.text();
+        assert!(logs.contains("ERROR"), "{logs}");
+        assert!(logs.contains("input=free crypto"), "{logs}");
+        assert!(logs.contains("verdict=ignore"), "{logs}");
+        assert!(logs.contains("reason=parse_error"), "{logs}");
+    }
+
+    #[tokio::test]
+    async fn benign_burst_rate_does_not_create_review_case() {
         let detector = crate::behavior_detector::BehaviorDetector::new(Arc::new(FakeBehaviorPort));
         let (moderator, port) = memory_moderator(
             &[r#"{"category":"game_related_ok","confidence":0.2,"reason":"harmlos"}"#],
@@ -1171,7 +1444,9 @@ mod tests {
             ))
             .await;
 
-        assert!(moderator.store.drafts.lock().await.is_empty());
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 1);
+        assert_eq!(drafts[0].action, "ignored");
         assert_eq!(port.posts.load(Ordering::Relaxed), 0);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
         assert_eq!(port.bans.load(Ordering::Relaxed), 0);
@@ -1257,7 +1532,9 @@ mod tests {
             .handle_message(&image_event(200, 11, 1001, created_at, joined_at))
             .await;
 
-        assert_eq!(moderator.store.drafts.lock().await.len(), 1);
+        let drafts = moderator.store.drafts.lock().await;
+        assert_eq!(drafts.len(), 2);
+        assert_eq!(drafts[0].action, "ignored");
         assert_eq!(moderator.store.review_messages.lock().await.len(), 1);
         assert_eq!(port.posts.load(Ordering::Relaxed), 1);
         assert_eq!(port.deletes.load(Ordering::Relaxed), 2);
@@ -1275,6 +1552,7 @@ mod tests {
         assert_eq!(port.posted_file_counts.lock().await.as_slice(), &[2]);
         assert_eq!(port.bans.load(Ordering::Relaxed), 1);
         assert_eq!(port.timeouts.load(Ordering::Relaxed), 0);
+        drop(drafts);
         let draft = moderator.store.drafts.lock().await.pop().expect("draft");
         assert_eq!(draft.source, "behavior");
         assert_eq!(draft.trigger_type.as_deref(), Some("account_takeover"));
