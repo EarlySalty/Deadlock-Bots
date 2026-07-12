@@ -1,3 +1,13 @@
+## #258 — Gelöschte Daten bleiben gelöscht
+
+Problem: Wer seine Daten über den Datenschutz-Befehl gelöscht hat, bekam einen Teil davon still zurück. Mehrere Hintergrundprozesse haben weitergeschrieben, sobald die Person wieder im Sprachkanal saß: Aktivitätsmuster, Mitspieler-Verbindungen, Mitspielersuche, Sprachstatistik und Umfrage-Einladungen.
+
+Änderung: Alle diese Schreibvorgänge prüfen den Widerspruch jetzt genau in dem Moment, in dem sie schreiben, statt vorher. Übersprungene Schreibvorgänge werden protokolliert.
+
+Aktuelles Verhalten: Eine Löschung hält. Wer widersprochen hat, taucht in keiner dieser Auswertungen wieder auf, auch nicht, wenn er weiter auf dem Server aktiv ist.
+
+---
+
 ## #257 — Feste Voice-Trennungen gelten überall
 
 Problem: Eine feste Trennung konnte in anderen Sprachkanälen oder über die Rechte eines TempVoice-Owners umgangen werden.
