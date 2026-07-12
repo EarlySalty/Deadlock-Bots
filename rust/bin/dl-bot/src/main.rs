@@ -1015,10 +1015,17 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
     let scrim_announcement_channel_id =
         NonZeroU64::new(env_u64_default("DL_SCRIM_ANNOUNCEMENT_CHANNEL_ID", 0))
             .map(NonZeroU64::get);
+    let scrim_voice_config = scrimglue::ScrimVoiceConfig {
+        enabled: env_bool_default("DL_SCRIM_VISIBLE_VCS_ENABLED", false),
+        category_id: NonZeroU64::new(env_u64_default("DL_SCRIM_VISIBLE_VCS_CATEGORY_ID", 0))
+            .map(NonZeroU64::get),
+    };
     let mut scrim_match_driver = scrimglue::spawn(
         central_pool.clone(),
         adapter.clone(),
         scrim_announcement_channel_id,
+        tempvoice.clone(),
+        scrim_voice_config,
     );
 
     // Gateway: user-gated — Python hält die Session bis zum Cutover

@@ -1,6 +1,9 @@
 //! Gateway-Cache-Anbindung des Voice-Trackers.
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{BTreeSet, HashMap},
+    sync::Arc,
+};
 
 use dl_discord::DiscordAdapter;
 use serde_json::{json, Map, Value};
@@ -16,6 +19,7 @@ use crate::tracker::{VoiceMemberState, VoiceSnapshot};
 
 /// Discord-Permission-Bit CONNECT (Voice).
 const CONNECT_BIT: u64 = 1 << 20;
+const VIEW_CHANNEL_BIT: u64 = 1 << 10;
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
 
@@ -51,6 +55,33 @@ fn overwrites_to_json(overwrites: &[PermissionOverwrite]) -> Vec<Value> {
             }))
         })
         .collect()
+}
+
+fn restricted_voice_overwrites(
+    guild_id: u64,
+    bot_user_id: u64,
+    connect_user_ids: impl IntoIterator<Item = u64>,
+) -> Vec<Value> {
+    let allowed = connect_user_ids
+        .into_iter()
+        .chain([bot_user_id])
+        .filter(|id| *id > 0)
+        .collect::<BTreeSet<_>>();
+    let mut overwrites = vec![json!({
+        "id": guild_id.to_string(),
+        "type": 0,
+        "allow": VIEW_CHANNEL_BIT.to_string(),
+        "deny": CONNECT_BIT.to_string(),
+    })];
+    overwrites.extend(allowed.into_iter().map(|user_id| {
+        json!({
+            "id": user_id.to_string(),
+            "type": 1,
+            "allow": (VIEW_CHANNEL_BIT | CONNECT_BIT).to_string(),
+            "deny": "0",
+        })
+    }));
+    overwrites
 }
 
 fn build_connect_batch_payload(
@@ -489,6 +520,51 @@ impl LanePort for CacheSnapshot {
             .await
             .map(|c| c.id.get())
             .map_err(|e| e.to_string())
+    }
+
+    async fn create_restricted_voice_channel(
+        &self,
+        guild_id: u64,
+        category_id: u64,
+        name: &str,
+        connect_user_ids: &[u64],
+    ) -> Result<u64, String> {
+        let bot_user_id = self
+            .adapter
+            .http
+            .get_current_user()
+            .await
+            .map_err(|err| err.to_string())?
+            .id
+            .get();
+        let bitrate = self
+            .adapter
+            .cache()
+            .guild(GuildId::new(guild_id))
+            .map(|guild| guild_voice_bitrate_limit(guild.premium_tier))
+            .unwrap_or(96_000);
+        let body = json!({
+            "name": name,
+            "type": 2,
+            "parent_id": category_id.to_string(),
+            "user_limit": 0,
+            "bitrate": bitrate,
+            "permission_overwrites": restricted_voice_overwrites(
+                guild_id,
+                bot_user_id,
+                connect_user_ids.iter().copied(),
+            ),
+        });
+        self.adapter
+            .http
+            .create_channel(
+                GuildId::new(guild_id),
+                &body,
+                Some("Scrim: sichtbaren Team-Voice erstellen"),
+            )
+            .await
+            .map(|channel| channel.id.get())
+            .map_err(|err| err.to_string())
     }
 
     async fn delete_channel(&self, channel_id: u64, reason: &str) -> Result<(), String> {
@@ -2263,6 +2339,41 @@ fn lfg_edit_error_from_serenity(err: serenity::Error) -> crate::lfg_panel::LfgEd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scrim_overwrites_enthalten_endzustand_bereits_beim_create() {
+        let overwrites = restricted_voice_overwrites(42, 99, [7, 8]);
+
+        assert_eq!(
+            overwrites,
+            vec![
+                json!({
+                    "id": "42",
+                    "type": 0,
+                    "allow": (1_u64 << 10).to_string(),
+                    "deny": CONNECT_BIT.to_string(),
+                }),
+                json!({
+                    "id": "7",
+                    "type": 1,
+                    "allow": ((1_u64 << 10) | CONNECT_BIT).to_string(),
+                    "deny": "0",
+                }),
+                json!({
+                    "id": "8",
+                    "type": 1,
+                    "allow": ((1_u64 << 10) | CONNECT_BIT).to_string(),
+                    "deny": "0",
+                }),
+                json!({
+                    "id": "99",
+                    "type": 1,
+                    "allow": ((1_u64 << 10) | CONNECT_BIT).to_string(),
+                    "deny": "0",
+                }),
+            ]
+        );
+    }
 
     #[test]
     fn rename_429_fallback_is_python_default_when_serenity_drops_retry_after() {

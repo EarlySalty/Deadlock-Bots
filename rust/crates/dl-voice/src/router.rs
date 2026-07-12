@@ -2278,6 +2278,15 @@ mod tests {
         ) -> Result<u64, String> {
             Ok(1)
         }
+        async fn create_restricted_voice_channel(
+            &self,
+            _guild_id: u64,
+            _category_id: u64,
+            _name: &str,
+            _connect_user_ids: &[u64],
+        ) -> Result<u64, String> {
+            Ok(1)
+        }
         async fn delete_channel(&self, _channel_id: u64, _reason: &str) -> Result<(), String> {
             Ok(())
         }
