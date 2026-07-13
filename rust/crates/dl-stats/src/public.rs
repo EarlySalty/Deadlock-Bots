@@ -11,6 +11,7 @@ use dl_core::pyfloat::py_round;
 use serde_json::{json, Map, Value};
 use sqlx::PgPool;
 
+use crate::me::avatar_url;
 use crate::ranks::{detect_lane, RankResolver, LANES, RANK_COLORS, RANK_ORDER};
 use crate::timeutil::{hour, isoformat, now_local, to_iso, utc_naive, weekday_mon0};
 use crate::{internal_error, parse_positive_int, SharedApp};
@@ -650,12 +651,16 @@ async fn voice_history_payload(
     })
 }
 
-/// Display-Namen aus member_events.
-pub(crate) async fn resolve_display_names(
+pub(crate) struct DisplayProfile {
+    pub name: String,
+    pub avatar: Option<String>,
+}
+
+async fn resolve_display_profiles(
     pool: &PgPool,
     user_ids: &[i64],
-) -> Result<HashMap<i64, String>, sqlx::Error> {
-    let mut names = HashMap::new();
+) -> Result<HashMap<i64, DisplayProfile>, sqlx::Error> {
+    let mut profiles = HashMap::new();
     let mut unique: Vec<i64> = user_ids
         .iter()
         .copied()
@@ -666,32 +671,51 @@ pub(crate) async fn resolve_display_names(
     unique.sort_unstable();
 
     if unique.is_empty() {
-        return Ok(names);
+        return Ok(profiles);
     }
 
-    let rows = sqlx::query!(
+    let rows = sqlx::query_as::<_, (i64, Option<String>, Option<String>)>(
         r#"
-        SELECT DISTINCT ON (user_id)
-               user_id,
-               display_name AS "display_name!"
-        FROM activity.member_events
-        WHERE user_id = ANY($1)
-          AND display_name IS NOT NULL
-          AND BTRIM(display_name) <> ''
-        ORDER BY user_id, occurred_at DESC NULLS LAST, id DESC
+        SELECT requested.user_id, member.display_name, core_user.avatar
+        FROM UNNEST($1::BIGINT[]) AS requested(user_id)
+        LEFT JOIN LATERAL (
+            SELECT display_name
+            FROM activity.member_events
+            WHERE user_id = requested.user_id
+              AND display_name IS NOT NULL
+              AND BTRIM(display_name) <> ''
+            ORDER BY occurred_at DESC NULLS LAST, id DESC
+            LIMIT 1
+        ) member ON TRUE
+        LEFT JOIN core.users core_user ON core_user.discord_id = requested.user_id
         "#,
-        &unique[..],
     )
+    .bind(&unique)
     .fetch_all(pool)
     .await?;
 
-    for row in rows {
-        names.insert(row.user_id, row.display_name);
+    for (user_id, name, avatar) in rows {
+        profiles.insert(
+            user_id,
+            DisplayProfile {
+                name: name.unwrap_or_else(|| format!("User {user_id}")),
+                avatar,
+            },
+        );
     }
-    for uid in unique {
-        names.entry(uid).or_insert_with(|| format!("User {uid}"));
-    }
-    Ok(names)
+    Ok(profiles)
+}
+
+/// Display-Namen aus member_events.
+pub(crate) async fn resolve_display_names(
+    pool: &PgPool,
+    user_ids: &[i64],
+) -> Result<HashMap<i64, String>, sqlx::Error> {
+    Ok(resolve_display_profiles(pool, user_ids)
+        .await?
+        .into_iter()
+        .map(|(user_id, profile)| (user_id, profile.name))
+        .collect())
 }
 
 async fn voice_updated_at(pool: &PgPool) -> Result<String, sqlx::Error> {
@@ -744,8 +768,8 @@ pub async fn handle_voice_leaderboard(
         Err(err) => return db_error(err),
     };
     let ids: Vec<i64> = rows.iter().map(|row| row.user_id).collect();
-    let names = match resolve_display_names(&app.pool, &ids).await {
-        Ok(names) => names,
+    let profiles = match resolve_display_profiles(&app.pool, &ids).await {
+        Ok(profiles) => profiles,
         Err(err) => return db_error(err),
     };
     let updated_at = match voice_updated_at(&app.pool).await {
@@ -756,11 +780,12 @@ pub async fn handle_voice_leaderboard(
         .iter()
         .enumerate()
         .map(|(index, row)| {
+            let profile = profiles.get(&row.user_id);
             json!({
                 "rank": index + 1,
                 "user_id": row.user_id.to_string(),
-                "name": names.get(&row.user_id).cloned().unwrap_or_else(|| format!("User {}", row.user_id)),
-                "avatar_url": null,
+                "name": profile.map(|profile| profile.name.clone()).unwrap_or_else(|| format!("User {}", row.user_id)),
+                "avatar_url": avatar_url(&json!(row.user_id), profile.and_then(|profile| profile.avatar.as_deref())),
                 "total_seconds": row.total_seconds,
                 "total_points": row.total_points,
                 "hours": py_round(row.total_seconds as f64 / 3600.0, 1),
@@ -796,8 +821,8 @@ pub async fn handle_text_leaderboard(
         Err(err) => return db_error(err),
     };
     let ids: Vec<i64> = rows.iter().map(|row| row.user_id).collect();
-    let names = match resolve_display_names(&app.pool, &ids).await {
-        Ok(names) => names,
+    let profiles = match resolve_display_profiles(&app.pool, &ids).await {
+        Ok(profiles) => profiles,
         Err(err) => return db_error(err),
     };
     let updated_at = match text_updated_at(&app.pool).await {
@@ -808,11 +833,12 @@ pub async fn handle_text_leaderboard(
         .iter()
         .enumerate()
         .map(|(index, row)| {
+            let profile = profiles.get(&row.user_id);
             json!({
                 "rank": index + 1,
                 "user_id": row.user_id.to_string(),
-                "name": names.get(&row.user_id).cloned().unwrap_or_else(|| format!("User {}", row.user_id)),
-                "avatar_url": null,
+                "name": profile.map(|profile| profile.name.clone()).unwrap_or_else(|| format!("User {}", row.user_id)),
+                "avatar_url": avatar_url(&json!(row.user_id), profile.and_then(|profile| profile.avatar.as_deref())),
                 "total_messages": row.total_messages,
                 "total_points": row.total_points,
             })
@@ -824,6 +850,68 @@ pub async fn handle_text_leaderboard(
 #[cfg(all(test, feature = "testing"))]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn public_voice_leaderboard_liefert_discord_avatare_oder_null(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let stored_url = "https://cdn.discordapp.com/avatars/9003/legacy.webp?size=1024";
+
+        sqlx::query(
+            r#"
+            INSERT INTO core.users (discord_id, avatar)
+            VALUES (9001, 'a_avatarhash'), (9002, NULL), (9003, $1)
+            "#,
+        )
+        .bind(stored_url)
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            r#"
+            INSERT INTO voice.voice_stats (user_id, total_seconds, total_points)
+            VALUES (9001, 300, 30), (9002, 200, 20), (9003, 100, 10)
+            "#,
+        )
+        .execute(db.pool())
+        .await?;
+
+        let app = std::sync::Arc::new(crate::StatsApp {
+            pool: db.pool().clone(),
+            codec: dl_webcore::SessionCodec::new(None),
+            dashboard: dl_webcore::DashboardClient::new(
+                "http://dashboard.invalid".to_string(),
+                None,
+                None,
+            ),
+            cookie_secure: false,
+            cors_origins: std::collections::HashSet::new(),
+            callback_url: String::new(),
+            static_dir: std::path::PathBuf::new(),
+        });
+        let response = handle_voice_leaderboard(
+            State(app),
+            Query(HashMap::from([("limit".to_string(), "3".to_string())])),
+        )
+        .await;
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let payload: Value = serde_json::from_slice(&body)?;
+        let entries = payload["entries"].as_array().expect("entries array");
+
+        assert_eq!(
+            field_for(entries, "user_id", "9001", "avatar_url"),
+            &json!("https://cdn.discordapp.com/avatars/9001/a_avatarhash.gif?size=256")
+        );
+        assert_eq!(
+            field_for(entries, "user_id", "9002", "avatar_url"),
+            &Value::Null
+        );
+        assert_eq!(
+            field_for(entries, "user_id", "9003", "avatar_url"),
+            &json!(stored_url)
+        );
+        Ok(())
+    }
 
     fn ts(value: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(value)

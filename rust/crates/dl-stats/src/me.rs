@@ -21,17 +21,15 @@ fn db_error(err: impl std::fmt::Display) -> Response {
     internal_error()
 }
 
-fn avatar_url(user_id: &Value, avatar: Option<&Value>) -> Value {
+pub(crate) fn avatar_url(user_id: &Value, avatar: Option<&str>) -> Value {
     let uid = match user_id {
         Value::String(s) if !s.is_empty() => s.clone(),
         Value::Number(n) => n.to_string(),
         _ => return Value::Null,
     };
-    let hash = avatar
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .filter(|s| !s.is_empty());
+    let hash = avatar.map(str::trim).filter(|s| !s.is_empty());
     match hash {
+        Some(url) if url.starts_with("https://cdn.discordapp.com/avatars/") => json!(url),
         Some(hash) => {
             let ext = if hash.starts_with("a_") { "gif" } else { "png" };
             json!(format!(
@@ -56,7 +54,7 @@ pub async fn handle_me(State(app): State<SharedApp>, headers: HeaderMap) -> Resp
     Json(json!({
         "user_id": match &user_id { Value::String(s) => s.clone(), Value::Number(n) => n.to_string(), _ => String::new() },
         "name": name,
-        "avatar_url": avatar_url(&user_id, session.get("avatar")),
+        "avatar_url": avatar_url(&user_id, session.get("avatar").and_then(Value::as_str)),
     }))
     .into_response()
 }
