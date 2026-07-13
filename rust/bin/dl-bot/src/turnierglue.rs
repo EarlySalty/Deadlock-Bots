@@ -1,6 +1,6 @@
-use std::sync::Arc;
+use std::{net::SocketAddr, sync::Arc};
 
-use axum::extract::State;
+use axum::extract::{ConnectInfo, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::routing::post;
 use axum::{Json, Router};
@@ -801,9 +801,16 @@ pub fn publisher_router(service: Arc<TurnierProposalService>, token: String) -> 
 
 async fn publish_proposal(
     State(state): State<PublisherState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
     Json(request): Json<PublishRequest>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if !peer.ip().is_loopback() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "Interne Route nur über Loopback erreichbar"})),
+        ));
+    }
     let supplied = headers
         .get(INTERNAL_TOKEN_HEADER)
         .and_then(|value| value.to_str().ok())
@@ -1174,6 +1181,7 @@ mod tests {
             .oneshot(
                 Request::post("/internal/master/v1/turnier/proposals/publish")
                     .header("content-type", "application/json")
+                    .extension(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12_345))))
                     .body(Body::from(
                         json!({"proposal_id": 1, "channel_id": PROPOSAL_CHANNEL_ID}).to_string(),
                     ))
@@ -1182,5 +1190,33 @@ mod tests {
             .await
             .expect("response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn publisher_route_rejects_non_loopback_before_side_effects() {
+        use axum::body::Body;
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        let service = Arc::new(TurnierProposalService::from_env(
+            DiscordAdapter::new("unused"),
+            None,
+            dl_ai::DEFAULT_OPENAI_MODEL.to_string(),
+            |_| None,
+        ));
+        let response = publisher_router(service, "expected".to_string())
+            .oneshot(
+                Request::post("/internal/master/v1/turnier/proposals/publish")
+                    .header("content-type", "application/json")
+                    .header(INTERNAL_TOKEN_HEADER, "expected")
+                    .extension(ConnectInfo(SocketAddr::from(([203, 0, 113, 7], 12_345))))
+                    .body(Body::from(
+                        json!({"proposal_id": 1, "channel_id": PROPOSAL_CHANNEL_ID}).to_string(),
+                    ))
+                    .expect("request"),
+            )
+            .await
+            .expect("response");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
