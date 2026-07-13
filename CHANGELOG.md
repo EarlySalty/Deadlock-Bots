@@ -1,3 +1,13 @@
+## #261 — Ein Logout beendet beide Admin-Sitzungen
+
+Problem: Discord- und Twitch-Admin-Dashboard teilten zwar einen Cookie, konnten die dahinterliegende Sitzung aber getrennt weiterführen.
+
+Änderung: Der zentrale Login-Dienst kann eine gemeinsame Admin-Sitzung jetzt auf den geschützten internen Auftrag des Twitch-Dashboards widerrufen.
+
+Aktuelles Verhalten: Ein Logout entfernt die gemeinsame Sitzung zentral, sodass derselbe Cookie nicht in einem der beiden Dashboards weiterverwendet werden kann.
+
+---
+
 ## #260 — Turniervorschläge bleiben in Mod-Hand
 
 Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen vorher gespeicherten KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; parallele Änderungen laufen nacheinander und alte Buttons finden automatisch die aktive Version. Aktuelles Verhalten: Die interne Übergabe ist auf Loopback plus Token begrenzt; erst zwei unterschiedliche Mods legen das Turnier an, danach erscheint die Vorlage in derselben Karte. Scheitert dieses Edit, bleibt es offen und wird bei einem erneuten J nochmals versucht.
