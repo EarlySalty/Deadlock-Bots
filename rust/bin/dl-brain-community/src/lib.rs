@@ -81,6 +81,22 @@ pub struct RenderedReport {
     pub report_text: String,
 }
 
+/// Fail-closed-Ausgang, wenn die Gate-Daten (Opt-out/Budget) nicht ladbar sind:
+/// keine Kandidaten-IDs in Report oder Ledger, nur ein anonymer Fehler-Eintrag.
+pub fn gate_failure_outcome(reason: &str, candidate_count: usize) -> Vec<LedgerEntry> {
+    vec![LedgerEntry {
+        source: "brain.activation",
+        subject_user_id: None,
+        guild_id: None,
+        input_summary: format!("load={reason};candidates_dropped={candidate_count}"),
+        decision: Decision::Error,
+        confidence: None,
+        reason: reason.to_string(),
+        action_taken: "shadow",
+        payload: json!({}),
+    }]
+}
+
 pub fn decide(candidates: &[Candidate], gates: &GateData) -> Vec<LedgerEntry> {
     candidates
         .iter()
@@ -291,6 +307,27 @@ mod tests {
                 .map(|entry| entry.subject_user_id)
                 .collect::<Vec<_>>(),
             vec![Some(11), Some(12), Some(13)]
+        );
+    }
+
+    #[test]
+    fn gate_failure_is_fail_closed_and_leaks_no_ids() {
+        let entries = gate_failure_outcome("load_opted_out", 5);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].decision, Decision::Error);
+        assert_eq!(entries[0].subject_user_id, None);
+        assert_eq!(entries[0].guild_id, None);
+
+        // Report ohne Kandidaten darf keine einzige User-ID enthalten.
+        let report = render_report(&[], &[], &entries);
+        assert!(report
+            .report_text
+            .contains("Keine auffällig inaktiven Mitglieder."));
+        assert_eq!(report.kpis["at_risk"]["count"].as_u64(), Some(0));
+        assert_eq!(
+            report.kpis["accountability"]["by_decision"]["error"].as_u64(),
+            Some(1)
         );
     }
 

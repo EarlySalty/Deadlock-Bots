@@ -849,6 +849,13 @@ const USER_TABLES: &[TableSpec] = &[
         "discord_user_id",
         ColumnType::I64,
     ),
+    TableSpec::new(
+        "ai_decision_ledger",
+        "subject_user_id",
+        "bot.ai_decision_ledger",
+        "subject_user_id",
+        ColumnType::I64,
+    ),
 ];
 
 const NULLABLE_USER_COLUMNS: &[TableSpec] = &[TableSpec::new(

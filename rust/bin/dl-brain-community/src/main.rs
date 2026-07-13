@@ -6,7 +6,8 @@ use anyhow::{Context, Result};
 use chrono::{TimeDelta, Utc};
 use clap::Parser;
 use dl_brain_community::{
-    decide, render_report, Candidate, Decision, GateData, LedgerEntry, RenderedReport, WeeklyPulse,
+    decide, gate_failure_outcome, render_report, Candidate, Decision, GateData, LedgerEntry,
+    RenderedReport, WeeklyPulse,
 };
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -72,30 +73,25 @@ async fn run() -> Result<()> {
         }
     };
 
-    let mut decisions = if candidates.is_empty() {
-        Vec::new()
+    // Fail-closed: ohne ladbare Gates (Opt-out/Budget) dürfen keine Kandidaten-IDs
+    // in Report oder Ledger auftauchen — nur ein anonymer Fehler-Eintrag.
+    let (mut decisions, reportable_candidates) = if candidates.is_empty() {
+        (Vec::new(), Vec::new())
     } else {
         match load_gate_data(&pool, &candidates).await {
-            Ok(gates) => decide(&candidates, &gates),
+            Ok(gates) => {
+                let decisions = decide(&candidates, &gates);
+                (decisions, candidates)
+            }
             Err((reason, error)) => {
-                tracing::error!(%error, reason, "Aktivierungs-Gates konnten nicht geladen werden");
-                candidates
-                    .iter()
-                    .map(|candidate| {
-                        error_entry(
-                            "brain.activation",
-                            reason,
-                            &format!("load={reason};candidate=at_risk"),
-                            Some(candidate),
-                        )
-                    })
-                    .collect()
+                tracing::error!(%error, reason, "Aktivierungs-Gates konnten nicht geladen werden; Kandidaten fail-closed verworfen");
+                (gate_failure_outcome(reason, candidates.len()), Vec::new())
             }
         }
     };
     decisions.extend(load_errors);
 
-    let report = render_report(&pulses, &candidates, &decisions);
+    let report = render_report(&pulses, &reportable_candidates, &decisions);
     let now = Utc::now();
     let period_start = pulses
         .iter()
@@ -168,6 +164,7 @@ async fn load_gate_data(
            LEFT JOIN activity.user_retention_tracking AS retention
              ON retention.user_id = candidate.user_id
           WHERE COALESCE(privacy.opted_out, FALSE)
+             OR privacy.deleted_at IS NOT NULL
              OR COALESCE(retention.opted_out, FALSE)",
     )
     .bind(&user_ids)
