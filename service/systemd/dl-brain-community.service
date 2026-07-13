@@ -1,0 +1,11 @@
+[Unit]
+Description=Deadlock Community Brain (Shadow Decision Ledger)
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
+ExecStart=/home/naniadm/Documents/Deadlock-Bots/rust/target/release/dl-brain-community
+Nice=10
+
+[Install]
+WantedBy=default.target

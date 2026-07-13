@@ -254,12 +254,22 @@ mod tests {
 
         let report = render_report(&[], &[candidate(21)], &decisions);
 
-        for class in ["yes", "no", "unsure", "timeout", "error", "suppressed"] {
+        for (class, expected) in [
+            ("yes", 0),
+            ("no", 1),
+            ("unsure", 0),
+            ("timeout", 0),
+            ("error", 0),
+            ("suppressed", 0),
+        ] {
             assert!(
                 report.report_text.contains(&format!("{class}=")),
                 "missing decision class {class}"
             );
-            assert!(report.kpis["accountability"]["by_decision"][class].is_number());
+            assert_eq!(
+                report.kpis["accountability"]["by_decision"][class].as_u64(),
+                Some(expected)
+            );
         }
     }
 }
