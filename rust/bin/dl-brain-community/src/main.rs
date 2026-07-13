@@ -6,8 +6,8 @@ use anyhow::{Context, Result};
 use chrono::{TimeDelta, Utc};
 use clap::Parser;
 use dl_brain_community::{
-    decide, gate_failure_outcome, render_report, Candidate, Decision, GateData, LedgerEntry,
-    RenderedReport, WeeklyPulse,
+    anonymize_for_privacy, decide, gate_failure_outcome, render_report, Candidate, Decision,
+    GateData, LedgerEntry, RenderedReport, WeeklyPulse,
 };
 use serde_json::json;
 use sqlx::{PgPool, Postgres, Transaction};
@@ -226,6 +226,19 @@ async fn persist_run(
 ) -> Result<(), sqlx::Error> {
     let mut transaction = pool.begin().await?;
     for entry in decisions {
+        // Recheck unter dem Privacy-Lock: eine Löschung zwischen Gate-Read
+        // und Insert darf keinen nutzerbezogenen Eintrag hinterlassen.
+        let anonymized;
+        let entry = match entry.subject_user_id {
+            Some(user_id)
+                if dl_central_db::lock_user_privacy_and_is_opted_out(&mut transaction, user_id)
+                    .await? =>
+            {
+                anonymized = anonymize_for_privacy(entry);
+                &anonymized
+            }
+            _ => entry,
+        };
         insert_ledger_entry(&mut transaction, entry).await?;
     }
     sqlx::query(

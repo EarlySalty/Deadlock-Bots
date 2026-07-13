@@ -105,22 +105,6 @@ pub fn decide(candidates: &[Candidate], gates: &GateData) -> Vec<LedgerEntry> {
             let budgeted = gates.budgeted_users.contains(&candidate.user_id);
             let anchor = gates.anchors.get(&candidate.user_id);
 
-            // Opt-out/gelöschte Nutzer: kein nutzerbezogener Write mehr — der
-            // Eintrag wird anonymisiert, nur die Zählung bleibt sichtbar.
-            if opted_out {
-                return LedgerEntry {
-                    source: "brain.activation",
-                    subject_user_id: None,
-                    guild_id: Some(candidate.guild_id),
-                    input_summary: "anonymisiert:opted_out".to_string(),
-                    decision: Decision::Suppressed,
-                    confidence: None,
-                    reason: "opted_out".to_string(),
-                    action_taken: "shadow",
-                    payload: json!({}),
-                };
-            }
-
             let (decision, reason) = if budgeted {
                 (Decision::Suppressed, "budget_14d".to_string())
             } else if let Some(kind) = anchor {
@@ -129,7 +113,7 @@ pub fn decide(candidates: &[Candidate], gates: &GateData) -> Vec<LedgerEntry> {
                 (Decision::No, "no_anchor".to_string())
             };
 
-            LedgerEntry {
+            let entry = LedgerEntry {
                 source: "brain.activation",
                 subject_user_id: Some(candidate.user_id),
                 guild_id: Some(candidate.guild_id),
@@ -146,9 +130,34 @@ pub fn decide(candidates: &[Candidate], gates: &GateData) -> Vec<LedgerEntry> {
                     "inactive_days": candidate.inactive_days,
                     "anchor": anchor,
                 }),
+            };
+
+            // Opt-out/gelöschte Nutzer: kein nutzerbezogener Write — nur die
+            // Zählung bleibt sichtbar.
+            if opted_out {
+                anonymize_for_privacy(&entry)
+            } else {
+                entry
             }
         })
         .collect()
+}
+
+/// Entfernt alle nutzerbezogenen Daten aus einem Ledger-Eintrag; wird sowohl
+/// vom Opt-out-Gate in `decide()` als auch vom Recheck unter dem
+/// Privacy-Lock direkt vor dem Insert benutzt.
+pub fn anonymize_for_privacy(entry: &LedgerEntry) -> LedgerEntry {
+    LedgerEntry {
+        source: entry.source,
+        subject_user_id: None,
+        guild_id: entry.guild_id,
+        input_summary: "anonymisiert:opted_out".to_string(),
+        decision: Decision::Suppressed,
+        confidence: None,
+        reason: "opted_out".to_string(),
+        action_taken: entry.action_taken,
+        payload: json!({}),
+    }
 }
 
 pub fn render_report(
@@ -307,6 +316,18 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(11), Some(12), Some(13)]
         );
+    }
+
+    #[test]
+    fn anonymize_strips_every_user_reference() {
+        let entries = decide(&[candidate(99)], &GateData::default());
+        let anonymized = anonymize_for_privacy(&entries[0]);
+
+        assert_eq!(anonymized.subject_user_id, None);
+        assert_eq!(anonymized.decision, Decision::Suppressed);
+        assert_eq!(anonymized.reason, "opted_out");
+        assert_eq!(anonymized.input_summary, "anonymisiert:opted_out");
+        assert_eq!(anonymized.payload, json!({}));
     }
 
     #[test]
