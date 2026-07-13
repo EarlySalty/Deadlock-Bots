@@ -1508,12 +1508,8 @@ impl InteractionHandler for PanelHandler {
                     Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
                     None => interaction.user_id,
                 };
-                let _ = engine.store.add_ban(owner_id, target).await;
-                if let Some(lane) = owned_lane {
-                    let _ = engine
-                        .port
-                        .set_member_connect(lane, target, Some(false))
-                        .await;
+                let _ = engine.add_owner_ban(owner_id, target, owned_lane).await;
+                if owned_lane.is_some() {
                     let _ = engine
                         .port
                         .disconnect_member(interaction.guild_id, target, "TempVoice: Owner-Bann")
@@ -1561,10 +1557,7 @@ impl InteractionHandler for PanelHandler {
                     Some(lane) => self.lane_owner_id(lane, interaction.user_id).await,
                     None => interaction.user_id,
                 };
-                let _ = engine.store.remove_ban(owner_id, target).await;
-                if let Some(lane) = owned_lane {
-                    let _ = engine.port.set_member_connect(lane, target, None).await;
-                }
+                let _ = engine.remove_owner_ban(owner_id, target, owned_lane).await;
                 BridgeReply::ephemeral_text(format!("<@{target}> entbannt."))
             }
 

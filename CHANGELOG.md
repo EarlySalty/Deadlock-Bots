@@ -1,6 +1,16 @@
-## #259 — Turniervorschläge bleiben in Mod-Hand
+## #260 — Turniervorschläge bleiben in Mod-Hand
 
 Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen vorher gespeicherten KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; parallele Änderungen laufen nacheinander und alte Buttons finden automatisch die aktive Version. Aktuelles Verhalten: Die interne Übergabe ist auf Loopback plus Token begrenzt; erst zwei unterschiedliche Mods legen das Turnier an, danach erscheint die Vorlage in derselben Karte. Scheitert dieses Edit, bleibt es offen und wird bei einem erneuten J nochmals versucht.
+
+---
+
+## #259 — Voice-Trennungen bleiben dauerhaft aktiv
+
+Problem: Andere Rechte-Updates des Bots konnten eine laufende feste Voice-Trennung aus einem Kanal wieder entfernen.
+
+Änderung: Aktive Trennungen werden jetzt bei jedem vollständigen Rechte-Update erneut eingemischt und mit Besitzer-Bans gemeinsam verarbeitet.
+
+Aktuelles Verhalten: Die beiden betroffenen Personen können in keinem Sprachkanal zusammenkommen; Besitzerrechte, Rang-Updates und Bot-Neustarts umgehen die Sperre nicht.
 
 ---
 
@@ -11,6 +21,16 @@ Problem: Wer seine Daten über den Datenschutz-Befehl gelöscht hat, bekam einen
 Änderung: Alle diese Schreibvorgänge prüfen den Widerspruch jetzt genau in dem Moment, in dem sie schreiben, statt vorher. Übersprungene Schreibvorgänge werden protokolliert.
 
 Aktuelles Verhalten: Eine Löschung hält. Wer widersprochen hat, taucht in keiner dieser Auswertungen wieder auf, auch nicht, wenn er weiter auf dem Server aktiv ist.
+
+---
+
+## #257 — Feste Voice-Trennungen gelten überall
+
+Problem: Eine feste Trennung konnte in anderen Sprachkanälen oder über die Rechte eines TempVoice-Owners umgangen werden.
+
+Änderung: Der Bot sperrt den jeweils belegten Sprachkanal jetzt serverweit für die andere betroffene Person und nimmt die Sperre beim Wechsel oder Verlassen wieder zurück.
+
+Aktuelles Verhalten: Beide Seiten haben dieselben Regeln, andere Sprachkanäle bleiben nutzbar und niemand wird nachträglich getrennt oder verschoben.
 
 ---
 

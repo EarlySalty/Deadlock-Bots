@@ -15,6 +15,7 @@ use dl_discord::{ChannelEvent, Dispatcher, GatewayEvent, VoiceEvent};
 
 use super::logic;
 use super::store::{DefaultPresetRecord, LaneRecord, TempVoiceStore};
+use crate::voice_pair_guard::VoicePairOperationLock;
 
 pub const PURGE_INTERVAL_SECONDS: u64 = 180;
 pub const VERIFIED_ROLE_ID: u64 = 1419608095533043774;
@@ -325,6 +326,7 @@ pub struct TempVoiceEngine {
     /// Anfänger-Routing-Hook (None = kein Reroute, wie Original ohne Cog).
     pub adaptive: tokio::sync::RwLock<Option<Arc<crate::adaptive::AdaptiveLanes>>>,
     lfg: tokio::sync::RwLock<Option<Weak<crate::lfg_panel::LfgPanelInterface>>>,
+    voice_pair_operations: Arc<VoicePairOperationLock>,
     state: tokio::sync::Mutex<EngineState>,
 }
 
@@ -334,6 +336,20 @@ impl TempVoiceEngine {
         store: TempVoiceStore,
         port: Arc<dyn LanePort>,
     ) -> Arc<Self> {
+        Self::new_with_voice_pair_operations(
+            config,
+            store,
+            port,
+            Arc::new(VoicePairOperationLock::new(())),
+        )
+    }
+
+    pub fn new_with_voice_pair_operations(
+        config: TempVoiceConfig,
+        store: TempVoiceStore,
+        port: Arc<dyn LanePort>,
+        voice_pair_operations: Arc<VoicePairOperationLock>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             config,
             store,
@@ -341,8 +357,47 @@ impl TempVoiceEngine {
             tags: tokio::sync::RwLock::new(None),
             adaptive: tokio::sync::RwLock::new(None),
             lfg: tokio::sync::RwLock::new(None),
+            voice_pair_operations,
             state: tokio::sync::Mutex::new(EngineState::default()),
         })
+    }
+
+    pub async fn add_owner_ban(
+        &self,
+        owner_id: u64,
+        target_id: u64,
+        channel_id: Option<u64>,
+    ) -> Result<(), String> {
+        let _operation = self.voice_pair_operations.lock().await;
+        self.store
+            .add_ban(owner_id, target_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if let Some(channel_id) = channel_id {
+            self.port
+                .set_member_connect(channel_id, target_id, Some(false))
+                .await?;
+        }
+        Ok(())
+    }
+
+    pub async fn remove_owner_ban(
+        &self,
+        owner_id: u64,
+        target_id: u64,
+        channel_id: Option<u64>,
+    ) -> Result<(), String> {
+        let _operation = self.voice_pair_operations.lock().await;
+        self.store
+            .remove_ban(owner_id, target_id)
+            .await
+            .map_err(|err| err.to_string())?;
+        if let Some(channel_id) = channel_id {
+            self.port
+                .set_member_connect(channel_id, target_id, None)
+                .await?;
+        }
+        Ok(())
     }
 
     pub async fn set_lfg_panel(&self, lfg: Arc<crate::lfg_panel::LfgPanelInterface>) {
@@ -1547,6 +1602,7 @@ impl TempVoiceEngine {
                     .insert(user_id)
             };
             if fresh {
+                let _operation = self.voice_pair_operations.lock().await;
                 let _ = self
                     .port
                     .set_member_connect(channel_id, user_id, Some(false))
@@ -1565,6 +1621,7 @@ impl TempVoiceEngine {
         if !was_blocked {
             return;
         }
+        let _operation = self.voice_pair_operations.lock().await;
         // Owner-Bann hat Vorrang: Overwrite dann NICHT löschen
         if let Some(owner_id) = self.lane_owner(channel_id).await {
             if self
@@ -2018,6 +2075,7 @@ impl TempVoiceEngine {
 
     /// Owner-Bans als Connect-Overwrites auf die Lane legen.
     async fn apply_owner_bans(&self, _guild_id: u64, channel_id: u64, owner_id: u64) {
+        let _operation = self.voice_pair_operations.lock().await;
         let bans = self.store.list_bans(owner_id).await.unwrap_or_default();
         if bans.is_empty() {
             return;
@@ -2078,6 +2136,7 @@ impl TempVoiceEngine {
     }
 
     async fn clear_owner_bans(&self, channel_id: u64, owner_id: u64) {
+        let _operation = self.voice_pair_operations.lock().await;
         let bans = self.store.list_bans(owner_id).await.unwrap_or_default();
         if bans.is_empty() {
             return;
@@ -2181,6 +2240,7 @@ pub fn spawn(engine: Arc<TempVoiceEngine>, dispatcher: &Dispatcher) -> tokio::ta
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Mutex as StdMutex;
 
     #[derive(Default)]
@@ -2198,6 +2258,10 @@ mod tests {
         role_batches: StdMutex<Vec<RoleBatch>>,
         role_overwrite_batches: StdMutex<Vec<RoleOverwriteBatch>>,
         member_batches: StdMutex<Vec<MemberBatch>>,
+        member_connect: StdMutex<HashMap<(u64, u64), Option<bool>>>,
+        pause_member_batch: AtomicBool,
+        member_batch_started: tokio::sync::Notify,
+        resume_member_batch: tokio::sync::Notify,
         limits: StdMutex<Vec<(u64, i64)>>,
         role_names: StdMutex<Vec<String>>,
         guild_roles: StdMutex<Vec<(u64, String)>>,
@@ -2307,6 +2371,10 @@ mod tests {
                 .lock()
                 .expect("lock")
                 .push((channel_id, user_id, connect));
+            self.member_connect
+                .lock()
+                .expect("lock")
+                .insert((channel_id, user_id), connect);
             Ok(())
         }
         async fn apply_member_connect_batch(
@@ -2315,11 +2383,22 @@ mod tests {
             denied_user_ids: &HashSet<u64>,
             clear_user_ids: &HashSet<u64>,
         ) -> Result<(), String> {
+            if self.pause_member_batch.swap(false, Ordering::SeqCst) {
+                self.member_batch_started.notify_one();
+                self.resume_member_batch.notified().await;
+            }
             self.member_batches.lock().expect("lock").push(MemberBatch {
                 channel_id,
                 denied: denied_user_ids.clone(),
                 cleared: clear_user_ids.clone(),
             });
+            let mut member_connect = self.member_connect.lock().expect("lock");
+            for user_id in clear_user_ids {
+                member_connect.insert((channel_id, *user_id), None);
+            }
+            for user_id in denied_user_ids {
+                member_connect.insert((channel_id, *user_id), Some(false));
+            }
             Ok(())
         }
         async fn set_role_connect(
@@ -3153,6 +3232,87 @@ mod tests {
                 cleared: HashSet::new(),
             }
         );
+    }
+
+    #[tokio::test]
+    async fn owner_ban_batch_kann_paralleles_unban_nicht_ueberschreiben() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let channel_id = 5_001;
+        let owner_id = 100;
+        let target = 666;
+        engine.store.add_ban(owner_id, target).await.expect("ban");
+        port.pause_member_batch.store(true, Ordering::SeqCst);
+
+        let apply = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine.apply_owner_bans(1, channel_id, owner_id).await;
+            })
+        };
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            port.member_batch_started.notified(),
+        )
+        .await
+        .expect("batch start");
+
+        let mut remove = {
+            let engine = engine.clone();
+            tokio::spawn(async move {
+                engine
+                    .remove_owner_ban(owner_id, target, Some(channel_id))
+                    .await
+            })
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), &mut remove)
+                .await
+                .is_err(),
+            "unban darf den laufenden Batch nicht ueberholen"
+        );
+        port.resume_member_batch.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(1), apply)
+            .await
+            .expect("batch timeout")
+            .expect("batch task");
+        tokio::time::timeout(std::time::Duration::from_secs(1), remove)
+            .await
+            .expect("unban timeout")
+            .expect("unban task")
+            .expect("unban");
+
+        assert_eq!(
+            port.member_connect
+                .lock()
+                .expect("lock")
+                .get(&(channel_id, target))
+                .copied(),
+            Some(None)
+        );
+    }
+
+    #[tokio::test]
+    async fn engine_nutzt_uebergebenen_pair_lock_ohne_deadlock() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let operations = Arc::new(VoicePairOperationLock::new(()));
+        let port = Arc::new(MockPort::default());
+        let engine = TempVoiceEngine::new_with_voice_pair_operations(
+            TempVoiceConfig::production(),
+            TempVoiceStore::new(db.pool().clone()),
+            port,
+            operations.clone(),
+        );
+
+        assert!(Arc::ptr_eq(&engine.voice_pair_operations, &operations));
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            engine.add_owner_ban(100, 666, Some(5_001)).await?;
+            engine.remove_owner_ban(100, 666, Some(5_001)).await
+        })
+        .await
+        .expect("pair lock deadlock")
+        .expect("owner ban roundtrip");
     }
 
     #[tokio::test]
