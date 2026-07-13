@@ -311,6 +311,10 @@ pub fn router(app: DashboardApp) -> Router {
             post(import_session),
         )
         .route(
+            "/internal/twitch/v1/discord/revoke-session",
+            post(revoke_session),
+        )
+        .route(
             "/internal/coaching/v1/no-show-ban",
             post(coaching_no_show_ban),
         )
@@ -1245,6 +1249,32 @@ async fn import_session(
     }
 }
 
+async fn revoke_session(
+    State(app): State<DashboardApp>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if let Err(resp) = guard_twitch(&app, &peer, &headers) {
+        return resp;
+    }
+    let payload = match parse_value(&body) {
+        Ok(value) => value,
+        Err(resp) => return resp,
+    };
+    let session_id = string_field(&payload, "session_id").unwrap_or_default();
+    if session_id.is_empty() {
+        return err_json(400, "missing_session_id");
+    }
+    match app.inner.sessions.remove(&session_id).await {
+        Ok(()) => ok_json(json!({ "ok": true })),
+        Err(error) => {
+            tracing::error!(%error, "Admin-Session konnte nicht widerrufen werden");
+            err_json(500, "session_persistence_failed")
+        }
+    }
+}
+
 // ── Interne Routen: Coaching ────────────────────────────────────────────────
 
 async fn coaching_no_show_ban(
@@ -1867,6 +1897,50 @@ mod tests {
             read_cookies(&duplicate, SESSION_COOKIE),
             vec!["alt".to_string(), "gueltig".to_string()]
         );
+    }
+
+    #[tokio::test]
+    async fn revoke_session_entfernt_gemeinsame_session() {
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            "TWITCH_INTERNAL_API_TOKEN" => Some("twitch-test-token".to_string()),
+            _ => None,
+        });
+        let (_dir, _db, app) = test_app(cfg).await;
+        let session_id = app
+            .inner
+            .sessions
+            .create(
+                NewSession {
+                    user_id: 42,
+                    username: "admin".to_string(),
+                    display_name: "Admin".to_string(),
+                    reason: "test".to_string(),
+                    access_level: AccessLevel::Full,
+                },
+                now_unix_f64(),
+            )
+            .await
+            .expect("session");
+
+        let response = router(app.clone())
+            .oneshot(internal_post(
+                "/internal/twitch/v1/discord/revoke-session",
+                "twitch-test-token",
+                json!({ "session_id": session_id }),
+            ))
+            .await
+            .expect("response");
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(app
+            .inner
+            .sessions
+            .touch(&session_id, now_unix_f64())
+            .await
+            .expect("lookup")
+            .is_none());
     }
 
     #[tokio::test]
