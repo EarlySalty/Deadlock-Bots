@@ -104,9 +104,24 @@ pub fn decide(candidates: &[Candidate], gates: &GateData) -> Vec<LedgerEntry> {
             let opted_out = gates.opted_out_users.contains(&candidate.user_id);
             let budgeted = gates.budgeted_users.contains(&candidate.user_id);
             let anchor = gates.anchors.get(&candidate.user_id);
-            let (decision, reason) = if opted_out {
-                (Decision::Suppressed, "opted_out".to_string())
-            } else if budgeted {
+
+            // Opt-out/gelöschte Nutzer: kein nutzerbezogener Write mehr — der
+            // Eintrag wird anonymisiert, nur die Zählung bleibt sichtbar.
+            if opted_out {
+                return LedgerEntry {
+                    source: "brain.activation",
+                    subject_user_id: None,
+                    guild_id: Some(candidate.guild_id),
+                    input_summary: "anonymisiert:opted_out".to_string(),
+                    decision: Decision::Suppressed,
+                    confidence: None,
+                    reason: "opted_out".to_string(),
+                    action_taken: "shadow",
+                    payload: json!({}),
+                };
+            }
+
+            let (decision, reason) = if budgeted {
                 (Decision::Suppressed, "budget_14d".to_string())
             } else if let Some(kind) = anchor {
                 (Decision::Yes, format!("anchor:{kind}"))
@@ -267,6 +282,9 @@ mod tests {
 
         assert_eq!(decisions[0].decision, Decision::Suppressed);
         assert_eq!(decisions[0].reason, "opted_out");
+        // Opt-out-Nutzer werden anonymisiert geledgert, nie mit ID.
+        assert_eq!(decisions[0].subject_user_id, None);
+        assert_eq!(decisions[0].input_summary, "anonymisiert:opted_out");
         assert_eq!(decisions[1].decision, Decision::Suppressed);
         assert_eq!(decisions[1].reason, "budget_14d");
         assert_eq!(decisions[2].decision, Decision::Yes);
