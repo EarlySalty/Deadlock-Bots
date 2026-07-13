@@ -1,6 +1,6 @@
 ## #259 — Turniervorschläge bleiben in Mod-Hand
 
-Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen vorher gespeicherten KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; parallele Änderungen laufen nacheinander und alte Buttons finden automatisch die aktive Version. Aktuelles Verhalten: Die interne Übergabe ist auf Loopback plus Token begrenzt; erst zwei unterschiedliche Mods legen das Turnier an, danach entsteht zuverlässig nur eine interne Ankündigungsvorlage. Scheitert dieser interne Post, bleibt er offen und wird bei einem erneuten J nochmals versucht.
+Problem: Die Turnier-Automatik konnte einen Wochenplan selbst live schalten und öffentlich ankündigen. Änderung: Im Mod-Kanal gibt es jetzt einen vorher gespeicherten KI-Vorschlag mit J, N samt Pflichtgrund und Änderungswunsch; parallele Änderungen laufen nacheinander und alte Buttons finden automatisch die aktive Version. Aktuelles Verhalten: Die interne Übergabe ist auf Loopback plus Token begrenzt; erst zwei unterschiedliche Mods legen das Turnier an, danach erscheint die Vorlage in derselben Karte. Scheitert dieses Edit, bleibt es offen und wird bei einem erneuten J nochmals versucht.
 
 ---
 

@@ -103,6 +103,12 @@ struct AnnouncementRenderedRequest {
     message_id: String,
 }
 
+#[derive(Debug, Serialize)]
+struct AnnouncementPlannedRequest {
+    role_ids: Vec<String>,
+    draft: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct PublishRequest {
     proposal_id: i64,
@@ -223,6 +229,22 @@ impl TurnierClient {
             self.http
                 .post(format!(
                     "{}/internal/turnier/v1/proposals/{proposal_id}/announcement-rendered",
+                    self.base_url
+                ))
+                .json(request),
+        )
+        .await
+    }
+
+    async fn announcement_planned(
+        &self,
+        proposal_id: i64,
+        request: &AnnouncementPlannedRequest,
+    ) -> Result<ProposalEnvelope, String> {
+        self.request(
+            self.http
+                .post(format!(
+                    "{}/internal/turnier/v1/proposals/{proposal_id}/announcement-planned",
                     self.base_url
                 ))
                 .json(request),
@@ -593,26 +615,55 @@ impl InteractionHandler for ProposalHandler {
                             return BridgeReply::ephemeral_text(error);
                         }
                         if needs_announcement(&envelope) {
-                            let draft = self.service.announcement_draft(&envelope).await;
-                            let message_id = match self
-                                .service
-                                .adapter
-                                .send_raw_public(PROPOSAL_CHANNEL_ID, &announcement_body(&draft))
-                                .await
-                            {
-                                Ok(message_id) => message_id,
-                                Err(error) => {
-                                    tracing::error!(%error, proposal_id, "Ankündigungsentwurf nicht postbar");
-                                    return BridgeReply::ephemeral_text(
-                                        "Turnier freigegeben, aber die interne Vorlage konnte nicht gepostet werden. J erneut klicken versucht es wieder.",
-                                    );
+                            let existing_draft =
+                                serde_json::from_str::<Value>(&envelope.proposal.config_json)
+                                    .ok()
+                                    .and_then(|config| {
+                                        config
+                                            .get("_announcement_draft")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string)
+                                    });
+                            let planned = if existing_draft.is_some() {
+                                envelope.clone()
+                            } else {
+                                let draft = self.service.announcement_draft(&envelope).await;
+                                match self
+                                    .service
+                                    .client
+                                    .announcement_planned(
+                                        envelope.proposal.id,
+                                        &AnnouncementPlannedRequest {
+                                            role_ids: interaction
+                                                .role_ids
+                                                .iter()
+                                                .map(ToString::to_string)
+                                                .collect(),
+                                            draft,
+                                        },
+                                    )
+                                    .await
+                                {
+                                    Ok(value) => value,
+                                    Err(error) => return BridgeReply::ephemeral_text(error),
                                 }
+                            };
+                            if let Err(error) = self.service.edit_proposal_message(&planned).await {
+                                return BridgeReply::ephemeral_text(format!(
+                                    "Vorlage gespeichert, Karte konnte nicht aktualisiert werden: {error}"
+                                ));
+                            }
+                            let Some(message_id) = planned.proposal.proposal_message_id.clone()
+                            else {
+                                return BridgeReply::ephemeral_text(
+                                    "Vorschlagsnachricht fehlt für die Vorlagen-Markierung.",
+                                );
                             };
                             let marked = match self
                                 .service
                                 .client
                                 .announcement_rendered(
-                                    proposal_id,
+                                    planned.proposal.id,
                                     &AnnouncementRenderedRequest {
                                         actor_id: interaction.user_id.to_string(),
                                         role_ids: interaction
@@ -620,7 +671,7 @@ impl InteractionHandler for ProposalHandler {
                                             .iter()
                                             .map(ToString::to_string)
                                             .collect(),
-                                        message_id: message_id.to_string(),
+                                        message_id,
                                     },
                                 )
                                 .await
@@ -628,7 +679,7 @@ impl InteractionHandler for ProposalHandler {
                                 Ok(marked) => marked,
                                 Err(error) => {
                                     return BridgeReply::ephemeral_text(format!(
-                                        "Vorlage gepostet, Status konnte nicht gespeichert werden: {error}"
+                                        "Vorlage steht in der Karte, Status konnte nicht gespeichert werden: {error}"
                                     ));
                                 }
                             };
@@ -943,6 +994,15 @@ fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Ve
         .map(|item| format!("- <@{}>: {}", item.caster_discord_id, item.raw_text))
         .collect::<Vec<_>>()
         .join("\n");
+    let announcement = config
+        .get("_announcement_draft")
+        .and_then(Value::as_str)
+        .map(|draft| {
+            format!(
+                "\n\n## 📝 Ankündigungsvorlage\nDiese Vorlage wird **nicht automatisch veröffentlicht**.\n\n{draft}"
+            )
+        })
+        .unwrap_or_default();
     let live = envelope.proposal.tournament_id.is_some() || envelope.tournament_id.is_some();
     let announcement_pending = live && !envelope.announcement_posted;
     let state = if live {
@@ -956,7 +1016,7 @@ fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Ve
         "components": [
             {"type": 10, "content": format!("## 🏆 Turniervorschlag #{} · Version {}\n**{}**", envelope.proposal.id, revision, name)},
             {"type": 14, "divider": true, "spacing": 1},
-            {"type": 10, "content": format!("**Status:** {}\n**Turnierstart:** `{}`\n**Anmeldung bis:** `{}`\n**Freigaben:** {}/{}\n**J:** {}\n**N:** {}\n**Einwände / Änderungen:**\n{}", state, event, registration, envelope.approvals, envelope.required_approvals, if yes.is_empty() { "—" } else { &yes }, if no.is_empty() { "—" } else { &no }, if objections.is_empty() { "—" } else { &objections })},
+            {"type": 10, "content": format!("**Status:** {}\n**Turnierstart:** `{}`\n**Anmeldung bis:** `{}`\n**Freigaben:** {}/{}\n**J:** {}\n**N:** {}\n**Einwände / Änderungen:**\n{}{}", state, event, registration, envelope.approvals, envelope.required_approvals, if yes.is_empty() { "—" } else { &yes }, if no.is_empty() { "—" } else { &no }, if objections.is_empty() { "—" } else { &objections }, announcement)},
             {"type": 14, "divider": true, "spacing": 1},
             {"type": 1, "components": [
                 {"type": 2, "style": 3, "label": if announcement_pending { "Vorlage erneut versuchen" } else { "J – Zeit & Freigabe" }, "custom_id": format!("{PREFIX}y:{}", envelope.proposal.id), "disabled": live && !announcement_pending},
@@ -965,25 +1025,6 @@ fn proposal_components(envelope: &ProposalEnvelope, config: &Value) -> Result<Ve
             ]}
         ]
     })])
-}
-
-fn announcement_body(draft: &str) -> Map<String, Value> {
-    let mut body = Map::new();
-    body.insert("flags".to_string(), json!(COMPONENTS_V2));
-    body.insert("allowed_mentions".to_string(), json!({"parse": []}));
-    body.insert(
-        "components".to_string(),
-        json!([{
-            "type": 17,
-            "accent_color": GOLD,
-            "components": [
-                {"type": 10, "content": "## 📝 Ankündigungsvorlage\nDas Turnier ist intern freigegeben. Diese Vorlage wird **nicht automatisch veröffentlicht**."},
-                {"type": 14, "divider": true, "spacing": 1},
-                {"type": 10, "content": draft}
-            ]
-        }]),
-    );
-    body
 }
 
 fn parse_plan(raw: &str) -> Result<Value, String> {
@@ -1163,6 +1204,14 @@ mod tests {
         let mut top_level_only = envelope();
         top_level_only.tournament_id = Some(8);
         assert!(needs_announcement(&top_level_only));
+
+        let mut with_draft = config();
+        with_draft["_announcement_draft"] = json!("Nur intern kopieren");
+        let card = proposal_components(&top_level_only, &with_draft).expect("draft card");
+        assert!(card[0]["components"][2]["content"]
+            .as_str()
+            .expect("card text")
+            .contains("Nur intern kopieren"));
     }
 
     #[tokio::test]
