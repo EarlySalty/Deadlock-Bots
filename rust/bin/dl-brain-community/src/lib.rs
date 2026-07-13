@@ -166,18 +166,64 @@ pub fn render_report(
         .map(|(class, count)| format!("{class}={count}"))
         .collect::<Vec<_>>()
         .join(" ");
-    let reasons = by_reason
-        .iter()
-        .map(|(reason, count)| format!("{reason}={count}"))
-        .collect::<Vec<_>>()
-        .join(" ");
+    let reasons = if by_reason.is_empty() {
+        "keine".to_string()
+    } else {
+        by_reason
+            .iter()
+            .map(|(reason, count)| format!("{reason}={count}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+
+    let pulse_text = if pulses.is_empty() {
+        "Keine Puls-Daten für diesen Zeitraum.".to_string()
+    } else {
+        pulses
+            .iter()
+            .map(|pulse| {
+                format!(
+                    "Guild {}: Voice-WAU {}, Text-WAU {}, neue Mitglieder {}, Voice-Minuten {:.0}, LFG offen {} / erfüllt {}",
+                    pulse.guild_id,
+                    pulse.voice_wau,
+                    pulse.text_wau,
+                    pulse.new_members,
+                    pulse.voice_minutes,
+                    pulse.open_lfg_watches,
+                    pulse.fired_lfg_watches,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    // Discord-Nachrichtenlimit: ID-Liste im Text kappen, vollständige Liste steht im KPI-JSON.
+    const MAX_IDS_IN_TEXT: usize = 30;
+    let at_risk_text = if user_ids.is_empty() {
+        "Keine auffällig inaktiven Mitglieder.".to_string()
+    } else {
+        let shown = user_ids
+            .iter()
+            .take(MAX_IDS_IN_TEXT)
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        let rest = user_ids.len().saturating_sub(MAX_IDS_IN_TEXT);
+        if rest > 0 {
+            format!(
+                "{} Mitglieder rutschen gerade ab. IDs: {shown} und {rest} weitere (volle Liste im Report-JSON).",
+                user_ids.len()
+            )
+        } else {
+            format!(
+                "{} Mitglieder rutschen gerade ab. IDs: {shown}",
+                user_ids.len()
+            )
+        }
+    };
+
     let report_text = format!(
-        "PLATZHALTER: puls_kernzahlen\n{}\nPLATZHALTER: at_risk_kohorte\ncount={} user_ids={}\nPLATZHALTER: rechenschaft\n{}\nreasons={}",
-        Value::Array(pulse_json.clone()),
-        user_ids.len(),
-        user_ids.iter().map(i64::to_string).collect::<Vec<_>>().join(","),
-        accountability,
-        reasons,
+        "**Zweitgehirn Wochenreport (Shadow-Modus)**\nEs wurde nichts gesendet, alle Entscheidungen sind nur protokolliert.\n\n**Puls**\n{pulse_text}\n\n**Abwanderungs-Kandidaten**\n{at_risk_text}\n\n**Rechenschaft**\nEntscheidungen: {accountability}\nGründe: {reasons}"
     );
 
     RenderedReport {
