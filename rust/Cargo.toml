@@ -28,6 +28,7 @@ members = [
     "bin/dl-web",
     "bin/dl-twitch-invite-sync",
     "bin/dl-repostats",
+    "bin/dl-brain-community",
     "bin/dl-central-migrate",
     "bin/dl-central-sync",
 ]
@@ -46,6 +47,7 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "syn
 # Fehler-Typen (Domänen) / Fehler-Kontext (Binaries)
 thiserror = "2"
 anyhow = "1"
+clap = { version = "4", features = ["derive"] }
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

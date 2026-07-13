@@ -1,0 +1,9 @@
+[Unit]
+Description=Deadlock Community Brain sonntags um 18 Uhr
+
+[Timer]
+OnCalendar=Sun *-*-* 18:00:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

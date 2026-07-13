@@ -8,6 +8,14 @@ fn migration() -> String {
     .expect("read zweitgehirn foundation migration")
 }
 
+fn decision_ledger_migration() -> String {
+    std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("migrations/2026071303_brain_decision_ledger.sql"),
+    )
+    .expect("read brain decision ledger migration")
+}
+
 #[test]
 fn migration_defines_anchored_idempotent_action_outbox() {
     let sql = migration();
@@ -48,4 +56,28 @@ fn migration_defines_weekly_pulse_and_at_risk_views() {
         assert!(sql.contains(contract), "missing view contract: {contract}");
     }
     assert!(!sql.contains("aggregates.day >= current_date - 6"));
+}
+
+#[test]
+fn migration_defines_ai_decision_ledger_and_brain_reports() {
+    let sql = decision_ledger_migration();
+
+    for contract in [
+        "CREATE TABLE bot.ai_decision_ledger",
+        "id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY",
+        "decided_at TIMESTAMPTZ NOT NULL DEFAULT now()",
+        "subject_user_id BIGINT",
+        "input_summary TEXT NOT NULL",
+        "CHECK (decision IN ('yes', 'no', 'unsure', 'timeout', 'error', 'suppressed'))",
+        "payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+        "ON bot.ai_decision_ledger (source, decided_at DESC)",
+        "ON bot.ai_decision_ledger (subject_user_id, decided_at DESC)",
+        "CREATE TABLE bot.brain_reports",
+        "period_start TIMESTAMPTZ NOT NULL",
+        "period_end TIMESTAMPTZ NOT NULL",
+        "kpis JSONB NOT NULL",
+        "report_text TEXT NOT NULL",
+    ] {
+        assert!(sql.contains(contract), "missing brain contract: {contract}");
+    }
 }
