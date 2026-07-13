@@ -153,12 +153,6 @@ pub fn render_report(
         *by_reason.entry(entry.reason.as_str()).or_insert(0_u64) += 1;
     }
 
-    let mut user_ids: Vec<i64> = candidates
-        .iter()
-        .map(|candidate| candidate.user_id)
-        .collect();
-    user_ids.sort_unstable();
-
     let pulse_json: Vec<Value> = pulses
         .iter()
         .map(|pulse| {
@@ -213,29 +207,16 @@ pub fn render_report(
             .join("\n")
     };
 
-    // Discord-Nachrichtenlimit: ID-Liste im Text kappen, vollständige Liste steht im KPI-JSON.
-    const MAX_IDS_IN_TEXT: usize = 30;
-    let at_risk_text = if user_ids.is_empty() {
+    // Keine rohen User-IDs im Report (Text oder JSON): der Report wird persistiert
+    // und läge damit außerhalb des DSA-Löschpfads. IDs sind löschbar im Ledger
+    // (bot.ai_decision_ledger, source 'brain.activation') abfragbar.
+    let at_risk_text = if candidates.is_empty() {
         "Keine auffällig inaktiven Mitglieder.".to_string()
     } else {
-        let shown = user_ids
-            .iter()
-            .take(MAX_IDS_IN_TEXT)
-            .map(i64::to_string)
-            .collect::<Vec<_>>()
-            .join(", ");
-        let rest = user_ids.len().saturating_sub(MAX_IDS_IN_TEXT);
-        if rest > 0 {
-            format!(
-                "{} Mitglieder rutschen gerade ab. IDs: {shown} und {rest} weitere (volle Liste im Report-JSON).",
-                user_ids.len()
-            )
-        } else {
-            format!(
-                "{} Mitglieder rutschen gerade ab. IDs: {shown}",
-                user_ids.len()
-            )
-        }
+        format!(
+            "{} Mitglieder rutschen gerade ab. IDs stehen im Entscheidungs-Ledger (bot.ai_decision_ledger, source brain.activation, aktueller Lauf).",
+            candidates.len()
+        )
     };
 
     let report_text = format!(
@@ -245,7 +226,7 @@ pub fn render_report(
     RenderedReport {
         kpis: json!({
             "pulse": pulse_json,
-            "at_risk": {"count": user_ids.len(), "user_ids": user_ids},
+            "at_risk": {"count": candidates.len()},
             "accountability": {
                 "by_decision": by_decision,
                 "by_reason": by_reason,
@@ -308,6 +289,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![Some(11), Some(12), Some(13)]
         );
+    }
+
+    #[test]
+    fn report_never_contains_raw_user_ids() {
+        let subject = 123_456_789_012_345_678_i64;
+        let candidates = vec![Candidate {
+            user_id: subject,
+            guild_id: 7,
+            inactive_days: 10,
+        }];
+        let decisions = decide(&candidates, &GateData::default());
+
+        let report = render_report(&[], &candidates, &decisions);
+
+        // Der Report wird persistiert und liegt damit außerhalb des
+        // DSA-Löschpfads: rohe User-IDs dürfen nie hinein.
+        assert!(!report.report_text.contains(&subject.to_string()));
+        assert!(!report.kpis.to_string().contains(&subject.to_string()));
+        assert_eq!(report.kpis["at_risk"]["count"].as_u64(), Some(1));
     }
 
     #[test]
