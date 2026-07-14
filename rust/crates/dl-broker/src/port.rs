@@ -83,6 +83,12 @@ pub struct ResolvedUser {
     pub display_name: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct MessageReaction {
+    pub emoji: String,
+    pub count: u64,
+}
+
 /// Ein Gilden-Mitglied für den Broker-Endpunkt `members` (Twitch-Bot-Relay).
 #[derive(Debug, Clone)]
 pub struct GuildMemberInfo {
@@ -191,6 +197,11 @@ pub trait DiscordPort: Send + Sync {
         topic: Option<&str>,
     ) -> Result<u64, PortError>;
     async fn delete_channel(&self, channel_id: u64) -> Result<(), PortError>;
+    async fn fetch_message_reactions(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Vec<MessageReaction>, PortError>;
     /// → message_id
     async fn send_rich_message(&self, message: &RichMessage) -> Result<u64, PortError>;
     async fn edit_rich_message(
