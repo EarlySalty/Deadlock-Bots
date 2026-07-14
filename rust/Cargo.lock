@@ -627,6 +627,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dl-brain-feeder"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "dl-central-db",
+ "regex",
+ "sqlx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "dl-bridges"
 version = "0.1.0"
 dependencies = [

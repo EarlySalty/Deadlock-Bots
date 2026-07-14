@@ -1,0 +1,15 @@
+[Unit]
+Description=Deadlock Second-Brain Feeder (Wochen-Digest ins Wiki)
+After=network-online.target infisical.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/home/naniadm/Documents/Deadlock-Bots
+LoadCredential=infisical-token:/home/naniadm/.config/infisical-tokens/infisical-token-bots
+ExecStartPre=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/wait_for_infisical.sh'
+ExecStart=/usr/bin/bash -lc '/home/naniadm/Documents/Deadlock-Bots/scripts/run_brain_feeder.sh'
+Nice=10
+
+[Install]
+WantedBy=default.target
