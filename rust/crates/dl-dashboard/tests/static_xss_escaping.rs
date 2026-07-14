@@ -4,9 +4,8 @@ const ESCAPER: &str = r#"function esc(s){ return String(s).replace(/&/g,'&amp;')
 fn dynamic_dashboard_html_is_escaped() {
     let dashboard = include_str!("../../../../service/static/dashboard.html");
     let insights = include_str!("../../../../service/static/insights.html");
-    let audit = include_str!("../../../../service/static/audit.html");
 
-    for html in [dashboard, insights, audit] {
+    for html in [dashboard, insights] {
         assert!(html.contains(ESCAPER), "HTML escaper is missing");
     }
 
@@ -38,7 +37,7 @@ fn dynamic_dashboard_html_is_escaped() {
         "${esc(formatDetails(entry.changes, entry.options))}",
         "${esc(entry.reason ?? \"–\")}",
     ] {
-        assert!(audit.contains(escaped_sink), "missing {escaped_sink}");
+        assert!(dashboard.contains(escaped_sink), "missing {escaped_sink}");
     }
 
     for action_type in [
@@ -47,7 +46,7 @@ fn dynamic_dashboard_html_is_escaped() {
         167, 190, 191, 192, 193,
     ] {
         let option = format!(r#"<option value="{action_type}">"#);
-        assert!(audit.contains(&option), "missing {option}");
+        assert!(dashboard.contains(&option), "missing {option}");
     }
-    assert!(audit.contains("Optionen:"));
+    assert!(dashboard.contains("Optionen:"));
 }

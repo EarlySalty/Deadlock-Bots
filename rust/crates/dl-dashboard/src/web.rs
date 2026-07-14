@@ -282,7 +282,6 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/", get(index))
         .route("/admin", get(index))
         .route("/insights", get(insights_page))
-        .route("/audit", get(audit_page))
         .route("/api/auth/me", get(auth_me))
         .route("/auth/discord/login", get(login))
         .route("/auth/discord/callback", get(own_callback))
@@ -549,28 +548,6 @@ async fn insights_page(State(app): State<DashboardApp>, headers: HeaderMap) -> R
         return err_text(500, "insights.html nicht ladbar");
     };
     render_spa(html, &display_name, "%2Finsights")
-}
-
-/// `/audit` — Audit-Log-Seite (statisch, Daten via `/api/audit-log`).
-async fn audit_page(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if app.cfg().auth_misconfigured() {
-        return auth_misconfigured_response();
-    }
-    let session = match app.session_from_headers(&headers).await {
-        Ok(session) => session,
-        Err(resp) => return resp,
-    };
-    if app.cfg().auth_enforced() && session.is_none() {
-        return redirect("/auth/discord/login?next=%2Faudit", None);
-    }
-    let display_name = session
-        .as_ref()
-        .map(|s| s.display_name.clone())
-        .unwrap_or_else(|| "Nicht angemeldet".to_string());
-    let Some(html) = load_static_html(&app, "audit.html").await else {
-        return err_text(500, "audit.html nicht ladbar");
-    };
-    render_spa(html, &display_name, "%2Faudit")
 }
 
 async fn auth_me(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
