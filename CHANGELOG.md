@@ -1,3 +1,11 @@
+## #265 — Gelöschte Profile bleiben gelöscht
+
+Problem: Wer seine Daten löschen ließ, konnte durch einen Nebenweg wieder angelegt werden. Der Bot liest regelmäßig Server-Protokolle mit und legte dabei Namen erneut an, ohne zu prüfen, ob die Person eine Löschung beantragt hatte.
+
+Änderung: Die zentrale Stelle, an der Profile geschrieben werden, prüft jetzt zuerst den Löschvermerk. Liegt einer vor, wird nichts geschrieben. Das gilt für alle Wege, die auf Profile schreiben, nicht nur für den Auslöser.
+
+Aktuelles Verhalten: Eine beantragte Löschung hält. Kein Hintergrundprozess kann ein gelöschtes Profil wiederbeleben.
+
 ## #264 — Verlorene Steam-Verknüpfungen finden zurück
 
 Problem: Im Februar hat der Bot bei einem fehlerhaften Abgleich angenommen, über zweihundert Mitglieder hätten den Server verlassen, obwohl sie da waren. Er hat ihre Steam-Verknüpfung gelöst und sie von seiner Freundesliste entfernt. Über hundert von ihnen liefen seitdem ohne Rang-Rolle herum, ohne zu wissen warum.
