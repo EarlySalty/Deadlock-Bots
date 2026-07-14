@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PLATZHALTER: Audit-Log</title>
+<title>Audit-Log</title>
 <style>
 @font-face {
   font-family: "Manrope";
@@ -108,113 +108,113 @@ td:nth-child(6) { min-width: 220px; overflow-wrap: anywhere; }
 <body>
 <main class="wrap">
   <nav class="page-nav">
-    <a href="/admin">PLATZHALTER: Dashboard</a>
-    <a href="/insights">PLATZHALTER: Server-Einblicke</a>
+    <a href="/admin">Dashboard</a>
+    <a href="/insights">Server-Einblicke</a>
     <span class="spacer"></span>
     <span>{{AUTH_USER_LABEL}}</span>
-    <a href="{{AUTH_LOGOUT_URL}}" rel="nofollow">PLATZHALTER: Abmelden</a>
+    <a href="{{AUTH_LOGOUT_URL}}" rel="nofollow">Abmelden</a>
   </nav>
 
   <header class="page-head">
-    <h1>PLATZHALTER: Audit-Log</h1>
-    <p>PLATZHALTER: Echte Admin-Aktionen prüfen und Automatik-Rauschen gezielt einblenden.</p>
+    <h1>Audit-Log</h1>
+    <p>Echte Admin-Aktionen prüfen und Automatik-Rauschen gezielt einblenden.</p>
   </header>
 
   <form id="filters" class="card filters">
     <div class="field">
-      <label for="from">PLATZHALTER: Von</label>
+      <label for="from">Von</label>
       <input type="date" id="from">
     </div>
     <div class="field">
-      <label for="to">PLATZHALTER: Bis</label>
+      <label for="to">Bis</label>
       <input type="date" id="to">
     </div>
     <div class="field">
-      <label for="action-type">PLATZHALTER: Aktionstyp</label>
+      <label for="action-type">Aktionstyp</label>
       <select id="action-type">
-        <option value="">PLATZHALTER: Alle Aktionen</option>
-        <option value="1">PLATZHALTER: Server geändert</option>
-        <option value="10">PLATZHALTER: Kanal erstellt</option>
-        <option value="11">PLATZHALTER: Kanal geändert</option>
-        <option value="12">PLATZHALTER: Kanal gelöscht</option>
-        <option value="13">PLATZHALTER: Kanal-Berechtigung erstellt</option>
-        <option value="14">PLATZHALTER: Kanal-Berechtigung geändert</option>
-        <option value="15">PLATZHALTER: Kanal-Berechtigung gelöscht</option>
-        <option value="20">PLATZHALTER: Mitglied gekickt</option>
-        <option value="22">PLATZHALTER: Gebannt</option>
-        <option value="23">PLATZHALTER: Entbannt</option>
-        <option value="24">PLATZHALTER: Mitglied geändert</option>
-        <option value="25">PLATZHALTER: Rollen geändert</option>
-        <option value="26">PLATZHALTER: Mitglied verschoben</option>
-        <option value="27">PLATZHALTER: Mitglied getrennt</option>
-        <option value="30">PLATZHALTER: Rolle erstellt</option>
-        <option value="31">PLATZHALTER: Rolle geändert</option>
-        <option value="32">PLATZHALTER: Rolle gelöscht</option>
-        <option value="40">PLATZHALTER: Webhook erstellt</option>
-        <option value="41">PLATZHALTER: Webhook geändert</option>
-        <option value="42">PLATZHALTER: Webhook gelöscht</option>
-        <option value="50">PLATZHALTER: Emoji erstellt</option>
-        <option value="51">PLATZHALTER: Emoji geändert</option>
-        <option value="52">PLATZHALTER: Emoji gelöscht</option>
-        <option value="60">PLATZHALTER: Integration erstellt</option>
-        <option value="61">PLATZHALTER: Integration geändert</option>
-        <option value="62">PLATZHALTER: Integration gelöscht</option>
-        <option value="72">PLATZHALTER: Nachricht gelöscht</option>
-        <option value="73">PLATZHALTER: Nachrichten gesammelt gelöscht</option>
-        <option value="74">PLATZHALTER: Nachricht angepinnt</option>
-        <option value="75">PLATZHALTER: Nachricht losgelöst</option>
-        <option value="80">PLATZHALTER: Sticker erstellt</option>
-        <option value="81">PLATZHALTER: Sticker geändert</option>
-        <option value="82">PLATZHALTER: Sticker gelöscht</option>
-        <option value="110">PLATZHALTER: Thread erstellt</option>
-        <option value="111">PLATZHALTER: Thread geändert</option>
-        <option value="112">PLATZHALTER: Thread gelöscht</option>
-        <option value="143">PLATZHALTER: AutoMod-Aktion ausgelöst</option>
-        <option value="144">PLATZHALTER: AutoMod-Meldung ausgelöst</option>
-        <option value="145">PLATZHALTER: AutoMod-Timeout ausgelöst</option>
-        <option value="163">PLATZHALTER: Onboarding-Prompt erstellt</option>
-        <option value="164">PLATZHALTER: Onboarding-Prompt geändert</option>
-        <option value="165">PLATZHALTER: Onboarding-Prompt gelöscht</option>
-        <option value="166">PLATZHALTER: Onboarding erstellt</option>
-        <option value="167">PLATZHALTER: Onboarding geändert</option>
-        <option value="190">PLATZHALTER: Startseiten-Funktion erstellt</option>
-        <option value="191">PLATZHALTER: Startseiten-Funktion geändert</option>
-        <option value="192">PLATZHALTER: Startseiten-Funktion gelöscht</option>
-        <option value="193">PLATZHALTER: Startseiten-Einstellungen geändert</option>
+        <option value="">Alle Aktionen</option>
+        <option value="1">Server geändert</option>
+        <option value="10">Kanal erstellt</option>
+        <option value="11">Kanal geändert</option>
+        <option value="12">Kanal gelöscht</option>
+        <option value="13">Kanal-Berechtigung erstellt</option>
+        <option value="14">Kanal-Berechtigung geändert</option>
+        <option value="15">Kanal-Berechtigung gelöscht</option>
+        <option value="20">Mitglied gekickt</option>
+        <option value="22">Gebannt</option>
+        <option value="23">Entbannt</option>
+        <option value="24">Mitglied geändert</option>
+        <option value="25">Rollen geändert</option>
+        <option value="26">Mitglied verschoben</option>
+        <option value="27">Mitglied getrennt</option>
+        <option value="30">Rolle erstellt</option>
+        <option value="31">Rolle geändert</option>
+        <option value="32">Rolle gelöscht</option>
+        <option value="40">Webhook erstellt</option>
+        <option value="41">Webhook geändert</option>
+        <option value="42">Webhook gelöscht</option>
+        <option value="50">Emoji erstellt</option>
+        <option value="51">Emoji geändert</option>
+        <option value="52">Emoji gelöscht</option>
+        <option value="60">Integration erstellt</option>
+        <option value="61">Integration geändert</option>
+        <option value="62">Integration gelöscht</option>
+        <option value="72">Nachricht gelöscht</option>
+        <option value="73">Nachrichten gesammelt gelöscht</option>
+        <option value="74">Nachricht angepinnt</option>
+        <option value="75">Nachricht losgelöst</option>
+        <option value="80">Sticker erstellt</option>
+        <option value="81">Sticker geändert</option>
+        <option value="82">Sticker gelöscht</option>
+        <option value="110">Thread erstellt</option>
+        <option value="111">Thread geändert</option>
+        <option value="112">Thread gelöscht</option>
+        <option value="143">AutoMod-Aktion ausgelöst</option>
+        <option value="144">AutoMod-Meldung ausgelöst</option>
+        <option value="145">AutoMod-Timeout ausgelöst</option>
+        <option value="163">Onboarding-Prompt erstellt</option>
+        <option value="164">Onboarding-Prompt geändert</option>
+        <option value="165">Onboarding-Prompt gelöscht</option>
+        <option value="166">Onboarding erstellt</option>
+        <option value="167">Onboarding geändert</option>
+        <option value="190">Startseiten-Funktion erstellt</option>
+        <option value="191">Startseiten-Funktion geändert</option>
+        <option value="192">Startseiten-Funktion gelöscht</option>
+        <option value="193">Startseiten-Einstellungen geändert</option>
       </select>
     </div>
     <div class="field">
-      <label for="q">PLATZHALTER: Grund durchsuchen</label>
-      <input type="search" id="q" placeholder="PLATZHALTER: Freitext">
+      <label for="q">Grund durchsuchen</label>
+      <input type="search" id="q" placeholder="Freitext">
     </div>
     <fieldset>
-      <legend>PLATZHALTER: Kategorien</legend>
+      <legend>Kategorien</legend>
       <div class="checks">
-        <label><input type="checkbox" name="category" value="moderation">PLATZHALTER: Moderation</label>
-        <label><input type="checkbox" name="category" value="rollen">PLATZHALTER: Rollen</label>
-        <label><input type="checkbox" name="category" value="struktur">PLATZHALTER: Struktur</label>
-        <label><input type="checkbox" name="category" value="sonstiges">PLATZHALTER: Sonstiges</label>
+        <label><input type="checkbox" name="category" value="moderation">Moderation</label>
+        <label><input type="checkbox" name="category" value="rollen">Rollen</label>
+        <label><input type="checkbox" name="category" value="struktur">Struktur</label>
+        <label><input type="checkbox" name="category" value="sonstiges">Sonstiges</label>
       </div>
     </fieldset>
     <div class="field">
-      <label for="actor">PLATZHALTER: Actor-ID</label>
-      <input inputmode="numeric" id="actor" placeholder="PLATZHALTER: Discord-User-ID">
+      <label for="actor">Wer (User-ID)</label>
+      <input inputmode="numeric" id="actor" placeholder="Discord-User-ID">
     </div>
     <div class="field">
-      <label for="target">PLATZHALTER: Ziel-User-ID</label>
-      <input inputmode="numeric" id="target" placeholder="PLATZHALTER: Discord-User-ID">
+      <label for="target">Betroffener (User-ID)</label>
+      <input inputmode="numeric" id="target" placeholder="Discord-User-ID">
     </div>
     <label class="toggle">
       <input type="checkbox" id="noise">
-      PLATZHALTER: Automatik-Rauschen anzeigen
+      Automatik-Rauschen anzeigen
     </label>
     <div class="filter-actions">
-      <button type="submit">PLATZHALTER: Filter anwenden</button>
+      <button type="submit">Filter anwenden</button>
     </div>
   </form>
 
   <div class="status">
-    <span id="summary">PLATZHALTER: Daten werden geladen.</span>
+    <span id="summary">Daten werden geladen.</span>
     <span id="noise-hint" class="noise"></span>
   </div>
 
@@ -222,19 +222,19 @@ td:nth-child(6) { min-width: 220px; overflow-wrap: anywhere; }
     <div class="table-wrap">
       <table>
         <thead><tr>
-          <th>PLATZHALTER: Zeit</th>
-          <th>PLATZHALTER: Aktion</th>
-          <th>PLATZHALTER: Actor</th>
-          <th>PLATZHALTER: Ziel</th>
-          <th>PLATZHALTER: Details</th>
-          <th>PLATZHALTER: Grund</th>
+          <th>Zeit</th>
+          <th>Aktion</th>
+          <th>Wer</th>
+          <th>Ziel</th>
+          <th>Details</th>
+          <th>Grund</th>
         </tr></thead>
         <tbody id="entries"></tbody>
       </table>
     </div>
-    <div id="empty" class="empty hidden">PLATZHALTER: Keine passenden Einträge.</div>
+    <div id="empty" class="empty hidden">Keine passenden Einträge.</div>
   </section>
-  <button id="more" class="more hidden" type="button">PLATZHALTER: Mehr laden</button>
+  <button id="more" class="more hidden" type="button">Mehr laden</button>
 </main>
 
 <script>
@@ -305,7 +305,7 @@ function formatDetails(changes, options) {
   } else if (changes && Object.keys(changes).length) {
     parts.push(compact(changes));
   }
-  if (options && Object.keys(options).length) parts.push(`PLATZHALTER: Optionen: ${compact(options)}`);
+  if (options && Object.keys(options).length) parts.push(`Optionen: ${compact(options)}`);
   return parts.join("; ") || "–";
 }
 
@@ -327,7 +327,7 @@ async function load(reset = false) {
     tbody.innerHTML = "";
   }
   more.disabled = true;
-  summary.textContent = "PLATZHALTER: Daten werden geladen.";
+  summary.textContent = "Daten werden geladen.";
   try {
     const response = await fetch(`/api/audit-log?${query()}`, { credentials: "same-origin" });
     if (response.status === 401) {
@@ -340,14 +340,14 @@ async function load(reset = false) {
     loaded += data.entries.length;
     offset = loaded;
     total = data.total;
-    summary.textContent = `PLATZHALTER: ${loaded} von ${total} Einträgen angezeigt.`;
+    summary.textContent = `${loaded} von ${total} Einträgen angezeigt.`;
     noiseHint.textContent = data.noise_hidden
-      ? `PLATZHALTER: ${data.noise_hidden} Automatik-Einträge ausgeblendet.`
+      ? `${data.noise_hidden} Automatik-Einträge ausgeblendet (Rang-Sync, TempVoice-Kanäle, Threads).`
       : "";
     empty.classList.toggle("hidden", total !== 0);
     more.classList.toggle("hidden", loaded >= total);
   } catch (error) {
-    summary.textContent = `PLATZHALTER: Audit-Log konnte nicht geladen werden (${error.message}).`;
+    summary.textContent = `Audit-Log konnte nicht geladen werden (${error.message}).`;
   } finally {
     more.disabled = false;
   }

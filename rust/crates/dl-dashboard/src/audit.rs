@@ -202,8 +202,8 @@ fn action_name(action_type: i32) -> String {
         14 => "Kanal-Berechtigung geändert",
         15 => "Kanal-Berechtigung gelöscht",
         20 => "Mitglied gekickt",
-        22 => "Gebannt",
-        23 => "Entbannt",
+        22 => "Mitglied gebannt",
+        23 => "Bann aufgehoben",
         24 => "Mitglied geändert (Mute/Timeout/Nick)",
         25 => "Rollen geändert",
         26 => "Mitglied verschoben",
@@ -223,7 +223,7 @@ fn action_name(action_type: i32) -> String {
         72 => "Nachricht gelöscht",
         73 => "Nachrichten gesammelt gelöscht",
         74 => "Nachricht angepinnt",
-        75 => "Nachricht losgelöst",
+        75 => "Pin entfernt",
         80 => "Sticker erstellt",
         81 => "Sticker geändert",
         82 => "Sticker gelöscht",
@@ -242,9 +242,9 @@ fn action_name(action_type: i32) -> String {
         191 => "Startseiten-Funktion geändert",
         192 => "Startseiten-Funktion gelöscht",
         193 => "Startseiten-Einstellungen geändert",
-        _ => return format!("PLATZHALTER: Unbekannt ({action_type})"),
+        _ => return format!("Unbekannt ({action_type})"),
     };
-    format!("PLATZHALTER: {name}")
+    name.to_string()
 }
 
 pub async fn audit_log(
