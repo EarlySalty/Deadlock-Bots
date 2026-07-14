@@ -24,6 +24,17 @@ use crate::voice_pair_guard::{
 /// Discord-Permission-Bit CONNECT (Voice).
 pub(crate) const CONNECT_BIT: u64 = 1 << 20;
 const VIEW_CHANNEL_BIT: u64 = 1 << 10;
+const FORBIDDEN_INHERITED_ALLOW: u64 = Permissions::MUTE_MEMBERS.bits()
+    | Permissions::DEAFEN_MEMBERS.bits()
+    | Permissions::MOVE_MEMBERS.bits()
+    | Permissions::KICK_MEMBERS.bits()
+    | Permissions::BAN_MEMBERS.bits()
+    | Permissions::MANAGE_CHANNELS.bits()
+    | Permissions::MANAGE_ROLES.bits()
+    | Permissions::MANAGE_MESSAGES.bits()
+    | Permissions::MODERATE_MEMBERS.bits()
+    | Permissions::ADMINISTRATOR.bits()
+    | Permissions::PRIORITY_SPEAKER.bits();
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
 
@@ -56,23 +67,47 @@ fn overlay_active_voice_pair_locks(
     }
 }
 
-fn overwrites_to_json(overwrites: &[PermissionOverwrite]) -> Vec<Value> {
-    overwrites
+fn sanitize_inherited_allow(allow: u64) -> u64 {
+    allow & !FORBIDDEN_INHERITED_ALLOW
+}
+
+fn inherit_category_overwrites(
+    body: &mut Map<String, Value>,
+    guild_id: u64,
+    category_id: u64,
+    overwrites: &[PermissionOverwrite],
+) {
+    let overwrites = overwrites
         .iter()
-        .filter_map(|ow| {
-            let (kind, target_id) = match ow.kind {
+        .filter_map(|overwrite| {
+            let (kind, target_id) = match overwrite.kind {
                 PermissionOverwriteType::Role(role_id) => (0u8, role_id.get()),
                 PermissionOverwriteType::Member(user_id) => (1u8, user_id.get()),
                 _ => return None,
             };
+            let original_allow = overwrite.allow.bits();
+            let allow = sanitize_inherited_allow(original_allow);
+            let removed = original_allow & !allow;
+            if removed != 0 {
+                tracing::warn!(
+                    guild_id,
+                    category_id,
+                    overwrite_target_id = target_id,
+                    removed_permissions = ?Permissions::from_bits_retain(removed),
+                    "TempVoice: Moderationsrechte aus geerbtem Kategorie-Overwrite entfernt"
+                );
+            }
             Some(json!({
                 "id": target_id.to_string(),
                 "type": kind,
-                "allow": ow.allow.bits().to_string(),
-                "deny": ow.deny.bits().to_string(),
+                "allow": allow.to_string(),
+                "deny": overwrite.deny.bits().to_string(),
             }))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if !overwrites.is_empty() {
+        body.insert("permission_overwrites".into(), json!(overwrites));
+    }
 }
 
 fn restricted_voice_overwrites(
@@ -568,22 +603,22 @@ impl LanePort for CacheSnapshot {
         body.insert("user_limit".into(), json!(user_limit));
         if let Some(category) = category_id {
             body.insert("parent_id".into(), json!(category.to_string()));
-            let (overwrites, bitrate) = self
+            let bitrate = self
                 .adapter
                 .cache()
                 .guild(GuildId::new(guild_id))
                 .map(|guild| {
-                    let overwrites = guild
-                        .channels
-                        .get(&ChannelId::new(category))
-                        .map(|channel| overwrites_to_json(&channel.permission_overwrites))
-                        .unwrap_or_default();
-                    (overwrites, guild_voice_bitrate_limit(guild.premium_tier))
+                    if let Some(channel) = guild.channels.get(&ChannelId::new(category)) {
+                        inherit_category_overwrites(
+                            &mut body,
+                            guild_id,
+                            category,
+                            &channel.permission_overwrites,
+                        );
+                    }
+                    guild_voice_bitrate_limit(guild.premium_tier)
                 })
-                .unwrap_or_else(|| (Vec::new(), 96_000));
-            if !overwrites.is_empty() {
-                body.insert("permission_overwrites".into(), json!(overwrites));
-            }
+                .unwrap_or(96_000);
             body.insert("bitrate".into(), json!(bitrate));
         }
         self.adapter
@@ -2599,6 +2634,71 @@ mod tests {
         cache.update(&mut event);
         adapter.link_cache(cache);
         adapter
+    }
+
+    #[test]
+    fn inherited_allow_masks_incident_value_281475009217536() {
+        let incident_allow = 281475009217536;
+
+        let sanitized = sanitize_inherited_allow(incident_allow);
+
+        assert_eq!(sanitized & (1 << 22), 0, "MUTE_MEMBERS must be removed");
+        assert_eq!(sanitized & (1 << 23), 0, "DEAFEN_MEMBERS must be removed");
+        assert_eq!(sanitized & (1 << 24), 0, "MOVE_MEMBERS must be removed");
+        assert_ne!(sanitized & (1 << 10), 0, "VIEW_CHANNEL must remain");
+        assert_ne!(sanitized & (1 << 20), 0, "CONNECT must remain");
+        assert_ne!(sanitized & (1 << 21), 0, "SPEAK must remain");
+    }
+
+    #[test]
+    fn inherited_allow_without_forbidden_permissions_is_unchanged() {
+        let allow = (1 << 10) | (1 << 20) | (1 << 21);
+
+        assert_eq!(sanitize_inherited_allow(allow), allow);
+    }
+
+    #[test]
+    fn inherited_overwrite_never_changes_deny() {
+        let deny = Permissions::MUTE_MEMBERS | Permissions::BAN_MEMBERS;
+        let mut body = Map::new();
+        inherit_category_overwrites(
+            &mut body,
+            7,
+            42,
+            &[PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL,
+                deny,
+                kind: PermissionOverwriteType::Member(UserId::new(9)),
+            }],
+        );
+
+        assert_eq!(
+            body["permission_overwrites"][0]["deny"],
+            deny.bits().to_string()
+        );
+    }
+
+    #[test]
+    fn inherited_category_overwrite_sanitizes_created_channel_body() {
+        let incident_allow = 281475009217536;
+        let mut body = Map::new();
+        inherit_category_overwrites(
+            &mut body,
+            7,
+            42,
+            &[PermissionOverwrite {
+                allow: Permissions::from_bits_retain(incident_allow),
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Role(RoleId::new(7)),
+            }],
+        );
+
+        let inherited_allow = body["permission_overwrites"][0]["allow"]
+            .as_str()
+            .and_then(|allow| allow.parse::<u64>().ok())
+            .expect("inherited allow in created channel body");
+        assert_eq!(inherited_allow & Permissions::MUTE_MEMBERS.bits(), 0);
+        assert_ne!(inherited_allow & Permissions::VIEW_CHANNEL.bits(), 0);
     }
 
     #[test]
