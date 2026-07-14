@@ -305,7 +305,7 @@ function formatDetails(changes, options) {
   } else if (changes && Object.keys(changes).length) {
     parts.push(compact(changes));
   }
-  if (options && Object.keys(options).length) parts.push(`Optionen: ${compact(options)}`);
+  if (options && Object.keys(options).length) parts.push(`PLATZHALTER: Optionen: ${compact(options)}`);
   return parts.join("; ") || "–";
 }
 

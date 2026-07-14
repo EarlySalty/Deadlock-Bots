@@ -49,4 +49,5 @@ fn dynamic_dashboard_html_is_escaped() {
         let option = format!(r#"<option value="{action_type}">"#);
         assert!(audit.contains(&option), "missing {option}");
     }
+    assert!(audit.contains("PLATZHALTER: Optionen:"));
 }
