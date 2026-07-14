@@ -24,6 +24,17 @@ use crate::voice_pair_guard::{
 /// Discord-Permission-Bit CONNECT (Voice).
 pub(crate) const CONNECT_BIT: u64 = 1 << 20;
 const VIEW_CHANNEL_BIT: u64 = 1 << 10;
+const FORBIDDEN_INHERITED_ALLOW: u64 = Permissions::MUTE_MEMBERS.bits()
+    | Permissions::DEAFEN_MEMBERS.bits()
+    | Permissions::MOVE_MEMBERS.bits()
+    | Permissions::KICK_MEMBERS.bits()
+    | Permissions::BAN_MEMBERS.bits()
+    | Permissions::MANAGE_CHANNELS.bits()
+    | Permissions::MANAGE_ROLES.bits()
+    | Permissions::MANAGE_MESSAGES.bits()
+    | Permissions::MODERATE_MEMBERS.bits()
+    | Permissions::ADMINISTRATOR.bits()
+    | Permissions::PRIORITY_SPEAKER.bits();
 const DISCORD_API_BASE: &str = "https://discord.com/api/v10";
 const SERENITY_429_RETRY_AFTER_FALLBACK_SECONDS: f64 = 1.0;
 
@@ -56,23 +67,47 @@ fn overlay_active_voice_pair_locks(
     }
 }
 
-fn overwrites_to_json(overwrites: &[PermissionOverwrite]) -> Vec<Value> {
-    overwrites
+fn sanitize_inherited_allow(allow: u64) -> u64 {
+    allow & !FORBIDDEN_INHERITED_ALLOW
+}
+
+fn inherit_category_overwrites(
+    body: &mut Map<String, Value>,
+    guild_id: u64,
+    source_channel_id: u64,
+    overwrites: &[PermissionOverwrite],
+) {
+    let overwrites = overwrites
         .iter()
-        .filter_map(|ow| {
-            let (kind, target_id) = match ow.kind {
+        .filter_map(|overwrite| {
+            let (kind, target_id) = match overwrite.kind {
                 PermissionOverwriteType::Role(role_id) => (0u8, role_id.get()),
                 PermissionOverwriteType::Member(user_id) => (1u8, user_id.get()),
                 _ => return None,
             };
+            let original_allow = overwrite.allow.bits();
+            let allow = sanitize_inherited_allow(original_allow);
+            let removed = original_allow & !allow;
+            if removed != 0 {
+                tracing::warn!(
+                    guild_id,
+                    source_channel_id,
+                    overwrite_target_id = target_id,
+                    removed_permissions = ?Permissions::from_bits_retain(removed),
+                    "TempVoice: Moderationsrechte aus geerbtem Kanal-Overwrite entfernt"
+                );
+            }
             Some(json!({
                 "id": target_id.to_string(),
                 "type": kind,
-                "allow": ow.allow.bits().to_string(),
-                "deny": ow.deny.bits().to_string(),
+                "allow": allow.to_string(),
+                "deny": overwrite.deny.bits().to_string(),
             }))
         })
-        .collect()
+        .collect::<Vec<_>>();
+    if !overwrites.is_empty() {
+        body.insert("permission_overwrites".into(), json!(overwrites));
+    }
 }
 
 fn restricted_voice_overwrites(
@@ -568,22 +603,22 @@ impl LanePort for CacheSnapshot {
         body.insert("user_limit".into(), json!(user_limit));
         if let Some(category) = category_id {
             body.insert("parent_id".into(), json!(category.to_string()));
-            let (overwrites, bitrate) = self
+            let bitrate = self
                 .adapter
                 .cache()
                 .guild(GuildId::new(guild_id))
                 .map(|guild| {
-                    let overwrites = guild
-                        .channels
-                        .get(&ChannelId::new(category))
-                        .map(|channel| overwrites_to_json(&channel.permission_overwrites))
-                        .unwrap_or_default();
-                    (overwrites, guild_voice_bitrate_limit(guild.premium_tier))
+                    if let Some(channel) = guild.channels.get(&ChannelId::new(category)) {
+                        inherit_category_overwrites(
+                            &mut body,
+                            guild_id,
+                            category,
+                            &channel.permission_overwrites,
+                        );
+                    }
+                    guild_voice_bitrate_limit(guild.premium_tier)
                 })
-                .unwrap_or_else(|| (Vec::new(), 96_000));
-            if !overwrites.is_empty() {
-                body.insert("permission_overwrites".into(), json!(overwrites));
-            }
+                .unwrap_or(96_000);
             body.insert("bitrate".into(), json!(bitrate));
         }
         self.adapter
@@ -2432,34 +2467,17 @@ impl crate::adaptive::AdaptivePort for CacheSnapshot {
             let Some(anchor) = guild.channels.get(&ChannelId::new(anchor_id)) else {
                 return Err("Adaptive-Lane-Anker nicht im Cache".to_string());
             };
-            let overwrites: Vec<serde_json::Value> = anchor
-                .permission_overwrites
-                .iter()
-                .filter_map(|ow| {
-                    let (kind, target_id) = match ow.kind {
-                        serenity::all::PermissionOverwriteType::Role(role_id) => {
-                            (0u8, role_id.get())
-                        }
-                        serenity::all::PermissionOverwriteType::Member(user_id) => {
-                            (1u8, user_id.get())
-                        }
-                        _ => return None,
-                    };
-                    Some(json!({
-                        "id": target_id.to_string(),
-                        "type": kind,
-                        "allow": ow.allow.bits().to_string(),
-                        "deny": ow.deny.bits().to_string(),
-                    }))
-                })
-                .collect();
+            let overwrites = anchor.permission_overwrites.clone();
             (
                 overwrites,
                 anchor.user_limit.map(|limit| limit as i64).unwrap_or(0),
                 anchor.bitrate,
             )
         };
-        body.insert("permission_overwrites".into(), json!(overwrites));
+        inherit_category_overwrites(&mut body, guild_id, anchor_id, &overwrites);
+        if overwrites.is_empty() {
+            body.insert("permission_overwrites".into(), json!([]));
+        }
         body.insert("user_limit".into(), json!(user_limit));
         if let Some(bitrate) = bitrate {
             body.insert("bitrate".into(), json!(bitrate));
@@ -2578,7 +2596,11 @@ fn lfg_edit_error_from_serenity(err: serenity::Error) -> crate::lfg_panel::LfgEd
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+
     use serenity::all::{Cache, Guild, GuildChannel, GuildCreateEvent};
+    use serenity::http::HttpBuilder;
 
     use super::*;
 
@@ -2599,6 +2621,176 @@ mod tests {
         cache.update(&mut event);
         adapter.link_cache(cache);
         adapter
+    }
+
+    #[test]
+    fn inherited_allow_masks_incident_value_281475009217536() {
+        let incident_allow = 281475009217536;
+
+        let sanitized = sanitize_inherited_allow(incident_allow);
+
+        assert_eq!(sanitized & (1 << 22), 0, "MUTE_MEMBERS must be removed");
+        assert_eq!(sanitized & (1 << 23), 0, "DEAFEN_MEMBERS must be removed");
+        assert_eq!(sanitized & (1 << 24), 0, "MOVE_MEMBERS must be removed");
+        assert_ne!(sanitized & (1 << 10), 0, "VIEW_CHANNEL must remain");
+        assert_ne!(sanitized & (1 << 20), 0, "CONNECT must remain");
+        assert_ne!(sanitized & (1 << 21), 0, "SPEAK must remain");
+    }
+
+    #[test]
+    fn inherited_allow_without_forbidden_permissions_is_unchanged() {
+        let allow = (1 << 10) | (1 << 20) | (1 << 21);
+
+        assert_eq!(sanitize_inherited_allow(allow), allow);
+    }
+
+    #[test]
+    fn inherited_overwrite_never_changes_deny() {
+        let deny = Permissions::MUTE_MEMBERS | Permissions::BAN_MEMBERS;
+        let mut body = Map::new();
+        inherit_category_overwrites(
+            &mut body,
+            7,
+            42,
+            &[PermissionOverwrite {
+                allow: Permissions::VIEW_CHANNEL,
+                deny,
+                kind: PermissionOverwriteType::Member(UserId::new(9)),
+            }],
+        );
+
+        assert_eq!(
+            body["permission_overwrites"][0]["deny"],
+            deny.bits().to_string()
+        );
+    }
+
+    #[test]
+    fn inherited_category_overwrite_sanitizes_created_channel_body() {
+        let incident_allow = 281475009217536;
+        let mut body = Map::new();
+        inherit_category_overwrites(
+            &mut body,
+            7,
+            42,
+            &[PermissionOverwrite {
+                allow: Permissions::from_bits_retain(incident_allow),
+                deny: Permissions::empty(),
+                kind: PermissionOverwriteType::Role(RoleId::new(7)),
+            }],
+        );
+
+        let inherited_allow = body["permission_overwrites"][0]["allow"]
+            .as_str()
+            .and_then(|allow| allow.parse::<u64>().ok())
+            .expect("inherited allow in created channel body");
+        assert_eq!(inherited_allow & Permissions::MUTE_MEMBERS.bits(), 0);
+        assert_ne!(inherited_allow & Permissions::VIEW_CHANNEL.bits(), 0);
+    }
+
+    #[tokio::test]
+    async fn adaptive_lane_sanitizes_inherited_anchor_overwrite() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind test HTTP server");
+        let address = listener.local_addr().expect("test HTTP server address");
+        let (body_tx, body_rx) = std::sync::mpsc::channel();
+        let mut created_channel = GuildChannel::default();
+        created_channel.id = ChannelId::new(99);
+        created_channel.guild_id = GuildId::new(7);
+        created_channel.name = "adaptive-lane".to_string();
+        let response_body = serde_json::to_string(&created_channel).expect("channel response JSON");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept create-channel request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 4096];
+            let (body_start, content_length) = loop {
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("read create-channel request");
+                assert_ne!(read, 0, "request ended before headers were complete");
+                request.extend_from_slice(&buffer[..read]);
+                if let Some(header_end) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length: ")
+                                .and_then(|value| value.parse::<usize>().ok())
+                        })
+                        .expect("content-length header");
+                    break (header_end + 4, content_length);
+                }
+            };
+            while request.len() < body_start + content_length {
+                let read = stream.read(&mut buffer).expect("read create-channel body");
+                assert_ne!(read, 0, "request ended before body was complete");
+                request.extend_from_slice(&buffer[..read]);
+            }
+            body_tx
+                .send(
+                    serde_json::from_slice::<Value>(
+                        &request[body_start..body_start + content_length],
+                    )
+                    .expect("create-channel body JSON"),
+                )
+                .expect("send captured body");
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            )
+            .expect("write channel response");
+        });
+
+        let incident_allow = 281475009217536;
+        let deny = Permissions::BAN_MEMBERS | Permissions::MUTE_MEMBERS;
+        let mut adapter = test_adapter_with_overwrites(vec![PermissionOverwrite {
+            allow: Permissions::from_bits_retain(incident_allow),
+            deny,
+            kind: PermissionOverwriteType::Role(RoleId::new(7)),
+        }]);
+        Arc::get_mut(&mut adapter)
+            .expect("unique test adapter")
+            .http = Arc::new(
+            HttpBuilder::new("test-token")
+                .proxy(format!("http://{address}"))
+                .ratelimiter_disabled(true)
+                .build(),
+        );
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_lazy("postgres://localhost/test")
+            .expect("lazy pool");
+        let snapshot = CacheSnapshot {
+            adapter,
+            voice_pair_store: Arc::new(VoicePairGuardStore::new(pool)),
+            voice_pair_operations: Arc::new(VoicePairOperationLock::new(())),
+        };
+
+        let result = crate::adaptive::AdaptivePort::create_voice_channel(
+            &snapshot,
+            7,
+            5,
+            42,
+            "adaptive-lane",
+        )
+        .await;
+        server.join().expect("test HTTP server");
+        assert_eq!(result.expect("adaptive channel created"), 99);
+        let body = body_rx.recv().expect("captured create-channel body");
+        let overwrite = &body["permission_overwrites"][0];
+        let inherited_allow = overwrite["allow"]
+            .as_str()
+            .and_then(|allow| allow.parse::<u64>().ok())
+            .expect("inherited allow in adaptive channel body");
+
+        assert_eq!(inherited_allow & Permissions::MUTE_MEMBERS.bits(), 0);
+        assert_eq!(inherited_allow & Permissions::DEAFEN_MEMBERS.bits(), 0);
+        assert_eq!(inherited_allow & Permissions::MOVE_MEMBERS.bits(), 0);
+        assert_ne!(inherited_allow & Permissions::VIEW_CHANNEL.bits(), 0);
+        assert_ne!(inherited_allow & Permissions::CONNECT.bits(), 0);
+        assert_ne!(inherited_allow & Permissions::SPEAK.bits(), 0);
+        assert_eq!(overwrite["deny"], deny.bits().to_string());
     }
 
     #[test]

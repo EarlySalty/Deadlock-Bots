@@ -1,3 +1,11 @@
+## #262 — Sprachkanäle vererben keine Moderationsrechte mehr
+
+Problem: Beim Anlegen eines Sprachkanals hat der Bot die Rechte der übergeordneten Kategorie eins zu eins übernommen. Stand dort ein Häkchen zu viel, konnte in diesen Kanälen jedes Mitglied andere stummschalten oder herumschieben, ganz ohne Mod-Rolle. Genau so wurden am 17. Juni Leute stummgeschaltet, die es bis heute waren.
+
+Änderung: Rechte wie Stummschalten, Verschieben, Kicken oder Bannen werden beim Übernehmen jetzt grundsätzlich herausgefiltert. Entzogene Rechte bleiben unangetastet, und jede herausgefilterte Berechtigung landet als Warnung im Log.
+
+Aktuelles Verhalten: Moderieren kann nur noch, wer die passende Rolle hat. Ein falsch gesetztes Häkchen an einer Kategorie kann diese Rechte nicht mehr an neue Sprachkanäle weiterreichen.
+
 ## #261 — Ein Logout beendet beide Admin-Sitzungen
 
 Problem: Discord- und Twitch-Admin-Dashboard teilten zwar einen Cookie, konnten die dahinterliegende Sitzung aber getrennt weiterführen.
