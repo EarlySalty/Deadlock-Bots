@@ -3,7 +3,7 @@ pub mod kv;
 mod locks;
 pub mod pool;
 mod proactive_dm;
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
 pub use core_users::{get_user, upsert_user, CoreUser};
@@ -13,7 +13,7 @@ pub use locks::{
 };
 pub use pool::{connect_pool, dsn_from_env};
 pub use proactive_dm::{is_proactive_dm_allowed, ProactiveDmDenialReason, ProactiveDmEligibility};
-#[cfg(feature = "testing")]
+#[cfg(any(test, feature = "testing"))]
 pub use testing::{test_pool, TestDb};
 
 #[derive(Debug, thiserror::Error)]
