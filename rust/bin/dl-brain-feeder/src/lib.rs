@@ -9,8 +9,7 @@ use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
 /// Die sechs Entscheidungsklassen des KI-Ledgers. Der Digest zeigt IMMER alle,
 /// auch mit 0 — Stille darf keine Klasse verschlucken (Judge-Regel).
-pub const DECISION_CLASSES: [&str; 6] =
-    ["yes", "no", "unsure", "timeout", "error", "suppressed"];
+pub const DECISION_CLASSES: [&str; 6] = ["yes", "no", "unsure", "timeout", "error", "suppressed"];
 
 /// Auszug aus dem jüngsten Sonntags-Report (bot.brain_reports).
 #[derive(Clone, Debug)]
@@ -513,6 +512,8 @@ pub fn pick_digest_relpath(date: NaiveDate, exists: impl Fn(&str) -> bool) -> St
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)]
+
     use super::*;
     use chrono::TimeZone;
     use regex::Regex;
@@ -657,11 +658,17 @@ mod tests {
         assert!(
             rendered.markdown.contains(&header),
             "Pflicht-Kopf-Zeile fehlt/falsch: {}",
-            rendered.markdown.lines().take(4).collect::<Vec<_>>().join(" | ")
+            rendered
+                .markdown
+                .lines()
+                .take(4)
+                .collect::<Vec<_>>()
+                .join(" | ")
         );
-        assert!(rendered
-            .markdown
-            .contains(&format!("# Wochen-Digest KW{} — 2026-07-14", rendered.iso_week)));
+        assert!(rendered.markdown.contains(&format!(
+            "# Wochen-Digest KW{} — 2026-07-14",
+            rendered.iso_week
+        )));
     }
 
     #[test]
@@ -682,9 +689,7 @@ mod tests {
             twitch: TwitchSection::Unavailable("DSN nicht gesetzt".into()),
         };
         let rendered = render_digest(&data);
-        assert!(rendered
-            .markdown
-            .contains("gesehen 0 / relevant "));
+        assert!(rendered.markdown.contains("gesehen 0 / relevant "));
         // KI-Gesamt (1) + Twitch-Ausfall (1) sind die einzigen Signale.
         assert_eq!(rendered.relevant, 2);
         assert_eq!(rendered.relevant, count_bullets(&rendered.markdown));
@@ -715,7 +720,9 @@ mod tests {
         );
         let rendered = render_digest(&data);
         assert!(rendered.markdown.contains("## Twitch"));
-        assert!(rendered.markdown.contains("Quelle nicht verfügbar (Verbindung abgelehnt)"));
+        assert!(rendered
+            .markdown
+            .contains("Quelle nicht verfügbar (Verbindung abgelehnt)"));
         assert!(rendered.kategorien.iter().any(|k| k == "Twitch"));
     }
 
@@ -774,7 +781,10 @@ mod tests {
         // Regex aus test_wiki.py nachgebaut.
         let re = Regex::new(r"(?m)^## \[\d{4}-\d{2}-\d{2}\] (?:ingest|query|lint|feed|setup) — ")
             .unwrap();
-        assert!(re.is_match(&entry), "log-Eintrag verletzt Wiki-Vertrag: {entry}");
+        assert!(
+            re.is_match(&entry),
+            "log-Eintrag verletzt Wiki-Vertrag: {entry}"
+        );
         assert!(entry.starts_with("## [2026-07-14] feed — Wochen-Digest KW29"));
     }
 

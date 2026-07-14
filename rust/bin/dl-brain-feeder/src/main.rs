@@ -173,8 +173,7 @@ async fn run(
         rendered.iso_week, rendered.gesehen, rendered.relevant
     );
 
-    let (committed, pushed, status, error) =
-        publish(&wiki, &relpath, &commit_message);
+    let (committed, pushed, status, error) = publish(&wiki, &relpath, &commit_message);
 
     Ok(RunOutcome {
         period_start,
@@ -231,7 +230,9 @@ async fn collect_data(
     let brain_report = load_brain_report(pool)
         .await
         .context("bot.brain_reports lesen")?;
-    let pulse = load_pulse(pool).await.context("activity.weekly_pulse lesen")?;
+    let pulse = load_pulse(pool)
+        .await
+        .context("activity.weekly_pulse lesen")?;
     let ledger = load_ledger(pool, period_start, period_end)
         .await
         .context("bot.ai_decision_ledger aggregieren")?;
@@ -278,11 +279,13 @@ async fn load_brain_report(pool: &PgPool) -> Result<Option<BrainReportExcerpt>, 
     )
     .fetch_optional(pool)
     .await?;
-    Ok(row.map(|(period_start, period_end, report_text)| BrainReportExcerpt {
-        period_start,
-        period_end,
-        report_text,
-    }))
+    Ok(row.map(
+        |(period_start, period_end, report_text)| BrainReportExcerpt {
+            period_start,
+            period_end,
+            report_text,
+        },
+    ))
 }
 
 async fn load_pulse(pool: &PgPool) -> Result<Vec<PulseRow>, sqlx::Error> {
