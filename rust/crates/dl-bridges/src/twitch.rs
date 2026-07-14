@@ -22,6 +22,9 @@ use tokio::sync::RwLock;
 pub const TWITCH_INTERNAL_API_BASE_PATH: &str = "/internal/twitch/v1";
 pub const TRACKING_PREFIX: &str = "twitch-live:";
 pub const SPAM_LEARNING_PREFIX: &str = "spam-learning:";
+pub const CREW_BAN_PREFIX: &str = "crew_ban:";
+const CREW_BAN_REASON: &str =
+    "Abwerbe-/Diffamierungskampagne im Chat (Crew-Guard-Radar, manuell bestätigt)";
 const DEFAULT_BUTTON_LABEL: &str = "Auf Twitch ansehen";
 /// Backoff der Start-Rehydrierung (der Twitch-Bot kann später hochkommen).
 const RESTORE_RETRY_DELAYS: [u64; 5] = [1, 2, 5, 10, 30];
@@ -388,6 +391,34 @@ impl TwitchApiClient {
                 .to_string(),
         ))
     }
+
+    pub async fn add_global_ban(
+        &self,
+        login: &str,
+        chatter_id: &str,
+        reason: &str,
+    ) -> Result<(), TwitchBridgeError> {
+        let url = format!(
+            "{}{TWITCH_INTERNAL_API_BASE_PATH}/globalban/add",
+            self.base_url
+        );
+        let response = self
+            .http
+            .post(&url)
+            .header("X-Internal-Token", &self.token)
+            .json(&json!({
+                "login": login,
+                "chatter_id": chatter_id,
+                "reason": reason,
+            }))
+            .send()
+            .await
+            .map_err(|e| TwitchBridgeError::Api(e.to_string()))?;
+        if !response.status().is_success() {
+            return Err(TwitchBridgeError::Status(response.status().as_u16()));
+        }
+        Ok(())
+    }
 }
 
 fn is_loopback_host(host: &str) -> bool {
@@ -595,6 +626,11 @@ pub struct SpamLearningHandler {
     pub client: Arc<TwitchApiClient>,
 }
 
+struct CrewBanHandler {
+    client: Arc<TwitchApiClient>,
+    owner_id: Option<u64>,
+}
+
 /// Aktion aus der custom_id — alle Button-Daten reisen im Button selbst,
 /// damit Korrekturen jeden dl-bot-Restart überleben (kein Store mehr).
 #[derive(Debug, PartialEq, Eq)]
@@ -632,6 +668,24 @@ fn corrected_components(label: &str) -> Value {
             "style": 2,
             "label": label,
             "custom_id": "spam-learning:done",
+            "disabled": true,
+        }],
+    }])
+}
+
+fn parse_crew_ban_custom_id(custom_id: &str) -> Option<(&str, &str)> {
+    let (chatter_id, login) = custom_id.strip_prefix(CREW_BAN_PREFIX)?.split_once(':')?;
+    (!chatter_id.is_empty() && !login.is_empty()).then_some((chatter_id, login))
+}
+
+fn completed_crew_ban_components(custom_id: &str) -> Value {
+    json!([{
+        "type": 1,
+        "components": [{
+            "type": 2,
+            "style": 4,
+            "label": "Auf Banliste gesetzt",
+            "custom_id": custom_id,
             "disabled": true,
         }],
     }])
@@ -690,6 +744,85 @@ impl InteractionHandler for SpamLearningHandler {
     }
 }
 
+#[async_trait::async_trait]
+impl InteractionHandler for CrewBanHandler {
+    async fn handle(&self, interaction: BridgeInteraction) -> BridgeReply {
+        let target = parse_crew_ban_custom_id(&interaction.custom_id);
+        let (chatter_id, login) = target.unwrap_or(("", ""));
+        let is_owner = self
+            .owner_id
+            .filter(|owner_id| *owner_id > 0)
+            .is_some_and(|owner_id| owner_id == interaction.user_id);
+        if !is_owner {
+            tracing::warn!(
+                actor_id = interaction.user_id,
+                actor = %interaction.author_name,
+                chatter_id,
+                login,
+                result = "denied",
+                "Crew-Radar-Ban-Klick"
+            );
+            return BridgeReply::ephemeral_text("Dafür fehlen dir die Rechte.");
+        }
+        let Some((chatter_id, login)) = target else {
+            tracing::error!(
+                actor_id = interaction.user_id,
+                actor = %interaction.author_name,
+                custom_id = %interaction.custom_id,
+                result = "invalid_custom_id",
+                "Crew-Radar-Ban-Klick"
+            );
+            return BridgeReply::ephemeral_text("Platzhalter");
+        };
+
+        match self
+            .client
+            .add_global_ban(login, chatter_id, CREW_BAN_REASON)
+            .await
+        {
+            Ok(()) => {
+                tracing::info!(
+                    actor_id = interaction.user_id,
+                    actor = %interaction.author_name,
+                    chatter_id,
+                    login,
+                    result = "success",
+                    "Crew-Radar-Ban-Klick"
+                );
+                BridgeReply {
+                    components: Some(completed_crew_ban_components(&interaction.custom_id)),
+                    update_message: true,
+                    ..BridgeReply::default()
+                }
+            }
+            Err(TwitchBridgeError::Status(status)) => {
+                tracing::error!(
+                    actor_id = interaction.user_id,
+                    actor = %interaction.author_name,
+                    chatter_id,
+                    login,
+                    status,
+                    result = "http_error",
+                    "Crew-Radar-Ban-Klick"
+                );
+                BridgeReply::ephemeral_text(format!("Platzhalter (HTTP-Status {status})"))
+            }
+            Err(err) => {
+                tracing::error!(
+                    actor_id = interaction.user_id,
+                    actor = %interaction.author_name,
+                    chatter_id,
+                    login,
+                    %err,
+                    result = "request_error",
+                    "Crew-Radar-Ban-Klick"
+                );
+                BridgeReply::ephemeral_text("Platzhalter")
+            }
+        }
+    }
+}
+
 /// Registriert die Twitch-Live-Routen am Router.
 pub fn register(
     router: &mut InteractionRouter,
@@ -706,6 +839,17 @@ pub fn register_spam_learning(router: &mut InteractionRouter, client: Arc<Twitch
     router.on_prefix(
         SPAM_LEARNING_PREFIX,
         Arc::new(SpamLearningHandler { client }),
+    );
+}
+
+pub fn register_crew_ban(
+    router: &mut InteractionRouter,
+    client: Arc<TwitchApiClient>,
+    owner_id: Option<u64>,
+) {
+    router.on_prefix(
+        CREW_BAN_PREFIX,
+        Arc::new(CrewBanHandler { client, owner_id }),
     );
 }
 
@@ -821,6 +965,44 @@ mod tests {
                     }
                 }),
             );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), received, handle)
+    }
+
+    async fn mock_global_ban_bot(
+        response_status: u16,
+    ) -> (
+        String,
+        Arc<Mutex<Vec<(String, Value)>>>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let received: Arc<Mutex<Vec<(String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+        let rec_add = received.clone();
+        let app = axum::Router::new().route(
+            "/internal/twitch/v1/globalban/add",
+            axum::routing::post(
+                move |headers: axum::http::HeaderMap, body: axum::Json<Value>| {
+                    let received = rec_add.clone();
+                    async move {
+                        let token = headers
+                            .get("X-Internal-Token")
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or_default()
+                            .to_string();
+                        received.lock().expect("lock").push((token, body.0));
+                        let status = axum::http::StatusCode::from_u16(response_status)
+                            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+                        (status, axum::Json(json!({"ok": status.is_success()})))
+                    }
+                },
+            ),
+        );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -1117,6 +1299,90 @@ mod tests {
             })
             .await;
         assert!(reply.content.expect("text").contains("Keine Berechtigung"));
+    }
+
+    #[tokio::test]
+    async fn crew_ban_klick_von_fremder_user_id_ruft_api_nicht_auf() {
+        let (url, received, server) = mock_global_ban_bot(200).await;
+        let handler = CrewBanHandler {
+            client: TwitchApiClient::new(url, "tok", Duration::from_secs(5)),
+            owner_id: Some(42),
+        };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "crew_ban:1509530433:sieg_deutschland".to_string(),
+                user_id: 7,
+                author_name: "fremd".to_string(),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Dafür fehlen dir die Rechte.")
+        );
+        assert!(received.lock().expect("lock").is_empty());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn crew_ban_non_2xx_laesst_button_aktiv_und_meldet_status() {
+        let (url, received, server) = mock_global_ban_bot(503).await;
+        let handler = CrewBanHandler {
+            client: TwitchApiClient::new(url, "tok", Duration::from_secs(5)),
+            owner_id: Some(42),
+        };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "crew_ban:1509530433:sieg_deutschland".to_string(),
+                user_id: 42,
+                author_name: "nani".to_string(),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.ephemeral);
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("Platzhalter (HTTP-Status 503)")
+        );
+        assert!(!reply.update_message);
+        assert!(reply.components.is_none());
+        assert_eq!(received.lock().expect("lock").len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn crew_ban_erfolg_postet_schema_und_deaktiviert_button() {
+        let (url, received, server) = mock_global_ban_bot(200).await;
+        let handler = CrewBanHandler {
+            client: TwitchApiClient::new(url, "tok", Duration::from_secs(5)),
+            owner_id: Some(42),
+        };
+        let reply = handler
+            .handle(BridgeInteraction {
+                custom_id: "crew_ban:1509530433:sieg_deutschland".to_string(),
+                user_id: 42,
+                author_name: "nani".to_string(),
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert!(reply.update_message);
+        let button = &reply.components.expect("components")[0]["components"][0];
+        assert_eq!(button["label"], "Auf Banliste gesetzt");
+        assert_eq!(button["disabled"], true);
+        let sent = received.lock().expect("lock");
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent[0].0, "tok");
+        assert_eq!(sent[0].1["login"], "sieg_deutschland");
+        assert_eq!(sent[0].1["chatter_id"], "1509530433");
+        assert_eq!(
+            sent[0].1["reason"],
+            "Abwerbe-/Diffamierungskampagne im Chat (Crew-Guard-Radar, manuell bestätigt)"
+        );
+        server.abort();
     }
 
     #[tokio::test]
