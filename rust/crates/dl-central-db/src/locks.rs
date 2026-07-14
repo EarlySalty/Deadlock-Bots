@@ -27,7 +27,7 @@ pub async fn lock_user_privacy(
     Ok(())
 }
 
-/// Sperrt den User und prueft den Opt-out-Grabstein unter demselben Lock.
+/// Sperrt den User und prueft den Privacy-Grabstein unter demselben Lock.
 pub async fn lock_user_privacy_and_is_opted_out(
     tx: &mut Transaction<'_, Postgres>,
     user_id: i64,
@@ -36,7 +36,7 @@ pub async fn lock_user_privacy_and_is_opted_out(
     sqlx::query_scalar(
         "SELECT EXISTS(
              SELECT 1 FROM core.user_privacy
-              WHERE user_id = $1 AND opted_out = TRUE
+              WHERE user_id = $1 AND (opted_out = TRUE OR deleted_at IS NOT NULL)
          )",
     )
     .bind(user_id)
