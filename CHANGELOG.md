@@ -1,10 +1,18 @@
-## #263 — Verlorene Steam-Verknüpfungen finden zurück
+## #264 — Verlorene Steam-Verknüpfungen finden zurück
 
 Problem: Im Februar hat der Bot bei einem fehlerhaften Abgleich angenommen, über zweihundert Mitglieder hätten den Server verlassen, obwohl sie da waren. Er hat ihre Steam-Verknüpfung gelöst und sie von seiner Freundesliste entfernt. Über hundert von ihnen liefen seitdem ohne Rang-Rolle herum, ohne zu wissen warum.
 
 Änderung: Der Bot hält jetzt fest, warum eine Verknüpfung gelöst wurde. Hat er sie selbst gekappt, gilt das Mitglied als Rückkehrer und bekommt beim nächsten Besuch in einem Sprachkanal automatisch eine neue Freundschaftsanfrage.
 
-Aktuelles Verhalten: Wer damals betroffen war, wird wieder angefragt und hat seinen Rang nach dem Bestätigen zurück. Angefragt wird nur, wer im Sprachkanal aktiv ist, und frühestens alle 30 Tage erneut.
+Aktuelles Verhalten: Wer damals betroffen war, wird wieder angefragt und hat seinen Rang nach dem Bestätigen zurück. Angefragt wird nur, wer im Sprachkanal aktiv ist, und frühestens alle 30 Tage erneut. Wer die Verknüpfung selbst über den Knopf im Panel entfernt, bleibt entfernt.
+
+## #263 — Steam-Panel bekommt einen Knopf zum Entfernen
+
+Problem: Das Steam-Panel zeigte nur den Weg hinein. Wer seine Verknüpfung wieder loswerden wollte, musste einen Slash-Befehl kennen, den kaum jemand kennt.
+
+Änderung: Das Panel hat jetzt einen vierten, roten Knopf zum Entfernen der Verknüpfung. Er fragt vorher nach und zeigt, was entfernt wird.
+
+Aktuelles Verhalten: Verknüpfen und Entfernen liegen an derselben Stelle. Beim Entfernen löst der Bot auch die Steam-Freundschaft auf, nicht nur den Eintrag bei uns.
 
 ## #262 — Sprachkanäle vererben keine Moderationsrechte mehr
 

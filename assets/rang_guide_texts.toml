@@ -33,6 +33,7 @@ steam_open = "🔗 Steam verknüpfen"
 linked_role = "✅ Discord-Verknüpfung herstellen"
 friend_code = "🔢 Freundescode eingeben"
 rankcheck = "📊 Rang prüfen"
+unlink = "🔓 Verknüpfung entfernen"
 
 [urls]
 linked_role_login = "https://deutsche-deadlock-community.de/coaching/api/auth/discord/linked-role/login"
