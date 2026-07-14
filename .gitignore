@@ -69,6 +69,7 @@ Gemini.ps1
 !scripts/kill_stale_bot.sh
 !scripts/test_dl_knowledge_launcher.py
 !scripts/wait_for_infisical.sh
+!scripts/export_infisical_env.py
 !scripts/run_brain_feeder.sh
 /service/pg_twitch/
 /.github/tmp

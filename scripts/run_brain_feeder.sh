@@ -40,4 +40,9 @@ fi
 INFISICAL_EXPORT="$("$PYTHON_BIN" "$ROOT_DIR/scripts/export_infisical_env.py" --format shell)"
 eval "$INFISICAL_EXPORT"
 
+# Das Infisical-GITHUB_TOKEN hat keinen Zugriff aufs 2nd-Brain-Repo und würde
+# den funktionierenden git-credential-Helper des Users übersteuern (403 beim
+# Wiki-Pull/-Push). Der Feeder braucht keine GitHub-API-Tokens — weg damit.
+unset GITHUB_TOKEN GH_TOKEN
+
 exec "$ROOT_DIR/rust/target/release/dl-brain-feeder"
