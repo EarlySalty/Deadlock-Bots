@@ -216,6 +216,7 @@ struct AuditEntry {
     occurred_at: String,
     action_type: i32,
     action_name: String,
+    action_icon: &'static str,
     category: &'static str,
     actor: NamedId,
     target: TargetId,
@@ -395,6 +396,41 @@ fn action_name(action_type: i32) -> String {
     name.to_string()
 }
 
+fn action_icon(action_type: i32) -> &'static str {
+    match action_type {
+        1 => "⚙️",
+        10..=12 => "📁",
+        13..=15 => "🔐",
+        20 => "👢",
+        21 => "🧹",
+        22 => "🔨",
+        23 => "🕊️",
+        24 => "🔇",
+        25 => "🏷️",
+        26 => "🔀",
+        27 => "🔌",
+        28 => "🤖",
+        30..=32 => "🏷️",
+        40..=42 => "🔗",
+        50..=52 => "🪝",
+        60..=62 => "😀",
+        72 | 73 => "🗑️",
+        74 | 75 => "📌",
+        80..=82 => "🧩",
+        83..=85 => "🎤",
+        90..=92 => "🖼️",
+        100..=102 => "📅",
+        110..=112 => "🧵",
+        121 => "⚡",
+        130..=132 => "🔊",
+        140..=145 => "🛡️",
+        163..=167 => "🚪",
+        190 | 191 => "🏠",
+        192 | 193 => "🗨️",
+        _ => "❓",
+    }
+}
+
 pub async fn audit_log(
     State(app): State<DashboardApp>,
     headers: HeaderMap,
@@ -547,6 +583,7 @@ pub async fn audit_log(
                 occurred_at: row.occurred_at.to_rfc3339(),
                 action_type: row.action_type,
                 action_name: action_name(row.action_type),
+                action_icon: action_icon(row.action_type),
                 category: category_for(row.action_type),
                 actor: named(row.user_id),
                 target: TargetId {
@@ -622,6 +659,20 @@ mod tests {
         assert_eq!(action_name(50), "Webhook erstellt");
         assert_eq!(action_name(192), "Kanal-Status gesetzt");
         assert_eq!(action_name(999), "Unbekannt (999)");
+    }
+
+    #[test]
+    fn maps_action_icons_with_unknown_fallback() {
+        assert_eq!(action_icon(22), "🔨");
+        assert_eq!(action_icon(40), "🔗");
+        assert_eq!(action_icon(192), "🗨️");
+        assert_eq!(action_icon(9999), "❓");
+    }
+
+    #[test]
+    fn action_names_do_not_contain_presentation_icons() {
+        assert_eq!(action_name(22), "Mitglied gebannt");
+        assert!(!action_name(22).contains(action_icon(22)));
     }
 
     #[test]
