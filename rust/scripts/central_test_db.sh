@@ -11,7 +11,7 @@ fi
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 IMAGE="timescale/timescaledb:2.17.2-pg16"
 NAME="dl-central-test-postgres-$$"
-DB="deadlock"
+DB="deadlock_test"
 USER="deadlock"
 PASS="testpw"
 

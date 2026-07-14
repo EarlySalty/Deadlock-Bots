@@ -12,7 +12,8 @@ use sqlx::{
 
 use crate::CentralDbError;
 
-const TEST_DSN_ENV_VARS: [&str; 3] = ["CENTRAL_TEST_DSN", "DATABASE_URL", "DEADLOCK_CENTRAL_DSN"];
+const TEST_DSN_ENV_VARS: [&str; 2] = ["CENTRAL_TEST_DSN", "DATABASE_URL"];
+const PROD_DB_NAMES: &[&str] = &["deadlock"];
 static TEST_DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 pub struct TestDb {
@@ -150,15 +151,32 @@ pub async fn test_pool() -> Result<TestDb, CentralDbError> {
 }
 
 fn test_dsn_from_env() -> Result<String, CentralDbError> {
-    TEST_DSN_ENV_VARS
+    let candidates = TEST_DSN_ENV_VARS.map(|name| (name, std::env::var(name).ok()));
+    pick_test_dsn(&candidates)
+}
+
+fn pick_test_dsn(candidates: &[(&str, Option<String>)]) -> Result<String, CentralDbError> {
+    let dsn = candidates
         .iter()
-        .find_map(|name| std::env::var(name).ok())
+        .find_map(|(_, dsn)| dsn.as_deref())
         .ok_or_else(|| {
-            CentralDbError::TestHarness(format!(
-                "eine der Umgebungsvariablen {} muss gesetzt sein",
-                TEST_DSN_ENV_VARS.join(", ")
-            ))
-        })
+            CentralDbError::TestHarness(
+                "CENTRAL_TEST_DSN muss gesetzt sein; rust/scripts/central_test_db.sh richtet die Testinstanz ein"
+                    .to_owned(),
+            )
+        })?;
+    let options = PgConnectOptions::from_str(dsn)?;
+
+    if let Some(database) = options
+        .get_database()
+        .filter(|database| PROD_DB_NAMES.contains(database))
+    {
+        return Err(CentralDbError::TestHarness(format!(
+            "Testlauf gegen die Produktionsdatenbank '{database}' verweigert; CENTRAL_TEST_DSN auf eine Testinstanz setzen"
+        )));
+    }
+
+    Ok(dsn.to_owned())
 }
 
 fn unique_db_name() -> String {
@@ -228,5 +246,55 @@ fn quoted_ident(ident: &str) -> Result<String, CentralDbError> {
         Err(CentralDbError::TestHarness(format!(
             "ungueltiger Test-Datenbankname: {ident}"
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_test_dsn;
+
+    #[test]
+    fn picks_central_test_dsn_for_a_test_database() {
+        let candidates = [(
+            "CENTRAL_TEST_DSN",
+            Some("postgres://localhost/deadlock_test".to_owned()),
+        )];
+
+        let dsn = pick_test_dsn(&candidates).expect("test database DSN should be accepted");
+
+        assert_eq!(dsn, "postgres://localhost/deadlock_test");
+    }
+
+    #[test]
+    fn missing_dsn_names_required_variable_and_setup_script() {
+        let err = pick_test_dsn(&[("CENTRAL_TEST_DSN", None), ("DATABASE_URL", None)])
+            .expect_err("missing test DSN should be rejected");
+        let message = err.to_string();
+
+        assert!(message.contains("CENTRAL_TEST_DSN"));
+        assert!(message.contains("rust/scripts/central_test_db.sh"));
+    }
+
+    #[test]
+    fn rejects_production_database_from_every_candidate() {
+        for variable in ["CENTRAL_TEST_DSN", "DATABASE_URL"] {
+            let err =
+                pick_test_dsn(&[(variable, Some("postgres://localhost/deadlock".to_owned()))])
+                    .expect_err("production database DSN should be rejected");
+            let message = err.to_string();
+
+            assert!(message.contains("deadlock"), "{variable}: {message}");
+            assert!(
+                message.contains("CENTRAL_TEST_DSN"),
+                "{variable}: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_dsn_without_explicit_database_name() {
+        let candidates = [("CENTRAL_TEST_DSN", Some("postgres://localhost".to_owned()))];
+
+        assert!(pick_test_dsn(&candidates).is_ok());
     }
 }

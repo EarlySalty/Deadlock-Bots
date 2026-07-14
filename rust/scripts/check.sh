@@ -11,6 +11,6 @@ echo "==> cargo clippy (-D warnings)"
 cargo clippy --workspace --all-targets -- -D warnings
 
 echo "==> cargo test"
-cargo test --workspace
+./scripts/central_test_db.sh cargo test --workspace
 
 echo "OK — alle Checks grün."
