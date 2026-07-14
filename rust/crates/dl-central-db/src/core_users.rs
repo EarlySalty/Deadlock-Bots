@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 
-use crate::CentralDbError;
+use crate::{lock_user_privacy_and_is_opted_out, CentralDbError};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoreUser {
@@ -20,6 +20,13 @@ pub async fn upsert_user(
     global_name: Option<&str>,
     avatar: Option<&str>,
 ) -> Result<(), CentralDbError> {
+    let mut tx = pool.begin().await?;
+    if lock_user_privacy_and_is_opted_out(&mut tx, discord_id).await? {
+        tx.commit().await?;
+        tracing::debug!(discord_id, "Privacy-Tombstone: Upsert uebersprungen");
+        return Ok(());
+    }
+
     sqlx::query!(
         r#"
         INSERT INTO core.users (discord_id, username, global_name, avatar)
@@ -35,8 +42,10 @@ pub async fn upsert_user(
         global_name,
         avatar,
     )
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(())
 }
