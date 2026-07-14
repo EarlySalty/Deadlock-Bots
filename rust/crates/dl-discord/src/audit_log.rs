@@ -1,4 +1,4 @@
-use std::{num::ParseIntError, sync::Arc, time::Duration};
+use std::{fmt::Display, future::Future, num::ParseIntError, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
@@ -33,6 +33,8 @@ enum AuditLogError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    CentralDatabase(#[from] dl_central_db::CentralDbError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -47,9 +49,19 @@ struct RawAuditLogEntry {
 }
 
 #[derive(Debug, Deserialize)]
+struct RawAuditUser {
+    id: String,
+    username: Option<String>,
+    global_name: Option<String>,
+    avatar: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct RawAuditLogPage {
     #[serde(rename = "audit_log_entries")]
     entries: Vec<RawAuditLogEntry>,
+    #[serde(default)]
+    users: Vec<RawAuditUser>,
 }
 
 #[derive(Debug)]
@@ -63,6 +75,38 @@ struct AuditLogRow {
     options: Option<Value>,
     reason: Option<String>,
     occurred_at: DateTime<Utc>,
+}
+
+async fn upsert_users_best_effort<E, F, Fut>(users: Vec<RawAuditUser>, mut upsert: F)
+where
+    E: Display,
+    F: FnMut(RawAuditUser) -> Fut,
+    Fut: Future<Output = Result<(), E>>,
+{
+    for user in users {
+        let user_id = user.id.clone();
+        if let Err(err) = upsert(user).await {
+            tracing::warn!(%err, user_id, "core.users-Upsert aus Audit-Log fehlgeschlagen");
+        }
+    }
+}
+
+async fn upsert_audit_user(pool: &PgPool, user: &RawAuditUser) -> Result<(), AuditLogError> {
+    let discord_id = parse_id(&user.id, "audit_user_id")?;
+    let username = user
+        .username
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let global_name = user
+        .global_name
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    let avatar = user
+        .avatar
+        .as_deref()
+        .filter(|value| !value.trim().is_empty());
+    dl_central_db::upsert_user(pool, discord_id, username, global_name, avatar).await?;
+    Ok(())
 }
 
 fn parse_id(value: &str, field: &'static str) -> Result<i64, AuditLogError> {
@@ -179,6 +223,10 @@ async fn sync_once(
             )
             .await
             .map_err(Box::new)?;
+        upsert_users_best_effort(logs.users, |user| async move {
+            upsert_audit_user(pool, &user).await
+        })
+        .await;
         let page_len = logs.entries.len();
         let Some(oldest_id) = logs.entries.last().map(|entry| entry.id.clone()) else {
             break;
@@ -248,6 +296,11 @@ pub fn spawn(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
     use serde_json::json;
 
     use super::*;
@@ -301,9 +354,21 @@ mod tests {
                 "action_type": 1,
                 "user_id": null,
                 "target_id": null
+            }],
+            "users": [{
+                "id": "123456789",
+                "username": "audit-user",
+                "global_name": "Audit User",
+                "avatar": "avatar-hash"
             }]
         }))
         .expect("audit page with system entry");
+
+        assert_eq!(page.users.len(), 1);
+        assert_eq!(page.users[0].id, "123456789");
+        assert_eq!(page.users[0].username.as_deref(), Some("audit-user"));
+        assert_eq!(page.users[0].global_name.as_deref(), Some("Audit User"));
+        assert_eq!(page.users[0].avatar.as_deref(), Some("avatar-hash"));
 
         let row = row_from_entry(
             1_289_721_245_281_292_288,
@@ -334,6 +399,83 @@ mod tests {
     fn startup_backfill_ignores_existing_max_until_complete() {
         assert_eq!(sync_cursor(true, Some(300)), None);
         assert_eq!(sync_cursor(false, Some(300)), Some(300));
+    }
+
+    #[tokio::test]
+    async fn failed_user_upsert_does_not_stop_following_users() {
+        let page: RawAuditLogPage = serde_json::from_value(json!({
+            "audit_log_entries": [],
+            "users": [
+                {"id": "1", "username": "fails"},
+                {"id": "2", "username": "continues"}
+            ]
+        }))
+        .expect("audit users");
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        upsert_users_best_effort(page.users, {
+            let calls = Arc::clone(&calls);
+            move |user| {
+                let calls = Arc::clone(&calls);
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    if user.id == "1" {
+                        Err("simulierter Upsert-Fehler")
+                    } else {
+                        Ok(())
+                    }
+                }
+            }
+        })
+        .await;
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
+    async fn audit_user_upsert_preserves_names_and_raw_when_new_values_are_empty() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("central test db");
+        let discord_id = 9_101_000_020_i64;
+        let original_raw = json!({"source": "existing"});
+        sqlx::query(
+            "INSERT INTO core.users (discord_id, username, global_name, raw) VALUES ($1, $2, $3, $4)",
+        )
+        .bind(discord_id)
+        .bind("existing-user")
+        .bind("Existing User")
+        .bind(&original_raw)
+        .execute(db.pool())
+        .await
+        .expect("seed core user");
+        let page: RawAuditLogPage = serde_json::from_value(json!({
+            "audit_log_entries": [],
+            "users": [{
+                "id": discord_id.to_string(),
+                "username": null,
+                "global_name": "",
+                "avatar": null
+            }]
+        }))
+        .expect("audit user");
+
+        upsert_audit_user(db.pool(), &page.users[0])
+            .await
+            .expect("upsert audit user");
+
+        let stored: (Option<String>, Option<String>, Value) = sqlx::query_as(
+            "SELECT username, global_name, raw FROM core.users WHERE discord_id = $1",
+        )
+        .bind(discord_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("read core user");
+        assert_eq!(stored.0.as_deref(), Some("existing-user"));
+        assert_eq!(stored.1.as_deref(), Some("Existing User"));
+        assert_eq!(stored.2, original_raw);
     }
 
     #[cfg(feature = "testing")]

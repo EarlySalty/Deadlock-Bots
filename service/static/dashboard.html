@@ -1435,6 +1435,127 @@
             display: block;
         }
 
+        /* ─── Tab: Audit-Log ─── */
+        .audit-heading {
+            margin-bottom: 1rem;
+        }
+        .audit-heading h2 {
+            margin-bottom: 0.3rem;
+        }
+        .audit-heading p,
+        .audit-status {
+            color: #adb5bd;
+            margin: 0;
+        }
+        .audit-filters {
+            display: grid;
+            grid-template-columns: repeat(4, minmax(150px, 1fr));
+            gap: 0.9rem;
+        }
+        .audit-field,
+        .audit-categories {
+            min-width: 0;
+        }
+        .audit-field label,
+        .audit-categories legend {
+            display: block;
+            margin-bottom: 0.35rem;
+            color: #adb5bd;
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+        .audit-field input,
+        .audit-field select {
+            width: 100%;
+            box-sizing: border-box;
+            border: 1px solid rgba(255,255,255,0.1);
+            border-radius: 6px;
+            background: #1f1f1f;
+            color: inherit;
+            padding: 0.45rem 0.65rem;
+        }
+        .audit-categories {
+            grid-column: span 2;
+            border: 0;
+            padding: 0;
+            margin: 0;
+        }
+        .audit-checks {
+            display: flex;
+            flex-wrap: wrap;
+            align-items: center;
+            gap: 0.55rem 0.9rem;
+            min-height: 2.2rem;
+        }
+        .audit-checks label,
+        .audit-toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin: 0;
+        }
+        .audit-checks input,
+        .audit-toggle input {
+            width: auto;
+            accent-color: #4dabf7;
+        }
+        .audit-actions {
+            display: flex;
+            align-items: end;
+        }
+        .audit-actions button {
+            width: 100%;
+            margin: 0;
+        }
+        .audit-status {
+            display: flex;
+            flex-wrap: wrap;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin: 1rem 0 0.65rem;
+        }
+        .audit-noise {
+            color: #ffd43b;
+        }
+        .audit-table-card {
+            padding: 0;
+            overflow: hidden;
+        }
+        .audit-table {
+            min-width: 1050px;
+        }
+        .audit-table th,
+        .audit-table td {
+            white-space: normal;
+            vertical-align: top;
+            overflow-wrap: anywhere;
+        }
+        .audit-table td:nth-child(1) { width: 150px; white-space: nowrap; }
+        .audit-table td:nth-child(2) { width: 230px; }
+        .audit-table td:nth-child(3),
+        .audit-table td:nth-child(4) { width: 190px; }
+        .audit-table td:nth-child(5) { min-width: 270px; }
+        .audit-table td:nth-child(6) { min-width: 220px; }
+        .audit-muted { color: #adb5bd; }
+        .audit-empty {
+            padding: 2rem;
+            color: #adb5bd;
+            text-align: center;
+        }
+        .audit-more {
+            display: block;
+            min-width: 180px;
+            margin: 1rem auto 0;
+        }
+        .audit-hidden { display: none; }
+        @media (max-width: 900px) {
+            .audit-filters { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
+        }
+        @media (max-width: 560px) {
+            .audit-filters { grid-template-columns: 1fr; }
+            .audit-categories { grid-column: span 1; }
+        }
+
         /* ─── Tab: Entwicklung (Repo-Aktivität) ─── */
         .dev-kpi-grid {
             display: grid;
@@ -1553,7 +1674,6 @@
         <div class="top-nav-left">
             <span id="auth-user-label" class="auth-user">{{AUTH_USER_LABEL}}</span>
             <a href="/insights">Server-Einblicke</a>
-            <a href="/audit">Audit-Log</a>
             <a id="auth-login-link" href="{{DISCORD_LOGIN_URL}}" rel="nofollow">Discord Login</a>
             <a id="auth-logout-link" href="{{AUTH_LOGOUT_URL}}" rel="nofollow">Logout</a>
         </div>
@@ -1605,6 +1725,7 @@
         <button class="tab-btn" data-tab="scrims">Scrims</button>
         <button class="tab-btn" data-tab="cogs">Cogs</button>
         <button class="tab-btn" data-tab="logs">Logs</button>
+        <button class="tab-btn" data-tab="audit">Audit-Log</button>
         <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
     </nav>
 
@@ -2126,6 +2247,136 @@
         </section>
 
     </div><!-- end tab: logs -->
+
+    <!-- ════════════════════════════════════════════════
+         Tab: Audit-Log
+         ════════════════════════════════════════════════ -->
+    <div class="tab-panel" data-tab="audit">
+        <section>
+            <div class="audit-heading">
+                <h2>Audit-Log</h2>
+                <p>Echte Admin-Aktionen prüfen und Automatik-Rauschen gezielt einblenden.</p>
+            </div>
+
+            <form id="audit-filters" class="card audit-filters">
+                <div class="audit-field">
+                    <label for="audit-from">Von</label>
+                    <input type="date" id="audit-from">
+                </div>
+                <div class="audit-field">
+                    <label for="audit-to">Bis</label>
+                    <input type="date" id="audit-to">
+                </div>
+                <div class="audit-field">
+                    <label for="audit-action-type">Aktionstyp</label>
+                    <select id="audit-action-type">
+                        <option value="">Alle Aktionen</option>
+                        <option value="1">Server geändert</option>
+                        <option value="10">Kanal erstellt</option>
+                        <option value="11">Kanal geändert</option>
+                        <option value="12">Kanal gelöscht</option>
+                        <option value="13">Kanal-Berechtigung erstellt</option>
+                        <option value="14">Kanal-Berechtigung geändert</option>
+                        <option value="15">Kanal-Berechtigung gelöscht</option>
+                        <option value="20">Mitglied gekickt</option>
+                        <option value="22">Gebannt</option>
+                        <option value="23">Entbannt</option>
+                        <option value="24">Mitglied geändert</option>
+                        <option value="25">Rollen geändert</option>
+                        <option value="26">Mitglied verschoben</option>
+                        <option value="27">Mitglied getrennt</option>
+                        <option value="30">Rolle erstellt</option>
+                        <option value="31">Rolle geändert</option>
+                        <option value="32">Rolle gelöscht</option>
+                        <option value="40">Webhook erstellt</option>
+                        <option value="41">Webhook geändert</option>
+                        <option value="42">Webhook gelöscht</option>
+                        <option value="50">Emoji erstellt</option>
+                        <option value="51">Emoji geändert</option>
+                        <option value="52">Emoji gelöscht</option>
+                        <option value="60">Integration erstellt</option>
+                        <option value="61">Integration geändert</option>
+                        <option value="62">Integration gelöscht</option>
+                        <option value="72">Nachricht gelöscht</option>
+                        <option value="73">Nachrichten gesammelt gelöscht</option>
+                        <option value="74">Nachricht angepinnt</option>
+                        <option value="75">Nachricht losgelöst</option>
+                        <option value="80">Sticker erstellt</option>
+                        <option value="81">Sticker geändert</option>
+                        <option value="82">Sticker gelöscht</option>
+                        <option value="110">Thread erstellt</option>
+                        <option value="111">Thread geändert</option>
+                        <option value="112">Thread gelöscht</option>
+                        <option value="143">AutoMod-Aktion ausgelöst</option>
+                        <option value="144">AutoMod-Meldung ausgelöst</option>
+                        <option value="145">AutoMod-Timeout ausgelöst</option>
+                        <option value="163">Onboarding-Prompt erstellt</option>
+                        <option value="164">Onboarding-Prompt geändert</option>
+                        <option value="165">Onboarding-Prompt gelöscht</option>
+                        <option value="166">Onboarding erstellt</option>
+                        <option value="167">Onboarding geändert</option>
+                        <option value="190">Startseiten-Funktion erstellt</option>
+                        <option value="191">Startseiten-Funktion geändert</option>
+                        <option value="192">Startseiten-Funktion gelöscht</option>
+                        <option value="193">Startseiten-Einstellungen geändert</option>
+                    </select>
+                </div>
+                <div class="audit-field">
+                    <label for="audit-q">Grund durchsuchen</label>
+                    <input type="search" id="audit-q" placeholder="Freitext">
+                </div>
+                <fieldset class="audit-categories">
+                    <legend>Kategorien</legend>
+                    <div class="audit-checks">
+                        <label><input type="checkbox" name="audit-category" value="moderation">Moderation</label>
+                        <label><input type="checkbox" name="audit-category" value="rollen">Rollen</label>
+                        <label><input type="checkbox" name="audit-category" value="struktur">Struktur</label>
+                        <label><input type="checkbox" name="audit-category" value="sonstiges">Sonstiges</label>
+                    </div>
+                </fieldset>
+                <div class="audit-field">
+                    <label for="audit-actor">Wer (User-ID)</label>
+                    <input inputmode="numeric" id="audit-actor" placeholder="Discord-User-ID">
+                </div>
+                <div class="audit-field">
+                    <label for="audit-target">Betroffenes Ziel (ID)</label>
+                    <input inputmode="numeric" id="audit-target" placeholder="Discord-ID">
+                </div>
+                <label class="audit-toggle">
+                    <input type="checkbox" id="audit-noise">
+                    Automatik-Rauschen anzeigen
+                </label>
+                <div class="audit-actions">
+                    <button class="reload" type="submit">Filter anwenden</button>
+                </div>
+            </form>
+
+            <div class="audit-status">
+                <span id="audit-summary">Daten werden geladen.</span>
+                <span id="audit-noise-hint" class="audit-noise"></span>
+            </div>
+
+            <div class="card audit-table-card">
+                <div class="dev-table-wrap">
+                    <table class="dev-table audit-table">
+                        <thead>
+                            <tr>
+                                <th>Zeit</th>
+                                <th>Aktion</th>
+                                <th>Wer</th>
+                                <th>Ziel</th>
+                                <th>Details</th>
+                                <th>Grund</th>
+                            </tr>
+                        </thead>
+                        <tbody id="audit-entries"></tbody>
+                    </table>
+                </div>
+                <div id="audit-empty" class="audit-empty audit-hidden">Keine passenden Einträge.</div>
+            </div>
+            <button id="audit-more" class="reload audit-more audit-hidden" type="button">Mehr laden</button>
+        </section>
+    </div><!-- end tab: audit -->
 
     <!-- ════════════════════════════════════════════════
          TAB: Entwicklung (Repo-Aktivität)
@@ -6566,6 +6817,138 @@ async function fetchStandaloneLogs(key, limit = 200) {
         };
     })();
 
+    // ─── Audit-Log ──────────────────────────────────
+    (function() {
+        const form = document.getElementById('audit-filters');
+        const tbody = document.getElementById('audit-entries');
+        const empty = document.getElementById('audit-empty');
+        const more = document.getElementById('audit-more');
+        const summary = document.getElementById('audit-summary');
+        const noiseHint = document.getElementById('audit-noise-hint');
+        const limit = 100;
+        let offset = 0;
+        let loaded = 0;
+        let total = 0;
+        let initialized = false;
+
+        function isoDate(date) {
+            return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        }
+
+        function setDefaultDates() {
+            const to = new Date();
+            const from = new Date(to);
+            from.setDate(from.getDate() - 29);
+            document.getElementById('audit-from').value = isoDate(from);
+            document.getElementById('audit-to').value = isoDate(to);
+        }
+
+        function query() {
+            const params = new URLSearchParams({ limit, offset });
+            for (const [id, key] of [
+                ['audit-from', 'from'],
+                ['audit-to', 'to'],
+                ['audit-action-type', 'action_type'],
+                ['audit-actor', 'actor'],
+                ['audit-target', 'target'],
+                ['audit-q', 'q'],
+            ]) {
+                const value = document.getElementById(id).value.trim();
+                if (value) params.set(key, value);
+            }
+            const categories = [...form.querySelectorAll('input[name="audit-category"]:checked')]
+                .map(input => input.value);
+            if (categories.length) params.set('category', categories.join(','));
+            params.set('noise', document.getElementById('audit-noise').checked ? 'show' : 'hide');
+            return params;
+        }
+
+        function formatDate(value) {
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString('de-DE');
+        }
+
+        function displayId(value) {
+            if (!value) return '–';
+            const prefix = value.kind === 'channel' ? '#' : value.kind === 'role' ? '@' : '';
+            if (value.name && value.id) return `${prefix}${value.name} (${value.id})`;
+            return value.name ? `${prefix}${value.name}` : value.id || '–';
+        }
+
+        function compact(value) {
+            if (value === null || value === undefined) return '∅';
+            if (typeof value === 'object') return JSON.stringify(value);
+            return String(value);
+        }
+
+        function formatDetails(changes, options) {
+            const parts = [];
+            if (Array.isArray(changes)) {
+                for (const change of changes) {
+                    if (change && typeof change === 'object') {
+                        parts.push(`${compact(change.key)}: ${compact(change.old_value)} → ${compact(change.new_value)}`);
+                    } else {
+                        parts.push(compact(change));
+                    }
+                }
+            } else if (changes && Object.keys(changes).length) {
+                parts.push(compact(changes));
+            }
+            if (options && Object.keys(options).length) parts.push(`Optionen: ${compact(options)}`);
+            return parts.join('; ') || '–';
+        }
+
+        function row(entry) {
+            return `<tr>
+                <td>${esc(formatDate(entry.occurred_at))}</td>
+                <td>${esc(entry.action_name)} <span class="audit-muted">#${esc(entry.action_type)}</span></td>
+                <td>${esc(displayId(entry.actor))}</td>
+                <td>${esc(displayId(entry.target))}</td>
+                <td>${esc(formatDetails(entry.changes, entry.options))}</td>
+                <td>${esc(entry.reason ?? "–")}</td>
+            </tr>`;
+        }
+
+        async function load(reset = false) {
+            if (reset) {
+                offset = 0;
+                loaded = 0;
+                tbody.innerHTML = '';
+            }
+            more.disabled = true;
+            summary.textContent = 'Daten werden geladen.';
+            try {
+                const data = await fetchJSON(`/api/audit-log?${query()}`);
+                tbody.insertAdjacentHTML('beforeend', data.entries.map(row).join(''));
+                loaded += data.entries.length;
+                offset = loaded;
+                total = data.total;
+                summary.textContent = `${loaded} von ${total} Einträgen angezeigt.`;
+                noiseHint.textContent = data.noise_hidden
+                    ? `${data.noise_hidden} Automatik-Einträge ausgeblendet (Rang-Sync, TempVoice-Kanäle, Threads).`
+                    : '';
+                empty.classList.toggle('audit-hidden', total !== 0);
+                more.classList.toggle('audit-hidden', loaded >= total);
+            } catch (error) {
+                summary.textContent = `Audit-Log konnte nicht geladen werden (${error.message}).`;
+            } finally {
+                more.disabled = false;
+            }
+        }
+
+        form.addEventListener('submit', event => {
+            event.preventDefault();
+            load(true);
+        });
+        more.addEventListener('click', () => load(false));
+        window.loadAuditLog = function() {
+            if (initialized) return;
+            initialized = true;
+            setDefaultDates();
+            load(true);
+        };
+    })();
+
     // ─── Tab Switching ───────────────────────────────
     (function() {
         var btns = document.querySelectorAll('.tab-btn');
@@ -6595,6 +6978,9 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 }
                 if (target === 'logs') {
                     ensureLogsLoaded();
+                }
+                if (target === 'audit' && typeof loadAuditLog === 'function') {
+                    loadAuditLog();
                 }
             });
         });

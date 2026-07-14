@@ -36,6 +36,29 @@ pub fn category_for(action_type: i32) -> &'static str {
         .unwrap_or("sonstiges")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TargetKind {
+    User,
+    Channel,
+    Role,
+    Message,
+    Webhook,
+    Emoji,
+    Sonstiges,
+}
+
+pub fn target_kind(action_type: i32) -> TargetKind {
+    match action_type {
+        20 | 22 | 23 | 24 | 25 | 26 | 27 | 72 | 73 | 74 | 75 | 143 | 144 | 145 => TargetKind::User,
+        10 | 11 | 12 | 13 | 14 | 15 | 110 | 111 | 112 => TargetKind::Channel,
+        30..=32 => TargetKind::Role,
+        40..=42 => TargetKind::Webhook,
+        50..=52 => TargetKind::Emoji,
+        _ => TargetKind::Sonstiges,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Snowflake(i64);
 
@@ -74,10 +97,104 @@ struct AuditRow {
     occurred_at: DateTime<Utc>,
 }
 
+#[derive(Default)]
+struct TargetLexicons {
+    roles: HashMap<i64, String>,
+    channels: HashMap<i64, String>,
+}
+
+fn value_id(value: &Value) -> Option<i64> {
+    value
+        .as_str()
+        .and_then(|value| value.parse().ok())
+        .or_else(|| value.as_i64())
+}
+
+fn changed_name(changes: Option<&Value>) -> Option<&str> {
+    changes?
+        .as_array()?
+        .iter()
+        .find(|change| change.get("key").and_then(Value::as_str) == Some("name"))
+        .and_then(|change| {
+            change
+                .get("new_value")
+                .and_then(Value::as_str)
+                .or_else(|| change.get("old_value").and_then(Value::as_str))
+        })
+        .filter(|name| !name.trim().is_empty())
+}
+
+fn build_target_lexicons(rows: &[AuditRow]) -> TargetLexicons {
+    let mut lexicons = TargetLexicons::default();
+
+    for row in rows {
+        if row.action_type == 25 {
+            for role in row
+                .changes
+                .as_ref()
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|change| change.get("new_value").and_then(Value::as_array))
+                .flatten()
+            {
+                if let (Some(id), Some(name)) = (
+                    role.get("id").and_then(value_id),
+                    role.get("name")
+                        .and_then(Value::as_str)
+                        .filter(|name| !name.trim().is_empty()),
+                ) {
+                    lexicons.roles.entry(id).or_insert_with(|| name.to_string());
+                }
+            }
+        }
+
+        let Some(name) = changed_name(row.changes.as_ref()) else {
+            continue;
+        };
+        match target_kind(row.action_type) {
+            TargetKind::Role => {
+                if let Some(id) = row.target_id {
+                    lexicons.roles.entry(id).or_insert_with(|| name.to_string());
+                }
+            }
+            TargetKind::Channel => {
+                if let Some(id) = row.target_id {
+                    lexicons
+                        .channels
+                        .entry(id)
+                        .or_insert_with(|| name.to_string());
+                }
+            }
+            _ => {}
+        }
+        if let Some(id) = row
+            .options
+            .as_ref()
+            .and_then(|options| options.get("channel_id"))
+            .and_then(value_id)
+        {
+            lexicons
+                .channels
+                .entry(id)
+                .or_insert_with(|| name.to_string());
+        }
+    }
+
+    lexicons
+}
+
 #[derive(Serialize)]
 struct NamedId {
     id: Option<Snowflake>,
     name: Option<String>,
+}
+
+#[derive(Serialize)]
+struct TargetId {
+    id: Option<Snowflake>,
+    name: Option<String>,
+    kind: TargetKind,
 }
 
 #[derive(Serialize)]
@@ -88,7 +205,7 @@ struct AuditEntry {
     action_name: String,
     category: &'static str,
     actor: NamedId,
-    target: NamedId,
+    target: TargetId,
     changes: Value,
     options: Value,
     reason: Option<String>,
@@ -264,18 +381,14 @@ pub async fn audit_log(
         Err(_) => return err_text(500, "DISCORD_BOT_USER_ID is out of range"),
     };
 
-    // ponytail: Bei mehr als 1 Mio. Zeilen einen occurred_at-Index ergänzen; bei ~26k reicht der Seq-Scan.
+    // ponytail: Für die Namenslexika werden alle ~26k Zeilen gebraucht; bei >1 Mio. materialisieren.
     let rows = match sqlx::query_as::<_, AuditRow>(
         r#"
         SELECT entry_id, action_type, user_id, target_id, changes, options, reason, occurred_at
           FROM core.discord_audit_log
-         WHERE occurred_at >= $1::date
-           AND occurred_at < $2::date
          ORDER BY occurred_at DESC, entry_id DESC
         "#,
     )
-    .bind(query.from)
-    .bind(query.to)
     .fetch_all(app.pool())
     .await
     {
@@ -286,11 +399,19 @@ pub async fn audit_log(
         }
     };
 
-    let noise_count = rows
+    let lexicons = build_target_lexicons(&rows);
+    let dated = rows
+        .into_iter()
+        .filter(|row| {
+            let date = row.occurred_at.date_naive();
+            date >= query.from && date < query.to
+        })
+        .collect::<Vec<_>>();
+    let noise_count = dated
         .iter()
         .filter(|row| is_noise(row.user_id, row.action_type, bot_user_id))
         .count();
-    let filtered = rows
+    let filtered = dated
         .into_iter()
         .filter(|row| {
             query
@@ -337,33 +458,74 @@ pub async fn audit_log(
         .collect::<Vec<_>>();
     let user_ids = page
         .iter()
-        .flat_map(|row| [row.user_id, row.target_id])
+        .flat_map(|row| {
+            [
+                row.user_id,
+                (target_kind(row.action_type) == TargetKind::User)
+                    .then_some(row.target_id)
+                    .flatten(),
+            ]
+        })
         .flatten()
-        .filter_map(|id| u64::try_from(id).ok())
         .collect::<HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    let names = app.names().resolve(&user_ids).await;
+    let names = if user_ids.is_empty() {
+        HashMap::new()
+    } else {
+        match sqlx::query_as::<_, (i64, Option<String>)>(
+            r#"
+            SELECT discord_id,
+                   COALESCE(NULLIF(BTRIM(global_name), ''), NULLIF(BTRIM(username), ''))
+              FROM core.users
+             WHERE discord_id = ANY($1)
+            "#,
+        )
+        .bind(&user_ids)
+        .fetch_all(app.pool())
+        .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .filter_map(|(id, name)| name.map(|name| (id, name)))
+                .collect(),
+            Err(err) => {
+                tracing::warn!(%err, "Audit-Log-Namen konnten nicht geladen werden");
+                HashMap::new()
+            }
+        }
+    };
     let named = |id: Option<i64>| NamedId {
         id: id.map(Snowflake),
-        name: id
-            .and_then(|value| u64::try_from(value).ok())
-            .and_then(|value| names.get(&value).cloned()),
+        name: id.and_then(|value| names.get(&value).cloned()),
     };
     let entries = page
         .into_iter()
-        .map(|row| AuditEntry {
-            entry_id: Snowflake(row.entry_id),
-            occurred_at: row.occurred_at.to_rfc3339(),
-            action_type: row.action_type,
-            action_name: action_name(row.action_type),
-            category: category_for(row.action_type),
-            actor: named(row.user_id),
-            target: named(row.target_id),
-            changes: row.changes.unwrap_or(Value::Null),
-            options: row.options.unwrap_or(Value::Null),
-            reason: row.reason,
-            is_noise: is_noise(row.user_id, row.action_type, bot_user_id),
+        .map(|row| {
+            let kind = target_kind(row.action_type);
+            let target_name = row.target_id.and_then(|id| match kind {
+                TargetKind::User => names.get(&id),
+                TargetKind::Role => lexicons.roles.get(&id),
+                TargetKind::Channel => lexicons.channels.get(&id),
+                _ => None,
+            });
+            AuditEntry {
+                entry_id: Snowflake(row.entry_id),
+                occurred_at: row.occurred_at.to_rfc3339(),
+                action_type: row.action_type,
+                action_name: action_name(row.action_type),
+                category: category_for(row.action_type),
+                actor: named(row.user_id),
+                target: TargetId {
+                    id: row.target_id.map(Snowflake),
+                    name: target_name.cloned(),
+                    kind,
+                },
+                changes: row.changes.unwrap_or(Value::Null),
+                options: row.options.unwrap_or(Value::Null),
+                reason: row.reason,
+                is_noise: is_noise(row.user_id, row.action_type, bot_user_id),
+            }
         })
         .collect();
 
@@ -418,9 +580,115 @@ mod tests {
     }
 
     #[test]
+    fn maps_target_kind_for_every_supported_group() {
+        for action_type in [20, 22, 23, 24, 25, 26, 27, 72, 73, 74, 75, 143, 144, 145] {
+            assert_eq!(target_kind(action_type), TargetKind::User);
+        }
+        for action_type in [10, 11, 12, 13, 14, 15, 110, 111, 112] {
+            assert_eq!(target_kind(action_type), TargetKind::Channel);
+        }
+        for action_type in [30, 31, 32] {
+            assert_eq!(target_kind(action_type), TargetKind::Role);
+        }
+        for action_type in [40, 41, 42] {
+            assert_eq!(target_kind(action_type), TargetKind::Webhook);
+        }
+        for action_type in [50, 51, 52] {
+            assert_eq!(target_kind(action_type), TargetKind::Emoji);
+        }
+        assert_eq!(target_kind(999), TargetKind::Sonstiges);
+    }
+
+    fn lexicon_row(
+        entry_id: i64,
+        action_type: i32,
+        target_id: Option<i64>,
+        changes: Option<Value>,
+    ) -> AuditRow {
+        AuditRow {
+            entry_id,
+            action_type,
+            user_id: Some(42),
+            target_id,
+            changes,
+            options: None,
+            reason: None,
+            occurred_at: DateTime::from_timestamp(entry_id, 0).expect("gültige Testzeit"),
+        }
+    }
+
+    #[test]
+    fn lexicons_resolve_role_and_channel_rows_without_own_name() {
+        let rows = vec![
+            lexicon_row(400, 31, Some(700), None),
+            lexicon_row(
+                300,
+                30,
+                Some(700),
+                Some(serde_json::json!([
+                    {"key": "name", "new_value": "Moderation"}
+                ])),
+            ),
+            lexicon_row(200, 11, Some(800), None),
+            lexicon_row(
+                100,
+                10,
+                Some(800),
+                Some(serde_json::json!([
+                    {"key": "name", "new_value": "einsatzleitung"}
+                ])),
+            ),
+            lexicon_row(
+                50,
+                25,
+                Some(42),
+                Some(serde_json::json!([
+                    {"key": "$add", "new_value": [{"id": "900", "name": "Einsatzteam"}]}
+                ])),
+            ),
+        ];
+
+        let lexicons = build_target_lexicons(&rows);
+
+        assert_eq!(
+            lexicons.roles.get(&700).map(String::as_str),
+            Some("Moderation")
+        );
+        assert_eq!(
+            lexicons.roles.get(&900).map(String::as_str),
+            Some("Einsatzteam")
+        );
+        assert_eq!(
+            lexicons.channels.get(&800).map(String::as_str),
+            Some("einsatzleitung")
+        );
+    }
+
+    #[test]
     fn serializes_snowflake_as_json_string() {
         let value = serde_json::to_value(Snowflake(BOT_ID)).expect("Snowflake serialisieren");
         assert_eq!(value, serde_json::Value::String(BOT_ID.to_string()));
+    }
+
+    #[test]
+    fn named_actor_and_target_keep_their_string_ids() {
+        let actor = serde_json::to_value(NamedId {
+            id: Some(Snowflake(42)),
+            name: Some("Admin".to_string()),
+        })
+        .expect("Actor serialisieren");
+        let target = serde_json::to_value(TargetId {
+            id: Some(Snowflake(700)),
+            name: Some("Moderation".to_string()),
+            kind: TargetKind::Role,
+        })
+        .expect("Ziel serialisieren");
+
+        assert_eq!(actor["id"], "42");
+        assert_eq!(actor["name"], "Admin");
+        assert_eq!(target["id"], "700");
+        assert_eq!(target["name"], "Moderation");
+        assert_eq!(target["kind"], "role");
     }
 
     #[test]
