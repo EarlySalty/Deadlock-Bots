@@ -400,7 +400,7 @@ pub async fn audit_log(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers).await {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     let query = match parse_params(params, Utc::now().date_naive()) {
