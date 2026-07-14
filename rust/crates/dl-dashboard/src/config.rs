@@ -13,6 +13,7 @@
 pub const DEFAULT_OWNER_USER_ID: u64 = 662995601738170389;
 /// Moderator-Rolle → Voll-Zugriff (DEFAULT_DASHBOARD_MODERATOR_ROLE_ID).
 pub const DEFAULT_MODERATOR_ROLE_ID: u64 = 1337518124647579661;
+pub const DEFAULT_AUDIT_BOT_USER_ID: u64 = 1_355_078_189_894_078_597;
 
 const DEFAULT_SESSION_TTL_SECONDS: i64 = 1_209_600; // 14 Tage
 const DEFAULT_OAUTH_STATE_TTL_SECONDS: i64 = 21_600; // 6 Stunden
@@ -48,6 +49,7 @@ pub struct DashboardConfig {
     pub discord_redirect_uri: String,
     pub owner_user_id: u64,
     pub moderator_role_id: u64,
+    pub audit_bot_user_id: u64,
     /// Gilden, in denen Admin-/Rollen-Status geprüft wird. Leer = alle
     /// Bot-Gilden (Broker entscheidet).
     pub auth_guild_ids: Vec<u64>,
@@ -119,6 +121,9 @@ impl DashboardConfig {
             moderator_role_id: get("MASTER_DASHBOARD_MODERATOR_ROLE_ID")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(DEFAULT_MODERATOR_ROLE_ID),
+            audit_bot_user_id: get("DISCORD_BOT_USER_ID")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(DEFAULT_AUDIT_BOT_USER_ID),
             auth_guild_ids: get("MASTER_DASHBOARD_AUTH_GUILD_IDS")
                 .map(|v| parse_id_list(&v))
                 .unwrap_or_default(),
@@ -268,6 +273,7 @@ mod tests {
     #[test]
     fn defaults_ohne_env() {
         let cfg = DashboardConfig::from_lookup(|_| None);
+        assert_eq!(cfg.audit_bot_user_id, 1_355_078_189_894_078_597);
         assert_eq!(cfg.owner_user_id, DEFAULT_OWNER_USER_ID);
         assert_eq!(cfg.moderator_role_id, DEFAULT_MODERATOR_ROLE_ID);
         assert_eq!(cfg.session_ttl_secs, DEFAULT_SESSION_TTL_SECONDS);
@@ -286,6 +292,13 @@ mod tests {
         assert!(cfg
             .allowed_origins
             .contains(&"http://127.0.0.1:8766".to_string()));
+    }
+
+    #[test]
+    fn audit_bot_user_id_kommt_aus_env() {
+        let map = HashMap::from([("DISCORD_BOT_USER_ID", "42")]);
+        let cfg = DashboardConfig::from_lookup(lookup(&map));
+        assert_eq!(cfg.audit_bot_user_id, 42);
     }
 
     #[test]
