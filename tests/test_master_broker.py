@@ -35,6 +35,29 @@ class _FakeRequest:
         return dict(self._payload)
 
 
+class _FakeDiscordHttp:
+    def __init__(
+        self,
+        payload: dict[str, Any] | None = None,
+        error: Exception | None = None,
+    ) -> None:
+        self.payload = payload or {}
+        self.error = error
+        self.calls: list[tuple[int, int]] = []
+
+    async def get_message(self, channel_id: int, message_id: int) -> dict[str, Any]:
+        self.calls.append((channel_id, message_id))
+        if self.error is not None:
+            raise self.error
+        return self.payload
+
+
+class _FakeHttpResponse:
+    status = 404
+    reason = "Not Found"
+    headers: dict[str, str] = {}
+
+
 class _FakeMessage:
     def __init__(self, message_id: int) -> None:
         self.id = message_id
@@ -234,6 +257,7 @@ class _FakeBot:
             self._users[int(user.id)] = user
         self.guilds = list(guilds or [])
         self.added_views: list[tuple[discord.ui.View, int | None]] = []
+        self.http: Any = None
 
     def get_guild(self, guild_id: int) -> Any | None:
         for guild in self.guilds:
@@ -276,6 +300,114 @@ class MasterBrokerTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _payload(response) -> dict[str, Any]:
         return json.loads(response.text)
+
+    async def test_message_reactions_route_is_registered(self) -> None:
+        broker = MasterBroker(
+            _FakeBot(),
+            token=self._headers()[_INTERNAL_TOKEN_HEADER],
+            port=0,
+        )
+        try:
+            await broker.start()
+            assert broker._runner is not None
+            routes = {
+                (route.method, route.resource.canonical)
+                for route in broker._runner.app.router.routes()
+            }
+            self.assertIn(
+                ("GET", "/internal/master/v1/discord/message-reactions"),
+                routes,
+            )
+        finally:
+            await broker.stop()
+
+    async def test_message_reactions_requires_internal_token(self) -> None:
+        bot = _FakeBot()
+        bot.http = _FakeDiscordHttp()
+        broker = MasterBroker(bot, token=self._headers()[_INTERNAL_TOKEN_HEADER])
+        request = _FakeRequest(
+            {},
+            headers={},
+            query={"channel_id": "123", "message_id": "456"},
+        )
+
+        response = await broker._handle_message_reactions(request)
+
+        self.assertEqual(response.status, 401)
+        self.assertEqual(self._payload(response)["error"]["code"], "unauthorized")
+        self.assertEqual(bot.http.calls, [])
+
+    async def test_message_reactions_returns_unicode_and_custom_emoji(self) -> None:
+        channel_id = 123456789012345678
+        message_id = 987654321098765432
+        custom_emoji_id = 112233445566778899
+        bot = _FakeBot()
+        bot.http = _FakeDiscordHttp(
+            {
+                "reactions": [
+                    {"emoji": {"id": None, "name": "👍"}, "count": 2},
+                    {
+                        "emoji": {"id": custom_emoji_id, "name": "party"},
+                        "count": 3,
+                    },
+                ]
+            }
+        )
+        broker = MasterBroker(bot, token=self._headers()[_INTERNAL_TOKEN_HEADER])
+        request = _FakeRequest(
+            {},
+            headers=self._headers(),
+            query={"channel_id": str(channel_id), "message_id": str(message_id)},
+        )
+
+        response = await broker._handle_message_reactions(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(
+            self._payload(response),
+            {
+                "found": True,
+                "reactions": [
+                    {"emoji": "👍", "count": 2},
+                    {"emoji": f"party:{custom_emoji_id}", "count": 3},
+                ],
+            },
+        )
+        self.assertEqual(bot.http.calls, [(channel_id, message_id)])
+
+    async def test_message_reactions_maps_discord_404_to_not_found(self) -> None:
+        not_found = discord.NotFound(
+            _FakeHttpResponse(),
+            {"message": "Unknown Message", "code": 10008},
+        )
+        bot = _FakeBot()
+        bot.http = _FakeDiscordHttp(error=not_found)
+        broker = MasterBroker(bot, token=self._headers()[_INTERNAL_TOKEN_HEADER])
+        request = _FakeRequest(
+            {},
+            headers=self._headers(),
+            query={"channel_id": "123", "message_id": "456"},
+        )
+
+        response = await broker._handle_message_reactions(request)
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(self._payload(response), {"found": False, "reactions": []})
+
+    async def test_message_reactions_maps_timeout_to_bad_gateway(self) -> None:
+        bot = _FakeBot()
+        bot.http = _FakeDiscordHttp(error=TimeoutError())
+        broker = MasterBroker(bot, token=self._headers()[_INTERNAL_TOKEN_HEADER])
+        request = _FakeRequest(
+            {},
+            headers=self._headers(),
+            query={"channel_id": "123", "message_id": "456"},
+        )
+
+        response = await broker._handle_message_reactions(request)
+
+        self.assertEqual(response.status, 502)
+        self.assertEqual(self._payload(response), {"error": "Discord request failed"})
 
     async def test_send_message_supports_dm_by_user_id(self) -> None:
         user = _FakeDmUser(123)
