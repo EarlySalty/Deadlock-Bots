@@ -427,6 +427,7 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
                 twitch_registry.clone(),
             );
             dl_bridges::twitch::register_spam_learning(&mut router, twitch_client.clone());
+            dl_bridges::twitch::register_crew_ban(&mut router, twitch_client.clone(), owner_id);
             // Streamer-Link-Matcher (Review-Buttons immer registrieren —
             // offene Vorschläge überleben Neustarts über den State-File)
             let matcher_config =

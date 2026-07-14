@@ -106,6 +106,12 @@ pub struct SpamLearningV2 {
     pub learn_pattern: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CrewRadar {
+    login: String,
+    chatter_id: String,
+}
+
 fn trim_text(value: Option<&Value>, limit: usize) -> String {
     let raw = match value {
         Some(Value::String(value)) => value.as_str(),
@@ -167,6 +173,35 @@ pub fn parse_spam_learning(raw: Option<&Value>) -> Option<SpamLearningV2> {
         learned,
         learn_pattern,
     })
+}
+
+fn parse_crew_radar(raw: Option<&Value>) -> Option<CrewRadar> {
+    let obj = raw?.as_object()?;
+    if obj.get("v").and_then(Value::as_i64) != Some(1) {
+        return None;
+    }
+    Some(CrewRadar {
+        login: trim_text(obj.get("login"), usize::MAX),
+        chatter_id: trim_text(obj.get("chatter_id"), usize::MAX),
+    })
+}
+
+fn crew_radar_components(payload: &CrewRadar) -> Option<Value> {
+    if payload.chatter_id.is_empty() {
+        return None;
+    }
+    let prefix = format!("crew_ban:{}:", payload.chatter_id);
+    let login_limit = 100usize.checked_sub(prefix.chars().count())?;
+    let login: String = payload.login.chars().take(login_limit).collect();
+    Some(json!([{
+        "type": 1,
+        "components": [{
+            "type": 2,
+            "style": 4,
+            "label": "Auf globale Banliste",
+            "custom_id": format!("{prefix}{login}"),
+        }],
+    }]))
 }
 
 fn spam_learning_components(data: &Map<String, Value>) -> Option<Value> {
@@ -381,11 +416,12 @@ async fn handle_changelog(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
-    let content = data
+    let mut content = data
         .get("content")
         .and_then(Value::as_str)
         .unwrap_or_default()
-        .trim();
+        .trim()
+        .to_string();
     let target = data
         .get("target")
         .and_then(Value::as_str)
@@ -395,13 +431,21 @@ async fn handle_changelog(
         return err(400, "title and content required");
     }
 
+    let crew_radar = parse_crew_radar(data.get("crew_radar"));
+    if crew_radar
+        .as_ref()
+        .is_some_and(|payload| payload.chatter_id.is_empty())
+    {
+        content.push_str("\n\n_(Keine Twitch-ID aufgelöst, Ban nur manuell möglich.)_");
+    }
+
     let direct = match parse_channel_id(data.get("channel_id")) {
         Ok(v) => v,
         Err(resp) => return resp,
     };
     let channel_id = match direct {
         Some(id) => id,
-        None => match publish_changelog(&state, title, content, target).await {
+        None => match publish_changelog(&state, title, &content, target).await {
             Ok(channel_id) => {
                 return Json(json!({ "ok": true, "channel_id": channel_id })).into_response();
             }
@@ -413,8 +457,11 @@ async fn handle_changelog(
         },
     };
 
-    let embed = build_embed(title, content, target);
-    let components = spam_learning_components(&data);
+    let embed = build_embed(title, &content, target);
+    let components = match &crew_radar {
+        Some(payload) => crew_radar_components(payload),
+        None => spam_learning_components(&data),
+    };
     match state
         .discord
         .send(channel_id, None, &[embed], false, components.as_ref())
@@ -710,7 +757,7 @@ mod tests {
     use std::sync::Mutex;
     use tower::ServiceExt;
 
-    type SentMessage = (u64, Option<String>, usize, Option<Value>);
+    type SentMessage = (u64, Option<String>, Vec<Value>, Option<Value>);
 
     /// Mock: zeichnet Sends auf, simuliert unbekannte Kanäle.
     struct MockDiscord {
@@ -733,7 +780,7 @@ mod tests {
             self.sent.lock().expect("mock lock").push((
                 channel_id,
                 content.map(str::to_string),
-                embeds.len(),
+                embeds.to_vec(),
                 components.cloned(),
             ));
             Ok(999)
@@ -823,6 +870,98 @@ mod tests {
         let sent = mock.sent.lock().expect("lock");
         assert_eq!(sent.len(), 1);
         assert_eq!(sent[0].0, DEV_UPDATES_CHANNEL_ID);
+        assert!(sent[0].3.is_none());
+    }
+
+    #[tokio::test]
+    async fn crew_radar_mit_chatter_id_baut_ban_button() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Crew-Guard",
+                "content": "x",
+                "crew_radar": {
+                    "v": 1,
+                    "login": "sieg_deutschland",
+                    "chatter_id": "1509530433",
+                    "channel": "dehackxas",
+                    "style_score": 13,
+                    "verdict": "clean",
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        let button = &sent[0].3.as_ref().expect("components")[0]["components"][0];
+        assert_eq!(button["label"], "Auf globale Banliste");
+        assert_eq!(button["style"], 4);
+        assert_eq!(button["custom_id"], "crew_ban:1509530433:sieg_deutschland");
+    }
+
+    #[tokio::test]
+    async fn crew_radar_ohne_chatter_id_baut_hinweis_statt_button() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Crew-Guard",
+                "content": "x",
+                "crew_radar": {
+                    "v": 1,
+                    "login": "sieg_deutschland",
+                    "chatter_id": "",
+                    "channel": "dehackxas",
+                    "style_score": 13,
+                    "verdict": "clean",
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        assert!(sent[0].3.is_none());
+        assert_eq!(
+            sent[0].2[0]["description"],
+            "x\n\n_(Keine Twitch-ID aufgelöst, Ban nur manuell möglich.)_"
+        );
+    }
+
+    #[tokio::test]
+    async fn crew_radar_custom_id_kuerzt_nur_login_auf_hundert_zeichen() {
+        let chatter_id = "1".repeat(40);
+        let login = "a".repeat(60);
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Crew-Guard",
+                "content": "x",
+                "crew_radar": { "v": 1, "login": login, "chatter_id": chatter_id },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        let custom_id = sent[0].3.as_ref().expect("components")[0]["components"][0]["custom_id"]
+            .as_str()
+            .expect("custom_id");
+        assert!(custom_id.chars().count() <= 100);
+        assert!(custom_id.starts_with(&format!("crew_ban:{chatter_id}:")));
+        assert_eq!(custom_id.chars().count(), 100);
     }
 
     #[tokio::test]
@@ -991,7 +1130,7 @@ mod tests {
         assert_eq!(body["message_id"], 999);
         let sent = mock.sent.lock().expect("lock");
         // Leere Section B übersprungen → 2 Embeds, Role-Ping im Content
-        assert_eq!(sent[0].2, 2);
+        assert_eq!(sent[0].2.len(), 2);
         assert_eq!(sent[0].1.as_deref(), Some("<@&42>"));
     }
 
