@@ -22,6 +22,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod analytics;
+pub mod audit;
 pub mod auth;
 pub mod authority;
 pub mod config;

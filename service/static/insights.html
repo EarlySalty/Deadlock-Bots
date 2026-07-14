@@ -64,6 +64,9 @@ body {
 }
 
 .wrap { max-width: 1240px; margin: 0 auto; padding: 28px 20px 80px; }
+.page-nav { display: flex; gap: 12px; margin-bottom: 18px; }
+.page-nav a { color: var(--text-secondary); text-decoration: none; }
+.page-nav a:hover { color: var(--text-primary); }
 
 /* ── Kopf ── */
 .page-head { display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px; margin-bottom: 8px; }
@@ -155,6 +158,11 @@ code { background: rgba(194,221,240,0.08); border-radius: 6px; padding: 1px 6px;
 </head>
 <body>
 <div class="wrap">
+
+  <nav class="page-nav">
+    <a href="/admin">PLATZHALTER: Dashboard</a>
+    <a href="/audit">PLATZHALTER: Audit-Log</a>
+  </nav>
 
   <div class="page-head">
     <div>
