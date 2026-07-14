@@ -1,6 +1,7 @@
 //! Zweitgehirn-Tab (:8766) — read-only Blick auf den Phase-2-Feeder.
 //!
-//! Drei GET-Handler, alle über [`DashboardApp::guard_read`] gegatet:
+//! Drei GET-Handler, alle über [`DashboardApp::guard_full`] gegatet (Wiki-
+//! und Report-Inhalte sind intern — TurnierOnly-Sessions bleiben draußen):
 //! - `/api/brain/overview` — jüngster Wochenreport, letzte Feeder-Läufe,
 //!   KI-Rechenschaft (7 Tage) und Top-Gründe je Quelle.
 //! - `/api/brain/wiki` — `index.md`, `log.md` und die Liste aller `.md`-Seiten.
@@ -81,7 +82,7 @@ fn is_missing_schema(err: &sqlx::Error) -> bool {
 }
 
 pub async fn overview(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_read(&headers).await {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     let pool = app.pool();
@@ -222,7 +223,7 @@ async fn load_reasons(
 }
 
 pub async fn wiki(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
-    if let Err(resp) = app.guard_read(&headers).await {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     let root = wiki_root();
@@ -275,7 +276,7 @@ pub async fn wiki_page(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Response {
-    if let Err(resp) = app.guard_read(&headers).await {
+    if let Err(resp) = app.guard_full(&headers).await {
         return resp;
     }
     let Some(rel) = params.get("path") else {

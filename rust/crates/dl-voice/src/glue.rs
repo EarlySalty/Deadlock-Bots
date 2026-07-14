@@ -603,22 +603,42 @@ impl LanePort for CacheSnapshot {
         body.insert("user_limit".into(), json!(user_limit));
         if let Some(category) = category_id {
             body.insert("parent_id".into(), json!(category.to_string()));
-            let bitrate = self
+            // Overwrites und Bitrate klonen, bevor ein await ansteht (Cache-Guard).
+            let cached = self
                 .adapter
                 .cache()
                 .guild(GuildId::new(guild_id))
                 .map(|guild| {
-                    if let Some(channel) = guild.channels.get(&ChannelId::new(category)) {
-                        inherit_category_overwrites(
-                            &mut body,
-                            guild_id,
-                            category,
-                            &channel.permission_overwrites,
-                        );
-                    }
-                    guild_voice_bitrate_limit(guild.premium_tier)
-                })
-                .unwrap_or(96_000);
+                    (
+                        guild
+                            .channels
+                            .get(&ChannelId::new(category))
+                            .map(|channel| channel.permission_overwrites.clone()),
+                        guild_voice_bitrate_limit(guild.premium_tier),
+                    )
+                });
+            let (overwrites, bitrate) = match cached {
+                Some((Some(overwrites), bitrate)) => (overwrites, bitrate),
+                other => {
+                    // Cache-Miss: Kategorie per HTTP nachladen. Ohne sanitizte
+                    // Overwrites darf der Create nicht rausgehen, sonst synct
+                    // Discord die rohen Kategorie-Rechte (inkl. Mute/Move) auf
+                    // den neuen Kanal — fail-closed statt Bypass.
+                    let channel = self
+                        .adapter
+                        .http
+                        .get_channel(ChannelId::new(category))
+                        .await
+                        .map_err(|e| format!("Kategorie {category} nicht ladbar: {e}"))?;
+                    let overwrites = channel
+                        .guild()
+                        .map(|c| c.permission_overwrites)
+                        .ok_or_else(|| format!("Kategorie {category} ist kein Guild-Channel"))?;
+                    let bitrate = other.map(|(_, bitrate)| bitrate).unwrap_or(96_000);
+                    (overwrites, bitrate)
+                }
+            };
+            inherit_category_overwrites(&mut body, guild_id, category, &overwrites);
             body.insert("bitrate".into(), json!(bitrate));
         }
         self.adapter

@@ -1,3 +1,11 @@
+## #263 — Steam-Panel bekommt einen Knopf zum Entfernen
+
+Problem: Das Steam-Panel zeigte nur den Weg hinein. Wer seine Verknüpfung wieder loswerden wollte, musste einen Slash-Befehl kennen, den kaum jemand kennt.
+
+Änderung: Das Panel hat jetzt einen vierten, roten Knopf zum Entfernen der Verknüpfung. Er fragt vorher nach und zeigt, was entfernt wird.
+
+Aktuelles Verhalten: Verknüpfen und Entfernen liegen an derselben Stelle. Beim Entfernen löst der Bot auch die Steam-Freundschaft auf, nicht nur den Eintrag bei uns.
+
 ## #262 — Sprachkanäle vererben keine Moderationsrechte mehr
 
 Problem: Beim Anlegen eines Sprachkanals hat der Bot die Rechte der übergeordneten Kategorie eins zu eins übernommen. Stand dort ein Häkchen zu viel, konnte in diesen Kanälen jedes Mitglied andere stummschalten oder herumschieben, ganz ohne Mod-Rolle. Genau so wurden am 17. Juni Leute stummgeschaltet, die es bis heute waren.
