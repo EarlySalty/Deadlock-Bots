@@ -11,12 +11,16 @@ use sqlx::FromRow;
 use crate::web::{err_text, ok_json, DashboardApp};
 
 pub const NOISE_ACTION_TYPES: &[i32] = &[10, 11, 12, 13, 14, 15, 25, 26, 110, 111, 112];
+const ALWAYS_NOISE_ACTION_TYPES: &[i32] = &[40, 41, 42, 192, 193];
 
-const MODERATION_TYPES: &[i32] = &[20, 22, 23, 24, 27, 72, 73, 74, 75, 143, 144, 145];
+const MODERATION_TYPES: &[i32] = &[
+    20, 21, 22, 23, 24, 26, 27, 72, 73, 74, 75, 140, 141, 142, 143, 144, 145,
+];
 const ROLE_TYPES: &[i32] = &[25, 30, 31, 32];
 const STRUCTURE_TYPES: &[i32] = &[
-    1, 10, 11, 12, 13, 14, 15, 40, 41, 42, 50, 51, 52, 60, 61, 62, 80, 81, 82, 110, 111, 112, 163,
-    164, 165, 166, 167, 190, 191, 192, 193,
+    1, 10, 11, 12, 13, 14, 15, 40, 41, 42, 50, 51, 52, 60, 61, 62, 80, 81, 82, 83, 84, 85, 90, 91,
+    92, 100, 101, 102, 110, 111, 112, 121, 130, 131, 132, 163, 164, 165, 166, 167, 190, 191, 192,
+    193,
 ];
 
 pub const CATEGORY_ACTION_TYPES: &[(&str, &[i32])] = &[
@@ -25,8 +29,15 @@ pub const CATEGORY_ACTION_TYPES: &[(&str, &[i32])] = &[
     ("struktur", STRUCTURE_TYPES),
 ];
 
-pub fn is_noise(actor_id: Option<i64>, action_type: i32, bot_user_id: i64) -> bool {
-    actor_id == Some(bot_user_id) && NOISE_ACTION_TYPES.contains(&action_type)
+pub fn is_noise(
+    actor_id: Option<i64>,
+    target_id: Option<i64>,
+    action_type: i32,
+    bot_user_id: i64,
+) -> bool {
+    (actor_id == Some(bot_user_id) && NOISE_ACTION_TYPES.contains(&action_type))
+        || (action_type == 25 && actor_id.is_some() && actor_id == target_id)
+        || ALWAYS_NOISE_ACTION_TYPES.contains(&action_type)
 }
 
 pub fn category_for(action_type: i32) -> &'static str {
@@ -45,6 +56,7 @@ pub enum TargetKind {
     Message,
     Webhook,
     Emoji,
+    Integration,
     Sonstiges,
 }
 
@@ -53,8 +65,9 @@ pub fn target_kind(action_type: i32) -> TargetKind {
         20 | 22 | 23 | 24 | 25 | 26 | 27 | 72 | 73 | 74 | 75 | 143 | 144 | 145 => TargetKind::User,
         10 | 11 | 12 | 13 | 14 | 15 | 110 | 111 | 112 => TargetKind::Channel,
         30..=32 => TargetKind::Role,
-        40..=42 => TargetKind::Webhook,
-        50..=52 => TargetKind::Emoji,
+        50..=52 => TargetKind::Webhook,
+        60..=62 => TargetKind::Emoji,
+        80..=82 => TargetKind::Integration,
         _ => TargetKind::Sonstiges,
     }
 }
@@ -319,46 +332,64 @@ fn action_name(action_type: i32) -> String {
         14 => "Kanal-Berechtigung geändert",
         15 => "Kanal-Berechtigung gelöscht",
         20 => "Mitglied gekickt",
+        21 => "Mitglieder aufgeräumt (Prune)",
         22 => "Mitglied gebannt",
         23 => "Bann aufgehoben",
-        24 => "Mitglied geändert (Mute/Timeout/Nick)",
+        24 => "Mitglied geändert (Mute/Timeout/Name)",
         25 => "Rollen geändert",
         26 => "Mitglied verschoben",
         27 => "Mitglied getrennt",
+        28 => "Bot hinzugefügt",
         30 => "Rolle erstellt",
         31 => "Rolle geändert",
         32 => "Rolle gelöscht",
-        40 => "Webhook erstellt",
-        41 => "Webhook geändert",
-        42 => "Webhook gelöscht",
-        50 => "Emoji erstellt",
-        51 => "Emoji geändert",
-        52 => "Emoji gelöscht",
-        60 => "Integration erstellt",
-        61 => "Integration geändert",
-        62 => "Integration gelöscht",
+        40 => "Einladung erstellt",
+        41 => "Einladung geändert",
+        42 => "Einladung gelöscht",
+        50 => "Webhook erstellt",
+        51 => "Webhook geändert",
+        52 => "Webhook gelöscht",
+        60 => "Emoji erstellt",
+        61 => "Emoji geändert",
+        62 => "Emoji gelöscht",
         72 => "Nachricht gelöscht",
         73 => "Nachrichten gesammelt gelöscht",
         74 => "Nachricht angepinnt",
         75 => "Pin entfernt",
-        80 => "Sticker erstellt",
-        81 => "Sticker geändert",
-        82 => "Sticker gelöscht",
+        80 => "Integration erstellt",
+        81 => "Integration geändert",
+        82 => "Integration gelöscht",
+        83 => "Bühne erstellt",
+        84 => "Bühne geändert",
+        85 => "Bühne gelöscht",
+        90 => "Sticker erstellt",
+        91 => "Sticker geändert",
+        92 => "Sticker gelöscht",
+        100 => "Event erstellt",
+        101 => "Event geändert",
+        102 => "Event gelöscht",
         110 => "Thread erstellt",
         111 => "Thread geändert",
         112 => "Thread gelöscht",
-        143 => "AutoMod-Aktion ausgelöst",
-        144 => "AutoMod-Meldung ausgelöst",
-        145 => "AutoMod-Timeout ausgelöst",
-        163 => "Onboarding-Prompt erstellt",
-        164 => "Onboarding-Prompt geändert",
-        165 => "Onboarding-Prompt gelöscht",
+        121 => "Befehlsrechte geändert",
+        130 => "Soundboard-Sound erstellt",
+        131 => "Soundboard-Sound geändert",
+        132 => "Soundboard-Sound gelöscht",
+        140 => "AutoMod-Regel erstellt",
+        141 => "AutoMod-Regel geändert",
+        142 => "AutoMod-Regel gelöscht",
+        143 => "AutoMod hat Nachricht blockiert",
+        144 => "AutoMod hat gemeldet",
+        145 => "AutoMod hat stummgeschaltet",
+        163 => "Onboarding-Frage erstellt",
+        164 => "Onboarding-Frage geändert",
+        165 => "Onboarding-Frage gelöscht",
         166 => "Onboarding erstellt",
         167 => "Onboarding geändert",
-        190 => "Startseiten-Funktion erstellt",
-        191 => "Startseiten-Funktion geändert",
-        192 => "Startseiten-Funktion gelöscht",
-        193 => "Startseiten-Einstellungen geändert",
+        190 => "Startseite erstellt",
+        191 => "Startseite geändert",
+        192 => "Kanal-Status gesetzt",
+        193 => "Kanal-Status entfernt",
         _ => return format!("Unbekannt ({action_type})"),
     };
     name.to_string()
@@ -409,7 +440,7 @@ pub async fn audit_log(
         .collect::<Vec<_>>();
     let noise_count = dated
         .iter()
-        .filter(|row| is_noise(row.user_id, row.action_type, bot_user_id))
+        .filter(|row| is_noise(row.user_id, row.target_id, row.action_type, bot_user_id))
         .count();
     let filtered = dated
         .into_iter()
@@ -438,7 +469,9 @@ pub async fn audit_log(
                     .is_some_and(|reason| reason.to_lowercase().contains(needle))
             })
         })
-        .filter(|row| !query.hide_noise || !is_noise(row.user_id, row.action_type, bot_user_id))
+        .filter(|row| {
+            !query.hide_noise || !is_noise(row.user_id, row.target_id, row.action_type, bot_user_id)
+        })
         .collect::<Vec<_>>();
 
     let mut counts = BTreeMap::from([
@@ -524,7 +557,7 @@ pub async fn audit_log(
                 changes: row.changes.unwrap_or(Value::Null),
                 options: row.options.unwrap_or(Value::Null),
                 reason: row.reason,
-                is_noise: is_noise(row.user_id, row.action_type, bot_user_id),
+                is_noise: is_noise(row.user_id, row.target_id, row.action_type, bot_user_id),
             }
         })
         .collect();
@@ -553,26 +586,47 @@ mod tests {
 
     #[test]
     fn bot_role_update_is_noise() {
-        assert!(is_noise(Some(BOT_ID), 25, BOT_ID));
+        assert!(is_noise(Some(BOT_ID), Some(42), 25, BOT_ID));
+    }
+
+    #[test]
+    fn self_assigned_role_is_noise() {
+        assert!(is_noise(Some(42), Some(42), 25, BOT_ID));
     }
 
     #[test]
     fn bot_ban_is_not_noise() {
-        assert!(!is_noise(Some(BOT_ID), 22, BOT_ID));
+        assert!(!is_noise(Some(BOT_ID), Some(42), 22, BOT_ID));
     }
 
     #[test]
-    fn human_role_update_is_not_noise() {
-        assert!(!is_noise(Some(42), 25, BOT_ID));
+    fn role_assigned_to_another_user_is_not_noise() {
+        assert!(!is_noise(Some(42), Some(43), 25, BOT_ID));
     }
 
     #[test]
     fn bot_member_update_is_not_noise() {
-        assert!(!is_noise(Some(BOT_ID), 24, BOT_ID));
+        assert!(!is_noise(Some(BOT_ID), Some(42), 24, BOT_ID));
+    }
+
+    #[test]
+    fn invitations_and_voice_channel_status_are_always_noise() {
+        for action_type in [40, 192, 193] {
+            assert!(is_noise(Some(42), Some(43), action_type, BOT_ID));
+        }
+    }
+
+    #[test]
+    fn maps_action_names_with_unknown_fallback() {
+        assert_eq!(action_name(40), "Einladung erstellt");
+        assert_eq!(action_name(50), "Webhook erstellt");
+        assert_eq!(action_name(192), "Kanal-Status gesetzt");
+        assert_eq!(action_name(999), "Unbekannt (999)");
     }
 
     #[test]
     fn maps_categories_with_unknown_fallback() {
+        assert_eq!(category_for(40), "struktur");
         assert_eq!(category_for(22), "moderation");
         assert_eq!(category_for(25), "rollen");
         assert_eq!(category_for(110), "struktur");
@@ -590,11 +644,17 @@ mod tests {
         for action_type in [30, 31, 32] {
             assert_eq!(target_kind(action_type), TargetKind::Role);
         }
-        for action_type in [40, 41, 42] {
+        for action_type in [50, 51, 52] {
             assert_eq!(target_kind(action_type), TargetKind::Webhook);
         }
-        for action_type in [50, 51, 52] {
+        for action_type in [60, 61, 62] {
             assert_eq!(target_kind(action_type), TargetKind::Emoji);
+        }
+        for action_type in [80, 81, 82] {
+            assert_eq!(target_kind(action_type), TargetKind::Integration);
+        }
+        for action_type in [40, 41, 42] {
+            assert_eq!(target_kind(action_type), TargetKind::Sonstiges);
         }
         assert_eq!(target_kind(999), TargetKind::Sonstiges);
     }
