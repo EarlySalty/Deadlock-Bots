@@ -11,7 +11,8 @@ use std::sync::{Arc, OnceLock};
 
 use dl_broker::port::{
     DiscordPort, GuildMemberInfo, GuildRoles, GuildStats, InviteInfo, MemberAccess, MemberInfo,
-    MemberPresence, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers, ViewSpec,
+    MemberPresence, MessageReaction, PortError, ResolvedUser, RichMessage, RoleInfo, RoleMembers,
+    ViewSpec,
 };
 use dl_changelog::{ChangelogDiscord, ChangelogError};
 use serde_json::{json, Map, Value};
@@ -328,6 +329,16 @@ impl DiscordAdapter {
         }
     }
 
+    fn reaction_emoji(reaction_type: &ReactionType) -> String {
+        match reaction_type {
+            ReactionType::Unicode(value) => value.clone(),
+            ReactionType::Custom { id, name, .. } => {
+                format!("{}:{}", name.as_deref().unwrap_or_default(), id.get())
+            }
+            _ => String::new(),
+        }
+    }
+
     fn is_unknown_channel(err: &serenity::Error) -> bool {
         // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
         // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).
@@ -440,6 +451,32 @@ impl DiscordPort for DiscordAdapter {
                     PortError::Discord(err.to_string())
                 }
             })
+    }
+
+    async fn fetch_message_reactions(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+    ) -> Result<Vec<MessageReaction>, PortError> {
+        let message = self
+            .http
+            .get_message(ChannelId::new(channel_id), MessageId::new(message_id))
+            .await
+            .map_err(|err| {
+                if Self::is_http_404(&err) {
+                    PortError::MessageNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })?;
+        Ok(message
+            .reactions
+            .into_iter()
+            .map(|reaction| MessageReaction {
+                emoji: Self::reaction_emoji(&reaction.reaction_type),
+                count: reaction.count,
+            })
+            .collect())
     }
 
     async fn send_rich_message(&self, message: &RichMessage) -> Result<u64, PortError> {
@@ -1209,6 +1246,22 @@ mod tests {
         assert_eq!(
             DiscordAdapter::move_voice_channel_precheck(Some(1), 1),
             Ok(())
+        );
+    }
+
+    #[test]
+    fn reaction_emoji_maps_unicode_and_custom_values() {
+        assert_eq!(
+            DiscordAdapter::reaction_emoji(&ReactionType::Unicode("👍".to_string())),
+            "👍"
+        );
+        assert_eq!(
+            DiscordAdapter::reaction_emoji(&ReactionType::Custom {
+                animated: false,
+                id: serenity::all::EmojiId::new(123),
+                name: Some("party".to_string()),
+            }),
+            "party:123"
         );
     }
 

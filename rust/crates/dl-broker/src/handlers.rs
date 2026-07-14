@@ -199,6 +199,42 @@ pub async fn channel_info(
     }
 }
 
+pub async fn message_reactions(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    let rid = request_id(&headers);
+    if let Err(resp) = authorize(&state, &peer, &headers, &rid) {
+        return resp;
+    }
+    let params: Map<String, Value> = params
+        .into_iter()
+        .map(|(key, value)| (key, Value::String(value)))
+        .collect();
+    let channel_id = match payload::positive_int(&params, "channel_id") {
+        Ok(value) => value,
+        Err(message) => return bad_request(&rid, &message),
+    };
+    let message_id = match payload::positive_int(&params, "message_id") {
+        Ok(value) => value,
+        Err(message) => return bad_request(&rid, &message),
+    };
+    match state
+        .port
+        .fetch_message_reactions(channel_id, message_id)
+        .await
+    {
+        Ok(reactions) => respond(200, json!({ "found": true, "reactions": reactions })),
+        Err(PortError::MessageNotFound) => respond(200, json!({ "found": false, "reactions": [] })),
+        Err(err) => {
+            tracing::error!(%err, channel_id, message_id, "message_reactions fehlgeschlagen");
+            respond(502, json!({ "error": "Discord request failed" }))
+        }
+    }
+}
+
 /// Zugriffsstatus eines Mitglieds (Admin + Rollen) für den Dashboard-Login.
 /// Loopback-only, ohne Token — wie die übrigen Diagnose-Routen.
 pub async fn member_access(
@@ -1546,11 +1582,13 @@ mod tests {
 
     use crate::port::{
         ChannelInfo, ChannelInfoPort, DiscordPort, GuildMemberInfo, GuildRoles, GuildStats,
-        InviteInfo, MemberAccess, MemberInfo, MemberPresence, ResolvedUser, RichMessage,
-        RoleMembers,
+        InviteInfo, MemberAccess, MemberInfo, MemberPresence, MessageReaction, ResolvedUser,
+        RichMessage, RoleMembers,
     };
 
-    struct UnusedDiscordPort;
+    struct UnusedDiscordPort {
+        message_reactions: Result<Vec<MessageReaction>, PortError>,
+    }
 
     #[async_trait::async_trait]
     impl DiscordPort for UnusedDiscordPort {
@@ -1585,6 +1623,14 @@ mod tests {
 
         async fn delete_channel(&self, _channel_id: u64) -> Result<(), PortError> {
             Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn fetch_message_reactions(
+            &self,
+            _channel_id: u64,
+            _message_id: u64,
+        ) -> Result<Vec<MessageReaction>, PortError> {
+            self.message_reactions.clone()
         }
 
         async fn send_rich_message(&self, _message: &RichMessage) -> Result<u64, PortError> {
@@ -1720,8 +1766,14 @@ mod tests {
     }
 
     fn test_state() -> Result<SharedBroker, String> {
+        test_state_with_reactions(Err(PortError::Discord("unused".to_string())))
+    }
+
+    fn test_state_with_reactions(
+        message_reactions: Result<Vec<MessageReaction>, PortError>,
+    ) -> Result<SharedBroker, String> {
         crate::BrokerState::new_with_channel_info(
-            Arc::new(UnusedDiscordPort),
+            Arc::new(UnusedDiscordPort { message_reactions }),
             Arc::new(MockChannelInfoPort),
             "secret".to_string(),
             |_| None,
@@ -1866,6 +1918,144 @@ mod tests {
         assert_eq!(status, 200);
         assert_eq!(body["ok"], true);
         assert_eq!(body["result"]["found"], false);
+        Ok(())
+    }
+
+    fn reaction_params(channel_id: &str, message_id: &str) -> HashMap<String, String> {
+        HashMap::from([
+            ("channel_id".to_string(), channel_id.to_string()),
+            ("message_id".to_string(), message_id.to_string()),
+        ])
+    }
+
+    #[tokio::test]
+    async fn message_reactions_requires_auth() -> Result<(), Box<dyn std::error::Error>> {
+        let response = message_reactions(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            HeaderMap::new(),
+            Query(reaction_params("42", "700")),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 401);
+        assert_eq!(body["error"]["code"], "unauthorized");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_reactions_rejects_invalid_query_params(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        let missing_response = message_reactions(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            headers.clone(),
+            Query(HashMap::new()),
+        )
+        .await;
+        let (missing_status, missing_body) = response_json(missing_response).await?;
+        assert_eq!(missing_status, 400);
+        assert_eq!(missing_body["error"]["code"], "bad_request");
+        assert_eq!(
+            missing_body["error"]["message"],
+            "channel_id must be a positive integer"
+        );
+
+        let response = message_reactions(
+            State(test_state()?),
+            peer("127.0.0.1:3456")?,
+            headers,
+            Query(reaction_params("broken", "700")),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 400);
+        assert_eq!(body["error"]["code"], "bad_request");
+        assert_eq!(
+            body["error"]["message"],
+            "channel_id must be a positive integer"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_reactions_maps_not_found_to_empty_result(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        let response = message_reactions(
+            State(test_state_with_reactions(Err(PortError::MessageNotFound))?),
+            peer("127.0.0.1:3456")?,
+            headers,
+            Query(reaction_params("42", "700")),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body, json!({"found": false, "reactions": []}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_reactions_returns_unicode_and_custom_emoji(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        let response = message_reactions(
+            State(test_state_with_reactions(Ok(vec![
+                MessageReaction {
+                    emoji: "👍".to_string(),
+                    count: 2,
+                },
+                MessageReaction {
+                    emoji: "party:123".to_string(),
+                    count: 5,
+                },
+            ]))?),
+            peer("127.0.0.1:3456")?,
+            headers,
+            Query(reaction_params("42", "700")),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(
+            body,
+            json!({
+                "found": true,
+                "reactions": [
+                    {"emoji": "👍", "count": 2},
+                    {"emoji": "party:123", "count": 5},
+                ],
+            })
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn message_reactions_maps_discord_errors_to_bad_gateway(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        let response = message_reactions(
+            State(test_state_with_reactions(Err(PortError::Discord(
+                "timeout".to_string(),
+            )))?),
+            peer("127.0.0.1:3456")?,
+            headers,
+            Query(reaction_params("42", "700")),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 502);
+        assert_eq!(body, json!({"error": "Discord request failed"}));
         Ok(())
     }
 }

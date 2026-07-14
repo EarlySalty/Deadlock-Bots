@@ -154,6 +154,10 @@ pub fn router(state: SharedBroker) -> Router {
             get(handlers::channel_info),
         )
         .route(
+            "/internal/master/v1/discord/message-reactions",
+            get(handlers::message_reactions),
+        )
+        .route(
             "/internal/master/v1/discord/member-access",
             get(handlers::member_access),
         )
