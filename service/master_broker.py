@@ -277,6 +277,10 @@ class MasterBroker:
                         self._handle_channel_info,
                     ),
                     web.get(
+                        "/internal/master/v1/discord/message-reactions",
+                        self._handle_message_reactions,
+                    ),
+                    web.get(
                         "/internal/master/v1/discord/members",
                         self._handle_list_members,
                     ),
@@ -2929,6 +2933,50 @@ class MasterBroker:
                 "display_name": getattr(user, "display_name", None),
             },
         )
+
+    async def _handle_message_reactions(self, request: web.Request) -> web.Response:
+        rejected = self._authorize(request)
+        if rejected is not None:
+            return rejected
+
+        try:
+            query = dict(request.query)
+            channel_id = self._parse_positive_payload_int(query, "channel_id")
+            message_id = self._parse_positive_payload_int(query, "message_id")
+        except ValueError as exc:
+            return self._error_response(
+                request=request,
+                status=400,
+                code="bad_request",
+                message=str(exc),
+            )
+
+        try:
+            message = await self.bot.http.get_message(channel_id, message_id)
+        except discord.NotFound:
+            return web.json_response({"found": False, "reactions": []})
+        except Exception as exc:
+            logger.error(
+                "Master broker message_reactions failed (channel=%s message=%s): %s",
+                channel_id,
+                message_id,
+                exc,
+            )
+            return web.json_response({"error": "Discord request failed"}, status=502)
+
+        reactions = []
+        for reaction in message.get("reactions", []):
+            emoji = reaction.get("emoji") or {}
+            emoji_id = emoji.get("id")
+            emoji_name = str(emoji.get("name") or "")
+            emoji_value = f"{emoji_name}:{emoji_id}" if emoji_id is not None else emoji_name
+            reactions.append(
+                {
+                    "emoji": emoji_value,
+                    "count": int(reaction.get("count") or 0),
+                }
+            )
+        return web.json_response({"found": True, "reactions": reactions})
 
     async def _handle_send_dm(self, request: web.Request) -> web.Response:
         """Sendet eine DM an einen Discord-User via user.create_dm().
