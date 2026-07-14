@@ -40,6 +40,32 @@ fn dynamic_dashboard_html_is_escaped() {
         assert!(dashboard.contains(escaped_sink), "missing {escaped_sink}");
     }
 
+    for escaped_sink in [
+        "${esc(source)}",
+        "${esc(r.reason)}",
+        "${esc(run.status)}",
+        "${esc(run.digest_path ?? '–')}",
+        "${esc(run.error ?? '')}",
+        "${esc(page)}",
+        "${esc(error.message)}",
+    ] {
+        assert!(dashboard.contains(escaped_sink), "missing {escaped_sink}");
+    }
+
+    for escaped_sink in [
+        "${esc(folder)}",
+        "${esc(label)}",
+        "data-page=\"${esc(page)}\"",
+        "${esc(path)}",
+        "${esc(flags)}",
+        "${esc(fmtDate(run.run_at))}",
+        "${esc(n)}",
+        "${esc(r.count)}",
+        "data-target=\"${target.trim()}\"",
+    ] {
+        assert!(dashboard.contains(escaped_sink), "missing {escaped_sink}");
+    }
+
     for action_type in [
         1, 10, 11, 12, 13, 14, 15, 20, 22, 23, 24, 25, 26, 27, 30, 31, 32, 40, 41, 42, 50, 51, 52,
         60, 61, 62, 72, 73, 74, 75, 80, 81, 82, 110, 111, 112, 143, 144, 145, 163, 164, 165, 166,
