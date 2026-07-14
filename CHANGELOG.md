@@ -1,3 +1,11 @@
+## #263 — Verlorene Steam-Verknüpfungen finden zurück
+
+Problem: Im Februar hat der Bot bei einem fehlerhaften Abgleich angenommen, über zweihundert Mitglieder hätten den Server verlassen, obwohl sie da waren. Er hat ihre Steam-Verknüpfung gelöst und sie von seiner Freundesliste entfernt. Über hundert von ihnen liefen seitdem ohne Rang-Rolle herum, ohne zu wissen warum.
+
+Änderung: Der Bot hält jetzt fest, warum eine Verknüpfung gelöst wurde. Hat er sie selbst gekappt, gilt das Mitglied als Rückkehrer und bekommt beim nächsten Besuch in einem Sprachkanal automatisch eine neue Freundschaftsanfrage.
+
+Aktuelles Verhalten: Wer damals betroffen war, wird wieder angefragt und hat seinen Rang nach dem Bestätigen zurück. Wer den Bot bewusst selbst entfernt hat, wird nicht behelligt.
+
 ## #262 — Sprachkanäle vererben keine Moderationsrechte mehr
 
 Problem: Beim Anlegen eines Sprachkanals hat der Bot die Rechte der übergeordneten Kategorie eins zu eins übernommen. Stand dort ein Häkchen zu viel, konnte in diesen Kanälen jedes Mitglied andere stummschalten oder herumschieben, ganz ohne Mod-Rolle. Genau so wurden am 17. Juni Leute stummgeschaltet, die es bis heute waren.
