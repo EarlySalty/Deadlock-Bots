@@ -1,10 +1,7 @@
-use std::{
-    collections::BTreeMap, fmt::Display, future::Future, num::ParseIntError, sync::Arc,
-    time::Duration,
-};
+use std::{fmt::Display, future::Future, num::ParseIntError, sync::Arc, time::Duration};
 
 use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use serde_json::Value;
 use serenity::{
     all::GuildId,
@@ -36,6 +33,8 @@ enum AuditLogError {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    CentralDatabase(#[from] dl_central_db::CentralDbError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,14 +48,12 @@ struct RawAuditLogEntry {
     reason: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize)]
 struct RawAuditUser {
     id: String,
     username: Option<String>,
     global_name: Option<String>,
     avatar: Option<String>,
-    #[serde(flatten)]
-    extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,29 +105,7 @@ async fn upsert_audit_user(pool: &PgPool, user: &RawAuditUser) -> Result<(), Aud
         .avatar
         .as_deref()
         .filter(|value| !value.trim().is_empty());
-    let raw = serde_json::to_value(user)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO core.users(
-            discord_id, username, global_name, avatar, first_seen, last_seen, raw
-        )
-        VALUES ($1, $2, $3, $4, now(), now(), $5)
-        ON CONFLICT (discord_id) DO UPDATE
-        SET username = COALESCE(EXCLUDED.username, core.users.username),
-            global_name = COALESCE(EXCLUDED.global_name, core.users.global_name),
-            avatar = COALESCE(EXCLUDED.avatar, core.users.avatar),
-            last_seen = now(),
-            raw = EXCLUDED.raw
-        "#,
-    )
-    .bind(discord_id)
-    .bind(username)
-    .bind(global_name)
-    .bind(avatar)
-    .bind(raw)
-    .execute(pool)
-    .await?;
+    dl_central_db::upsert_user(pool, discord_id, username, global_name, avatar).await?;
     Ok(())
 }
 
@@ -460,17 +435,19 @@ mod tests {
     #[cfg(feature = "testing")]
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN or DEADLOCK_CENTRAL_DSN"]
-    async fn audit_user_upsert_preserves_names_when_new_values_are_empty() {
+    async fn audit_user_upsert_preserves_names_and_raw_when_new_values_are_empty() {
         let db = dl_central_db::testing::test_pool()
             .await
             .expect("central test db");
         let discord_id = 9_101_000_020_i64;
+        let original_raw = json!({"source": "existing"});
         sqlx::query(
-            "INSERT INTO core.users (discord_id, username, global_name) VALUES ($1, $2, $3)",
+            "INSERT INTO core.users (discord_id, username, global_name, raw) VALUES ($1, $2, $3, $4)",
         )
         .bind(discord_id)
         .bind("existing-user")
         .bind("Existing User")
+        .bind(&original_raw)
         .execute(db.pool())
         .await
         .expect("seed core user");
@@ -489,14 +466,16 @@ mod tests {
             .await
             .expect("upsert audit user");
 
-        let stored: (Option<String>, Option<String>) =
-            sqlx::query_as("SELECT username, global_name FROM core.users WHERE discord_id = $1")
-                .bind(discord_id)
-                .fetch_one(db.pool())
-                .await
-                .expect("read core user");
+        let stored: (Option<String>, Option<String>, Value) = sqlx::query_as(
+            "SELECT username, global_name, raw FROM core.users WHERE discord_id = $1",
+        )
+        .bind(discord_id)
+        .fetch_one(db.pool())
+        .await
+        .expect("read core user");
         assert_eq!(stored.0.as_deref(), Some("existing-user"));
         assert_eq!(stored.1.as_deref(), Some("Existing User"));
+        assert_eq!(stored.2, original_raw);
     }
 
     #[cfg(feature = "testing")]
