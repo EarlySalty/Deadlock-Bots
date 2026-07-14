@@ -1,0 +1,9 @@
+[Unit]
+Description=Deadlock Second-Brain Feeder sonntags um 19 Uhr (nach dem Community-Report)
+
+[Timer]
+OnCalendar=Sun *-*-* 19:00:00 Europe/Berlin
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1548,6 +1548,47 @@
             margin: 1rem auto 0;
         }
         .audit-hidden { display: none; }
+        .brain-pre {
+            white-space: pre-wrap;
+            word-break: break-word;
+            background: #0f0f0f;
+            border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 6px;
+            padding: 1rem;
+            max-height: 480px;
+            overflow: auto;
+            font-size: 0.9rem;
+            line-height: 1.5;
+        }
+        .status-error { color: #ff6b6b; font-weight: 600; }
+        .status-warn { color: #ffd43b; font-weight: 600; }
+        .brain-reason-block { margin-top: 1rem; }
+        .brain-reason-block h4 { margin: 0.4rem 0; font-size: 0.95rem; }
+        .brain-reason-block ul { margin: 0; padding-left: 1.2rem; color: #cfcfcf; }
+        .brain-wiki-layout { display: flex; gap: 1rem; flex-wrap: wrap; }
+        .brain-wiki-nav {
+            flex: 0 0 260px;
+            max-height: 620px;
+            overflow: auto;
+            border-right: 1px solid rgba(255,255,255,0.06);
+            padding-right: 0.5rem;
+        }
+        .brain-wiki-nav .wiki-folder { margin: 0.6rem 0 0.2rem; color: #9aa0a6; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.04em; }
+        .brain-wiki-nav a { display: block; color: #74c0fc; text-decoration: none; padding: 0.15rem 0; font-size: 0.9rem; word-break: break-word; }
+        .brain-wiki-nav a:hover, .brain-wiki-nav a.active { color: #fff; text-decoration: underline; }
+        .brain-wiki-content { flex: 1 1 400px; min-width: 0; max-height: 620px; overflow: auto; }
+        .brain-wiki-content h3, .brain-wiki-content h4, .brain-wiki-content h5, .brain-wiki-content h6 { margin: 0.8rem 0 0.4rem; }
+        .brain-wiki-content p { line-height: 1.55; }
+        .brain-wiki-content .wiki-list { padding-left: 1.3rem; }
+        .brain-wiki-content .wiki-code {
+            white-space: pre-wrap; word-break: break-word;
+            background: #0f0f0f; border: 1px solid rgba(255,255,255,0.05);
+            border-radius: 6px; padding: 0.8rem; font-size: 0.85rem;
+        }
+        .brain-wiki-content .wiki-link { color: #ffd43b; cursor: pointer; text-decoration: underline; }
+        @media (max-width: 700px) {
+            .brain-wiki-nav { flex-basis: 100%; border-right: none; }
+        }
         @media (max-width: 900px) {
             .audit-filters { grid-template-columns: repeat(2, minmax(140px, 1fr)); }
         }
@@ -1726,6 +1767,7 @@
         <button class="tab-btn" data-tab="cogs">Cogs</button>
         <button class="tab-btn" data-tab="logs">Logs</button>
         <button class="tab-btn" data-tab="audit">Audit-Log</button>
+        <button class="tab-btn" data-tab="brain">Zweitgehirn</button>
         <button class="tab-btn" data-tab="entwicklung">Entwicklung</button>
     </nav>
 
@@ -2377,6 +2419,82 @@
             <button id="audit-more" class="reload audit-more audit-hidden" type="button">Mehr laden</button>
         </section>
     </div><!-- end tab: audit -->
+
+    <!-- ════════════════════════════════════════════════
+         TAB: Zweitgehirn (Feeder + Second-Brain-Wiki)
+    ════════════════════════════════════════════════ -->
+    <div class="tab-panel" data-tab="brain">
+        <section>
+            <div class="section-header">
+                <h2>Zweitgehirn</h2>
+                <div class="section-actions">
+                    <button class="reload" id="brain-refresh">Neu laden</button>
+                    <span class="voice-meta" id="brain-status">–</span>
+                </div>
+            </div>
+
+            <div class="card" style="margin-bottom:1rem;">
+                <h3>Wochenreport</h3>
+                <p class="voice-meta" id="brain-report-period">Zeitraum: –</p>
+                <pre class="brain-pre" id="brain-report-text">Wird geladen…</pre>
+            </div>
+
+            <div class="card" style="margin-bottom:1rem;">
+                <h3>KI-Rechenschaft (7 Tage)</h3>
+                <p class="voice-meta">Alle sechs Entscheidungsklassen — auch bei 0, Fehlern und Timeouts sichtbar.</p>
+                <div class="dev-table-wrap">
+                    <table class="dev-table" id="brain-ledger-table">
+                        <thead>
+                            <tr>
+                                <th>Quelle</th>
+                                <th class="num">Ja</th>
+                                <th class="num">Nein</th>
+                                <th class="num">Unsicher</th>
+                                <th class="num">Timeout</th>
+                                <th class="num">Fehler</th>
+                                <th class="num">Unterdrückt</th>
+                            </tr>
+                        </thead>
+                        <tbody id="brain-ledger-body"></tbody>
+                    </table>
+                </div>
+                <div id="brain-ledger-empty" class="audit-empty audit-hidden">Keine Entscheidungen im Zeitraum.</div>
+                <div id="brain-reasons"></div>
+            </div>
+
+            <div class="card" style="margin-bottom:1rem;">
+                <h3>Feeder-Läufe</h3>
+                <div id="brain-runs-stale" class="audit-empty status-error audit-hidden">Feeder überfällig: letzter Lauf älter als 8 Tage (oder nie gelaufen).</div>
+                <div class="dev-table-wrap">
+                    <table class="dev-table" id="brain-runs-table">
+                        <thead>
+                            <tr>
+                                <th>Zeitpunkt</th>
+                                <th>Status</th>
+                                <th class="num">Gesehen</th>
+                                <th class="num">Relevant</th>
+                                <th>Digest</th>
+                                <th>Commit/Push</th>
+                                <th>Fehler</th>
+                            </tr>
+                        </thead>
+                        <tbody id="brain-runs-body"></tbody>
+                    </table>
+                </div>
+                <div id="brain-runs-hint" class="audit-empty audit-hidden"></div>
+            </div>
+
+            <div class="card">
+                <h3>Second-Brain-Wiki</h3>
+                <div class="brain-wiki-layout">
+                    <nav class="brain-wiki-nav" id="brain-wiki-nav"></nav>
+                    <div class="brain-wiki-content" id="brain-wiki-content">
+                        <p class="voice-meta">Seite links auswählen.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div><!-- end tab: brain -->
 
     <!-- ════════════════════════════════════════════════
          TAB: Entwicklung (Repo-Aktivität)
@@ -6949,6 +7067,255 @@ async function fetchStandaloneLogs(key, limit = 200) {
         };
     })();
 
+    // ─── Zweitgehirn ─────────────────────────────────
+    (function() {
+        const DECISIONS = [
+            ['yes', 'Ja'], ['no', 'Nein'], ['unsure', 'Unsicher'],
+            ['timeout', 'Timeout'], ['error', 'Fehler'], ['suppressed', 'Unterdrückt'],
+        ];
+        const statusEl = document.getElementById('brain-status');
+        let initialized = false;
+        let wikiPages = [];
+
+        function fmtDate(value) {
+            if (!value) return '–';
+            const date = new Date(value);
+            return Number.isNaN(date.getTime()) ? value : date.toLocaleString('de-DE');
+        }
+
+        function renderReport(report) {
+            const period = document.getElementById('brain-report-period');
+            const text = document.getElementById('brain-report-text');
+            if (!report) {
+                period.textContent = 'Zeitraum: –';
+                text.textContent = 'Noch kein Wochenreport vorhanden.';
+                return;
+            }
+            period.textContent = `Zeitraum: ${esc(fmtDate(report.period_start))} – ${esc(fmtDate(report.period_end))}`;
+            text.textContent = report.report_text || '(leer)';
+        }
+
+        function renderLedger(ledger) {
+            const body = document.getElementById('brain-ledger-body');
+            const empty = document.getElementById('brain-ledger-empty');
+            const bySource = {};
+            for (const row of ledger || []) {
+                bySource[row.source] = bySource[row.source] || {};
+                bySource[row.source][row.decision] = (bySource[row.source][row.decision] || 0) + row.count;
+            }
+            const sources = Object.keys(bySource).sort();
+            empty.classList.toggle('audit-hidden', sources.length !== 0);
+            body.innerHTML = sources.map(source => {
+                const cells = DECISIONS.map(([key]) => {
+                    const n = bySource[source][key] || 0;
+                    const cls = key === 'error' && n > 0 ? ' class="num status-error"' : ' class="num"';
+                    return `<td${cls}>${esc(n)}</td>`;
+                }).join('');
+                return `<tr><td>${esc(source)}</td>${cells}</tr>`;
+            }).join('');
+        }
+
+        function renderReasons(reasons) {
+            const wrap = document.getElementById('brain-reasons');
+            const bySource = {};
+            for (const row of reasons || []) {
+                (bySource[row.source] = bySource[row.source] || []).push(row);
+            }
+            const sources = Object.keys(bySource).sort();
+            if (!sources.length) { wrap.innerHTML = ''; return; }
+            wrap.innerHTML = sources.map(source => {
+                const items = bySource[source]
+                    .map(r => `<li>${esc(r.reason)} <span class="audit-muted">(${esc(r.count)})</span></li>`)
+                    .join('');
+                return `<div class="brain-reason-block"><h4>Top-Gründe — ${esc(source)}</h4><ul>${items}</ul></div>`;
+            }).join('');
+        }
+
+        function renderRuns(runs, schemaMissing, feederStale) {
+            const body = document.getElementById('brain-runs-body');
+            const hint = document.getElementById('brain-runs-hint');
+            const stale = document.getElementById('brain-runs-stale');
+            stale.classList.toggle('audit-hidden', !feederStale);
+            body.innerHTML = (runs || []).map(run => {
+                const statusCls = run.status === 'error' ? ' class="status-error"'
+                    : run.status === 'partial' ? ' class="status-warn"' : '';
+                const flags = `${run.committed ? 'commit' : '–'} / ${run.pushed ? 'push' : '–'}`;
+                return `<tr>
+                    <td>${esc(fmtDate(run.run_at))}</td>
+                    <td${statusCls}>${esc(run.status)}</td>
+                    <td class="num">${esc(run.gesehen ?? '–')}</td>
+                    <td class="num">${esc(run.relevant ?? '–')}</td>
+                    <td>${esc(run.digest_path ?? '–')}</td>
+                    <td>${esc(flags)}</td>
+                    <td class="status-error">${esc(run.error ?? '')}</td>
+                </tr>`;
+            }).join('');
+            if (schemaMissing) {
+                hint.textContent = 'Migration ausstehend — brain.feeder_runs existiert noch nicht.';
+                hint.classList.remove('audit-hidden');
+            } else if (!runs || !runs.length) {
+                hint.textContent = 'Noch kein Lauf.';
+                hint.classList.remove('audit-hidden');
+            } else {
+                hint.classList.add('audit-hidden');
+            }
+        }
+
+        // Minimaler Markdown-Renderer: JEDER Textknoten wird ZUERST via esc()
+        // escapt, danach werden eigene Tags eingesetzt (nie umgekehrt).
+        function inlineMd(text) {
+            let s = esc(text);
+            // [[Ziel|Label]] / [[Ziel]] → klickbare Wiki-Navigation (Captures sind bereits escapt)
+            s = s.replace(/\[\[([^\]|]+)(?:\|([^\]]+))?\]\]/g, (m, target, label) =>
+                `<a class="wiki-link" data-target="${target.trim()}">${(label || target).trim()}</a>`);
+            // [Text](url) → nur der (bereits escapte) Text, nicht klickbar
+            s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (m, txt) => txt);
+            // **fett**
+            s = s.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+            return s;
+        }
+
+        function renderMarkdown(md) {
+            const lines = String(md || '').split('\n');
+            let html = '';
+            let inCode = false;
+            let listOpen = false;
+            const closeList = () => { if (listOpen) { html += '</ul>'; listOpen = false; } };
+            for (const raw of lines) {
+                if (raw.trim().startsWith('```')) {
+                    if (inCode) { html += '</pre>'; inCode = false; }
+                    else { closeList(); html += '<pre class="wiki-code">'; inCode = true; }
+                    continue;
+                }
+                if (inCode) { html += esc(raw) + '\n'; continue; }
+                const heading = raw.match(/^(#{1,6})\s+(.*)$/);
+                if (heading) {
+                    closeList();
+                    const level = Math.min(heading[1].length + 2, 6);
+                    html += `<h${level}>${inlineMd(heading[2])}</h${level}>`;
+                    continue;
+                }
+                const li = raw.match(/^\s*[-*]\s+(.*)$/);
+                if (li) {
+                    if (!listOpen) { html += '<ul class="wiki-list">'; listOpen = true; }
+                    html += `<li>${inlineMd(li[1])}</li>`;
+                    continue;
+                }
+                closeList();
+                if (raw.trim() === '') continue;
+                html += `<p>${inlineMd(raw)}</p>`;
+            }
+            closeList();
+            if (inCode) html += '</pre>';
+            return html;
+        }
+
+        function renderWikiNav(pages, index, log) {
+            const nav = document.getElementById('brain-wiki-nav');
+            const groups = {};
+            for (const page of pages) {
+                const slash = page.lastIndexOf('/');
+                const folder = slash === -1 ? '(Wurzel)' : page.slice(0, slash);
+                (groups[folder] = groups[folder] || []).push(page);
+            }
+            let html = '<div class="wiki-folder">Übersicht</div>'
+                + '<a data-special="index">index.md</a>'
+                + '<a data-special="log">log.md</a>';
+            for (const folder of Object.keys(groups).sort()) {
+                html += `<div class="wiki-folder">${esc(folder)}</div>`;
+                for (const page of groups[folder]) {
+                    const label = page.slice(page.lastIndexOf('/') + 1);
+                    html += `<a data-page="${esc(page)}">${esc(label)}</a>`;
+                }
+            }
+            nav.innerHTML = html;
+            nav.querySelectorAll('a[data-special="index"]').forEach(a =>
+                a.addEventListener('click', () => showPage('index.md', index)));
+            nav.querySelectorAll('a[data-special="log"]').forEach(a =>
+                a.addEventListener('click', () => showPage('log.md', log)));
+            nav.querySelectorAll('a[data-page]').forEach(a =>
+                a.addEventListener('click', () => loadWikiPage(a.dataset.page)));
+        }
+
+        function showPage(path, content) {
+            const el = document.getElementById('brain-wiki-content');
+            el.innerHTML = `<h3>${esc(path)}</h3>` + renderMarkdown(content);
+        }
+
+        async function loadWikiPage(path) {
+            const el = document.getElementById('brain-wiki-content');
+            el.innerHTML = '<p class="voice-meta">Wird geladen…</p>';
+            try {
+                const data = await fetchJSON(`/api/brain/wiki/page?path=${encodeURIComponent(path)}`);
+                showPage(data.path, data.content);
+            } catch (error) {
+                el.innerHTML = `<p class="status-error">Seite nicht ladbar (${esc(error.message)}).</p>`;
+            }
+        }
+
+        function openWikiByName(name) {
+            const needle = name.toLowerCase().replace(/\.md$/, '');
+            const match = wikiPages.find(p => {
+                const base = p.slice(p.lastIndexOf('/') + 1).replace(/\.md$/, '').toLowerCase();
+                return base === needle || p.toLowerCase() === needle + '.md';
+            });
+            if (match) loadWikiPage(match);
+        }
+
+        document.getElementById('brain-wiki-content').addEventListener('click', event => {
+            const link = event.target.closest('.wiki-link');
+            if (!link) return;
+            event.preventDefault();
+            openWikiByName(link.dataset.target || '');
+        });
+
+        async function loadWiki() {
+            try {
+                const data = await fetchJSON('/api/brain/wiki');
+                wikiPages = data.pages || [];
+                renderWikiNav(wikiPages, data.index || '', data.log || '');
+            } catch (error) {
+                document.getElementById('brain-wiki-nav').innerHTML =
+                    `<p class="status-error">Wiki nicht ladbar (${esc(error.message)}).</p>`;
+            }
+        }
+
+        async function loadOverview() {
+            statusEl.textContent = 'Wird geladen…';
+            try {
+                const data = await fetchJSON('/api/brain/overview');
+                renderReport(data.report);
+                renderLedger(data.ledger_week);
+                renderReasons(data.top_reasons);
+                renderRuns(data.feeder_runs, data.schema_missing, data.feeder_stale);
+                statusEl.textContent = `Aktualisiert: ${esc(new Date().toLocaleTimeString('de-DE'))}`;
+            } catch (error) {
+                // Kein Panel darf auf "Wird geladen…" hängen bleiben — überall Fehlertext zeigen.
+                const msg = esc(error.message);
+                statusEl.textContent = `Fehler: ${msg}`;
+                document.getElementById('brain-report-text').innerHTML =
+                    `<span class="status-error">Report nicht ladbar (${msg}).</span>`;
+                document.getElementById('brain-ledger-body').innerHTML =
+                    `<tr><td colspan="7" class="status-error">Ledger nicht ladbar (${msg}).</td></tr>`;
+                document.getElementById('brain-reasons').innerHTML = '';
+                document.getElementById('brain-runs-body').innerHTML =
+                    `<tr><td colspan="7" class="status-error">Läufe nicht ladbar (${msg}).</td></tr>`;
+            }
+        }
+
+        document.getElementById('brain-refresh').addEventListener('click', () => {
+            loadOverview();
+            loadWiki();
+        });
+
+        window.loadBrain = function() {
+            if (initialized) return;
+            initialized = true;
+            loadOverview();
+            loadWiki();
+        };
+    })();
+
     // ─── Tab Switching ───────────────────────────────
     (function() {
         var btns = document.querySelectorAll('.tab-btn');
@@ -6981,6 +7348,9 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 }
                 if (target === 'audit' && typeof loadAuditLog === 'function') {
                     loadAuditLog();
+                }
+                if (target === 'brain' && typeof loadBrain === 'function') {
+                    loadBrain();
                 }
             });
         });
