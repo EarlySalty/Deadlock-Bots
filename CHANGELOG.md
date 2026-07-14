@@ -4,7 +4,7 @@ Problem: Im Februar hat der Bot bei einem fehlerhaften Abgleich angenommen, übe
 
 Änderung: Der Bot hält jetzt fest, warum eine Verknüpfung gelöst wurde. Hat er sie selbst gekappt, gilt das Mitglied als Rückkehrer und bekommt beim nächsten Besuch in einem Sprachkanal automatisch eine neue Freundschaftsanfrage.
 
-Aktuelles Verhalten: Wer damals betroffen war, wird wieder angefragt und hat seinen Rang nach dem Bestätigen zurück. Wer den Bot bewusst selbst entfernt hat, wird nicht behelligt.
+Aktuelles Verhalten: Wer damals betroffen war, wird wieder angefragt und hat seinen Rang nach dem Bestätigen zurück. Angefragt wird nur, wer im Sprachkanal aktiv ist, und frühestens alle 30 Tage erneut.
 
 ## #262 — Sprachkanäle vererben keine Moderationsrechte mehr
 
