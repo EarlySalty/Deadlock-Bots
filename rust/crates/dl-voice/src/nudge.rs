@@ -145,7 +145,9 @@ impl VoiceNudge {
                   FROM core.steam_links
                  WHERE discord_id = $1
                    AND is_steam_friend = FALSE
-                   AND unlink_reason = 'inactive_purge'
+                   -- MUSS mit find_refriend_candidates_for_user in Deadlock-Steam-Bot
+                   -- (crates/steam-persistence/src/friends.rs) synchron gehalten werden.
+                   AND unlink_reason IN ('inactive_purge', 'friend_missing', 'legacy_unlink')
                    -- Mit REFRIEND_COOLDOWN_DAYS=30 auf der Steam-Seite gekoppelt.
                    AND (
                        refriend_attempted_at IS NULL
@@ -764,7 +766,7 @@ mod tests {
         sqlx::query!(
             r#"
             INSERT INTO core.users (discord_id)
-            VALUES (101), (102), (103), (104), (105)
+            VALUES (101), (102), (103), (104), (105), (106), (107)
             "#
         )
         .execute(&nudge.pool)
@@ -776,11 +778,13 @@ mod tests {
                 discord_id, steam_id, is_steam_friend, unlink_reason, refriend_attempted_at
             )
             VALUES
-                (101, 'returner', FALSE, 'inactive_purge', NULL),
-                (102, 'friend', TRUE, 'inactive_purge', NULL),
-                (103, 'no-reason', FALSE, NULL, NULL),
-                (104, 'other-reason', FALSE, 'manual', NULL),
-                (105, 'cooldown', FALSE, 'inactive_purge', NOW())
+                (101, 'inactive-purge', FALSE, 'inactive_purge', NULL),
+                (102, 'friend-missing', FALSE, 'friend_missing', NULL),
+                (103, 'legacy-unlink', FALSE, 'legacy_unlink', NULL),
+                (104, 'no-reason', FALSE, NULL, NULL),
+                (105, 'unknown-reason', FALSE, 'user_removed_bot', NULL),
+                (106, 'cooldown', FALSE, 'inactive_purge', NOW()),
+                (107, 'friend', TRUE, 'inactive_purge', NULL)
             "#
         )
         .execute(&nudge.pool)
@@ -788,10 +792,12 @@ mod tests {
         .expect("links");
 
         assert!(nudge.is_refriend_returner(101).await);
-        assert!(!nudge.is_refriend_returner(102).await);
-        assert!(!nudge.is_refriend_returner(103).await);
+        assert!(nudge.is_refriend_returner(102).await);
+        assert!(nudge.is_refriend_returner(103).await);
         assert!(!nudge.is_refriend_returner(104).await);
         assert!(!nudge.is_refriend_returner(105).await);
+        assert!(!nudge.is_refriend_returner(106).await);
+        assert!(!nudge.is_refriend_returner(107).await);
     }
 
     #[tokio::test]
