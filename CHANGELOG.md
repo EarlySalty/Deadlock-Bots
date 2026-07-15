@@ -1,3 +1,11 @@
+## #266 — Neue Server-Tour beim Onboarding
+
+Problem: Neue Mitglieder mussten sich alles selbst zusammensuchen. Wie die Sprachkanäle funktionieren, wo man Fragen stellt oder Hilfe bekommt, das stand zwar irgendwo, aber niemand hat es einem gezeigt.
+
+Änderung: Beim Beitritt gibt es jetzt die Frage „Willst du Starthilfe?". Dort kannst du dir den echten Rang einrichten lassen, eine kleine Server-Tour per DM bekommen, oder beides. Die Tour erklärt Schritt für Schritt die wichtigsten Ecken des Servers, und nach jedem Schritt kannst du direkt Fragen stellen, die der Bot beantwortet.
+
+Aktuelles Verhalten: Wer die Tour anhakt, bekommt nach dem Start eine DM und klickt sich in seinem Tempo durch sechs kurze Stationen, von den Sprachkanälen bis zu den Streamern. Wer nichts anhakt, merkt keinen Unterschied.
+
 ## #265 — Gelöschte Profile bleiben gelöscht
 
 Problem: Wer seine Daten löschen ließ, konnte durch einen Nebenweg wieder angelegt werden. Der Bot liest regelmäßig Server-Protokolle mit und legte dabei Namen erneut an, ohne zu prüfen, ob die Person eine Löschung beantragt hatte.
