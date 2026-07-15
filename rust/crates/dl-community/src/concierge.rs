@@ -6885,6 +6885,25 @@ pub fn spawn(
     concierge: Arc<Concierge>,
     dispatcher: &Dispatcher,
 ) -> Vec<tokio::task::JoinHandle<()>> {
+    spawn_with_message_loop(concierge, dispatcher, true)
+}
+
+/// Startet alle Concierge-Hintergrundaufgaben außer dem Message-Subscriber.
+///
+/// Der Tour-Router bleibt damit der einzige Owner direkter Nachrichten und
+/// leitet nicht zur Tour gehörende Nachrichten explizit an den Concierge weiter.
+pub fn spawn_without_message_loop(
+    concierge: Arc<Concierge>,
+    dispatcher: &Dispatcher,
+) -> Vec<tokio::task::JoinHandle<()>> {
+    spawn_with_message_loop(concierge, dispatcher, false)
+}
+
+fn spawn_with_message_loop(
+    concierge: Arc<Concierge>,
+    dispatcher: &Dispatcher,
+    message_loop: bool,
+) -> Vec<tokio::task::JoinHandle<()>> {
     if !concierge.enabled() {
         return Vec::new();
     }
@@ -6908,21 +6927,23 @@ pub fn spawn(
         }
     }));
 
-    let mut messages = dispatcher.subscribe_messages();
-    let message_concierge = concierge.clone();
-    handles.push(tokio::spawn(async move {
-        loop {
-            match messages.recv().await {
-                Ok(event) => {
-                    message_concierge.handle_routed_message(&event).await;
+    if message_loop {
+        let mut messages = dispatcher.subscribe_messages();
+        let message_concierge = concierge.clone();
+        handles.push(tokio::spawn(async move {
+            loop {
+                match messages.recv().await {
+                    Ok(event) => {
+                        message_concierge.handle_routed_message(&event).await;
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
+                        tracing::warn!(missed, "Concierge: Message-Events verpasst");
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
-                    tracing::warn!(missed, "Concierge: Message-Events verpasst");
-                }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
-        }
-    }));
+        }));
+    }
 
     let mut voice = dispatcher.subscribe_voice();
     let voice_concierge = concierge.clone();
@@ -6989,6 +7010,12 @@ mod tests {
     #[test]
     fn concierge_owner_topic_prefix_bleibt_stabil() {
         assert_eq!(CONCIERGE_OWNER_TOPIC_PREFIX, "dl-concierge-owner:");
+    }
+
+    #[test]
+    fn concierge_bietet_eine_explizite_spawn_api_ohne_message_loop() {
+        let _: fn(Arc<Concierge>, &Dispatcher) -> Vec<tokio::task::JoinHandle<()>> =
+            spawn_without_message_loop;
     }
 
     fn valid_pate_claim_interaction(user_id: u64, pate_id: u64) -> BridgeInteraction {

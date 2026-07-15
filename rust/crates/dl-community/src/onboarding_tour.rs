@@ -12,6 +12,7 @@ use thiserror::Error;
 
 pub const TOUR_STATE_SCHEMA: u8 = 1;
 pub const QUESTION_WINDOW_HOURS: i64 = 24;
+pub const ANSWERING_LEASE_MINUTES: i64 = 5;
 pub const MAX_RETRY_COUNT: u32 = 3;
 pub const RETRY_DELAY_SECONDS: i64 = 60;
 
@@ -115,6 +116,7 @@ pub struct TourState {
     pub last_tour_message_id: Option<String>,
     pub claimed_question_message_id: Option<String>,
     pub question_deadline_at: Option<String>,
+    pub answering_deadline_at: Option<String>,
     pub retry_count: u32,
     pub next_retry_at: Option<String>,
     pub updated_at: String,
@@ -130,6 +132,8 @@ struct TourStateWire {
     last_tour_message_id: Option<String>,
     claimed_question_message_id: Option<String>,
     question_deadline_at: Option<String>,
+    #[serde(default)]
+    answering_deadline_at: Option<String>,
     retry_count: u32,
     next_retry_at: Option<String>,
     updated_at: String,
@@ -156,6 +160,7 @@ impl<'de> Deserialize<'de> for TourState {
             last_tour_message_id: state.last_tour_message_id,
             claimed_question_message_id: state.claimed_question_message_id,
             question_deadline_at: state.question_deadline_at,
+            answering_deadline_at: state.answering_deadline_at,
             retry_count: state.retry_count,
             next_retry_at: state.next_retry_at,
             updated_at: state.updated_at,
@@ -174,6 +179,7 @@ impl TourState {
             last_tour_message_id: None,
             claimed_question_message_id: None,
             question_deadline_at: None,
+            answering_deadline_at: None,
             retry_count: 0,
             next_retry_at: None,
             updated_at: now.to_rfc3339(),
@@ -422,7 +428,6 @@ pub enum TourAction {
     OpenQuestionWindow(DateTime<Utc>),
     AnswerQuestionViaConcierge {
         channel_id: String,
-        message_id: String,
         content: String,
         step: TourStepKey,
         resume_state: Box<TourState>,
@@ -475,7 +480,9 @@ fn persist_state(expected: &TourState, next: TourState) -> TourAction {
 pub fn normalize_tour_state(state: &TourState, now: DateTime<Utc>) -> TourState {
     let mut normalized = state.clone();
     match state.mode {
-        TourMode::Step | TourMode::Answering => {}
+        TourMode::Step => {
+            normalized.answering_deadline_at = None;
+        }
         TourMode::WaitingForQuestion => {
             let deadline_is_valid = state
                 .question_deadline_at
@@ -486,6 +493,20 @@ pub fn normalize_tour_state(state: &TourState, now: DateTime<Utc>) -> TourState 
             if !deadline_is_valid {
                 normalized.mode = TourMode::Step;
                 normalized.question_deadline_at = None;
+                normalized.updated_at = now.to_rfc3339();
+            }
+        }
+        TourMode::Answering => {
+            let deadline_is_valid = state
+                .answering_deadline_at
+                .as_deref()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc) > now)
+                .unwrap_or(false);
+            if !deadline_is_valid {
+                normalized.mode = TourMode::Step;
+                normalized.question_deadline_at = None;
+                normalized.answering_deadline_at = None;
                 normalized.updated_at = now.to_rfc3339();
             }
         }
@@ -591,6 +612,7 @@ pub fn decide_tour_component_actions(input: &TourComponentDecisionInput) -> Vec<
             let deadline = input.now + Duration::hours(QUESTION_WINDOW_HOURS);
             state.mode = TourMode::WaitingForQuestion;
             state.question_deadline_at = Some(deadline.to_rfc3339());
+            state.answering_deadline_at = None;
             state.updated_at = input.now.to_rfc3339();
             vec![
                 persist_state(expected, state),
@@ -600,6 +622,7 @@ pub fn decide_tour_component_actions(input: &TourComponentDecisionInput) -> Vec<
         TourComponentAction::End => {
             state.status = TourStatus::AbortedByUser;
             state.question_deadline_at = None;
+            state.answering_deadline_at = None;
             state.updated_at = input.now.to_rfc3339();
             vec![
                 persist_state(expected, state),
@@ -612,6 +635,7 @@ pub fn decide_tour_component_actions(input: &TourComponentDecisionInput) -> Vec<
             }
             state.status = TourStatus::Completed;
             state.question_deadline_at = None;
+            state.answering_deadline_at = None;
             state.updated_at = input.now.to_rfc3339();
             vec![persist_state(expected, state), TourAction::Complete]
         }
@@ -652,6 +676,7 @@ pub fn decide_tour_dm_message_actions(input: &TourDmMessageDecisionInput) -> Vec
         aborted.status = TourStatus::AbortedLeftGuild;
         aborted.mode = TourMode::Step;
         aborted.question_deadline_at = None;
+        aborted.answering_deadline_at = None;
         aborted.updated_at = input.now.to_rfc3339();
         return vec![
             persist_state(expected, aborted),
@@ -672,15 +697,17 @@ pub fn decide_tour_dm_message_actions(input: &TourDmMessageDecisionInput) -> Vec
     answering.mode = TourMode::Answering;
     answering.claimed_question_message_id = Some(input.message_id.clone());
     answering.question_deadline_at = None;
+    answering.answering_deadline_at =
+        Some((input.now + Duration::minutes(ANSWERING_LEASE_MINUTES)).to_rfc3339());
     answering.updated_at = input.now.to_rfc3339();
 
     let mut resume = answering.clone();
     resume.mode = TourMode::Step;
+    resume.answering_deadline_at = None;
     vec![
         persist_state(expected, answering),
         TourAction::AnswerQuestionViaConcierge {
             channel_id: input.channel_id.clone(),
-            message_id: input.message_id.clone(),
             content: input.content.clone(),
             step: input.state.step,
             resume_state: Box::new(resume),
@@ -698,6 +725,7 @@ fn pending_send_state(
         step: target_step,
         mode: TourMode::Step,
         question_deadline_at: None,
+        answering_deadline_at: None,
         next_retry_at: None,
         updated_at: now.to_rfc3339(),
         ..state.clone()
@@ -732,7 +760,14 @@ pub fn decide_tour_retry_actions(state: &TourState, now: DateTime<Utc>) -> Vec<T
                 .map(|value| value.with_timezone(&Utc) <= now)
                 .unwrap_or(false);
             if due {
-                vec![TourAction::SendStep(normalized.step)]
+                let mut claimed = normalized.clone();
+                claimed.next_retry_at =
+                    Some((now + Duration::seconds(RETRY_DELAY_SECONDS)).to_rfc3339());
+                claimed.updated_at = now.to_rfc3339();
+                vec![
+                    persist_state(state, claimed),
+                    TourAction::SendStep(normalized.step),
+                ]
             } else {
                 normalized_noop(state, normalized)
             }
@@ -765,6 +800,7 @@ fn actions_after_send(
             next.dm_channel_id = Some(dm_channel_id.clone());
             next.last_tour_message_id = Some(message_id.clone());
             next.question_deadline_at = None;
+            next.answering_deadline_at = None;
             next.retry_count = 0;
             next.next_retry_at = None;
             next.updated_at = now.to_rfc3339();
@@ -779,6 +815,7 @@ fn actions_after_send(
             aborted.status = TourStatus::AbortedDmBlocked;
             aborted.step = target_step;
             aborted.question_deadline_at = None;
+            aborted.answering_deadline_at = None;
             aborted.next_retry_at = None;
             aborted.updated_at = now.to_rfc3339();
             let mut actions = vec![
@@ -806,6 +843,7 @@ fn actions_after_send(
             uncertain.step = target_step;
             uncertain.mode = TourMode::Step;
             uncertain.question_deadline_at = None;
+            uncertain.answering_deadline_at = None;
             uncertain.next_retry_at = None;
             uncertain.updated_at = now.to_rfc3339();
             vec![persist_state(state, uncertain), TourAction::MarkUncertain]
@@ -868,9 +906,9 @@ pub trait OnboardingTourPort: Send + Sync {
         &self,
         user_id: u64,
         channel_id: &str,
-        message_id: &str,
         content: &str,
         step: TourStepKey,
+        answering_state: &TourState,
         resume_state: &TourState,
     ) -> Result<(), String>;
 }
@@ -898,6 +936,7 @@ mod tests {
             last_tour_message_id: Some("456".into()),
             claimed_question_message_id: None,
             question_deadline_at: None,
+            answering_deadline_at: None,
             retry_count: 0,
             next_retry_at: None,
             updated_at: now().to_rfc3339(),
@@ -961,6 +1000,18 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<TourState>(&encoded).expect("deserialize v1"),
             original
+        );
+
+        let mut old_schema = serde_json::to_value(&original).expect("state value");
+        old_schema
+            .as_object_mut()
+            .expect("state object")
+            .remove("answering_deadline_at");
+        assert_eq!(
+            serde_json::from_value::<TourState>(old_schema)
+                .expect("schema 1 without answering lease")
+                .answering_deadline_at,
+            None
         );
 
         let mut unsupported = serde_json::to_value(&original).expect("state value");
@@ -1325,6 +1376,10 @@ mod tests {
             now: now(),
         });
         assert_eq!(persisted(&dm_actions).mode, TourMode::Answering);
+        assert_eq!(
+            persisted(&dm_actions).answering_deadline_at,
+            Some((now() + Duration::minutes(ANSWERING_LEASE_MINUTES)).to_rfc3339())
+        );
         let resume = dm_actions
             .iter()
             .find_map(|action| match action {
@@ -1338,6 +1393,38 @@ mod tests {
         assert_eq!(resume.mode, TourMode::Step);
         assert_eq!(resume.step, TourStepKey::RankLink);
         assert_eq!(resume.claimed_question_message_id.as_deref(), Some("1001"));
+        assert_eq!(resume.answering_deadline_at, None);
+    }
+
+    #[test]
+    fn expired_answering_lease_preserves_watermark_and_unblocks_buttons() {
+        let answering = TourState {
+            claimed_question_message_id: Some("1001".into()),
+            answering_deadline_at: Some((now() - Duration::seconds(1)).to_rfc3339()),
+            ..state(
+                TourStatus::Active,
+                TourStepKey::Support,
+                TourMode::Answering,
+            )
+        };
+
+        let actions = decide_tour_component_actions(&component_input(
+            answering.clone(),
+            TourComponentAction::Next,
+            TourStepKey::Support,
+        ));
+
+        assert!(matches!(
+            actions.first(),
+            Some(TourAction::PersistState { expected, next })
+                if expected == &answering
+                    && next.status == TourStatus::Starting
+                    && next.step == TourStepKey::Streamers
+                    && next.mode == TourMode::Step
+                    && next.claimed_question_message_id.as_deref() == Some("1001")
+                    && next.answering_deadline_at.is_none()
+        ));
+        assert!(actions.contains(&TourAction::SendStep(TourStepKey::Streamers)));
     }
 
     #[test]
@@ -1513,10 +1600,49 @@ mod tests {
             .iter()
             .flat_map(|state| decide_tour_retry_actions(state, now()))
             .collect::<Vec<_>>();
-        assert_eq!(
-            recovered,
-            vec![TourAction::SendStep(TourStepKey::Patchnotes)]
-        );
+        assert!(matches!(
+            recovered.as_slice(),
+            [
+                TourAction::PersistState { expected, next },
+                TourAction::SendStep(TourStepKey::Patchnotes)
+            ] if expected.next_retry_at == persisted_rows[0].next_retry_at
+                && next.next_retry_at == Some((now() + Duration::seconds(RETRY_DELAY_SECONDS)).to_rfc3339())
+        ));
+    }
+
+    #[test]
+    fn two_retry_workers_claim_exactly_one_send() {
+        let mut row = TourState {
+            status: TourStatus::Starting,
+            step: TourStepKey::Patchnotes,
+            retry_count: 1,
+            next_retry_at: Some((now() - Duration::seconds(1)).to_rfc3339()),
+            ..state(
+                TourStatus::Starting,
+                TourStepKey::Patchnotes,
+                TourMode::Step,
+            )
+        };
+        let workers = [
+            decide_tour_retry_actions(&row, now()),
+            decide_tour_retry_actions(&row, now()),
+        ];
+        let mut sends = 0;
+
+        for actions in workers {
+            let Some(TourAction::PersistState { expected, next }) = actions.first() else {
+                panic!("retry claim must be persisted before send");
+            };
+            if &row == expected {
+                row = next.clone();
+                sends += actions
+                    .iter()
+                    .filter(|action| matches!(action, TourAction::SendStep(_)))
+                    .count();
+            }
+        }
+
+        assert_eq!(sends, 1);
     }
 
     #[test]
@@ -1669,6 +1795,8 @@ mod tests {
             let mut current = state(TourStatus::Active, TourStepKey::Voice, mode);
             if mode == TourMode::WaitingForQuestion {
                 current.question_deadline_at = Some((now() + Duration::hours(1)).to_rfc3339());
+            } else if mode == TourMode::Answering {
+                current.answering_deadline_at = Some((now() + Duration::minutes(1)).to_rfc3339());
             }
             let actions = decide_tour_component_actions(&component_input(
                 current,
