@@ -1709,6 +1709,17 @@ pub async fn delete_user_data(
         }
         counts.insert("kv_voice_nudge".to_string(), nudge);
 
+        let mut onboarding_dm = 0i64;
+        for ns in ["onboarding_bridge_dm", "onboarding_tour"] {
+            let result = sqlx::query("DELETE FROM bot.kv_store WHERE ns = $1 AND k = $2")
+                .bind(ns)
+                .bind(&uid_key)
+                .execute(&mut *tx)
+                .await?;
+            onboarding_dm += rows_to_i64(result.rows_affected());
+        }
+        counts.insert("kv_onboarding_dm".to_string(), onboarding_dm);
+
         let native_onboarding = sqlx::query(
             "DELETE FROM bot.kv_store
               WHERE ns = $1
@@ -1914,6 +1925,13 @@ pub async fn export_user_data(pool: &PgPool, user_id: i64, now: i64) -> Communit
             serde_json::json!({
                 "first_seen": kv_value(pool, "voice_nudge_first_seen", &uid_key).await?,
                 "done": kv_value(pool, "voice_nudge_done", &uid_key).await?,
+            }),
+        );
+        kv_out.insert(
+            "onboarding_dm".into(),
+            serde_json::json!({
+                "bridge": kv_value(pool, "onboarding_bridge_dm", &uid_key).await?,
+                "tour": kv_value(pool, "onboarding_tour", &uid_key).await?,
             }),
         );
         let rows = sqlx::query(
@@ -2951,7 +2969,9 @@ mod tests {
               ('ai_onboarding:persistent_views','viewA','{"user_id":42}'),
               ('ai_onboarding:persistent_views','viewB','{"user_id":99}'),
               ('voice_nudge_done','42','1'),
-              ('native_onboarding:completed','1:42','{"guild_id":1,"user_id":42}')
+              ('native_onboarding:completed','1:42','{"guild_id":1,"user_id":42}'),
+              ('onboarding_bridge_dm','42','dm_done'),
+              ('onboarding_tour','42','{"schema":1,"status":"active"}')
             "#
         )
         .execute(db.pool())
@@ -2997,6 +3017,7 @@ mod tests {
         assert_eq!(s.counts.get("kv_ai_onboarding_sessions").copied(), Some(1));
         assert_eq!(s.counts.get("kv_ai_onboarding_views").copied(), Some(1));
         assert_eq!(s.counts.get("kv_voice_nudge").copied(), Some(1));
+        assert_eq!(s.counts.get("kv_onboarding_dm").copied(), Some(2));
         assert_eq!(
             s.counts.get("kv_native_onboarding_completed").copied(),
             Some(1)

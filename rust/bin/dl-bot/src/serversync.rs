@@ -82,15 +82,18 @@ pub(crate) fn rang_guide_message_id_key(message_index: usize) -> String {
     rang_guide_publish::rang_guide_message_id_key(message_index)
 }
 
+// memes + deadlock-invite liegen seit W3.x im Archiv (kein @everyone-VIEW mehr);
+// off-topic + gameplay-clips halten die Discord-Regel "mind. 5 Defaults mit
+// @everyone VIEW+SEND" ein (live verifiziert 2026-07-15).
 const DEFAULT_ONBOARDING_CHANNEL_NAMES: &[&str] = &[
     "allgemein",
     "frag-die-community",
     "mitspieler-suche",
-    "memes",
+    "off-topic",
+    "gameplay-clips",
     "rank-ups",
     "patchnotes",
     "deadlock-rang",
-    "deadlock-invite",
     "server-support",
 ];
 
@@ -9702,11 +9705,11 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             (6001, "allgemein"),
             (6002, "frag-die-community"),
             (6003, "🎯mitspieler-suche"),
-            (6004, "💀memes"),
+            (6004, "🎲off-topic"),
             (6005, "rank-ups"),
             (6006, "patchnotes"),
             (6007, "deadlock-rang"),
-            (6008, "deadlock-invite"),
+            (6008, "📼gameplay-clips"),
             (6009, "server-support"),
         ] {
             model.channels.insert(id, onboarding_channel(id, name));
@@ -9743,18 +9746,18 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn channel_resolver_meldet_deadlock_invite_duplikat_statt_ersten_treffer() {
+    fn channel_resolver_meldet_kanal_duplikat_statt_ersten_treffer() {
         let mut model = onboarding_model();
         model
             .channels
-            .insert(6010, onboarding_channel(6010, "💌deadlock-invite"));
+            .insert(6010, onboarding_channel(6010, "💬frag-die-community"));
 
-        let err = require_channel_mention(&model, "deadlock-invite")
+        let err = require_channel_mention(&model, "frag-die-community")
             .expect_err("duplicate channel names must fail");
 
         assert!(err.to_string().contains("mehrdeutig"));
-        assert!(err.to_string().contains("6008:deadlock-invite"));
-        assert!(err.to_string().contains("6010:💌deadlock-invite"));
+        assert!(err.to_string().contains("6002:frag-die-community"));
+        assert!(err.to_string().contains("6010:💬frag-die-community"));
     }
 
     fn serverguide_model() -> GuildModel {
