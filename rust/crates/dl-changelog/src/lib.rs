@@ -110,6 +110,7 @@ pub struct SpamLearningV2 {
 struct CrewRadar {
     login: String,
     chatter_id: String,
+    notify_only: bool,
 }
 
 fn trim_text(value: Option<&Value>, limit: usize) -> String {
@@ -183,11 +184,15 @@ fn parse_crew_radar(raw: Option<&Value>) -> Option<CrewRadar> {
     Some(CrewRadar {
         login: trim_text(obj.get("login"), usize::MAX),
         chatter_id: trim_text(obj.get("chatter_id"), usize::MAX),
+        notify_only: obj
+            .get("notify_only")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     })
 }
 
 fn crew_radar_components(payload: &CrewRadar) -> Option<Value> {
-    if payload.chatter_id.is_empty() {
+    if payload.notify_only || payload.chatter_id.is_empty() {
         return None;
     }
     let prefix = format!("crew_ban:{}:", payload.chatter_id);
@@ -891,6 +896,7 @@ mod tests {
                     "channel": "dehackxas",
                     "style_score": 13,
                     "verdict": "clean",
+                    "notify_only": false,
                 },
             }),
         )
@@ -902,6 +908,32 @@ mod tests {
         assert_eq!(button["label"], "Auf globale Banliste");
         assert_eq!(button["style"], 4);
         assert_eq!(button["custom_id"], "crew_ban:1509530433:sieg_deutschland");
+    }
+
+    #[tokio::test]
+    async fn crew_radar_notify_only_baut_keinen_ban_button() {
+        let (app, mock) = test_app();
+        let (status, _) = post_json(
+            app,
+            "/changelog",
+            json!({
+                "token": "test-token",
+                "channel_id": "42",
+                "title": "Crew-Guard",
+                "content": "x",
+                "crew_radar": {
+                    "v": 1,
+                    "login": "sieg_deutschland",
+                    "chatter_id": "1509530433",
+                    "notify_only": true,
+                },
+            }),
+        )
+        .await;
+
+        assert_eq!(status, 200);
+        let sent = mock.sent.lock().expect("lock");
+        assert!(sent[0].3.is_none());
     }
 
     #[tokio::test]
