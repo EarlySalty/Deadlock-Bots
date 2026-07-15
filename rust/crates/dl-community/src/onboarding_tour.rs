@@ -178,7 +178,7 @@ impl TourState {
             question_deadline_at: None,
             answering_deadline_at: None,
             retry_count: 0,
-            next_retry_at: None,
+            next_retry_at: Some((now + Duration::seconds(RETRY_DELAY_SECONDS)).to_rfc3339()),
             updated_at: now.to_rfc3339(),
         }
     }
@@ -730,7 +730,7 @@ fn pending_send_state(
         mode: TourMode::Step,
         question_deadline_at: None,
         answering_deadline_at: None,
-        next_retry_at: None,
+        next_retry_at: Some((now + Duration::seconds(RETRY_DELAY_SECONDS)).to_rfc3339()),
         updated_at: now.to_rfc3339(),
         ..state.clone()
     }
@@ -1613,6 +1613,31 @@ mod tests {
             ] if expected.next_retry_at == persisted_rows[0].next_retry_at
                 && next.next_retry_at == Some((now() + Duration::seconds(RETRY_DELAY_SECONDS)).to_rfc3339())
         ));
+    }
+
+    #[test]
+    fn starting_send_leases_are_recovered_after_restart() {
+        let initial = TourState::starting(now());
+        let pending = persisted(&decide_tour_component_actions(&component_input(
+            state(TourStatus::Active, TourStepKey::Voice, TourMode::Step),
+            TourComponentAction::Next,
+            TourStepKey::Voice,
+        )))
+        .clone();
+
+        for (state, step) in [
+            (initial, TourStepKey::Voice),
+            (pending, TourStepKey::CommunityQuestions),
+        ] {
+            let retry_at = now() + Duration::seconds(RETRY_DELAY_SECONDS);
+            assert_eq!(state.next_retry_at, Some(retry_at.to_rfc3339()));
+            assert!(decide_tour_retry_actions(&state, now()).is_empty());
+            assert!(matches!(
+                decide_tour_retry_actions(&state, retry_at).as_slice(),
+                [TourAction::PersistState { .. }, TourAction::SendStep(actual)]
+                    if *actual == step
+            ));
+        }
     }
 
     #[test]
