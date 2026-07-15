@@ -19,19 +19,17 @@ pub const RETRY_DELAY_SECONDS: i64 = 60;
 // TODO(Welle 3): Nach Live-Aufloesung des Kanals durch die belegte Snowflake ersetzen.
 pub const PATCHNOTES_CHANNEL_ID: u64 = 0;
 
-pub const VOICE_CONTENT: &str = "PLATZHALTER: kurze Erklärung für Step voice";
-pub const COMMUNITY_QUESTIONS_CONTENT: &str =
-    "PLATZHALTER: kurze Erklärung für Step community_questions";
-pub const RANK_LINK_CONTENT: &str = "PLATZHALTER: kurze Erklärung für Step rank_link";
-pub const PATCHNOTES_CONTENT: &str = "PLATZHALTER: kurze Erklärung für Step patchnotes";
-pub const SUPPORT_CONTENT: &str = "PLATZHALTER: kurze Erklärung für Step support";
-pub const STREAMERS_CONTENT: &str = "PLATZHALTER: kurze Erklärung für Step streamers";
-pub const FINAL_CONTENT: &str = "PLATZHALTER: freundlicher Abschluss im letzten Step";
-pub const LINK_BUTTON_LABEL: &str = "PLATZHALTER: Link-Button je Step";
-pub const NEXT_BUTTON_LABEL: &str = "PLATZHALTER: Weiter-Button";
-pub const ASK_BUTTON_LABEL: &str = "PLATZHALTER: Ich-habe-noch-eine-Frage-Button";
-pub const END_BUTTON_LABEL: &str = "PLATZHALTER: Tour-beenden-Button";
-pub const FINISH_BUTTON_LABEL: &str = "PLATZHALTER: Abschluss-Button";
+pub const VOICE_CONTENT: &str = "**Sprachkanäle, das Herz vom Server** 🎧\n\nDu musst niemanden kennen, um zu joinen. Spring einfach in eine offene Lane, die Leute freuen sich über Mitspieler. Und wenn du lieber deine eigene Lane willst, klick unten auf den Button, wähl deinen Modus, und der Bot baut dir sofort einen eigenen Kanal.";
+pub const COMMUNITY_QUESTIONS_CONTENT: &str = "**Fragen? Immer her damit** 💬\n\nEgal ob Frage zum Spiel oder zum Server, stell sie einfach in frag-die-community. Hier beißt niemand, auch die simpelste Frage ist willkommen, und meistens antwortet ziemlich schnell jemand.";
+pub const RANK_LINK_CONTENT: &str = "**Dein echter Rang, automatisch** 🔗\n\nVerknüpf einmal kurz deinen Steam-Account, dann holt sich der Bot deinen Rang aus deinen echten Matches und hält ihn von selbst aktuell. Dauert zwei Minuten, die Anleitung findest du hinter dem Button.";
+pub const PATCHNOTES_CONTENT: &str = "**Immer auf dem Laufenden** 📰\n\nDeadlock ändert sich ständig. Jedes Update landet bei uns auf Deutsch übersetzt im Patchnotes-Kanal, sobald es rauskommt. Ein kurzer Blick nach jedem Patch, und du weißt sofort, was sich geändert hat.";
+pub const SUPPORT_CONTENT: &str = "**Wenn mal was hakt** 🎟️\n\nEin Problem mit dem Server, einem Bot oder einem anderen Mitglied? Mach einfach ein Ticket auf. Das liest nur das Team, und wir kümmern uns.";
+pub const STREAMERS_CONTENT: &str = "**Streamer aus der Community** 🎥\n\nEin paar Leute von hier streamen regelmäßig Deadlock. Wenn dir mal langweilig ist, schau im Streamer-Kanal vorbei, da siehst du, wer gerade live ist.";
+pub const FINAL_CONTENT: &str = "Das war die Tour, schön, dass du da bist! Wenn später noch Fragen aufkommen, schreib mir einfach eine DM oder frag in der Community. Und jetzt viel Spaß, man sieht sich im Voice! 👋";
+pub const NEXT_BUTTON_LABEL: &str = "Weiter";
+pub const ASK_BUTTON_LABEL: &str = "Ich hab noch eine Frage";
+pub const END_BUTTON_LABEL: &str = "Tour beenden";
+pub const FINISH_BUTTON_LABEL: &str = "Alles klar, danke!";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -198,6 +196,7 @@ pub struct TourStep {
     pub key: TourStepKey,
     pub content: &'static str,
     pub link_target: TourLinkTarget,
+    pub link_label: &'static str,
 }
 
 pub const TOUR_STEPS: [TourStep; 6] = [
@@ -205,31 +204,37 @@ pub const TOUR_STEPS: [TourStep; 6] = [
         key: TourStepKey::Voice,
         content: VOICE_CONTENT,
         link_target: TourLinkTarget::Channel(1_513_468_476_365_209_670),
+        link_label: "Lane erstellen",
     },
     TourStep {
         key: TourStepKey::CommunityQuestions,
         content: COMMUNITY_QUESTIONS_CONTENT,
         link_target: TourLinkTarget::Channel(1_426_220_702_054_355_077),
+        link_label: "Zum Kanal",
     },
     TourStep {
         key: TourStepKey::RankLink,
         content: RANK_LINK_CONTENT,
         link_target: TourLinkTarget::RankGuide,
+        link_label: "Zur Anleitung",
     },
     TourStep {
         key: TourStepKey::Patchnotes,
         content: PATCHNOTES_CONTENT,
         link_target: TourLinkTarget::Channel(PATCHNOTES_CHANNEL_ID),
+        link_label: "Zum Kanal",
     },
     TourStep {
         key: TourStepKey::Support,
         content: SUPPORT_CONTENT,
         link_target: TourLinkTarget::Channel(1_459_628_609_705_738_539),
+        link_label: "Ticket eröffnen",
     },
     TourStep {
         key: TourStepKey::Streamers,
         content: STREAMERS_CONTENT,
         link_target: TourLinkTarget::Channel(1_304_169_815_505_637_458),
+        link_label: "Zum Kanal",
     },
 ];
 
@@ -345,7 +350,7 @@ pub fn tour_step_payload(
             json!({
                 "type": 2,
                 "style": 5,
-                "label": LINK_BUTTON_LABEL,
+                "label": step.link_label,
                 "url": link.url,
             })
         })
@@ -1112,7 +1117,8 @@ mod tests {
             let payload = tour_step_payload(step.key, &links).expect("step payload");
             let rendered = payload.components.to_string();
 
-            assert!(payload.content.starts_with("PLATZHALTER:"));
+            assert!(payload.content.starts_with(step.content));
+            assert!(rendered.contains(step.link_label));
             assert!(rendered.contains(&own_url));
             assert!(!rendered.contains("example.invalid/foreign"));
             assert!(rendered.contains(&build_tour_custom_id(TourComponentAction::Ask, step.key)));
