@@ -1986,6 +1986,9 @@ impl dl_community::faq::FaqPort for FaqGlue {
     }
 
     async fn channel_category(&self, guild_id: u64, channel_id: u64) -> Option<u64> {
+        if guild_id == 0 {
+            return None;
+        }
         self.adapter
             .cache()
             .guild(GuildId::new(guild_id))?
@@ -2000,6 +2003,9 @@ impl dl_community::faq::FaqPort for FaqGlue {
         channel_id: u64,
         user_id: u64,
     ) -> bool {
+        if guild_id == 0 {
+            return false;
+        }
         let Some(guild) = self.adapter.cache().guild(GuildId::new(guild_id)) else {
             return false;
         };
@@ -3980,6 +3986,28 @@ mod tests {
         channel.topic = topic.map(str::to_string);
         channel.permission_overwrites = private_overwrites_for(guild_id, owner_id, 1);
         channel
+    }
+
+    #[tokio::test]
+    async fn faq_channel_category_lehnt_guild_null_ohne_panic_ab() {
+        use dl_community::faq::FaqPort as _;
+
+        let faq = FaqGlue {
+            adapter: DiscordAdapter::new("test-token"),
+        };
+
+        assert_eq!(faq.channel_category(0, 1).await, None);
+    }
+
+    #[tokio::test]
+    async fn faq_private_channel_lehnt_guild_null_ohne_panic_ab() {
+        use dl_community::faq::FaqPort as _;
+
+        let faq = FaqGlue {
+            adapter: DiscordAdapter::new("test-token"),
+        };
+
+        assert!(!faq.private_faq_channel_owned_by_user(0, 1, 2).await);
     }
 
     #[tokio::test]
