@@ -607,12 +607,8 @@ where
 }
 
 fn channel_url(guild_id: u64, channel_id: u64) -> Result<String, String> {
-    // Welle 3 muss die echte Patchnotes-ID setzen, bevor TOUR_OPT_IN_ROLE_ID
-    // aktiviert wird. Ein stilles Ueberspringen wuerde den Tourvertrag brechen.
     if channel_id == 0 {
-        return Err(
-            "Tour-Kanal-ID ist 0; Welle 3 muss sie vor Aktivierung des Cutover-Flags setzen".into(),
-        );
+        return Err("Tour-Kanal-ID darf nicht 0 sein".into());
     }
     Ok(format!(
         "https://discord.com/channels/{guild_id}/{channel_id}"
@@ -1232,14 +1228,14 @@ mod tests {
     }
 
     #[test]
-    fn channel_url_enthaelt_guild_und_channel_und_null_ist_deploy_blocker() {
+    fn channel_url_enthaelt_guild_und_channel_und_lehnt_null_ab() {
         assert_eq!(
             channel_url(1, 2).expect("valid channel"),
             "https://discord.com/channels/1/2"
         );
         assert!(channel_url(1, 0)
             .expect_err("zero channel must fail")
-            .contains("Welle 3"));
+            .contains("darf nicht 0"));
     }
 
     #[test]

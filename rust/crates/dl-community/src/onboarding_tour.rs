@@ -16,8 +16,7 @@ pub const ANSWERING_LEASE_MINUTES: i64 = 5;
 pub const MAX_RETRY_COUNT: u32 = 3;
 pub const RETRY_DELAY_SECONDS: i64 = 60;
 
-// TODO(Welle 3): Nach Live-Aufloesung des Kanals durch die belegte Snowflake ersetzen.
-pub const PATCHNOTES_CHANNEL_ID: u64 = 0;
+pub const PATCHNOTES_CHANNEL_ID: u64 = 1_326_973_956_825_284_628;
 
 pub const VOICE_CONTENT: &str = "**Sprachkanäle, das Herz vom Server** 🎧\n\nDu musst niemanden kennen, um zu joinen. Spring einfach in eine offene Lane, die Leute freuen sich über Mitspieler. Und wenn du lieber deine eigene Lane willst, klick unten auf den Button, wähl deinen Modus, und der Bot baut dir sofort einen eigenen Kanal.";
 pub const COMMUNITY_QUESTIONS_CONTENT: &str = "**Fragen? Immer her damit** 💬\n\nEgal ob Frage zum Spiel oder zum Server, stell sie einfach in frag-die-community. Hier beißt niemand, auch die simpelste Frage ist willkommen, und meistens antwortet ziemlich schnell jemand.";
@@ -1043,12 +1042,12 @@ mod tests {
                 TourLinkTarget::Channel(1_513_468_476_365_209_670),
                 TourLinkTarget::Channel(1_426_220_702_054_355_077),
                 TourLinkTarget::RankGuide,
-                TourLinkTarget::Channel(PATCHNOTES_CHANNEL_ID),
+                TourLinkTarget::Channel(1_326_973_956_825_284_628),
                 TourLinkTarget::Channel(1_459_628_609_705_738_539),
                 TourLinkTarget::Channel(1_304_169_815_505_637_458),
             ]
         );
-        assert_eq!(PATCHNOTES_CHANNEL_ID, 0);
+        assert_eq!(PATCHNOTES_CHANNEL_ID, 1_326_973_956_825_284_628);
     }
 
     #[test]

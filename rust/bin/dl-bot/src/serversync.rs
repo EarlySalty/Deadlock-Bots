@@ -5803,6 +5803,7 @@ fn build_welle2b_onboarding_config(
         "Rang-Verknüpfung",
         &mut blockers,
     );
+    let tour_role = require_role_id(model, &["Server-Tour"], "Server-Tour", &mut blockers);
 
     let rank_prompt = find_rank_prompt(&live, model);
     if rank_prompt.is_none() {
@@ -5823,6 +5824,7 @@ fn build_welle2b_onboarding_config(
         prompts.push(prompt);
     }
     prompts.push(rang_verknuepfung_prompt(rang_verknuepfung_role));
+    prompts.push(tour_opt_in_prompt(tour_role));
 
     if mitspieler_suche.is_some() {
         warnings.push(
@@ -6102,6 +6104,29 @@ fn rang_verknuepfung_prompt(role_id: Option<u64>) -> NativeOnboardingPrompt {
                 "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).".to_string(),
             ),
             emoji: Some(json!({ "name": "🔗" })),
+            role_ids: role_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
+            channel_ids: Vec::new(),
+            extra: BTreeMap::new(),
+        }],
+        single_select: true,
+        required: false,
+        in_onboarding: true,
+        extra: BTreeMap::new(),
+    }
+}
+
+fn tour_opt_in_prompt(role_id: Option<u64>) -> NativeOnboardingPrompt {
+    NativeOnboardingPrompt {
+        id: None,
+        prompt_type: 0,
+        title: "Willst du eine kleine Tour, wie der Server funktioniert?".to_string(),
+        options: vec![NativeOnboardingOption {
+            id: None,
+            title: "Ja, zeig mir den Server".to_string(),
+            description: Some(
+                "Nach dem Start schicke ich dir eine kurze Tour per DM (2 Minuten).".to_string(),
+            ),
+            emoji: Some(json!({ "name": "🧭" })),
             role_ids: role_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
             channel_ids: Vec::new(),
             extra: BTreeMap::new(),
@@ -9661,6 +9686,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             (5006, "Custom Games Ping Rolle", true),
             (5007, "Streams", true),
             (5008, "Rang-Verknüpfung", false),
+            (5009, "Server-Tour", false),
         ] {
             model
                 .roles
@@ -10054,7 +10080,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+    fn onboarding_builder_baut_fuenf_prompts_und_uebernimmt_rank_prompt_unveraendert() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -10064,7 +10090,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
         assert_eq!(built.config.default_channel_ids.len(), 9);
-        assert_eq!(built.config.prompts.len(), 4);
+        assert_eq!(built.config.prompts.len(), 5);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
         assert!(built.config.prompts[0].single_select);
         assert!(built.config.prompts[0].required);
@@ -10100,6 +10126,42 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(option.emoji, Some(json!({ "name": "🔗" })));
         assert_eq!(option.role_ids, vec!["5008".to_string()]);
         assert!(option.channel_ids.is_empty());
+        assert_eq!(
+            serde_json::to_value(rang_bridge).expect("rang bridge prompt"),
+            json!({
+                "type": 0,
+                "title": "Willst du deinen echten Rang automatisch bekommen?",
+                "options": [{
+                    "title": "Ja — zeig mir, wie ich Steam verknüpfe",
+                    "description": "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).",
+                    "emoji": { "name": "🔗" },
+                    "role_ids": ["5008"],
+                    "channel_ids": []
+                }],
+                "single_select": true,
+                "required": false,
+                "in_onboarding": true
+            })
+        );
+
+        let tour = &built.config.prompts[4];
+        assert_eq!(
+            serde_json::to_value(tour).expect("tour prompt"),
+            json!({
+                "type": 0,
+                "title": "Willst du eine kleine Tour, wie der Server funktioniert?",
+                "options": [{
+                    "title": "Ja, zeig mir den Server",
+                    "description": "Nach dem Start schicke ich dir eine kurze Tour per DM (2 Minuten).",
+                    "emoji": { "name": "🧭" },
+                    "role_ids": ["5009"],
+                    "channel_ids": []
+                }],
+                "single_select": true,
+                "required": false,
+                "in_onboarding": true
+            })
+        );
     }
 
     #[test]
@@ -10111,7 +10173,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
-        for prompt in [&prompts[0], &prompts[1], &prompts[3]] {
+        for prompt in [&prompts[0], &prompts[1], &prompts[3], &prompts[4]] {
             assert!(!prompt.as_object().expect("prompt").contains_key("id"));
             for option in prompt["options"].as_array().expect("options") {
                 assert!(!option.as_object().expect("option").contains_key("id"));
@@ -10174,6 +10236,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
         assert_eq!(prompts[3]["options"][0]["emoji_name"], "🔗");
+        assert_eq!(prompts[4]["options"][0]["emoji_name"], "🧭");
         // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
         // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
         assert_eq!(prompts[0]["id"], "0");
@@ -10404,6 +10467,20 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Rolle `Rang-Verknüpfung`")));
+    }
+
+    #[test]
+    fn onboarding_builder_blockt_fehlende_server_tour_marker_rolle() {
+        let mut model = onboarding_model();
+        model.roles.retain(|_, role| role.name != "Server-Tour");
+
+        let built = build_welle2b_onboarding_config(&rank_live_onboarding_config(), &model)
+            .expect("builder returns blockers");
+
+        assert!(built
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("Rolle `Server-Tour`")));
     }
 
     #[test]
