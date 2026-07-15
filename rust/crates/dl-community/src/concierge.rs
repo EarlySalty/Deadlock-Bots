@@ -1266,6 +1266,40 @@ fn v2_body(content: &str, buttons: Vec<Value>) -> Map<String, Value> {
     body
 }
 
+fn with_response_components(
+    mut body: Map<String, Value>,
+    response_components: Option<&Value>,
+) -> Map<String, Value> {
+    let Some(rows) = response_components.and_then(Value::as_array) else {
+        return body;
+    };
+    let Some(components) = body
+        .get_mut("components")
+        .and_then(Value::as_array_mut)
+        .and_then(|components| components.first_mut())
+        .and_then(|container| container.get_mut("components"))
+        .and_then(Value::as_array_mut)
+    else {
+        return body;
+    };
+    components.extend(rows.iter().cloned());
+    body
+}
+
+fn answer_body(
+    reply: &str,
+    pate_request: bool,
+    allow_personal_actions: bool,
+    response_components: Option<&Value>,
+) -> Map<String, Value> {
+    let body = if pate_request && allow_personal_actions {
+        pate_offer_body(reply)
+    } else {
+        v2_body(reply, Vec::new())
+    };
+    with_response_components(body, response_components)
+}
+
 fn button(label: &str, style: u8, custom_id: &str) -> Value {
     json!({ "type": 2, "style": style, "label": label, "custom_id": custom_id })
 }
@@ -1339,6 +1373,51 @@ pub enum ConciergeDmDelivery {
     Sent { channel_id: u64, message_id: u64 },
     CannotSend50007,
     Failed(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConciergeAnswerOutcome {
+    Answered,
+    NoAnswer,
+    PrivacyStateless,
+    Uncertain,
+    Timeout,
+    Error,
+}
+
+impl ConciergeAnswerOutcome {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Answered => "answered",
+            Self::NoAnswer => "no_answer",
+            Self::PrivacyStateless => "privacy_stateless",
+            Self::Uncertain => "uncertain",
+            Self::Timeout => "timeout",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnswerRoute {
+    Concierge,
+    OnboardingTour,
+}
+
+impl AnswerRoute {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Concierge => "concierge",
+            Self::OnboardingTour => "onboarding_tour",
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct AnswerOptions<'a> {
+    allow_personal_actions: bool,
+    route: AnswerRoute,
+    response_components: Option<&'a Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3466,6 +3545,221 @@ impl Concierge {
             .await
     }
 
+    pub async fn handle_routed_message(&self, event: &dl_discord::MessageEvent) -> bool {
+        let handled = self
+            .handle_user_message(
+                event.channel_id,
+                event.guild_id,
+                event.author_id,
+                &event.content,
+            )
+            .await;
+        if handled {
+            tracing::debug!(
+                user_id = event.author_id,
+                "Concierge: Nachricht verarbeitet"
+            );
+        } else if let Some(guild_id) = event.guild_id {
+            self.mark_first_message(guild_id, event.author_id).await;
+        }
+        handled
+    }
+
+    pub async fn answer_tour_dm_question(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        question: &str,
+        step_key: &str,
+        response_components: Value,
+    ) -> ConciergeAnswerOutcome {
+        let action = self.user_action_lock(user_id);
+        let _guard = action.lock().await;
+        let terminal = self
+            .answer_tour_dm_question_inner(channel_id, user_id, question, &response_components)
+            .await;
+        log_tour_answer_decision(question, step_key, user_id, &terminal);
+        terminal.outcome
+    }
+
+    async fn answer_tour_dm_question_inner(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        question: &str,
+        response_components: &Value,
+    ) -> AnswerTerminal {
+        if !self.config.user_allowed(user_id) {
+            return AnswerTerminal::without_answer(ConciergeAnswerOutcome::Error, "user_denied");
+        }
+        let control_text = question.trim();
+        if control_text.is_empty() {
+            return AnswerTerminal::without_answer(ConciergeAnswerOutcome::NoAnswer, "empty");
+        }
+        let guild_id = self.config.main_guild_id;
+        let now = Utc::now();
+        if let Some(terminal) = self
+            .handle_dm_control(
+                channel_id,
+                guild_id,
+                user_id,
+                control_text,
+                now,
+                Some(response_components),
+            )
+            .await
+        {
+            return terminal;
+        }
+        let (_, trimmed) = parse_brain_command(control_text);
+        if trimmed.is_empty() {
+            return AnswerTerminal::without_answer(ConciergeAnswerOutcome::NoAnswer, "empty");
+        }
+        self.answer_dm_question_inner(
+            channel_id,
+            guild_id,
+            user_id,
+            trimmed,
+            now,
+            AnswerOptions {
+                allow_personal_actions: true,
+                route: AnswerRoute::OnboardingTour,
+                response_components: Some(response_components),
+            },
+        )
+        .await
+    }
+
+    async fn handle_dm_control(
+        &self,
+        channel_id: u64,
+        guild_id: u64,
+        user_id: u64,
+        control_text: &str,
+        now: DateTime<Utc>,
+        response_components: Option<&Value>,
+    ) -> Option<AnswerTerminal> {
+        if forget_intent(control_text) {
+            let deleted = match self.store.forget_user(user_id).await {
+                Ok(()) => {
+                    self.clear_user_runtime(user_id);
+                    true
+                }
+                Err(err) => {
+                    tracing::warn!(%err, user_id, "Concierge: Vergessen fehlgeschlagen");
+                    false
+                }
+            };
+            let body = with_response_components(
+                v2_body(forget_reply_text(deleted), Vec::new()),
+                response_components,
+            );
+            return Some(
+                self.send_control_reply_inner(
+                    channel_id,
+                    user_id,
+                    body,
+                    "control_forget",
+                    response_components,
+                )
+                .await,
+            );
+        }
+        if !optout_intent(control_text) {
+            return None;
+        }
+        if let Err(err) = self
+            .store
+            .record_conversation(user_id, guild_id, "user", control_text, now)
+            .await
+        {
+            tracing::warn!(%err, user_id, "Concierge: User-Nachricht konnte nicht gespeichert werden");
+        }
+        let persisted = match self.store.set_opted_out(user_id, guild_id, now).await {
+            Ok(true) => true,
+            Ok(false) => {
+                tracing::warn!(user_id, "Concierge: Opt-out traf keinen Concierge-Zustand");
+                false
+            }
+            Err(err) => {
+                tracing::warn!(%err, user_id, "Concierge: Opt-out konnte nicht gespeichert werden");
+                false
+            }
+        };
+        if persisted {
+            self.clear_user_runtime(user_id);
+            self.record_journey(
+                user_id,
+                guild_id,
+                dl_activity::journey::JourneyEventType::ConciergeOptedOut,
+                now,
+                json!({}),
+            )
+            .await;
+        }
+        let body = with_response_components(
+            v2_body(optout_reply_text(persisted), Vec::new()),
+            response_components,
+        );
+        Some(
+            self.send_control_reply_inner(
+                channel_id,
+                user_id,
+                body,
+                "control_optout",
+                response_components,
+            )
+            .await,
+        )
+    }
+
+    async fn send_control_reply_inner(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        body: Map<String, Value>,
+        source: &'static str,
+        response_components: Option<&Value>,
+    ) -> AnswerTerminal {
+        match tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT,
+            self.port.send_channel_v2(channel_id, body),
+        )
+        .await
+        {
+            Ok(Ok(message_id)) => {
+                return AnswerTerminal {
+                    source,
+                    knowledge_hit: false,
+                    stateful: false,
+                    outcome: ConciergeAnswerOutcome::Answered,
+                    message_id: Some(message_id),
+                };
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(%err, user_id, channel_id, "Concierge: Kontroll-Zustellung fehlgeschlagen oder unsicher");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    user_id,
+                    channel_id,
+                    timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
+                    "Concierge: Kontroll-Zustellung hat Zeitlimit ueberschritten"
+                );
+            }
+        }
+        let message_id = self
+            .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+            .await;
+        AnswerTerminal {
+            source,
+            knowledge_hit: false,
+            stateful: false,
+            outcome: ConciergeAnswerOutcome::Uncertain,
+            message_id,
+        }
+    }
+
     async fn handle_user_message_inner(
         &self,
         channel_id: u64,
@@ -3488,33 +3782,19 @@ impl Concierge {
             return true;
         }
         let now = Utc::now();
-        if is_direct_dm && forget_intent(control_text) {
-            let deleted = match self.store.forget_user(user_id).await {
-                Ok(()) => {
-                    self.clear_user_runtime(user_id);
-                    true
-                }
-                Err(err) => {
-                    tracing::warn!(%err, user_id, "Concierge: Vergessen fehlgeschlagen");
-                    false
-                }
-            };
-            let _ = self
-                .port
-                .send_channel_v2(channel_id, v2_body(forget_reply_text(deleted), Vec::new()))
-                .await;
-            return true;
-        }
-        if is_direct_dm && optout_intent(control_text) {
-            if let Err(err) = self
-                .store
-                .record_conversation(user_id, effective_guild_id, "user", control_text, now)
+        if is_direct_dm
+            && self
+                .handle_dm_control(
+                    channel_id,
+                    effective_guild_id,
+                    user_id,
+                    control_text,
+                    now,
+                    None,
+                )
                 .await
-            {
-                tracing::warn!(%err, user_id, "Concierge: User-Nachricht konnte nicht gespeichert werden");
-            }
-            self.opt_out(user_id, effective_guild_id, channel_id, now)
-                .await;
+                .is_some()
+        {
             return true;
         }
         // Ein exakt vorangestelltes !brain wird nur bei Wissensfragen entfernt. Dadurch kann der
@@ -3534,23 +3814,56 @@ impl Concierge {
                 return true;
             }
             let _support_turn = knowledge_client::acquire_stateful_support_turn().await;
-            self.send_stateless_reply(channel_id, effective_guild_id, trimmed, false)
+            self.send_stateless_reply(channel_id, effective_guild_id, user_id, trimmed, false)
                 .await;
             return true;
         }
-        let allow_personal_actions = is_direct_dm;
+        let _ = self
+            .answer_dm_question_inner(
+                channel_id,
+                effective_guild_id,
+                user_id,
+                trimmed,
+                now,
+                AnswerOptions {
+                    allow_personal_actions: is_direct_dm,
+                    route: AnswerRoute::Concierge,
+                    response_components: None,
+                },
+            )
+            .await;
+        true
+    }
+
+    async fn answer_dm_question_inner(
+        &self,
+        channel_id: u64,
+        effective_guild_id: u64,
+        user_id: u64,
+        trimmed: &str,
+        now: DateTime<Utc>,
+        options: AnswerOptions<'_>,
+    ) -> AnswerTerminal {
+        let AnswerOptions {
+            allow_personal_actions,
+            route,
+            response_components,
+        } = options;
         let db_guild_id = match u64_to_i64(effective_guild_id, "concierge_conversations.guild_id") {
             Ok(guild_id) => guild_id,
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Guild-ID fuer Antwort ungueltig");
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         };
         let stateful_turn = knowledge_client::acquire_stateful_support_turn().await;
@@ -3559,26 +3872,32 @@ impl Concierge {
             Ok(None) => {
                 self.clear_user_runtime(user_id);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_stateless_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Privacy-Status vor Antwort nicht pruefbar");
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         };
         match record_conversation_tx(
@@ -3595,27 +3914,33 @@ impl Concierge {
             Ok(false) => {
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_stateless_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: User-Nachricht konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         }
         let intent = classify_intent(trimmed);
@@ -3633,28 +3958,36 @@ impl Concierge {
             tracing::warn!(%err, user_id, "Concierge: Intent konnte nicht gespeichert werden");
             drop(delivery_tx);
             drop(stateful_turn);
-            self.send_stateless_reply(
-                channel_id,
-                effective_guild_id,
-                trimmed,
-                allow_personal_actions,
-            )
-            .await;
-            return true;
+            return self
+                .send_internal_error_reply_inner(
+                    channel_id,
+                    user_id,
+                    trimmed,
+                    allow_personal_actions,
+                    route,
+                    response_components,
+                )
+                .await
+                .override_outcome(ConciergeAnswerOutcome::Error);
         }
         let cooldown_hit = self.user_cooldown_hit(user_id);
         if cooldown_hit {
-            let delivery_uncertain = match tokio::time::timeout(
+            let message_id = match tokio::time::timeout(
                 CONCIERGE_DISCORD_IO_TIMEOUT,
-                self.port
-                    .send_channel_v2(channel_id, v2_body(COOLDOWN_TEXT, Vec::new())),
+                self.port.send_channel_v2(
+                    channel_id,
+                    with_response_components(
+                        v2_body(COOLDOWN_TEXT, Vec::new()),
+                        response_components,
+                    ),
+                ),
             )
             .await
             {
-                Ok(Ok(_)) => false,
+                Ok(Ok(message_id)) => Some(message_id),
                 Ok(Err(err)) => {
                     tracing::warn!(%err, user_id, channel_id, "Concierge: Cooldown-Zustellung fehlgeschlagen oder unsicher");
-                    true
+                    None
                 }
                 Err(_) => {
                     tracing::warn!(
@@ -3663,7 +3996,7 @@ impl Concierge {
                         timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
                         "Concierge: Cooldown-Zustellung hat Zeitlimit ueberschritten"
                     );
-                    true
+                    None
                 }
             };
             let committed = match delivery_tx.commit().await {
@@ -3684,10 +4017,25 @@ impl Concierge {
                 )
                 .await;
             }
-            if delivery_uncertain || !committed {
-                self.send_answer_uncertain_notice(channel_id, user_id).await;
+            if message_id.is_none() || !committed {
+                let notice_id = self
+                    .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+                    .await;
+                return AnswerTerminal {
+                    source: "cooldown",
+                    knowledge_hit: false,
+                    stateful: true,
+                    outcome: ConciergeAnswerOutcome::Uncertain,
+                    message_id: notice_id,
+                };
             }
-            return true;
+            return AnswerTerminal {
+                source: "cooldown",
+                knowledge_hit: false,
+                stateful: true,
+                outcome: ConciergeAnswerOutcome::Answered,
+                message_id,
+            };
         }
         let history = match recent_user_questions_tx(&mut delivery_tx, db_user_id, 5).await {
             Ok(history) => history,
@@ -3695,14 +4043,17 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: Verlauf konnte nicht geladen werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         };
         let conversation = match recent_conversation_messages_tx(&mut delivery_tx, db_user_id, 12)
@@ -3713,20 +4064,26 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: Rollenverlauf konnte nicht geladen werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         };
         let answer = self
-            .answer_with_knowledge_and_llm(trimmed, Some(&history), Some(&conversation))
+            .answer_decision(trimmed, Some(&history), Some(&conversation), route)
             .await;
-        if let Some(intent) = answer.intent {
+        let source = answer.source;
+        let knowledge_hit = answer.knowledge_hit;
+        let answer_outcome = answer.outcome;
+        if let Some(intent) = answer.answer.intent {
             if let Err(err) = sqlx::query(
                 "UPDATE bot.concierge_profiles SET intent = $2, updated_at = $3 WHERE user_id = $1",
             )
@@ -3739,23 +4096,28 @@ impl Concierge {
                 tracing::warn!(%err, user_id, "Concierge: LLM-Intent konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         }
-        let pate_request = answer.pate_request;
+        let pate_request = answer.answer.pate_request;
         let reply = if pate_request {
             answer
+                .answer
                 .reply
                 .unwrap_or_else(|| PATE_REQUEST_FALLBACK_TEXT.to_string())
         } else {
             answer
+                .answer
                 .reply
                 .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string())
         };
@@ -3773,34 +4135,41 @@ impl Concierge {
             Ok(false) => {
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_stateless_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::PrivacyStateless);
             }
             Err(err) => {
                 tracing::warn!(%err, user_id, "Concierge: Assistant-Nachricht konnte nicht gespeichert werden");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_stateless_reply(
-                    channel_id,
-                    effective_guild_id,
-                    trimmed,
-                    allow_personal_actions,
-                )
-                .await;
-                return true;
+                return self
+                    .send_internal_error_reply_inner(
+                        channel_id,
+                        user_id,
+                        trimmed,
+                        allow_personal_actions,
+                        route,
+                        response_components,
+                    )
+                    .await
+                    .override_outcome(ConciergeAnswerOutcome::Error);
             }
         }
-        let body = if pate_request && allow_personal_actions {
-            pate_offer_body(&reply)
-        } else {
-            v2_body(&reply, Vec::new())
-        };
+        let body = answer_body(
+            &reply,
+            pate_request,
+            allow_personal_actions,
+            response_components,
+        );
         let message_id = match tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
             self.port.send_channel_v2(channel_id, body),
@@ -3812,8 +4181,16 @@ impl Concierge {
                 tracing::warn!(%err, user_id, channel_id, "Concierge: Antwort-Zustellung fehlgeschlagen oder unsicher");
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_answer_uncertain_notice(channel_id, user_id).await;
-                return true;
+                let message_id = self
+                    .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+                    .await;
+                return AnswerTerminal {
+                    source,
+                    knowledge_hit,
+                    stateful: true,
+                    outcome: ConciergeAnswerOutcome::Uncertain,
+                    message_id,
+                };
             }
             Err(_) => {
                 tracing::warn!(
@@ -3824,8 +4201,16 @@ impl Concierge {
                 );
                 drop(delivery_tx);
                 drop(stateful_turn);
-                self.send_answer_uncertain_notice(channel_id, user_id).await;
-                return true;
+                let message_id = self
+                    .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+                    .await;
+                return AnswerTerminal {
+                    source,
+                    knowledge_hit,
+                    stateful: true,
+                    outcome: ConciergeAnswerOutcome::Uncertain,
+                    message_id,
+                };
             }
         };
         let commit_result = delivery_tx.commit().await;
@@ -3833,7 +4218,16 @@ impl Concierge {
         if let Err(err) = commit_result {
             tracing::warn!(%err, user_id, channel_id, "Concierge: Antwort-Transaktion konnte nicht abgeschlossen werden");
             tracing::error!(user_id, channel_id, message_id, "Concierge: Antwort-Commit unsicher; sichtbare Antwort wird nicht destruktiv entfernt");
-            self.send_answer_uncertain_notice(channel_id, user_id).await;
+            let message_id = self
+                .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+                .await;
+            return AnswerTerminal {
+                source,
+                knowledge_hit,
+                stateful: true,
+                outcome: ConciergeAnswerOutcome::Uncertain,
+                message_id,
+            };
         } else {
             self.record_journey(
                 user_id,
@@ -3844,7 +4238,13 @@ impl Concierge {
             )
             .await;
         }
-        true
+        AnswerTerminal {
+            source,
+            knowledge_hit,
+            stateful: true,
+            outcome: answer_outcome,
+            message_id: Some(message_id),
+        }
     }
 
     async fn effective_guild_id(
@@ -3906,51 +4306,23 @@ impl Concierge {
             .await
     }
 
-    async fn opt_out(&self, user_id: u64, guild_id: u64, channel_id: u64, now: DateTime<Utc>) {
-        // Fail-closed: Journey-Erfolg und die sichtbare globale Opt-out-Bestätigung NUR nach
-        // erfolgreicher DB-Persistenz. Schlägt die DB fehl, wird nichts falsch zugesagt: eine
-        // ehrliche Fehlermeldung, kein Erfolgs-Journey.
-        let persisted = match self.store.set_opted_out(user_id, guild_id, now).await {
-            Ok(true) => true,
-            Ok(false) => {
-                tracing::warn!(user_id, "Concierge: Opt-out traf keinen Concierge-Zustand");
-                false
-            }
-            Err(err) => {
-                tracing::warn!(%err, user_id, "Concierge: Opt-out konnte nicht gespeichert werden");
-                false
-            }
-        };
-        if persisted {
-            self.clear_user_runtime(user_id);
-            self.record_journey(
-                user_id,
-                guild_id,
-                dl_activity::journey::JourneyEventType::ConciergeOptedOut,
-                now,
-                json!({}),
-            )
-            .await;
-        }
-        let _ = self
-            .port
-            .send_channel_v2(
-                channel_id,
-                v2_body(optout_reply_text(persisted), Vec::new()),
-            )
-            .await;
-    }
-
-    async fn answer_with_knowledge_and_llm(
+    async fn answer_decision(
         &self,
         question: &str,
         history: Option<&[String]>,
         conversation: Option<&[ChatMessage]>,
-    ) -> LlmAnswer {
+        route: AnswerRoute,
+    ) -> AnswerDecision {
         let stateful = history.is_some();
         if let Some(answer) = local_conversational_answer(question, self.config.free_voice) {
-            log_answer_decision("local", false, question, stateful);
-            return answer;
+            let decision = AnswerDecision {
+                answer,
+                source: "local",
+                knowledge_hit: false,
+                outcome: ConciergeAnswerOutcome::Answered,
+            };
+            log_concierge_answer_decision(route, &decision, question, stateful);
+            return decision;
         }
         // Der Wissensdienst ist der EINZIGE Faktenpfad des Concierge. B07: eine belegte legitime
         // Frage mit vorangestellter Manipulation wird beantwortet, die Manipulation verworfen;
@@ -3959,18 +4331,25 @@ impl Concierge {
             || question.to_string(),
             |history| knowledge_question_from_user_history(history, question),
         );
-        let knowledge = match knowledge_client::ask(
+        let (knowledge, knowledge_outcome) = match knowledge_client::ask(
             &self.config.knowledge_url,
             &retrieval_question,
             KNOWLEDGE_TIMEOUT,
         )
         .await
         {
-            KnowledgeLookup::Answer(answer) => answer
-                .answer
-                .map(|text| text.trim().to_string())
-                .filter(|text| !text.is_empty()),
-            _ => None,
+            KnowledgeLookup::Answer(answer) => (
+                answer
+                    .answer
+                    .map(|text| text.trim().to_string())
+                    .filter(|text| !text.is_empty()),
+                ConciergeAnswerOutcome::Answered,
+            ),
+            KnowledgeLookup::Unanswerable => (None, ConciergeAnswerOutcome::NoAnswer),
+            KnowledgeLookup::Timeout => (None, ConciergeAnswerOutcome::Timeout),
+            KnowledgeLookup::Transport | KnowledgeLookup::InvalidResponse => {
+                (None, ConciergeAnswerOutcome::Error)
+            }
         };
         let knowledge_hit = knowledge.is_some();
 
@@ -3980,47 +4359,95 @@ impl Concierge {
             } else {
                 "gap_llm"
             };
-            log_answer_decision(source, knowledge_hit, question, stateful);
-            return LlmAnswer {
-                reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-                intent: Some(classify_intent(question)),
-                ..LlmAnswer::default()
+            let decision = AnswerDecision {
+                answer: LlmAnswer {
+                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
+                    intent: Some(classify_intent(question)),
+                    ..LlmAnswer::default()
+                },
+                source,
+                knowledge_hit,
+                outcome: knowledge_outcome,
             };
+            log_concierge_answer_decision(route, &decision, question, stateful);
+            return decision;
         }
 
         let extra_system = knowledge.as_ref().map_or_else(
             || GAP_GUIDANCE.to_string(),
             |answer| format!("Wissenskontext aus dl-knowledge:\n{answer}"),
         );
-        if let Some(answer) = self.llm_answer(question, &extra_system, conversation).await {
-            log_answer_decision(
+        let llm = self.llm_answer(question, &extra_system, conversation).await;
+        let (answer, source, outcome) = match llm {
+            LlmLookup::Answer(answer) => (
+                answer,
                 if knowledge_hit {
                     "knowledge_llm"
                 } else {
                     "gap_llm"
                 },
-                knowledge_hit,
-                question,
-                stateful,
-            );
-            return answer;
-        }
-
-        log_answer_decision(
-            if knowledge_hit {
-                "llm_error_verbatim"
-            } else {
-                "llm_error_gap"
-            },
+                ConciergeAnswerOutcome::Answered,
+            ),
+            LlmLookup::NoAnswer => (
+                LlmAnswer {
+                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
+                    intent: Some(classify_intent(question)),
+                    ..LlmAnswer::default()
+                },
+                if knowledge_hit {
+                    "llm_error_verbatim"
+                } else {
+                    "llm_error_gap"
+                },
+                knowledge_outcome,
+            ),
+            LlmLookup::Timeout => (
+                LlmAnswer {
+                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
+                    intent: Some(classify_intent(question)),
+                    ..LlmAnswer::default()
+                },
+                if knowledge_hit {
+                    "llm_error_verbatim"
+                } else {
+                    "llm_error_gap"
+                },
+                if knowledge_hit {
+                    ConciergeAnswerOutcome::Answered
+                } else {
+                    ConciergeAnswerOutcome::Timeout
+                },
+            ),
+            LlmLookup::Error => (
+                LlmAnswer {
+                    reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
+                    intent: Some(classify_intent(question)),
+                    ..LlmAnswer::default()
+                },
+                if knowledge_hit {
+                    "llm_error_verbatim"
+                } else {
+                    "llm_error_gap"
+                },
+                if knowledge_hit {
+                    ConciergeAnswerOutcome::Answered
+                } else if route == AnswerRoute::OnboardingTour
+                    && knowledge_outcome == ConciergeAnswerOutcome::Timeout
+                {
+                    ConciergeAnswerOutcome::Timeout
+                } else {
+                    ConciergeAnswerOutcome::Error
+                },
+            ),
+        };
+        let decision = AnswerDecision {
+            answer,
+            source,
             knowledge_hit,
-            question,
-            stateful,
-        );
-        LlmAnswer {
-            reply: knowledge.or_else(|| Some(KNOWLEDGE_GAP_TEXT.to_string())),
-            intent: Some(classify_intent(question)),
-            ..LlmAnswer::default()
-        }
+            outcome,
+        };
+        log_concierge_answer_decision(route, &decision, question, stateful);
+        decision
     }
 
     async fn llm_answer(
@@ -4028,8 +4455,10 @@ impl Concierge {
         question: &str,
         extra_system: &str,
         conversation: Option<&[ChatMessage]>,
-    ) -> Option<LlmAnswer> {
-        let ai = self.ai.as_ref()?;
+    ) -> LlmLookup {
+        let Some(ai) = self.ai.as_ref() else {
+            return LlmLookup::NoAnswer;
+        };
         let mut messages = vec![ChatMessage::system(llm_system(Some(extra_system)))];
         if let Some(conversation) = conversation {
             messages.extend_from_slice(conversation);
@@ -4047,22 +4476,22 @@ impl Concierge {
             Ok(Ok(response)) => {
                 let answer = parse_llm_answer(&response.content);
                 if answer.reply.is_some() {
-                    Some(answer)
+                    LlmLookup::Answer(answer)
                 } else {
                     tracing::warn!("Concierge: LLM-Antwort war leer oder unbrauchbar");
-                    None
+                    LlmLookup::Error
                 }
             }
             Ok(Err(err)) => {
                 tracing::warn!(%err, "Concierge: LLM-Antwort fehlgeschlagen");
-                None
+                LlmLookup::Error
             }
             Err(_) => {
                 tracing::warn!(
                     timeout_secs = CONCIERGE_AI_TIMEOUT.as_secs(),
                     "Concierge: LLM-Antwort hat Zeitlimit ueberschritten"
                 );
-                None
+                LlmLookup::Timeout
             }
         }
     }
@@ -4071,38 +4500,151 @@ impl Concierge {
         &self,
         channel_id: u64,
         _guild_id: u64,
+        user_id: u64,
         question: &str,
         allow_personal_actions: bool,
     ) {
-        let answer = self
-            .answer_with_knowledge_and_llm(question, None, None)
+        let _ = self
+            .send_stateless_reply_inner(
+                channel_id,
+                user_id,
+                question,
+                allow_personal_actions,
+                AnswerRoute::Concierge,
+                None,
+            )
             .await;
-        let reply = answer
+    }
+
+    async fn send_internal_error_reply_inner(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        question: &str,
+        allow_personal_actions: bool,
+        route: AnswerRoute,
+        response_components: Option<&Value>,
+    ) -> AnswerTerminal {
+        if route == AnswerRoute::Concierge {
+            return self
+                .send_stateless_reply_inner(
+                    channel_id,
+                    user_id,
+                    question,
+                    allow_personal_actions,
+                    route,
+                    response_components,
+                )
+                .await
+                .override_outcome(ConciergeAnswerOutcome::Error);
+        }
+        let message_id = self
+            .send_answer_uncertain_notice_inner(channel_id, user_id, response_components)
+            .await;
+        AnswerTerminal {
+            source: "internal_error",
+            knowledge_hit: false,
+            stateful: false,
+            outcome: ConciergeAnswerOutcome::Error,
+            message_id,
+        }
+    }
+
+    async fn send_stateless_reply_inner(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        question: &str,
+        allow_personal_actions: bool,
+        route: AnswerRoute,
+        response_components: Option<&Value>,
+    ) -> AnswerTerminal {
+        let decision = self.answer_decision(question, None, None, route).await;
+        let source = decision.source;
+        let knowledge_hit = decision.knowledge_hit;
+        let outcome = decision.outcome;
+        let pate_request = decision.answer.pate_request;
+        let reply = decision
+            .answer
             .reply
             .unwrap_or_else(|| KNOWLEDGE_GAP_TEXT.to_string());
-        let body = if answer.pate_request && allow_personal_actions {
-            pate_offer_body(&reply)
-        } else {
-            v2_body(&reply, Vec::new())
-        };
-        let _ = tokio::time::timeout(
+        let body = answer_body(
+            &reply,
+            pate_request,
+            allow_personal_actions,
+            response_components,
+        );
+        let (message_id, delivery_uncertain) = match tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
             self.port.send_channel_v2(channel_id, body),
         )
-        .await;
+        .await
+        {
+            Ok(Ok(message_id)) => (Some(message_id), false),
+            Ok(Err(err)) => {
+                tracing::warn!(%err, channel_id, "Concierge: Stateless-Antwort-Zustellung fehlgeschlagen oder unsicher");
+                (
+                    self.send_answer_uncertain_notice_inner(
+                        channel_id,
+                        user_id,
+                        response_components,
+                    )
+                    .await,
+                    true,
+                )
+            }
+            Err(_) => {
+                tracing::warn!(
+                    channel_id,
+                    timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
+                    "Concierge: Stateless-Antwort-Zustellung hat Zeitlimit ueberschritten"
+                );
+                (
+                    self.send_answer_uncertain_notice_inner(
+                        channel_id,
+                        user_id,
+                        response_components,
+                    )
+                    .await,
+                    true,
+                )
+            }
+        };
+        AnswerTerminal {
+            source,
+            knowledge_hit,
+            stateful: false,
+            outcome: if delivery_uncertain {
+                ConciergeAnswerOutcome::Uncertain
+            } else {
+                outcome
+            },
+            message_id,
+        }
     }
 
-    async fn send_answer_uncertain_notice(&self, channel_id: u64, user_id: u64) {
+    async fn send_answer_uncertain_notice_inner(
+        &self,
+        channel_id: u64,
+        user_id: u64,
+        response_components: Option<&Value>,
+    ) -> Option<u64> {
         match tokio::time::timeout(
             CONCIERGE_DISCORD_IO_TIMEOUT,
-            self.port
-                .send_channel_v2(channel_id, v2_body(ANSWER_UNCERTAIN_TEXT, Vec::new())),
+            self.port.send_channel_v2(
+                channel_id,
+                with_response_components(
+                    v2_body(ANSWER_UNCERTAIN_TEXT, Vec::new()),
+                    response_components,
+                ),
+            ),
         )
         .await
         {
-            Ok(Ok(_)) => {}
+            Ok(Ok(message_id)) => Some(message_id),
             Ok(Err(err)) => {
                 tracing::error!(%err, user_id, channel_id, "Concierge: Unsicherheitshinweis konnte nicht gesendet werden");
+                None
             }
             Err(_) => {
                 tracing::error!(
@@ -4111,6 +4653,7 @@ impl Concierge {
                     timeout_secs = CONCIERGE_DISCORD_IO_TIMEOUT.as_secs(),
                     "Concierge: Unsicherheitshinweis hat Zeitlimit ueberschritten"
                 );
+                None
             }
         }
     }
@@ -5472,6 +6015,47 @@ struct LlmAnswer {
     pate_request: bool,
 }
 
+struct AnswerDecision {
+    answer: LlmAnswer,
+    source: &'static str,
+    knowledge_hit: bool,
+    outcome: ConciergeAnswerOutcome,
+}
+
+struct AnswerTerminal {
+    source: &'static str,
+    knowledge_hit: bool,
+    stateful: bool,
+    outcome: ConciergeAnswerOutcome,
+    message_id: Option<u64>,
+}
+
+impl AnswerTerminal {
+    fn override_outcome(mut self, outcome: ConciergeAnswerOutcome) -> Self {
+        if self.outcome != ConciergeAnswerOutcome::Uncertain {
+            self.outcome = outcome;
+        }
+        self
+    }
+
+    const fn without_answer(outcome: ConciergeAnswerOutcome, source: &'static str) -> Self {
+        Self {
+            source,
+            knowledge_hit: false,
+            stateful: false,
+            outcome,
+            message_id: None,
+        }
+    }
+}
+
+enum LlmLookup {
+    Answer(LlmAnswer),
+    NoAnswer,
+    Timeout,
+    Error,
+}
+
 #[derive(Deserialize)]
 struct LlmAnswerWire {
     reply: Option<String>,
@@ -5613,22 +6197,61 @@ fn llm_system(extra: Option<&str>) -> String {
 }
 
 fn log_answer_decision(
-    source: &'static str,
-    knowledge_hit: bool,
     question: &str,
-    include_question: bool,
+    route: AnswerRoute,
+    user_id: Option<u64>,
+    terminal: &AnswerTerminal,
 ) {
     let question_len = question.chars().count();
-    if include_question {
-        let question = question.chars().take(80).collect::<String>();
-        tracing::info!(source, knowledge_hit, question_len, %question, "Concierge: Antwort entschieden");
-    } else {
-        tracing::info!(
-            source,
-            knowledge_hit,
-            question_len,
-            "Concierge: Antwort entschieden"
-        );
+    tracing::info!(
+        route = route.as_str(),
+        outcome = terminal.outcome.as_str(),
+        source = terminal.source,
+        knowledge_hit = terminal.knowledge_hit,
+        stateful = terminal.stateful,
+        question_len,
+        ?user_id,
+        message_id = ?terminal.message_id,
+        "Concierge: Antwort entschieden"
+    );
+}
+
+fn log_tour_answer_decision(
+    question: &str,
+    step_key: &str,
+    user_id: u64,
+    terminal: &AnswerTerminal,
+) {
+    let question_len = question.chars().count();
+    tracing::info!(
+        route = AnswerRoute::OnboardingTour.as_str(),
+        outcome = terminal.outcome.as_str(),
+        step_key,
+        source = terminal.source,
+        knowledge_hit = terminal.knowledge_hit,
+        stateful = terminal.stateful,
+        question_len,
+        user_id,
+        message_id = ?terminal.message_id,
+        "Concierge: Tour-Antwort entschieden"
+    );
+}
+
+fn log_concierge_answer_decision(
+    route: AnswerRoute,
+    decision: &AnswerDecision,
+    question: &str,
+    stateful: bool,
+) {
+    if route == AnswerRoute::Concierge {
+        let terminal = AnswerTerminal {
+            source: decision.source,
+            knowledge_hit: decision.knowledge_hit,
+            stateful,
+            outcome: decision.outcome,
+            message_id: None,
+        };
+        log_answer_decision(question, route, None, &terminal);
     }
 }
 
@@ -6291,27 +6914,7 @@ pub fn spawn(
         loop {
             match messages.recv().await {
                 Ok(event) => {
-                    let handled = message_concierge
-                        .handle_user_message(
-                            event.channel_id,
-                            event.guild_id,
-                            event.author_id,
-                            &event.content,
-                        )
-                        .await;
-                    if handled {
-                        tracing::debug!(
-                            user_id = event.author_id,
-                            "Concierge: Nachricht verarbeitet"
-                        );
-                    }
-                    if !handled {
-                        if let Some(guild_id) = event.guild_id {
-                            message_concierge
-                                .mark_first_message(guild_id, event.author_id)
-                                .await;
-                        }
-                    }
+                    message_concierge.handle_routed_message(&event).await;
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(missed)) => {
                     tracing::warn!(missed, "Concierge: Message-Events verpasst");
@@ -6361,7 +6964,8 @@ mod tests {
     use super::*;
     use std::str::FromStr;
     #[cfg(feature = "testing")]
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     fn test_config(enabled: bool, allowlist: &[u64]) -> ConciergeConfig {
@@ -6466,6 +7070,7 @@ mod tests {
         dm_cannot_send: std::sync::Mutex<bool>,
         dm_fails: std::sync::Mutex<bool>,
         channel_send_fails: std::sync::Mutex<bool>,
+        channel_send_failures_remaining: std::sync::atomic::AtomicUsize,
         created_private_channels: std::sync::Mutex<Vec<(u64, u64, Option<u64>)>>,
         sent_channel_ids: std::sync::Mutex<Vec<u64>>,
         sent_channel_v2: std::sync::Mutex<Vec<Map<String, Value>>>,
@@ -6555,6 +7160,15 @@ mod tests {
             body: Map<String, Value>,
         ) -> Result<u64, String> {
             self.wait_at_port_gate().await;
+            if self
+                .channel_send_failures_remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Err("channel send failed once".to_string());
+            }
             if *self.channel_send_fails.lock().unwrap() {
                 return Err("channel send failed".to_string());
             }
@@ -6738,6 +7352,7 @@ mod tests {
             dm_cannot_send: std::sync::Mutex::new(false),
             dm_fails: std::sync::Mutex::new(false),
             channel_send_fails: std::sync::Mutex::new(false),
+            channel_send_failures_remaining: std::sync::atomic::AtomicUsize::new(0),
             created_private_channels: std::sync::Mutex::new(Vec::new()),
             sent_channel_ids: std::sync::Mutex::new(Vec::new()),
             sent_channel_v2: std::sync::Mutex::new(Vec::new()),
@@ -6800,6 +7415,511 @@ mod tests {
             let _ = socket.write_all(response.as_bytes()).await;
         });
         (format!("http://{addr}"), requests, handle)
+    }
+
+    fn tour_response_components() -> Value {
+        json!([{
+            "type": 1,
+            "components": [{
+                "type": 2,
+                "style": 2,
+                "label": "Weiter",
+                "custom_id": "tour:v1:next:welcome"
+            }]
+        }])
+    }
+
+    fn assert_has_tour_components(body: &Map<String, Value>) {
+        assert!(body["components"][0]["components"]
+            .as_array()
+            .expect("V2 container components")
+            .iter()
+            .any(|row| row["components"][0]["custom_id"] == "tour:v1:next:welcome"));
+    }
+
+    async fn stalled_knowledge_server() -> (
+        String,
+        Arc<tokio::sync::Notify>,
+        tokio::task::JoinHandle<()>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task_started = started.clone();
+        let handle = tokio::spawn(async move {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let _ = read_http_request_body(&mut socket).await;
+            task_started.notify_one();
+            std::future::pending::<()>().await;
+        });
+        (format!("http://{addr}"), started, handle)
+    }
+
+    fn assert_single_tour_answer_log(
+        logs: &str,
+        outcome: ConciergeAnswerOutcome,
+        step_key: &str,
+        message_id: Option<u64>,
+    ) {
+        let answer_logs = logs
+            .lines()
+            .filter(|line| line.contains("Concierge: Tour-Antwort entschieden"))
+            .collect::<Vec<_>>();
+        assert_eq!(answer_logs.len(), 1, "{logs}");
+        let log = answer_logs[0];
+        assert!(log.contains("route=\"onboarding_tour\""), "{log}");
+        assert!(
+            log.contains(&format!("outcome=\"{}\"", outcome.as_str())),
+            "{log}"
+        );
+        assert!(log.contains(&format!("step_key=\"{step_key}\"")), "{log}");
+        assert!(log.contains(&format!("message_id={message_id:?}")), "{log}");
+    }
+
+    #[tokio::test]
+    async fn tour_answer_early_return_loggt_genau_eine_strukturierte_zeile() {
+        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let concierge = Concierge::new(lazy_pool(), mock_port(), None, fast_knowledge_config());
+        let outcome = concierge
+            .answer_tour_dm_question(10, 42, "", "welcome", tour_response_components())
+            .await;
+        drop(guard);
+
+        let logs = capture.text();
+        assert_eq!(outcome, ConciergeAnswerOutcome::NoAnswer);
+        assert_single_tour_answer_log(&logs, outcome, "welcome", None);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_knowledge_hit_ist_answered_mit_buttons_und_genau_einem_log() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Tour-Antwort","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_001,
+                "Wo ist die Tour-Antwort?",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        drop(guard);
+        server.await.expect("knowledge server");
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::Answered);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent_v2_content(&sent[0]), "Tour-Antwort");
+        assert_has_tour_components(&sent[0]);
+        assert_single_tour_answer_log(&capture.text(), outcome, "welcome", Some(1));
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_ohne_antwort_ist_no_answer_mit_wissensluecke_und_buttons() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let (knowledge_url, _requests, server) =
+            knowledge_server(r#"{"answerable":false,"answer":null,"sources":[]}"#).await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_002,
+                "Unbeantwortbar",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        server.await.expect("knowledge server");
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::NoAnswer);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent_v2_content(&sent[0]), KNOWLEDGE_GAP_TEXT);
+        assert_has_tour_components(&sent[0]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_optout_bleibt_stateless_ohne_persistenz() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .set_opted_out(9_900_003, 1, Utc::now())
+            .await
+            .expect("opt out"));
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Stateless","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_003,
+                "Private Frage",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        server.await.expect("knowledge server");
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::PrivacyStateless);
+        let conversations = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 9900003",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert_eq!(conversations, 0);
+        assert_has_tour_components(&port.sent_channel_v2.lock().unwrap()[0]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_optout_zustellfehler_sendet_unsicherheit_mit_buttons() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .set_opted_out(9_900_009, 1, Utc::now())
+            .await
+            .expect("opt out"));
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Nicht zugestellt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        port.channel_send_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_009,
+                "Private Frage",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        server.await.expect("knowledge server");
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::Uncertain);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
+        assert_has_tour_components(&sent[0]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_provider_timeout_ist_timeout() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let (knowledge_url, started, server) = stalled_knowledge_server().await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = true;
+        let provider = dl_ai::MockChatProvider::new(Vec::new());
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let concierge = Concierge::new(db.pool().clone(), mock_port(), Some(ai), config);
+        let task = tokio::spawn(async move {
+            concierge
+                .answer_tour_dm_question(
+                    10,
+                    9_900_004,
+                    "Timeout",
+                    "welcome",
+                    tour_response_components(),
+                )
+                .await
+        });
+        started.notified().await;
+
+        assert_eq!(
+            tokio::time::timeout(KNOWLEDGE_TIMEOUT + StdDuration::from_secs(2), task)
+                .await
+                .expect("tour timeout result")
+                .expect("tour task"),
+            ConciergeAnswerOutcome::Timeout
+        );
+        assert_eq!(provider.requests().len(), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn tour_answer_decision_knowledge_timeout_und_provider_fehler_ist_timeout() {
+        let (knowledge_url, started, server) = stalled_knowledge_server().await;
+        let provider = dl_ai::MockChatProvider::new(Vec::new());
+        let ai: Arc<dyn ChatProvider> = provider.clone();
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = true;
+        let concierge = Concierge::new(lazy_pool(), mock_port(), Some(ai), config);
+        let task = tokio::spawn(async move {
+            concierge
+                .answer_decision("Timeout", None, None, AnswerRoute::OnboardingTour)
+                .await
+                .outcome
+        });
+        started.notified().await;
+
+        assert_eq!(
+            tokio::time::timeout(KNOWLEDGE_TIMEOUT + StdDuration::from_secs(2), task)
+                .await
+                .expect("tour decision timeout result")
+                .expect("tour decision task"),
+            ConciergeAnswerOutcome::Timeout
+        );
+        assert_eq!(provider.requests().len(), 1);
+        server.abort();
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_frage_zustellfehler_ist_uncertain_und_hinweis_hat_buttons() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let (knowledge_url, _requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Nicht zugestellt","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        port.channel_send_failures_remaining
+            .store(1, Ordering::SeqCst);
+        let concierge = Concierge::new(db.pool().clone(), port.clone(), None, config);
+
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_005,
+                "Zustellfehler",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        server.await.expect("knowledge server");
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::Uncertain);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
+        assert_has_tour_components(&sent[0]);
+    }
+
+    #[tokio::test]
+    async fn tour_frage_interner_fehler_ist_error() {
+        let (knowledge_url, requests, server) = knowledge_server(
+            r#"{"answerable":true,"answer":"Stateless nach Fehler","sources":[{"title":"Test","path":"public/test.html"}]}"#,
+        )
+        .await;
+        let mut config = test_config(true, &[]);
+        config.knowledge_url = knowledge_url;
+        config.free_voice = false;
+        let port = mock_port();
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, config);
+
+        let outcome = concierge
+            .answer_tour_dm_question(
+                10,
+                9_900_006,
+                "Interner Fehler",
+                "welcome",
+                tour_response_components(),
+            )
+            .await;
+        tokio::task::yield_now().await;
+        server.abort();
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::Error);
+        assert!(requests.lock().unwrap().is_empty());
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
+        assert_has_tour_components(&sent[0]);
+    }
+
+    #[cfg(feature = "testing")]
+    #[tokio::test]
+    async fn tour_kontrollbefehle_bleiben_kontrollbefehle() {
+        let db = dl_central_db::testing::test_pool()
+            .await
+            .expect("test_pool");
+        let store = ConciergeStore::new(db.pool().clone());
+        assert!(store
+            .record_conversation(9_900_008, 1, "user", "vorher", Utc::now())
+            .await
+            .expect("seed conversation"));
+        let port = mock_port();
+        let concierge = Concierge::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            fast_knowledge_config(),
+        );
+
+        assert_eq!(
+            concierge
+                .answer_tour_dm_question(
+                    10,
+                    9_900_007,
+                    "stopp",
+                    "welcome",
+                    tour_response_components(),
+                )
+                .await,
+            ConciergeAnswerOutcome::Answered
+        );
+        assert_eq!(
+            concierge
+                .answer_tour_dm_question(
+                    10,
+                    9_900_008,
+                    "vergiss mich",
+                    "welcome",
+                    tour_response_components(),
+                )
+                .await,
+            ConciergeAnswerOutcome::Answered
+        );
+
+        let opted_out = sqlx::query_scalar::<_, bool>(
+            "SELECT opted_out FROM core.user_privacy WHERE user_id = 9900007",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("privacy state");
+        let forgotten = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM bot.concierge_conversations WHERE user_id = 9900008",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("conversation count");
+        assert!(opted_out);
+        assert_eq!(forgotten, 0);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent_v2_content(&sent[0]), OPTOUT_TEXT);
+        assert_eq!(sent_v2_content(&sent[1]), FORGET_TEXT);
+        assert_has_tour_components(&sent[0]);
+        assert_has_tour_components(&sent[1]);
+    }
+
+    #[tokio::test]
+    async fn tour_kontrollzustellung_timeout_terminiert_uncertain_mit_einer_logzeile() {
+        let capture = crate::knowledge_client::test_logging::LogCapture::default();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(capture.clone())
+            .with_ansi(false)
+            .without_time()
+            .with_target(false)
+            .finish();
+        let guard = tracing::subscriber::set_default(subscriber);
+        let port = mock_port();
+        *port.port_release.lock().unwrap() = Some(Arc::new(tokio::sync::Notify::new()));
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+
+        let outcome = tokio::time::timeout(
+            CONCIERGE_DISCORD_IO_TIMEOUT + StdDuration::from_secs(2),
+            concierge.answer_tour_dm_question(
+                10,
+                9_900_010,
+                "stopp",
+                "welcome",
+                tour_response_components(),
+            ),
+        )
+        .await
+        .expect("control delivery must terminate");
+        drop(guard);
+
+        assert_eq!(outcome, ConciergeAnswerOutcome::Uncertain);
+        let sent = port.sent_channel_v2.lock().unwrap();
+        assert_eq!(sent.len(), 1);
+        assert_eq!(sent_v2_content(&sent[0]), ANSWER_UNCERTAIN_TEXT);
+        assert_has_tour_components(&sent[0]);
+        assert_single_tour_answer_log(&capture.text(), outcome, "welcome", Some(1));
+    }
+
+    #[tokio::test]
+    async fn routed_message_nutzt_den_bisherigen_message_loop_kern() {
+        let port = mock_port();
+        let concierge = Concierge::new(lazy_pool(), port.clone(), None, fast_knowledge_config());
+        let event = dl_discord::MessageEvent {
+            guild_id: None,
+            channel_id: 10,
+            message_id: 11,
+            author_id: 42,
+            author_display_name: "Test".to_string(),
+            author_is_admin: false,
+            author_can_manage_messages: false,
+            author_can_manage_guild: false,
+            author_is_staff: false,
+            author_staff_status_known: false,
+            content: "Hallo".to_string(),
+            message_created_at: 0,
+            is_reply: false,
+            reply_message_id: None,
+            reply_channel_id: None,
+            attachment_count: 0,
+            image_attachment_count: 0,
+            image_attachment_urls: Vec::new(),
+            attachments: Vec::new(),
+            author_created_at: 0,
+            author_joined_at: None,
+        };
+
+        assert!(concierge.handle_routed_message(&event).await);
+        assert_eq!(port.sent_channel_v2.lock().unwrap().len(), 1);
     }
 
     async fn read_http_request_body(socket: &mut tokio::net::TcpStream) -> String {
@@ -9151,8 +10271,14 @@ mod tests {
             .expect("locked history");
 
         let answer = concierge
-            .answer_with_knowledge_and_llm("Aktuelle Frage", Some(&history), None)
-            .await;
+            .answer_decision(
+                "Aktuelle Frage",
+                Some(&history),
+                None,
+                AnswerRoute::Concierge,
+            )
+            .await
+            .answer;
         server.await.expect("knowledge server");
         tx.rollback().await.expect("rollback direct helper test");
 
