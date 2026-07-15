@@ -13,6 +13,7 @@ mod mcp;
 mod modglue;
 mod onboardglue;
 mod onboardingbridgeglue;
+mod onboardingtourglue;
 mod scrimglue;
 mod serversync;
 mod turnierglue;
@@ -844,6 +845,34 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
         concierge_config.clone(),
     );
     dl_community::concierge::register(&mut router, concierge.clone());
+    let onboarding_tour_runtime = onboardingtourglue::tour_opt_in_role_id_from_lookup(|key| {
+        std::env::var(key).ok()
+    })
+    .and_then(|marker_role_id| {
+        match onboardingtourglue::OnboardingTourGlue::new(
+            adapter.clone(),
+            central_pool.clone(),
+            concierge.clone(),
+            discord_token.clone(),
+        ) {
+            Ok(glue) => {
+                let runtime = onboardingtourglue::OnboardingTourRuntime::new(
+                    glue,
+                    onboardglue::MAIN_GUILD_ID,
+                    marker_role_id,
+                );
+                Some(runtime)
+            }
+            Err(error) => {
+                tracing::error!(%error, "Onboarding-Tour HTTP-Client konnte nicht gebaut werden");
+                None
+            }
+        }
+    });
+    if onboarding_tour_runtime.is_none() {
+        tracing::info!("Onboarding-Tour deaktiviert (TOUR_OPT_IN_ROLE_ID fehlt oder ist 0)");
+    }
+    onboardingtourglue::register(&mut router, onboarding_tour_runtime.clone());
     // Privacy-Oberflaeche: /datenschutz + /datenschutz-optin (Loeschung/Opt-in).
     // Nach erfolgreicher Loeschung wird auch der fluechtige Concierge-Zustand entfernt.
     dl_community::privacy_ui::register(&mut router, central_pool.clone(), {
@@ -1328,7 +1357,13 @@ async fn main() -> anyhow::Result<std::process::ExitCode> {
             &dispatcher,
             onboardglue::MAIN_GUILD_ID,
         );
-        let _concierge_tasks = dl_community::concierge::spawn(concierge.clone(), &dispatcher);
+        let _concierge_tasks = if onboarding_tour_runtime.is_some() {
+            dl_community::concierge::spawn_without_message_loop(concierge.clone(), &dispatcher)
+        } else {
+            dl_community::concierge::spawn(concierge.clone(), &dispatcher)
+        };
+        let _onboarding_tour_tasks =
+            onboardingtourglue::spawn_if_enabled(onboarding_tour_runtime.clone(), &dispatcher);
         let _journey_tag_events = journeyglue::spawn_tag_events(
             central_pool.clone(),
             tag_service.clone(),

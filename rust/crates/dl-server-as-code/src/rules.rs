@@ -25,6 +25,7 @@ const ROLE_COACHING_FEEDBACK: &str = "Coaching Feedback";
 const ROLE_INVITE_GAST: &str = "Invite-Gast";
 const ROLE_FRISCHLING: &str = "Frischling";
 const ROLE_RANG_VERKNUEPFUNG: &str = "Rang-Verknüpfung";
+const ROLE_SERVER_TOUR: &str = "Server-Tour";
 const ROLE_STREAMS: &str = "Streams";
 const CATEGORY_MODERATION: &str = "🛡️ ─ MODERATION ─";
 const CATEGORY_INFORMATION: &str = "🏛️ ─ INFORMATION ─";
@@ -53,7 +54,12 @@ const LFG_FORUM_DEFAULT_AUTO_ARCHIVE_DURATION: i32 = 1440;
 const LFG_CHANNEL_ALIASES: &[&str] = &["spieler-suche", "mitspieler-suche"];
 const LFG_FORUM_CUTOVER_ENV: &str = "DL_LFG_FORUM_CUTOVER";
 
-const WELLE2B_MARKER_ROLES: &[&str] = &[ROLE_INVITE_GAST, ROLE_FRISCHLING, ROLE_RANG_VERKNUEPFUNG];
+const WELLE2B_MARKER_ROLES: &[&str] = &[
+    ROLE_INVITE_GAST,
+    ROLE_FRISCHLING,
+    ROLE_RANG_VERKNUEPFUNG,
+    ROLE_SERVER_TOUR,
+];
 const WELLE2B_PING_ROLE_TEMPLATE_CANDIDATES: &[&str] = &[
     "Patchnotes Ping Rolle",
     "Spieler-Suche Ping Rolle",
@@ -3263,7 +3269,12 @@ mod tests {
 
         let derived = derive_desired_model(&actual)?;
 
-        for role_name in ["Invite-Gast", "Frischling", "Rang-Verknüpfung"] {
+        for role_name in [
+            "Invite-Gast",
+            "Frischling",
+            "Rang-Verknüpfung",
+            "Server-Tour",
+        ] {
             let role = role_by_name(&derived.desired, role_name).expect("marker role");
             assert_eq!(role.permissions_bitmask, 0);
             assert!(!role.hoist);

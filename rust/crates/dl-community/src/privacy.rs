@@ -654,6 +654,13 @@ const USER_TABLES: &[TableSpec] = &[
         ColumnType::I64,
     ),
     TableSpec::new(
+        "voice_pair_guard_locks",
+        "blocked_user_id",
+        "voice.voice_pair_guard_locks",
+        "blocked_user_id",
+        ColumnType::I64,
+    ),
+    TableSpec::new(
         "lfg_posts",
         "owner_id",
         "voice.lfg_posts",
