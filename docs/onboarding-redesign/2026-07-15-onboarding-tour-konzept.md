@@ -391,3 +391,16 @@ MVP: Wellen 1–4, insgesamt etwa 3,5–5,5 Entwicklertage inklusive Tests und L
 2. **Logging-Auslegung:** Darf „voll loggen“ als vollständige Outcome-Metadaten ohne Frage-/Antwortklartext umgesetzt werden? Empfehlung: ja; Inhalte bleiben ausschließlich im bereits datenschutzgesteuerten Concierge-Speicher.
 
 Entschieden (Owner 2026-07-15): Die Rang-Frage bleibt als eigenständige 4. Frage bestehen; die Tour ist eine zusätzliche 5. Frage, beides ist kombinierbar. Keine Migration, keine Legacy-Suppression.
+
+## Nachtrag 2026-07-15 (Aktivierung): Discord-Limit erzwingt kombinierte Frage
+
+Discord erlaubt hart maximal 4 Onboarding-Fragen (PUT-Fehler
+`TOO_MANY_ONBOARDING_PROMPTS`, live verifiziert). Die geplante 5. Frage ist damit
+unmöglich. Umsetzung stattdessen: Rang-Opt-in und Tour-Opt-in teilen sich die
+4. Frage „Willst du Starthilfe?" als Multi-Select mit zwei unabhängigen Optionen
+(🔗 Rang / 🧭 Tour, `starthilfe_prompt()` in serversync.rs). Beide Marker-Rollen,
+beide Folge-Flows und die Kombinierbarkeit bleiben unverändert; nur die
+Fragen-Hülle ist geteilt. Außerdem beim Apply gefunden: Die Default-Kanal-Liste
+musste an den Live-Server angepasst werden (memes/deadlock-invite im Archiv →
+off-topic/gameplay-clips), sonst blockt die Discord-Regel „mind. 5 Defaults mit
+@everyone VIEW+SEND".

@@ -5826,8 +5826,7 @@ fn build_welle2b_onboarding_config(
         sanitize_carried_over_channel_ids(&mut prompt, model, &mut warnings);
         prompts.push(prompt);
     }
-    prompts.push(rang_verknuepfung_prompt(rang_verknuepfung_role));
-    prompts.push(tour_opt_in_prompt(tour_role));
+    prompts.push(starthilfe_prompt(rang_verknuepfung_role, tour_role));
 
     if mitspieler_suche.is_some() {
         warnings.push(
@@ -6095,46 +6094,47 @@ fn ping_prompt(model: &GuildModel, blockers: &mut Vec<String>) -> NativeOnboardi
     }
 }
 
-fn rang_verknuepfung_prompt(role_id: Option<u64>) -> NativeOnboardingPrompt {
+// Discord erlaubt hart maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS,
+// live verifiziert 2026-07-15). Rang-Opt-in und Tour-Opt-in teilen sich deshalb
+// EINE Multi-Select-Frage; beide Marker-Rollen und Folge-Flows bleiben getrennt.
+fn starthilfe_prompt(
+    rang_role_id: Option<u64>,
+    tour_role_id: Option<u64>,
+) -> NativeOnboardingPrompt {
     NativeOnboardingPrompt {
         id: None,
         prompt_type: 0,
-        title: "Willst du deinen echten Rang automatisch bekommen?".to_string(),
-        options: vec![NativeOnboardingOption {
-            id: None,
-            title: "Ja — zeig mir, wie ich Steam verknüpfe".to_string(),
-            description: Some(
-                "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).".to_string(),
-            ),
-            emoji: Some(json!({ "name": "🔗" })),
-            role_ids: role_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
-            channel_ids: Vec::new(),
-            extra: BTreeMap::new(),
-        }],
-        single_select: true,
-        required: false,
-        in_onboarding: true,
-        extra: BTreeMap::new(),
-    }
-}
-
-fn tour_opt_in_prompt(role_id: Option<u64>) -> NativeOnboardingPrompt {
-    NativeOnboardingPrompt {
-        id: None,
-        prompt_type: 0,
-        title: "Willst du eine kleine Tour, wie der Server funktioniert?".to_string(),
-        options: vec![NativeOnboardingOption {
-            id: None,
-            title: "Ja, zeig mir den Server".to_string(),
-            description: Some(
-                "Nach dem Start schicke ich dir eine kurze Tour per DM (2 Minuten).".to_string(),
-            ),
-            emoji: Some(json!({ "name": "🧭" })),
-            role_ids: role_id.map(|id| vec![id.to_string()]).unwrap_or_default(),
-            channel_ids: Vec::new(),
-            extra: BTreeMap::new(),
-        }],
-        single_select: true,
+        title: "Willst du Starthilfe?".to_string(),
+        options: vec![
+            NativeOnboardingOption {
+                id: None,
+                title: "Echten Rang automatisch bekommen".to_string(),
+                description: Some(
+                    "Nach dem Start schicken wir dir die kurze Steam-Anleitung (2 Minuten)."
+                        .to_string(),
+                ),
+                emoji: Some(json!({ "name": "🔗" })),
+                role_ids: rang_role_id
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                channel_ids: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+            NativeOnboardingOption {
+                id: None,
+                title: "Kleine Server-Tour per DM".to_string(),
+                description: Some(
+                    "Ich zeig dir Schritt für Schritt, wie der Server funktioniert.".to_string(),
+                ),
+                emoji: Some(json!({ "name": "🧭" })),
+                role_ids: tour_role_id
+                    .map(|id| vec![id.to_string()])
+                    .unwrap_or_default(),
+                channel_ids: Vec::new(),
+                extra: BTreeMap::new(),
+            },
+        ],
+        single_select: false,
         required: false,
         in_onboarding: true,
         extra: BTreeMap::new(),
@@ -10083,7 +10083,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
     }
 
     #[test]
-    fn onboarding_builder_baut_fuenf_prompts_und_uebernimmt_rank_prompt_unveraendert() {
+    fn onboarding_builder_baut_vier_prompts_und_uebernimmt_rank_prompt_unveraendert() {
         let model = onboarding_model();
         let live = rank_live_onboarding_config();
 
@@ -10093,7 +10093,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
         assert_eq!(built.config.default_channel_ids.len(), 9);
-        assert_eq!(built.config.prompts.len(), 5);
+        // Discord-Limit: maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS).
+        assert_eq!(built.config.prompts.len(), 4);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
         assert!(built.config.prompts[0].single_select);
         assert!(built.config.prompts[0].required);
@@ -10111,56 +10112,26 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             serde_json::to_value(&built.config.prompts[2]).expect("rank prompt"),
             live["prompts"][1]
         );
-        let rang_bridge = &built.config.prompts[3];
+        let starthilfe = &built.config.prompts[3];
         assert_eq!(
-            rang_bridge.title,
-            "Willst du deinen echten Rang automatisch bekommen?"
-        );
-        assert!(rang_bridge.single_select);
-        assert!(!rang_bridge.required);
-        assert!(rang_bridge.in_onboarding);
-        assert_eq!(rang_bridge.options.len(), 1);
-        let option = &rang_bridge.options[0];
-        assert_eq!(option.title, "Ja — zeig mir, wie ich Steam verknüpfe");
-        assert_eq!(
-            option.description.as_deref(),
-            Some("Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).")
-        );
-        assert_eq!(option.emoji, Some(json!({ "name": "🔗" })));
-        assert_eq!(option.role_ids, vec!["5008".to_string()]);
-        assert!(option.channel_ids.is_empty());
-        assert_eq!(
-            serde_json::to_value(rang_bridge).expect("rang bridge prompt"),
+            serde_json::to_value(starthilfe).expect("starthilfe prompt"),
             json!({
                 "type": 0,
-                "title": "Willst du deinen echten Rang automatisch bekommen?",
+                "title": "Willst du Starthilfe?",
                 "options": [{
-                    "title": "Ja — zeig mir, wie ich Steam verknüpfe",
-                    "description": "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten).",
+                    "title": "Echten Rang automatisch bekommen",
+                    "description": "Nach dem Start schicken wir dir die kurze Steam-Anleitung (2 Minuten).",
                     "emoji": { "name": "🔗" },
                     "role_ids": ["5008"],
                     "channel_ids": []
-                }],
-                "single_select": true,
-                "required": false,
-                "in_onboarding": true
-            })
-        );
-
-        let tour = &built.config.prompts[4];
-        assert_eq!(
-            serde_json::to_value(tour).expect("tour prompt"),
-            json!({
-                "type": 0,
-                "title": "Willst du eine kleine Tour, wie der Server funktioniert?",
-                "options": [{
-                    "title": "Ja, zeig mir den Server",
-                    "description": "Nach dem Start schicke ich dir eine kurze Tour per DM (2 Minuten).",
+                }, {
+                    "title": "Kleine Server-Tour per DM",
+                    "description": "Ich zeig dir Schritt für Schritt, wie der Server funktioniert.",
                     "emoji": { "name": "🧭" },
                     "role_ids": ["5009"],
                     "channel_ids": []
                 }],
-                "single_select": true,
+                "single_select": false,
                 "required": false,
                 "in_onboarding": true
             })
@@ -10176,7 +10147,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         let payload = serde_json::to_value(&built.config).expect("payload");
 
         let prompts = payload["prompts"].as_array().expect("prompts");
-        for prompt in [&prompts[0], &prompts[1], &prompts[3], &prompts[4]] {
+        for prompt in [&prompts[0], &prompts[1], &prompts[3]] {
             assert!(!prompt.as_object().expect("prompt").contains_key("id"));
             for option in prompt["options"].as_array().expect("options") {
                 assert!(!option.as_object().expect("option").contains_key("id"));
@@ -10203,24 +10174,22 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(ping_options[4]["title"], "Streams");
         assert_eq!(ping_options[4]["role_ids"], json!(["5007"]));
 
-        let rang_bridge = &payload["prompts"][3];
+        let starthilfe = &payload["prompts"][3];
+        assert_eq!(starthilfe["title"], "Willst du Starthilfe?");
+        assert_eq!(starthilfe["required"], false);
+        assert_eq!(starthilfe["single_select"], false);
+        assert_eq!(starthilfe["in_onboarding"], true);
         assert_eq!(
-            rang_bridge["title"],
-            "Willst du deinen echten Rang automatisch bekommen?"
+            starthilfe["options"][0]["title"],
+            "Echten Rang automatisch bekommen"
         );
-        assert_eq!(rang_bridge["required"], false);
-        assert_eq!(rang_bridge["single_select"], true);
-        assert_eq!(rang_bridge["in_onboarding"], true);
+        assert_eq!(starthilfe["options"][0]["role_ids"], json!(["5008"]));
         assert_eq!(
-            rang_bridge["options"][0]["title"],
-            "Ja — zeig mir, wie ich Steam verknüpfe"
+            starthilfe["options"][1]["title"],
+            "Kleine Server-Tour per DM"
         );
-        assert_eq!(
-            rang_bridge["options"][0]["description"],
-            "Nach dem Start schicken wir dir die kurze Anleitung (2 Minuten)."
-        );
-        assert_eq!(rang_bridge["options"][0]["role_ids"], json!(["5008"]));
-        assert_eq!(rang_bridge["options"][0]["channel_ids"], json!([]));
+        assert_eq!(starthilfe["options"][1]["role_ids"], json!(["5009"]));
+        assert_eq!(starthilfe["options"][1]["channel_ids"], json!([]));
     }
 
     #[test]
@@ -10239,7 +10208,7 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert_eq!(prompts[0]["options"][1]["emoji_name"], "🔑");
         assert_eq!(prompts[0]["options"][2]["emoji_name"], "🌱");
         assert_eq!(prompts[3]["options"][0]["emoji_name"], "🔗");
-        assert_eq!(prompts[4]["options"][0]["emoji_name"], "🧭");
+        assert_eq!(prompts[3]["options"][1]["emoji_name"], "🧭");
         // Discord verlangt id auch fuer neue Prompts (BASE_TYPE_REQUIRED,
         // live verifiziert 2026-07-03): neue Objekte tragen Platzhalter-IDs.
         assert_eq!(prompts[0]["id"], "0");
