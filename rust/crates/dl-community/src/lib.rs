@@ -19,6 +19,7 @@ mod knowledge_client;
 pub mod leave_survey;
 pub mod onboarding;
 pub mod onboarding_bridge;
+pub mod onboarding_tour;
 pub mod privacy;
 pub mod privacy_ui;
 pub mod reaction_roles;
