@@ -3220,8 +3220,8 @@ impl ServerSyncOps for ServerSyncService {
             self.guild_id,
         )
         .await?;
-        validate_default_channels_7_5(&live, &preview.config.default_channel_ids)
-            .map_err(ServerSyncError::bad_request)?;
+        // Keine 7/5-Revalidierung mehr: Die Defaults sind 1:1 der Owner-Zustand
+        // (Discord haelt sie bereits); ein echter PUT-Fehler wird ehrlich gemeldet.
         validate_onboarding_references(&live, &preview.config)
             .map_err(ServerSyncError::bad_request)?;
 
@@ -5784,12 +5784,33 @@ fn build_welle2b_onboarding_config(
     let mut blockers = Vec::new();
     let mut warnings = Vec::new();
 
-    let default_channel_ids = resolve_default_channel_ids(model, &mut blockers);
-    if !default_channel_ids.is_empty() {
-        if let Err(err) = validate_default_channels_7_5(model, &default_channel_ids) {
-            blockers.push(err);
+    // Die Default-Kanaele gestaltet der Owner im Discord-UI; der Bot uebernimmt
+    // sie 1:1 und published nur die Prompts (Owner-Vorfall 2026-07-15: die alte
+    // Code-Namensliste ueberschrieb die Owner-Auswahl beim Apply). Nur wenn live
+    // noch gar keine Defaults existieren, greift die Namensliste als Fallback.
+    let default_channel_ids = if live.default_channel_ids.is_empty() {
+        let ids = resolve_default_channel_ids(model, &mut blockers);
+        if !ids.is_empty() {
+            if let Err(err) = validate_default_channels_7_5(model, &ids) {
+                blockers.push(err);
+            }
         }
-    }
+        ids
+    } else {
+        let (kept, dropped): (Vec<String>, Vec<String>) =
+            live.default_channel_ids.iter().cloned().partition(|id| {
+                id.parse::<u64>()
+                    .ok()
+                    .is_some_and(|id| model.channels.contains_key(&id))
+            });
+        if !dropped.is_empty() {
+            warnings.push(format!(
+                "Default-Kanaele: stale Live-IDs entfernt: {}",
+                dropped.join(", ")
+            ));
+        }
+        kept
+    };
 
     let mitspieler_suche = match resolve_channel_id(model, "mitspieler-suche") {
         Ok(id) => id,
@@ -9792,7 +9813,8 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         json!({
             "enabled": false,
             "mode": 1,
-            "default_channel_ids": ["1"],
+            // 9 gueltige Modell-IDs + eine stale ID (Kanal existiert nicht mehr)
+            "default_channel_ids": ["6001","6002","6003","6004","6005","6006","6007","6008","6009","1"],
             "prompts": [
                 {
                     "id": "old-meta",
@@ -10092,7 +10114,15 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
         assert!(built.blockers.is_empty(), "blockers: {:?}", built.blockers);
         assert!(built.config.enabled);
         assert_eq!(built.config.mode, json!(1));
-        assert_eq!(built.config.default_channel_ids.len(), 9);
+        // Live-Uebernahme: 9 gueltige Owner-IDs bleiben, die stale ID faellt raus.
+        assert_eq!(
+            built.config.default_channel_ids,
+            (6001..=6009).map(|id| id.to_string()).collect::<Vec<_>>()
+        );
+        assert!(built
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("stale Live-IDs")));
         // Discord-Limit: maximal 4 Onboarding-Fragen (TOO_MANY_ONBOARDING_PROMPTS).
         assert_eq!(built.config.prompts.len(), 4);
         assert_eq!(built.config.prompts[0].title, "Wo stehst du gerade?");
@@ -10419,10 +10449,12 @@ title = "**❓ Server-FAQ · Deutsche Deadlock Community**"
             .blockers
             .iter()
             .any(|blocker| blocker.contains("Rolle `Invite-Gast`")));
+        // Verschwundene Default-Kanaele blocken nicht mehr (Live-Uebernahme),
+        // sie fallen als stale ID mit Warnung raus.
         assert!(built
-            .blockers
+            .warnings
             .iter()
-            .any(|blocker| blocker.contains("Kanal `server-support`")));
+            .any(|warning| warning.contains("stale Live-IDs") && warning.contains("6009")));
     }
 
     #[test]
