@@ -107,6 +107,21 @@ struct PlanItem {
     created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, FromRow)]
+struct RejectedPlanItem {
+    id: i64,
+    run_id: i64,
+    prioritaet: i16,
+    bereich: String,
+    titel: String,
+    begruendung: String,
+    aktion: String,
+    beleg: String,
+    beleg_art: String,
+    verworfen_grund: String,
+    created_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct UpdatePlanItem {
     status: String,
@@ -290,6 +305,7 @@ pub async fn plan(State(app): State<DashboardApp>, headers: HeaderMap) -> Respon
         return ok_json(json!({
             "run": null,
             "items": [],
+            "verworfen_items": [],
             "older_open_items": [],
             "stale": true,
         }));
@@ -308,14 +324,38 @@ pub async fn plan(State(app): State<DashboardApp>, headers: HeaderMap) -> Respon
             return err_text(500, "brain plan unavailable");
         }
     };
+    let verworfen_items = match load_rejected_plan_items(pool, run.id).await {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::error!(%err, "verworfene brain.plan_items konnten nicht gelesen werden");
+            return err_text(500, "brain plan unavailable");
+        }
+    };
     let stale = Utc::now() - run.run_at > Duration::days(8);
 
     ok_json(json!({
         "run": plan_run_json(&run),
         "items": items.into_iter().map(plan_item_json).collect::<Vec<_>>(),
+        "verworfen_items": verworfen_items.into_iter().map(rejected_plan_item_json).collect::<Vec<_>>(),
         "older_open_items": older_open_items.into_iter().map(plan_item_json).collect::<Vec<_>>(),
         "stale": stale,
     }))
+}
+
+fn rejected_plan_item_json(item: RejectedPlanItem) -> Value {
+    json!({
+        "id": item.id,
+        "run_id": item.run_id,
+        "prioritaet": item.prioritaet,
+        "bereich": item.bereich,
+        "titel": item.titel,
+        "begruendung": item.begruendung,
+        "aktion": item.aktion,
+        "beleg": item.beleg,
+        "beleg_art": item.beleg_art,
+        "verworfen_grund": item.verworfen_grund,
+        "created_at": item.created_at.to_rfc3339(),
+    })
 }
 
 fn plan_run_json(run: &PlanRun) -> Value {
@@ -364,6 +404,22 @@ async fn load_plan_items(pool: &PgPool, run_id: i64) -> Result<Vec<PlanItem>, sq
            JOIN brain.plan_runs run ON run.id = item.run_id
           WHERE item.run_id = $1
           ORDER BY item.prioritaet, item.created_at, item.id",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+}
+
+async fn load_rejected_plan_items(
+    pool: &PgPool,
+    run_id: i64,
+) -> Result<Vec<RejectedPlanItem>, sqlx::Error> {
+    sqlx::query_as::<_, RejectedPlanItem>(
+        "SELECT id, run_id, prioritaet, bereich, titel, begruendung, aktion,
+                beleg, beleg_art, verworfen_grund, created_at
+           FROM brain.plan_items_verworfen
+          WHERE run_id = $1
+          ORDER BY created_at, id",
     )
     .bind(run_id)
     .fetch_all(pool)
@@ -656,6 +712,27 @@ mod tests {
         }
         assert!(!html.contains("${item.titel}"));
     }
+
+    #[test]
+    fn plan_panel_escaped_verworfene_items() {
+        let html = include_str!("../../../../service/static/dashboard.html");
+        let rejected = html
+            .split_once("function rejectedPlanItemHtml")
+            .expect("Renderer für verworfene Items")
+            .1
+            .split_once("\n        function ")
+            .expect("Ende des Renderers")
+            .0;
+
+        for sink in [
+            "${esc(item.titel)}",
+            "${esc(item.beleg)}",
+            "${esc(item.beleg_art)}",
+            "${esc(item.verworfen_grund)}",
+        ] {
+            assert!(rejected.contains(sink), "fehlender esc()-Sink: {sink}");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]
@@ -753,6 +830,23 @@ mod plan_tests {
         )
         .execute(db.pool())
         .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS brain.plan_items_verworfen (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                run_id BIGINT NOT NULL REFERENCES brain.plan_runs(id) ON DELETE CASCADE,
+                prioritaet SMALLINT NOT NULL,
+                bereich TEXT NOT NULL,
+                titel TEXT NOT NULL,
+                begruendung TEXT NOT NULL,
+                aktion TEXT NOT NULL,
+                beleg TEXT NOT NULL,
+                beleg_art TEXT NOT NULL,
+                verworfen_grund TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+        )
+        .execute(db.pool())
+        .await?;
 
         let session = if with_session {
             let session_id = "brain-plan-test-session".to_string();
@@ -834,6 +928,20 @@ mod plan_tests {
         .bind(run_id)
         .fetch_one(pool)
         .await
+    }
+
+    async fn insert_rejected_plan_item(pool: &PgPool, run_id: i64) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            "INSERT INTO brain.plan_items_verworfen(
+                run_id, prioritaet, bereich, titel, begruendung, aktion,
+                beleg, beleg_art, verworfen_grund
+             ) VALUES($1, 9, 'kaputt', '<Titel>', 'Grund', 'Aktion',
+                      '## Erfunden', 'falsch', 'beleg_unaufloesbar')",
+        )
+        .bind(run_id)
+        .execute(pool)
+        .await?;
+        Ok(())
     }
 
     #[tokio::test]
@@ -940,6 +1048,42 @@ mod plan_tests {
                 .fetch_one(db.pool())
                 .await?;
         assert!(entschieden_am.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "benötigt CENTRAL_TEST_DSN"]
+    async fn plan_get_trennt_verworfene_von_normalen_items(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session) = plan_app(true).await?;
+        let item_id = insert_plan_item(db.pool()).await?;
+        let run_id: i64 = sqlx::query_scalar("SELECT run_id FROM brain.plan_items WHERE id = $1")
+            .bind(item_id)
+            .fetch_one(db.pool())
+            .await?;
+        insert_rejected_plan_item(db.pool(), run_id).await?;
+        let (session_id, csrf) = session.expect("session");
+
+        let response = app
+            .oneshot(auth_request(
+                "GET",
+                "/api/brain/plan",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await?)?;
+
+        assert_eq!(body["items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["items"][0]["titel"], "Titel");
+        assert_eq!(body["verworfen_items"].as_array().map(Vec::len), Some(1));
+        assert_eq!(body["verworfen_items"][0]["beleg"], "## Erfunden");
+        assert_eq!(
+            body["verworfen_items"][0]["verworfen_grund"],
+            "beleg_unaufloesbar"
+        );
         Ok(())
     }
 }

@@ -79,6 +79,12 @@ pub struct PlanItem {
     pub fingerprint: String,
 }
 
+#[derive(Clone, Debug)]
+pub struct RejectedPlanItem {
+    pub item: RawPlanItem,
+    pub verworfen_grund: String,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct PlanSources {
     pub digest_sections: BTreeSet<String>,
@@ -94,6 +100,7 @@ pub struct GateResult {
     pub verworfen: i32,
     pub verworfen_gruende: BTreeMap<String, i32>,
     pub items: Vec<PlanItem>,
+    pub verworfene_items: Vec<RejectedPlanItem>,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +134,10 @@ pub fn gate_items(items: Vec<RawPlanItem>, sources: &PlanSources) -> GateResult 
                 .entry(reason.to_string())
                 .or_default() += 1;
             result.verworfen += 1;
+            result.verworfene_items.push(RejectedPlanItem {
+                item,
+                verworfen_grund: reason.to_string(),
+            });
             continue;
         }
 

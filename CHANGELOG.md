@@ -1,3 +1,11 @@
+## #268 — Verworfenes aus dem Tagesplan bleibt sichtbar
+
+Problem: Wenn das Zweitgehirn einen geplanten Punkt wegen fehlender Belege aussortierte, verschwand er aus der Ansicht. Damit war schwer nachzuvollziehen, warum ein Lauf weniger Vorschläge lieferte als erwartet.
+
+Änderung: Aussortierte Punkte werden mit ihrem Grund dauerhaft zum jeweiligen Planlauf gespeichert und im Dashboard getrennt von den angenommenen Punkten angezeigt.
+
+Aktuelles Verhalten: Der Tagesplan bleibt streng belegt, zeigt aber transparent, welche Vorschläge verworfen wurden und weshalb.
+
 ## #267 — Sprachkanäle alle an einem Ort
 
 Problem: Der Knopf zum Erstellen eigener Sprachkanäle saß in einer eigenen Kategorie ganz woanders, während die fertigen Lanes weiter unten bei Chill auftauchten. Wer den Server nicht auswendig kennt, hat den Einstieg schlicht nicht gefunden.

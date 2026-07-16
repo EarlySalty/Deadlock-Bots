@@ -752,16 +752,6 @@ async fn run_plan_phase(
 
     let operating_text = render_operating_health(&health);
     let tournament_text = render_tournaments(&tournaments);
-    let prompt = build_plan_prompt(
-        period_start,
-        period_end,
-        &digest,
-        &operating_text,
-        &tournament_text,
-        &wiki_documents,
-        &feedback,
-        &quellen_fehlend,
-    );
     let sources = PlanSources {
         digest_sections: digest
             .lines()
@@ -774,6 +764,17 @@ async fn run_plan_phase(
         pg_tables: plan_pg_tables(&digest, &tournaments),
         betrieb_units: health.units(),
     };
+    let prompt = build_plan_prompt(
+        period_start,
+        period_end,
+        &digest,
+        &operating_text,
+        &tournament_text,
+        &wiki_documents,
+        &feedback,
+        &quellen_fehlend,
+        &sources,
+    );
 
     let Some(client) = FireworksClient::from_env(|key| {
         if matches!(key, "FIREWORK_MODEL" | "FIREWORKS_MODEL") {
@@ -1155,6 +1156,7 @@ fn build_plan_prompt(
     wiki_documents: &[WikiDocument],
     feedback: &[FeedbackItem],
     missing: &[String],
+    sources: &PlanSources,
 ) -> String {
     let wiki = if wiki_documents.is_empty() {
         "(keine Wiki-Dateien verfügbar)".to_string()
@@ -1186,8 +1188,22 @@ fn build_plan_prompt(
     } else {
         format!("\n\nFehlende Quellen: {}", missing.join(", "))
     };
+    let source_list = |values: &BTreeSet<String>| {
+        values
+            .iter()
+            .map(|value| format!("- {value}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let valid_sources = format!(
+        "digest:\n{}\n\nwiki:\n{}\n\npg:\n{}\n\nbetrieb:\n{}",
+        source_list(&sources.digest_sections),
+        source_list(&sources.wiki_paths),
+        source_list(&sources.pg_tables),
+        source_list(&sources.betrieb_units),
+    );
     format!(
-        "## Zeitraum\n\n{} bis {}\n\n## Gemessene Lage (Digest)\n\n{}\n\n## Betriebszustand\n\n{}\n\n## Turniere\n\n{}\n\n## Interne Lage (Wiki — behauptet, evtl. veraltet)\n\n{}{}\n\n## Schon abgeräumt (nicht wiederholen)\n\n{}",
+        "## Zeitraum\n\n{} bis {}\n\n## Gemessene Lage (Digest)\n\n{}\n\n## Betriebszustand\n\n{}\n\n## Turniere\n\n{}\n\n## Interne Lage (Wiki — behauptet, evtl. veraltet)\n\n{}{}\n\n## Gültige Belege\n\n{}\n\nDer Wert von `beleg` MUSS wörtlich einer aus dieser Liste sein. Steht dein Beleg nicht in der Liste, nimm den nächstbesten aus der Liste oder lass die Empfehlung weg.\n\n## Schon abgeräumt (nicht wiederholen)\n\n{}",
         period_start.to_rfc3339(),
         period_end.to_rfc3339(),
         digest,
@@ -1195,6 +1211,7 @@ fn build_plan_prompt(
         tournaments,
         wiki,
         missing,
+        valid_sources,
         feedback,
     )
 }
@@ -1316,7 +1333,41 @@ async fn insert_plan_run_and_items(
         .execute(&mut *transaction)
         .await?;
     }
+    for rejected in &plan.gate.verworfene_items {
+        let item = &rejected.item;
+        sqlx::query(
+            "INSERT INTO brain.plan_items_verworfen(
+                 run_id, prioritaet, bereich, titel, begruendung, aktion,
+                 beleg, beleg_art, verworfen_grund
+             ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+        )
+        .bind(run_id)
+        .bind(item.prioritaet)
+        .bind(&item.bereich)
+        .bind(&item.titel)
+        .bind(&item.begruendung)
+        .bind(&item.aktion)
+        .bind(&item.beleg)
+        .bind(&item.beleg_art)
+        .bind(&rejected.verworfen_grund)
+        .execute(&mut *transaction)
+        .await?;
+    }
     transaction.commit().await?;
+    for rejected in &plan.gate.verworfene_items {
+        let item = &rejected.item;
+        let eingabe = format!("{} | {}", item.titel, item.beleg)
+            .chars()
+            .take(200)
+            .collect::<String>();
+        tracing::info!(
+            %eingabe,
+            urteil = "verworfen",
+            confidence = 1.0,
+            trigger_grund = %rejected.verworfen_grund,
+            "Plan-Beleg-Gate-Urteil"
+        );
+    }
     Ok(run_id)
 }
 
@@ -1635,6 +1686,39 @@ mod plan_tests {
         assert!(!tables.iter().any(|table| table.starts_with("turnier.")));
     }
 
+    #[test]
+    fn plan_prompt_nennt_alle_gueltigen_belege_woertlich() {
+        let start = Utc::now() - TimeDelta::days(7);
+        let end = Utc::now();
+        let prompt = build_plan_prompt(
+            start,
+            end,
+            "Digest",
+            "Betrieb",
+            "Turniere",
+            &[],
+            &[],
+            &[],
+            &PlanSources {
+                digest_sections: BTreeSet::from(["Community-Puls".to_string()]),
+                wiki_paths: BTreeSet::from(["projekte/server-beleben.md".to_string()]),
+                pg_tables: BTreeSet::from(["bot.ai_decision_ledger".to_string()]),
+                betrieb_units: BTreeSet::from(["dl-bot.service".to_string()]),
+            },
+        );
+
+        for expected in [
+            "## Gültige Belege",
+            "digest:\n- Community-Puls",
+            "wiki:\n- projekte/server-beleben.md",
+            "pg:\n- bot.ai_decision_ledger",
+            "betrieb:\n- dl-bot.service",
+            "Der Wert von `beleg` MUSS wörtlich einer aus dieser Liste sein.",
+        ] {
+            assert!(prompt.contains(expected), "Prompt fehlt: {expected}");
+        }
+    }
+
     #[tokio::test]
     #[ignore = "requires CENTRAL_TEST_DSN"]
     async fn kaputtes_llm_json_hinterlaesst_error_plan_run() -> Result<()> {
@@ -1688,6 +1772,78 @@ mod plan_tests {
             .await?;
 
         assert_eq!(status, "partial");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires CENTRAL_TEST_DSN"]
+    async fn verworfenes_item_wird_mit_beleg_und_grund_persistiert() -> Result<()> {
+        let db = dl_central_db::testing::test_pool().await?;
+        let pool = db.pool();
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS brain.plan_items_verworfen (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                run_id BIGINT NOT NULL REFERENCES brain.plan_runs(id) ON DELETE CASCADE,
+                prioritaet SMALLINT NOT NULL,
+                bereich TEXT NOT NULL,
+                titel TEXT NOT NULL,
+                begruendung TEXT NOT NULL,
+                aktion TEXT NOT NULL,
+                beleg TEXT NOT NULL,
+                beleg_art TEXT NOT NULL,
+                verworfen_grund TEXT NOT NULL,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+        )
+        .execute(pool)
+        .await?;
+        let sources = PlanSources {
+            digest_sections: BTreeSet::from(["Community-Puls".to_string()]),
+            ..PlanSources::default()
+        };
+        let plan = evaluate_response(
+            r###"{"lage":"Test.","items":[
+                {"prioritaet":2,"bereich":"discord","titel":"Gültig","begruendung":"Grund","aktion":"Aktion","beleg":"Community-Puls","beleg_art":"digest"},
+                {"prioritaet":2,"bereich":"discord","titel":"Verworfen","begruendung":"Grund","aktion":"Aktion","beleg":"## Community-Puls","beleg_art":"digest"}
+            ]}"###,
+            &sources,
+        )?;
+
+        let run_id = insert_plan_run_and_items(
+            pool,
+            Utc::now() - TimeDelta::days(7),
+            Utc::now(),
+            "plaene/test.md",
+            "deepseek-v4-pro",
+            &[],
+            &plan,
+        )
+        .await?;
+        let rejected: (String, String) = sqlx::query_as(
+            "SELECT beleg, verworfen_grund
+               FROM brain.plan_items_verworfen
+              WHERE run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+        let counts: (i32, i32, i32) = sqlx::query_as(
+            "SELECT vorgeschlagen, uebernommen, verworfen
+               FROM brain.plan_runs
+              WHERE id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await?;
+
+        assert_eq!(
+            rejected,
+            (
+                "## Community-Puls".to_string(),
+                "beleg_unaufloesbar".to_string()
+            )
+        );
+        assert_eq!(counts.0, counts.1 + counts.2);
         Ok(())
     }
 }
