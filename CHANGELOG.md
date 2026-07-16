@@ -1,3 +1,11 @@
+## #267 — Sprachkanäle alle an einem Ort
+
+Problem: Der Knopf zum Erstellen eigener Sprachkanäle saß in einer eigenen Kategorie ganz woanders, während die fertigen Lanes weiter unten bei Chill auftauchten. Wer den Server nicht auswendig kennt, hat den Einstieg schlicht nicht gefunden.
+
+Änderung: Verwaltung, Erstellen-Knopf und Off Topic Voice sitzen jetzt oben in der Chill-Kategorie, direkt über den Lanes. Die Reihenfolge untereinander bleibt genau wie gewohnt.
+
+Aktuelles Verhalten: Alles rund um Sprachkanäle steht jetzt in einer einzigen Kategorie, von oben nach unten: verwalten, erstellen, Off Topic Voice, danach die laufenden Lanes. Off Topic Voice bekommt außerdem wieder automatisch einen zweiten Kanal dazu, sobald zwei Leute drin sitzen.
+
 ## #266 — Neue Server-Tour beim Onboarding
 
 Problem: Neue Mitglieder mussten sich alles selbst zusammensuchen. Wie die Sprachkanäle funktionieren, wo man Fragen stellt oder Hilfe bekommt, das stand zwar irgendwo, aber niemand hat es einem gezeigt.
