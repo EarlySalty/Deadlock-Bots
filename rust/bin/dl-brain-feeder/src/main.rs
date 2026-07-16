@@ -1497,9 +1497,8 @@ mod plan_tests {
 
     use super::*;
 
-    #[tokio::test]
-    async fn digest_bleibt_gruen_wenn_plan_phase_stirbt() {
-        let digest = RunOutcome {
+    fn digest_outcome() -> RunOutcome {
+        RunOutcome {
             period_start: Utc::now() - TimeDelta::days(7),
             period_end: Utc::now(),
             digest_path: Some("raw/2026-07/test.md".to_string()),
@@ -1509,14 +1508,32 @@ mod plan_tests {
             status: "ok",
             error: None,
             committed: true,
-            pushed: true,
-        };
+            pushed: false,
+        }
+    }
 
-        let digest = isolate_plan_failure(digest, async { bail!("LLM kaputt") }).await;
-
+    fn assert_digest_unveraendert(digest: &RunOutcome) {
         assert_eq!(digest.status, "ok");
+        assert_eq!(digest.digest_path.as_deref(), Some("raw/2026-07/test.md"));
         assert!(digest.committed);
-        assert!(digest.pushed);
+        assert!(!digest.pushed);
+    }
+
+    #[tokio::test]
+    async fn digest_bleibt_gruen_wenn_plan_phase_stirbt() {
+        let digest = isolate_plan_failure(digest_outcome(), async {
+            Err(anyhow::anyhow!("Plan kaputt"))
+        })
+        .await;
+
+        assert_digest_unveraendert(&digest);
+    }
+
+    #[tokio::test]
+    async fn digest_bleibt_unveraendert_wenn_plan_phase_erfolgreich_ist() {
+        let digest = isolate_plan_failure(digest_outcome(), async { Ok(()) }).await;
+
+        assert_digest_unveraendert(&digest);
     }
 
     #[test]

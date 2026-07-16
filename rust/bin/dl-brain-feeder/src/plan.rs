@@ -102,12 +102,6 @@ pub struct EvaluatedPlan {
     pub gate: GateResult,
 }
 
-impl EvaluatedPlan {
-    pub fn status(&self) -> &'static str {
-        "ok"
-    }
-}
-
 pub fn evaluate_response(
     response: &str,
     sources: &PlanSources,
@@ -441,7 +435,6 @@ mod tests {
             &result,
         );
 
-        assert_eq!(result.status(), "ok");
         assert!(markdown.contains("Keine Vorschläge"));
     }
 
