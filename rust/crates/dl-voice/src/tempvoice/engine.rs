@@ -251,7 +251,8 @@ impl TempVoiceConfig {
             guild_id_hint: 1289721245281292288,
             staging_channels: HashSet::from([staging_casual, staging_street_brawl, staging_comp]),
             fixed_lane_ids: HashSet::from([
-                1493690350580138114, // permanenter Chill-Voice
+                crate::router::ROUTER_VC_ID, // Router-Einstieg liegt in Chill, ist keine Lane
+                1493690350580138114,         // permanenter Chill-Voice
                 1411391356278018245,
                 1470126503252721845,
                 1505618194017161267,
@@ -2605,6 +2606,14 @@ mod tests {
     const RANKED_CATEGORY: u64 = 1412804540994162789;
     const STREET_CATEGORY: u64 = 1357422957017698478;
 
+    #[test]
+    fn production_schuetzt_router_vc_in_chill_als_fixed_lane() {
+        let config = TempVoiceConfig::production();
+
+        assert!(config.tempvoice_categories.contains(&CASUAL_CATEGORY));
+        assert!(config.fixed_lane_ids.contains(&crate::router::ROUTER_VC_ID));
+    }
+
     async fn setup() -> (
         dl_central_db::TestDb,
         Arc<TempVoiceEngine>,
@@ -3080,6 +3089,47 @@ mod tests {
         assert_eq!(
             port.deleted.lock().expect("lock").clone(),
             vec![custom_channel]
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_purge_schuetzt_leeren_router_vc_aber_loescht_andere_leere_lane() {
+        let (_dir, engine, port, _staging) = setup().await;
+        let custom_channel = 4242;
+        {
+            let mut categories = port.categories.lock().expect("lock");
+            categories.insert(crate::router::ROUTER_VC_ID, CASUAL_CATEGORY);
+            categories.insert(custom_channel, CASUAL_CATEGORY);
+        }
+        {
+            let mut names = port.names.lock().expect("lock");
+            names.insert(
+                crate::router::ROUTER_VC_ID,
+                "➕Sprachkanal erstellen".to_string(),
+            );
+            names.insert(custom_channel, "Team Kekse".to_string());
+        }
+
+        engine.purge_empty_lanes().await;
+
+        assert_eq!(
+            port.deleted.lock().expect("lock").clone(),
+            vec![custom_channel]
+        );
+    }
+
+    #[tokio::test]
+    async fn router_vc_in_tempvoice_category_ist_keine_managed_lane() {
+        let (_dir, engine, port, _staging) = setup().await;
+        port.categories
+            .lock()
+            .expect("lock")
+            .insert(crate::router::ROUTER_VC_ID, CASUAL_CATEGORY);
+
+        assert!(
+            !engine
+                .is_managed_lane(engine.config.guild_id_hint, crate::router::ROUTER_VC_ID)
+                .await
         );
     }
 
