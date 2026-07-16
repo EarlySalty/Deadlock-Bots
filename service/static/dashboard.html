@@ -2474,6 +2474,10 @@
                 <p id="brain-plan-accountability" class="brain-plan-accountability">0 vorgeschlagen, 0 übernommen, 0 verworfen.</p>
                 <p id="brain-plan-sources" class="status-warn audit-hidden"></p>
                 <div id="brain-plan-items"></div>
+                <details id="brain-plan-rejected" class="audit-hidden">
+                    <summary>PLATZHALTER: verworfene Vorschläge</summary>
+                    <div id="brain-plan-rejected-items"></div>
+                </details>
                 <div id="brain-plan-older" class="audit-hidden">
                     <h4>Offene Punkte aus Vorwochen</h4>
                     <div id="brain-plan-older-items"></div>
@@ -7228,6 +7232,17 @@ async function fetchStandaloneLogs(key, limit = 200) {
             </article>`;
         }
 
+        function rejectedPlanItemHtml(item) {
+            return `<article class="brain-plan-item">
+                <div class="brain-plan-meta">P${esc(item.prioritaet)} · ${esc(item.bereich)}</div>
+                <h5>${esc(item.titel)}</h5>
+                <p><strong>PLATZHALTER: Begründung:</strong> ${esc(item.begruendung)}</p>
+                <p><strong>PLATZHALTER: Aktion:</strong> ${esc(item.aktion)}</p>
+                <p class="brain-plan-meta"><strong>PLATZHALTER: Beleg:</strong> ${esc(item.beleg)} (${esc(item.beleg_art)})</p>
+                <p class="status-warn"><strong>PLATZHALTER: Ablehnungsgrund:</strong> ${esc(item.verworfen_grund)}</p>
+            </article>`;
+        }
+
         function groupedPlanItems(items) {
             return [1, 2, 3].map(priority => {
                 const rows = (items || []).filter(item => item.prioritaet === priority);
@@ -7249,6 +7264,8 @@ async function fetchStandaloneLogs(key, limit = 200) {
             const accountability = document.getElementById('brain-plan-accountability');
             const sources = document.getElementById('brain-plan-sources');
             const items = document.getElementById('brain-plan-items');
+            const rejected = document.getElementById('brain-plan-rejected');
+            const rejectedItems = document.getElementById('brain-plan-rejected-items');
             const older = document.getElementById('brain-plan-older');
             const olderItems = document.getElementById('brain-plan-older-items');
 
@@ -7260,6 +7277,8 @@ async function fetchStandaloneLogs(key, limit = 200) {
                 accountability.textContent = '0 vorgeschlagen, 0 übernommen, 0 verworfen.';
                 sources.classList.add('audit-hidden');
                 items.innerHTML = '';
+                rejected.classList.add('audit-hidden');
+                rejectedItems.innerHTML = '';
                 older.classList.add('audit-hidden');
                 return;
             }
@@ -7278,6 +7297,10 @@ async function fetchStandaloneLogs(key, limit = 200) {
             error.innerHTML = `Plan-Lauf fehlgeschlagen – ${esc(run.error ?? '')}`;
             error.classList.toggle('audit-hidden', !failed);
             items.innerHTML = failed ? '' : (groupedPlanItems(data.items) || '<p class="audit-empty">Keine Vorschläge in diesem Lauf.</p>');
+
+            const rejectedRows = data.verworfen_items || [];
+            rejected.classList.toggle('audit-hidden', rejectedRows.length === 0);
+            rejectedItems.innerHTML = rejectedRows.map(rejectedPlanItemHtml).join('');
 
             const old = data.older_open_items || [];
             older.classList.toggle('audit-hidden', old.length === 0);
