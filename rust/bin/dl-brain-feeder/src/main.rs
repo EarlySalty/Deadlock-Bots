@@ -1235,11 +1235,12 @@ async fn persist_and_publish_plan(
         return Ok(());
     }
     let log = format!(
-        "## [{}] plan — PLATZHALTER: Handlungsvorschläge\n\nvorgeschlagen {} / übernommen {} / verworfen {}.\n",
+        "## [{}] plan — Handlungsvorschläge\n\nvorgeschlagen {} / übernommen {} / verworfen {}. Plan: {}.\nAngenommen, abgelehnt oder erledigt wird im Dashboard, Tab Zweitgehirn.\n",
         run_date.format("%Y-%m-%d"),
         plan.gate.vorgeschlagen,
         plan.gate.uebernommen,
         plan.gate.verworfen,
+        relpath,
     );
     if let Err(error) = append_log(wiki, &log) {
         update_plan_run(
