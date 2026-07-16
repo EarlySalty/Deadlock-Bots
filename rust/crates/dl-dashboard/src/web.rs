@@ -343,6 +343,12 @@ pub fn router(app: DashboardApp) -> Router {
         .route("/api/voice-stats", get(crate::analytics::voice_stats))
         .route("/api/audit-log", get(crate::audit::audit_log))
         .route("/api/brain/overview", get(crate::brain::overview))
+        .route("/api/brain/plan", get(crate::brain::plan))
+        .route("/api/brain/plan/runs", get(crate::brain::plan_runs))
+        .route(
+            "/api/brain/plan/item/{id}",
+            post(crate::brain::update_plan_item),
+        )
         .route("/api/brain/wiki", get(crate::brain::wiki))
         .route("/api/brain/wiki/page", get(crate::brain::wiki_page))
         .route(

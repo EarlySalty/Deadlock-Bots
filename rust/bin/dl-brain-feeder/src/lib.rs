@@ -7,6 +7,8 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 
+pub mod plan;
+
 /// Die sechs Entscheidungsklassen des KI-Ledgers. Der Digest zeigt IMMER alle,
 /// auch mit 0 — Stille darf keine Klasse verschlucken (Judge-Regel).
 pub const DECISION_CLASSES: [&str; 6] = ["yes", "no", "unsure", "timeout", "error", "suppressed"];
