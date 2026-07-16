@@ -1,23 +1,25 @@
-//! Zweitgehirn-Tab (:8766) — read-only Blick auf den Phase-2-Feeder.
+//! Zweitgehirn-Tab (:8766) — Feeder, Plan-Läufe und Second-Brain-Wiki.
 //!
-//! Drei GET-Handler, alle über [`DashboardApp::guard_full`] gegatet (Wiki-
+//! Alle Handler sind über [`DashboardApp::guard_full`] gegatet (Wiki-
 //! und Report-Inhalte sind intern — TurnierOnly-Sessions bleiben draußen):
 //! - `/api/brain/overview` — jüngster Wochenreport, letzte Feeder-Läufe,
 //!   KI-Rechenschaft (7 Tage) und Top-Gründe je Quelle.
 //! - `/api/brain/wiki` — `index.md`, `log.md` und die Liste aller `.md`-Seiten.
 //! - `/api/brain/wiki/page?path=<rel>` — Inhalt einer einzelnen Wiki-Seite,
 //!   streng auf das kanonisierte Wiki-Wurzelverzeichnis eingegrenzt.
+//! - `/api/brain/plan` und `/api/brain/plan/runs` — aktueller Plan und Historie.
+//! - `/api/brain/plan/item/:id` — Status und Kommentar eines Planpunkts.
 //!
 //! Es werden ausschliesslich Aggregate gelesen — keine einzelnen User-IDs.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
 
-use axum::extract::{Query, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::HeaderMap;
 use axum::response::Response;
 use chrono::{DateTime, Duration, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::FromRow;
 use sqlx::PgPool;
@@ -69,6 +71,46 @@ struct ReasonAgg {
     source: String,
     reason: String,
     count: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct PlanRun {
+    id: i64,
+    run_at: DateTime<Utc>,
+    vorgeschlagen: i32,
+    uebernommen: i32,
+    verworfen: i32,
+    verworfen_gruende: Option<Value>,
+    modell: Option<String>,
+    status: String,
+    error: Option<String>,
+    quellen_fehlend: Option<Vec<String>>,
+    lage: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct PlanItem {
+    id: i64,
+    run_id: i64,
+    run_at: DateTime<Utc>,
+    prioritaet: i16,
+    bereich: String,
+    titel: String,
+    begruendung: String,
+    aktion: String,
+    beleg: String,
+    beleg_art: String,
+    belegt_gemessen: bool,
+    status: String,
+    kommentar: Option<String>,
+    entschieden_am: Option<DateTime<Utc>>,
+    created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdatePlanItem {
+    status: String,
+    kommentar: Option<String>,
 }
 
 /// `true`, wenn die Tabelle/das Schema `brain.feeder_runs` noch fehlt
@@ -220,6 +262,199 @@ async fn load_reasons(
     .bind(end)
     .fetch_all(pool)
     .await
+}
+
+pub async fn plan(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    let pool = app.pool();
+    let run = match sqlx::query_as::<_, PlanRun>(
+        "SELECT id, run_at, vorgeschlagen, uebernommen, verworfen,
+                verworfen_gruende, modell, status, error, quellen_fehlend, lage
+           FROM brain.plan_runs
+          ORDER BY run_at DESC, id DESC
+          LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    {
+        Ok(run) => run,
+        Err(err) => {
+            tracing::error!(%err, "brain.plan_runs konnte nicht gelesen werden");
+            return err_text(500, "brain plan unavailable");
+        }
+    };
+
+    let Some(run) = run else {
+        return ok_json(json!({
+            "run": null,
+            "items": [],
+            "older_open_items": [],
+            "stale": true,
+        }));
+    };
+    let items = match load_plan_items(pool, run.id).await {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::error!(%err, "brain.plan_items konnte nicht gelesen werden");
+            return err_text(500, "brain plan unavailable");
+        }
+    };
+    let older_open_items = match load_older_open_items(pool, run.id).await {
+        Ok(items) => items,
+        Err(err) => {
+            tracing::error!(%err, "ältere brain.plan_items konnten nicht gelesen werden");
+            return err_text(500, "brain plan unavailable");
+        }
+    };
+    let stale = Utc::now() - run.run_at > Duration::days(8);
+
+    ok_json(json!({
+        "run": plan_run_json(&run),
+        "items": items.into_iter().map(plan_item_json).collect::<Vec<_>>(),
+        "older_open_items": older_open_items.into_iter().map(plan_item_json).collect::<Vec<_>>(),
+        "stale": stale,
+    }))
+}
+
+fn plan_run_json(run: &PlanRun) -> Value {
+    json!({
+        "id": run.id,
+        "run_at": run.run_at.to_rfc3339(),
+        "vorgeschlagen": run.vorgeschlagen,
+        "uebernommen": run.uebernommen,
+        "verworfen": run.verworfen,
+        "verworfen_gruende": run.verworfen_gruende,
+        "modell": run.modell,
+        "status": run.status,
+        "error": run.error,
+        "quellen_fehlend": run.quellen_fehlend,
+        "lage": run.lage,
+    })
+}
+
+fn plan_item_json(item: PlanItem) -> Value {
+    json!({
+        "id": item.id,
+        "run_id": item.run_id,
+        "run_at": item.run_at.to_rfc3339(),
+        "prioritaet": item.prioritaet,
+        "bereich": item.bereich,
+        "titel": item.titel,
+        "begruendung": item.begruendung,
+        "aktion": item.aktion,
+        "beleg": item.beleg,
+        "beleg_art": item.beleg_art,
+        "belegt_gemessen": item.belegt_gemessen,
+        "status": item.status,
+        "kommentar": item.kommentar,
+        "entschieden_am": item.entschieden_am.map(|value| value.to_rfc3339()),
+        "created_at": item.created_at.to_rfc3339(),
+    })
+}
+
+async fn load_plan_items(pool: &PgPool, run_id: i64) -> Result<Vec<PlanItem>, sqlx::Error> {
+    sqlx::query_as::<_, PlanItem>(
+        "SELECT item.id, item.run_id, run.run_at, item.prioritaet, item.bereich,
+                item.titel, item.begruendung, item.aktion, item.beleg, item.beleg_art,
+                item.belegt_gemessen, item.status, item.kommentar, item.entschieden_am,
+                item.created_at
+           FROM brain.plan_items item
+           JOIN brain.plan_runs run ON run.id = item.run_id
+          WHERE item.run_id = $1
+          ORDER BY item.prioritaet, item.created_at, item.id",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+}
+
+async fn load_older_open_items(
+    pool: &PgPool,
+    current_run_id: i64,
+) -> Result<Vec<PlanItem>, sqlx::Error> {
+    sqlx::query_as::<_, PlanItem>(
+        "SELECT item.id, item.run_id, run.run_at, item.prioritaet, item.bereich,
+                item.titel, item.begruendung, item.aktion, item.beleg, item.beleg_art,
+                item.belegt_gemessen, item.status, item.kommentar, item.entschieden_am,
+                item.created_at
+           FROM brain.plan_items item
+           JOIN brain.plan_runs run ON run.id = item.run_id
+          WHERE item.run_id <> $1 AND item.status = 'offen'
+          ORDER BY item.prioritaet, run.run_at, item.created_at, item.id",
+    )
+    .bind(current_run_id)
+    .fetch_all(pool)
+    .await
+}
+
+pub async fn plan_runs(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    match sqlx::query_as::<_, PlanRun>(
+        "SELECT id, run_at, vorgeschlagen, uebernommen, verworfen,
+                verworfen_gruende, modell, status, error, quellen_fehlend, lage
+           FROM brain.plan_runs
+          ORDER BY run_at DESC, id DESC",
+    )
+    .fetch_all(app.pool())
+    .await
+    {
+        Ok(runs) => ok_json(json!({
+            "runs": runs.iter().map(plan_run_json).collect::<Vec<_>>()
+        })),
+        Err(err) => {
+            tracing::error!(%err, "Historie aus brain.plan_runs konnte nicht gelesen werden");
+            err_text(500, "brain plan runs unavailable")
+        }
+    }
+}
+
+pub async fn update_plan_item(
+    State(app): State<DashboardApp>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<i64>,
+    axum::Json(body): axum::Json<UpdatePlanItem>,
+) -> Response {
+    if let Err(resp) = app.guard_full(&headers).await {
+        return resp;
+    }
+    if let Err(resp) = app.guard_mutate(&headers, true).await {
+        return resp;
+    }
+    if !matches!(
+        body.status.as_str(),
+        "offen" | "angenommen" | "abgelehnt" | "erledigt"
+    ) {
+        return err_text(400, "invalid status");
+    }
+
+    match sqlx::query_as::<_, (String, Option<String>, DateTime<Utc>)>(
+        "UPDATE brain.plan_items
+            SET status = $2, kommentar = $3, entschieden_am = now()
+          WHERE id = $1
+          RETURNING status, kommentar, entschieden_am",
+    )
+    .bind(id)
+    .bind(&body.status)
+    .bind(&body.kommentar)
+    .fetch_optional(app.pool())
+    .await
+    {
+        Ok(Some((status, kommentar, entschieden_am))) => ok_json(json!({
+            "id": id,
+            "status": status,
+            "kommentar": kommentar,
+            "entschieden_am": entschieden_am.to_rfc3339(),
+        })),
+        Ok(None) => err_text(404, "plan item not found"),
+        Err(err) => {
+            tracing::error!(%err, "brain.plan_items konnte nicht aktualisiert werden");
+            err_text(500, "brain plan item unavailable")
+        }
+    }
 }
 
 pub async fn wiki(State(app): State<DashboardApp>, headers: HeaderMap) -> Response {
@@ -404,5 +639,307 @@ mod tests {
         assert!(pages.contains(&"index.md".to_string()));
         assert!(pages.contains(&"Projekte/foo.md".to_string()));
         assert!(!pages.iter().any(|p| p.starts_with(".git")));
+    }
+
+    #[test]
+    fn plan_panel_escaped_alle_llm_texte() {
+        let html = include_str!("../../../../service/static/dashboard.html");
+        for sink in [
+            "${esc(run.lage ?? '')}",
+            "${esc(item.titel)}",
+            "${esc(item.begruendung)}",
+            "${esc(item.aktion)}",
+            "${esc(item.beleg)}",
+            "${esc(item.kommentar ?? '')}",
+        ] {
+            assert!(html.contains(sink), "fehlender esc()-Sink: {sink}");
+        }
+        assert!(!html.contains("${item.titel}"));
+    }
+}
+
+#[cfg(all(test, feature = "testing"))]
+mod plan_tests {
+    use std::sync::Arc;
+
+    use axum::body::{to_bytes, Body};
+    use axum::http::{header, Request, StatusCode};
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::authority::{MemberAccessInfo, MemberLookup};
+    use crate::config::{AccessLevel, DashboardConfig};
+    use crate::names::NameResolver;
+    use crate::now_unix_f64;
+    use crate::web::{router, SESSION_COOKIE};
+
+    struct NoMemberLookup;
+
+    #[async_trait::async_trait]
+    impl MemberLookup for NoMemberLookup {
+        async fn member_access(
+            &self,
+            _guild_id: Option<u64>,
+            _user_id: u64,
+        ) -> Option<MemberAccessInfo> {
+            None
+        }
+    }
+
+    struct NoNameResolver;
+
+    #[async_trait::async_trait]
+    impl NameResolver for NoNameResolver {
+        async fn resolve(&self, _user_ids: &[u64]) -> HashMap<u64, String> {
+            HashMap::new()
+        }
+    }
+
+    async fn plan_app(
+        with_session: bool,
+    ) -> Result<
+        (
+            dl_central_db::TestDb,
+            axum::Router,
+            Option<(String, String)>,
+        ),
+        Box<dyn std::error::Error>,
+    > {
+        let db = dl_central_db::testing::test_pool().await?;
+        sqlx::query("CREATE SCHEMA IF NOT EXISTS brain")
+            .execute(db.pool())
+            .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS brain.plan_runs (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                run_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                period_start TIMESTAMPTZ NOT NULL,
+                period_end TIMESTAMPTZ NOT NULL,
+                plan_path TEXT,
+                modell TEXT,
+                lage TEXT,
+                vorgeschlagen INTEGER NOT NULL DEFAULT 0,
+                uebernommen INTEGER NOT NULL DEFAULT 0,
+                verworfen INTEGER NOT NULL DEFAULT 0,
+                verworfen_gruende JSONB,
+                quellen_fehlend TEXT[],
+                status TEXT NOT NULL,
+                error TEXT,
+                committed BOOLEAN NOT NULL DEFAULT false,
+                pushed BOOLEAN NOT NULL DEFAULT false
+            )",
+        )
+        .execute(db.pool())
+        .await?;
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS brain.plan_items (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                run_id BIGINT NOT NULL REFERENCES brain.plan_runs(id) ON DELETE CASCADE,
+                prioritaet SMALLINT NOT NULL,
+                bereich TEXT NOT NULL,
+                titel TEXT NOT NULL,
+                begruendung TEXT NOT NULL,
+                aktion TEXT NOT NULL,
+                beleg TEXT NOT NULL,
+                beleg_art TEXT NOT NULL,
+                belegt_gemessen BOOLEAN NOT NULL,
+                fingerprint TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'offen',
+                kommentar TEXT,
+                entschieden_am TIMESTAMPTZ,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+            )",
+        )
+        .execute(db.pool())
+        .await?;
+
+        let session = if with_session {
+            let session_id = "brain-plan-test-session".to_string();
+            let csrf = "brain-plan-test-csrf".to_string();
+            let now = now_unix_f64();
+            dl_central_db::kv::set(
+                db.pool(),
+                "dl_dashboard_admin_session",
+                &session_id,
+                &json!({
+                    "user_id": 42,
+                    "username": "admin",
+                    "display_name": "Admin",
+                    "reason": "test",
+                    "access_level": AccessLevel::Full.as_str(),
+                    "csrf_token": csrf,
+                    "created_at": now,
+                    "last_seen_at": now,
+                    "expires_at": now + 3600.0,
+                })
+                .to_string(),
+            )
+            .await?;
+            Some((session_id, csrf))
+        } else {
+            None
+        };
+
+        let cfg = DashboardConfig::from_lookup(|key| match key {
+            "DISCORD_OAUTH_CLIENT_ID" => Some("id".to_string()),
+            "DISCORD_OAUTH_CLIENT_SECRET" => Some("secret".to_string()),
+            _ => None,
+        });
+        let app = DashboardApp::new(
+            cfg,
+            db.pool().clone(),
+            Arc::new(NoMemberLookup),
+            Arc::new(NoNameResolver),
+        )
+        .await?;
+        Ok((db, router(app), session))
+    }
+
+    fn auth_request(
+        method: &str,
+        uri: &str,
+        session_id: &str,
+        csrf: &str,
+        body: Value,
+    ) -> Result<Request<Body>, axum::http::Error> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .header(
+                header::ORIGIN,
+                "https://admin.deutsche-deadlock-community.de",
+            )
+            .header("X-CSRF-Token", csrf)
+            .header(header::COOKIE, format!("{SESSION_COOKIE}={session_id}"))
+            .body(Body::from(body.to_string()))
+    }
+
+    async fn insert_plan_item(pool: &PgPool) -> Result<i64, sqlx::Error> {
+        let run_id: i64 = sqlx::query_scalar(
+            "INSERT INTO brain.plan_runs(period_start, period_end, status)
+             VALUES(now() - interval '7 days', now(), 'ok') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await?;
+        sqlx::query_scalar(
+            "INSERT INTO brain.plan_items(
+                run_id, prioritaet, bereich, titel, begruendung, aktion,
+                beleg, beleg_art, belegt_gemessen, fingerprint
+             ) VALUES($1, 1, 'discord', 'Titel', 'Grund', 'Aktion',
+                      'Discord', 'digest', true, 'fingerprint')
+             RETURNING id",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+    }
+
+    #[tokio::test]
+    #[ignore = "benötigt CENTRAL_TEST_DSN"]
+    async fn plan_endpunkte_verlangen_vollzugriff() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, _) = plan_app(false).await?;
+        for (method, uri) in [
+            ("GET", "/api/brain/plan"),
+            ("GET", "/api/brain/plan/runs"),
+            ("POST", "/api/brain/plan/item/1"),
+        ] {
+            let body = if method == "POST" {
+                r#"{"status":"offen"}"#
+            } else {
+                "{}"
+            };
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body))?,
+                )
+                .await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{method} {uri}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "benötigt CENTRAL_TEST_DSN"]
+    async fn plan_get_ist_bei_leeren_tabellen_sauber() -> Result<(), Box<dyn std::error::Error>> {
+        let (_db, app, session) = plan_app(true).await?;
+        let (session_id, csrf) = session.expect("session");
+        let response = app
+            .oneshot(auth_request(
+                "GET",
+                "/api/brain/plan",
+                &session_id,
+                &csrf,
+                json!({}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 64 * 1024).await?)?;
+        assert!(body["run"].is_null());
+        assert_eq!(body["items"], json!([]));
+        assert_eq!(body["older_open_items"], json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "benötigt CENTRAL_TEST_DSN"]
+    async fn ungueltiger_status_schreibt_nicht() -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session) = plan_app(true).await?;
+        let item_id = insert_plan_item(db.pool()).await?;
+        let (session_id, csrf) = session.expect("session");
+        let response = app
+            .oneshot(auth_request(
+                "POST",
+                &format!("/api/brain/plan/item/{item_id}"),
+                &session_id,
+                &csrf,
+                json!({"status": "spaeter", "kommentar": "nein"}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let stored: (String, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status, kommentar, entschieden_am FROM brain.plan_items WHERE id = $1",
+        )
+        .bind(item_id)
+        .fetch_one(db.pool())
+        .await?;
+        assert_eq!(stored, ("offen".to_string(), None, None));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "benötigt CENTRAL_TEST_DSN"]
+    async fn post_setzt_entschieden_am() -> Result<(), Box<dyn std::error::Error>> {
+        let (db, app, session) = plan_app(true).await?;
+        let item_id = insert_plan_item(db.pool()).await?;
+        let (session_id, csrf) = session.expect("session");
+        let response = app
+            .oneshot(auth_request(
+                "POST",
+                &format!("/api/brain/plan/item/{item_id}"),
+                &session_id,
+                &csrf,
+                json!({"status": "angenommen", "kommentar": "Montag"}),
+            )?)
+            .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let entschieden_am: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT entschieden_am FROM brain.plan_items WHERE id = $1")
+                .bind(item_id)
+                .fetch_one(db.pool())
+                .await?;
+        assert!(entschieden_am.is_some());
+        Ok(())
     }
 }

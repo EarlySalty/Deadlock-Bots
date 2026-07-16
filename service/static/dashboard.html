@@ -1589,6 +1589,18 @@
             border-radius: 6px; padding: 0.8rem; font-size: 0.85rem;
         }
         .brain-wiki-content .wiki-link { color: #ffd43b; cursor: pointer; text-decoration: underline; }
+        .brain-plan-card { border-top: 2px solid #ffd43b; }
+        .brain-plan-banner { padding: 0.8rem 1rem; margin: 0.8rem 0; border: 1px solid currentColor; border-radius: 6px; }
+        .brain-plan-accountability { color: #ffd43b; font-weight: 600; }
+        .brain-plan-group { margin-top: 1.2rem; }
+        .brain-plan-group h4 { margin-bottom: 0.6rem; }
+        .brain-plan-item { background: #161616; border: 1px solid rgba(255,255,255,0.07); border-left: 3px solid #ffd43b; border-radius: 6px; padding: 1rem; margin-bottom: 0.7rem; }
+        .brain-plan-item[data-priority="1"] { border-left-color: #ff6b6b; }
+        .brain-plan-item h5 { margin: 0.3rem 0 0.7rem; font-size: 1rem; }
+        .brain-plan-item p { margin: 0.4rem 0; line-height: 1.45; }
+        .brain-plan-meta { color: #adb5bd; font-size: 0.82rem; }
+        .brain-plan-comment { width: 100%; min-height: 64px; margin-top: 0.7rem; resize: vertical; }
+        .brain-plan-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.6rem; }
         @media (max-width: 700px) {
             .brain-wiki-nav { flex-basis: 100%; border-right: none; }
         }
@@ -2451,6 +2463,20 @@
                 <div class="section-actions">
                     <button class="reload" id="brain-refresh">Neu laden</button>
                     <span class="voice-meta" id="brain-status">–</span>
+                </div>
+            </div>
+
+            <div class="card brain-plan-card" style="margin-bottom:1rem;">
+                <h3>PLATZHALTER: Wochenplan</h3>
+                <div id="brain-plan-error" class="brain-plan-banner status-error audit-hidden"></div>
+                <div id="brain-plan-stale" class="brain-plan-banner status-error audit-hidden">PLATZHALTER: Plan-Lauf ist älter als acht Tage.</div>
+                <p id="brain-plan-lage" class="brain-pre">PLATZHALTER: Lage wird geladen.</p>
+                <p id="brain-plan-accountability" class="brain-plan-accountability">PLATZHALTER: 0 vorgeschlagen, 0 übernommen, 0 verworfen.</p>
+                <p id="brain-plan-sources" class="status-warn audit-hidden"></p>
+                <div id="brain-plan-items"></div>
+                <div id="brain-plan-older" class="audit-hidden">
+                    <h4>PLATZHALTER: Offene Punkte aus Vorwochen</h4>
+                    <div id="brain-plan-older-items"></div>
                 </div>
             </div>
 
@@ -7182,6 +7208,113 @@ async function fetchStandaloneLogs(key, limit = 200) {
             }
         }
 
+        function planItemHtml(item, age) {
+            const evidence = item.belegt_gemessen
+                ? 'PLATZHALTER: gemessen'
+                : 'PLATZHALTER: behauptet';
+            const ageText = age ? `<span class="status-warn">PLATZHALTER: ${esc(age)}. Woche offen</span> · ` : '';
+            return `<article class="brain-plan-item" data-priority="${esc(item.prioritaet)}" data-item-id="${esc(item.id)}">
+                <div class="brain-plan-meta">${ageText}P${esc(item.prioritaet)} · ${esc(item.bereich)} · ${esc(item.status)}</div>
+                <h5>${esc(item.titel)}</h5>
+                <p><strong>PLATZHALTER: Begründung:</strong> ${esc(item.begruendung)}</p>
+                <p><strong>PLATZHALTER: Aktion:</strong> ${esc(item.aktion)}</p>
+                <p class="brain-plan-meta"><strong>PLATZHALTER: Beleg:</strong> ${esc(item.beleg)} (${esc(item.beleg_art)}, ${evidence})</p>
+                <textarea class="brain-plan-comment" aria-label="PLATZHALTER: Kommentar">${esc(item.kommentar ?? '')}</textarea>
+                <div class="brain-plan-actions">
+                    <button class="reload" type="button" data-plan-status="angenommen">PLATZHALTER: Angenommen</button>
+                    <button class="reload" type="button" data-plan-status="abgelehnt">PLATZHALTER: Abgelehnt</button>
+                    <button class="reload" type="button" data-plan-status="erledigt">PLATZHALTER: Erledigt</button>
+                </div>
+            </article>`;
+        }
+
+        function groupedPlanItems(items) {
+            return [1, 2, 3].map(priority => {
+                const rows = (items || []).filter(item => item.prioritaet === priority);
+                if (!rows.length) return '';
+                return `<section class="brain-plan-group"><h4>P${priority}</h4>${rows.map(item => planItemHtml(item)).join('')}</section>`;
+            }).join('');
+        }
+
+        function openWeeks(runAt) {
+            const age = Date.now() - new Date(runAt).getTime();
+            return Math.max(1, Math.ceil(age / (7 * 24 * 60 * 60 * 1000)));
+        }
+
+        function renderPlan(data) {
+            const run = data.run;
+            const error = document.getElementById('brain-plan-error');
+            const stale = document.getElementById('brain-plan-stale');
+            const lage = document.getElementById('brain-plan-lage');
+            const accountability = document.getElementById('brain-plan-accountability');
+            const sources = document.getElementById('brain-plan-sources');
+            const items = document.getElementById('brain-plan-items');
+            const older = document.getElementById('brain-plan-older');
+            const olderItems = document.getElementById('brain-plan-older-items');
+
+            stale.classList.toggle('audit-hidden', !data.stale);
+            if (!run) {
+                error.textContent = 'PLATZHALTER: Noch kein Plan-Lauf vorhanden.';
+                error.classList.remove('audit-hidden');
+                lage.innerHTML = 'PLATZHALTER: Keine Lage vorhanden.';
+                accountability.textContent = 'PLATZHALTER: 0 vorgeschlagen, 0 übernommen, 0 verworfen.';
+                sources.classList.add('audit-hidden');
+                items.innerHTML = '';
+                older.classList.add('audit-hidden');
+                return;
+            }
+
+            const reasons = Object.entries(run.verworfen_gruende || {})
+                .map(([reason, count]) => `${esc(reason)}: ${esc(count)}`)
+                .join(', ');
+            accountability.innerHTML = `PLATZHALTER: ${esc(run.vorgeschlagen)} vorgeschlagen, ${esc(run.uebernommen)} übernommen, ${esc(run.verworfen)} verworfen${reasons ? ` (${reasons})` : ''}.`;
+            lage.innerHTML = `${esc(run.lage ?? '')}`;
+
+            const missing = run.quellen_fehlend || [];
+            sources.innerHTML = `PLATZHALTER: Quellen fehlen – ${missing.map(source => esc(source)).join(', ')}`;
+            sources.classList.toggle('audit-hidden', missing.length === 0);
+
+            const failed = run.status === 'error';
+            error.innerHTML = `PLATZHALTER: Plan-Lauf fehlgeschlagen – ${esc(run.error ?? '')}`;
+            error.classList.toggle('audit-hidden', !failed);
+            items.innerHTML = failed ? '' : (groupedPlanItems(data.items) || '<p class="audit-empty">PLATZHALTER: Keine Vorschläge in diesem Lauf.</p>');
+
+            const old = data.older_open_items || [];
+            older.classList.toggle('audit-hidden', old.length === 0);
+            olderItems.innerHTML = old.map(item => planItemHtml(item, openWeeks(item.run_at))).join('');
+        }
+
+        async function loadPlan() {
+            try {
+                renderPlan(await fetchJSON('/api/brain/plan'));
+            } catch (error) {
+                const banner = document.getElementById('brain-plan-error');
+                banner.innerHTML = `PLATZHALTER: Plan nicht ladbar – ${esc(error.message)}`;
+                banner.classList.remove('audit-hidden');
+            }
+        }
+
+        document.querySelector('.brain-plan-card').addEventListener('click', async event => {
+            const button = event.target.closest('[data-plan-status]');
+            if (!button) return;
+            const item = button.closest('[data-item-id]');
+            const kommentar = item.querySelector('.brain-plan-comment').value;
+            button.disabled = true;
+            try {
+                await fetchJSON(`/api/brain/plan/item/${encodeURIComponent(item.dataset.itemId)}`, {
+                    method: 'POST',
+                    body: JSON.stringify({ status: button.dataset.planStatus, kommentar }),
+                });
+                await loadPlan();
+            } catch (error) {
+                const banner = document.getElementById('brain-plan-error');
+                banner.innerHTML = `PLATZHALTER: Planpunkt nicht gespeichert – ${esc(error.message)}`;
+                banner.classList.remove('audit-hidden');
+            } finally {
+                button.disabled = false;
+            }
+        });
+
         // Minimaler Markdown-Renderer: JEDER Textknoten wird ZUERST via esc()
         // escapt, danach werden eigene Tags eingesetzt (nie umgekehrt).
         function inlineMd(text) {
@@ -7325,6 +7458,7 @@ async function fetchStandaloneLogs(key, limit = 200) {
         }
 
         document.getElementById('brain-refresh').addEventListener('click', () => {
+            loadPlan();
             loadOverview();
             loadWiki();
         });
@@ -7332,6 +7466,7 @@ async function fetchStandaloneLogs(key, limit = 200) {
         window.loadBrain = function() {
             if (initialized) return;
             initialized = true;
+            loadPlan();
             loadOverview();
             loadWiki();
         };
