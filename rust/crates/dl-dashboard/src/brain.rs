@@ -733,6 +733,24 @@ mod tests {
             assert!(rejected.contains(sink), "fehlender esc()-Sink: {sink}");
         }
     }
+
+    #[test]
+    fn plan_panel_verworfene_items_hat_finale_beschriftung() {
+        let html = include_str!("../../../../service/static/dashboard.html");
+        assert!(!html.contains("PLATZHALTER"));
+        for label in [
+            "Vom Beleg-Gate verworfene Vorschläge",
+            "Vorgeschlagene Begründung:",
+            "Vorgeschlagene Aktion:",
+            "Angegebener Beleg:",
+            "Verworfen, weil:",
+        ] {
+            assert!(
+                html.contains(label),
+                "fehlende finale Beschriftung: {label}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, feature = "testing"))]

@@ -2475,7 +2475,7 @@
                 <p id="brain-plan-sources" class="status-warn audit-hidden"></p>
                 <div id="brain-plan-items"></div>
                 <details id="brain-plan-rejected" class="audit-hidden">
-                    <summary>PLATZHALTER: verworfene Vorschläge</summary>
+                    <summary>Vom Beleg-Gate verworfene Vorschläge</summary>
                     <div id="brain-plan-rejected-items"></div>
                 </details>
                 <div id="brain-plan-older" class="audit-hidden">
@@ -7236,10 +7236,10 @@ async function fetchStandaloneLogs(key, limit = 200) {
             return `<article class="brain-plan-item">
                 <div class="brain-plan-meta">P${esc(item.prioritaet)} · ${esc(item.bereich)}</div>
                 <h5>${esc(item.titel)}</h5>
-                <p><strong>PLATZHALTER: Begründung:</strong> ${esc(item.begruendung)}</p>
-                <p><strong>PLATZHALTER: Aktion:</strong> ${esc(item.aktion)}</p>
-                <p class="brain-plan-meta"><strong>PLATZHALTER: Beleg:</strong> ${esc(item.beleg)} (${esc(item.beleg_art)})</p>
-                <p class="status-warn"><strong>PLATZHALTER: Ablehnungsgrund:</strong> ${esc(item.verworfen_grund)}</p>
+                <p><strong>Vorgeschlagene Begründung:</strong> ${esc(item.begruendung)}</p>
+                <p><strong>Vorgeschlagene Aktion:</strong> ${esc(item.aktion)}</p>
+                <p class="brain-plan-meta"><strong>Angegebener Beleg:</strong> ${esc(item.beleg)} (${esc(item.beleg_art)})</p>
+                <p class="status-warn"><strong>Verworfen, weil:</strong> ${esc(item.verworfen_grund)}</p>
             </article>`;
         }
 
