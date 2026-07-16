@@ -916,6 +916,26 @@ async fn dl_central_migrate_builds_contract_schema_and_is_idempotent() {
         .await
         .expect("connect fresh migrated database");
 
+    for (id, default_from, default_to) in [
+        (-1602, Some(1_200_i32), None),
+        (-1603, None, Some(1_260_i32)),
+    ] {
+        let result = sqlx::query(
+            "INSERT INTO scrim.teams
+                (id, name, created_at, default_from, default_to)
+             VALUES ($1, 'half-window', NOW(), $2, $3)",
+        )
+        .bind(id)
+        .bind(default_from)
+        .bind(default_to)
+        .execute(&pool)
+        .await;
+        assert!(
+            result.is_err(),
+            "Stammzeit muss entweder vollstaendig gesetzt oder vollstaendig NULL sein"
+        );
+    }
+
     let migration_count_after_first = scalar_i64(
         &pool,
         "SELECT count(*)
