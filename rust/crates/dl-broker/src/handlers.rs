@@ -1575,10 +1575,94 @@ pub async fn send_dm(
     .await
 }
 
+pub async fn add_reaction(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let parsed = (|| -> Result<(u64, u64, String), String> {
+        let channel_id = payload::positive_int(&payload, "channel_id")?;
+        let message_id = payload::positive_int(&payload, "message_id")?;
+        let emoji = payload::optional_content(&payload, "emoji")?
+            .ok_or_else(|| "emoji is required".to_string())?;
+        Ok((channel_id, message_id, emoji))
+    })();
+    let (channel_id, message_id, emoji) = match parsed {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+
+    if let Err(resp) = allowlist_check(
+        &rid,
+        Some(&idem),
+        "channel",
+        channel_id,
+        &state.channel_allowlist,
+    ) {
+        return resp;
+    }
+
+    let mut op = Map::new();
+    op.insert("channel_id".into(), json!(channel_id));
+    op.insert("message_id".into(), json!(message_id));
+    op.insert("emoji".into(), json!(emoji));
+    let hash = payload_hash(&op);
+
+    run_idempotent(
+        &state,
+        &rid,
+        "discord.add_reaction",
+        &idem,
+        &hash,
+        || async {
+            match state
+                .port
+                .add_reaction(channel_id, message_id, &emoji)
+                .await
+            {
+                Ok(()) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        json!({
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                            "emoji": emoji,
+                        }),
+                    ),
+                ),
+                Err(PortError::MessageNotFound) => (
+                    404,
+                    error_body(
+                        &rid,
+                        Some(&idem),
+                        "not_found",
+                        &format!("message {message_id} not found"),
+                    ),
+                ),
+                Err(err) => {
+                    tracing::error!(%err, channel_id, message_id, "add_reaction fehlgeschlagen");
+                    (
+                        502,
+                        error_body(&rid, Some(&idem), "discord_error", "failed to add reaction"),
+                    )
+                }
+            }
+        },
+    )
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
 
     use crate::port::{
         ChannelInfo, ChannelInfoPort, DiscordPort, GuildMemberInfo, GuildRoles, GuildStats,
@@ -1588,6 +1672,7 @@ mod tests {
 
     struct UnusedDiscordPort {
         message_reactions: Result<Vec<MessageReaction>, PortError>,
+        add_reaction_calls: Mutex<Vec<(u64, u64, String)>>,
     }
 
     #[async_trait::async_trait]
@@ -1631,6 +1716,19 @@ mod tests {
             _message_id: u64,
         ) -> Result<Vec<MessageReaction>, PortError> {
             self.message_reactions.clone()
+        }
+
+        async fn add_reaction(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            emoji: &str,
+        ) -> Result<(), PortError> {
+            self.add_reaction_calls
+                .lock()
+                .expect("reaction calls")
+                .push((channel_id, message_id, emoji.to_string()));
+            Ok(())
         }
 
         async fn send_rich_message(&self, _message: &RichMessage) -> Result<u64, PortError> {
@@ -1773,11 +1871,40 @@ mod tests {
         message_reactions: Result<Vec<MessageReaction>, PortError>,
     ) -> Result<SharedBroker, String> {
         crate::BrokerState::new_with_channel_info(
-            Arc::new(UnusedDiscordPort { message_reactions }),
+            Arc::new(UnusedDiscordPort {
+                message_reactions,
+                add_reaction_calls: Mutex::new(Vec::new()),
+            }),
             Arc::new(MockChannelInfoPort),
             "secret".to_string(),
             |_| None,
         )
+    }
+
+    fn reaction_test_state(
+        allowed_channel_ids: &str,
+    ) -> Result<(SharedBroker, Arc<UnusedDiscordPort>), String> {
+        let port = Arc::new(UnusedDiscordPort {
+            message_reactions: Err(PortError::Discord("unused".to_string())),
+            add_reaction_calls: Mutex::new(Vec::new()),
+        });
+        let allowed_channel_ids = allowed_channel_ids.to_string();
+        let state = crate::BrokerState::new_with_channel_info(
+            port.clone(),
+            Arc::new(MockChannelInfoPort),
+            "secret".to_string(),
+            move |key| {
+                (key == "MASTER_BROKER_ALLOWED_CHANNEL_IDS").then(|| allowed_channel_ids.clone())
+            },
+        )?;
+        Ok((state, port))
+    }
+
+    fn action_headers(idempotency_key: &str) -> Result<HeaderMap, axum::http::Error> {
+        let mut headers = HeaderMap::new();
+        headers.insert(crate::TOKEN_HEADER, "secret".parse()?);
+        headers.insert(IDEMPOTENCY_HEADER, idempotency_key.parse()?);
+        Ok(headers)
     }
 
     fn peer(addr: &str) -> Result<Peer, std::net::AddrParseError> {
@@ -2056,6 +2183,114 @@ mod tests {
         let (status, body) = response_json(response).await?;
         assert_eq!(status, 502);
         assert_eq!(body, json!({"error": "Discord request failed"}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_reaction_calls_port_with_valid_payload() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (state, port) = reaction_test_state("42")?;
+        let response = add_reaction(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("reaction-happy")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":42,"message_id":700,"emoji":"\u2705"}"#,
+            ),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body["ok"], true);
+        assert_eq!(
+            *port.add_reaction_calls.lock().expect("reaction calls"),
+            vec![(42, 700, "✅".to_string())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_reaction_rejects_channel_outside_allowlist_without_calling_port(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (state, port) = reaction_test_state("41")?;
+        let response = add_reaction(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("reaction-forbidden")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":42,"message_id":700,"emoji":"\u2705"}"#,
+            ),
+        )
+        .await;
+
+        let (status, _) = response_json(response).await?;
+        assert_eq!(status, 403);
+        assert!(port
+            .add_reaction_calls
+            .lock()
+            .expect("reaction calls")
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_reaction_rejects_missing_or_invalid_fields(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (state, port) = reaction_test_state("42")?;
+        for (key, body) in [
+            (
+                "reaction-missing",
+                br#"{"channel_id":42,"message_id":700}"#.as_slice(),
+            ),
+            (
+                "reaction-invalid",
+                br#"{"channel_id":42,"message_id":0,"emoji":"\u2705"}"#.as_slice(),
+            ),
+        ] {
+            let response = add_reaction(
+                State(state.clone()),
+                peer("127.0.0.1:3456")?,
+                action_headers(key)?,
+                axum::body::Bytes::copy_from_slice(body),
+            )
+            .await;
+            let (status, _) = response_json(response).await?;
+            assert_eq!(status, 400);
+        }
+        assert!(port
+            .add_reaction_calls
+            .lock()
+            .expect("reaction calls")
+            .is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn add_reaction_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
+        let (state, port) = reaction_test_state("42")?;
+        let body = axum::body::Bytes::from_static(
+            br#"{"channel_id":42,"message_id":700,"emoji":"\u2705"}"#,
+        );
+
+        for _ in 0..2 {
+            let response = add_reaction(
+                State(state.clone()),
+                peer("127.0.0.1:3456")?,
+                action_headers("reaction-idempotent")?,
+                body.clone(),
+            )
+            .await;
+            let (status, _) = response_json(response).await?;
+            assert_eq!(status, 200);
+        }
+        assert_eq!(
+            port.add_reaction_calls
+                .lock()
+                .expect("reaction calls")
+                .len(),
+            1
+        );
         Ok(())
     }
 }

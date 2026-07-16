@@ -1,3 +1,11 @@
+## #269 — Scrim-Anmeldungen starten mit dem Bestätigungszeichen
+
+Problem: Neue Scrim-Ankündigungen konnten das Bestätigungszeichen bisher nicht selbst setzen. Dadurch musste nach jedem Beitrag jemand zuerst manuell auf ✅ klicken, bevor weitere Mitglieder bequem reagieren konnten.
+
+Änderung: Der Discord-Vermittler kann gezielt und wiederholsicher eine erlaubte Reaktion an eine frisch gesendete Nachricht setzen.
+
+Aktuelles Verhalten: Scrim-Ankündigungen aus der Website erhalten automatisch ein ✅. Schlägt nur dieser Zusatzschritt fehl, bleibt der Beitrag bestehen und nennt weiterhin den manuellen Weg.
+
 ## #268 — Verworfenes aus dem Tagesplan bleibt sichtbar
 
 Problem: Wenn das Zweitgehirn einen geplanten Punkt wegen fehlender Belege aussortierte, verschwand er aus der Ansicht. Damit war schwer nachzuvollziehen, warum ein Lauf weniger Vorschläge lieferte als erwartet.

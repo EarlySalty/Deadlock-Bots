@@ -202,6 +202,12 @@ pub trait DiscordPort: Send + Sync {
         channel_id: u64,
         message_id: u64,
     ) -> Result<Vec<MessageReaction>, PortError>;
+    async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> Result<(), PortError>;
     /// → message_id
     async fn send_rich_message(&self, message: &RichMessage) -> Result<u64, PortError>;
     async fn edit_rich_message(

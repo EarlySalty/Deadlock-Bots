@@ -339,6 +339,10 @@ impl DiscordAdapter {
         }
     }
 
+    fn reaction_type_for_rest(emoji: &str) -> ReactionType {
+        ReactionType::Unicode(emoji.to_string())
+    }
+
     fn is_unknown_channel(err: &serenity::Error) -> bool {
         // Discord-Fehlercode 10003 = Unknown Channel; 404 generell als
         // "nicht gefunden" werten (wie Pythons get/fetch-Fallbacks).
@@ -477,6 +481,28 @@ impl DiscordPort for DiscordAdapter {
                 count: reaction.count,
             })
             .collect())
+    }
+
+    async fn add_reaction(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        emoji: &str,
+    ) -> Result<(), PortError> {
+        self.http
+            .create_reaction(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                &Self::reaction_type_for_rest(emoji),
+            )
+            .await
+            .map_err(|err| {
+                if Self::is_http_404(&err) {
+                    PortError::MessageNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })
     }
 
     async fn send_rich_message(&self, message: &RichMessage) -> Result<u64, PortError> {
@@ -1231,6 +1257,14 @@ mod tests {
         let body = DiscordAdapter::rich_body(&message);
 
         assert_eq!(body.get("embeds"), Some(&json!([{"description": "x"}])));
+    }
+
+    #[test]
+    fn reaction_type_url_encodes_unicode_for_rest_path() {
+        let encoded = DiscordAdapter::reaction_type_for_rest("✅").as_data();
+
+        assert_eq!(encoded, "%E2%9C%85");
+        assert!(!encoded.contains('✅'));
     }
 
     #[test]

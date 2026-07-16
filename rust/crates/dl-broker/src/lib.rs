@@ -229,6 +229,10 @@ pub fn router(state: SharedBroker) -> Router {
             "/internal/master/v1/discord/send-dm",
             post(handlers::send_dm),
         )
+        .route(
+            "/internal/master/v1/discord/add-reaction",
+            post(handlers::add_reaction),
+        )
         .with_state(state)
 }
 
