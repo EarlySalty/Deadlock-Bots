@@ -5799,9 +5799,10 @@ fn build_welle2b_onboarding_config(
     } else {
         let (kept, dropped): (Vec<String>, Vec<String>) =
             live.default_channel_ids.iter().cloned().partition(|id| {
-                id.parse::<u64>()
-                    .ok()
-                    .is_some_and(|id| model.channels.contains_key(&id))
+                // Discord erlaubt auch Kategorien als Onboarding-Defaults.
+                id.parse::<u64>().ok().is_some_and(|id| {
+                    model.channels.contains_key(&id) || model.categories.contains_key(&id)
+                })
             });
         if !dropped.is_empty() {
             warnings.push(format!(
