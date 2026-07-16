@@ -691,6 +691,8 @@ name = "dl-central-db"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "hex",
+ "sha2",
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
