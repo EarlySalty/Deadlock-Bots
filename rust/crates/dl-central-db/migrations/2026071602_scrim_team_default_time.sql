@@ -23,11 +23,5 @@ ALTER TABLE scrim.teams
 ALTER TABLE scrim.teams
     ADD CONSTRAINT teams_default_window_sane CHECK (
         (default_from IS NULL AND default_to IS NULL)
-        OR (
-            default_from IS NOT NULL
-            AND default_to IS NOT NULL
-            AND default_from >= 0
-            AND default_to <= 1440
-            AND default_from < default_to
-        )
+        OR (default_from >= 0 AND default_to <= 1440 AND default_from < default_to)
     ) NOT VALID;
