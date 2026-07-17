@@ -1936,7 +1936,7 @@ impl InteractionHandler for CoachingHandler {
                 .await;
             let request_id_i32 = match i64_to_i32(request_id, "request_id") {
                 Ok(value) => value,
-                Err(_) => return BridgeReply::ephemeral_text("PLATZHALTER: Request-ID ungueltig"),
+                Err(_) => return BridgeReply::ephemeral_text("❌ Request-ID ungültig."),
             };
             let uid = match u64_to_i64(request.user_id, "request.user_id") {
                 Ok(value) => value,
@@ -2099,7 +2099,7 @@ impl InteractionHandler for CoachingHandler {
                 Err(err) => {
                     tracing::warn!(%err, request_id, "Aktive Coaching-Session konnte nicht geladen werden");
                     return BridgeReply::ephemeral_text(
-                        "PLATZHALTER: aktive Session nicht geladen",
+                        "❌ Session konnte nicht geladen werden. Bitte gleich nochmal versuchen.",
                     );
                 }
             };
@@ -2127,22 +2127,24 @@ impl InteractionHandler for CoachingHandler {
                     request_id,
                 })
             }) else {
-                return BridgeReply::ephemeral_text("PLATZHALTER: keine aktive Session");
+                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
             };
             let Some(coach_id) = session.coach_id else {
-                return BridgeReply::ephemeral_text("PLATZHALTER: keine aktive Session");
+                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
             };
             let is_owner = interaction.user_id == OWNER_EXCLUDE_ID
                 || c.port
                     .member_is_admin(interaction.guild_id, interaction.user_id)
                     .await;
             if coach_id != interaction.user_id && !is_owner {
-                return BridgeReply::ephemeral_text("PLATZHALTER: Abschluss nicht erlaubt");
+                return BridgeReply::ephemeral_text(
+                    "❌ Nur der zugewiesene Coach kann dieses Coaching abschließen.",
+                );
             }
             if !c.complete_session(session, coach_id).await {
-                return BridgeReply::ephemeral_text("PLATZHALTER: Coaching bereits abgeschlossen");
+                return BridgeReply::ephemeral_text("ℹ️ Dieses Coaching wurde bereits abgeschlossen.");
             }
-            return BridgeReply::ephemeral_text("PLATZHALTER: Coaching-Abschluss bestaetigt");
+            return BridgeReply::ephemeral_text("✅ Coaching als abgeschlossen markiert.");
         }
 
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_release_") {
@@ -3267,7 +3269,7 @@ mod pg_tests {
 
         assert_eq!(
             reply.content.as_deref(),
-            Some("PLATZHALTER: Coaching-Abschluss bestaetigt")
+            Some("✅ Coaching als abgeschlossen markiert.")
         );
         let request_status = sqlx::query_scalar::<_, String>(
             "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 1",
