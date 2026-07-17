@@ -18,13 +18,14 @@
 
 use std::sync::Arc;
 
+use chrono::NaiveDateTime;
 use dl_ai::{GenerateRequest, TextGenerator};
 use dl_central_db::kv;
 use dl_discord::{
     BridgeInteraction, BridgeReply, CommandSpec, InteractionHandler, InteractionRouter,
 };
 use serde_json::{json, Map, Value};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::db::{
     advisory_lock, i64_to_i32, pg_i64_to_u64, u64_to_i64, unix_from_utc, utc_from_unix,
@@ -95,6 +96,16 @@ pub fn normalize_inline(value: &str, fallback: &str, limit: usize) -> String {
         let cut: String = base.chars().take(limit.saturating_sub(1)).collect();
         format!("{cut}…")
     }
+}
+
+pub fn format_scheduled_slot_for_embed(value: &str) -> String {
+    let trimmed = value.trim();
+    for format in ["%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S"] {
+        if let Ok(slot) = NaiveDateTime::parse_from_str(trimmed, format) {
+            return slot.format("%d.%m.%Y %H:%M Uhr").to_string();
+        }
+    }
+    value.to_string()
 }
 
 pub fn format_ai_summary(value: &str) -> String {
@@ -319,7 +330,7 @@ fn build_request_embed_inner(
         json!({ "name": "Rang", "value": normalize_inline(&request.rank, "N/A", 256), "inline": true }),
         json!({ "name": "Hero", "value": normalize_inline(&request.hero, "Nicht angegeben", 256), "inline": true }),
         json!({ "name": "Games / Stunden", "value": normalize_inline(&request.games_played, "N/A", 256), "inline": true }),
-        json!({ "name": "📅 Bevorzugter Slot", "value": normalize_inline(&request.scheduled_slot, "Nicht angegeben", 256), "inline": false }),
+        json!({ "name": "📅 Bevorzugter Slot", "value": normalize_inline(&format_scheduled_slot_for_embed(&request.scheduled_slot), "Nicht angegeben", 256), "inline": false }),
         json!({ "name": "📝 Probleme", "value": normalize_inline(&request.current_problems, "Keine Beschreibung", 1024), "inline": false }),
     ]);
     if include_ai {
@@ -437,6 +448,15 @@ pub fn claim_components_with_website_link(
           "custom_id": format!("coach_release_{request_id}_{author_id}") },
         { "type": 2, "style": 5, "label": COACHING_WEBSITE_OPEN_BUTTON_LABEL,
           "url": coachee_website_url(coachee_id) },
+    ]}])
+}
+
+pub fn active_session_components(session_id: &str, request_id: i64, author_id: u64) -> Value {
+    json!([{ "type": 1, "components": [
+        { "type": 2, "style": 3, "label": "Coaching abgeschlossen",
+          "custom_id": format!("coaching_complete_{request_id}") },
+        { "type": 2, "style": 4, "label": "Abbrechen (User meldet sich nicht)",
+          "custom_id": format!("coach_cancel_{session_id}_{author_id}") },
     ]}])
 }
 
@@ -1566,9 +1586,12 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             return;
         }
 
-        // Voice-Session beendet → atomar abschließen. Der WHERE-Filter macht den
-        // Claim wettlaufsicher: Poll und Voice-Listener können dieselbe Session
-        // gleichzeitig sehen, aber nur einer trifft `status='active'`.
+        self.complete_session(session, coach_id).await;
+    }
+
+    async fn complete_session(&self, session: SurveySession, coach_id: u64) -> bool {
+        let guild = self.guild_id;
+        let now = chrono::Utc::now();
         let reward_expiry = now + chrono::Duration::seconds(REWARD_ROLE_DURATION_SECS);
         let claimed = sqlx::query!(
             r#"
@@ -1589,7 +1612,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
         .map(|result| result.rows_affected())
         .unwrap_or(0);
         if claimed == 0 {
-            return;
+            return false;
         }
 
         let coach_name = self.port.member_display_name(guild, coach_id).await;
@@ -1652,6 +1675,7 @@ Erstelle eine präzise, hilfreiche Zusammenfassung für den Coach.",
             bot_session_id: Some(session.id.clone()),
             ..MirrorOpts::default()
         });
+        true
     }
 
     async fn member_has_role(&self, guild_id: u64, user_id: u64, role_id: u64) -> bool {
@@ -1870,7 +1894,7 @@ impl InteractionHandler for CoachingHandler {
             );
         }
 
-        // coach_claim_{id} / coach_release_{id}_{author} / coach_cancel_{session}_{author}
+        // coach_claim_{id} / coaching_complete_{id} / coach_release_{id}_{author} / coach_cancel_{session}_{author}
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_claim_") {
             let request_id: i64 = rest.parse().unwrap_or(0);
             let roles = c
@@ -2028,7 +2052,7 @@ impl InteractionHandler for CoachingHandler {
                         message_id,
                         &format!("📥 Anfrage von <@{}> – ✅ geclaimt", request.user_id),
                         embed,
-                        cancel_components(&session_id, request.user_id),
+                        active_session_components(&session_id, request_id, request.user_id),
                     )
                     .await;
             }
@@ -2050,6 +2074,77 @@ impl InteractionHandler for CoachingHandler {
                 "✅ Session mit {} gestartet!{dm_note}",
                 request.username
             ));
+        }
+
+        if let Some(rest) = interaction.custom_id.strip_prefix("coaching_complete_") {
+            let request_id: i64 = rest.parse().unwrap_or(0);
+            let request_id_i32 = match i64_to_i32(request_id, "request_id") {
+                Ok(value) => value,
+                Err(_) => return BridgeReply::ephemeral_text("❌ Request-ID ungültig."),
+            };
+            let row = match sqlx::query(
+                r#"
+                SELECT id, coach_id, discord_user_id, voice_started_at
+                  FROM coaching.sessions
+                 WHERE bot_request_id = $1 AND status = 'active'
+                 ORDER BY created_at DESC
+                 LIMIT 1
+                "#,
+            )
+            .bind(request_id_i32)
+            .fetch_optional(&c.pool)
+            .await
+            {
+                Ok(row) => row,
+                Err(err) => {
+                    tracing::warn!(%err, request_id, "Aktive Coaching-Session konnte nicht geladen werden");
+                    return BridgeReply::ephemeral_text(
+                        "❌ Session konnte nicht geladen werden. Bitte gleich nochmal versuchen.",
+                    );
+                }
+            };
+            let Some(session) = row.and_then(|row| {
+                let coach_id = row
+                    .try_get::<Option<String>, _>("coach_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| raw.parse::<u64>().ok())?;
+                let user_id = row
+                    .try_get::<Option<i64>, _>("discord_user_id")
+                    .ok()
+                    .flatten()
+                    .and_then(|value| pg_i64_to_u64(value, "discord_user_id").ok())?;
+                let voice_started_at = row
+                    .try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("voice_started_at")
+                    .ok()
+                    .flatten()
+                    .map(unix_from_utc);
+                Some(SurveySession {
+                    id: row.try_get::<String, _>("id").ok()?,
+                    coach_id: Some(coach_id),
+                    user_id,
+                    voice_started_at,
+                    request_id,
+                })
+            }) else {
+                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
+            };
+            let Some(coach_id) = session.coach_id else {
+                return BridgeReply::ephemeral_text("⚠️ Keine aktive Session mehr für diese Anfrage gefunden.");
+            };
+            let is_owner = interaction.user_id == OWNER_EXCLUDE_ID
+                || c.port
+                    .member_is_admin(interaction.guild_id, interaction.user_id)
+                    .await;
+            if coach_id != interaction.user_id && !is_owner {
+                return BridgeReply::ephemeral_text(
+                    "❌ Nur der zugewiesene Coach kann dieses Coaching abschließen.",
+                );
+            }
+            if !c.complete_session(session, coach_id).await {
+                return BridgeReply::ephemeral_text("ℹ️ Dieses Coaching wurde bereits abgeschlossen.");
+            }
+            return BridgeReply::ephemeral_text("✅ Coaching als abgeschlossen markiert.");
         }
 
         if let Some(rest) = interaction.custom_id.strip_prefix("coach_release_") {
@@ -2343,6 +2438,41 @@ mod tests {
             "Du hast nun für **5 Tage** Zugriff auf unseren Feedback-Kanal. Bitte teile deine Erfahrungen dort mit uns:\n\n👉 [**HIER FEEDBACK ABGEBEN**](https://discord.com/channels/1/1494756126644895885)\n\nDein Feedback hilft uns die Qualität der Coaches sicherzustellen!"
         );
         assert_eq!(embed["fields"][0]["inline"], false);
+    }
+
+    #[test]
+    fn scheduled_slot_formatiert_datetime_local_fuer_discord() {
+        assert_eq!(
+            format_scheduled_slot_for_embed("2026-07-17T21:52"),
+            "17.07.2026 21:52 Uhr"
+        );
+        assert_eq!(
+            format_scheduled_slot_for_embed("2026-07-17T21:52:13"),
+            "17.07.2026 21:52 Uhr"
+        );
+    }
+
+    #[test]
+    fn scheduled_slot_laesst_freitext_unveraendert() {
+        assert_eq!(
+            format_scheduled_slot_for_embed("morgen Abend nach Scrim"),
+            "morgen Abend nach Scrim"
+        );
+    }
+
+    #[test]
+    fn active_session_components_enthalten_abschluss_button() {
+        let components = active_session_components("sess-1", 7, 42);
+
+        assert_eq!(components[0]["components"][0]["style"], 3);
+        assert_eq!(
+            components[0]["components"][0]["label"],
+            "Coaching abgeschlossen"
+        );
+        assert_eq!(
+            components[0]["components"][0]["custom_id"],
+            "coaching_complete_7"
+        );
     }
 }
 
@@ -3069,6 +3199,120 @@ mod pg_tests {
             found.expect("website payload")
         };
         assert_eq!(payload["website_request_id"], "web-complete");
+        assert_eq!(payload["status"], "completed");
+        assert_eq!(payload["session_status"], "completed");
+    }
+
+    #[tokio::test]
+    async fn complete_button_schliesst_aktive_session() {
+        let db = test_pool().await.expect("test pool");
+        let port = Arc::new(MockCoachingPort::default());
+        let website = Arc::new(MockWebsiteSync::default());
+        port.role_ids
+            .lock()
+            .expect("role_ids lock")
+            .push((12345, vec![COACH_ROLE_ID]));
+        let coaching = CoachingRequests::new(
+            db.pool().clone(),
+            port.clone(),
+            None,
+            1,
+            Some(website.clone()),
+        );
+        let now = chrono::Utc::now();
+
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.requests(
+                request_uid, bot_request_id, website_request_id, discord_user_id,
+                discord_username, rank, subrank, hero, games_played, hours_played,
+                availability, current_problems, ai_summary, status, created_at, updated_at,
+                message_id, channel_id
+            )
+            VALUES (
+                'website:web-manual-complete', 1, 'web-manual-complete', 900,
+                'Player900', 'Phantom', 'III', 'Ivy', '120 games', '300h',
+                '2026-07-17T21:52', 'Laning', '**Analyse:** Tempo', 'matched', $1, $1,
+                8801, $2
+            )
+            "#,
+        )
+        .bind(now)
+        .bind(i64::try_from(REQUEST_CHANNEL_ID).expect("channel id fits bigint"))
+        .execute(db.pool())
+        .await
+        .expect("request insert");
+        sqlx::query(
+            r#"
+            INSERT INTO coaching.sessions(
+                id, bot_request_id, coach_id, discord_user_id, discord_username,
+                discord_channel_id, status, created_at
+            )
+            VALUES ('sess-manual-complete', 1, '12345', 900, 'Player900', 500,
+                    'active', $1)
+            "#,
+        )
+        .bind(now)
+        .execute(db.pool())
+        .await
+        .expect("session insert");
+
+        let reply = CoachingHandler { coaching }
+            .handle(BridgeInteraction {
+                custom_id: "coaching_complete_1".to_string(),
+                user_id: 12345,
+                guild_id: 1,
+                channel_id: 500,
+                ..BridgeInteraction::default()
+            })
+            .await;
+
+        assert_eq!(
+            reply.content.as_deref(),
+            Some("✅ Coaching als abgeschlossen markiert.")
+        );
+        let request_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.requests WHERE bot_request_id = 1",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("request status");
+        assert_eq!(request_status, "completed");
+        let session_status = sqlx::query_scalar::<_, String>(
+            "SELECT COALESCE(status, '') FROM coaching.sessions WHERE id = 'sess-manual-complete'",
+        )
+        .fetch_one(db.pool())
+        .await
+        .expect("session status");
+        assert_eq!(session_status, "completed");
+
+        let edits = port
+            .request_edits
+            .lock()
+            .expect("request_edits lock")
+            .clone();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(edits[0].message_id, 8801);
+        assert_eq!(edits[0].embed["title"], "✅ Coaching abgeschlossen");
+        assert_eq!(edits[0].components, json!([]));
+
+        let payload = {
+            let mut found = None;
+            for _ in 0..20 {
+                found = website
+                    .payloads
+                    .lock()
+                    .expect("website payloads lock")
+                    .first()
+                    .cloned();
+                if found.is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            found.expect("website payload")
+        };
+        assert_eq!(payload["website_request_id"], "web-manual-complete");
         assert_eq!(payload["status"], "completed");
         assert_eq!(payload["session_status"], "completed");
     }
