@@ -1,3 +1,11 @@
+## #269 — Interne Discord-Nachrichten lassen sich fristgerecht entfernen
+
+Problem: Interne Dienste konnten Review-Nachrichten über den zentralen Bot versenden und bearbeiten, aber nicht einzeln löschen. Eine eigene Aufbewahrungsfrist ließ sich deshalb nicht zuverlässig auch auf die Discord-Kopie anwenden.
+
+Änderung: Der zentrale Discord-Zugang nimmt jetzt authentifizierte Löschaufträge für eine konkrete Kanal- und Nachrichten-ID an. Derselbe Auftrag ist wiederholbar; eine bereits fehlende Nachricht gilt als erledigt.
+
+Aktuelles Verhalten: Interne Dienste können ihre abgelaufenen Discord-Kopien entfernen, ohne selbst einen Discord-Token zu erhalten.
+
 ## #268 — Verworfenes aus dem Tagesplan bleibt sichtbar
 
 Problem: Wenn das Zweitgehirn einen geplanten Punkt wegen fehlender Belege aussortierte, verschwand er aus der Ansicht. Damit war schwer nachzuvollziehen, warum ein Lauf weniger Vorschläge lieferte als erwartet.
