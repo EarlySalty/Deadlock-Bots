@@ -810,6 +810,103 @@ pub async fn delete_channel(
     .await
 }
 
+pub async fn delete_message(
+    State(state): State<SharedBroker>,
+    peer: Peer,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Response {
+    let (rid, payload, idem) = match begin_action(&state, &peer, &headers, &body) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    let parsed = (|| -> Result<(u64, u64, String), String> {
+        let channel_id = payload::positive_int(&payload, "channel_id")?;
+        let message_id = payload::positive_int(&payload, "message_id")?;
+        let reason = payload
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|reason| !reason.is_empty())
+            .ok_or_else(|| "reason is required".to_string())?
+            .to_string();
+        Ok((channel_id, message_id, reason))
+    })();
+    let (channel_id, message_id, reason) = match parsed {
+        Ok(v) => v,
+        Err(msg) => return bad_request(&rid, &msg),
+    };
+
+    if let Err(resp) = allowlist_check(
+        &rid,
+        Some(&idem),
+        "channel",
+        channel_id,
+        &state.channel_allowlist,
+    ) {
+        return resp;
+    }
+
+    let mut op = Map::new();
+    op.insert("channel_id".into(), json!(channel_id));
+    op.insert("message_id".into(), json!(message_id));
+    op.insert("reason".into(), json!(reason));
+    let hash = payload_hash(&op);
+
+    run_idempotent(
+        &state,
+        &rid,
+        "discord.delete_message",
+        &idem,
+        &hash,
+        || async {
+            match state
+                .port
+                .delete_message(channel_id, message_id, &reason)
+                .await
+            {
+                Ok(()) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        json!({
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                            "already_absent": false,
+                        }),
+                    ),
+                ),
+                Err(PortError::MessageNotFound | PortError::ChannelNotFound) => (
+                    200,
+                    success_body(
+                        &rid,
+                        Some(&idem),
+                        json!({
+                            "channel_id": channel_id,
+                            "message_id": message_id,
+                            "already_absent": true,
+                        }),
+                    ),
+                ),
+                Err(err) => {
+                    tracing::error!(%err, channel_id, message_id, "delete_message fehlgeschlagen");
+                    (
+                        502,
+                        error_body(
+                            &rid,
+                            Some(&idem),
+                            "discord_error",
+                            "failed to delete message",
+                        ),
+                    )
+                }
+            }
+        },
+    )
+    .await
+}
+
 /// Rich-Payload parsen + Allowlists (Channel + Rollen) prüfen.
 fn parse_rich(
     state: &SharedBroker,
@@ -1673,6 +1770,8 @@ mod tests {
     struct UnusedDiscordPort {
         message_reactions: Result<Vec<MessageReaction>, PortError>,
         add_reaction_calls: Mutex<Vec<(u64, u64, String)>>,
+        delete_message_calls: Mutex<Vec<(u64, u64, String)>>,
+        delete_message_result: Result<(), PortError>,
     }
 
     #[async_trait::async_trait]
@@ -1708,6 +1807,19 @@ mod tests {
 
         async fn delete_channel(&self, _channel_id: u64) -> Result<(), PortError> {
             Err(PortError::Discord("unused".to_string()))
+        }
+
+        async fn delete_message(
+            &self,
+            channel_id: u64,
+            message_id: u64,
+            reason: &str,
+        ) -> Result<(), PortError> {
+            self.delete_message_calls
+                .lock()
+                .expect("delete message calls")
+                .push((channel_id, message_id, reason.to_string()));
+            self.delete_message_result.clone()
         }
 
         async fn fetch_message_reactions(
@@ -1874,6 +1986,8 @@ mod tests {
             Arc::new(UnusedDiscordPort {
                 message_reactions,
                 add_reaction_calls: Mutex::new(Vec::new()),
+                delete_message_calls: Mutex::new(Vec::new()),
+                delete_message_result: Err(PortError::Discord("unused".to_string())),
             }),
             Arc::new(MockChannelInfoPort),
             "secret".to_string(),
@@ -1887,6 +2001,8 @@ mod tests {
         let port = Arc::new(UnusedDiscordPort {
             message_reactions: Err(PortError::Discord("unused".to_string())),
             add_reaction_calls: Mutex::new(Vec::new()),
+            delete_message_calls: Mutex::new(Vec::new()),
+            delete_message_result: Err(PortError::Discord("unused".to_string())),
         });
         let allowed_channel_ids = allowed_channel_ids.to_string();
         let state = crate::BrokerState::new_with_channel_info(
@@ -1896,6 +2012,24 @@ mod tests {
             move |key| {
                 (key == "MASTER_BROKER_ALLOWED_CHANNEL_IDS").then(|| allowed_channel_ids.clone())
             },
+        )?;
+        Ok((state, port))
+    }
+
+    fn delete_message_test_state(
+        result: Result<(), PortError>,
+    ) -> Result<(SharedBroker, Arc<UnusedDiscordPort>), String> {
+        let port = Arc::new(UnusedDiscordPort {
+            message_reactions: Err(PortError::Discord("unused".to_string())),
+            add_reaction_calls: Mutex::new(Vec::new()),
+            delete_message_calls: Mutex::new(Vec::new()),
+            delete_message_result: result,
+        });
+        let state = crate::BrokerState::new_with_channel_info(
+            port.clone(),
+            Arc::new(MockChannelInfoPort),
+            "secret".to_string(),
+            |key| (key == "MASTER_BROKER_ALLOWED_CHANNEL_IDS").then(|| "42".to_string()),
         )?;
         Ok((state, port))
     }
@@ -2288,6 +2422,60 @@ mod tests {
             port.add_reaction_calls
                 .lock()
                 .expect("reaction calls")
+                .len(),
+            1
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_message_ruft_port_mit_channel_message_und_reason(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (state, port) = delete_message_test_state(Ok(()))?;
+        let response = delete_message(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("delete-message-happy")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":"42","message_id":"700","reason":"review retention"}"#,
+            ),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body["result"]["already_absent"], false);
+        assert_eq!(
+            *port
+                .delete_message_calls
+                .lock()
+                .expect("delete message calls"),
+            vec![(42, 700, "review retention".to_string())]
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_message_ist_bei_fehlender_nachricht_idempotent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (state, port) = delete_message_test_state(Err(PortError::MessageNotFound))?;
+        let response = delete_message(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("delete-message-absent")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":"42","message_id":"700","reason":"review retention"}"#,
+            ),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body["result"]["already_absent"], true);
+        assert_eq!(
+            port.delete_message_calls
+                .lock()
+                .expect("delete message calls")
                 .len(),
             1
         );

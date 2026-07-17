@@ -194,6 +194,10 @@ pub fn router(state: SharedBroker) -> Router {
             post(handlers::delete_channel),
         )
         .route(
+            "/internal/master/v1/discord/delete-message",
+            post(handlers::delete_message),
+        )
+        .route(
             "/internal/master/v1/discord/send-rich-message",
             post(handlers::send_rich_message),
         )

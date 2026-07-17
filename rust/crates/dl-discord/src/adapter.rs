@@ -457,6 +457,28 @@ impl DiscordPort for DiscordAdapter {
             })
     }
 
+    async fn delete_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        reason: &str,
+    ) -> Result<(), PortError> {
+        self.http
+            .delete_message(
+                ChannelId::new(channel_id),
+                MessageId::new(message_id),
+                Some(reason),
+            )
+            .await
+            .map_err(|err| {
+                if Self::is_http_404(&err) {
+                    PortError::MessageNotFound
+                } else {
+                    PortError::Discord(err.to_string())
+                }
+            })
+    }
+
     async fn fetch_message_reactions(
         &self,
         channel_id: u64,

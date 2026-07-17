@@ -197,6 +197,12 @@ pub trait DiscordPort: Send + Sync {
         topic: Option<&str>,
     ) -> Result<u64, PortError>;
     async fn delete_channel(&self, channel_id: u64) -> Result<(), PortError>;
+    async fn delete_message(
+        &self,
+        channel_id: u64,
+        message_id: u64,
+        reason: &str,
+    ) -> Result<(), PortError>;
     async fn fetch_message_reactions(
         &self,
         channel_id: u64,
