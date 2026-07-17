@@ -2481,4 +2481,45 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn delete_message_ist_bei_fehlendem_kanal_idempotent(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _) = delete_message_test_state(Err(PortError::ChannelNotFound))?;
+        let response = delete_message(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("delete-message-channel-absent")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":"42","message_id":"700","reason":"review retention"}"#,
+            ),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 200);
+        assert_eq!(body["result"]["already_absent"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_message_verdeckt_interne_discord_fehler(
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        const SENTINEL: &str = "INTERNAL_DELETE_SENTINEL";
+        let (state, _) = delete_message_test_state(Err(PortError::Discord(SENTINEL.to_string())))?;
+        let response = delete_message(
+            State(state),
+            peer("127.0.0.1:3456")?,
+            action_headers("delete-message-discord-error")?,
+            axum::body::Bytes::from_static(
+                br#"{"channel_id":"42","message_id":"700","reason":"review retention"}"#,
+            ),
+        )
+        .await;
+
+        let (status, body) = response_json(response).await?;
+        assert_eq!(status, 502);
+        assert!(!body.to_string().contains(SENTINEL));
+        Ok(())
+    }
 }
